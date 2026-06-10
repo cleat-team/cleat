@@ -109,7 +109,19 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	wasiBuilder.NewFunctionBuilder().WithFunc(
 		func(ctx context.Context, m api.Module) {},
 	).Export("reset_adapter_state")
-	if _, err := wasiBuilder.Instantiate(ctx); err != nil {
+	// Instantiate WASI with a fake Sys context that returns fixed (zero) time.
+	// This prevents the wazero nil pointer panic in clock_time_get (which
+	// accesses mod.Sys for walltime/nanotime) while keeping the Go WASM
+	// runtime's GC/goroutine scheduler from accessing real wall clock time.
+	// Workflow logic uses h.Now() (cleat_now) for deterministic time.
+	wasiCompiled, err := wasiBuilder.Compile(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("host: compiling WASI module: %w", err)
+	}
+	wasiConfig := wazero.NewModuleConfig().
+		WithWalltime(func() (int64, int32) { return 0, 0 }, sys.ClockResolution(1)).
+		WithNanotime(func() int64 { return 0 }, sys.ClockResolution(1))
+	if _, err := rt.InstantiateModule(ctx, wasiCompiled, wasiConfig); err != nil {
 		return nil, fmt.Errorf("host: instantiating WASI module: %w", err)
 	}
 

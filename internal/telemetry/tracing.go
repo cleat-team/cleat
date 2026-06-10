@@ -107,7 +107,7 @@ func spanContextFromTraceID(traceID string) (trace.SpanContext, error) {
 	copy(tid[:], b)
 
 	var sid trace.SpanID
-	rand.Read(sid[:])
+	_, _ = rand.Read(sid[:])
 
 	return trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    tid,

@@ -632,7 +632,7 @@ func (s *PostgresStore) beginTxWithRLS(ctx context.Context) (*sql.Tx, error) {
 		return nil, fmt.Errorf("beginTxWithRLS: begin tx: %w", err)
 	}
 	if err := s.setRLSOnTx(tx); err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return nil, fmt.Errorf("set row-level security: %w", err)
 	}
 	return tx, nil
@@ -661,7 +661,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
@@ -717,7 +717,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	}
 
 	if len(wfs) == 0 {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return nil, nil
 	}
 	return wfs, tx.Commit()
@@ -731,7 +731,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
@@ -788,7 +788,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	}
 
 	if len(wfs) == 0 {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return nil, nil
 	}
 	return wfs, tx.Commit()
@@ -800,7 +800,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 	if err != nil {
 		return nil, fmt.Errorf("load history: begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT step, event_type, service, operation, request, response, error,
@@ -1315,8 +1315,8 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	}
 
 	// Best-effort cleanup after commit.
-	s.ClearStickyWorker(context.Background(), currentRunID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), currentRunID)
+	_ = s.ClearStickyWorker(context.Background(), currentRunID)
+	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), currentRunID)
 	s.enforceParentClosePolicy(context.Background(), currentRunID)
 
 	return newRunID, nil
@@ -1449,8 +1449,8 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 
 	// Best-effort cleanup for terminal statuses (post-commit).
 	if finalStatus == "done" || finalStatus == "failed" {
-		s.ClearStickyWorker(context.Background(), runID)
-		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
+		_ = s.ClearStickyWorker(context.Background(), runID)
+		_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
 	}
 
@@ -1657,7 +1657,7 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 		}
 		def.CreatedAt = createdAt
 		if len(pluginDepsRaw) > 0 {
-			json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+			_ = json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
 		}
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
@@ -1696,7 +1696,7 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt
 	if len(pluginDepsRaw) > 0 {
-		json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+		_ = json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
 	}
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)
@@ -1915,9 +1915,9 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	}
 
 	// Best-effort: clear sticky worker assignment (Feature 10).
-	s.ClearStickyWorker(context.Background(), workflowID)
+	_ = s.ClearStickyWorker(context.Background(), workflowID)
 	// Best-effort: release all concurrency keys (Feature 5).
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
@@ -2203,7 +2203,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		n, _ := res.RowsAffected()
 		if n == 0 {
 			// Key was inserted concurrently — rollback and return the existing one.
-			tx.Rollback()
+			_ = tx.Rollback()
 			err := s.db.QueryRowContext(ctx,
 				`SELECT workflow_id FROM idempotency_keys
 				 WHERE key_hash = $1 AND expires_at > now()`,
@@ -4156,7 +4156,7 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 			)
 		`, olderThan)
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -4189,7 +4189,7 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 			)
 		`, olderThan)
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			break
 		}
 		if err := tx.Commit(); err != nil {

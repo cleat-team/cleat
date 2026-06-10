@@ -158,14 +158,14 @@ func runBenchmark(ctx context.Context, store engine.WorkflowStore, defName strin
 			result, history, _, _, _, err := eng.Execute(ctx, wasmBytes, entryPoint, input)
 			if err != nil {
 				log.Printf("Execute error for %s: %v", runID, err)
-				store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
+				_ = store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
 				return
 			}
 
 			_ = result
 			_ = history
 
-			store.CompleteWorkflow(ctx, runID, "", 0, "{}", nil)
+			_ = store.CompleteWorkflow(ctx, runID, "", 0, "{}", nil)
 
 			elapsed := time.Since(start)
 			latenciesMu.Lock()
@@ -225,12 +225,12 @@ func runReplayBenchmark(ctx context.Context, store engine.WorkflowStore, defName
 			_, history, _, _, _, err := eng.Execute(ctx, wasmBytes, entryPoint, input)
 			if err != nil {
 				log.Printf("First execute error: %v", err)
-				store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
+				_ = store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
 				return
 			}
 
 			// Save events.
-			store.AppendEventHistoryBatch(ctx, runID, history)
+			_ = store.AppendEventHistoryBatch(ctx, runID, history)
 
 			// Replay from history.
 			rt2, _ := engine.NewRuntime(ctx, 0, 0)
@@ -244,11 +244,11 @@ func runReplayBenchmark(ctx context.Context, store engine.WorkflowStore, defName
 			_, _, _, _, _, err = engine2.Replay(ctx, wasmBytes, entryPoint, input, history)
 			if err != nil {
 				log.Printf("Replay error: %v", err)
-				store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
+				_ = store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
 				return
 			}
 
-			store.CompleteWorkflow(ctx, runID, "", 0, "{}", nil)
+			_ = store.CompleteWorkflow(ctx, runID, "", 0, "{}", nil)
 
 			elapsed := time.Since(start)
 			latenciesMu.Lock()

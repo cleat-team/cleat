@@ -21,7 +21,7 @@ var workflowTemplates embed.FS
 func runInit(args []string) {
 	flags := flag.NewFlagSet("init", flag.ExitOnError)
 	templateName := flags.String("template", "basic", "project template (basic, agent, agent-python, workflow)")
-	flags.Parse(args)
+	_ = flags.Parse(args)
 
 	if flags.NArg() < 1 {
 		fmt.Fprintf(os.Stderr, "Usage: cleat init [--template agent|basic|agent-python|workflow] <project-name>\n")
@@ -179,5 +179,5 @@ func scaffoldWorkflow(projectName string) {
 
 func writeYAML(dir, projectName string) {
 	yamlContent := fmt.Sprintf("project: %q\nlanguage: go\nentry_points:\n  - name: agent\n    function: AgentLoop\n", projectName)
-	os.WriteFile(filepath.Join(dir, "cleat.yaml"), []byte(yamlContent), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "cleat.yaml"), []byte(yamlContent), 0644)
 }

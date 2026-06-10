@@ -1237,7 +1237,7 @@ func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 				SELECT parent_workflow_id FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 			)
 			AND status IN ('ready', 'suspended')
-		`, runID); err != nil {
+		`, runID, s.tenantID); err != nil {
 			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
 		}
 	}
@@ -1753,13 +1753,13 @@ func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 		return "", false, fmt.Errorf("poll and claim signal: select: %w", err)
 	}
 
-	// Mark the signal as delivered so PollSignal can still find it.
+	// Delete the signal row so it cannot be claimed twice.
 	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_signals SET delivered_at = SYSUTCDATETIME()
+		DELETE FROM workflow_signals
 		WHERE workflow_id = @p1 AND signal_name = @p2
 	`, workflowID, signalName)
 	if err != nil {
-		return "", false, fmt.Errorf("poll and claim signal: update: %w", err)
+		return "", false, fmt.Errorf("poll and claim signal: delete: %w", err)
 	}
 	return payload, true, tx.Commit()
 }
@@ -1926,8 +1926,9 @@ func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	d := s.dialect
 	qb := NewQueryBuilder(d,
-		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
+		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE tenant_id = @p1",
 	)
+	qb.AddArgs(s.tenantID)
 
 	if filter.Status != "" {
 		qb.AddCondition("status = %s", filter.Status)
@@ -2393,7 +2394,7 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
 		SELECT @p1, @p2, @p3, DATEADD(SECOND, @p4, SYSUTCDATETIME()), @p5
 		WHERE NOT EXISTS (
-			SELECT 1 FROM concurrency_keys WHERE key_hash = @p1 AND tenant_id = @p5 AND expires_at > SYSUTCDATETIME()
+			SELECT 1 FROM concurrency_keys WHERE key_hash = @p1 AND expires_at > SYSUTCDATETIME()
 		)
 	`, keyHash[:], key, workflowID, int(ttl.Seconds()), s.tenantID)
 	if err != nil {

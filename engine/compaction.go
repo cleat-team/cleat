@@ -503,7 +503,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 		case EventCodeAcquireLock:
 			rec.LockKey = ce.ChildName
 			rec.LockTTLMs = ce.DurationMs
-			fmt.Sscanf(ce.Response, "%d", &rec.LockAcquired)
+			_, _ = fmt.Sscanf(ce.Response, "%d", &rec.LockAcquired)
 		case EventCodeReleaseLock:
 			rec.LockKey = ce.ChildName
 		case EventCodeScopeAcquired:

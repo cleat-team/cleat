@@ -215,14 +215,14 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 
 			// Run the selected migration SQL.
 			if err := execSQLStatements(ctx, tx.ExecContext, sql); err != nil {
-				tx.Rollback()
+				_ = tx.Rollback()
 				return fmt.Errorf("plugin %s migration v%d: %w", name, m.Version, err)
 			}
 
 			if _, err := tx.ExecContext(ctx,
 				insertPluginMigrationSQL(dialect),
 				name, m.Version); err != nil {
-				tx.Rollback()
+				_ = tx.Rollback()
 				return fmt.Errorf("plugin %s migration v%d record: %w", name, m.Version, err)
 			}
 
