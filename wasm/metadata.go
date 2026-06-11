@@ -332,6 +332,14 @@ func hasComponentModelImports(wasmBytes []byte) bool {
 // patterns that identify the source language when no metadata is present.
 func detectLanguageFromImports(wasmBytes []byte) string {
 	imports, err := readImportSection(wasmBytes)
+
+	// Rust cdylib modules embed /rustc/ paths from the standard library.
+	// Detect these before import-based heuristics so Rust modules fall
+	// through to the default runtime instead of crashing in wasmtime.
+	if strings.Contains(string(wasmBytes), "/rustc/") {
+		return "rust"
+	}
+
 	if err != nil {
 		return ""
 	}
