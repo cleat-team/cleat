@@ -20,6 +20,14 @@ BEGIN
             RAISE WARNING 'create_tenant_role: cannot create role % (SQLSTATE: %) — skipping (single-tenant mode)', v_role_name, SQLSTATE;
             RETURN NULL;
         END;
+    ELSE
+        -- Role already exists (e.g. after database drop/recreate).
+        -- Sync the password so admin.tenant_roles and pg_roles agree.
+        BEGIN
+            EXECUTE format('ALTER ROLE %I WITH PASSWORD %L', v_role_name, v_password);
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'create_tenant_role: cannot alter password for role % (SQLSTATE: %)', v_role_name, SQLSTATE;
+        END;
     END IF;
 
     EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I AUTHORIZATION %I',
@@ -222,6 +230,7 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 CREATE TABLE IF NOT EXISTS workflow_update_requests (
     workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
     update_name TEXT NOT NULL,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     priority INTEGER NOT NULL DEFAULT 0,
     payload JSONB NOT NULL DEFAULT '{}',
     promise_id TEXT,
