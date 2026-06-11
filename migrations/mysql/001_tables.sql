@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 CREATE TABLE IF NOT EXISTS workflow_update_requests (
     workflow_id        VARCHAR(255) NOT NULL,
     update_name        VARCHAR(255) NOT NULL,
+    tenant_id          CHAR(36) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     priority           INTEGER NOT NULL DEFAULT 0,
     payload            JSON NOT NULL DEFAULT ('{}'),
     promise_id         VARCHAR(255),
