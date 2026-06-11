@@ -1,0 +1,156 @@
+package engine
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+)
+
+func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("request cancellation: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET cancellation_requested = true, cancellation_reason = $2
+		WHERE id = $1
+	`, workflowID, reason)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// CheckCancellation checks if a workflow has been cancelled.
+
+func (s *PostgresStore) CheckCancellation(ctx context.Context, workflowID string) (bool, string, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("check cancellation: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var cancelled bool
+	var reason sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT cancellation_requested, cancellation_reason
+		FROM workflow_instances WHERE id = $1
+	`, workflowID).Scan(&cancelled, &reason)
+	if err != nil {
+		return false, "", err
+	}
+	return cancelled, reason.String, tx.Commit()
+}
+
+// PollAndClaimSignal atomically checks for and claims a pending signal.
+
+func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback()
+
+	if err := s.setRLSOnTx(tx); err != nil {
+		return "", false, err
+	}
+
+	var payload string
+	err = tx.QueryRowContext(ctx, `
+		DELETE FROM workflow_signals
+		WHERE workflow_id = $1 AND signal_name = $2
+		RETURNING payload
+	`, workflowID, signalName).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, tx.Rollback()
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("poll signal: %w", err)
+	}
+	return payload, true, tx.Commit()
+}
+
+// StartNewRun creates a new workflow instance.
+// If idempotencyKey is non-empty, provides exactly-once semantics: a subsequent
+// call with the same key returns the existing workflow ID without creating a
+// duplicate. Returns the workflow ID, whether it already existed, and any error.
+
+func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("deliver signal: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Ensure payload is valid JSON for JSONB column
+	if !json.Valid([]byte(payload)) {
+		payload = `"` + payload + `"`
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO workflow_signals (workflow_id, signal_name, payload)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (workflow_id, signal_name) DO UPDATE SET payload = $3, delivered_at = now()
+	`, workflowID, signalName, payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET next_wake_at = now()
+		WHERE id = $1 AND status IN ('ready', 'suspended')
+	`, workflowID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// PollSignal satisfies the SignalStore interface by checking for a delivered signal.
+
+func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+	return s.PollAndClaimSignal(ctx, workflowID, signalName)
+}
+
+// PollCancellation satisfies the SignalStore interface.
+
+func (s *PostgresStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
+	return s.CheckCancellation(ctx, workflowID)
+}
+
+// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+// Returns nil when allowed_signals is NULL or the target workflow doesn't exist.
+
+func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var raw sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT allowed_signals FROM workflow_instances WHERE id = $1`, workflowID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, tx.Commit()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: %w", err)
+	}
+	if !raw.Valid || raw.String == "" || raw.String == "null" {
+		return nil, tx.Commit()
+	}
+	var callers []string
+	if err := json.Unmarshal([]byte(raw.String), &callers); err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: parse: %w", err)
+	}
+	return callers, tx.Commit()
+}
+
+// GetQueryState returns the value for a key in the workflow's query_state JSONB.

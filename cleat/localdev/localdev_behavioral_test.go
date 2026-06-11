@@ -1180,12 +1180,33 @@ func TestLR_PluginCallImpl_ReturnsError(t *testing.T) {
 	if resp != "" {
 		t.Errorf("expected empty response, got %q", resp)
 	}
-	if !strings.Contains(err.Error(), "not available") {
-		t.Errorf("expected 'not available' in error, got: %v", err)
+	if !strings.Contains(err.Error(), "no PluginCaller configured") {
+		t.Errorf("expected 'no PluginCaller configured' in error, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "myplugin") || !strings.Contains(err.Error(), "myfunc") {
 		t.Errorf("error should mention plugin and function names, got: %v", err)
 	}
+}
+
+func TestLR_PluginCallImpl_WithCaller(t *testing.T) {
+	caller := &mockPluginCaller{}
+	r := NewLocalRunner(
+		WithPluginCaller(caller),
+		WithLogWriter(io.Discard),
+	)
+	resp, err := r.pluginCallImpl("myplugin", "myfunc", `{"key":"val"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp, "myplugin") || !strings.Contains(resp, "myfunc") {
+		t.Errorf("response should mention plugin and function names, got: %q", resp)
+	}
+}
+
+type mockPluginCaller struct{}
+
+func (m *mockPluginCaller) CallPlugin(_ context.Context, pluginName, functionName, inputJSON string) (string, error) {
+	return fmt.Sprintf(`{"called":"%s.%s","input":%s}`, pluginName, functionName, inputJSON), nil
 }
 
 // =========================================================================

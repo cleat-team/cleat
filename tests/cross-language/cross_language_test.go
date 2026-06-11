@@ -94,12 +94,11 @@ func buildRustWasm(t *testing.T, projectRoot string) string {
 // buildGoWasm compiles a Go workflow to WASM using the cleat build pipeline.
 func buildGoWasm(t *testing.T, projectRoot, pkgPath string) string {
 	t.Helper()
-	requireTinygo(t)
 
 	tmpDir := t.TempDir()
 	cmd := exec.Command("go", "run",
 		filepath.Join(projectRoot, "cmd", "cleat"),
-		"build", "--target", "tinygo", "-o", tmpDir, pkgPath,
+		"build", "--target", "go", "-o", tmpDir, pkgPath,
 	)
 	cmd.Dir = projectRoot
 	cmd.Env = os.Environ()
@@ -305,7 +304,7 @@ func TestGoWorkflow_ExecuteAndReplay(t *testing.T) {
 	)
 	defer env.Close()
 
-	inputJSON := `{"UserID":"user-42","Cart":[{"SKU":"SKU-001","Quantity":2}]}`
+	inputJSON := `{"userID":"user-42","cart":[{"sku":"SKU-001","quantity":2}]}`
 
 	result, history, err := env.Execute(t, wasmBytes, "place_order", inputJSON)
 	if err != nil {

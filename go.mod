@@ -4,6 +4,7 @@ go 1.25.11
 
 require (
 	github.com/cleat-team/cleat/cleat v0.0.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.12.3

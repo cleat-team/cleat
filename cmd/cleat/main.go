@@ -52,7 +52,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
-		fmt.Fprintf(os.Stderr, "  cleat dev [--input <json>] [--entry-point <name>] <package>\n")
+		fmt.Fprintf(os.Stderr, "  cleat dev [--input <json>] [--entry-point <name>] [--concurrency-key <key>] [--watch] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>]\n")
 		fmt.Fprintf(os.Stderr, "  cleat schedule list\n")
 		fmt.Fprintf(os.Stderr, "  cleat schedule delete <name>\n")

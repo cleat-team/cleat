@@ -9,6 +9,7 @@
 - **Test my workflows** -- [Testing Workflows](how-to/test-workflows.md)
 - **Deploy to production** -- [Deploying to Production](operations/deploying-to-production.md)
 - **Understand the architecture** -- [Architecture Overview](explanation/architecture.md)
+- **Monitor workflows visually** -- [Web UI / Admin Dashboard](../web/README.md)
 - **See the full CLI reference** -- [CLI Reference](reference/cli.md)
 - **Migrate from Temporal/DBOS/Restate** -- [Migration Guides](migration/)
 - **Troubleshoot common issues** -- [Troubleshooting Guide](troubleshooting.md)

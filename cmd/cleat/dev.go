@@ -8,9 +8,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/fsnotify/fsnotify"
 )
 
 // paramInfo describes an entry-point parameter beyond cleat.HostCalls.
@@ -282,6 +285,7 @@ func runDev(args []string) {
 	var entryPointName string
 	var inputJSON string
 	var concurrencyKey string
+	watch := false
 
 	// Parse --flags before the package path.
 	for i := 0; i < len(args); i++ {
@@ -316,11 +320,15 @@ func runDev(args []string) {
 			concurrencyKey = strings.TrimPrefix(args[i], "--concurrency-key=")
 			args = append(args[:i], args[i+1:]...)
 			i--
+		case args[i] == "--watch" || args[i] == "-w":
+			watch = true
+			args = append(args[:i], args[i+1:]...)
+			i--
 		}
 	}
 
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat dev [--input <json>] [--entry-point <name>] [--concurrency-key <key>] <package>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat dev [--input <json>] [--entry-point <name>] [--concurrency-key <key>] [--watch] <package>\n")
 		fmt.Fprintf(os.Stderr, "Example: cleat dev --input '{\"userID\":\"u1\",\"cart\":[]}' ./testdata/basic/\n")
 		os.Exit(1)
 	}
@@ -339,18 +347,156 @@ func runDev(args []string) {
 
 	pattern := args[0]
 
-	// Load the target package using the analyzer.
+	if watch {
+		runDevWithWatch(pattern, entryPointName, inputJSON, concurrencyKey)
+		return
+	}
+
+	runDevOnce(pattern, entryPointName, inputJSON, concurrencyKey)
+}
+
+// runDevOnce performs a single dev cycle: analyze, generate, execute.
+func runDevOnce(pattern, entryPointName, inputJSON, concurrencyKey string) {
+	cmd, tmpPath, err := buildDevRun(pattern, entryPointName, inputJSON, concurrencyKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "Running workflow...\n\n")
+	runErr := cmd.Run()
+
+	// Clean up the temp file before any exit.
+	os.Remove(tmpPath)
+
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "Error running workflow: %v\n", runErr)
+		os.Exit(1)
+	}
+}
+
+// runDevWithWatch watches the target package directory for .go file changes
+// and automatically rebuilds and restarts the workflow runner.
+func runDevWithWatch(pattern, entryPointName, inputJSON, concurrencyKey string) {
+	// Resolve the target directory to watch.
+	targetDir, moduleDir := resolveDevTargetDir(pattern)
+	if moduleDir == "" {
+		moduleDir = "."
+	}
+
+	// Set up fsnotify watcher.
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating file watcher: %v\n", err)
+		os.Exit(1)
+	}
+	defer watcher.Close()
+
+	// Walk target directory and watch all subdirectories.
+	filepath.WalkDir(targetDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+			if addErr := watcher.Add(path); addErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: cannot watch %s: %v\n", path, addErr)
+			}
+		}
+		return nil
+	})
+
+	fmt.Fprintf(os.Stderr, "Watching for changes in %s...\n\n", targetDir)
+
+	var currentCmd *exec.Cmd
+	var currentTmpPath string
+	var debounceTimer *time.Timer
+
+	// rebuildAndRun kills the current process (if any), re-analyzes,
+	// regenerates, and starts a new runner.
+	rebuildAndRun := func() {
+		if currentCmd != nil && currentCmd.Process != nil {
+			currentCmd.Process.Kill()
+			currentCmd.Wait()
+		}
+		if currentTmpPath != "" {
+			os.Remove(currentTmpPath)
+			currentTmpPath = ""
+		}
+
+		cmd, tmpPath, err := buildDevRun(pattern, entryPointName, inputJSON, concurrencyKey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nBuild error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Waiting for changes to retry...\n")
+			return
+		}
+
+		currentCmd = cmd
+		currentTmpPath = tmpPath
+
+		fmt.Fprintf(os.Stderr, "Running workflow...\n\n")
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting workflow: %v\n", err)
+			os.Remove(tmpPath)
+			currentTmpPath = ""
+		}
+	}
+
+	// Initial build and run.
+	rebuildAndRun()
+
+	// Watch loop — rebuild on .go file changes with debounce.
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			if !strings.HasSuffix(event.Name, ".go") {
+				continue
+			}
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+			debounceTimer = time.AfterFunc(200*time.Millisecond, rebuildAndRun)
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "Watch error: %v\n", err)
+		}
+	}
+}
+
+// resolveDevTargetDir loads the target package (once) solely to determine
+// the directory to watch and the module directory.
+func resolveDevTargetDir(pattern string) (targetDir, moduleDir string) {
 	fset := token.NewFileSet()
 	result, err := analyzer.LoadPackages(pattern, fset)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading package: %v\n", err)
 		os.Exit(1)
 	}
+	return result.TargetPkg.Dir, result.ModuleDir
+}
+
+// buildDevRun analyzes the package, selects the entry point, generates the
+// runner code, writes a temp file, and returns an exec.Cmd ready to be
+// started (or run). On failure it returns an error; the caller decides
+// whether to retry or exit.
+func buildDevRun(pattern, entryPointName, inputJSON, concurrencyKey string) (*exec.Cmd, string, error) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages(pattern, fset)
+	if err != nil {
+		return nil, "", fmt.Errorf("loading package: %w", err)
+	}
 
 	// Select the entry point.
 	var funcName string
 	if entryPointName != "" {
-		// Find the matching entry point by short name.
 		found := false
 		for _, ep := range result.EntryPoints {
 			if analyzer.ShortName(ep) == entryPointName {
@@ -364,31 +510,30 @@ func runDev(args []string) {
 			for i, ep := range result.EntryPoints {
 				names[i] = analyzer.ShortName(ep)
 			}
-			fmt.Fprintf(os.Stderr, "Error: entry point %q not found. Available: %s\n",
+			return nil, "", fmt.Errorf("entry point %q not found. Available: %s",
 				entryPointName, strings.Join(names, ", "))
-			os.Exit(1)
 		}
 	} else if len(result.EntryPoints) == 1 {
 		funcName = result.EntryPoints[0]
 	} else {
-		fmt.Fprintf(os.Stderr, "Error: multiple entry points found. Use --entry-point to select one.\n")
-		fmt.Fprintf(os.Stderr, "Available entry points:\n")
+		var b strings.Builder
+		b.WriteString("multiple entry points found. Use --entry-point to select one.\n")
+		b.WriteString("Available entry points:\n")
 		for _, ep := range result.EntryPoints {
-			fmt.Fprintf(os.Stderr, "  %s\n", analyzer.ShortName(ep))
+			fmt.Fprintf(&b, "  %s\n", analyzer.ShortName(ep))
 		}
-		os.Exit(1)
+		return nil, "", fmt.Errorf("%s", b.String())
 	}
 
 	fd := result.Funcs[funcName]
 	if fd == nil {
-		fmt.Fprintf(os.Stderr, "Error: function %q not found in analysis results\n", funcName)
-		os.Exit(1)
+		return nil, "", fmt.Errorf("function %q not found in analysis results", funcName)
 	}
 
 	params := buildParams(result, fd)
 	kind, _ := classifyReturn(fd.Type)
 
-	// Show what we are doing.
+	// Show what we are doing (to stderr).
 	shortName := analyzer.ShortName(funcName)
 	fmt.Fprintf(os.Stderr, "Workflow: %s.%s\n", result.TargetPkg.Name, shortName)
 	fmt.Fprintf(os.Stderr, "Package:  %s\n", result.TargetPkg.Path)
@@ -411,8 +556,7 @@ func runDev(args []string) {
 	// Generate the main.go source.
 	src, err := generateDevMain(result, shortName, params, kind, concurrencyKey)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error generating dev code: %v\n", err)
-		os.Exit(1)
+		return nil, "", fmt.Errorf("generating dev code: %w", err)
 	}
 
 	// Write a temp file inside the module directory so "go run" can resolve
@@ -424,42 +568,26 @@ func runDev(args []string) {
 
 	tmpFile, err := os.CreateTemp(moduleDir, "cleat_dev_*.go")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating temp file: %v\n", err)
-		os.Exit(1)
+		return nil, "", fmt.Errorf("creating temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 
-	// Write the generated source.
 	if _, err := tmpFile.Write(src); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
-		fmt.Fprintf(os.Stderr, "Error writing temp file: %v\n", err)
-		os.Exit(1)
+		return nil, "", fmt.Errorf("writing temp file: %w", err)
 	}
 	tmpFile.Close()
 
-	// Run the generated program with "go run".
+	// Create the "go run" command.
 	cmd := exec.Command("go", "run", tmpPath)
 	cmd.Dir = moduleDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Pass input as first argument.
 	if inputJSON != "" {
 		cmd.Args = append(cmd.Args, inputJSON)
 	}
 
-	fmt.Fprintf(os.Stderr, "Running workflow...\n\n")
-	runErr := cmd.Run()
-
-	// Clean up the temp file before any exit (os.Exit skips deferred defers).
-	os.Remove(tmpPath)
-
-	if runErr != nil {
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		fmt.Fprintf(os.Stderr, "Error running workflow: %v\n", runErr)
-		os.Exit(1)
-	}
+	return cmd, tmpPath, nil
 }

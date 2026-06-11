@@ -224,12 +224,13 @@ func TestGenerateExportsPlaceOrderUnmarshalsArgs(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
 	code := string(GenerateExports("basic", result, "tinygo"))
-	// The TinyGo target uses extractJSONString for all params (no json.Unmarshal).
+	// UserID is a simple string: extracted via extractJSONString.
 	if !strings.Contains(code, `UserID := extractJSONString`) {
 		t.Error("expected UserID extraction in generated code")
 	}
-	if !strings.Contains(code, `Cart := extractJSONString`) {
-		t.Error("expected Cart extraction in generated code")
+	// Cart is []CartItem (complex type): deserialized via json.Unmarshal.
+	if !strings.Contains(code, "json.Unmarshal") {
+		t.Error("expected json.Unmarshal for Cart in generated code")
 	}
 }
 
