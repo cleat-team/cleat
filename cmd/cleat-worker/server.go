@@ -334,14 +334,12 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// Inject entry point into input if provided.
 	in := input.Input
 	if input.EntryPoint != "" {
+		var originalInput map[string]any
+		json.Unmarshal(input.Input, &originalInput)
 		in, _ = json.Marshal(map[string]any{
+			"input":        originalInput,
 			"__entry_point": input.EntryPoint,
 		})
-		// Merge with provided input.
-		var merged map[string]any
-		json.Unmarshal(input.Input, &merged)
-		merged["__entry_point"] = input.EntryPoint
-		in, _ = json.Marshal(merged)
 	}
 
 	// Support Concurrency-Key header or JSON body field (Feature 5).
