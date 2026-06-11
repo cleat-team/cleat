@@ -19,14 +19,14 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 		data := []byte(val)
 		if uint32(len(data)) > maxLen {
 			data = data[:maxLen]
-		}
+			}
 		n := copy(rawBuf[ptr:], data)
 		return uint32(n), nil
 	}
 	if m != nil {
 		if mem := m.Memory(); mem != nil {
 			return writeWasmString(mem, ptr, val, maxLen)
-		}
+			}
 	}
 	return 0, nil
 }
@@ -55,7 +55,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				return fmt.Errorf("flush event: context cancelled after %d retries: %w", attempt, ctx.Err())
 			case <-time.After(backoff[attempt-1]):
 			}
-		}
+			}
 
 		tx, err := e.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -64,19 +64,19 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				continue
 			}
 			break
-		}
+			}
 
 		var prevChecksum string
 		if rec.Step > 1 {
 			tx.QueryRowContext(ctx, `SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = $1 AND step = $2`,
 				workflowID, rec.Step-1).Scan(&prevChecksum)
-		}
+			}
 		checksum := computeEventChecksum(rec, prevChecksum)
 		payloadJSON, _ := eventRecordToPayload(rec)
 		payloadArg := nullStr("")
 		if len(payloadJSON) > 0 {
 			payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
-		}
+			}
 
 		requestStr := tryEncodeBase64(rec.Request)
 		responseStr := tryEncodeBase64(rec.Response)
@@ -97,134 +97,156 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 
 			if requestStr, encErr = e.encryption.EncryptString(rec.Request); encErr != nil {
 				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "request", "error", encErr)
-				encryptionErrorsTotal.Inc()
+				if e.Metrics != nil {
+					e.Metrics.RecordEncryptionError(ctx)
+				}
 				tx.Rollback()
 				lastErr = fmt.Errorf("flush event: encrypt request: %w", encErr)
 				if attempt < len(backoff) {
 					continue
-				}
+			}
 				break
 			}
 			if responseStr, encErr = e.encryption.EncryptString(rec.Response); encErr != nil {
 				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "response", "error", encErr)
-				encryptionErrorsTotal.Inc()
+				if e.Metrics != nil {
+					e.Metrics.RecordEncryptionError(ctx)
+				}
 				tx.Rollback()
 				lastErr = fmt.Errorf("flush event: encrypt response: %w", encErr)
 				if attempt < len(backoff) {
 					continue
-				}
+			}
 				break
 			}
 			if errStr, encErr = e.encryption.EncryptString(rec.Err); encErr != nil {
 				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "err", "error", encErr)
-				encryptionErrorsTotal.Inc()
+				if e.Metrics != nil {
+					e.Metrics.RecordEncryptionError(ctx)
+				}
 				tx.Rollback()
 				lastErr = fmt.Errorf("flush event: encrypt err: %w", encErr)
 				if attempt < len(backoff) {
 					continue
-				}
+			}
 				break
 			}
 			if rec.SignalPayload != "" {
 				if sigPayload, encErr = e.encryption.EncryptString(rec.SignalPayload); encErr != nil {
 					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "signal_payload", "error", encErr)
-					encryptionErrorsTotal.Inc()
+					if e.Metrics != nil {
+						e.Metrics.RecordEncryptionError(ctx)
+					}
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt signal_payload: %w", encErr)
 					if attempt < len(backoff) {
 						continue
 					}
 					break
-				}
+			}
 			}
 			if rec.ChildInput != "" {
 				if childInput, encErr = e.encryption.EncryptString(rec.ChildInput); encErr != nil {
 					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "child_input", "error", encErr)
-					encryptionErrorsTotal.Inc()
+					if e.Metrics != nil {
+						e.Metrics.RecordEncryptionError(ctx)
+					}
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt child_input: %w", encErr)
 					if attempt < len(backoff) {
 						continue
 					}
 					break
-				}
+			}
 			}
 			if rec.NewInput != "" {
 				if newInput, encErr = e.encryption.EncryptString(rec.NewInput); encErr != nil {
 					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "new_input", "error", encErr)
-					encryptionErrorsTotal.Inc()
+					if e.Metrics != nil {
+						e.Metrics.RecordEncryptionError(ctx)
+					}
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt new_input: %w", encErr)
 					if attempt < len(backoff) {
 						continue
 					}
 					break
-				}
+			}
 			}
 			if rec.PluginInput != "" {
 				if pluginInput, encErr = e.encryption.EncryptString(rec.PluginInput); encErr != nil {
 					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "plugin_input", "error", encErr)
-					encryptionErrorsTotal.Inc()
+					if e.Metrics != nil {
+						e.Metrics.RecordEncryptionError(ctx)
+					}
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt plugin_input: %w", encErr)
 					if attempt < len(backoff) {
 						continue
 					}
 					break
-				}
+			}
 			}
 			if rec.PluginOutput != "" {
 				if pluginOutput, encErr = e.encryption.EncryptString(rec.PluginOutput); encErr != nil {
 					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "plugin_output", "error", encErr)
-					encryptionErrorsTotal.Inc()
+					if e.Metrics != nil {
+						e.Metrics.RecordEncryptionError(ctx)
+					}
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt plugin_output: %w", encErr)
 					if attempt < len(backoff) {
 						continue
 					}
 					break
-				}
+			}
 			}
 			if rec.PromiseResult != "" {
 				if promiseResult, encErr = e.encryption.EncryptString(rec.PromiseResult); encErr != nil {
 					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "promise_result", "error", encErr)
-					encryptionErrorsTotal.Inc()
+					if e.Metrics != nil {
+						e.Metrics.RecordEncryptionError(ctx)
+					}
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt promise_result: %w", encErr)
 					if attempt < len(backoff) {
 						continue
 					}
 					break
-				}
+			}
 			}
 			if rec.PromiseError != "" {
 				if promiseError, encErr = e.encryption.EncryptString(rec.PromiseError); encErr != nil {
 					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "promise_error", "error", encErr)
-					encryptionErrorsTotal.Inc()
+					if e.Metrics != nil {
+						e.Metrics.RecordEncryptionError(ctx)
+					}
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt promise_error: %w", encErr)
 					if attempt < len(backoff) {
 						continue
 					}
 					break
-				}
+			}
 			}
 			// Encrypt payload JSON when present.
 			if len(payloadJSON) > 0 {
 				var encrypted []byte
 				if encrypted, encErr = e.encryption.EncryptJSON(payloadJSON); encErr != nil {
 					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "payload", "error", encErr)
-					encryptionErrorsTotal.Inc()
+					if e.Metrics != nil {
+						e.Metrics.RecordEncryptionError(ctx)
+					}
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt payload: %w", encErr)
 					if attempt < len(backoff) {
 						continue
 					}
 					break
-				}
+			}
 				payloadArg = sql.NullString{String: string(encrypted), Valid: true}
 			}
-		}
+			}
 
 		// Quota check: read current count without incrementing.
 		// Increment happens in appendEventsInTx (via FinalizeWorkflowSegment)
@@ -242,14 +264,14 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				lastErr = fmt.Errorf("flush event: quota check: %w", qErr)
 				if attempt < len(backoff) {
 					continue
-				}
+			}
 				break
 			}
 			if currentCount >= e.maxQuotaEvents {
 				tx.Rollback()
 				return fmt.Errorf("flush event: event quota exceeded (max %d)", e.maxQuotaEvents)
 			}
-		}
+			}
 
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
@@ -280,7 +302,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				continue
 			}
 			break
-		}
+			}
 
 		if err := tx.Commit(); err != nil {
 			tx.Rollback()
@@ -289,7 +311,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				continue
 			}
 			break
-		}
+			}
 
 		return nil
 	}
@@ -365,18 +387,22 @@ func (e *Engine) completeCallEvent(ctx context.Context, workflowID string, rec E
 		s, err := e.encryption.EncryptString(rec.Response)
 		if err != nil {
 			e.log().ErrorContext(ctx, "encryption failed for response", "workflow_id", workflowID, "tenant_id", e.tenantID, "step", rec.Step, "error", err)
-			encryptionErrorsTotal.Inc()
+			if e.Metrics != nil {
+				e.Metrics.RecordEncryptionError(ctx)
+			}
 			tx.Rollback()
 			return fmt.Errorf("complete call event: encrypt response: %w", err)
-		}
+			}
 		responseStr = nullStr(s)
 		s, err = e.encryption.EncryptString(callErr)
 		if err != nil {
 			e.log().ErrorContext(ctx, "encryption failed for error", "workflow_id", workflowID, "tenant_id", e.tenantID, "step", rec.Step, "error", err)
-			encryptionErrorsTotal.Inc()
+			if e.Metrics != nil {
+				e.Metrics.RecordEncryptionError(ctx)
+			}
 			tx.Rollback()
 			return fmt.Errorf("complete call event: encrypt error: %w", err)
-		}
+			}
 		errorStr = nullStr(s)
 	}
 
@@ -425,6 +451,6 @@ func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[
 			if err != nil {
 				// Defer failures are not propagated — cleanup runs best-effort.
 			}
-		}
+			}
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 )
 
 // WorkflowDef is a row from the workflow_defs table.
@@ -35,10 +37,13 @@ type PostgresStore struct {
 	// that flow through both paths. Until the paths are unified or
 	// exclusive, full coverage requires routing all events through the per-event path.
 	encryptSensitivePayloads bool
+		metrics                  *prometheus.Metrics
 
 	// disableReadRedaction when true bypasses RedactOnRead on the read path.
 	// Set to true during replay to avoid the overhead of retroactive redaction.
 	disableReadRedaction bool
+
+	Metrics *prometheus.Metrics
 }
 
 // NewPostgresStore creates a PostgresStore scoped to the given task queues.
@@ -120,7 +125,9 @@ func (s *PostgresStore) decryptField(encrypted, fieldName, workflowID string, st
 	}
 	if err != nil {
 		log.Printf("[store] decrypt %s failed for workflow %s step %d: %v", fieldName, workflowID, step, err)
-		decryptionErrorsTotal.Inc()
+		if s.Metrics != nil {
+			s.Metrics.RecordDecryptionError(context.Background())
+		}
 		return "[DECRYPTION_FAILED]"
 	}
 	return decrypted
@@ -168,7 +175,9 @@ func (s *PostgresStore) decryptPayloadJSON(payloadStr string) string {
 			return string(decrypted)
 		} else {
 			log.Printf("[store] decrypt payload JSON failed: %v", err)
-			decryptionErrorsTotal.Inc()
+			if s.Metrics != nil {
+				s.Metrics.RecordDecryptionError(context.Background())
+			}
 		}
 	}
 	return payloadStr
@@ -1119,6 +1128,7 @@ type PostgresStoreFactory struct {
 
 	encryption               *PayloadEncryption
 	encryptSensitivePayloads bool
+		metrics                  *prometheus.Metrics
 }
 
 // NewPostgresStoreFactory creates a PostgresStoreFactory.
@@ -1155,6 +1165,13 @@ func (f *PostgresStoreFactory) WithNotifyChannel(channel string) *PostgresStoreF
 	return f
 }
 
+// WithMetrics sets the metrics instance on the factory. Stores created by
+// OpenStore will inherit it.
+func (f *PostgresStoreFactory) WithMetrics(m *prometheus.Metrics) *PostgresStoreFactory {
+	f.metrics = m
+	return f
+}
+
 // OpenStore creates a PostgresStore scoped to the given tenant and task queues.
 func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
 	// Ensure the schema exists.
@@ -1171,6 +1188,9 @@ func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, t
 	store = store.WithIdempotencyKeyTTL(f.idempotencyKeyTTL)
 	if f.notifyChannel != "" {
 		store = store.WithNotifyChannel(f.notifyChannel)
+	}
+	if f.metrics != nil {
+		store.Metrics = f.metrics
 	}
 	return store, nopCloser{}, nil
 }

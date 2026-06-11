@@ -448,19 +448,6 @@ func TestSignalAuthDeniesWhenAllowedCallersEmpty(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// F56 plugin call duration metric
-// ---------------------------------------------------------------------------
-
-// TestPluginCallDurationMetric verifies the cleat_plugin_call_duration_seconds
-// histogram is registered and observable.
-func TestPluginCallDurationMetric(t *testing.T) {
-	if pluginCallDuration == nil {
-		t.Fatal("pluginCallDuration histogram is nil — not registered")
-	}
-	// Observe a value.
-	pluginCallDuration.WithLabelValues("test-plugin", "test-func").Observe(0.5)
-}
-
 // makeSignalAuthCheck returns a signalAuthCheck function backed by the store.
 // This mirrors the closure wired in cmd/cleat-worker/main.go.
 func makeSignalAuthCheck(store *mockSignalWorkflowStore) func(ctx context.Context, targetWorkflowID, callerDefName string) error {

@@ -59,7 +59,7 @@ func TestCompactionReducesEventCount(t *testing.T) {
 	}
 
 	// Compact the history.
-	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold, nil); err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
 
@@ -137,7 +137,7 @@ func TestCompactionPreservesState(t *testing.T) {
 	}
 
 	// Compact.
-	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold, nil); err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
 
@@ -212,7 +212,7 @@ func TestCompactionIdempotent(t *testing.T) {
 	}
 
 	// First compaction.
-	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold, nil); err != nil {
 		t.Fatalf("first compaction: %v", err)
 	}
 	afterFirst, err := store.LoadEventHistory(ctx, runID)
@@ -225,7 +225,7 @@ func TestCompactionIdempotent(t *testing.T) {
 	}
 
 	// Second compaction — should be a no-op since event count is now <= threshold.
-	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold, nil); err != nil {
 		t.Fatalf("second compaction: %v", err)
 	}
 	afterSecond, err := store.LoadEventHistory(ctx, runID)
@@ -315,7 +315,7 @@ func TestCompactionEdgeCases(t *testing.T) {
 			beforeCount := tt.numEvents
 
 			// Compact should not error in any edge case.
-			if err := engine.CompactWorkflowHistory(ctx, store, runID, tt.threshold); err != nil {
+			if err := engine.CompactWorkflowHistory(ctx, store, runID, tt.threshold, nil); err != nil {
 				t.Fatalf("CompactWorkflowHistory: %v", err)
 			}
 

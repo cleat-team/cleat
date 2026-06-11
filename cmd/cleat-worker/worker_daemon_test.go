@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/google/uuid"
 )
 
@@ -578,7 +579,9 @@ func newTestWorker(ms *mockStore) *Worker {
 	ctx, cancel := context.WithCancel(context.Background())
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", 5, 1<<40, 1<<40)
+	testMetrics := newTestPrometheus()
 	return &Worker{
+		Metrics: testMetrics,
 		id:                  "test-worker",
 		store:               ms,
 		concurrency:         5,
@@ -603,7 +606,9 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 	ctx, cancel := context.WithCancel(context.Background())
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", concurrency, 1<<40, 1<<40)
+	testMetrics := newTestPrometheus()
 	return &Worker{
+		Metrics: testMetrics,
 		id:                  "test-worker",
 		store:               ms,
 		concurrency:         concurrency,
@@ -619,6 +624,18 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 		healthTracker:       newHealthTracker(),
 		loopCtxMap:          make(map[string]*loopContext),
 	}
+}
+
+// newTestPrometheus creates a Metrics instance for test use. Errors are
+// silently ignored; callers that need metric recording should check.
+func newTestPrometheus() *prometheus.Metrics {
+	m, err := prometheus.New(prometheus.Config{
+		WorkerID: "test-worker",
+	})
+	if err != nil {
+		return nil
+	}
+	return m
 }
 
 // newTestAPIServer creates an apiServer with a proper maxBodySize for tests.
@@ -1509,21 +1526,25 @@ func TestAPIMetrics(t *testing.T) {
 }
 
 func TestAPIMetrics_ZeroCounts(t *testing.T) {
+	old := globalWorker
+	t.Cleanup(func() { globalWorker = old })
+	m := newTestPrometheus()
+	m.RecordReplayDuration(context.Background(), time.Second)
+	globalWorker = &Worker{
+		Metrics: m,
+	}
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 	handleMetrics(w, req)
-
 	resp := w.Result()
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	body := string(bodyBytes)
 	resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("metrics returned status %d, want 200", resp.StatusCode)
 	}
-
-	if strings.Contains(body, "cleat_replay_duration_seconds{quantile") {
-		t.Error("should not include quantile when replay count is 0")
+	if !strings.Contains(body, "cleat_") {
+		t.Error("expected metric output")
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/tetratelabs/wazero/sys"
+
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 )
 
 // cleatComplete stores the workflow result delivered via cleat_complete host import.
@@ -42,6 +44,7 @@ type Runtime struct {
 	callTimeout      time.Duration // per-call WASM execution timeout (0 = none)
 	MemoryLimitPages uint32        // max WASM linear memory in pages (64KB each)
 	fuelLimit        uint64        // max WASM fuel (function calls) per invocation; 0 = no limit
+	Metrics          *prometheus.Metrics
 }
 
 // Stdout returns captured stdout output from the most recent module.
@@ -379,6 +382,7 @@ func formatWasmCallError(err error) error {
 // and shuts down the module when the fuel budget is exhausted.
 type fuelMeter struct {
 	remaining atomic.Uint64
+	Metrics   *prometheus.Metrics
 }
 
 // NewFunctionListener satisfies FunctionListenerFactory. It returns itself as
@@ -389,9 +393,11 @@ func (fm *fuelMeter) NewFunctionListener(_ api.FunctionDefinition) experimental.
 
 // Before implements FunctionListener. Each function call consumes one unit of
 // fuel. When the budget is exhausted, the module is closed to stop execution.
-func (fm *fuelMeter) Before(_ context.Context, mod api.Module, _ api.FunctionDefinition, _ []uint64, _ experimental.StackIterator) {
+func (fm *fuelMeter) Before(ctx context.Context, mod api.Module, _ api.FunctionDefinition, _ []uint64, _ experimental.StackIterator) {
 	if fm.remaining.Add(^uint64(0)) == 0 { // decrement by 1
-		wasmFuelExhaustedTotal.Inc()
+		if fm.Metrics != nil {
+			fm.Metrics.RecordWasmFuelExhausted(ctx)
+		}
 		mod.CloseWithExitCode(context.Background(), 1)
 	}
 }
@@ -494,7 +500,7 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// each call consumes one unit of fuel. When the budget is exhausted,
 	// the module is closed, which surfaces as an ExitError to the caller.
 	if r.fuelLimit > 0 {
-		fm := &fuelMeter{}
+		fm := &fuelMeter{Metrics: r.Metrics}
 		fm.remaining.Store(r.fuelLimit)
 		callCtx = experimental.WithFunctionListenerFactory(callCtx, fm)
 	}

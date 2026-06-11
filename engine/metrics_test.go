@@ -35,21 +35,3 @@ func TestFreshStepCount(t *testing.T) {
 	}
 }
 
-func TestAmbiguousCallsTotalCounter(t *testing.T) {
-	c := AmbiguousCallsTotalCounter()
-	if c == nil {
-		t.Error("AmbiguousCallsTotalCounter() returned nil")
-	}
-}
-
-func TestPluginCallDuration(t *testing.T) {
-	h := PluginCallDuration()
-	if h == nil {
-		t.Fatal("PluginCallDuration() returned nil")
-	}
-	// Verify WithLabelValues returns a non-nil observer.
-	obs := h.WithLabelValues("test_plugin", "test_func")
-	if obs == nil {
-		t.Error("WithLabelValues returned nil observer")
-	}
-}

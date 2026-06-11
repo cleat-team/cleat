@@ -230,7 +230,9 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, comput
 		}
 
 		if rec.EventType != EventTypeSideEffect {
-			replayFailuresTotal.Inc()
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected side_effect event, got %s", rec.Step, rec.EventType)
 			written, _ := s.writeResult(ctx, m, respPtr, errMsg, respMaxLen)
 			return packSimpleResult(1, written)
@@ -240,7 +242,9 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, comput
 		// recorded value. A mismatch means the WASM module produced a
 		// different result on replay — a non-determinism bug.
 		if rec.SideEffectResult != computedResult {
-			replayFailuresTotal.Inc()
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf(
 				"replay divergence at step %d: SideEffect produced %q but history recorded %q. "+
 					"Your workflow may have a non-determinism bug (time.Now(), random values, "+
@@ -543,7 +547,9 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 				return 0
 			}
 			if rec.EventType != EventTypeFetch || rec.FetchMethod != method || rec.FetchURL != url || rec.FetchBody != body {
-				replayFailuresTotal.Inc()
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordReplayFailure(ctx)
+				}
 				errMsg := fmt.Sprintf("replay divergence at step %d: Fetch mismatch.\n  workflow: %s %s\n  history: %s %s\n  actual body: %s\n  expected body: %s\n  expected response: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 					rec.Step,
 					method, url,

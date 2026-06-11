@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/wasm"
 )
@@ -348,13 +349,16 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 		}
 	}
 	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
+		rt.Metrics = w.Metrics
 	if err != nil {
+		rt.Metrics = w.Metrics
 		w.logger.ErrorContext(context.Background(), "runDefers: create runtime failed", "worker_id", w.id, "error", err)
 		return
 	}
 	defer rt.Close(w.ctx)
 
 	eng := engine.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id})
+		eng.Metrics = w.Metrics
 
 	// Collect defer IDs sorted by step number for LIFO ordering.
 	// Map iteration order is random in Go, so we always parse the step
@@ -798,7 +802,7 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 				stack := string(debug.Stack())
 				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r, "stack", stack)
 				w.healthTracker.recordPanic(name)
-				backgroundLoopsTotal.WithLabelValues(name, "panic").Inc()
+				w.Metrics.RecordBackgroundLoop(context.Background(), name, "panic")
 			}
 		}()
 		fn()
@@ -839,6 +843,7 @@ type Worker struct {
 	circuitOpen         atomic.Bool
 
 	// Compaction settings.
+	Metrics                 *prometheus.Metrics
 	compactionThreshold int
 	compactionInterval  time.Duration
 
@@ -1063,8 +1068,16 @@ func (w *Worker) dispatchLoop() {
 		// Memory-aware tick: read system memory, compute pressure, adjust concurrency.
 		w.memoryController.Tick(w.ctx)
 		state := w.memoryController.State()
-		updateMemoryMetrics(state)
-		SetQueueDepth(state.QueueDepth)
+		w.Metrics.RecordMemoryRSS(w.ctx, int64(state.UsedBytes))
+		w.Metrics.RecordMemoryAvailable(w.ctx, int64(state.AvailableBytes))
+		w.Metrics.RecordMemoryTotal(w.ctx, int64(state.TotalBytes))
+		w.Metrics.RecordConcurrencyLimit(w.ctx, int64(state.DynamicConcurrency))
+		w.Metrics.SetMemoryPressure(w.ctx, state.Pressure)
+		w.Metrics.SetScalingPressure(w.ctx, state.ScalingPressure)
+		for defName, bytes := range w.memoryController.DefEstimates() {
+		w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, defName, bytes)
+		}
+		w.Metrics.SetQueueDepth(w.ctx, state.QueueDepth)
 		updateThroughputGauges()
 
 		if !w.memoryController.CanClaim() {
@@ -1126,7 +1139,7 @@ func (w *Worker) dispatchLoop() {
 		if remaining > 0 {
 			var err error
 			generalWfs, err = w.store.ClaimWorkflows(w.ctx, w.id, remaining)
-			pollWaitDuration.Observe(time.Since(pollStart).Seconds())
+			w.Metrics.RecordPollWaitDuration(w.ctx, time.Since(pollStart))
 			if err != nil {
 				if isConnectionError(err) {
 					w.consecutiveDBErrors++
@@ -1180,7 +1193,7 @@ func (w *Worker) dispatchLoop() {
 		}
 		w.consecutiveDBErrors = 0 // reset circuit breaker on success
 
-		workflowsClaimed.Add(float64(len(wfs)))
+		w.Metrics.RecordWorkflowsClaimed(w.ctx, int64(len(wfs)))
 
 		// Re-check draining after claim to close the TOCTOU window between
 		// the drain check above and the DB claim calls.
@@ -1193,7 +1206,7 @@ func (w *Worker) dispatchLoop() {
 
 		for _, wf := range wfs {
 			w.logger.InfoContext(w.ctx, "claimed workflow", "worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName, "def_version", wf.DefVersion)
-			dispatchLatency.WithLabelValues("").Observe(time.Since(wf.CreatedAt).Seconds())
+			w.Metrics.RecordDispatchLatency(w.ctx, time.Since(wf.CreatedAt), "")
 
 			w.inflight.Store(wf.ID, wf)
 			w.wg.Add(1)
@@ -1212,8 +1225,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.releaseOrFail(wf, fmt.Sprintf("panic: %v", r))
 		}
 	}()
-	workflowsActive.Inc()
-	defer workflowsActive.Dec()
+	w.Metrics.AddWorkflowActive(context.Background(), 1, wf.DefName)
+	defer w.Metrics.AddWorkflowActive(context.Background(), -1, wf.DefName)
 	workflowStartTime := time.Now()
 
 	// Measure memory usage before and after to estimate per-workflow footprint.
@@ -1240,11 +1253,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// ---- Load WASM ----
 	wasmStart := time.Now()
 	wasmBytes, err := w.loadWASM(wf.DefName, wf.DefVersion)
-	wasmCompileDuration.WithLabelValues(wf.DefName).Observe(time.Since(wasmStart).Seconds())
+	w.Metrics.RecordWasmCompileDuration(context.Background(), time.Since(wasmStart), wf.DefName)
 	if err != nil {
 		w.logger.ErrorContext(context.Background(), "failed to load WASM", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		var ce *engine.CleatError
 		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
@@ -1255,7 +1268,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "retries exhausted") {
 			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
-			workflowsDeadLettered.Inc()
+			w.Metrics.RecordWorkflowsDeadLettered(context.Background())
 		} else {
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
 		}
@@ -1274,8 +1287,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errMsg := fmt.Sprintf("module requires %d pages (%.0f MB) but max is %d pages (%d MB); increase --wasm-memory-max-mb or reduce module memory usage",
 				requiredPages, requiredMB, allowedPages, *w.wasmMemoryMaxMB)
 			w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)
-			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, engine.ErrUnknown.String(), "", nil)
 			return
 		}
@@ -1289,8 +1302,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 			return
 		}
-		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: history load: %v", wf.ID, err), engine.ErrUnknown.String(), "", nil)
 		return
 	}
@@ -1300,8 +1313,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// ---- Determine entry point ----
 	entryPoint := determineEntryPoint(wf.Input, wasmBytes)
 	if entryPoint == "" {
-		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation,
 			"cannot determine entry point: no __entry_point in input and no handle_* export in WASM binary",
 			engine.ErrPermanent.String(), "", nil)
@@ -1326,9 +1339,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 	}
 	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
+		rt.Metrics = w.Metrics
 	if err != nil {
-		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		rt.Metrics = w.Metrics
+		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: create runtime: %v", wf.ID, err), engine.ErrUnknown.String(), "", nil)
 		return
 	}
@@ -1352,8 +1367,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			"version mismatch: workflow instance %s expects def_version %d but WASM binary metadata reports version %d (def=%s). The workflow_defs row and the deployed WASM binary are out of sync.",
 			wf.ID, wf.DefVersion, wfMeta.WorkflowVersion, wf.DefName)
 		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "version_check", nil)
 		return
 	}
@@ -1375,8 +1390,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 					"missing plugin: workflow requires plugin %q version %s but it is not installed in this worker. Available plugins: %v",
 					pluginName, requiredVersion, pluginNames(workerPlugins))
 				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+				w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+				w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "plugin_check", nil)
 				return
 			}
@@ -1385,8 +1400,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 					"plugin version mismatch: workflow requires plugin %q version %s but worker has version %s",
 					pluginName, requiredVersion, workerVersion)
 				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+				w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+				w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "plugin_check", nil)
 				return
 			}
@@ -1460,8 +1475,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		tenantDB, err := w.tenantPools.For(w.ctx, wf.TenantID)
 		if err != nil {
 			w.logger.ErrorContext(context.Background(), "cannot get tenant pool", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), engine.ErrUnknown.String(), "", nil)
 			return
 		}
@@ -1496,6 +1511,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 	}
 	eng := engine.NewEngine(rt, caller, engineOpts...)
+		eng.Metrics = w.Metrics
 	w.execEngines.Store(wf.ID, eng)
 
 	// ---- Execute/Resume ----
@@ -1504,23 +1520,23 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	result, resultHistory, suspended, deferrals, queryState, err := eng.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
 	engineElapsed := time.Since(engineStart)
 	if len(history) > 0 {
-		replayDuration.Observe(engineElapsed.Seconds())
+		w.Metrics.RecordReplayDuration(context.Background(), engineElapsed)
 	} else {
-		freshDuration.WithLabelValues(wf.DefName).Observe(engineElapsed.Seconds())
+		w.Metrics.RecordFreshDuration(context.Background(), engineElapsed, wf.DefName)
 	}
 	// Update throughput gauges (events/sec).
 	if engineElapsed.Seconds() > 0 {
 		eventsPerSec := float64(len(resultHistory)) / engineElapsed.Seconds()
 		if len(history) > 0 {
-			SetReplayThroughput(eventsPerSec)
+			w.Metrics.SetReplayThroughput(context.Background(), eventsPerSec)
 		} else {
-			SetFreshThroughput(eventsPerSec)
+			w.Metrics.SetFreshThroughput(context.Background(), eventsPerSec)
 		}
 	}
 	if err != nil {
 		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		var ce *engine.CleatError
 		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
@@ -1531,7 +1547,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "retries exhausted") {
 			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
-			workflowsDeadLettered.Inc()
+			w.Metrics.RecordWorkflowsDeadLettered(context.Background())
 		} else {
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
 		}
@@ -1560,14 +1576,14 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
 		if err != nil {
 			w.logger.ErrorContext(context.Background(), "continue_as_new failed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("continue_as_new: %v", err), engine.ErrUnknown.String(), "", nil)
 			return
 		}
 		w.logger.InfoContext(context.Background(), "continued as new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "new_run_id", newRunID)
-		workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
-		workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.Metrics.RecordWorkflowCompleted(context.Background(), wf.DefName, "")
+		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "done", "")
 		return
 	}
 
@@ -1583,15 +1599,15 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	queryStart := time.Now()
 	err = w.store.FinalizeWorkflowSegment(w.ctx, wf.ID, w.id, wf.Generation, newEvents, finalStatus, result, "", "", queryState, nextWakeAt)
 	if err != nil {
-		dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
+		w.Metrics.RecordDBQueryLatency(context.Background(), time.Since(queryStart), "finalize")
 		if isConnectionError(err) {
 			w.logger.WarnContext(context.Background(), "DB down finalizing", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 			return
 		}
 		w.logger.ErrorContext(context.Background(), "finalize error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		var ce *engine.CleatError
 		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
@@ -1602,13 +1618,13 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "retries exhausted") {
 			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
-			workflowsDeadLettered.Inc()
+			w.Metrics.RecordWorkflowsDeadLettered(context.Background())
 		} else {
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
 		}
 		return
 	}
-	dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
+	w.Metrics.RecordDBQueryLatency(context.Background(), time.Since(queryStart), "finalize")
 
 	// Signal the dispatch loop to poll immediately. The parent
 	// was woken atomically inside FinalizeWorkflowSegment.
@@ -1627,8 +1643,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 
 		duration := time.Since(workflowStartTime)
-		workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(duration.Seconds())
-		workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
+		w.Metrics.RecordWorkflowDuration(context.Background(), duration, wf.DefName, "done", "")
+		w.Metrics.RecordWorkflowCompleted(context.Background(), wf.DefName, "")
 		w.logger.InfoContext(context.Background(), "workflow completed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "duration", duration)
 	} else {
 		w.logger.InfoContext(context.Background(), "workflow suspended", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "reason", suspended.Reason, "wake_at", suspended.SuspendUntil)
@@ -1650,16 +1666,16 @@ func (w *Worker) heartbeatLoop() {
 			hbStart := time.Now()
 			_, err := w.store.BatchHeartbeat(w.ctx, w.id)
 			if err != nil {
-				backgroundLoopsTotal.WithLabelValues("heartbeat", "error").Inc()
+				w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
 				if isConnectionError(err) {
 					w.logger.WarnContext(w.ctx, "BatchHeartbeat failed: DB appears down", "worker_id", w.id)
 				} else {
 					w.logger.ErrorContext(w.ctx, "BatchHeartbeat error", "worker_id", w.id, "error", err)
 				}
 			} else {
-				backgroundLoopsTotal.WithLabelValues("heartbeat", "ok").Inc()
+				w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
 			}
-			backgroundLoopDuration.WithLabelValues("heartbeat").Set(time.Since(hbStart).Seconds())
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "heartbeat", time.Since(hbStart).Seconds())
 		}
 	}
 }
@@ -1692,16 +1708,16 @@ func (w *Worker) reaperLoop() {
 				} else {
 					w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", err)
 				}
-				backgroundLoopsTotal.WithLabelValues("reaper", "error").Inc()
-				backgroundLoopDuration.WithLabelValues("reaper").Set(time.Since(reaperStart).Seconds())
+				w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "error")
+				w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
 				continue
 			}
 			if reaped > 0 {
 				w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
-				backgroundLoopItemsProcessed.WithLabelValues("reaper").Set(float64(reaped))
+				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
 			}
-			backgroundLoopsTotal.WithLabelValues("reaper", "ok").Inc()
-			backgroundLoopDuration.WithLabelValues("reaper").Set(time.Since(reaperStart).Seconds())
+			w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "ok")
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
 		}
 	}
 }
@@ -1727,16 +1743,16 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 				} else {
 					w.logger.ErrorContext(w.ctx, "Concurrency key reaper error", "worker_id", w.id, "error", err)
 				}
-				backgroundLoopsTotal.WithLabelValues("concurrency_key_reaper", "error").Inc()
-				backgroundLoopDuration.WithLabelValues("concurrency_key_reaper").Set(time.Since(ckStart).Seconds())
+				w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "error")
+				w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
 				continue
 			}
 			if reaped > 0 {
 				w.logger.InfoContext(w.ctx, "Concurrency key reaper: removed expired keys", "worker_id", w.id, "count", reaped)
-				backgroundLoopItemsProcessed.WithLabelValues("concurrency_key_reaper").Set(float64(reaped))
+				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "concurrency_key_reaper", int64(reaped))
 			}
-			backgroundLoopsTotal.WithLabelValues("concurrency_key_reaper", "ok").Inc()
-			backgroundLoopDuration.WithLabelValues("concurrency_key_reaper").Set(time.Since(ckStart).Seconds())
+			w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "ok")
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
 		}
 	}
 }
@@ -1763,8 +1779,8 @@ func (w *Worker) scheduleLoop() {
 				} else {
 					w.logger.ErrorContext(w.ctx, "Scheduler error", "worker_id", w.id, "error", err)
 				}
-				backgroundLoopsTotal.WithLabelValues("schedule", "error").Inc()
-				backgroundLoopDuration.WithLabelValues("schedule").Set(time.Since(schStart).Seconds())
+				w.Metrics.RecordBackgroundLoop(w.ctx, "schedule", "error")
+				w.Metrics.SetBackgroundLoopDuration(w.ctx, "schedule", time.Since(schStart).Seconds())
 				continue
 			}
 
@@ -1806,9 +1822,9 @@ func (w *Worker) scheduleLoop() {
 				w.logger.InfoContext(w.ctx, "Scheduler: fired schedule", "worker_id", w.id, "schedule", sch.Name, "workflow_id", runID, "next_at", nextRun.Format(time.RFC3339))
 			}
 			w.scheduleMu.Unlock()
-			backgroundLoopsTotal.WithLabelValues("schedule", "ok").Inc()
-			backgroundLoopDuration.WithLabelValues("schedule").Set(time.Since(schStart).Seconds())
-			backgroundLoopItemsProcessed.WithLabelValues("schedule").Set(float64(len(schedules)))
+			w.Metrics.RecordBackgroundLoop(w.ctx, "schedule", "ok")
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "schedule", time.Since(schStart).Seconds())
+			w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "schedule", int64(len(schedules)))
 		}
 	}
 }
@@ -1829,18 +1845,18 @@ func (w *Worker) compactionLoop() {
 			candidates, err := w.store.GetCompactionCandidates(w.ctx, w.compactionThreshold, 10)
 			if err != nil {
 				w.logger.ErrorContext(w.ctx, "compaction: error finding candidates", "worker_id", w.id, "error", err)
-				backgroundLoopsTotal.WithLabelValues("compaction", "error").Inc()
-				backgroundLoopDuration.WithLabelValues("compaction").Set(time.Since(compStart).Seconds())
+				w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "error")
+				w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
 				continue
 			}
 			for _, wfID := range candidates {
-				if err := engine.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold); err != nil {
+				if err := engine.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold, w.Metrics); err != nil {
 					w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
 				}
 			}
-			backgroundLoopsTotal.WithLabelValues("compaction", "ok").Inc()
-			backgroundLoopDuration.WithLabelValues("compaction").Set(time.Since(compStart).Seconds())
-			backgroundLoopItemsProcessed.WithLabelValues("compaction").Set(float64(len(candidates)))
+			w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "ok")
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
+			w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction", int64(len(candidates)))
 		}
 	}
 }
@@ -1860,11 +1876,11 @@ func (w *Worker) memoryReloadLoop() {
 			mrStart := time.Now()
 			if err := w.memoryController.LoadEstimates(w.ctx); err != nil {
 				w.logger.ErrorContext(w.ctx, "memory reload error", "worker_id", w.id, "error", err)
-				backgroundLoopsTotal.WithLabelValues("memory_reload", "error").Inc()
+				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_reload", "error")
 			} else {
-				backgroundLoopsTotal.WithLabelValues("memory_reload", "ok").Inc()
+				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_reload", "ok")
 			}
-			backgroundLoopDuration.WithLabelValues("memory_reload").Set(time.Since(mrStart).Seconds())
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_reload", time.Since(mrStart).Seconds())
 		}
 	}
 }
@@ -1890,10 +1906,10 @@ func (w *Worker) retentionLoop(retentionDays int) {
 			if err != nil {
 				w.logger.ErrorContext(w.ctx, "retention: error deleting expired events", "worker_id", w.id, "error", err)
 			} else if deleted > 0 {
-				eventsDeletedTotal.Add(float64(deleted))
+				w.Metrics.RecordEventsDeleted(w.ctx, deleted)
 				w.logger.InfoContext(w.ctx, "retention: deleted expired event rows", "worker_id", w.id, "count", deleted)
 			}
-			retentionLastRunTimestamp.Set(float64(time.Now().Unix()))
+			w.Metrics.SetRetentionLastRunTimestamp(w.ctx, time.Now().Unix())
 		}
 	}
 }
@@ -1914,17 +1930,17 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 			deleted, err := w.store.CleanupMemorySamples(w.ctx, maxSamples)
 			if err != nil {
 				w.logger.ErrorContext(w.ctx, "memory cleanup error", "worker_id", w.id, "error", err)
-				backgroundLoopsTotal.WithLabelValues("memory_cleanup", "error").Inc()
+				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "error")
 			} else if deleted > 0 {
 				w.logger.InfoContext(w.ctx, "memory cleanup: removed old samples", "worker_id", w.id, "count", deleted)
 			}
 			if err == nil {
-				backgroundLoopsTotal.WithLabelValues("memory_cleanup", "ok").Inc()
+				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "ok")
 				if deleted > 0 {
-					backgroundLoopItemsProcessed.WithLabelValues("memory_cleanup").Set(float64(deleted))
+					w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "memory_cleanup", int64(deleted))
 				}
 			}
-			backgroundLoopDuration.WithLabelValues("memory_cleanup").Set(time.Since(mcStart).Seconds())
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())
 		}
 	}
 }
@@ -2018,12 +2034,12 @@ func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 		dbLen, err := w.store.GetWASMLength(w.ctx, defName, defVersion)
 		if err == nil {
 			if dbLen == int64(len(cached)) {
-				wasmCacheHits.Inc()
+				w.Metrics.RecordWasmCacheHit(w.ctx)
 				return cached, nil
 			}
 			w.logger.InfoContext(w.ctx, "WASM cache stale, reloading", "worker_id", w.id, "key", key)
 		} else {
-			wasmCacheHits.Inc()
+			w.Metrics.RecordWasmCacheHit(w.ctx)
 			return cached, nil
 		}
 		w.wasmCache.remove(key)
@@ -2032,13 +2048,13 @@ func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 	// Check disk cache before going to the database.
 	if w.wasmDiskCache != nil {
 		if cached := w.wasmDiskCache.LookupDef(defName, defVersion); cached != nil {
-			wasmCacheMisses.Inc()
+			w.Metrics.RecordWasmCacheMiss(w.ctx)
 			w.wasmCache.put(key, cached)
 			return cached, nil
 		}
 	}
 
-	wasmCacheMisses.Inc()
+	w.Metrics.RecordWasmCacheMiss(w.ctx)
 
 	wasmBytes, err := w.store.LoadWASM(w.ctx, defName, defVersion)
 	if err != nil {
@@ -2082,7 +2098,7 @@ func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
 	if errMsg != "" {
 		if strings.Contains(errMsg, "retries exhausted") {
 			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, "", "")
-			workflowsDeadLettered.Inc()
+			w.Metrics.RecordWorkflowsDeadLettered(context.Background())
 		} else {
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, "", "", nil)
 		}
@@ -2135,10 +2151,10 @@ func (w *Worker) watchdogLoop() {
 			// Report health metrics.
 			lastRun, panicked, restarts := w.healthTracker.snapshot()
 			for name, t := range lastRun {
-				backgroundLoopLastRun.WithLabelValues(name).Set(float64(t.Unix()))
+				w.Metrics.SetBackgroundLoopLastRun(w.ctx, name, float64(t.Unix()))
 			}
 			for name, count := range restarts {
-				backgroundLoopRestarts.WithLabelValues(name).Add(float64(count))
+				w.Metrics.RecordBackgroundLoopRestart(w.ctx, name, int64(count))
 			}
 			for name := range panicked {
 				_ = name // available for future alerting

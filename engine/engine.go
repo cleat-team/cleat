@@ -10,6 +10,7 @@ import (
 
 	"github.com/tetratelabs/wazero"
 
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/wasm"
 )
 
@@ -70,6 +71,8 @@ type Engine struct {
 
 	childBindingPolicy   string // from WASM metadata; defines how child versions are resolved
 	childBindingOverride string // from env/flag; overrides policy for debugging (e.g. "latest")
+
+	Metrics *prometheus.Metrics
 }
 
 // WithSignalStore sets the signal store.

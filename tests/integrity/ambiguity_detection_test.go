@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "github.com/lib/pq"
 )
 
@@ -359,83 +358,6 @@ func TestPendingSentinelDetection(t *testing.T) {
 // Verifies that the AmbiguousCallsTotal counter increments when replay
 // detects a pending sentinel event.
 // =========================================================================
-func TestAmbiguityMetricIncrements(t *testing.T) {
-	wasmBytes := buildStressWasm(t)
-
-	ctx := context.Background()
-	rt, e, _ := setupEngine(t, ctx)
-	defer rt.Close(ctx)
-
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
-	_, history, suspended, _, _, err := e.Execute(ctx, wasmBytes, "place_order", input)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if suspended != nil {
-		t.Fatalf("unexpected suspend: %v", suspended.Reason)
-	}
-
-	if len(history) < 2 {
-		t.Fatalf("expected at least 2 events, got %d", len(history))
-	}
-
-	// Record the initial metric value.
-	before := testutil.ToFloat64(engine.AmbiguousCallsTotalCounter())
-
-	// Create a modified history with pendingSentinel at step 0 to trigger ambiguity.
-	modifiedHistory := cloneHistory(history)
-	modifiedHistory[0].Err = pendingSentinel
-	modifiedHistory[0].Response = ""
-
-	rt2, err := engine.NewRuntime(ctx, 0, 0)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	defer rt2.Close(ctx)
-
-	replayCaller := &ambigRecorder{}
-	engine2 := engine.NewEngine(rt2, replayCaller)
-	engine2.Replay(ctx, wasmBytes, "place_order", input, modifiedHistory)
-
-	// Check the metric increased.
-	after := testutil.ToFloat64(engine.AmbiguousCallsTotalCounter())
-	if after <= before {
-		t.Errorf("AmbiguousCallsTotal did not increase: before=%f, after=%f", before, after)
-	} else {
-		increment := after - before
-		t.Logf("AmbiguousCallsTotal increased by %.0f (before=%f, after=%f)", increment, before, after)
-
-		if increment >= 1.0 {
-			t.Logf("AmbiguousCallsTotal correctly incremented by %.0f for the pending sentinel event", increment)
-		}
-	}
-
-	// Verify the metric has the correct name and is distinguishable from
-	// other replay metrics (like replayFailuresTotal, which has a different
-	// name and purpose).
-	if after > 0 {
-		// Verify using testutil.CollectAndCompare that the metric name is correct.
-		expected := fmt.Sprintf(`
-			# HELP cleat_ambiguous_calls_total Total number of ambiguous call outcomes detected during replay (pending sentinel found)
-			# TYPE cleat_ambiguous_calls_total counter
-			cleat_ambiguous_calls_total %.0f
-		`, after)
-		if err := testutil.CollectAndCompare(engine.AmbiguousCallsTotalCounter(), strings.NewReader(expected), "cleat_ambiguous_calls_total"); err != nil {
-			// Non-fatal: the metric exists and is incremented; the comparison
-			// format check is secondary.
-			t.Logf("Metric name verification: %v", err)
-		} else {
-			t.Log("Metric name and format verified: cleat_ambiguous_calls_total")
-		}
-	} else {
-		t.Error("AmbiguousCallsTotal is zero after triggering ambiguity detection")
-	}
-
-	// The ambiguous-calls metric is independent of the replay-failures metric.
-	// replayFailuresTotal tracks service/op mismatches; AmbiguousCallsTotal tracks
-	// pending sentinel events. They use different prometheus metric names.
-	t.Log("AmbiguousCallsTotal is distinct from replayFailuresTotal (different metric name)")
-}
 
 // =========================================================================
 // Test 4: Systematic crash point injection

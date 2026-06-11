@@ -27,13 +27,13 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/migration"
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
 		"github.com/google/uuid"
 	"golang.org/x/time/rate"
@@ -115,6 +115,20 @@ func main() {
 
 	shutdownTelemetry := setupTelemetry(ctx, *otelEndpoint, *otelDisabled, workerID)
 	defer shutdownTelemetry()
+
+	// Create OTel metrics instance.
+	var metricsInstance *prometheus.Metrics
+	{
+		m, mErr := prometheus.New(prometheus.Config{
+			WorkerID: workerID,
+		})
+		if mErr != nil {
+			logger.ErrorContext(context.Background(), "failed to create metrics", "worker_id", workerID, "error", mErr)
+			os.Exit(1)
+		}
+		metricsInstance = m
+	}
+	defer metricsInstance.Shutdown(context.Background())
 
 	taskQueues := strings.Split(*taskQueuesStr, ",")
 
@@ -243,7 +257,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-				pluginConnectionsMax.Set(float64(*maxPluginConnections))
+					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -306,7 +320,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-				pluginConnectionsMax.Set(float64(*maxPluginConnections))
+					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -332,7 +346,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-				pluginConnectionsMax.Set(float64(*maxPluginConnections))
+					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -359,7 +373,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-				pluginConnectionsMax.Set(float64(*maxPluginConnections))
+					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -649,7 +663,7 @@ func main() {
 					return
 				case <-ticker.C:
 					stats := pluginDB.Stats()
-					pluginConnectionsInUse.Set(float64(stats.InUse))
+						metricsInstance.SetPluginConnectionsInUse(context.Background(), int64(stats.InUse))
 					openConns := stats.OpenConnections
 					if openConns > 0 && *maxPluginConnections > 0 && float64(openConns) > 0.8*float64(*maxPluginConnections) {
 						logger.WarnContext(context.Background(), "plugin DB connections near limit", "worker_id", workerID, "used", openConns, "max", *maxPluginConnections, "pct", 100*float64(openConns)/float64(*maxPluginConnections))
@@ -686,6 +700,7 @@ func main() {
 	}
 
 	w := &Worker{
+		Metrics:                     metricsInstance,
 		id:                          workerID,
 		logger:                      logger,
 		store:                       store,
@@ -732,8 +747,18 @@ func main() {
 		logger.WarnContext(context.Background(), "failed to load memory estimates", "worker_id", workerID, "error", err)
 	}
 	w.memoryController = mc
-	atomic.StoreInt64(&metricsDesiredConcurrency, int64(*concurrency))
+	metricsInstance.RecordDesiredConcurrency(context.Background(), int64(*concurrency))
 	globalWorker = w
+
+		// Set metrics on the store factory so stores created during workflow
+		// execution inherit the OTel metrics instance.
+		if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
+			pf.WithMetrics(metricsInstance)
+		}
+
+		if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
+			pf.WithMetrics(metricsInstance)
+		}
 
 	// Start HTTP API server if configured.
 	if *apiAddr != "" {
@@ -746,7 +771,7 @@ func main() {
 		}
 
 		mux.HandleFunc("/healthz", api.handleHealthz)
-		mux.HandleFunc("/metrics", handleMetrics)
+		mux.Handle("/metrics", metricsInstance.ServeHTTP())
 		mux.HandleFunc("/api/admin/drain", api.handleDrain)
 		// Schedule API routes (registered before workflows so /api/schedules is not caught by /api/workflows/).
 		mux.HandleFunc("/api/schedules/", api.handleSchedules)
@@ -903,8 +928,10 @@ func main() {
 		}
 	}()
 
-	workerCount.Set(1)
-	defer workerCount.Set(0)
+	metricsInstance.SetWorkerCount(context.Background(), 1)
+	defer func() {
+		metricsInstance.SetWorkerCount(context.Background(), 0)
+	}()
 	w.Run()
 	logger.InfoContext(context.Background(), "shutdown complete", "worker_id", workerID)
 }

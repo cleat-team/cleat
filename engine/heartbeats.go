@@ -110,7 +110,9 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 		}
 
 		if rec.EventType != EventTypeCall {
-			replayFailuresTotal.Inc()
+			if s.engine != nil && s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, rec.EventType,
 				truncateWithHash(requestJSON, maxPayloadLen),
@@ -120,7 +122,9 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 		}
 
 		if rec.Service != service || rec.Op != operation {
-			replayFailuresTotal.Inc()
+			if s.engine != nil && s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, service, operation, rec.Service, rec.Op,
 				truncateWithHash(requestJSON, maxPayloadLen),
@@ -133,7 +137,9 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 		// but the outcome was never persisted.  Return ErrAmbiguous so
 		// the caller can check the external service before retrying.
 		if rec.Err == pendingSentinel {
-			ambiguousCallsTotal.Inc()
+			if s.engine != nil && s.engine.Metrics != nil {
+				s.engine.Metrics.RecordAmbiguousCall(ctx)
+			}
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)
