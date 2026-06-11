@@ -347,6 +347,7 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		}
 	}
 
+	pgNotify(ctx, tx, s.notifyChannel)
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -550,6 +551,7 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 	if err != nil {
 		return err
 	}
+	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
 }
 
@@ -571,6 +573,7 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 		return err
 	}
 
+	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
 }
 
@@ -645,6 +648,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
 
+		pgNotify(ctx, tx, s.notifyChannel)
 		return runID, false, tx.Commit()
 	}
 
@@ -664,6 +668,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
+	pgNotify(ctx, tx, s.notifyChannel)
 	return runID, false, tx.Commit()
 }
 
