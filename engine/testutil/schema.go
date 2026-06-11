@@ -286,6 +286,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				status TEXT NOT NULL DEFAULT 'pending',
 				result JSONB, error_msg TEXT,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT now(), resolved_at TIMESTAMPTZ,
+				tenant_id UUID,
 				PRIMARY KEY (workflow_id, promise_id))`,
 			`CREATE TABLE IF NOT EXISTS idempotency_keys (
 				key_hash BYTEA NOT NULL PRIMARY KEY,
@@ -302,6 +303,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				status TEXT NOT NULL DEFAULT 'pending',
 				result JSONB,
 				error_msg TEXT,
+				tenant_id UUID,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 				completed_at TIMESTAMPTZ,
 				PRIMARY KEY (workflow_id, update_name))`,
@@ -335,7 +337,28 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`,
 			`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS tenant_id UUID`,
 			`ALTER TABLE concurrency_keys ADD COLUMN IF NOT EXISTS tenant_id TEXT`,
+			`ALTER TABLE workflow_promises ADD COLUMN IF NOT EXISTS tenant_id UUID`,
+			`ALTER TABLE workflow_update_requests ADD COLUMN IF NOT EXISTS tenant_id UUID`,
 			`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS allowed_signals JSONB DEFAULT NULL`,
+			// Disable RLS for tests — tests use direct SQL without session variables.
+			`DO $$
+			BEGIN
+				IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'workflow_instances' AND rowsecurity = true) THEN
+					ALTER TABLE workflow_instances DISABLE ROW LEVEL SECURITY;
+				END IF;
+				IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'event_history' AND rowsecurity = true) THEN
+					ALTER TABLE event_history DISABLE ROW LEVEL SECURITY;
+				END IF;
+				IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'workflow_signals' AND rowsecurity = true) THEN
+					ALTER TABLE workflow_signals DISABLE ROW LEVEL SECURITY;
+				END IF;
+				IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'workflow_defs' AND rowsecurity = true) THEN
+					ALTER TABLE workflow_defs DISABLE ROW LEVEL SECURITY;
+				END IF;
+				IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'workflow_schedules' AND rowsecurity = true) THEN
+					ALTER TABLE workflow_schedules DISABLE ROW LEVEL SECURITY;
+				END IF;
+			END $$;`,
 			// Ensure event_history FK with CASCADE exists (for idempotency when
 			// the table was created by an older CREATE TABLE IF NOT EXISTS).
 			`DO $$
@@ -348,6 +371,13 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			        ALTER TABLE event_history ADD CONSTRAINT fk_event_history_workflow
 			            FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE;
 			    END IF;
+			END $$;`,
+			// Drop the FK constraint if it exists (tests insert events without workflow instances).
+			`DO $$
+			BEGIN
+				IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_event_history_workflow') THEN
+					ALTER TABLE event_history DROP CONSTRAINT fk_event_history_workflow;
+				END IF;
 			END $$;`,
 			// Memory statistics tables (migration 010)
 			`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
@@ -403,6 +433,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				status VARCHAR(255) NOT NULL DEFAULT 'pending',
 				result JSON,
 				error_msg TEXT,
+				tenant_id VARCHAR(255) NOT NULL,
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 				completed_at TIMESTAMP(6),
 				PRIMARY KEY (workflow_id, update_name))`,
@@ -449,6 +480,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					result NVARCHAR(MAX), error_msg NVARCHAR(MAX),
 					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
 					resolved_at DATETIMEOFFSET,
+					tenant_id UNIQUEIDENTIFIER,
 					PRIMARY KEY (workflow_id, promise_id))`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'idempotency_keys')
 				CREATE TABLE idempotency_keys (
@@ -467,6 +499,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
 					result NVARCHAR(MAX),
 					error_msg NVARCHAR(MAX),
+					tenant_id UNIQUEIDENTIFIER,
 					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
 					completed_at DATETIMEOFFSET,
 					PRIMARY KEY (workflow_id, update_name))`,
@@ -477,6 +510,10 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				ALTER TABLE workflow_instances ADD error_op NVARCHAR(MAX) NULL`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('concurrency_keys') AND name = 'tenant_id')
 				ALTER TABLE concurrency_keys ADD tenant_id NVARCHAR(128) NULL`,
+			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_promises') AND name = 'tenant_id')
+				ALTER TABLE workflow_promises ADD tenant_id UNIQUEIDENTIFIER NULL`,
+			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_update_requests') AND name = 'tenant_id')
+				ALTER TABLE workflow_update_requests ADD tenant_id UNIQUEIDENTIFIER NULL`,
 			// Memory statistics tables
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_samples')
 				CREATE TABLE workflow_memory_samples (
