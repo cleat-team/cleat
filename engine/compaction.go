@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 )
 
 // DefaultCompactionThreshold is the default number of events before history
@@ -190,7 +192,7 @@ type CompactedChild struct {
 // It loads all events, extracts a compaction checkpoint from events before
 // the compaction point, deletes those events from the database, and stores
 // the compaction state on the workflow_instances row.
-func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID string, threshold int) error {
+func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID string, threshold int, metrics *prometheus.Metrics) error {
 	events, err := store.LoadEventHistory(ctx, workflowID)
 	if err != nil {
 		return fmt.Errorf("compact: load events: %w", err)
@@ -239,7 +241,9 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 		return fmt.Errorf("compact: store: %w", compactErr)
 	}
 
-	compactionEventsDeletedTotal.Add(float64(compactedStep))
+	if metrics != nil {
+		metrics.AddCompactionEventsDeleted(ctx, int64(compactedStep))
+	}
 	log.Printf("compact: workflow=%s events=%d compacted=%d kept=%d state_size=%d",
 		workflowID, len(events), compactedStep, len(events)-keepStep, len(csJSON))
 	return nil

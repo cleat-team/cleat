@@ -291,7 +291,9 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 				s.exitReplay()
 			} else {
 				// Event type mismatch — replay divergence.
-				replayFailuresTotal.Inc()
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordReplayFailure(ctx)
+				}
 				errMsg := fmt.Sprintf("replay divergence at step %d: expected await_child, got %s.\n  run ID: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 					rec.Step, rec.EventType, runID)
 				written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
@@ -411,7 +413,9 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 				s.exitReplay()
 			} else {
 				// Event type mismatch — replay divergence.
-				replayFailuresTotal.Inc()
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordReplayFailure(ctx)
+				}
 				errMsg := fmt.Sprintf("replay divergence at step %d: expected await_any_child, got %s", rec.Step, rec.EventType)
 				written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
 				return int64(uint64(written)<<32 | 1)
@@ -548,7 +552,9 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 		}
 
 		if rec.EventType != EventTypeAwaitAllChildren {
-			replayFailuresTotal.Inc()
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s.\n  actual run IDs: %s\n  expected run IDs: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, rec.EventType,
 				truncateWithHash(runIDsJSON, maxPayloadLen),
@@ -558,7 +564,9 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 		}
 
 		if runIDsJSON != rec.Request {
-			replayFailuresTotal.Inc()
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: await_all_children run IDs mismatch.\n  actual run IDs: %s\n  expected run IDs: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step,
 				truncateWithHash(runIDsJSON, maxPayloadLen),

@@ -13,6 +13,19 @@ import (
 	"github.com/cleat-team/cleat/internal/telemetry"
 )
 
+// Atomic counters for throughput computation. Sampled by the worker outside of
+// the Prometheus registry to avoid prometheus.Collect overhead.
+var (
+	replayStepCount int64
+	freshStepCount  int64
+)
+
+// ReplayStepCount returns the total replay step count from the atomic counter.
+func ReplayStepCount() int64 { return atomic.LoadInt64(&replayStepCount) }
+
+// FreshStepCount returns the total fresh step count from the atomic counter.
+func FreshStepCount() int64 { return atomic.LoadInt64(&freshStepCount) }
+
 func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	if s.isReplay {
 		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
@@ -22,8 +35,10 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 
 func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 
-	durableCallsTotal.Inc()
-	freshStepsTotal.Inc()
+	if s.engine.Metrics != nil {
+		s.engine.Metrics.RecordCall(ctx)
+		s.engine.Metrics.RecordFreshStep(ctx)
+	}
 	atomic.AddInt64(&freshStepCount, 1)
 
 	// Check cancellation before making the call.
@@ -41,7 +56,9 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// tracked locally in the session (no DB query per call).
 	if s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow && !s.autoContinueAsNewTriggered {
 		s.autoContinueAsNewTriggered = true
-		continueAsNewTotal.WithLabelValues("event_cap").Inc()
+		if s.engine.Metrics != nil {
+			s.engine.Metrics.RecordContinueAsNew(ctx, "event_cap")
+		}
 		s.engine.log().InfoContext(ctx, "auto-ContinueAsNew triggered", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "event_count", s.eventCount, "max", s.engine.maxEventsPerWorkflow)
 		s.ContinueAsNew(ctx, m, s.originalInput)
 		m.CloseWithExitCode(ctx, 0)
@@ -92,7 +109,9 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 
 func (s *execSession) replayCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 
-	replayStepsTotal.WithLabelValues(s.defName).Inc()
+	if s.engine.Metrics != nil {
+		s.engine.Metrics.RecordReplayStep(ctx, s.defName)
+	}
 	atomic.AddInt64(&replayStepCount, 1)
 
 	if s.stepCount < len(s.history) {
@@ -102,7 +121,9 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 		}
 
 		if rec.EventType != EventTypeCall {
-			replayFailuresTotal.Inc()
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, rec.EventType,
 				truncateWithHash(requestJSON, maxPayloadLen),
@@ -112,7 +133,9 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 		}
 
 		if rec.Service != service || rec.Op != operation {
-			replayFailuresTotal.Inc()
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, service, operation, rec.Service, rec.Op,
 				truncateWithHash(requestJSON, maxPayloadLen),
@@ -125,7 +148,9 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 		// but the outcome was never persisted.  Return ErrAmbiguous so
 		// the caller can check the external service before retrying.
 		if rec.Err == pendingSentinel {
-			ambiguousCallsTotal.Inc()
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordAmbiguousCall(ctx)
+			}
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)

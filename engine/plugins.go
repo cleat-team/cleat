@@ -193,7 +193,9 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 		}
 
 		if rec.EventType != EventTypePluginCall {
-			replayFailuresTotal.Inc()
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s.\n  actual input: %s\n  expected (cached) input: %s\n  expected (cached) output: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, rec.EventType,
 				truncateWithHash(inputJSON, maxPayloadLen),
@@ -204,7 +206,9 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 		}
 
 		if rec.PluginName != pluginName || rec.PluginFunc != functionName {
-			replayFailuresTotal.Inc()
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s.\n  actual input: %s\n  expected (cached) input: %s\n  expected (cached) output: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc,
 				truncateWithHash(inputJSON, maxPayloadLen),
@@ -304,7 +308,9 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "plugin_call", pluginName, functionName)
 			t0 := time.Now()
 			outputJSON, fnErr = fn(callCtx, inputJSON)
-			pluginCallDuration.WithLabelValues(pluginName, functionName).Observe(time.Since(t0).Seconds())
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordPluginCallDuration(ctx, time.Since(t0), pluginName, functionName)
+			}
 			eventSpan.End()
 		}
 	}

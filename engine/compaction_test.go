@@ -565,7 +565,7 @@ func (m *mockCompactStore) StreamEventHistory(ctx context.Context, workflowID st
 func TestCompactWorkflowHistory_EmptyHistory(t *testing.T) {
 	// Empty event history should not trigger compaction.
 	store := &mockCompactStore{events: []EventRecord{}}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-001", DefaultCompactionThreshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-001", DefaultCompactionThreshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -583,7 +583,7 @@ func TestCompactWorkflowHistory_SingleEvent(t *testing.T) {
 		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: `{}`, Response: `{"ok":true}`},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-002", DefaultCompactionThreshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-002", DefaultCompactionThreshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -599,7 +599,7 @@ func TestCompactWorkflowHistory_BelowThreshold(t *testing.T) {
 		events[i] = EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-003", DefaultCompactionThreshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-003", DefaultCompactionThreshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -620,7 +620,7 @@ func TestCompactWorkflowHistory_AboveThreshold(t *testing.T) {
 	}
 
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-004", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-004", threshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -662,7 +662,7 @@ func TestCompactionWithOpenChildrenAndTail(t *testing.T) {
 	}
 
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-open-children", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-open-children", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -720,7 +720,7 @@ func TestCompactWorkflowHistory_ThresholdExactlyAtBoundary(t *testing.T) {
 	}
 
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-threshold-exact", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-threshold-exact", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -783,7 +783,7 @@ func TestLoadCompactionStateNonExistentWorkflow(t *testing.T) {
 func TestCompactWorkflowHistory_LoadError(t *testing.T) {
 	// LoadEventHistory returns error → should propagate.
 	store := &mockCompactStore{loadErr: fmt.Errorf("db error")}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-005", DefaultCompactionThreshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-005", DefaultCompactionThreshold, nil)
 	if err == nil {
 		t.Fatal("expected error from LoadEventHistory, got nil")
 	}
@@ -797,7 +797,7 @@ func TestCompactWorkflowHistory_CompactError(t *testing.T) {
 		events[i] = EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
 	}
 	store := &mockCompactStore{events: events, compactErr: fmt.Errorf("store error")}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-006", 1000)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-006", 1000, nil)
 	if err == nil {
 		t.Fatal("expected error from CompactHistory, got nil")
 	}
@@ -811,7 +811,7 @@ func TestCompactWorkflowHistory_ExactThreshold(t *testing.T) {
 		events[i] = EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-007", DefaultCompactionThreshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-007", DefaultCompactionThreshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -830,7 +830,7 @@ func TestCompactWorkflowHistory_CompactAll(t *testing.T) {
 		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "op3"},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-008", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-008", threshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -854,7 +854,7 @@ func TestCompactWorkflowHistory_MultipleEventTypes(t *testing.T) {
 		{Step: 3, EventType: EventTypeAwaitSignals, SignalNames: "payment", TimeoutMs: 30000},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-009", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-009", threshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -883,7 +883,7 @@ func TestCompactWorkflowHistory_ExactThresholdPlusOne(t *testing.T) {
 		events[i] = EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-010", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-010", threshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -906,7 +906,7 @@ func TestCompactWorkflowHistory_VerifyCompactionStateContent(t *testing.T) {
 		{Step: 2, EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup"},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-011", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-011", threshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -949,7 +949,7 @@ func TestCompactWorkflowHistory_VerifyTailPreserved(t *testing.T) {
 		{Step: 3, EventType: EventTypeCall, Service: "svc", Op: "recent2"},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-012", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-012", threshold, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1108,7 +1108,7 @@ func TestCompactWorkflowHistory_OpenChildrenInState(t *testing.T) {
 		{Step: 3, EventType: EventTypeCall, Service: "svc", Op: "final"},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-children", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-children", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1144,7 +1144,7 @@ func TestCompactWorkflowHistoryWithSideEffects(t *testing.T) {
 		{Step: 2, EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup"},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-side", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-side", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1195,7 +1195,7 @@ func TestCompactWorkflowHistoryWithDefers(t *testing.T) {
 		{Step: 3, EventType: EventTypeDefer, DeferID: "d3", DeferDescription: "notify completion"},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-defers-roundtrip", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-defers-roundtrip", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1264,7 +1264,7 @@ func TestCompactWorkflowHistory_DefersInState(t *testing.T) {
 		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "work"},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-defers", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-defers", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1380,7 +1380,7 @@ func TestCompactionThresholdBoundaryExact(t *testing.T) {
 	}
 
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-boundary", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-boundary", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1403,7 +1403,7 @@ func TestCompactionThresholdBoundaryPlusOne(t *testing.T) {
 	}
 
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-boundary-plus", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-boundary-plus", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1431,7 +1431,7 @@ func TestCompactionThresholdBoundaryLargeThreshold(t *testing.T) {
 	}
 
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-large", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-large", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1463,7 +1463,7 @@ func TestCompactWorkflowHistoryWithContinueAsNew(t *testing.T) {
 		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "extra"},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-continue-asnew", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-continue-asnew", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1507,7 +1507,7 @@ func TestCompactWorkflowHistoryWithPluginCallStreamChunk(t *testing.T) {
 		{Step: 2, EventType: EventTypePluginCallStreamChunk, PluginName: "p", PluginFunc: "f", PluginOutput: `{"chunk":2,"finish":true}`, StreamChunkIndex: 1, StreamFinish: true},
 	}
 	store := &mockCompactStore{events: events}
-	err := CompactWorkflowHistory(context.Background(), store, "wf-plugin-chunks", threshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-plugin-chunks", threshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1727,7 +1727,7 @@ func TestCompactWorkflowHistory_RetryOnDeadlock(t *testing.T) {
 		failCount:        2, // Fail twice, succeed on third attempt.
 	}
 
-	err := CompactWorkflowHistory(context.Background(), store, "wf-001", DefaultCompactionThreshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-001", DefaultCompactionThreshold, nil)
 	if err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
@@ -1742,7 +1742,7 @@ func TestCompactWorkflowHistory_NoRetryOnNonDeadlock(t *testing.T) {
 		mockCompactStore: mockCompactStore{events: events},
 	}
 
-	err := CompactWorkflowHistory(context.Background(), store, "wf-001", DefaultCompactionThreshold)
+	err := CompactWorkflowHistory(context.Background(), store, "wf-001", DefaultCompactionThreshold, nil)
 	if err == nil {
 		t.Fatal("expected error for non-deadlock failure")
 	}

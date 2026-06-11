@@ -1132,8 +1132,10 @@ func updateThroughputGauges() {
 	}
 	replayDelta := float64(replayCur - lastReplayStepCount)
 	freshDelta := float64(freshCur - lastFreshStepCount)
-	replayThroughput.Set(replayDelta / elapsed)
-	freshThroughput.Set(freshDelta / elapsed)
+	if globalWorker != nil && globalWorker.Metrics != nil {
+		globalWorker.Metrics.SetReplayThroughput(context.Background(), replayDelta/elapsed)
+		globalWorker.Metrics.SetFreshThroughput(context.Background(), freshDelta/elapsed)
+	}
 	lastReplayStepCount = replayCur
 	lastFreshStepCount = freshCur
 	lastThroughputTime = now

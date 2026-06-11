@@ -22,11 +22,11 @@ import (
 func (e *Engine) backendForWasm(wasmBytes []byte) WasmBackend {
 	if e.backends == nil {
 		return nil
-	}
+				}
 	lang := wasm.DetectLanguage(wasmBytes)
 	if backend, ok := e.backends[lang]; ok {
 		return backend
-	}
+				}
 	return nil
 }
 
@@ -48,12 +48,12 @@ func (e *Engine) executeWithBackend(
 	if e.compactionState != nil && len(history) > 0 {
 		replayHistory = buildFullHistoryFromCompaction(history, e.compactionState)
 		compactedStep = e.compactionState.CompactedStep
-	}
+				}
 
 	now := nowMs.Load()
 	if len(replayHistory) > 0 && replayHistory[0].TimestampMs > 0 {
 		now = replayHistory[0].TimestampMs
-	}
+				}
 
 	session := &execSession{
 		engine:       e,
@@ -66,7 +66,7 @@ func (e *Engine) executeWithBackend(
 		execRunID:    e.workflowID,
 		tenantID:     e.tenantID,
 		stepCallback: e.stepCallback,
-	}
+				}
 
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel
@@ -81,14 +81,14 @@ func (e *Engine) executeWithBackend(
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(execCtx, e.defaultWorkflowTimeout)
 		defer cancel()
-	}
+				}
 
 	// Apply per-execution WASM instance timeout if configured.
 	if e.wasmInstanceTimeout > 0 {
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(execCtx, e.wasmInstanceTimeout)
 		defer cancel()
-	}
+				}
 
 	// If replaying, verify event history integrity (checksums) and
 	// validate version compatibility before proceeding.
@@ -97,7 +97,9 @@ func (e *Engine) executeWithBackend(
 		if e.workflowEventVerifier != nil {
 			if verr := e.workflowEventVerifier(ctx, e.workflowID); verr != nil {
 				e.log().WarnContext(ctx, "checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", verr)
-				replayChecksumFailuresTotal.Inc()
+				if e.Metrics != nil {
+					e.Metrics.RecordReplayChecksumFailure(ctx)
+				}
 				if e.failOnChecksumMismatch {
 					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, verr)
 				}
@@ -111,7 +113,7 @@ func (e *Engine) executeWithBackend(
 				return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: version validation failed: %w", e.workflowID, verr)
 			}
 		}
-	}
+				}
 
 	// Use a per-execution backend instance to prevent data races on
 	// the handler/work-data fields when Execute is called concurrently.
@@ -125,7 +127,7 @@ func (e *Engine) executeWithBackend(
 		}
 		session.releaseHeldScopes(context.Background())
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution timed out", e.workflowID)
-	}
+				}
 	if callErr != nil && session.suspendErr == nil {
 		// Non-suspend error (trap, panic, timeout, or cancellation).
 		// Try running defers on a fresh module.
@@ -137,7 +139,7 @@ func (e *Engine) executeWithBackend(
 			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
 		}
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr)
-	}
+				}
 
 	if res.Suspended || session.suspendErr != nil {
 		se := session.suspendErr
@@ -174,7 +176,7 @@ func (e *Engine) executeWithBackend(
 		}
 
 		return "", stripCompactedEvents(session.history, compactedStep), susResult, session.deferrals, session.queryState, nil
-	}
+				}
 
 	// Workflow completed successfully. Release any held scopes.
 	session.releaseHeldScopes(ctx)
@@ -187,12 +189,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	mod, err := e.rt.InstantiateModule(ctx, compiled)
 	if err != nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: instantiate module: %w", err)
-	}
+				}
 	defer mod.Close(ctx)
 
 	if err := e.rt.InitModule(ctx, mod); err != nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: init module: %w", err)
-	}
+				}
 
 	// If compaction state is set, merge virtual compacted events with tail history
 	// to produce a complete replay history for deterministic replay.
@@ -201,12 +203,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	if e.compactionState != nil && len(history) > 0 {
 		replayHistory = buildFullHistoryFromCompaction(history, e.compactionState)
 		compactedStep = e.compactionState.CompactedStep
-	}
+				}
 
 	now := nowMs.Load()
 	if len(replayHistory) > 0 && replayHistory[0].TimestampMs > 0 {
 		now = replayHistory[0].TimestampMs
-	}
+				}
 
 	session := &execSession{
 		engine:        e,
@@ -221,7 +223,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		originalInput: string(input),
 		eventCount:    e.initialEventCount,
 		stepCallback:  e.stepCallback,
-	}
+				}
 
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel
@@ -237,14 +239,14 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(execCtx, e.defaultWorkflowTimeout)
 		defer cancel()
-	}
+				}
 
 	// Apply per-execution WASM instance timeout if configured.
 	if e.wasmInstanceTimeout > 0 {
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(execCtx, e.wasmInstanceTimeout)
 		defer cancel()
-	}
+				}
 
 	// If replaying, verify event history integrity (checksums) and
 	// validate version compatibility before proceeding.
@@ -253,7 +255,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		if e.workflowEventVerifier != nil {
 			if err := e.workflowEventVerifier(ctx, e.workflowID); err != nil {
 				e.log().WarnContext(ctx, "replay checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", err)
-				replayChecksumFailuresTotal.Inc()
+				if e.Metrics != nil {
+					e.Metrics.RecordReplayChecksumFailure(ctx)
+				}
 				if e.failOnChecksumMismatch {
 					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, err)
 				}
@@ -267,7 +271,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: version validation failed: %w", e.workflowID, err)
 			}
 		}
-	}
+				}
 
 	result, err := e.rt.CallExport(execCtx, mod, entryPoint, input)
 	if err != nil {
@@ -335,7 +339,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
 		}
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, err)
-	}
+				}
 
 	// Workflow completed successfully. Release any held scopes.
 	session.releaseHeldScopes(ctx)
@@ -374,7 +378,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: compile core module %d: %w", e.workflowID, i, err)
 		}
 		defer compiled[i].Close(ctx)
-	}
+				}
 
 	// ---- Step 2: Set up execution session ----
 	now := nowMs.Load()
@@ -388,7 +392,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		defName:    e.defName,
 		execRunID:  e.workflowID,
 		tenantID:   e.tenantID,
-	}
+				}
 	execCtx := withHandler(ctx, session)
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
@@ -399,12 +403,12 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(execCtx, e.defaultWorkflowTimeout)
 		defer cancel()
-	}
+				}
 	if e.wasmInstanceTimeout > 0 {
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(execCtx, e.wasmInstanceTimeout)
 		defer cancel()
-	}
+				}
 
 	// ---- Step 3: Walk instance DAG and instantiate core modules ----
 	// resolvedInstances[i] is the wazero api.Module for instance i (nil for
@@ -421,7 +425,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			return m
 		}
 		return nil
-	}
+				}
 
 	// Keep track of all instantiated modules for cleanup.
 	var cleanupMods []api.Module
@@ -483,7 +487,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		}
 		resolvedInstances[i] = mod
 		cleanupMods = append(cleanupMods, mod)
-	}
+				}
 
 	// ---- Step 4: Build resolved exports map per instance ----
 	// resolvedExports[i] maps export name -> (actual export name, source module)
@@ -491,7 +495,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 	type resolvedExp struct {
 		exportName string // actual export name on the source module
 		mod        api.Module
-	}
+				}
 	resolvedExports := make([]map[string]resolvedExp, len(bundle.Instances))
 
 	for i, inst := range bundle.Instances {
@@ -528,13 +532,13 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 				}
 			}
 		}
-	}
+				}
 
 	// ---- Step 5: Find the entry point and initialize the module ----
 	exp, ok := bundle.Exports[entryPoint]
 	if !ok {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: component export %q not found", entryPoint)
-	}
+				}
 
 	// Resolve the entry point through the export chain (handles FromExports).
 	var entryMod api.Module
@@ -552,13 +556,13 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		}
 	} else {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: cannot resolve component export %q (instance %d)", entryPoint, exp.InstanceIndex)
-	}
+				}
 
 	// Initialize the module (calls _start if present, e.g. for Go wasip1
 	// runtime initialization; no-op for modules without _start).
 	if err := e.rt.InitModule(execCtx, entryMod); err != nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: init component entry module: %w", err)
-	}
+				}
 
 	// ---- Step 6: Call the entry point ----
 	result, err := e.rt.CallExport(execCtx, entryMod, entryExportName, input)
@@ -605,7 +609,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		}
 		session.releaseHeldScopes(ctx)
 		return "", session.history, nil, nil, nil, err
-	}
+				}
 
 	// Workflow completed successfully.
 	session.releaseHeldScopes(ctx)
@@ -619,7 +623,7 @@ func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName strin
 	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {
 		return "", fmt.Errorf("host: compile module for defer: %w", err)
-	}
+				}
 	defer compiled.Close(ctx)
 	return e.RunDeferCompiled(ctx, compiled, deferName, input)
 }
@@ -629,12 +633,12 @@ func (e *Engine) RunDeferCompiled(ctx context.Context, compiled wazero.CompiledM
 	mod, err := e.rt.InstantiateModule(ctx, compiled)
 	if err != nil {
 		return "", fmt.Errorf("host: instantiate module for defer: %w", err)
-	}
+				}
 	defer mod.Close(ctx)
 
 	if err := e.rt.InitModule(ctx, mod); err != nil {
 		return "", fmt.Errorf("host: init module for defer: %w", err)
-	}
+				}
 
 	// Defer functions don't need history replay — they're always fresh.
 	return e.rt.CallExport(ctx, mod, deferName, input)
@@ -655,7 +659,7 @@ func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferra
 		if err != nil {
 			e.log().WarnContext(ctx, "defer execution failed", "defer_id", deferID, "description", description, "error", err)
 		}
-	}
+				}
 }
 
 // DispatchUpdate dispatches an update to a workflow by invoking its registered handler.
@@ -664,6 +668,6 @@ func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferra
 func (e *Engine) DispatchUpdate(ctx context.Context, name, payload string) (string, error) {
 	if e.updateHandler == nil {
 		return "", fmt.Errorf("host: no update handler configured for this engine. Call WithUpdateHandler before DispatchUpdate.")
-	}
+				}
 	return e.updateHandler(name, payload)
 }
