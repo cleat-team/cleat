@@ -25,6 +25,7 @@ type PostgresStore struct {
 	tenantID          string
 	dialect           Dialect
 	idempotencyKeyTTL time.Duration
+	notifyChannel     string // PostgreSQL NOTIFY channel; empty = disabled
 
 	// Encryption at rest for sensitive event payloads.
 	encryption *PayloadEncryption
@@ -88,6 +89,14 @@ func (s *PostgresStore) WithEncryption(enc *PayloadEncryption, enabled bool) *Po
 func (s *PostgresStore) WithReadRedactionDisabled(disabled bool) *PostgresStore {
 	cp := *s
 	cp.disableReadRedaction = disabled
+	return &cp
+}
+
+// WithNotifyChannel returns a copy of the store that sends PostgreSQL NOTIFY
+// on dispatchable state changes (new workflows, released timers, signals, promises).
+func (s *PostgresStore) WithNotifyChannel(channel string) *PostgresStore {
+	cp := *s
+	cp.notifyChannel = channel
 	return &cp
 }
 
@@ -1106,6 +1115,7 @@ type PostgresStoreFactory struct {
 	db                *sql.DB
 	schemaName        string
 	idempotencyKeyTTL time.Duration
+	notifyChannel     string // PostgreSQL NOTIFY channel; empty = disabled
 
 	encryption               *PayloadEncryption
 	encryptSensitivePayloads bool
@@ -1137,6 +1147,14 @@ func (f *PostgresStoreFactory) WithEncryption(enc *PayloadEncryption, enabled bo
 	return f
 }
 
+// WithNotifyChannel sets the PostgreSQL NOTIFY channel for dispatch wake-up.
+// When non-empty, OpenStore configures the returned PostgresStore to send
+// pg_notify on dispatchable state changes.
+func (f *PostgresStoreFactory) WithNotifyChannel(channel string) *PostgresStoreFactory {
+	f.notifyChannel = channel
+	return f
+}
+
 // OpenStore creates a PostgresStore scoped to the given tenant and task queues.
 func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
 	// Ensure the schema exists.
@@ -1151,6 +1169,9 @@ func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, t
 		store = store.WithEncryption(f.encryption, true)
 	}
 	store = store.WithIdempotencyKeyTTL(f.idempotencyKeyTTL)
+	if f.notifyChannel != "" {
+		store = store.WithNotifyChannel(f.notifyChannel)
+	}
 	return store, nopCloser{}, nil
 }
 

@@ -56,6 +56,7 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseI
 	if err != nil {
 		return err
 	}
+	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
 }
 

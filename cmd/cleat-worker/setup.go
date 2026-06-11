@@ -881,6 +881,11 @@ type Worker struct {
 	// idle sleep, waking immediately to claim the newly-ready parent.
 	parentWakeCh chan struct{}
 
+	// notifyCh receives PostgreSQL NOTIFY events for dispatch wake-up.
+	// nil when not using Postgres or when --notify-channel is empty —
+	// a nil channel blocks forever in select, so the case is a no-op.
+	notifyCh <-chan struct{}
+
 	// Health check interval for watchdog.
 	healthCheckInterval time.Duration
 
@@ -1159,6 +1164,8 @@ func (w *Worker) dispatchLoop() {
 				return
 			case <-w.parentWakeCh:
 				idleTicks = 0 // reset backoff, poll immediately
+			case <-w.notifyCh:
+				idleTicks = 0 // PostgreSQL NOTIFY: reset backoff, poll immediately
 			case <-time.After(sleep):
 			}
 			continue

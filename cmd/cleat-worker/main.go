@@ -288,7 +288,7 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewPostgresStoreFactory(db, *schemaName)
+			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel)
 
 			// Create per-tenant database connection pools for tenant-scoped plugin operations.
 			baseDSN := baseDSNFromURL(*dbURL)
@@ -676,6 +676,15 @@ func main() {
 		logger.WarnContext(context.Background(), "wasmtime backend unavailable, using legacy wazero for Go WASM", "worker_id", workerID, "error", err)
 	}
 
+	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
+	var notifyCh chan struct{}
+	var closeNotify func()
+	if *driver == "postgres" && *notifyChannel != "" {
+		notifyCh = make(chan struct{}, 1)
+		closeNotify = startNotifyListener(*dbURL, *notifyChannel, notifyCh, logger)
+		defer closeNotify()
+	}
+
 	w := &Worker{
 		id:                          workerID,
 		logger:                      logger,
@@ -713,6 +722,7 @@ func main() {
 		encryptSensitivePayloads:    *encryptSensitivePayloads,
 		drainCh:                     make(chan struct{}),
 		parentWakeCh:                make(chan struct{}, 1),
+		notifyCh:                    notifyCh,
 	}
 
 	// Initialize memory-aware concurrency controller.

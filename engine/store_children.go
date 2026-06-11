@@ -33,6 +33,7 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
+	pgNotify(ctx, tx, s.notifyChannel)
 	return runID, tx.Commit()
 }
 
@@ -98,6 +99,7 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
 	}
 
+	pgNotify(ctx, tx, s.notifyChannel)
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("start child workflow atomic: commit: %w", err)
 	}

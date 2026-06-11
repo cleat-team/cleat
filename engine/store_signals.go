@@ -109,6 +109,7 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 	if err != nil {
 		return err
 	}
+	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
 }
 
