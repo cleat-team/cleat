@@ -126,15 +126,42 @@ type loopContext struct {
 
 // dbServiceCaller implements engine.ServiceCaller for the worker.
 type dbServiceCaller struct {
-	store    engine.WorkflowStore
-	workerID string
+	store      engine.WorkflowStore
+	workerID   string
+	benchSvcURL string
 }
 
 func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
 	if service == "http" && operation == "fetch" {
 		return c.handleHTTPFetch(ctx, requestJSON)
 	}
+	if c.benchSvcURL != "" {
+		return c.forwardToBenchSvc(ctx, service, operation, requestJSON)
+	}
 	return "", fmt.Errorf("service %s.%s not configured: no endpoint registered", service, operation)
+}
+
+func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operation, requestJSON string) (string, error) {
+	url := fmt.Sprintf("%s/call/%s/%s", c.benchSvcURL, service, operation)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(requestJSON))
+	if err != nil {
+		return "", fmt.Errorf("bench-svc: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("bench-svc: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("bench-svc: read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("bench-svc: %s", string(body))
+	}
+	return string(body), nil
 }
 
 func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON string) (string, error) {
@@ -357,7 +384,7 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 	}
 	defer rt.Close(w.ctx)
 
-	eng := engine.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id})
+	eng := engine.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL})
 		eng.Metrics = w.Metrics
 
 	// Collect defer IDs sorted by step number for LIFO ordering.
@@ -1414,7 +1441,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		childBindingPolicy = wfMeta.ChildBindingPolicy
 	}
 
-	caller := &dbServiceCaller{store: w.store, workerID: w.id}
+	caller := &dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(w.store.(engine.SignalStore)),
 		engine.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),

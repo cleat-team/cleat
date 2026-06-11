@@ -878,9 +878,14 @@ func main() {
 		}
 
 		// Create rate limiters and wrap handler.
-		ratelim = newIPRateLimiter(rate.Limit(*rateLimit), *rateLimitBurst)
-		tenantLim = newKeyedRateLimiter()
-		handler = rateLimitMiddleware(ratelim, tenantLim, rate.Limit(*rateLimitPerTenant), *rateLimitPerTenantBurst)(handler)
+		// A rate-limit of 0 disables IP-based rate limiting.
+		if *rateLimit > 0 {
+			ratelim = newIPRateLimiter(rate.Limit(*rateLimit), *rateLimitBurst)
+		}
+		if *rateLimit > 0 || *rateLimitPerTenant > 0 {
+			tenantLim = newKeyedRateLimiter()
+			handler = rateLimitMiddleware(ratelim, tenantLim, rate.Limit(*rateLimitPerTenant), *rateLimitPerTenantBurst)(handler)
+		}
 
 		srv := &http.Server{
 			Addr:         *apiAddr,
