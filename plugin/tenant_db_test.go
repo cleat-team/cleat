@@ -27,7 +27,7 @@ func (d *fakeConnectorDriver) Open(name string) (driver.Conn, error) {
 }
 
 func TestNewTenantPools(t *testing.T) {
-	tp := NewTenantPools(nil, "")
+	tp := NewTenantPools(nil, "", 5)
 	if tp == nil {
 		t.Fatal("NewTenantPools returned nil")
 	}
@@ -44,14 +44,14 @@ func TestNewTenantPools(t *testing.T) {
 
 func TestTenantPoolsClose(t *testing.T) {
 	// Close on empty pools should not panic.
-	tp := NewTenantPools(nil, "")
+	tp := NewTenantPools(nil, "", 5)
 	tp.Close()
 	// Closing again should also be safe.
 	tp.Close()
 }
 
 func TestTenantPoolsCloseWithEntries(t *testing.T) {
-	tp := NewTenantPools(nil, "")
+	tp := NewTenantPools(nil, "", 5)
 	db := sql.OpenDB(&fakeConnector{})
 	tp.pools["550e8400-e29b-41d4-a716-446655440000"] = db
 	// Close with one pool entry exercises the loop body.
@@ -63,7 +63,7 @@ func TestTenantPoolsCloseWithEntries(t *testing.T) {
 }
 
 func TestEvictIdle(t *testing.T) {
-	tp := NewTenantPools(nil, "")
+	tp := NewTenantPools(nil, "", 5)
 	n := tp.EvictIdle(0)
 	if n != 0 {
 		t.Errorf("EvictIdle(0) = %d, want 0", n)
