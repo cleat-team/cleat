@@ -63,7 +63,18 @@ func main() {
 
 	workerID := generateWorkerID()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	var level slog.Level
+	switch *logLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	logger.InfoContext(context.Background(), "starting worker", "worker_id", workerID, "concurrency", *concurrency)
 
 	if *disableChecksumVerification {
