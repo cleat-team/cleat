@@ -304,13 +304,15 @@ func main() {
 			db.SetConnMaxLifetime(5 * time.Minute)
 			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel)
 
-			// Create per-tenant database connection pools for tenant-scoped plugin operations.
-			// Skip tenant pools when auth is disabled (single-tenant/benchmark mode)
-			// to avoid the 5-connection pool limit bottlenecking high-concurrency workloads.
-			if *requireAuth {
+			// Create per-tenant database connection pools for tenant-scoped operations.
+			// PostgreSQL uses set_config('cleat.tenant_id', ...) per transaction for RLS,
+			// which works on the owner pool — separate tenant pools are unnecessary.
+			// MySQL and MSSQL use per-tenant databases or session context, so pools
+			// are only created for those drivers.
+			if *driver != "postgres" && *requireAuth {
 				baseDSN := baseDSNFromURL(*dbURL)
 				if baseDSN != "" {
-					tenantPools = plugin.NewTenantPools(db, baseDSN)
+					tenantPools = plugin.NewTenantPools(db, baseDSN, *tenantPoolMaxConns)
 				}
 			}
 
@@ -338,7 +340,7 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL))
+			factory = engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL)).WithTenantPoolMaxConns(*tenantPoolMaxConns)
 
 			// Create plugin-dedicated connection pool.
 			if *maxPluginConnections > 0 {
@@ -355,7 +357,7 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		case "mssql":
-			factory = engine.NewMSSQLStoreFactory(*dbURL)
+			factory = engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns)
 			// Open a connection to verify and for plugin/migration use.
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
