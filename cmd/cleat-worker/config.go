@@ -91,6 +91,8 @@ var (
 	maxPluginConnections = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
 	otelEndpoint         = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
 	otelDisabled         = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
+	benchSvcURL          = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
+	tenantPoolMaxConns   = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool (MySQL/MSSQL only)")
 )
 
 func applyChildBindingOverrideEnv() {

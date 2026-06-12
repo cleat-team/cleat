@@ -17,19 +17,25 @@ type TenantPools struct {
 	// Owner pool for administrative operations (claiming, migrations).
 	OwnerDB *sql.DB
 
-	mu      sync.Mutex
-	pools   map[string]*sql.DB
-	connStr string // base connection string (without user/password — we add per-tenant)
+	mu       sync.Mutex
+	pools    map[string]*sql.DB
+	connStr  string // base connection string (without user/password — we add per-tenant)
+	maxConns int    // max open connections per tenant pool
 }
 
 // NewTenantPools creates a TenantPools manager.
+// maxConns is the max open connections per tenant pool (0 = default 25).
 // baseDSN is a connection string template like:
 // "host=localhost port=5432 dbname=cleat sslmode=disable"
 // The user and password are added per tenant.
-func NewTenantPools(ownerDB *sql.DB, baseDSN string) *TenantPools {
+func NewTenantPools(ownerDB *sql.DB, baseDSN string, maxConns int) *TenantPools {
+	if maxConns <= 0 {
+		maxConns = 25
+	}
 	return &TenantPools{
-		OwnerDB: ownerDB,
-		pools:   make(map[string]*sql.DB),
+		OwnerDB:  ownerDB,
+		pools:    make(map[string]*sql.DB),
+		maxConns: maxConns,
 		connStr: baseDSN,
 	}
 }
@@ -70,8 +76,8 @@ func (tp *TenantPools) For(ctx context.Context, tenantID string) (*sql.DB, error
 	if err != nil {
 		return nil, fmt.Errorf("tenant pool for %s: open: %w", tenantID, err)
 	}
-	pool.SetMaxOpenConns(5)
-	pool.SetMaxIdleConns(2)
+	pool.SetMaxOpenConns(tp.maxConns)
+	pool.SetMaxIdleConns(max(2, tp.maxConns/5))
 	pool.SetConnMaxLifetime(5 * time.Minute)
 
 	tp.mu.Lock()

@@ -519,7 +519,8 @@ type MySQLStoreFactory struct {
 	// tenantDBs maps tenantID -> per-tenant connection pool.
 	tenantDBs map[string]*sql.DB
 
-	idempotencyKeyTTL time.Duration
+	idempotencyKeyTTL  time.Duration
+	tenantPoolMaxConns int
 }
 
 // NewMySQLStoreFactory creates a MySQLStoreFactory.
@@ -537,7 +538,16 @@ func NewMySQLStoreFactory(masterDB *sql.DB, baseDSN string, idempotencyKeyTTL ..
 		baseDSN:           baseDSN,
 		tenantDBs:         make(map[string]*sql.DB),
 		idempotencyKeyTTL: ttl,
+		tenantPoolMaxConns: 25,
 	}
+}
+
+// WithTenantPoolMaxConns sets the max open connections per tenant pool.
+func (f *MySQLStoreFactory) WithTenantPoolMaxConns(n int) *MySQLStoreFactory {
+	if n > 0 {
+		f.tenantPoolMaxConns = n
+	}
+	return f
 }
 
 // buildTenantDSN inserts the database name into the base DSN.
@@ -587,8 +597,8 @@ func (f *MySQLStoreFactory) CreateTenantDatabase(ctx context.Context, tenantID s
 	}
 
 	// Configure the pool.
-	tenantDB.SetMaxOpenConns(15)
-	tenantDB.SetMaxIdleConns(5)
+	tenantDB.SetMaxOpenConns(f.tenantPoolMaxConns)
+	tenantDB.SetMaxIdleConns(max(2, f.tenantPoolMaxConns/5))
 	tenantDB.SetConnMaxLifetime(5 * time.Minute)
 
 	// Verify connectivity.

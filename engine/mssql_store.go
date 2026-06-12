@@ -194,7 +194,8 @@ type MSSQLStoreFactory struct {
 	mu                sync.RWMutex
 	connStr           string             // connection string for SQL Server
 	tenantDBs         map[string]*sql.DB // per-tenant connection pools with RLS context
-	idempotencyKeyTTL time.Duration
+	idempotencyKeyTTL  time.Duration
+	tenantPoolMaxConns int
 }
 
 // NewMSSQLStoreFactory creates an MSSQLStoreFactory.
@@ -205,10 +206,19 @@ func NewMSSQLStoreFactory(connStr string, idempotencyKeyTTL ...time.Duration) *M
 		ttl = idempotencyKeyTTL[0]
 	}
 	return &MSSQLStoreFactory{
-		connStr:           connStr,
-		tenantDBs:         make(map[string]*sql.DB),
-		idempotencyKeyTTL: ttl,
+		connStr:            connStr,
+		tenantDBs:          make(map[string]*sql.DB),
+		idempotencyKeyTTL:  ttl,
+		tenantPoolMaxConns: 25,
 	}
+}
+
+// WithTenantPoolMaxConns sets the max open connections per tenant pool.
+func (f *MSSQLStoreFactory) WithTenantPoolMaxConns(n int) *MSSQLStoreFactory {
+	if n > 0 {
+		f.tenantPoolMaxConns = n
+	}
+	return f
 }
 
 // OpenStore creates an MSSQLStore scoped to the given tenant.
@@ -276,8 +286,8 @@ func (f *MSSQLStoreFactory) getOrCreateTenantPool(ctx context.Context, tenantID 
 	}
 
 	tenantDB := sql.OpenDB(wrapped)
-	tenantDB.SetMaxOpenConns(15)
-	tenantDB.SetMaxIdleConns(5)
+	tenantDB.SetMaxOpenConns(f.tenantPoolMaxConns)
+	tenantDB.SetMaxIdleConns(max(2, f.tenantPoolMaxConns/5))
 	tenantDB.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := tenantDB.PingContext(ctx); err != nil {
