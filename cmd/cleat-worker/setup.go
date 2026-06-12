@@ -141,6 +141,18 @@ func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJ
 	return "", fmt.Errorf("service %s.%s not configured: no endpoint registered", service, operation)
 }
 
+// benchSvcHTTPClient is a shared HTTP client for bench-svc forwarding with
+// connection pooling enabled. Creating a new client per call exhausts ephemeral
+// ports and adds TCP handshake latency under high concurrency.
+var benchSvcHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operation, requestJSON string) (string, error) {
 	url := fmt.Sprintf("%s/call/%s/%s", c.benchSvcURL, service, operation)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(requestJSON))
@@ -148,8 +160,7 @@ func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operat
 		return "", fmt.Errorf("bench-svc: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := benchSvcHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("bench-svc: %w", err)
 	}

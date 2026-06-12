@@ -305,9 +305,13 @@ func main() {
 			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel)
 
 			// Create per-tenant database connection pools for tenant-scoped plugin operations.
-			baseDSN := baseDSNFromURL(*dbURL)
-			if baseDSN != "" {
-				tenantPools = plugin.NewTenantPools(db, baseDSN)
+			// Skip tenant pools when auth is disabled (single-tenant/benchmark mode)
+			// to avoid the 5-connection pool limit bottlenecking high-concurrency workloads.
+			if *requireAuth {
+				baseDSN := baseDSNFromURL(*dbURL)
+				if baseDSN != "" {
+					tenantPools = plugin.NewTenantPools(db, baseDSN)
+				}
 			}
 
 			// Create plugin-dedicated connection pool.
