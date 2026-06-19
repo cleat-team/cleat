@@ -36,7 +36,8 @@ type wasmtimeBackend struct {
 
 	// moduleCache holds compiled wasmtime Modules keyed by SHA-256 of wasmBytes.
 	// Shared across PerExecution instances to avoid serialized recompilation.
-	moduleCache *sync.Map
+	moduleCache   *sync.Map
+	compileLocks  *sync.Map // per-key *sync.Mutex to serialize compilation
 
 	// witDylib holds the wit_dylib stack machine state for component
 	// model adapter ABI (push/pop/export_call). Initialized per
@@ -51,7 +52,7 @@ type wasmtimeBackend struct {
 // NewWasmtimeBackend creates a new wasmtimeBackend with a fresh engine.
 func NewWasmtimeBackend(ctx context.Context) (*wasmtimeBackend, error) {
 	engine := wasmtime.NewEngine()
-	return &wasmtimeBackend{engine: engine, moduleCache: new(sync.Map)}, nil
+	return &wasmtimeBackend{engine: engine, moduleCache: new(sync.Map), compileLocks: new(sync.Map)}, nil
 }
 
 // Name returns "wasmtime" for diagnostics.
@@ -67,7 +68,7 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 // but has its own per-execution handler and work data, eliminating
 // the data race when Execute is called concurrently.
 func (b *wasmtimeBackend) PerExecution() WasmBackend {
-	return &wasmtimeBackend{engine: b.engine, moduleCache: b.moduleCache}
+	return &wasmtimeBackend{engine: b.engine, moduleCache: b.moduleCache, compileLocks: b.compileLocks}
 }
 
 // Execute compiles, instantiates, and runs a core WASM module via wasmtime.
@@ -114,22 +115,35 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		return b.ExecuteComponent(ctx, wasmBytes, bundle, entryPoint, input, session)
 	}
 
-	// Compile the WASM module (cached by content hash).
+	// Compile the WASM module (cached by content hash, single-compile per key).
 	key := sha256.Sum256(wasmBytes)
 	keyStr := string(key[:])
 	compileStart := time.Now()
-	var module *wasmtime.Module
+
+	// Fast path: module already cached.
 	if cached, ok := b.moduleCache.Load(keyStr); ok {
-		module = cached.(*wasmtime.Module)
+		module := cached.(*wasmtime.Module)
 		fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
 	} else {
-		var err error
-		module, err = wasmtime.NewModule(b.engine, wasmBytes)
-		fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE MISS elapsed=%dms\n", time.Since(compileStart).Milliseconds())
-		if err != nil {
-			return nil, fmt.Errorf("host: compile: %w", err)
+		// Slow path: serialize compilation per unique WASM binary.
+		muI, _ := b.compileLocks.LoadOrStore(keyStr, new(sync.Mutex))
+		mu := muI.(*sync.Mutex)
+		mu.Lock()
+		// Double-check: another goroutine may have compiled while we waited.
+		if cached, ok := b.moduleCache.Load(keyStr); ok {
+			module = cached.(*wasmtime.Module)
+			fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile WAIT THEN HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+		} else {
+			var err error
+			module, err = wasmtime.NewModule(b.engine, wasmBytes)
+			fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE MISS elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+			if err != nil {
+				mu.Unlock()
+				return nil, fmt.Errorf("host: compile: %w", err)
+			}
+			b.moduleCache.Store(keyStr, module)
 		}
-		b.moduleCache.Store(keyStr, module)
+		mu.Unlock()
 	}
 	// Do NOT close the module — it's cached and shared.
 
