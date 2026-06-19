@@ -771,13 +771,12 @@ func main() {
 		// execution inherit the OTel metrics instance.
 		if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
 			pf.WithMetrics(metricsInstance)
+			if syncCommitOff != nil && *syncCommitOff {
+				pf.WithSyncCommitOff(true)
+			}
 		}
-
-		if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
-			pf.WithMetrics(metricsInstance)
-		}
-
 	// Start HTTP API server if configured.
+
 	if *apiAddr != "" {
 		api := &apiServer{store: store, worker: w, maxBodySize: *maxBodySize, db: db}
 

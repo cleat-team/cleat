@@ -248,6 +248,12 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		return fmt.Errorf("finalize workflow: set rls: %w", err)
 	}
 
+	if s.syncCommitOff {
+		if _, err := tx.Exec("SET LOCAL synchronous_commit = off"); err != nil {
+			return fmt.Errorf("finalize workflow: set sync commit: %w", err)
+		}
+	}
+
 	// Append new events within the same transaction.
 	if err := s.appendEventsInTx(ctx, tx, runID, newEvents); err != nil {
 		return fmt.Errorf("finalize workflow: append events: %w", err)
