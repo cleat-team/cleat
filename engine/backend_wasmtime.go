@@ -81,9 +81,12 @@ func (b *wasmtimeBackend) PerExecution() WasmBackend {
 // high offset (10 MB) for input/output buffers and uses the same encoding
 // conventions for export return values.
 func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
+	t0 := time.Now()
+
 	// Create per-execution store with WASI configuration.
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	t1 := time.Now()
 
 	// Configure WASI for Go wasip1 module support.
 	// The module may need WASI for stack/goroutine management even though we
@@ -161,11 +164,14 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		return nil, fmt.Errorf("host: register imports: %w", err)
 	}
 
+	t2 := time.Now()
+
 	// Instantiate the module.
 	instance, err := linker.Instantiate(store, module)
 	if err != nil {
 		return nil, fmt.Errorf("host: instantiate: %w", err)
 	}
+	t3 := time.Now()
 
 	// Get exported memory.
 	memory := instance.GetExport(store, "memory")
@@ -266,6 +272,8 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		return nil, fmt.Errorf("host: export %q not found", entryPoint)
 	}
 
+	t4 := time.Now()
+
 	// Call the entry point. The return value is a single i64 encoding
 	// the error code (low 32 bits) and output length (high 32 bits).
 	// Wrap in recover to handle wasmtime-go internal panics (e.g., from
@@ -325,6 +333,10 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if errCode != 0 {
 		return nil, fmt.Errorf("host: export %q: %s", entryPoint, outputStr)
 	}
+
+	t5 := time.Now()
+	fmt.Fprintf(os.Stderr, "TIMING: wasmtime phases store=%dms compile=%dms link+inst=%dms call=%dms total=%dms\n",
+		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), t5.Sub(t4).Milliseconds(), t5.Sub(t0).Milliseconds())
 
 	return &ExecResult{Result: outputStr, Suspended: false}, nil
 }
