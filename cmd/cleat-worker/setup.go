@@ -1557,6 +1557,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 
 	// ---- Execute/Resume ----
 	inputJSON := wf.Input
+	setupElapsed := time.Since(workflowStartTime)
 	engineStart := time.Now()
 	result, resultHistory, suspended, deferrals, queryState, err := eng.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
 	engineElapsed := time.Since(engineStart)
@@ -1639,7 +1640,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 
 	queryStart := time.Now()
 	err = w.store.FinalizeWorkflowSegment(w.ctx, wf.ID, w.id, wf.Generation, newEvents, finalStatus, result, "", "", queryState, nextWakeAt)
+	finalizeElapsed := time.Since(queryStart)
 	if err != nil {
+		w.logger.InfoContext(context.Background(), "TIMING: finalize error", "worker_id", w.id, "workflow_id", wf.ID, "elapsed_ms", finalizeElapsed.Milliseconds())
 		w.Metrics.RecordDBQueryLatency(context.Background(), time.Since(queryStart), "finalize")
 		if isConnectionError(err) {
 			w.logger.WarnContext(context.Background(), "DB down finalizing", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
@@ -1686,7 +1689,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		duration := time.Since(workflowStartTime)
 		w.Metrics.RecordWorkflowDuration(context.Background(), duration, wf.DefName, "done", "")
 		w.Metrics.RecordWorkflowCompleted(context.Background(), wf.DefName, "")
-		w.logger.InfoContext(context.Background(), "workflow completed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "duration", duration)
+		w.logger.InfoContext(context.Background(), "workflow completed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "duration", duration, "replay_ms", engineElapsed.Milliseconds(), "finalize_ms", finalizeElapsed.Milliseconds())
+		w.logger.InfoContext(context.Background(), "TIMING: breakdown", "worker_id", w.id, "workflow_id", wf.ID, "total_ms", duration.Milliseconds(), "setup_ms", setupElapsed.Milliseconds(), "replay_ms", engineElapsed.Milliseconds(), "finalize_ms", finalizeElapsed.Milliseconds())
 	} else {
 		w.logger.InfoContext(context.Background(), "workflow suspended", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "reason", suspended.Reason, "wake_at", suspended.SuspendUntil)
 	}
