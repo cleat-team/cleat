@@ -120,9 +120,11 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	keyStr := string(key[:])
 	compileStart := time.Now()
 
+	var module *wasmtime.Module
+
 	// Fast path: module already cached.
 	if cached, ok := b.moduleCache.Load(keyStr); ok {
-		module := cached.(*wasmtime.Module)
+		module = cached.(*wasmtime.Module)
 		fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
 	} else {
 		// Slow path: serialize compilation per unique WASM binary.
