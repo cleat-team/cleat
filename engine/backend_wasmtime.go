@@ -335,8 +335,12 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	}
 
 	t5 := time.Now()
-	fmt.Fprintf(os.Stderr, "TIMING: wasmtime phases store=%dms compile=%dms link+inst=%dms call=%dms total=%dms\n",
-		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), t5.Sub(t4).Milliseconds(), t5.Sub(t0).Milliseconds())
+	// Write timing to a file so it's captured even under sudo/nohup.
+	if f, err := os.OpenFile("/tmp/wasmtime-timing.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		fmt.Fprintf(f, "TIMING: wasmtime phases store=%dms compile=%dms link+inst=%dms call=%dms total=%dms\n",
+			t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), t5.Sub(t4).Milliseconds(), t5.Sub(t0).Milliseconds())
+		f.Close()
+	}
 
 	return &ExecResult{Result: outputStr, Suspended: false}, nil
 }
