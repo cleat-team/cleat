@@ -70,7 +70,9 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	step := s.stepCount
 	callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "call", service, operation)
 	defer eventSpan.End()
+	callStart := time.Now()
 	resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
+	callElapsed := time.Since(callStart)
 
 	var callErr string
 	if err != nil {
@@ -92,11 +94,15 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// crashes before the workflow completes, replay will find this event
 	// and return the cached response.  (Use DurableCallIdempotent for
 	// exactly-once with write-ahead logging and ambiguity detection.)
+	var flushElapsed time.Duration
 	if s.engine.db != nil {
+		flushStart := time.Now()
 		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
 			s.engine.log().ErrorContext(ctx, "freshCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
 		}
+		flushElapsed = time.Since(flushStart)
 	}
+	s.engine.log().InfoContext(ctx, "TIMING: freshCall", "workflow_id", s.workflowID, "step", rec.Step, "call_ms", callElapsed.Milliseconds(), "flush_ms", flushElapsed.Milliseconds())
 
 	if err != nil {
 		written, _ := s.writeResult(ctx, m, responsePtr, err.Error(), responseMaxLen)

@@ -45,6 +45,11 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		return nil
 	}
 
+	flushStart := time.Now()
+	defer func() {
+		e.log().InfoContext(ctx, "TIMING: flushEvent db tx", "workflow_id", workflowID, "step", rec.Step, "total_ms", time.Since(flushStart).Milliseconds())
+	}()
+
 	var lastErr error
 	backoff := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
 
