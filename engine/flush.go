@@ -41,7 +41,7 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 // constraint -- MySQL and MSSQL workers use the batch path (appendEventsInTx
 // via FinalizeWorkflowSegment) which is fully dialect-abstracted.
 func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRecord) error {
-	if e.db == nil {
+	if e.db == nil || e.noPerStepFlush {
 		return nil
 	}
 

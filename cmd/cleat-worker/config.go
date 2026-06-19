@@ -73,6 +73,7 @@ var (
 	disableChecksumVerification = flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
 	wasmMemoryMaxMB      = flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
 	wasmInstructionLimit = flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; monitored via wazero function listener)")
+	noPerStepFlush       = flag.Bool("no-per-step-flush", false, "Skip per-step event flush; rely on batch finalization for persistence (higher throughput, weaker crash safety)")
 	wasmOutputBufferSize = flag.Int("wasm-output-buffer-size", 32768, "WASM output buffer size in bytes (default 32 KB)")
 	wasmMaxStringLen     = flag.Int("wasm-max-string-len", 65536, "Maximum WASM string parameter length in bytes (default 64 KB)")
 	wasmCacheDir         = flag.String("wasm-cache-dir", "", "Directory for disk-backed compiled WASM module cache (empty disables)")

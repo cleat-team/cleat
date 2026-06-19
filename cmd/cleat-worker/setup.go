@@ -1548,6 +1548,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			engineOpts = append(engineOpts, engine.WithInitialEventCount(count))
 		}
 	}
+	if noPerStepFlush != nil && *noPerStepFlush {
+		engineOpts = append(engineOpts, engine.WithNoPerStepFlush(true))
+	}
 	eng := engine.NewEngine(rt, caller, engineOpts...)
 		eng.Metrics = w.Metrics
 	w.execEngines.Store(wf.ID, eng)

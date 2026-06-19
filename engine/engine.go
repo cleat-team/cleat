@@ -72,6 +72,8 @@ type Engine struct {
 	childBindingPolicy   string // from WASM metadata; defines how child versions are resolved
 	childBindingOverride string // from env/flag; overrides policy for debugging (e.g. "latest")
 
+	noPerStepFlush bool // skip per-step flushEvent; rely on FinalizeWorkflowSegment for persistence
+
 	Metrics *prometheus.Metrics
 }
 
@@ -252,6 +254,12 @@ func WithLogger(l *slog.Logger) EngineOption { return func(e *Engine) { e.logger
 func WithChildBindingPolicy(policy string) EngineOption {
 	return func(e *Engine) { e.childBindingPolicy = policy }
 }
+
+// WithNoPerStepFlush disables per-step flushEvent calls. Events are still
+// accumulated in the session history and persisted atomically by
+// FinalizeWorkflowSegment. This improves throughput at the cost of losing
+// in-flight events on crash.
+func WithNoPerStepFlush(v bool) EngineOption { return func(e *Engine) { e.noPerStepFlush = v } }
 
 // WithChildBindingOverride overrides the child binding policy for debugging.
 // For example, "latest" forces resolution to the latest version regardless
