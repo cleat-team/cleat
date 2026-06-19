@@ -248,112 +248,29 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		return fmt.Errorf("finalize workflow: set rls: %w", err)
 	}
 
-	if s.syncCommitOff {
-		if _, err := tx.Exec("SET LOCAL synchronous_commit = off"); err != nil {
-			return fmt.Errorf("finalize workflow: set sync commit: %w", err)
-		}
-	}
-
 	// Append new events within the same transaction.
 	if err := s.appendEventsInTx(ctx, tx, runID, newEvents); err != nil {
 		return fmt.Errorf("finalize workflow: append events: %w", err)
 	}
 
-	// Update workflow status based on finalStatus.
-	switch finalStatus {
-	case "done":
-		qsJSON, _ := json.Marshal(queryState)
-		if qsJSON == nil {
-			qsJSON = []byte("{}")
-		}
-		// Ensure result is valid JSON for the JSONB column. Empty strings
-		// and non-JSON values cause "invalid input syntax for type json".
-		if result == "" || !json.Valid([]byte(result)) {
-			result = "{}"
-		}
-		_, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = 'done', result = $3::jsonb, completed_at = now(), assigned_to = NULL, query_state = $4
-			WHERE id = $1 AND assigned_to = $2 AND generation = $5
-		`, runID, workerID, result, string(qsJSON), generation)
-	case "failed":
-		qsJSON, _ := json.Marshal(queryState)
-		if qsJSON == nil {
-			qsJSON = []byte("{}")
-		}
-		_, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = 'failed',
-			    error_msg = $3,
-			    error_code = $4,
-			    error_op = $5,
-			    completed_at = now(),
-			    assigned_to = NULL,
-			    query_state = $6
-			WHERE id = $1 AND assigned_to = $2 AND generation = $7
-		`, runID, workerID, result, errorCode, errorOp, string(qsJSON), generation)
-	case "ready":
-		_, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = 'ready', assigned_to = NULL, next_wake_at = $3
-			WHERE id = $1 AND assigned_to = $2 AND generation = $4
-		`, runID, workerID, nextWakeAt, generation)
-	default:
-		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
+	// Delegate the terminal UPDATEs (status, idempotency, parent wake,
+	// await_child population, pg_notify) to a server-side PL/pgSQL function.
+	// This replaces 5 individual round-trips with 1 function call.
+	qsJSON, _ := json.Marshal(queryState)
+	if qsJSON == nil {
+		qsJSON = []byte("{}")
 	}
-	if err != nil {
-		return fmt.Errorf("finalize workflow: update status: %w", err)
+	resultJSON := result
+	if resultJSON == "" || !json.Valid([]byte(resultJSON)) {
+		resultJSON = "{}"
 	}
 
-	// Record idempotency outcome within the transaction (best-effort).
-	if finalStatus == "done" || finalStatus == "failed" {
-		switch finalStatus {
-		case "done":
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1`,
-				runID, result); err != nil {
-				log.Printf("idempotency update failed (non-fatal): %v", err)
-			}
-		case "failed":
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
-				runID, result); err != nil {
-				log.Printf("idempotency update failed (non-fatal): %v", err)
-			}
-		}
-
-		// Atomically wake the parent inside the same transaction.
-		// Committed atomically with the child's terminal status so the
-		// parent is never left waiting on AwaitChild.
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET next_wake_at = now()
-			WHERE id = (
-				SELECT parent_workflow_id FROM workflow_instances WHERE id = $1
-			)
-			AND status IN ('ready', 'suspended')
-		`, runID); err != nil {
-			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
-		}
-
-		// Also populate the parent's await_child event with the child's
-		// result so the parent can replay it directly without needing
-		// a fresh GetChildResult query (which requires exitReplay).
-		if _, err := tx.ExecContext(ctx, `
-				UPDATE event_history
-				SET response = $2
-				WHERE workflow_id = (
-					SELECT parent_workflow_id FROM workflow_instances WHERE id = $1
-				)
-				AND event_type = 'await_child'
-				AND run_id = $1
-				AND (response IS NULL OR response = '')
-			`, runID, result); err != nil {
-			log.Printf("[store] parent event update failed (non-fatal): %v", err)
-		}
+	if _, err := tx.ExecContext(ctx, `
+		SELECT finalize_workflow_status($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel); err != nil {
+		return fmt.Errorf("finalize workflow: %w", err)
 	}
 
-	pgNotify(ctx, tx, s.notifyChannel)
 	if err := tx.Commit(); err != nil {
 		return err
 	}
