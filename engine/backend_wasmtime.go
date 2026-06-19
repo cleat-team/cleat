@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -108,7 +109,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	}
 
 	// Compile the WASM module.
+	compileStart := time.Now()
 	module, err := wasmtime.NewModule(b.engine, wasmBytes)
+	fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile elapsed=%dms\n", time.Since(compileStart).Milliseconds())
 	if err != nil {
 		return nil, fmt.Errorf("host: compile: %w", err)
 	}
