@@ -4,11 +4,13 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bytecodealliance/wasmtime-go/v44"
@@ -32,6 +34,10 @@ type wasmtimeBackend struct {
 	engine  *wasmtime.Engine
 	handler HostHandler // current execution session
 
+	// moduleCache holds compiled wasmtime Modules keyed by SHA-256 of wasmBytes.
+	// Shared across PerExecution instances to avoid serialized recompilation.
+	moduleCache *sync.Map
+
 	// witDylib holds the wit_dylib stack machine state for component
 	// model adapter ABI (push/pop/export_call). Initialized per
 	// ExecuteComponent call.
@@ -45,7 +51,7 @@ type wasmtimeBackend struct {
 // NewWasmtimeBackend creates a new wasmtimeBackend with a fresh engine.
 func NewWasmtimeBackend(ctx context.Context) (*wasmtimeBackend, error) {
 	engine := wasmtime.NewEngine()
-	return &wasmtimeBackend{engine: engine}, nil
+	return &wasmtimeBackend{engine: engine, moduleCache: new(sync.Map)}, nil
 }
 
 // Name returns "wasmtime" for diagnostics.
@@ -61,7 +67,7 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 // but has its own per-execution handler and work data, eliminating
 // the data race when Execute is called concurrently.
 func (b *wasmtimeBackend) PerExecution() WasmBackend {
-	return &wasmtimeBackend{engine: b.engine}
+	return &wasmtimeBackend{engine: b.engine, moduleCache: b.moduleCache}
 }
 
 // Execute compiles, instantiates, and runs a core WASM module via wasmtime.
@@ -108,14 +114,24 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		return b.ExecuteComponent(ctx, wasmBytes, bundle, entryPoint, input, session)
 	}
 
-	// Compile the WASM module.
+	// Compile the WASM module (cached by content hash).
+	key := sha256.Sum256(wasmBytes)
+	keyStr := string(key[:])
 	compileStart := time.Now()
-	module, err := wasmtime.NewModule(b.engine, wasmBytes)
-	fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile elapsed=%dms\n", time.Since(compileStart).Milliseconds())
-	if err != nil {
-		return nil, fmt.Errorf("host: compile: %w", err)
+	var module *wasmtime.Module
+	if cached, ok := b.moduleCache.Load(keyStr); ok {
+		module = cached.(*wasmtime.Module)
+		fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+	} else {
+		var err error
+		module, err = wasmtime.NewModule(b.engine, wasmBytes)
+		fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE MISS elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+		if err != nil {
+			return nil, fmt.Errorf("host: compile: %w", err)
+		}
+		b.moduleCache.Store(keyStr, module)
 	}
-	defer module.Close()
+	// Do NOT close the module — it's cached and shared.
 
 	// Create linker and register host functions.
 	linker := wasmtime.NewLinker(b.engine)
