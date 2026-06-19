@@ -289,6 +289,13 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		results, callErr = fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
 	}()
 
+		// Phase timing: write to file for analysis.
+		if f, err := os.OpenFile("/tmp/wasmtime-timing.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			fmt.Fprintf(f, "TIMING: wasmtime phases store=%dms compile=%dms link+inst=%dms call=%dms total=%dms\n",
+				t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), time.Since(t4).Milliseconds(), time.Since(t0).Milliseconds())
+			f.Close()
+		}
+
 	// Check for a result delivered via cleat_complete before treating
 	// a trap/proc_exit as an error.
 	if completeErr != "" {
@@ -332,14 +339,6 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	if errCode != 0 {
 		return nil, fmt.Errorf("host: export %q: %s", entryPoint, outputStr)
-	}
-
-	t5 := time.Now()
-	// Write timing to a file so it's captured even under sudo/nohup.
-	if f, err := os.OpenFile("/tmp/wasmtime-timing.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		fmt.Fprintf(f, "TIMING: wasmtime phases store=%dms compile=%dms link+inst=%dms call=%dms total=%dms\n",
-			t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), t5.Sub(t4).Milliseconds(), t5.Sub(t0).Milliseconds())
-		f.Close()
 	}
 
 	return &ExecResult{Result: outputStr, Suspended: false}, nil
