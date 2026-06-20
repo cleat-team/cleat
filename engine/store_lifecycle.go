@@ -50,7 +50,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
 			  AND task_queue = ANY($2)
-			ORDER BY CASE WHEN sticky_worker_id = $1 THEN 0 ELSE 1 END, priority ASC, created_at
+			ORDER BY priority ASC, created_at
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)

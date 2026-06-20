@@ -856,6 +856,7 @@ type Worker struct {
 	logger               *slog.Logger
 	store                engine.WorkflowStore
 	concurrency          int
+	maxQueued            int
 	heartbeatInterval    time.Duration
 	pollInterval         time.Duration
 	pluginRegistry       *engine.PluginRegistry
@@ -1263,6 +1264,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.releaseOrFail(wf, fmt.Sprintf("panic: %v", r))
 		}
 	}()
+	w.Metrics.RecordWorkflowStarted(context.Background(), wf.DefName)
 	w.Metrics.AddWorkflowActive(context.Background(), 1, wf.DefName)
 	defer w.Metrics.AddWorkflowActive(context.Background(), -1, wf.DefName)
 	workflowStartTime := time.Now()

@@ -274,6 +274,14 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, 503, "worker is under memory pressure; cannot accept new workflows")
 		return
 	}
+	if s.worker.maxQueued > 0 {
+		depth, err := s.worker.store.QueueDepth(r.Context())
+		if err == nil && depth >= int64(s.worker.maxQueued) {
+			s.writeError(w, 503, fmt.Sprintf("queue full (%d ready, max %d); retry later", depth, s.worker.maxQueued))
+			return
+		}
+		_ = err
+	}
 
 	var input struct {
 		Input          json.RawMessage `json:"input"`
@@ -1133,6 +1141,8 @@ func updateThroughputGauges() {
 	if globalWorker != nil && globalWorker.Metrics != nil {
 		globalWorker.Metrics.SetReplayThroughput(context.Background(), replayDelta/elapsed)
 		globalWorker.Metrics.SetFreshThroughput(context.Background(), freshDelta/elapsed)
+		globalWorker.Metrics.SetFreshStepCount(context.Background(), freshCur)
+		globalWorker.Metrics.SetReplayStepCount(context.Background(), replayCur)
 	}
 	lastReplayStepCount = replayCur
 	lastFreshStepCount = freshCur

@@ -39,6 +39,7 @@ var (
 	dbURL                = flag.String("db", "", "Database connection URL (required). For Postgres: postgres://... For MySQL: user:pass@tcp(host:port)/dbname?parseTime=true For MSSQL: sqlserver://user:pass@host:port?database=dbname")
 	driver               = flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
 	concurrency          = flag.Int("concurrency", 10, "Max concurrent workflow executions")
+	maxQueued            = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
 	heartbeatInterval    = flag.Duration("heartbeat", 5*time.Second, "Heartbeat interval")
 	pollInterval         = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
 	notifyChannel        = flag.String("notify-channel", "cleat_dispatch", "PostgreSQL NOTIFY channel for dispatch wake-up (empty disables)")

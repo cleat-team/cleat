@@ -722,6 +722,7 @@ func main() {
 		logger:                      logger,
 		store:                       store,
 		concurrency:                 *concurrency,
+		maxQueued:                   *maxQueued,
 		heartbeatInterval:           *heartbeatInterval,
 		pollInterval:                *pollInterval,
 		ctx:                         ctx,

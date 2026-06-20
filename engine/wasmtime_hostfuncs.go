@@ -105,6 +105,6 @@ func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
 		if argsLen > 0 {
 			copy(buf[argsPtr:argsPtr+int32(argsLen)], b.workInput[:argsLen])
 		}
-		return int64(entryLen) | int64(argsLen)<<32
+		return int64(argsLen) | int64(entryLen)<<32
 	})
 }
