@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/tetratelabs/wazero"
@@ -13,6 +14,11 @@ import (
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/wasm"
 )
+
+// DebugTiming enables verbose per-step/per-execution timing output to stderr
+// and structured logs. Set the CLEAT_DEBUG_TIMING=1 environment variable to
+// enable it. Default off — timing I/O adds measurable overhead at high concurrency.
+var DebugTiming = os.Getenv("CLEAT_DEBUG_TIMING") == "1"
 
 // Engine provides cleat execution semantics (Execute/Replay) on top of a
 // Runtime using a checkpoint/replay model.
@@ -73,6 +79,8 @@ type Engine struct {
 	childBindingOverride string // from env/flag; overrides policy for debugging (e.g. "latest")
 
 	noPerStepFlush bool // skip per-step flushEvent; rely on FinalizeWorkflowSegment for persistence
+
+	cancellationCheckInterval time.Duration // throttle PollCancellation; 0 = every step
 
 	Metrics *prometheus.Metrics
 }
@@ -261,6 +269,12 @@ func WithChildBindingPolicy(policy string) EngineOption {
 // in-flight events on crash.
 func WithNoPerStepFlush(v bool) EngineOption { return func(e *Engine) { e.noPerStepFlush = v } }
 
+// WithCancellationCheckInterval sets the minimum wall-clock interval between
+// PollCancellation DB queries. Zero (the default) checks on every durable step.
+func WithCancellationCheckInterval(d time.Duration) EngineOption {
+	return func(e *Engine) { e.cancellationCheckInterval = d }
+}
+
 // WithChildBindingOverride overrides the child binding policy for debugging.
 // For example, "latest" forces resolution to the latest version regardless
 // of the compiled-in policy. This is a worker-level, cross-tenant setting
@@ -303,6 +317,9 @@ func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint strin
 			return "", nil, nil, nil, nil, fmt.Errorf("host: parse component bundle: %w", parseErr)
 		}
 		return e.executeComponent(ctx, bundle, entryPoint, input)
+	}
+	if e.rt == nil {
+		return "", nil, nil, nil, nil, fmt.Errorf("host: no runtime available for WASM compilation; register a backend for this language with WithBackend")
 	}
 	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {

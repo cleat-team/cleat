@@ -4,14 +4,16 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cespare/xxhash/v2"
 
 	"github.com/bytecodealliance/wasmtime-go/v44"
 
@@ -25,6 +27,14 @@ var _ WasmBackend = (*wasmtimeBackend)(nil)
 // from FuncWrap closures (which must return int64, not uint64).
 const errBadParamInt64 int64 = -4294967295
 
+// wasmMeta bundles cached per-WASM-binary metadata. All fields are
+// computed once from the WASM import section and cached by xxhash key.
+type wasmMeta struct {
+	envNeeded map[string]bool // "env" imports the module needs
+	hasWasi   bool            // imports from wasi_snapshot_preview1
+	language  string          // detected source language ("go", "python", etc.)
+}
+
 // wasmtimeBackend implements WasmBackend using the wasmtime WASM runtime.
 // It loads core WASM modules (post-decompose Component Model binaries).
 //
@@ -34,10 +44,15 @@ type wasmtimeBackend struct {
 	engine  *wasmtime.Engine
 	handler HostHandler // current execution session
 
-	// moduleCache holds compiled wasmtime Modules keyed by SHA-256 of wasmBytes.
+	// moduleCache holds compiled wasmtime Modules keyed by xxhash of wasmBytes.
 	// Shared across PerExecution instances to avoid serialized recompilation.
-	moduleCache   *sync.Map
-	compileLocks  *sync.Map // per-key *sync.Mutex to serialize compilation
+	moduleCache  *sync.Map
+	compileLocks *sync.Map // per-key *sync.Mutex to serialize compilation
+	metaCache    *sync.Map // per-key *wasmMeta (envNeeded, hasWasi, language)
+
+	// envNeeded is the set of "env" module imports the WASM module requests.
+	// nil means "register everything" (conservative fallback on parse error).
+	envNeeded map[string]bool
 
 	// witDylib holds the wit_dylib stack machine state for component
 	// model adapter ABI (push/pop/export_call). Initialized per
@@ -52,7 +67,7 @@ type wasmtimeBackend struct {
 // NewWasmtimeBackend creates a new wasmtimeBackend with a fresh engine.
 func NewWasmtimeBackend(ctx context.Context) (*wasmtimeBackend, error) {
 	engine := wasmtime.NewEngine()
-	return &wasmtimeBackend{engine: engine, moduleCache: new(sync.Map), compileLocks: new(sync.Map)}, nil
+	return &wasmtimeBackend{engine: engine, moduleCache: new(sync.Map), compileLocks: new(sync.Map), metaCache: new(sync.Map)}, nil
 }
 
 // Name returns "wasmtime" for diagnostics.
@@ -68,7 +83,7 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 // but has its own per-execution handler and work data, eliminating
 // the data race when Execute is called concurrently.
 func (b *wasmtimeBackend) PerExecution() WasmBackend {
-	return &wasmtimeBackend{engine: b.engine, moduleCache: b.moduleCache, compileLocks: b.compileLocks}
+	return &wasmtimeBackend{engine: b.engine, moduleCache: b.moduleCache, compileLocks: b.compileLocks, metaCache: b.metaCache}
 }
 
 // Execute compiles, instantiates, and runs a core WASM module via wasmtime.
@@ -93,7 +108,22 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// override time/random functions for determinism.
 	// Skip for modules that don't import from WASI (AS, Rust cdylib, TeaVM)
 	// to avoid wasmtime-go v44 nil pointer dereference during fn.Call.
-	needsWasi := wasm.HasWasiImports(wasmBytes)
+	// Look up or populate cached per-WASM metadata (envNeeded, hasWasi, language).
+	wHash := xxhash.Sum64(wasmBytes)
+	wKey := strconv.FormatUint(wHash, 16)
+	var meta *wasmMeta
+	if cached, ok := b.metaCache.Load(wKey); ok {
+		meta = cached.(*wasmMeta)
+	} else {
+		meta = &wasmMeta{
+			envNeeded: wasm.NeededEnvImports(wasmBytes),
+			hasWasi:   wasm.HasWasiImports(wasmBytes),
+			language:  wasm.DetectLanguage(wasmBytes),
+		}
+		b.metaCache.Store(wKey, meta)
+	}
+	b.envNeeded = meta.envNeeded
+	needsWasi := meta.hasWasi
 	if needsWasi {
 		wasiConfig := wasmtime.NewWasiConfig()
 		wasiConfig.InheritStderr()
@@ -118,35 +148,39 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		return b.ExecuteComponent(ctx, wasmBytes, bundle, entryPoint, input, session)
 	}
 
-	// Compile the WASM module (cached by content hash, single-compile per key).
-	key := sha256.Sum256(wasmBytes)
-	keyStr := string(key[:])
+	// Compile the WASM module (cached by xxhash key, computed above).
 	compileStart := time.Now()
 
 	var module *wasmtime.Module
 
 	// Fast path: module already cached.
-	if cached, ok := b.moduleCache.Load(keyStr); ok {
+	if cached, ok := b.moduleCache.Load(wKey); ok {
 		module = cached.(*wasmtime.Module)
-		fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+		if DebugTiming {
+			fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+		}
 	} else {
 		// Slow path: serialize compilation per unique WASM binary.
-		muI, _ := b.compileLocks.LoadOrStore(keyStr, new(sync.Mutex))
+		muI, _ := b.compileLocks.LoadOrStore(wKey, new(sync.Mutex))
 		mu := muI.(*sync.Mutex)
 		mu.Lock()
 		// Double-check: another goroutine may have compiled while we waited.
-		if cached, ok := b.moduleCache.Load(keyStr); ok {
+		if cached, ok := b.moduleCache.Load(wKey); ok {
 			module = cached.(*wasmtime.Module)
-			fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile WAIT THEN HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+			if DebugTiming {
+				fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile WAIT THEN HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+			}
 		} else {
 			var err error
 			module, err = wasmtime.NewModule(b.engine, wasmBytes)
-			fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE MISS elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+			if DebugTiming {
+				fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE MISS elapsed=%dms\n", time.Since(compileStart).Milliseconds())
+			}
 			if err != nil {
 				mu.Unlock()
 				return nil, fmt.Errorf("host: compile: %w", err)
 			}
-			b.moduleCache.Store(keyStr, module)
+			b.moduleCache.Store(wKey, module)
 		}
 		mu.Unlock()
 	}
@@ -183,7 +217,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		return nil, fmt.Errorf("host: memory export is not a memory")
 	}
 
-	lang := wasm.DetectLanguage(wasmBytes)
+	lang := meta.language
 
 	// If the module exports _start, call it first. Go wasip1 modules use
 	// the cleat_poll_work dispatcher protocol to route work. Java/TeaVM
@@ -289,12 +323,17 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		results, callErr = fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
 	}()
 
-		// Phase timing: write to file for analysis.
-		if f, err := os.OpenFile("/tmp/wasmtime-timing.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			fmt.Fprintf(f, "TIMING: wasmtime phases store=%dms compile=%dms link+inst=%dms call=%dms total=%dms\n",
-				t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), time.Since(t4).Milliseconds(), time.Since(t0).Milliseconds())
-			f.Close()
-		}
+	callElapsed := time.Since(t4)
+	if DebugTiming {
+		fmt.Fprintf(os.Stderr, "TIMING-WASMTIME: lang=%s preStart=%d call=%d total=%d ms (store=%d compileLink=%d instantiate=%d)\n",
+			meta.language,
+			t3.Sub(t0).Milliseconds(),
+			callElapsed.Milliseconds(),
+			time.Since(t0).Milliseconds(),
+			t1.Sub(t0).Milliseconds(),
+			t2.Sub(t1).Milliseconds(),
+			t3.Sub(t2).Milliseconds())
+	}
 
 	// Check for a result delivered via cleat_complete before treating
 	// a trap/proc_exit as an error.

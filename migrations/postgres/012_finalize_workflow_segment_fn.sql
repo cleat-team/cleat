@@ -64,7 +64,7 @@ BEGIN
         -- Record idempotency outcome
         IF p_final_status = 'done' THEN
             UPDATE idempotency_keys
-            SET result = p_result
+            SET result = p_result::jsonb
             WHERE workflow_id = p_workflow_id;
         ELSE
             UPDATE idempotency_keys

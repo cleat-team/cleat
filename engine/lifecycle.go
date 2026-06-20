@@ -155,8 +155,11 @@ func (s *execSession) recordEvent(rec EventRecord) {
 
 	// Persist immediately so events survive worker crashes.
 	if s.engine.db != nil && !s.isReplay {
-		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
+		checksum := computeEventChecksum(rec, s.lastChecksum)
+		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum); flushErr != nil {
 			s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
+		} else {
+			s.lastChecksum = checksum
 		}
 	}
 }

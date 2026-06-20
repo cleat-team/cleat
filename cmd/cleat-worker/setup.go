@@ -126,8 +126,8 @@ type loopContext struct {
 
 // dbServiceCaller implements engine.ServiceCaller for the worker.
 type dbServiceCaller struct {
-	store      engine.WorkflowStore
-	workerID   string
+	store       engine.WorkflowStore
+	workerID    string
 	benchSvcURL string
 }
 
@@ -387,7 +387,7 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 		}
 	}
 	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
-		rt.Metrics = w.Metrics
+	rt.Metrics = w.Metrics
 	if err != nil {
 		rt.Metrics = w.Metrics
 		w.logger.ErrorContext(context.Background(), "runDefers: create runtime failed", "worker_id", w.id, "error", err)
@@ -396,7 +396,7 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 	defer rt.Close(w.ctx)
 
 	eng := engine.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL})
-		eng.Metrics = w.Metrics
+	eng.Metrics = w.Metrics
 
 	// Collect defer IDs sorted by step number for LIFO ordering.
 	// Map iteration order is random in Go, so we always parse the step
@@ -881,7 +881,7 @@ type Worker struct {
 	circuitOpen         atomic.Bool
 
 	// Compaction settings.
-	Metrics                 *prometheus.Metrics
+	Metrics             *prometheus.Metrics
 	compactionThreshold int
 	compactionInterval  time.Duration
 
@@ -1113,7 +1113,7 @@ func (w *Worker) dispatchLoop() {
 		w.Metrics.SetMemoryPressure(w.ctx, state.Pressure)
 		w.Metrics.SetScalingPressure(w.ctx, state.ScalingPressure)
 		for defName, bytes := range w.memoryController.DefEstimates() {
-		w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, defName, bytes)
+			w.Metrics.RecordWorkflowMemoryEstimate(w.ctx, defName, bytes)
 		}
 		w.Metrics.SetQueueDepth(w.ctx, state.QueueDepth)
 		updateThroughputGauges()
@@ -1346,7 +1346,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		return
 	}
 
-	w.logger.InfoContext(context.Background(), "loaded history events", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "count", len(history))
+	if engine.DebugTiming {
+		w.logger.InfoContext(context.Background(), "loaded history events", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "count", len(history))
+	}
 
 	// ---- Determine entry point ----
 	entryPoint := determineEntryPoint(wf.Input, wasmBytes)
@@ -1367,7 +1369,10 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		compactionState = nil
 	}
 
-	// ---- Create engine ----
+	// ---- Create engine runtime ----
+	// The wazero Runtime is only needed for non-Go languages or when the
+	// wasmtime backend is unavailable. Go workflows use the wasmtime backend
+	// which compiles and instantiates WASM independently of wazero.
 	memoryPages := uint32(0)
 	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
 		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
@@ -1376,16 +1381,23 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			memoryPages = 65536
 		}
 	}
-	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
+	needsWazeroRuntime := w.wasmtimeBackend == nil || wasm.DetectLanguage(wasmBytes) != "go"
+	var rt *engine.Runtime
+	if needsWazeroRuntime {
+		var rtErr error
+		rt, rtErr = engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 		rt.Metrics = w.Metrics
-	if err != nil {
-		rt.Metrics = w.Metrics
-		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: create runtime: %v", wf.ID, err), engine.ErrUnknown.String(), "", nil)
-		return
+		if rtErr != nil {
+			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: create runtime: %v", wf.ID, rtErr), engine.ErrUnknown.String(), "", nil)
+			if rt != nil {
+				rt.Close(w.ctx)
+			}
+			return
+		}
+		defer rt.Close(w.ctx)
 	}
-	defer rt.Close(w.ctx)
 
 	// Extract child version pins from WASM metadata (compile-time resolution).
 	var childVersions map[string]int
@@ -1551,8 +1563,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if noPerStepFlush != nil && *noPerStepFlush {
 		engineOpts = append(engineOpts, engine.WithNoPerStepFlush(true))
 	}
+	// Throttle cancellation polls to at most once per 100ms wall-clock
+	// to avoid a full DB transaction on every durable step.
+	engineOpts = append(engineOpts, engine.WithCancellationCheckInterval(100*time.Millisecond))
 	eng := engine.NewEngine(rt, caller, engineOpts...)
-		eng.Metrics = w.Metrics
+	eng.Metrics = w.Metrics
 	w.execEngines.Store(wf.ID, eng)
 
 	// ---- Execute/Resume ----
@@ -1642,7 +1657,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	err = w.store.FinalizeWorkflowSegment(w.ctx, wf.ID, w.id, wf.Generation, newEvents, finalStatus, result, "", "", queryState, nextWakeAt)
 	finalizeElapsed := time.Since(queryStart)
 	if err != nil {
-		w.logger.InfoContext(context.Background(), "TIMING: finalize error", "worker_id", w.id, "workflow_id", wf.ID, "elapsed_ms", finalizeElapsed.Milliseconds())
+		if engine.DebugTiming {
+			w.logger.InfoContext(context.Background(), "TIMING: finalize error", "worker_id", w.id, "workflow_id", wf.ID, "elapsed_ms", finalizeElapsed.Milliseconds())
+		}
 		w.Metrics.RecordDBQueryLatency(context.Background(), time.Since(queryStart), "finalize")
 		if isConnectionError(err) {
 			w.logger.WarnContext(context.Background(), "DB down finalizing", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
@@ -1690,7 +1707,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		w.Metrics.RecordWorkflowDuration(context.Background(), duration, wf.DefName, "done", "")
 		w.Metrics.RecordWorkflowCompleted(context.Background(), wf.DefName, "")
 		w.logger.InfoContext(context.Background(), "workflow completed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "duration", duration, "replay_ms", engineElapsed.Milliseconds(), "finalize_ms", finalizeElapsed.Milliseconds())
-		w.logger.InfoContext(context.Background(), "TIMING: breakdown", "worker_id", w.id, "workflow_id", wf.ID, "total_ms", duration.Milliseconds(), "setup_ms", setupElapsed.Milliseconds(), "replay_ms", engineElapsed.Milliseconds(), "finalize_ms", finalizeElapsed.Milliseconds())
+		if engine.DebugTiming {
+			w.logger.InfoContext(context.Background(), "TIMING: breakdown", "worker_id", w.id, "workflow_id", wf.ID, "total_ms", duration.Milliseconds(), "setup_ms", setupElapsed.Milliseconds(), "replay_ms", engineElapsed.Milliseconds(), "finalize_ms", finalizeElapsed.Milliseconds())
+		}
 	} else {
 		w.logger.InfoContext(context.Background(), "workflow suspended", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "reason", suspended.Reason, "wake_at", suspended.SuspendUntil)
 	}
