@@ -76,7 +76,7 @@ var (
 	wasmInstructionLimit = flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; monitored via wazero function listener)")
 	noPerStepFlush       = flag.Bool("no-per-step-flush", false, "Skip per-step event flush; rely on batch finalization for persistence (higher throughput, weaker crash safety)")
 	batchFlushDisabled  = flag.Bool("batch-flush-disabled", false, "Disable adaptive batch flushing (always use direct per-step flush)")
-	batchFlushMaxWaitMs = flag.Int("batch-flush-max-wait-ms", 5, "Max milliseconds to wait accumulating events in batch mode")
+	batchFlushMaxWaitMs = flag.Int("batch-flush-max-wait-ms", 8, "Max milliseconds to wait accumulating events in batch mode")
 	batchFlushMaxSize   = flag.Int("batch-flush-max-size", 200, "Max events per batch flush transaction")
 	batchFlushEnterRate = flag.Int("batch-flush-enter-rate", 500, "Steps/sec threshold to enter adaptive batch mode")
 	batchFlushExitRate  = flag.Int("batch-flush-exit-rate", 250, "Steps/sec threshold to exit batch mode (hysteresis, must be < enter-rate)")

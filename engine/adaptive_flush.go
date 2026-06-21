@@ -65,7 +65,7 @@ type AdaptiveFlusher struct {
 
 func NewAdaptiveFlusher(db *sql.DB, tenantID string, maxWait time.Duration, maxBatch int, enterThreshold, exitThreshold float64, _ int) *AdaptiveFlusher {
 	if maxWait <= 0 {
-		maxWait = 5 * time.Millisecond
+		maxWait = 8 * time.Millisecond
 	}
 	if maxBatch <= 0 {
 		maxBatch = 200
@@ -515,7 +515,7 @@ type TenantFlusherRegistry struct {
 // AdaptiveFlusher instances with the given configuration.
 func NewTenantFlusherRegistry(db *sql.DB, config FlusherConfig) *TenantFlusherRegistry {
 	if config.MaxWait <= 0 {
-		config.MaxWait = 5 * time.Millisecond
+		config.MaxWait = 8 * time.Millisecond
 	}
 	if config.MaxBatch <= 0 {
 		config.MaxBatch = 200
