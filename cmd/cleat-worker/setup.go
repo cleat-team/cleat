@@ -906,6 +906,12 @@ type Worker struct {
 	encryption               *engine.PayloadEncryption
 	encryptSensitivePayloads bool
 
+	// Database connection for background operations.
+	db *sql.DB
+
+	// Batch flusher for higher throughput event persistence.
+	adaptiveFlusher *engine.AdaptiveFlusher
+
 	// Per-workflow resource quotas.
 	maxQuotaEvents          int
 	maxQuotaChildren        int
@@ -1565,11 +1571,18 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if noPerStepFlush != nil && *noPerStepFlush {
 		engineOpts = append(engineOpts, engine.WithNoPerStepFlush(true))
 	}
+	if w.adaptiveFlusher != nil {
+		engineOpts = append(engineOpts, engine.WithAdaptiveFlusher(w.adaptiveFlusher))
+	} else {
+		w.logger.InfoContext(context.Background(), "adaptive flusher not set on worker — using direct flush", "workflow_id", wf.ID)
+	}
 	// Throttle cancellation polls to at most once per 100ms wall-clock
 	// to avoid a full DB transaction on every durable step.
 	engineOpts = append(engineOpts, engine.WithCancellationCheckInterval(100*time.Millisecond))
 	eng := engine.NewEngine(rt, caller, engineOpts...)
 	eng.Metrics = w.Metrics
+
+
 	w.execEngines.Store(wf.ID, eng)
 
 	// ---- Execute/Resume ----

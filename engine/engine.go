@@ -80,6 +80,9 @@ type Engine struct {
 
 	noPerStepFlush bool // skip per-step flushEvent; rely on FinalizeWorkflowSegment for persistence
 
+	batchFlusher    *BatchFlusher    // batch flusher for higher throughput event persistence
+	adaptiveFlusher *AdaptiveFlusher // adaptive batch flusher based on step rate
+
 	cancellationCheckInterval time.Duration // throttle PollCancellation; 0 = every step
 
 	Metrics *prometheus.Metrics
@@ -269,6 +272,16 @@ func WithChildBindingPolicy(policy string) EngineOption {
 // in-flight events on crash.
 func WithNoPerStepFlush(v bool) EngineOption { return func(e *Engine) { e.noPerStepFlush = v } }
 
+// WithAdaptiveFlusher sets the adaptive batch flusher based on step rate.
+// When set, recordEvent uses the adaptive flusher to decide between direct
+// per-step flushing and batched event persistence.
+func WithAdaptiveFlusher(af *AdaptiveFlusher) EngineOption { return func(e *Engine) { e.adaptiveFlusher = af } }
+
+// WithBatchFlusher sets the batch flusher for higher throughput event
+// persistence. When set, recordEvent submits events to the batch flusher
+// instead of executing individual INSERT statements.
+func WithBatchFlusher(bf *BatchFlusher) EngineOption { return func(e *Engine) { e.batchFlusher = bf } }
+
 // WithCancellationCheckInterval sets the minimum wall-clock interval between
 // PollCancellation DB queries. Zero (the default) checks on every durable step.
 func WithCancellationCheckInterval(d time.Duration) EngineOption {
@@ -290,6 +303,18 @@ func (e *Engine) log() *slog.Logger {
 	}
 	return slog.Default()
 }
+
+// DB returns the tenant-scoped database connection.
+func (e *Engine) DB() *sql.DB { return e.db }
+
+// TenantID returns the tenant identifier.
+func (e *Engine) TenantID() string { return e.tenantID }
+
+// EncryptSensitivePayloads returns whether sensitive payload encryption is enabled.
+func (e *Engine) EncryptSensitivePayloads() bool { return e.encryptSensitivePayloads }
+
+// Encryption returns the payload encryption instance.
+func (e *Engine) Encryption() *PayloadEncryption { return e.encryption }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
 func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine {

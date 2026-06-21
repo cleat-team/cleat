@@ -156,10 +156,28 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	// Persist immediately so events survive worker crashes.
 	if s.engine.db != nil && !s.isReplay {
 		checksum := computeEventChecksum(rec, s.lastChecksum)
-		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum); flushErr != nil {
-			s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
-		} else {
-			s.lastChecksum = checksum
+		flushed := false
+		if s.engine.adaptiveFlusher != nil {
+			done, useBatch := s.engine.adaptiveFlusher.Flush(context.Background(), s.workflowID, rec, checksum)
+			if useBatch {
+				select {
+				case err := <-done:
+					if err != nil {
+						s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
+					} else {
+						s.lastChecksum = checksum
+					}
+				}
+				flushed = true
+			}
+		}
+		if !flushed {
+			// Direct flush (low-rate mode or batch/adaptive flushers disabled)
+			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum); flushErr != nil {
+				s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
+			} else {
+				s.lastChecksum = checksum
+			}
 		}
 	}
 }
