@@ -222,7 +222,29 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 	}
 
 	t1 := time.Now()
-	_, err = af.db.ExecContext(ctx, "SELECT batch_flush_events($1::jsonb)", string(eventsJSON))
+	_, err = af.db.ExecContext(ctx, `
+		INSERT INTO event_history (
+			workflow_id, step, event_type, service, operation,
+			request, response, error, duration_ms, signal_names,
+			timeout_ms, signal_name, signal_payload, defer_description,
+			defer_id, child_name, child_input, run_id, new_input,
+			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+			promise_name, promise_id, promise_result, promise_error,
+			payload, created_at, checksum, tenant_id
+		)
+		SELECT
+			workflow_id, step, event_type, service, operation,
+			request, response, error, duration_ms, signal_names,
+			timeout_ms, signal_name, signal_payload, defer_description,
+			defer_id, child_name, child_input, run_id, new_input,
+			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+			promise_name, promise_id, promise_result, promise_error,
+			payload, created_at, checksum, tenant_id
+		FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb)
+		ON CONFLICT (workflow_id, step) DO UPDATE
+			SET response = EXCLUDED.response, error = EXCLUDED.error
+			WHERE event_history.response = '' AND event_history.error IS NULL
+	`, string(eventsJSON))
 	dbUs := time.Since(t1).Microseconds()
 	af.totalDBUs.Add(dbUs)
 	if err != nil {
