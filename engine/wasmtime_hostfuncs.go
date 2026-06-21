@@ -45,7 +45,7 @@ func (b *wasmtimeBackend) registerCleatCall(linker *wasmtime.Linker, completeRes
 		callCtx := ctxWithMem(context.Background(), buf)
 		result := h.DurableCall(callCtx, nil, service, op, req, uint32(respPtr), uint32(respMaxLen))
 		elapsed := time.Since(t0)
-		if elapsed > 5*time.Millisecond {
+		if DebugTiming && elapsed > 5*time.Millisecond {
 			fmt.Fprintf(os.Stderr, "TIMING-WASMTIME: cleat_call total=%dms read=%dus handler=%dus\n",
 				elapsed.Milliseconds(), t1.Sub(t0).Microseconds(), time.Since(t1).Microseconds())
 		}
