@@ -233,29 +233,26 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 		return nil
 	}
 
-	started := make(chan struct{})
+	// Run _start in a goroutine. When it completes, the Go WASI runtime
+	// has fully initialized its function table, so we can call exports
+	// without call_indirect traps. We track completion via a done channel
+	// so the caller can wait for the runtime to be ready rather than
+	// sleeping a fixed interval.
+	done := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				errCh <- fmt.Errorf("host: _start panicked: %v", r)
 			}
+			close(done)
 		}()
-		close(started)
 		start.Call(ctx)
 	}()
 
-	// Wait for the goroutine to actually begin executing _start.
-	select {
-	case <-started:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
 	// Exponential backoff: check module liveness at increasing intervals.
-	// Fast-starting modules (most Go wasip1 binaries) pass on the first
-	// iteration and pay only the initial 100µs yield. Slow starters
-	// (e.g., modules with heavy init() work) get up to ~10ms total.
+	// Most Go wasip1 modules allocate memory within the first 100µs.
+	// Heavy init() work may take longer; we back off to ~10ms total.
 	delay := 100 * time.Microsecond
 	const maxDelay = 10 * time.Millisecond
 	for {
@@ -267,21 +264,28 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 		case <-time.After(delay):
 		}
 
-		// Liveness check: memory is allocated during instantiation, but
-		// if _start panicked the module may have been torn down, so verify
-		// memory is still accessible.
 		if mem := mod.Memory(); mem != nil && mem.Size() > 0 {
-			// Give Go WASM runtime extra time to initialize the function
-			// table after _start launches. Prevents call_indirect traps
-			// in child workflows where timing is tighter.
-			time.Sleep(50 * time.Millisecond)
-			// Check for a late panic before returning success.
+			// Memory is live. Wait for _start to complete so the runtime's
+			// function table is fully populated. _start runs main(), which
+			// for Go WASI modules calls proc_exit when done. Most modules
+			// complete quickly here (main() polls for work and returns
+			// immediately when none is queued). If _start blocks (e.g.,
+			// waiting on a blocking import), we fall back to a short grace
+			// period — the runtime has already allocated its function table
+			// by this point, and the remaining init is non-critical.
 			select {
+			case <-done:
+				// _start completed normally; runtime is fully initialized.
+				return nil
 			case err := <-errCh:
 				return err
-			default:
+			case <-time.After(5 * time.Millisecond):
+				// _start is still running (likely blocked on a host import
+				// in main()). The Go runtime's function table is populated
+				// early during _start, so 5ms is sufficient for the rare
+				// case where init work overlaps with our memory check.
+				return nil
 			}
-			return nil
 		}
 		delay *= 2
 		if delay > maxDelay {

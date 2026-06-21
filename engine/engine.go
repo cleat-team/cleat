@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/tetratelabs/wazero"
@@ -13,6 +14,11 @@ import (
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/wasm"
 )
+
+// DebugTiming enables verbose per-step/per-execution timing output to stderr
+// and structured logs. Set the CLEAT_DEBUG_TIMING=1 environment variable to
+// enable it. Default off — timing I/O adds measurable overhead at high concurrency.
+var DebugTiming = os.Getenv("CLEAT_DEBUG_TIMING") == "1"
 
 // Engine provides cleat execution semantics (Execute/Replay) on top of a
 // Runtime using a checkpoint/replay model.
@@ -71,6 +77,13 @@ type Engine struct {
 
 	childBindingPolicy   string // from WASM metadata; defines how child versions are resolved
 	childBindingOverride string // from env/flag; overrides policy for debugging (e.g. "latest")
+
+	noPerStepFlush bool // skip per-step flushEvent; rely on FinalizeWorkflowSegment for persistence
+
+	batchFlusher     *BatchFlusher           // batch flusher for higher throughput event persistence
+	flusherRegistry  *TenantFlusherRegistry   // per-tenant adaptive batch flushers based on step rate
+
+	cancellationCheckInterval time.Duration // throttle PollCancellation; 0 = every step
 
 	Metrics *prometheus.Metrics
 }
@@ -253,6 +266,30 @@ func WithChildBindingPolicy(policy string) EngineOption {
 	return func(e *Engine) { e.childBindingPolicy = policy }
 }
 
+// WithNoPerStepFlush disables per-step flushEvent calls. Events are still
+// accumulated in the session history and persisted atomically by
+// FinalizeWorkflowSegment. This improves throughput at the cost of losing
+// in-flight events on crash.
+func WithNoPerStepFlush(v bool) EngineOption { return func(e *Engine) { e.noPerStepFlush = v } }
+
+// WithFlusherRegistry sets the tenant-keyed adaptive batch flusher registry.
+// When set, recordEvent uses the tenant-specific flusher to decide between
+// direct per-step flushing and batched event persistence.
+func WithFlusherRegistry(r *TenantFlusherRegistry) EngineOption {
+	return func(e *Engine) { e.flusherRegistry = r }
+}
+
+// WithBatchFlusher sets the batch flusher for higher throughput event
+// persistence. When set, recordEvent submits events to the batch flusher
+// instead of executing individual INSERT statements.
+func WithBatchFlusher(bf *BatchFlusher) EngineOption { return func(e *Engine) { e.batchFlusher = bf } }
+
+// WithCancellationCheckInterval sets the minimum wall-clock interval between
+// PollCancellation DB queries. Zero (the default) checks on every durable step.
+func WithCancellationCheckInterval(d time.Duration) EngineOption {
+	return func(e *Engine) { e.cancellationCheckInterval = d }
+}
+
 // WithChildBindingOverride overrides the child binding policy for debugging.
 // For example, "latest" forces resolution to the latest version regardless
 // of the compiled-in policy. This is a worker-level, cross-tenant setting
@@ -268,6 +305,27 @@ func (e *Engine) log() *slog.Logger {
 	}
 	return slog.Default()
 }
+
+// DB returns the tenant-scoped database connection.
+func (e *Engine) DB() *sql.DB { return e.db }
+
+// TenantID returns the tenant identifier.
+func (e *Engine) TenantID() string { return e.tenantID }
+
+// getAdaptiveFlusher returns the tenant-specific AdaptiveFlusher from the
+// registry, or nil if no registry is configured.
+func (e *Engine) getAdaptiveFlusher() *AdaptiveFlusher {
+	if e.flusherRegistry == nil {
+		return nil
+	}
+	return e.flusherRegistry.For(e.tenantID)
+}
+
+// EncryptSensitivePayloads returns whether sensitive payload encryption is enabled.
+func (e *Engine) EncryptSensitivePayloads() bool { return e.encryptSensitivePayloads }
+
+// Encryption returns the payload encryption instance.
+func (e *Engine) Encryption() *PayloadEncryption { return e.encryption }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
 func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine {
@@ -295,6 +353,9 @@ func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint strin
 			return "", nil, nil, nil, nil, fmt.Errorf("host: parse component bundle: %w", parseErr)
 		}
 		return e.executeComponent(ctx, bundle, entryPoint, input)
+	}
+	if e.rt == nil {
+		return "", nil, nil, nil, nil, fmt.Errorf("host: no runtime available for WASM compilation; register a backend for this language with WithBackend")
 	}
 	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {

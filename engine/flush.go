@@ -19,273 +19,136 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 		data := []byte(val)
 		if uint32(len(data)) > maxLen {
 			data = data[:maxLen]
-			}
+		}
 		n := copy(rawBuf[ptr:], data)
 		return uint32(n), nil
 	}
 	if m != nil {
 		if mem := m.Memory(); mem != nil {
 			return writeWasmString(mem, ptr, val, maxLen)
-			}
+		}
 	}
 	return 0, nil
 }
 
-// flushEvent writes a single event to event_history in its own transaction.
-// This guarantees exactly-once: if the worker crashes before the workflow
-// completes, replay will find this event and return the cached response.
-// Retries with [100ms, 200ms, 400ms] backoff on transient failures.
-//
-// NOTE: flushEvent, flushCallIntent, and completeCallEvent use Postgres-specific
-// SQL syntax ($N placeholders, ON CONFLICT). This is a known portability
-// constraint -- MySQL and MSSQL workers use the batch path (appendEventsInTx
-// via FinalizeWorkflowSegment) which is fully dialect-abstracted.
-func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRecord) error {
-	if e.db == nil {
+// insertEventSQL is the shared INSERT statement for both fast and quota paths.
+const insertEventSQL = `
+	INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
+		duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+		defer_description, defer_id, child_name, child_input, run_id, new_input,
+		plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+		promise_name, promise_id, promise_result, promise_error, payload,
+		checksum, created_at, tenant_id)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+		$9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+		$20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
+		$30, NOW(), $31)
+	ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL`
+
+// flushEvent persists a single event to event_history. Each step is one INSERT
+// that auto-commits; no explicit transaction is needed. The checksum chain is
+// tracked in-memory (execSession.lastChecksum) to avoid a DB round-trip.
+func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRecord, prevChecksum string) error {
+	if e.db == nil || e.noPerStepFlush {
 		return nil
 	}
 
-	var lastErr error
-	backoff := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+	flushStart := time.Now()
+	defer func() {
+		if DebugTiming {
+			e.log().InfoContext(ctx, "TIMING: flushEvent db tx", "workflow_id", workflowID, "step", rec.Step, "total_ms", time.Since(flushStart).Milliseconds())
+		}
+	}()
 
-	for attempt := 0; attempt <= len(backoff); attempt++ {
-		if attempt > 0 && attempt-1 < len(backoff) {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("flush event: context cancelled after %d retries: %w", attempt, ctx.Err())
-			case <-time.After(backoff[attempt-1]):
-			}
-			}
+	checksum := computeEventChecksum(rec, prevChecksum)
+	payloadJSON, _ := eventRecordToPayload(rec)
+	payloadArg := nullStr("")
+	if len(payloadJSON) > 0 {
+		payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
+	}
 
+	requestStr := tryEncodeBase64(rec.Request)
+	responseStr := tryEncodeBase64(rec.Response)
+	errStr := rec.Err
+	sigPayload := rec.SignalPayload
+	childInput := rec.ChildInput
+	newInput := rec.NewInput
+	pluginInput := rec.PluginInput
+	pluginOutput := rec.PluginOutput
+	promiseResult := rec.PromiseResult
+	promiseError := rec.PromiseError
+
+	// Encrypt sensitive payload fields when encryption is enabled.
+	if e.encryptSensitivePayloads && e.encryption != nil {
+		var encErr error
+		if requestStr, encErr = e.encryption.EncryptString(rec.Request); encErr != nil {
+			return fmt.Errorf("flush event: encrypt request: %w", encErr)
+		}
+		if responseStr, encErr = e.encryption.EncryptString(rec.Response); encErr != nil {
+			return fmt.Errorf("flush event: encrypt response: %w", encErr)
+		}
+		if errStr, encErr = e.encryption.EncryptString(rec.Err); encErr != nil {
+			return fmt.Errorf("flush event: encrypt err: %w", encErr)
+		}
+		if rec.SignalPayload != "" {
+			if sigPayload, encErr = e.encryption.EncryptString(rec.SignalPayload); encErr != nil {
+				return fmt.Errorf("flush event: encrypt signal_payload: %w", encErr)
+			}
+		}
+		if rec.ChildInput != "" {
+			if childInput, encErr = e.encryption.EncryptString(rec.ChildInput); encErr != nil {
+				return fmt.Errorf("flush event: encrypt child_input: %w", encErr)
+			}
+		}
+		if rec.NewInput != "" {
+			if newInput, encErr = e.encryption.EncryptString(rec.NewInput); encErr != nil {
+				return fmt.Errorf("flush event: encrypt new_input: %w", encErr)
+			}
+		}
+		if rec.PluginInput != "" {
+			if pluginInput, encErr = e.encryption.EncryptString(rec.PluginInput); encErr != nil {
+				return fmt.Errorf("flush event: encrypt plugin_input: %w", encErr)
+			}
+		}
+		if rec.PluginOutput != "" {
+			if pluginOutput, encErr = e.encryption.EncryptString(rec.PluginOutput); encErr != nil {
+				return fmt.Errorf("flush event: encrypt plugin_output: %w", encErr)
+			}
+		}
+		if rec.PromiseResult != "" {
+			if promiseResult, encErr = e.encryption.EncryptString(rec.PromiseResult); encErr != nil {
+				return fmt.Errorf("flush event: encrypt promise_result: %w", encErr)
+			}
+		}
+		if rec.PromiseError != "" {
+			if promiseError, encErr = e.encryption.EncryptString(rec.PromiseError); encErr != nil {
+				return fmt.Errorf("flush event: encrypt promise_error: %w", encErr)
+			}
+		}
+		if len(payloadJSON) > 0 && e.encryption != nil {
+			encrypted, encErr := e.encryption.EncryptJSON(payloadJSON)
+			if encErr != nil {
+				return fmt.Errorf("flush event: encrypt payload: %w", encErr)
+			}
+			payloadArg = sql.NullString{String: string(encrypted), Valid: true}
+		}
+	}
+
+	// Quota check path: needs explicit transaction for atomic read-then-insert.
+	if e.maxQuotaEvents > 0 && e.workflowStore != nil {
 		tx, err := e.db.BeginTx(ctx, nil)
 		if err != nil {
-			lastErr = fmt.Errorf("flush event: begin tx: %w", err)
-			if attempt < len(backoff) {
-				continue
-			}
-			break
-			}
-
-		var prevChecksum string
-		if rec.Step > 1 {
-			tx.QueryRowContext(ctx, `SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = $1 AND step = $2`,
-				workflowID, rec.Step-1).Scan(&prevChecksum)
-			}
-		checksum := computeEventChecksum(rec, prevChecksum)
-		payloadJSON, _ := eventRecordToPayload(rec)
-		payloadArg := nullStr("")
-		if len(payloadJSON) > 0 {
-			payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
-			}
-
-		requestStr := tryEncodeBase64(rec.Request)
-		responseStr := tryEncodeBase64(rec.Response)
-		errStr := rec.Err
-		sigPayload := rec.SignalPayload
-		childInput := rec.ChildInput
-		newInput := rec.NewInput
-		pluginInput := rec.PluginInput
-		pluginOutput := rec.PluginOutput
-		promiseResult := rec.PromiseResult
-		promiseError := rec.PromiseError
-
-		// Encrypt sensitive payload fields when encryption is enabled.
-		// On any encryption failure, abort the flush (fail-secure). Silently
-		// storing plaintext when encryption is enabled would be a data leak.
-		if e.encryptSensitivePayloads && e.encryption != nil {
-			var encErr error
-
-			if requestStr, encErr = e.encryption.EncryptString(rec.Request); encErr != nil {
-				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "request", "error", encErr)
-				if e.Metrics != nil {
-					e.Metrics.RecordEncryptionError(ctx)
-				}
-				tx.Rollback()
-				lastErr = fmt.Errorf("flush event: encrypt request: %w", encErr)
-				if attempt < len(backoff) {
-					continue
-			}
-				break
-			}
-			if responseStr, encErr = e.encryption.EncryptString(rec.Response); encErr != nil {
-				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "response", "error", encErr)
-				if e.Metrics != nil {
-					e.Metrics.RecordEncryptionError(ctx)
-				}
-				tx.Rollback()
-				lastErr = fmt.Errorf("flush event: encrypt response: %w", encErr)
-				if attempt < len(backoff) {
-					continue
-			}
-				break
-			}
-			if errStr, encErr = e.encryption.EncryptString(rec.Err); encErr != nil {
-				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "err", "error", encErr)
-				if e.Metrics != nil {
-					e.Metrics.RecordEncryptionError(ctx)
-				}
-				tx.Rollback()
-				lastErr = fmt.Errorf("flush event: encrypt err: %w", encErr)
-				if attempt < len(backoff) {
-					continue
-			}
-				break
-			}
-			if rec.SignalPayload != "" {
-				if sigPayload, encErr = e.encryption.EncryptString(rec.SignalPayload); encErr != nil {
-					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "signal_payload", "error", encErr)
-					if e.Metrics != nil {
-						e.Metrics.RecordEncryptionError(ctx)
-					}
-					tx.Rollback()
-					lastErr = fmt.Errorf("flush event: encrypt signal_payload: %w", encErr)
-					if attempt < len(backoff) {
-						continue
-					}
-					break
-			}
-			}
-			if rec.ChildInput != "" {
-				if childInput, encErr = e.encryption.EncryptString(rec.ChildInput); encErr != nil {
-					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "child_input", "error", encErr)
-					if e.Metrics != nil {
-						e.Metrics.RecordEncryptionError(ctx)
-					}
-					tx.Rollback()
-					lastErr = fmt.Errorf("flush event: encrypt child_input: %w", encErr)
-					if attempt < len(backoff) {
-						continue
-					}
-					break
-			}
-			}
-			if rec.NewInput != "" {
-				if newInput, encErr = e.encryption.EncryptString(rec.NewInput); encErr != nil {
-					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "new_input", "error", encErr)
-					if e.Metrics != nil {
-						e.Metrics.RecordEncryptionError(ctx)
-					}
-					tx.Rollback()
-					lastErr = fmt.Errorf("flush event: encrypt new_input: %w", encErr)
-					if attempt < len(backoff) {
-						continue
-					}
-					break
-			}
-			}
-			if rec.PluginInput != "" {
-				if pluginInput, encErr = e.encryption.EncryptString(rec.PluginInput); encErr != nil {
-					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "plugin_input", "error", encErr)
-					if e.Metrics != nil {
-						e.Metrics.RecordEncryptionError(ctx)
-					}
-					tx.Rollback()
-					lastErr = fmt.Errorf("flush event: encrypt plugin_input: %w", encErr)
-					if attempt < len(backoff) {
-						continue
-					}
-					break
-			}
-			}
-			if rec.PluginOutput != "" {
-				if pluginOutput, encErr = e.encryption.EncryptString(rec.PluginOutput); encErr != nil {
-					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "plugin_output", "error", encErr)
-					if e.Metrics != nil {
-						e.Metrics.RecordEncryptionError(ctx)
-					}
-					tx.Rollback()
-					lastErr = fmt.Errorf("flush event: encrypt plugin_output: %w", encErr)
-					if attempt < len(backoff) {
-						continue
-					}
-					break
-			}
-			}
-			if rec.PromiseResult != "" {
-				if promiseResult, encErr = e.encryption.EncryptString(rec.PromiseResult); encErr != nil {
-					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "promise_result", "error", encErr)
-					if e.Metrics != nil {
-						e.Metrics.RecordEncryptionError(ctx)
-					}
-					tx.Rollback()
-					lastErr = fmt.Errorf("flush event: encrypt promise_result: %w", encErr)
-					if attempt < len(backoff) {
-						continue
-					}
-					break
-			}
-			}
-			if rec.PromiseError != "" {
-				if promiseError, encErr = e.encryption.EncryptString(rec.PromiseError); encErr != nil {
-					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "promise_error", "error", encErr)
-					if e.Metrics != nil {
-						e.Metrics.RecordEncryptionError(ctx)
-					}
-					tx.Rollback()
-					lastErr = fmt.Errorf("flush event: encrypt promise_error: %w", encErr)
-					if attempt < len(backoff) {
-						continue
-					}
-					break
-			}
-			}
-			// Encrypt payload JSON when present.
-			if len(payloadJSON) > 0 {
-				var encrypted []byte
-				if encrypted, encErr = e.encryption.EncryptJSON(payloadJSON); encErr != nil {
-					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "payload", "error", encErr)
-					if e.Metrics != nil {
-						e.Metrics.RecordEncryptionError(ctx)
-					}
-					tx.Rollback()
-					lastErr = fmt.Errorf("flush event: encrypt payload: %w", encErr)
-					if attempt < len(backoff) {
-						continue
-					}
-					break
-			}
-				payloadArg = sql.NullString{String: string(encrypted), Valid: true}
-			}
-			}
-
-		// Quota check: read current count without incrementing.
-		// Increment happens in appendEventsInTx (via FinalizeWorkflowSegment)
-		// to avoid double-counting with flushEvent's own increment.
-		// Note: event_count is read before appendEventsInTx increments it.
-		// Within a single execution segment, multiple flushEvent calls see the
-		// same count, allowing the quota to be exceeded by the segment size.
-		// This is intentional: the quota is a soft backstop, not an exact cap.
-		// The atomic increment in appendEventsInTx determines the final count.
-		if e.maxQuotaEvents > 0 && e.workflowStore != nil {
-			var currentCount int
-			qErr := tx.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = $1`, workflowID).Scan(&currentCount)
-			if qErr != nil {
-				tx.Rollback()
-				lastErr = fmt.Errorf("flush event: quota check: %w", qErr)
-				if attempt < len(backoff) {
-					continue
-			}
-				break
-			}
-			if currentCount >= e.maxQuotaEvents {
-				tx.Rollback()
-				return fmt.Errorf("flush event: event quota exceeded (max %d)", e.maxQuotaEvents)
-			}
-			}
-
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
-				duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
-				defer_description, defer_id, child_name, child_input, run_id, new_input,
-				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
-				promise_name, promise_id, promise_result, promise_error, payload,
-				checksum, created_at, tenant_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-				$9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
-				$20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
-				$30, NOW(), $31)
-			ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
-		`, workflowID, rec.Step, rec.EventType,
+			return fmt.Errorf("flush event (quota): begin tx: %w", err)
+		}
+		defer tx.Rollback()
+		var currentCount int
+		if err := tx.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = $1`, workflowID).Scan(&currentCount); err != nil {
+			return fmt.Errorf("flush event (quota): %w", err)
+		}
+		if currentCount >= e.maxQuotaEvents {
+			return fmt.Errorf("flush event: event quota exceeded (max %d)", e.maxQuotaEvents)
+		}
+		_, err = tx.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
 			nullStr(rec.SignalName), nullStr(sigPayload),
@@ -293,33 +156,27 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
-			payloadArg,
-			checksum, e.tenantID)
+			payloadArg, checksum, e.tenantID)
 		if err != nil {
-			tx.Rollback()
-			lastErr = fmt.Errorf("flush event: exec: %w", err)
-			if attempt < len(backoff) {
-				continue
-			}
-			break
-			}
-
-		if err := tx.Commit(); err != nil {
-			tx.Rollback()
-			lastErr = fmt.Errorf("flush event: commit: %w", err)
-			if attempt < len(backoff) {
-				continue
-			}
-			break
-			}
-
-		return nil
+			return fmt.Errorf("flush event (quota): %w", err)
+		}
+		return tx.Commit()
 	}
 
-	// All retries exhausted --- log a structured error that can be alerted on.
-	e.log().ErrorContext(ctx, "flushEvent retries exhausted", "workflow_id", workflowID, "tenant_id", e.tenantID, "step", rec.Step, "event_type", rec.EventType, "error", lastErr)
-	return lastErr
-
+	// Fast path: single INSERT auto-commits. No explicit BEGIN/COMMIT needed.
+	_, err := e.db.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
+		nullStr(rec.SignalName), nullStr(sigPayload),
+		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
+		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
+		payloadArg, checksum, e.tenantID)
+	if err != nil {
+		return fmt.Errorf("flush event: %w", err)
+	}
+	return nil
 }
 
 // flushCallIntent inserts a pending event BEFORE the external call is
@@ -392,7 +249,7 @@ func (e *Engine) completeCallEvent(ctx context.Context, workflowID string, rec E
 			}
 			tx.Rollback()
 			return fmt.Errorf("complete call event: encrypt response: %w", err)
-			}
+		}
 		responseStr = nullStr(s)
 		s, err = e.encryption.EncryptString(callErr)
 		if err != nil {
@@ -402,7 +259,7 @@ func (e *Engine) completeCallEvent(ctx context.Context, workflowID string, rec E
 			}
 			tx.Rollback()
 			return fmt.Errorf("complete call event: encrypt error: %w", err)
-			}
+		}
 		errorStr = nullStr(s)
 	}
 
@@ -451,6 +308,6 @@ func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[
 			if err != nil {
 				// Defer failures are not propagated — cleanup runs best-effort.
 			}
-			}
+		}
 	}
 }

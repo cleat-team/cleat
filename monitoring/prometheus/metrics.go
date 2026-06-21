@@ -97,9 +97,11 @@ type Metrics struct {
 	workflowMemoryEstimate       metric.Int64UpDownCounter
 
 	// --- Int64Gauges ---
-	queueDepth                metric.Int64Gauge
-	retentionLastRunTimestamp metric.Int64Gauge
-	backgroundLoopItemsProcessed metric.Int64Gauge
+	queueDepth                     metric.Int64Gauge
+	retentionLastRunTimestamp      metric.Int64Gauge
+	backgroundLoopItemsProcessed   metric.Int64Gauge
+	freshStepCountGauge            metric.Int64Gauge
+	replayStepCountGauge           metric.Int64Gauge
 
 	// --- Float64Gauges ---
 	replayThroughput    metric.Float64Gauge
@@ -528,6 +530,22 @@ func New(cfg Config) (*Metrics, error) {
 		return nil, fmt.Errorf("cleat_background_loop_items_processed: %w", err)
 	}
 
+	m.freshStepCountGauge, err = meter.Int64Gauge(
+		"cleat_fresh_step_count",
+		metric.WithDescription("Cumulative count of fresh steps executed"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_fresh_step_count: %w", err)
+	}
+
+	m.replayStepCountGauge, err = meter.Int64Gauge(
+		"cleat_replay_step_count",
+		metric.WithDescription("Cumulative count of replay steps served from cached history"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_replay_step_count: %w", err)
+	}
+
 	// --- Initialise Float64Gauges ---
 
 	m.replayThroughput, err = meter.Float64Gauge(
@@ -756,8 +774,12 @@ func (m *Metrics) RecordWorkflowFailed(ctx context.Context, workflowName string,
 }
 
 // RecordFreshStep increments the fresh-steps-executed counter.
-func (m *Metrics) RecordFreshStep(ctx context.Context, extraAttrs ...attribute.KeyValue) {
-	attrs := m.mergeAttrs(extraAttrs...)
+// workflowName is recorded as a label so the runner can scope step
+// counts to the correct variant (matching cleat_workflows_completed_total).
+func (m *Metrics) RecordFreshStep(ctx context.Context, workflowName string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("workflow_name", workflowName),
+	}, extraAttrs...)...)
 	m.freshSteps.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
@@ -1150,6 +1172,18 @@ func (m *Metrics) SetReplayThroughput(ctx context.Context, rate float64, extraAt
 func (m *Metrics) SetFreshThroughput(ctx context.Context, rate float64, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.freshThroughput.Record(ctx, rate, metric.WithAttributes(attrs...))
+}
+
+// SetFreshStepCount sets the cumulative fresh step count gauge.
+func (m *Metrics) SetFreshStepCount(ctx context.Context, val int64, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.freshStepCountGauge.Record(ctx, val, metric.WithAttributes(attrs...))
+}
+
+// SetReplayStepCount sets the cumulative replay step count gauge.
+func (m *Metrics) SetReplayStepCount(ctx context.Context, val int64, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.replayStepCountGauge.Record(ctx, val, metric.WithAttributes(attrs...))
 }
 
 // SetMemoryPressureRatio sets the memory pressure ratio gauge.

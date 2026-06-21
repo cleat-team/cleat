@@ -63,7 +63,18 @@ func main() {
 
 	workerID := generateWorkerID()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	var level slog.Level
+	switch *logLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	logger.InfoContext(context.Background(), "starting worker", "worker_id", workerID, "concurrency", *concurrency)
 
 	if *disableChecksumVerification {
@@ -705,12 +716,26 @@ func main() {
 		defer closeNotify()
 	}
 
+	// Set up per-tenant adaptive flusher registry if batch flushing is not disabled.
+	var flusherRegistry *engine.TenantFlusherRegistry
+	if !*batchFlushDisabled && !*noPerStepFlush {
+		registry := engine.NewTenantFlusherRegistry(db, engine.FlusherConfig{
+			MaxWait:        time.Duration(*batchFlushMaxWaitMs) * time.Millisecond,
+			MaxBatch:       *batchFlushMaxSize,
+			EnterThreshold: float64(*batchFlushEnterRate),
+			ExitThreshold:  float64(*batchFlushExitRate),
+		})
+		registry.SetEncryption(*encryptSensitivePayloads, payloadEncryption)
+		flusherRegistry = registry
+		logger.InfoContext(ctx, "adaptive flusher registry enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
+	}
 	w := &Worker{
 		Metrics:                     metricsInstance,
 		id:                          workerID,
 		logger:                      logger,
 		store:                       store,
 		concurrency:                 *concurrency,
+		maxQueued:                   *maxQueued,
 		heartbeatInterval:           *heartbeatInterval,
 		pollInterval:                *pollInterval,
 		ctx:                         ctx,
@@ -744,6 +769,8 @@ func main() {
 		drainCh:                     make(chan struct{}),
 		parentWakeCh:                make(chan struct{}, 1),
 		notifyCh:                    notifyCh,
+		flusherRegistry:             flusherRegistry,
+		db:                          db,
 	}
 
 	// Initialize memory-aware concurrency controller.
@@ -760,13 +787,12 @@ func main() {
 		// execution inherit the OTel metrics instance.
 		if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
 			pf.WithMetrics(metricsInstance)
+			if syncCommitOff != nil && *syncCommitOff {
+				pf.WithSyncCommitOff(true)
+			}
 		}
-
-		if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
-			pf.WithMetrics(metricsInstance)
-		}
-
 	// Start HTTP API server if configured.
+
 	if *apiAddr != "" {
 		api := &apiServer{store: store, worker: w, maxBodySize: *maxBodySize, db: db}
 
@@ -924,6 +950,9 @@ func main() {
 		}
 		if tenantLim != nil {
 			tenantLim.stop()
+		}
+		if flusherRegistry != nil {
+			flusherRegistry.Shutdown()
 		}
 		logger.InfoContext(context.Background(), "waiting for background workers to stop", "worker_id", workerID)
 		done := make(chan struct{})

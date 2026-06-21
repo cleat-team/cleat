@@ -338,7 +338,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 
 		// Flush immediately so plugin results survive worker crashes.
 		if s.engine.db != nil {
-			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
+			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum); flushErr != nil {
 				s.engine.log().ErrorContext(ctx, "PluginCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
 			}
 		}

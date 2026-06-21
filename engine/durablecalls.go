@@ -18,6 +18,7 @@ import (
 var (
 	replayStepCount int64
 	freshStepCount  int64
+	freshCallCount  int64
 )
 
 // ReplayStepCount returns the total replay step count from the atomic counter.
@@ -25,6 +26,9 @@ func ReplayStepCount() int64 { return atomic.LoadInt64(&replayStepCount) }
 
 // FreshStepCount returns the total fresh step count from the atomic counter.
 func FreshStepCount() int64 { return atomic.LoadInt64(&freshStepCount) }
+
+// FreshCallCount returns the total fresh DurableCall count from the atomic counter.
+func FreshCallCount() int64 { return atomic.LoadInt64(&freshCallCount) }
 
 func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	if s.isReplay {
@@ -34,12 +38,12 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 }
 
 func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
+	atomic.AddInt64(&freshCallCount, 1)
 
 	if s.engine.Metrics != nil {
 		s.engine.Metrics.RecordCall(ctx)
-		s.engine.Metrics.RecordFreshStep(ctx)
+		s.engine.Metrics.RecordFreshStep(ctx, s.defName)
 	}
-	atomic.AddInt64(&freshStepCount, 1)
 
 	// Check cancellation before making the call.
 	callCtx := ctx
@@ -70,7 +74,9 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	step := s.stepCount
 	callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "call", service, operation)
 	defer eventSpan.End()
+	callStart := time.Now()
 	resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
+	callElapsed := time.Since(callStart)
 
 	var callErr string
 	if err != nil {
@@ -88,14 +94,8 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	}
 	s.recordEvent(rec)
 
-	// Flush the event immediately to guarantee at-least-once: if the worker
-	// crashes before the workflow completes, replay will find this event
-	// and return the cached response.  (Use DurableCallIdempotent for
-	// exactly-once with write-ahead logging and ambiguity detection.)
-	if s.engine.db != nil {
-		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
-			s.engine.log().ErrorContext(ctx, "freshCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
-		}
+	if DebugTiming {
+		s.engine.log().InfoContext(ctx, "TIMING: freshCall", "workflow_id", s.workflowID, "step", rec.Step, "call_ms", callElapsed.Milliseconds())
 	}
 
 	if err != nil {

@@ -274,6 +274,14 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, 503, "worker is under memory pressure; cannot accept new workflows")
 		return
 	}
+	if s.worker.maxQueued > 0 {
+		depth, err := s.worker.store.QueueDepth(r.Context())
+		if err == nil && depth >= int64(s.worker.maxQueued) {
+			s.writeError(w, 503, fmt.Sprintf("queue full (%d ready, max %d); retry later", depth, s.worker.maxQueued))
+			return
+		}
+		_ = err
+	}
 
 	var input struct {
 		Input          json.RawMessage `json:"input"`
@@ -1109,6 +1117,7 @@ func rateLimitMiddleware(ipLim *ipRateLimiter, tenantLim *keyedRateLimiter, tena
 var (
 	lastReplayStepCount int64
 	lastFreshStepCount  int64
+	lastFreshCallCount  int64
 	lastThroughputTime  time.Time
 )
 
@@ -1117,24 +1126,29 @@ var (
 func updateThroughputGauges() {
 	now := time.Now()
 	elapsed := now.Sub(lastThroughputTime).Seconds()
-	if elapsed < 5 {
+	if elapsed < 1 {
 		return
 	}
 	replayCur := engine.ReplayStepCount()
-	freshCur := engine.FreshStepCount()
+	freshStepCur := engine.FreshStepCount()
+	freshCallCur := engine.FreshCallCount()
 	if lastThroughputTime.IsZero() {
 		lastReplayStepCount = replayCur
-		lastFreshStepCount = freshCur
+		lastFreshStepCount = freshStepCur
+		lastFreshCallCount = freshCallCur
 		lastThroughputTime = now
 		return
 	}
 	replayDelta := float64(replayCur - lastReplayStepCount)
-	freshDelta := float64(freshCur - lastFreshStepCount)
+	freshCallDelta := float64(freshCallCur - lastFreshCallCount)
 	if globalWorker != nil && globalWorker.Metrics != nil {
 		globalWorker.Metrics.SetReplayThroughput(context.Background(), replayDelta/elapsed)
-		globalWorker.Metrics.SetFreshThroughput(context.Background(), freshDelta/elapsed)
+		globalWorker.Metrics.SetFreshThroughput(context.Background(), freshCallDelta/elapsed)
+		globalWorker.Metrics.SetFreshStepCount(context.Background(), freshStepCur)
+		globalWorker.Metrics.SetReplayStepCount(context.Background(), replayCur)
 	}
 	lastReplayStepCount = replayCur
-	lastFreshStepCount = freshCur
+	lastFreshStepCount = freshStepCur
+	lastFreshCallCount = freshCallCur
 	lastThroughputTime = now
 }

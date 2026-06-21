@@ -377,10 +377,18 @@ type execSession struct {
 	// to prevent repeated triggers during the same execution segment.
 	autoContinueAsNewTriggered bool
 
+	// lastCancellationCheck is the wall-clock time of the last cancellation
+	// poll. Used to throttle checks to at most once per interval.
+	lastCancellationCheck time.Time
+
 	// eventCount tracks the number of durable call events in this session.
 	// Incremented per freshCall; compared against maxEventsPerWorkflow for
 	// auto-ContinueAsNew without querying the database.
 	eventCount int
+
+	// lastChecksum tracks the checksum of the most recently flushed event,
+	// avoiding a DB round-trip to re-fetch it for the next step's chain.
+	lastChecksum string
 
 	// mu protects maps (queryState, stateStore, deferrals) from
 	// concurrent access when wasmtime host functions race with Go dispatch.

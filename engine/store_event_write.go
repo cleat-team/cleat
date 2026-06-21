@@ -30,47 +30,38 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 		return nil
 	}
 
-	// Compute SHA-256 checksum for each event and include it in the INSERT.
-	// Requires migration 011: ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT;
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
-			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
-			defer_description, defer_id, child_name, child_input, run_id, new_input,
-			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
-			promise_name, promise_id, promise_result, promise_error, payload,
-			created_at, checksum, tenant_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
-		ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
-	`)
-	if err != nil {
-		return fmt.Errorf("append events in tx: prepare: %w", err)
-	}
-	defer stmt.Close()
-
-	var prevChecksum string
-	for _, rec := range recs {
-		payload, err := eventRecordToPayload(rec)
-		payloadArg := nullStr("")
-		if err == nil && len(payload) > 0 {
-			payloadArg = sql.NullString{String: string(payload), Valid: true}
+	// For a single event, use direct Exec to avoid a PREPARE round-trip.
+	// For multiple events, use PrepareContext to avoid re-parsing per event.
+	if len(recs) == 1 {
+		if err := s.appendOneEvent(ctx, tx, workflowID, recs[0], ""); err != nil {
+			return err
 		}
-		checksum := computeEventChecksum(rec, prevChecksum)
-		prevChecksum = checksum
-		_, err = stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
-			nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
-			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-			nullStr(rec.SignalName), nullStr(rec.SignalPayload),
-			nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-			nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
-			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
-			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
-			payloadArg,
-			time.UnixMilli(rec.TimestampMs),
-			checksum, s.tenantID)
+	} else {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
+				duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+				defer_description, defer_id, child_name, child_input, run_id, new_input,
+				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+				promise_name, promise_id, promise_result, promise_error, payload,
+				created_at, checksum, tenant_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+			ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
+		`)
 		if err != nil {
-			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
+			return fmt.Errorf("append events in tx: prepare: %w", err)
+		}
+		defer stmt.Close()
+
+		var prevChecksum string
+		for _, rec := range recs {
+			if err := s.execEventStmt(ctx, stmt, workflowID, rec, prevChecksum); err != nil {
+				return err
+			}
+			checksum := computeEventChecksum(rec, prevChecksum)
+			prevChecksum = checksum
 		}
 	}
+
 	// Increment event_count on workflow_instances so quota enforcement
 	// has an up-to-date count.
 	if _, err := tx.ExecContext(ctx,
@@ -79,6 +70,58 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 		return fmt.Errorf("append events in tx: increment event_count: %w", err)
 	}
 
+	return nil
+}
+
+// appendOneEvent inserts a single event without a prepared statement.
+func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflowID string, rec EventRecord, prevChecksum string) error {
+	payload, _ := eventRecordToPayload(rec)
+	checksum := computeEventChecksum(rec, prevChecksum)
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
+			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+			defer_description, defer_id, child_name, child_input, run_id, new_input,
+			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+			promise_name, promise_id, promise_result, promise_error, payload,
+			created_at, checksum, tenant_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+		ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
+	`, workflowID, rec.Step, rec.EventType,
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
+		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
+		nullStr(rec.SignalName), nullStr(rec.SignalPayload),
+		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
+		nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
+		nullStr(string(payload)),
+		time.UnixMilli(rec.TimestampMs),
+		checksum, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("append one event: exec step %d: %w", rec.Step, err)
+	}
+	return nil
+}
+
+// execEventStmt executes a prepared INSERT for a single event.
+func (s *PostgresStore) execEventStmt(ctx context.Context, stmt *sql.Stmt, workflowID string, rec EventRecord, prevChecksum string) error {
+	payload, _ := eventRecordToPayload(rec)
+	checksum := computeEventChecksum(rec, prevChecksum)
+	payloadArg := sql.NullString{String: string(payload), Valid: len(payload) > 0}
+	_, err := stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
+		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
+		nullStr(rec.SignalName), nullStr(rec.SignalPayload),
+		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
+		nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
+		payloadArg,
+		time.UnixMilli(rec.TimestampMs),
+		checksum, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("exec event stmt: step %d: %w", rec.Step, err)
+	}
 	return nil
 }
 

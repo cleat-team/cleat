@@ -312,6 +312,23 @@ func HasImport(wasmBytes []byte, module, name string) bool {
 		strings.Contains(string(wasmBytes), name)
 }
 
+// NeededEnvImports parses the WASM import section and returns the set of
+// function names imported from the "env" module. Used to skip registration
+// of host functions the module doesn't need.
+func NeededEnvImports(wasmBytes []byte) map[string]bool {
+	imports, err := readImportSection(wasmBytes)
+	if err != nil {
+		return nil // nil means "register everything" (conservative fallback)
+	}
+	needed := make(map[string]bool)
+	for _, imp := range imports {
+		if imp.module == "env" {
+			needed[imp.field] = true
+		}
+	}
+	return needed
+}
+
 // hasComponentModelImports scans the WASM import section for module names
 // that contain "cleat:" — the prefix used by the Component Model toolchain
 // (e.g., componentize-py).

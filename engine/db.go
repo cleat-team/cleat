@@ -43,8 +43,13 @@ type PostgresStore struct {
 	// Set to true during replay to avoid the overhead of retroactive redaction.
 	disableReadRedaction bool
 
+	syncCommitOff bool // SET LOCAL synchronous_commit = off in finalize tx
+
 	Metrics *prometheus.Metrics
 }
+
+// SetSyncCommitOff sets synchronous_commit = off for finalize transactions.
+func (s *PostgresStore) SetSyncCommitOff(v bool) { s.syncCommitOff = v }
 
 // NewPostgresStore creates a PostgresStore scoped to the given task queues.
 // The taskQueues slice specifies which task queues this worker pool should poll
@@ -1129,6 +1134,13 @@ type PostgresStoreFactory struct {
 	encryption               *PayloadEncryption
 	encryptSensitivePayloads bool
 		metrics                  *prometheus.Metrics
+	syncCommitOff bool
+}
+
+// WithSyncCommitOff sets synchronous_commit = off for finalize transactions.
+func (f *PostgresStoreFactory) WithSyncCommitOff(v bool) *PostgresStoreFactory {
+	f.syncCommitOff = v
+	return f
 }
 
 // NewPostgresStoreFactory creates a PostgresStoreFactory.
@@ -1192,6 +1204,7 @@ func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, t
 	if f.metrics != nil {
 		store.Metrics = f.metrics
 	}
+	store.syncCommitOff = f.syncCommitOff
 	return store, nopCloser{}, nil
 }
 
