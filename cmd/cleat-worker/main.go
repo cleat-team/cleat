@@ -715,19 +715,20 @@ func main() {
 		closeNotify = startNotifyListener(*dbURL, *notifyChannel, notifyCh, logger)
 		defer closeNotify()
 	}
-		// Set up per-tenant adaptive flusher registry if batch flushing is not disabled.
-		var flusherRegistry *engine.TenantFlusherRegistry
-		if !*batchFlushDisabled && !*noPerStepFlush {
-			registry := engine.NewTenantFlusherRegistry(db, engine.FlusherConfig{
-				MaxWait:        time.Duration(*batchFlushMaxWaitMs) * time.Millisecond,
-				MaxBatch:       *batchFlushMaxSize,
-				EnterThreshold: float64(*batchFlushEnterRate),
-				ExitThreshold:  float64(*batchFlushExitRate),
-			})
-			registry.SetEncryption(*encryptSensitivePayloads, payloadEncryption)
-			flusherRegistry = registry
-			logger.InfoContext(ctx, "adaptive flusher registry enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
-		}
+
+	// Set up per-tenant adaptive flusher registry if batch flushing is not disabled.
+	var flusherRegistry *engine.TenantFlusherRegistry
+	if !*batchFlushDisabled && !*noPerStepFlush {
+		registry := engine.NewTenantFlusherRegistry(db, engine.FlusherConfig{
+			MaxWait:        time.Duration(*batchFlushMaxWaitMs) * time.Millisecond,
+			MaxBatch:       *batchFlushMaxSize,
+			EnterThreshold: float64(*batchFlushEnterRate),
+			ExitThreshold:  float64(*batchFlushExitRate),
+		})
+		registry.SetEncryption(*encryptSensitivePayloads, payloadEncryption)
+		flusherRegistry = registry
+		logger.InfoContext(ctx, "adaptive flusher registry enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
+	}
 	w := &Worker{
 		Metrics:                     metricsInstance,
 		id:                          workerID,
