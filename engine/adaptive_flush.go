@@ -176,32 +176,32 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			"workflow_id":       p[0],
 			"step":              p[1],
 			"event_type":        p[2],
-			"service":           p[3],
-			"operation":         p[4],
-			"request":           p[5],
-			"response":          p[6],
-			"error":             p[7],
-			"duration_ms":       p[8],
-			"signal_names":      p[9],
-			"timeout_ms":        p[10],
-			"signal_name":       p[11],
-			"signal_payload":    p[12],
-			"defer_description": p[13],
-			"defer_id":          p[14],
-			"child_name":        p[15],
-			"child_input":       p[16],
-			"run_id":            p[17],
-			"new_input":         p[18],
-			"plugin_name":       p[19],
-			"plugin_func":       p[20],
-			"plugin_input":      p[21],
-			"plugin_output":     p[22],
-			"plugin_error":      p[23],
-			"promise_name":      p[24],
-			"promise_id":        p[25],
-			"promise_result":    p[26],
-			"promise_error":     p[27],
-			"payload":           p[28],
+			"service":           jsonNull(p[3]),
+			"operation":         jsonNull(p[4]),
+			"request":           jsonNull(p[5]),
+			"response":          jsonNull(p[6]),
+			"error":             jsonNull(p[7]),
+			"duration_ms":       jsonNull(p[8]),
+			"signal_names":      jsonNull(p[9]),
+			"timeout_ms":        jsonNull(p[10]),
+			"signal_name":       jsonNull(p[11]),
+			"signal_payload":    jsonNull(p[12]),
+			"defer_description": jsonNull(p[13]),
+			"defer_id":          jsonNull(p[14]),
+			"child_name":        jsonNull(p[15]),
+			"child_input":       jsonNull(p[16]),
+			"run_id":            jsonNull(p[17]),
+			"new_input":         jsonNull(p[18]),
+			"plugin_name":       jsonNull(p[19]),
+			"plugin_func":       jsonNull(p[20]),
+			"plugin_input":      jsonNull(p[21]),
+			"plugin_output":     jsonNull(p[22]),
+			"plugin_error":      jsonNull(p[23]),
+			"promise_name":      jsonNull(p[24]),
+			"promise_id":        jsonNull(p[25]),
+			"promise_result":    jsonNull(p[26]),
+			"promise_error":     jsonNull(p[27]),
+			"payload":           jsonNull(p[28]),
 			"checksum":          p[29],
 			"tenant_id":         p[30],
 			"created_at":        time.Now(),
@@ -339,6 +339,25 @@ func (af *AdaptiveFlusher) updateRate() {
 	} else if af.batchMode && af.rateEWMA < af.exitThreshold {
 		af.batchMode = false
 		slog.Info("adaptive flusher exited batch mode", "rate", af.rateEWMA)
+	}
+}
+
+// jsonNull converts sql.Null* types to JSON-safe values (string, int64, or nil)
+// so that json.Marshal produces null instead of {"String":"","Valid":false}.
+func jsonNull(v interface{}) interface{} {
+	switch t := v.(type) {
+	case sql.NullString:
+		if t.Valid {
+			return t.String
+		}
+		return nil
+	case sql.NullInt64:
+		if t.Valid {
+			return t.Int64
+		}
+		return nil
+	default:
+		return v
 	}
 }
 
