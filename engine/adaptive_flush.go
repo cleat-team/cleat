@@ -525,3 +525,25 @@ func (r *TenantFlusherRegistry) Remove(tenantID string) {
 	defer r.mu.Unlock()
 	delete(r.flushers, tenantID)
 }
+
+// Shutdown drains all per-tenant accumulators. Call before the worker exits.
+func (r *TenantFlusherRegistry) Shutdown() {
+	r.mu.Lock()
+	flushers := make([]*AdaptiveFlusher, 0, len(r.flushers))
+	for _, af := range r.flushers {
+		flushers = append(flushers, af)
+	}
+	r.mu.Unlock()
+	for _, af := range flushers {
+		af.mu.Lock()
+		batch := af.events
+		af.events = nil
+		if af.timer != nil {
+			af.timer.Stop()
+		}
+		af.mu.Unlock()
+		if len(batch) > 0 {
+			af.flushAndNotify(context.Background(), batch)
+		}
+	}
+}

@@ -950,6 +950,9 @@ func main() {
 		if tenantLim != nil {
 			tenantLim.stop()
 		}
+		if flusherRegistry != nil {
+			flusherRegistry.Shutdown()
+		}
 		logger.InfoContext(context.Background(), "waiting for background workers to stop", "worker_id", workerID)
 		done := make(chan struct{})
 		go func() {
