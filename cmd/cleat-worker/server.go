@@ -1125,7 +1125,7 @@ var (
 func updateThroughputGauges() {
 	now := time.Now()
 	elapsed := now.Sub(lastThroughputTime).Seconds()
-	if elapsed < 5 {
+	if elapsed < 1 {
 		return
 	}
 	replayCur := engine.ReplayStepCount()
