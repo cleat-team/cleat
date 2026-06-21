@@ -22,10 +22,9 @@ type batchEntry struct {
 // AdaptiveFlusher tracks the recent step rate and automatically switches
 // between direct (low-rate) and batched (high-rate) event persistence.
 //
-// In batch mode, a single drainer goroutine quickly assembles batches (with
-// a maxWait timer). Completed batches are handed off to a worker pool that
-// calls the pg function in parallel — since each workflow has at most one
-// outstanding event, there are no ordering constraints between batches.
+// In batch mode, events accumulate in a mutex-protected slice. When the
+// batch reaches maxBatch or maxWait elapses, the goroutine that triggers
+// the flush does the DB work directly — no channels, no worker pool.
 type AdaptiveFlusher struct {
 	mu        sync.Mutex
 	batchMode bool
@@ -38,14 +37,13 @@ type AdaptiveFlusher struct {
 	enterThreshold float64
 	exitThreshold  float64
 
-	// Batch-mode
-	entries    chan batchEntry  // submitted by recordEvent
-	batches    chan []batchEntry // drainer → worker pool
-	db         *sql.DB
-	tenantID   string
-	maxWait    time.Duration
-	maxBatch   int
-	numWorkers int
+	// Accumulator state (batch mode only)
+	events   []batchEntry
+	timer    *time.Timer
+	db       *sql.DB
+	tenantID string
+	maxWait  time.Duration
+	maxBatch int
 
 	encryptSensitivePayloads bool
 	encryption               *PayloadEncryption
@@ -56,8 +54,7 @@ type AdaptiveFlusher struct {
 	batchedEvents atomic.Int64
 }
 
-// NewAdaptiveFlusher creates an AdaptiveFlusher. Zero-valued parameters get defaults.
-func NewAdaptiveFlusher(db *sql.DB, tenantID string, maxWait time.Duration, maxBatch int, enterThreshold, exitThreshold float64, numWorkers int) *AdaptiveFlusher {
+func NewAdaptiveFlusher(db *sql.DB, tenantID string, maxWait time.Duration, maxBatch int, enterThreshold, exitThreshold float64, _ int) *AdaptiveFlusher {
 	if maxWait <= 0 {
 		maxWait = 5 * time.Millisecond
 	}
@@ -70,9 +67,6 @@ func NewAdaptiveFlusher(db *sql.DB, tenantID string, maxWait time.Duration, maxB
 	if exitThreshold <= 0 {
 		exitThreshold = 250.0
 	}
-	if numWorkers <= 0 {
-		numWorkers = 4
-	}
 
 	return &AdaptiveFlusher{
 		db:             db,
@@ -80,9 +74,6 @@ func NewAdaptiveFlusher(db *sql.DB, tenantID string, maxWait time.Duration, maxB
 		rateAlpha:      0.2,
 		maxWait:        maxWait,
 		maxBatch:       maxBatch,
-		numWorkers:     numWorkers,
-		entries:        make(chan batchEntry, maxBatch*2),
-		batches:        make(chan []batchEntry, numWorkers),
 		enterThreshold: enterThreshold,
 		exitThreshold:  exitThreshold,
 		lastSample:     time.Now(),
@@ -96,7 +87,9 @@ func (af *AdaptiveFlusher) SetEncryption(encrypt bool, enc *PayloadEncryption) {
 	af.encryption = enc
 }
 
-// Flush is the main entry point, called from recordEvent.
+// Flush is called from recordEvent. In direct mode it returns (nil, false)
+// and the caller falls through to flushEvent. In batch mode it returns a
+// done channel; the caller blocks on <-done until the batch is persisted.
 func (af *AdaptiveFlusher) Flush(ctx context.Context, workflowID string, rec EventRecord, checksum string) (chan error, bool) {
 	af.updateRate()
 
@@ -119,14 +112,132 @@ func (af *AdaptiveFlusher) Flush(ctx context.Context, workflowID string, rec Eve
 	done := make(chan error, 1)
 	entry.done = done
 
-	select {
-	case af.entries <- entry:
-	case <-ctx.Done():
-		done <- ctx.Err()
+	af.mu.Lock()
+	af.events = append(af.events, entry)
+	n := len(af.events)
+
+	if n == 1 {
+		// First event in a new batch — start the timer.
+		if af.timer == nil {
+			af.timer = time.AfterFunc(af.maxWait, af.onTimer)
+		} else {
+			af.timer.Reset(af.maxWait)
+		}
+	}
+
+	if n >= af.maxBatch {
+		// Batch full — flush in a new goroutine so the next batch
+		// can start accumulating while this one commits.
+		batch := af.events
+		af.events = nil
+		if af.timer != nil {
+			af.timer.Stop()
+		}
+		af.mu.Unlock()
+		go af.flushAndNotify(ctx, batch)
 		return done, true
 	}
 
+	af.mu.Unlock()
 	return done, true
+}
+
+// onTimer is called when maxWait elapses without the batch filling up.
+func (af *AdaptiveFlusher) onTimer() {
+	af.mu.Lock()
+	batch := af.events
+	af.events = nil
+	af.mu.Unlock()
+
+	if len(batch) > 0 {
+		go af.flushAndNotify(context.Background(), batch)
+	}
+}
+
+func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntry) {
+	events := make([]map[string]interface{}, len(batch))
+	for i, entry := range batch {
+		p := entry.params
+		events[i] = map[string]interface{}{
+			"workflow_id":       p[0],
+			"step":              p[1],
+			"event_type":        p[2],
+			"service":           p[3],
+			"operation":         p[4],
+			"request":           p[5],
+			"response":          p[6],
+			"error":             p[7],
+			"duration_ms":       p[8],
+			"signal_names":      p[9],
+			"timeout_ms":        p[10],
+			"signal_name":       p[11],
+			"signal_payload":    p[12],
+			"defer_description": p[13],
+			"defer_id":          p[14],
+			"child_name":        p[15],
+			"child_input":       p[16],
+			"run_id":            p[17],
+			"new_input":         p[18],
+			"plugin_name":       p[19],
+			"plugin_func":       p[20],
+			"plugin_input":      p[21],
+			"plugin_output":     p[22],
+			"plugin_error":      p[23],
+			"promise_name":      p[24],
+			"promise_id":        p[25],
+			"promise_result":    p[26],
+			"promise_error":     p[27],
+			"payload":           p[28],
+			"checksum":          p[29],
+			"tenant_id":         p[30],
+			"created_at":        time.Now(),
+		}
+	}
+
+	eventsJSON, err := json.Marshal(events)
+	if err != nil {
+		for _, entry := range batch {
+			if entry.done != nil {
+				entry.done <- err
+			}
+		}
+		return
+	}
+
+	_, err = af.db.ExecContext(ctx, "SELECT batch_flush_events($1::jsonb)", string(eventsJSON))
+	if err != nil {
+		for _, entry := range batch {
+			if entry.done != nil {
+				entry.done <- err
+			}
+		}
+		return
+	}
+
+	af.batchFlushes.Add(1)
+	af.batchedEvents.Add(int64(len(batch)))
+
+	for _, entry := range batch {
+		if entry.done != nil {
+			close(entry.done)
+		}
+	}
+}
+
+// Run is a no-op in this design — no background goroutines needed.
+func (af *AdaptiveFlusher) Run(ctx context.Context) {
+	<-ctx.Done()
+	// Flush any remaining events on shutdown.
+	af.mu.Lock()
+	batch := af.events
+	af.events = nil
+	if af.timer != nil {
+		af.timer.Stop()
+	}
+	af.mu.Unlock()
+	if len(batch) > 0 {
+		go af.flushAndNotify(context.Background(), batch)
+	}
 }
 
 func (af *AdaptiveFlusher) updateRate() {
@@ -160,82 +271,6 @@ func (af *AdaptiveFlusher) updateRate() {
 	} else if af.batchMode && af.rateEWMA < af.exitThreshold {
 		af.batchMode = false
 		slog.Info("adaptive flusher exited batch mode", "rate", af.rateEWMA)
-	}
-}
-
-// Run starts the drainer goroutine and the worker pool.
-func (af *AdaptiveFlusher) Run(ctx context.Context) {
-	// Start worker pool.
-	var wg sync.WaitGroup
-	for i := 0; i < af.numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for batch := range af.batches {
-				af.flushBatch(ctx, batch)
-			}
-		}()
-	}
-
-	// Run drainer in the calling goroutine.
-	af.drainer(ctx)
-
-	// Drainer exited — close batches channel and wait for workers.
-	close(af.batches)
-	wg.Wait()
-}
-
-// drainer assembles batches from the entry channel and hands them to workers.
-func (af *AdaptiveFlusher) drainer(ctx context.Context) {
-	for {
-		// Wait for first event.
-		entry, ok := af.receive(ctx)
-		if !ok {
-			return
-		}
-		batch := []batchEntry{entry}
-
-		// Drain with timer — assemble as many events as possible
-		// within maxWait, up to maxBatch.
-		timer := time.NewTimer(af.maxWait)
-		draining := true
-		for draining && len(batch) < af.maxBatch {
-			select {
-			case e, ok := <-af.entries:
-				if !ok {
-					draining = false
-				} else {
-					batch = append(batch, e)
-				}
-			case <-timer.C:
-				draining = false
-			case <-ctx.Done():
-				timer.Stop()
-				select {
-				case af.batches <- batch:
-				case <-ctx.Done():
-				}
-				return
-			}
-		}
-		timer.Stop()
-
-		// Hand batch to worker pool.
-		select {
-		case af.batches <- batch:
-		case <-ctx.Done():
-			af.flushBatch(context.Background(), batch)
-			return
-		}
-	}
-}
-
-func (af *AdaptiveFlusher) receive(ctx context.Context) (batchEntry, bool) {
-	select {
-	case entry, ok := <-af.entries:
-		return entry, ok
-	case <-ctx.Done():
-		return batchEntry{}, false
 	}
 }
 
@@ -331,93 +366,18 @@ func (af *AdaptiveFlusher) prepareEntry(workflowID string, rec EventRecord, chec
 	return batchEntry{workflowID: workflowID, step: rec.Step, params: params}, nil
 }
 
-// flushBatch marshals the batch to JSON and calls the pg function.
-// Called from worker pool goroutines — multiple batches may be in-flight.
-func (af *AdaptiveFlusher) flushBatch(ctx context.Context, batch []batchEntry) {
-	events := make([]map[string]interface{}, len(batch))
-	for i, entry := range batch {
-		p := entry.params
-		events[i] = map[string]interface{}{
-			"workflow_id":       p[0],
-			"step":              p[1],
-			"event_type":        p[2],
-			"service":           p[3],
-			"operation":         p[4],
-			"request":           p[5],
-			"response":          p[6],
-			"error":             p[7],
-			"duration_ms":       p[8],
-			"signal_names":      p[9],
-			"timeout_ms":        p[10],
-			"signal_name":       p[11],
-			"signal_payload":    p[12],
-			"defer_description": p[13],
-			"defer_id":          p[14],
-			"child_name":        p[15],
-			"child_input":       p[16],
-			"run_id":            p[17],
-			"new_input":         p[18],
-			"plugin_name":       p[19],
-			"plugin_func":       p[20],
-			"plugin_input":      p[21],
-			"plugin_output":     p[22],
-			"plugin_error":      p[23],
-			"promise_name":      p[24],
-			"promise_id":        p[25],
-			"promise_result":    p[26],
-			"promise_error":     p[27],
-			"payload":           p[28],
-			"checksum":          p[29],
-			"tenant_id":         p[30],
-			"created_at":        time.Now(),
-		}
-	}
-
-	eventsJSON, err := json.Marshal(events)
-	if err != nil {
-		for _, entry := range batch {
-			if entry.done != nil {
-				entry.done <- err
-			}
-		}
-		return
-	}
-
-	_, err = af.db.ExecContext(ctx, "SELECT batch_flush_events($1::jsonb)", string(eventsJSON))
-	if err != nil {
-		for _, entry := range batch {
-			if entry.done != nil {
-				entry.done <- err
-			}
-		}
-		return
-	}
-
-	af.batchFlushes.Add(1)
-	af.batchedEvents.Add(int64(len(batch)))
-
-	for _, entry := range batch {
-		if entry.done != nil {
-			close(entry.done)
-		}
-	}
-}
-
-// InBatchMode reports whether currently in batch mode.
 func (af *AdaptiveFlusher) InBatchMode() bool {
 	af.mu.Lock()
 	defer af.mu.Unlock()
 	return af.batchMode
 }
 
-// GetRate returns the current EWMA of steps/sec.
 func (af *AdaptiveFlusher) GetRate() float64 {
 	af.mu.Lock()
 	defer af.mu.Unlock()
 	return af.rateEWMA
 }
 
-// Stats returns (directFlushes, batchFlushes, batchedEvents).
 func (af *AdaptiveFlusher) Stats() (int64, int64, int64) {
 	return af.directFlushes.Load(), af.batchFlushes.Load(), af.batchedEvents.Load()
 }
