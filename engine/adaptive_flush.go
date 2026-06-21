@@ -201,7 +201,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			"promise_id":        jsonNull(p[25]),
 			"promise_result":    jsonNull(p[26]),
 			"promise_error":     jsonNull(p[27]),
-			"payload":           jsonNull(p[28]),
+			"payload":           payloadJSONRaw(p[28]),
 			"checksum":          p[29],
 			"tenant_id":         p[30],
 			"created_at":        time.Now(),
@@ -385,6 +385,17 @@ func jsonNull(v interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+// payloadJSONRaw converts a sql.NullString containing JSON to a json.RawMessage,
+// so that json.Marshal embeds it as raw JSON rather than escaping quotes.
+// This avoids double-encoding: the payload is already JSON from eventRecordToPayload.
+func payloadJSONRaw(v interface{}) interface{} {
+	s, ok := v.(sql.NullString)
+	if ok && s.Valid {
+		return json.RawMessage(s.String)
+	}
+	return nil
 }
 
 func (af *AdaptiveFlusher) prepareEntry(workflowID string, rec EventRecord, checksum string) (batchEntry, error) {
