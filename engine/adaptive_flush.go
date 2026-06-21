@@ -223,6 +223,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 
 	t1 := time.Now()
 	_, err = af.db.ExecContext(ctx, `
+		WITH cfg AS (SELECT set_config('cleat.tenant_id', ($1::jsonb->0->>'tenant_id'), true))
 		INSERT INTO event_history (
 			workflow_id, step, event_type, service, operation,
 			request, response, error, duration_ms, signal_names,
@@ -240,7 +241,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error,
 			payload, created_at, checksum, tenant_id
-		FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb)
+		FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb), cfg
 		ON CONFLICT (workflow_id, step) DO UPDATE
 			SET response = EXCLUDED.response, error = EXCLUDED.error
 			WHERE event_history.response = '' AND event_history.error IS NULL
@@ -297,7 +298,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 		if be > 0 {
 			avgPrepare = float64(af.totalPrepareUs.Load()) / float64(be)
 		}
-		slog.Info("ADAPTIVE-STATS",
+		slog.Debug("ADAPTIVE-STATS",
 			"batchMode", af.batchMode,
 			"rate", af.rateEWMA,
 			"directFlushes", df,
@@ -366,6 +367,9 @@ func (af *AdaptiveFlusher) updateRate() {
 
 // jsonNull converts sql.Null* types to JSON-safe values (string, int64, or nil)
 // so that json.Marshal produces null instead of {"String":"","Valid":false}.
+//
+// NOTE: Only sql.NullString and sql.NullInt64 are handled here. If new nullable
+// types are added to event_history, they need corresponding cases added here too.
 func jsonNull(v interface{}) interface{} {
 	switch t := v.(type) {
 	case sql.NullString:
@@ -547,6 +551,8 @@ func (r *TenantFlusherRegistry) SetEncryption(encrypt bool, enc *PayloadEncrypti
 
 // For returns the AdaptiveFlusher for the given tenant, creating one if it
 // does not already exist. Safe for concurrent use.
+//
+// TODO: Add TTL-based eviction or LRU bound for transient tenants.
 func (r *TenantFlusherRegistry) For(tenantID string) *AdaptiveFlusher {
 	r.mu.Lock()
 	defer r.mu.Unlock()

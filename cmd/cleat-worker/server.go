@@ -1117,6 +1117,7 @@ func rateLimitMiddleware(ipLim *ipRateLimiter, tenantLim *keyedRateLimiter, tena
 var (
 	lastReplayStepCount int64
 	lastFreshStepCount  int64
+	lastFreshCallCount  int64
 	lastThroughputTime  time.Time
 )
 
@@ -1129,22 +1130,25 @@ func updateThroughputGauges() {
 		return
 	}
 	replayCur := engine.ReplayStepCount()
-	freshCur := engine.FreshStepCount()
+	freshStepCur := engine.FreshStepCount()
+	freshCallCur := engine.FreshCallCount()
 	if lastThroughputTime.IsZero() {
 		lastReplayStepCount = replayCur
-		lastFreshStepCount = freshCur
+		lastFreshStepCount = freshStepCur
+		lastFreshCallCount = freshCallCur
 		lastThroughputTime = now
 		return
 	}
 	replayDelta := float64(replayCur - lastReplayStepCount)
-	freshDelta := float64(freshCur - lastFreshStepCount)
+	freshCallDelta := float64(freshCallCur - lastFreshCallCount)
 	if globalWorker != nil && globalWorker.Metrics != nil {
 		globalWorker.Metrics.SetReplayThroughput(context.Background(), replayDelta/elapsed)
-		globalWorker.Metrics.SetFreshThroughput(context.Background(), freshDelta/elapsed)
-		globalWorker.Metrics.SetFreshStepCount(context.Background(), freshCur)
+		globalWorker.Metrics.SetFreshThroughput(context.Background(), freshCallDelta/elapsed)
+		globalWorker.Metrics.SetFreshStepCount(context.Background(), freshStepCur)
 		globalWorker.Metrics.SetReplayStepCount(context.Background(), replayCur)
 	}
 	lastReplayStepCount = replayCur
-	lastFreshStepCount = freshCur
+	lastFreshStepCount = freshStepCur
+	lastFreshCallCount = freshCallCur
 	lastThroughputTime = now
 }

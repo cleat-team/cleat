@@ -18,6 +18,7 @@ import (
 var (
 	replayStepCount int64
 	freshStepCount  int64
+	freshCallCount  int64
 )
 
 // ReplayStepCount returns the total replay step count from the atomic counter.
@@ -25,6 +26,9 @@ func ReplayStepCount() int64 { return atomic.LoadInt64(&replayStepCount) }
 
 // FreshStepCount returns the total fresh step count from the atomic counter.
 func FreshStepCount() int64 { return atomic.LoadInt64(&freshStepCount) }
+
+// FreshCallCount returns the total fresh DurableCall count from the atomic counter.
+func FreshCallCount() int64 { return atomic.LoadInt64(&freshCallCount) }
 
 func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	if s.isReplay {
@@ -34,6 +38,7 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 }
 
 func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
+	atomic.AddInt64(&freshCallCount, 1)
 
 	if s.engine.Metrics != nil {
 		s.engine.Metrics.RecordCall(ctx)

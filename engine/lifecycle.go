@@ -165,11 +165,11 @@ func (s *execSession) recordEvent(rec EventRecord) {
 			if useBatch {
 				select {
 				case err := <-done:
-				if err != nil {
-					s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
-				} else {
-					s.lastChecksum = checksum
-				}
+					if err != nil {
+						s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
+					} else {
+						s.lastChecksum = checksum
+					}
 				}
 				flushed = true
 			}

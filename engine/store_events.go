@@ -359,6 +359,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 // (lexicographic) order. This is critical for checksum stability: Go's
 // json.Marshal iterates map keys in random order, so two calls with the
 // same data can produce different byte sequences.
+//
+// NOTE: This only sorts top-level keys. If any value in the map were a
+// nested map[string]any, the keys in that nested map would not be sorted
+// and would be non-deterministic. Currently safe because all payload
+// values are primitives (string, int, bool).
 func sortedJSONMarshal(m map[string]any) ([]byte, error) {
 	keys := make([]string, 0, len(m))
 	for k := range m {
