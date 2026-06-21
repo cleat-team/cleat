@@ -715,23 +715,19 @@ func main() {
 		closeNotify = startNotifyListener(*dbURL, *notifyChannel, notifyCh, logger)
 		defer closeNotify()
 	}
-	// Set up adaptive flusher if batch flushing is not disabled.
-	var adaptiveFlusher *engine.AdaptiveFlusher
-	if !*batchFlushDisabled && !*noPerStepFlush {
-		af := engine.NewAdaptiveFlusher(
-			db,
-			engine.DefaultTenantUUID,
-			time.Duration(*batchFlushMaxWaitMs)*time.Millisecond,
-			*batchFlushMaxSize,
-			float64(*batchFlushEnterRate),
-			float64(*batchFlushExitRate),
-			4, // numShards
-		)
-		af.SetEncryption(*encryptSensitivePayloads, payloadEncryption)
-		go af.Run(ctx)
-		adaptiveFlusher = af
-		logger.InfoContext(ctx, "adaptive flusher enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
-	}
+		// Set up per-tenant adaptive flusher registry if batch flushing is not disabled.
+		var flusherRegistry *engine.TenantFlusherRegistry
+		if !*batchFlushDisabled && !*noPerStepFlush {
+			registry := engine.NewTenantFlusherRegistry(db, engine.FlusherConfig{
+				MaxWait:        time.Duration(*batchFlushMaxWaitMs) * time.Millisecond,
+				MaxBatch:       *batchFlushMaxSize,
+				EnterThreshold: float64(*batchFlushEnterRate),
+				ExitThreshold:  float64(*batchFlushExitRate),
+			})
+			registry.SetEncryption(*encryptSensitivePayloads, payloadEncryption)
+			flusherRegistry = registry
+			logger.InfoContext(ctx, "adaptive flusher registry enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
+		}
 	w := &Worker{
 		Metrics:                     metricsInstance,
 		id:                          workerID,
@@ -772,7 +768,8 @@ func main() {
 		drainCh:                     make(chan struct{}),
 		parentWakeCh:                make(chan struct{}, 1),
 		notifyCh:                    notifyCh,
-		adaptiveFlusher:             adaptiveFlusher,
+		flusherRegistry:             flusherRegistry,
+		db:                          db,
 	}
 
 	// Initialize memory-aware concurrency controller.

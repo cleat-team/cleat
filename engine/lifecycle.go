@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tetratelabs/wazero/api"
@@ -152,21 +153,23 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	s.nowMs = rec.TimestampMs
 	s.history = append(s.history, rec)
 	s.stepCount++
+	atomic.AddInt64(&freshStepCount, 1)
 
 	// Persist immediately so events survive worker crashes.
 	if s.engine.db != nil && !s.isReplay {
 		checksum := computeEventChecksum(rec, s.lastChecksum)
 		flushed := false
-		if s.engine.adaptiveFlusher != nil {
-			done, useBatch := s.engine.adaptiveFlusher.Flush(context.Background(), s.workflowID, rec, checksum)
+		af := s.engine.getAdaptiveFlusher()
+		if af != nil {
+			done, useBatch := af.Flush(context.Background(), s.workflowID, rec, checksum)
 			if useBatch {
 				select {
 				case err := <-done:
-					if err != nil {
-						s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
-					} else {
-						s.lastChecksum = checksum
-					}
+				if err != nil {
+					s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
+				} else {
+					s.lastChecksum = checksum
+				}
 				}
 				flushed = true
 			}

@@ -80,8 +80,8 @@ type Engine struct {
 
 	noPerStepFlush bool // skip per-step flushEvent; rely on FinalizeWorkflowSegment for persistence
 
-	batchFlusher    *BatchFlusher    // batch flusher for higher throughput event persistence
-	adaptiveFlusher *AdaptiveFlusher // adaptive batch flusher based on step rate
+	batchFlusher     *BatchFlusher           // batch flusher for higher throughput event persistence
+	flusherRegistry  *TenantFlusherRegistry   // per-tenant adaptive batch flushers based on step rate
 
 	cancellationCheckInterval time.Duration // throttle PollCancellation; 0 = every step
 
@@ -272,10 +272,12 @@ func WithChildBindingPolicy(policy string) EngineOption {
 // in-flight events on crash.
 func WithNoPerStepFlush(v bool) EngineOption { return func(e *Engine) { e.noPerStepFlush = v } }
 
-// WithAdaptiveFlusher sets the adaptive batch flusher based on step rate.
-// When set, recordEvent uses the adaptive flusher to decide between direct
-// per-step flushing and batched event persistence.
-func WithAdaptiveFlusher(af *AdaptiveFlusher) EngineOption { return func(e *Engine) { e.adaptiveFlusher = af } }
+// WithFlusherRegistry sets the tenant-keyed adaptive batch flusher registry.
+// When set, recordEvent uses the tenant-specific flusher to decide between
+// direct per-step flushing and batched event persistence.
+func WithFlusherRegistry(r *TenantFlusherRegistry) EngineOption {
+	return func(e *Engine) { e.flusherRegistry = r }
+}
 
 // WithBatchFlusher sets the batch flusher for higher throughput event
 // persistence. When set, recordEvent submits events to the batch flusher
@@ -309,6 +311,15 @@ func (e *Engine) DB() *sql.DB { return e.db }
 
 // TenantID returns the tenant identifier.
 func (e *Engine) TenantID() string { return e.tenantID }
+
+// getAdaptiveFlusher returns the tenant-specific AdaptiveFlusher from the
+// registry, or nil if no registry is configured.
+func (e *Engine) getAdaptiveFlusher() *AdaptiveFlusher {
+	if e.flusherRegistry == nil {
+		return nil
+	}
+	return e.flusherRegistry.For(e.tenantID)
+}
 
 // EncryptSensitivePayloads returns whether sensitive payload encryption is enabled.
 func (e *Engine) EncryptSensitivePayloads() bool { return e.encryptSensitivePayloads }

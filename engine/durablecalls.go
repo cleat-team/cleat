@@ -39,7 +39,6 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		s.engine.Metrics.RecordCall(ctx)
 		s.engine.Metrics.RecordFreshStep(ctx, s.defName)
 	}
-	atomic.AddInt64(&freshStepCount, 1)
 
 	// Check cancellation before making the call.
 	callCtx := ctx

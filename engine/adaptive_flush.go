@@ -49,9 +49,18 @@ type AdaptiveFlusher struct {
 	encryption               *PayloadEncryption
 
 	// Stats
-	directFlushes atomic.Int64
-	batchFlushes  atomic.Int64
-	batchedEvents atomic.Int64
+	directFlushes   atomic.Int64
+	batchFlushes    atomic.Int64
+	batchedEvents   atomic.Int64
+	totalPrepareUs  atomic.Int64
+	totalFlushUs    atomic.Int64
+	totalMarshalUs  atomic.Int64
+	totalDBUs       atomic.Int64
+	batchSizeTotal  atomic.Int64
+	batchCount      atomic.Int64
+	timerFlushes    atomic.Int64
+	fullFlushes     atomic.Int64
+	lastReportTime  time.Time
 }
 
 func NewAdaptiveFlusher(db *sql.DB, tenantID string, maxWait time.Duration, maxBatch int, enterThreshold, exitThreshold float64, _ int) *AdaptiveFlusher {
@@ -102,7 +111,9 @@ func (af *AdaptiveFlusher) Flush(ctx context.Context, workflowID string, rec Eve
 		return nil, false
 	}
 
+	t0 := time.Now()
 	entry, err := af.prepareEntry(workflowID, rec, checksum)
+	af.totalPrepareUs.Add(time.Since(t0).Microseconds())
 	if err != nil {
 		done := make(chan error, 1)
 		done <- err
@@ -133,6 +144,7 @@ func (af *AdaptiveFlusher) Flush(ctx context.Context, workflowID string, rec Eve
 		if af.timer != nil {
 			af.timer.Stop()
 		}
+		af.fullFlushes.Add(1)
 		af.mu.Unlock()
 		go af.flushAndNotify(ctx, batch)
 		return done, true
@@ -150,11 +162,13 @@ func (af *AdaptiveFlusher) onTimer() {
 	af.mu.Unlock()
 
 	if len(batch) > 0 {
+		af.timerFlushes.Add(1)
 		go af.flushAndNotify(context.Background(), batch)
 	}
 }
 
 func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntry) {
+	tStart := time.Now()
 	events := make([]map[string]interface{}, len(batch))
 	for i, entry := range batch {
 		p := entry.params
@@ -194,7 +208,10 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 		}
 	}
 
+	t0 := time.Now()
 	eventsJSON, err := json.Marshal(events)
+	marshalUs := time.Since(t0).Microseconds()
+	af.totalMarshalUs.Add(marshalUs)
 	if err != nil {
 		for _, entry := range batch {
 			if entry.done != nil {
@@ -204,7 +221,10 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 		return
 	}
 
+	t1 := time.Now()
 	_, err = af.db.ExecContext(ctx, "SELECT batch_flush_events($1::jsonb)", string(eventsJSON))
+	dbUs := time.Since(t1).Microseconds()
+	af.totalDBUs.Add(dbUs)
 	if err != nil {
 		for _, entry := range batch {
 			if entry.done != nil {
@@ -216,11 +236,59 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 
 	af.batchFlushes.Add(1)
 	af.batchedEvents.Add(int64(len(batch)))
+	af.batchSizeTotal.Add(int64(len(batch)))
+	af.batchCount.Add(1)
+	af.totalFlushUs.Add(time.Since(tStart).Microseconds())
 
 	for _, entry := range batch {
 		if entry.done != nil {
 			close(entry.done)
 		}
+	}
+
+	// Periodic report every ~5 seconds.
+	now := time.Now()
+	if now.Sub(af.lastReportTime) >= 5*time.Second {
+		af.lastReportTime = now
+		bc := af.batchCount.Load()
+		bs := af.batchSizeTotal.Load()
+		bf := af.batchFlushes.Load()
+		be := af.batchedEvents.Load()
+		df := af.directFlushes.Load()
+		avgBatch := float64(0)
+		if bc > 0 {
+			avgBatch = float64(bs) / float64(bc)
+		}
+		avgFlush := float64(0)
+		if bf > 0 {
+			avgFlush = float64(af.totalFlushUs.Load()) / float64(bf)
+		}
+		avgMarshal := float64(0)
+		if bf > 0 {
+			avgMarshal = float64(af.totalMarshalUs.Load()) / float64(bf)
+		}
+		avgDB := float64(0)
+		if bf > 0 {
+			avgDB = float64(af.totalDBUs.Load()) / float64(bf)
+		}
+		avgPrepare := float64(0)
+		if be > 0 {
+			avgPrepare = float64(af.totalPrepareUs.Load()) / float64(be)
+		}
+		slog.Info("ADAPTIVE-STATS",
+			"batchMode", af.batchMode,
+			"rate", af.rateEWMA,
+			"directFlushes", df,
+			"batchFlushes", bf,
+			"batchedEvents", be,
+			"avgBatchSize", fmt.Sprintf("%.1f", avgBatch),
+			"avgFlushUs", fmt.Sprintf("%.0f", avgFlush),
+			"avgMarshalUs", fmt.Sprintf("%.0f", avgMarshal),
+			"avgDBUs", fmt.Sprintf("%.0f", avgDB),
+			"avgPrepareUs", fmt.Sprintf("%.0f", avgPrepare),
+			"timerFlushes", af.timerFlushes.Load(),
+			"fullFlushes", af.fullFlushes.Load(),
+		)
 	}
 }
 
@@ -380,4 +448,80 @@ func (af *AdaptiveFlusher) GetRate() float64 {
 
 func (af *AdaptiveFlusher) Stats() (int64, int64, int64) {
 	return af.directFlushes.Load(), af.batchFlushes.Load(), af.batchedEvents.Load()
+}
+
+// FlusherConfig holds the configuration for creating AdaptiveFlusher instances.
+type FlusherConfig struct {
+	MaxWait        time.Duration
+	MaxBatch       int
+	EnterThreshold float64
+	ExitThreshold  float64
+}
+
+// TenantFlusherRegistry creates and caches per-tenant AdaptiveFlusher instances.
+// Each tenant gets its own rate tracking and batch accumulator, preventing
+// cross-tenant interference and ensuring batch payloads carry a single tenant_id.
+type TenantFlusherRegistry struct {
+	mu       sync.Mutex
+	flushers map[string]*AdaptiveFlusher
+	db       *sql.DB
+	config   FlusherConfig
+	encrypt  bool
+	enc      *PayloadEncryption
+}
+
+// NewTenantFlusherRegistry creates a registry that lazily provisions per-tenant
+// AdaptiveFlusher instances with the given configuration.
+func NewTenantFlusherRegistry(db *sql.DB, config FlusherConfig) *TenantFlusherRegistry {
+	if config.MaxWait <= 0 {
+		config.MaxWait = 5 * time.Millisecond
+	}
+	if config.MaxBatch <= 0 {
+		config.MaxBatch = 200
+	}
+	if config.EnterThreshold <= 0 {
+		config.EnterThreshold = 500.0
+	}
+	if config.ExitThreshold <= 0 {
+		config.ExitThreshold = 250.0
+	}
+	return &TenantFlusherRegistry{
+		flushers: make(map[string]*AdaptiveFlusher),
+		db:       db,
+		config:   config,
+	}
+}
+
+// SetEncryption propagates encryption settings to the registry and all
+// existing per-tenant flusher instances.
+func (r *TenantFlusherRegistry) SetEncryption(encrypt bool, enc *PayloadEncryption) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.encrypt = encrypt
+	r.enc = enc
+	for _, af := range r.flushers {
+		af.SetEncryption(encrypt, enc)
+	}
+}
+
+// For returns the AdaptiveFlusher for the given tenant, creating one if it
+// does not already exist. Safe for concurrent use.
+func (r *TenantFlusherRegistry) For(tenantID string) *AdaptiveFlusher {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if af, ok := r.flushers[tenantID]; ok {
+		return af
+	}
+	af := NewAdaptiveFlusher(r.db, tenantID, r.config.MaxWait, r.config.MaxBatch,
+		r.config.EnterThreshold, r.config.ExitThreshold, 0)
+	af.SetEncryption(r.encrypt, r.enc)
+	r.flushers[tenantID] = af
+	return af
+}
+
+// Remove cleans up a tenant flusher that is no longer needed.
+func (r *TenantFlusherRegistry) Remove(tenantID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.flushers, tenantID)
 }

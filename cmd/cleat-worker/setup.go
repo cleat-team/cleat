@@ -910,7 +910,7 @@ type Worker struct {
 	db *sql.DB
 
 	// Batch flusher for higher throughput event persistence.
-	adaptiveFlusher *engine.AdaptiveFlusher
+	flusherRegistry *engine.TenantFlusherRegistry
 
 	// Per-workflow resource quotas.
 	maxQuotaEvents          int
@@ -1528,7 +1528,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
 		engineOpts = append(engineOpts, engine.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
 	}
-	// Use tenant-scoped database connection for plugin host functions.
+	// Always provide DB so per-step flush and adaptive flusher work.
+	engineOpts = append(engineOpts, engine.WithDB(w.db))
+	// Use tenant-scoped database connection for plugin host functions if available.
 	if w.tenantPools != nil && wf.TenantID != "" {
 		tenantDB, err := w.tenantPools.For(w.ctx, wf.TenantID)
 		if err != nil {
@@ -1571,10 +1573,10 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if noPerStepFlush != nil && *noPerStepFlush {
 		engineOpts = append(engineOpts, engine.WithNoPerStepFlush(true))
 	}
-	if w.adaptiveFlusher != nil {
-		engineOpts = append(engineOpts, engine.WithAdaptiveFlusher(w.adaptiveFlusher))
+	if w.flusherRegistry != nil {
+		engineOpts = append(engineOpts, engine.WithFlusherRegistry(w.flusherRegistry))
 	} else {
-		w.logger.InfoContext(context.Background(), "adaptive flusher not set on worker — using direct flush", "workflow_id", wf.ID)
+		w.logger.InfoContext(context.Background(), "flusher registry not set on worker — using direct flush", "workflow_id", wf.ID)
 	}
 	// Throttle cancellation polls to at most once per 100ms wall-clock
 	// to avoid a full DB transaction on every durable step.
