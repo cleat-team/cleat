@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
@@ -350,7 +352,40 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 			payload["response_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Response))
 		}
 	}
-	return json.Marshal(payload)
+	return sortedJSONMarshal(payload)
+}
+
+// sortedJSONMarshal marshals a map to JSON with keys in deterministic
+// (lexicographic) order. This is critical for checksum stability: Go's
+// json.Marshal iterates map keys in random order, so two calls with the
+// same data can produce different byte sequences.
+func sortedJSONMarshal(m map[string]any) ([]byte, error) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		keyBytes, err := json.Marshal(k)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(keyBytes)
+		buf.WriteByte(':')
+		valBytes, err := json.Marshal(m[k])
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(valBytes)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
 }
 
 func populateFromPayload(rec *EventRecord, payload []byte) {
