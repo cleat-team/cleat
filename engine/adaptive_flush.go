@@ -298,7 +298,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 		if be > 0 {
 			avgPrepare = float64(af.totalPrepareUs.Load()) / float64(be)
 		}
-		slog.Debug("ADAPTIVE-STATS",
+		slog.Info("ADAPTIVE-STATS",
 			"batchMode", af.batchMode,
 			"rate", af.rateEWMA,
 			"directFlushes", df,

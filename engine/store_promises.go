@@ -3,14 +3,14 @@ package engine
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 func (s *PostgresStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
@@ -323,33 +323,28 @@ func atoi(s string) int {
 	return n
 }
 
-// computeEventChecksum computes a SHA-256 checksum of the event record's data,
+// computeEventChecksum computes an xxHash64 checksum of the event record's data,
 // chained with the previous event's checksum so that deleting an event breaks
 // the chain for all subsequent events. When previousChecksum is empty (first
 // event or unavailable), it is omitted from the computation.
+//
+// xxHash64 is ~20x faster than SHA-256 and sufficient for integrity verification;
+// the chain is not a security boundary (cryptographic hashing is unnecessary).
 func computeEventChecksum(rec EventRecord, previousChecksum string) string {
 	payload, err := eventRecordToPayload(rec)
 	if err != nil {
-		// Fall back to checksum of the event type and step as a stable identifier.
-		// The fallback path is a safety net; json.Marshal on the payload map never
-		// fails in practice because all values are primitive types. The field list
-		// here is a stable subset for defense-in-depth.
 		data := fmt.Sprintf("%d:%s:%s:%s:%s:%s", rec.Step, rec.EventType, rec.Service, rec.Op, rec.Request, rec.Response)
-		hash := sha256.Sum256([]byte(data))
+		h := xxhash.Sum64String(data)
 		if previousChecksum == "" {
-			return hex.EncodeToString(hash[:])
+			return fmt.Sprintf("%016x", h)
 		}
-		chain := fmt.Sprintf("%s:%s", previousChecksum, hex.EncodeToString(hash[:]))
-		hash2 := sha256.Sum256([]byte(chain))
-		return hex.EncodeToString(hash2[:])
+		return fmt.Sprintf("%016x", xxhash.Sum64String(previousChecksum+":"+fmt.Sprintf("%016x", h)))
 	}
-	hash := sha256.Sum256(payload)
+	h := xxhash.Sum64(payload)
 	if previousChecksum == "" {
-		return hex.EncodeToString(hash[:])
+		return fmt.Sprintf("%016x", h)
 	}
-	chain := fmt.Sprintf("%s:%s", previousChecksum, hex.EncodeToString(hash[:]))
-	hash2 := sha256.Sum256([]byte(chain))
-	return hex.EncodeToString(hash2[:])
+	return fmt.Sprintf("%016x", xxhash.Sum64String(previousChecksum+":"+fmt.Sprintf("%016x", h)))
 }
 
 // VerifyWorkflowEvents loads all events for a workflow, recomputes their

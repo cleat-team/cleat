@@ -160,6 +160,7 @@ func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operat
 		return "", fmt.Errorf("bench-svc: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	t0 := time.Now()
 	resp, err := benchSvcHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("bench-svc: %w", err)
@@ -172,6 +173,7 @@ func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operat
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("bench-svc: %s", string(body))
 	}
+	slog.Info("BENCH-SVC-CALL", "duration_ms", time.Since(t0).Milliseconds(), "body_bytes", len(body))
 	return string(body), nil
 }
 
