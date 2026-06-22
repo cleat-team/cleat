@@ -173,7 +173,7 @@ func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operat
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("bench-svc: %s", string(body))
 	}
-	slog.Info("BENCH-SVC-CALL", "duration_ms", time.Since(t0).Milliseconds(), "body_bytes", len(body))
+	slog.Debug("BENCH-SVC-CALL", "duration_ms", time.Since(t0).Milliseconds(), "body_bytes", len(body))
 	return string(body), nil
 }
 
