@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	_ "net/http/pprof"
 	"database/sql"
 	"encoding/json"
 		"flag"
@@ -299,11 +300,11 @@ func main() {
 		}
 
 		sqlDriver := sqlDriverName(*driver)
+		dbDSN := dsnWithSchema(*dbURL, *schemaName)
 
 		var err error
 		switch *driver {
 		case "postgres":
-			dbDSN := dsnWithSchema(*dbURL, *schemaName)
 			db, err = sql.Open(sqlDriver, dbDSN)
 			if err != nil {
 				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err)
@@ -311,7 +312,7 @@ func main() {
 			}
 			defer db.Close()
 			db.SetMaxOpenConns(*concurrency + 5)
-			db.SetMaxIdleConns(5)
+			db.SetMaxIdleConns(max(10, *concurrency/2))
 			db.SetConnMaxLifetime(5 * time.Minute)
 			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel)
 
@@ -718,8 +719,19 @@ func main() {
 
 	// Set up per-tenant adaptive flusher registry if batch flushing is not disabled.
 	var flusherRegistry *engine.TenantFlusherRegistry
+	var flusherDB *sql.DB
 	if !*batchFlushDisabled && !*noPerStepFlush {
-		registry := engine.NewTenantFlusherRegistry(db, engine.FlusherConfig{
+		// Open a dedicated DB pool for the adaptive flusher so batch flushes
+		// never queue behind workflow claims, history loads, or finalizations.
+		flusherDB, err = sql.Open(sqlDriverName(*driver), dsnWithSchema(*dbURL, *schemaName))
+		if err != nil {
+			logger.ErrorContext(ctx, "failed to open flusher DB pool", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		flusherDB.SetMaxOpenConns(*batchFlushMaxConns)
+		flusherDB.SetMaxIdleConns(max(1, *batchFlushMaxConns/2))
+		flusherDB.SetConnMaxLifetime(5 * time.Minute)
+		registry := engine.NewTenantFlusherRegistry(flusherDB, engine.FlusherConfig{
 			MaxWait:        time.Duration(*batchFlushMaxWaitMs) * time.Millisecond,
 			MaxBatch:       *batchFlushMaxSize,
 			EnterThreshold: float64(*batchFlushEnterRate),
@@ -938,6 +950,17 @@ func main() {
 		}()
 	}
 
+
+		// Start pprof server on a separate port for CPU profiling.
+		if *pprofAddr != "" {
+			go func() {
+				logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
+				if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+					logger.ErrorContext(context.Background(), "pprof server error", "worker_id", workerID, "error", err)
+				}
+			}()
+		}
+
 	// Handle shutdown signals.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -953,6 +976,9 @@ func main() {
 		}
 		if flusherRegistry != nil {
 			flusherRegistry.Shutdown()
+		if flusherDB != nil {
+			flusherDB.Close()
+		}
 		}
 		logger.InfoContext(context.Background(), "waiting for background workers to stop", "worker_id", workerID)
 		done := make(chan struct{})
