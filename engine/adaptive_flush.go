@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -249,12 +252,17 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 	dbUs := time.Since(t1).Microseconds()
 	af.totalDBUs.Add(dbUs)
 	if err != nil {
-		for _, entry := range batch {
-			if entry.done != nil {
-				entry.done <- err
+		err = retryBatchFlush(ctx, af, eventsJSON, len(batch))
+		dbUs2 := time.Since(t1).Microseconds()
+		af.totalDBUs.Add(dbUs2 - dbUs)
+		if err != nil {
+			for _, entry := range batch {
+				if entry.done != nil {
+					entry.done <- err
+				}
 			}
+			return
 		}
-		return
 	}
 
 	af.batchFlushes.Add(1)
@@ -363,6 +371,106 @@ func (af *AdaptiveFlusher) updateRate() {
 		af.batchMode = false
 		slog.Info("adaptive flusher exited batch mode", "rate", af.rateEWMA)
 	}
+}
+
+// errPoolClosed reports whether err is fatal because the database pool has been
+// shut down. Transient errors (timeouts, deadlocks, broken connections) are
+// retried; a closed pool cannot recover.
+func errPoolClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return msg == "sql: database is closed" || msg == "sql: connection is already closed"
+}
+
+// errIsRetryable reports whether a DB error is likely transient and worth
+// retrying. Connection-level errors (ErrBadConn) are transient because the
+// pool will provide a fresh connection on the next attempt. Deadlocks and
+// serialization failures are also retryable. Permanent errors like a closed
+// pool or syntax errors are not retried.
+func errIsRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errPoolClosed(err) {
+		return false
+	}
+	// driver.ErrBadConn — the pool dropped a bad connection; retry gets a fresh one.
+	if errors.Is(err, sql.ErrConnDone) {
+		return true
+	}
+	// PostgreSQL deadlock (40P01) and serialization failure (40001) are retryable.
+	msg := err.Error()
+	if strings.Contains(msg, "deadlock") || strings.Contains(msg, "serialization") || strings.Contains(msg, "could not serialize") {
+		return true
+	}
+	// Connection timeout / broken pipe — retryable.
+	if strings.Contains(msg, "connection refused") || strings.Contains(msg, "broken pipe") || strings.Contains(msg, "timeout") || strings.Contains(msg, "connection reset") {
+		return true
+	}
+	// Default: retry unknown errors — better to retry a few times than drop events.
+	return true
+}
+
+// retryBatchFlush executes the batch INSERT with exponential backoff on
+// transient errors. It returns nil on success or the last error after
+// exhausting retries.
+func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte, batchSize int) error {
+	const (
+		maxRetries   = 5
+		baseBackoff  = 50 * time.Millisecond
+		maxBackoff   = 2 * time.Second
+	)
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(math.Min(float64(baseBackoff)*math.Pow(2, float64(attempt-1)), float64(maxBackoff)))
+			slog.Warn("adaptive flusher retrying batch flush",
+				"attempt", attempt,
+				"batchSize", batchSize,
+				"backoff", backoff,
+				"prevErr", lastErr,
+			)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+		_, err := af.db.ExecContext(ctx, `
+			WITH cfg AS (SELECT set_config('cleat.tenant_id', ($1::jsonb->0->>'tenant_id'), true))
+			INSERT INTO event_history (
+				workflow_id, step, event_type, service, operation,
+				request, response, error, duration_ms, signal_names,
+				timeout_ms, signal_name, signal_payload, defer_description,
+				defer_id, child_name, child_input, run_id, new_input,
+				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+				promise_name, promise_id, promise_result, promise_error,
+				payload, created_at, checksum, tenant_id
+			)
+			SELECT
+				workflow_id, step, event_type, service, operation,
+				request, response, error, duration_ms, signal_names,
+				timeout_ms, signal_name, signal_payload, defer_description,
+				defer_id, child_name, child_input, run_id, new_input,
+				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+				promise_name, promise_id, promise_result, promise_error,
+				payload, created_at, checksum, tenant_id
+			FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb), cfg
+			ON CONFLICT (workflow_id, step) DO UPDATE
+				SET response = EXCLUDED.response, error = EXCLUDED.error
+				WHERE event_history.response = '' AND event_history.error IS NULL
+		`, string(eventsJSON))
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errIsRetryable(err) {
+			return err
+		}
+	}
+	return fmt.Errorf("batch flush failed after %d attempts: %w", maxRetries, lastErr)
 }
 
 // jsonNull converts sql.Null* types to JSON-safe values (string, int64, or nil)
