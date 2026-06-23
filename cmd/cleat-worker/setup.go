@@ -1088,21 +1088,14 @@ func (w *Worker) dispatchLoop() {
 	const maxIdleTicks = 6 // progressive backoff caps at 6 * pollInterval
 
 	for {
-		select {
-		case <-w.getLoopCtx("dispatch").Done():
-			return
-		default:
-		}
-		// Re-check after the non-blocking select to narrow the
-		// TOCTOU window between the check and the DB claims below.
-		if w.ctx.Err() != nil {
-			return
-		}
-
-		w.healthTracker.recordRun("dispatch")
-
-		// If draining and no in-flight work, exit cleanly.
-		if w.draining.Load() {
+		// When the worker is shutting down (context cancelled) or
+		// draining, stop claiming new work and wait for in-flight
+		// workflows to finish so events can be flushed cleanly.
+		if w.ctx.Err() != nil || w.draining.Load() {
+			if !w.draining.Load() {
+				w.draining.Store(true)
+				w.logger.InfoContext(w.ctx, "shutdown signal received; draining in-flight workflows", "worker_id", w.id)
+			}
 			inflight := 0
 			w.inflight.Range(func(_, _ any) bool { inflight++; return true })
 			if inflight == 0 {
@@ -1112,6 +1105,8 @@ func (w *Worker) dispatchLoop() {
 			time.Sleep(w.pollInterval)
 			continue
 		}
+
+		w.healthTracker.recordRun("dispatch")
 		// Memory-aware tick: read system memory, compute pressure, adjust concurrency.
 		w.memoryController.Tick(w.ctx)
 		state := w.memoryController.State()
