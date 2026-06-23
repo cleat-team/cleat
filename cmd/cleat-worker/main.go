@@ -974,24 +974,6 @@ func main() {
 		if tenantLim != nil {
 			tenantLim.stop()
 		}
-		if flusherRegistry != nil {
-			flusherRegistry.Shutdown()
-		if flusherDB != nil {
-			flusherDB.Close()
-		}
-		}
-		logger.InfoContext(context.Background(), "waiting for background workers to stop", "worker_id", workerID)
-		done := make(chan struct{})
-		go func() {
-			bgWg.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-			logger.InfoContext(context.Background(), "all background workers stopped", "worker_id", workerID)
-		case <-time.After(30 * time.Second):
-			logger.WarnContext(context.Background(), "timed out waiting for background workers after 30s", "worker_id", workerID)
-		}
 	}()
 
 	metricsInstance.SetWorkerCount(context.Background(), 1)
@@ -999,6 +981,28 @@ func main() {
 		metricsInstance.SetWorkerCount(context.Background(), 0)
 	}()
 	w.Run()
+
+	// Drain the flusher and close its dedicated pool AFTER the engine
+	// has stopped so in-flight events are not lost.
+	if flusherRegistry != nil {
+		flusherRegistry.Shutdown()
+	}
+	if flusherDB != nil {
+		flusherDB.Close()
+	}
+
+	// Wait for background workers to finish.
+	bgDone := make(chan struct{})
+	go func() {
+		bgWg.Wait()
+		close(bgDone)
+	}()
+	select {
+	case <-bgDone:
+		logger.InfoContext(context.Background(), "all background workers stopped", "worker_id", workerID)
+	case <-time.After(30 * time.Second):
+		logger.WarnContext(context.Background(), "timed out waiting for background workers after 30s", "worker_id", workerID)
+	}
 	logger.InfoContext(context.Background(), "shutdown complete", "worker_id", workerID)
 }
 
