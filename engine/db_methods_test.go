@@ -2422,7 +2422,7 @@ func TestPostgresStore_AppendEventsInTx_ExecError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "append events in tx: exec step 0") {
+	if !strings.Contains(err.Error(), "append one event: exec step 0") {
 		t.Errorf("expected exec step error, got: %v", err)
 	}
 }
@@ -3723,8 +3723,8 @@ func TestPostgresStore_AppendEventHistoryBatch_InsertError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from INSERT failure, got nil")
 	}
-	if !strings.Contains(err.Error(), "append events in tx") {
-		t.Errorf("expected error to contain 'append events in tx', got: %v", err)
+	if !strings.Contains(err.Error(), "append one event") {
+		t.Errorf("expected error to contain 'append one event', got: %v", err)
 	}
 }
 
@@ -4256,8 +4256,8 @@ func TestComputeEventChecksum_NoPrevious(t *testing.T) {
 	if checksum == "" {
 		t.Error("expected non-empty checksum")
 	}
-	if len(checksum) != 64 {
-		t.Errorf("expected 64 hex chars, got %d", len(checksum))
+	if len(checksum) != 16 {
+		t.Errorf("expected 16 hex chars, got %d", len(checksum))
 	}
 }
 
@@ -4817,8 +4817,8 @@ func TestComputeEventChecksum_SideEffect(t *testing.T) {
 	rec := EventRecord{Step: 0, EventType: EventTypeSideEffect, SideEffectResult: "result-data"}
 	c1 := computeEventChecksum(rec, "")
 	c2 := computeEventChecksum(rec, "")
-	if c1 == "" || len(c1) != 64 {
-		t.Error("expected non-empty 64-char hex checksum")
+	if c1 == "" || len(c1) != 16 {
+		t.Error("expected non-empty 16-char hex checksum")
 	}
 	if c1 != c2 {
 		t.Error("checksum should be deterministic for same input")
@@ -4832,16 +4832,16 @@ func TestComputeEventChecksum_StateMutation(t *testing.T) {
 	if c1 != c2 {
 		t.Error("checksum should be deterministic")
 	}
-	if len(c1) != 64 {
-		t.Error("expected 64 hex chars")
+	if len(c1) != 16 {
+		t.Error("expected 16 hex chars")
 	}
 }
 
 func TestComputeEventChecksum_RunDetached(t *testing.T) {
 	rec := EventRecord{Step: 0, EventType: EventTypeRunDetached, DetachedName: "child", DetachedInput: `{"x":1}`}
 	c := computeEventChecksum(rec, "")
-	if c == "" || len(c) != 64 {
-		t.Error("expected non-empty 64-char hex checksum")
+	if c == "" || len(c) != 16 {
+		t.Error("expected non-empty 16-char hex checksum")
 	}
 }
 

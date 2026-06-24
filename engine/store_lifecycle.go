@@ -238,6 +238,10 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 // Fields not relevant to the chosen status are ignored.
 
 func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	if !validFinalStatus(finalStatus) {
+		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("finalize workflow: begin tx: %w", err)
@@ -283,6 +287,15 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 	}
 
 	return nil
+}
+
+// validFinalStatus returns true for status values accepted by finalize_workflow_status.
+func validFinalStatus(status string) bool {
+	switch status {
+	case "done", "failed", "ready", "suspended":
+		return true
+	}
+	return false
 }
 
 // AppendEventHistory appends a single event to the history.

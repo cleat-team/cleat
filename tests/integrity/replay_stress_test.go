@@ -29,12 +29,16 @@ import (
 
 // stressMockCaller records all service calls for test assertions.
 type stressMockCaller struct {
-	calls []engine.CallRecord
+	calls     []engine.CallRecord
+	callCount int
 }
 
 func (m *stressMockCaller) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
 	resp := stressMockResponse(service, operation)
+	step := m.callCount
+	m.callCount++
 	m.calls = append(m.calls, engine.CallRecord{
+		Step:      step,
 		EventType: engine.EventTypeCall,
 		Service:   service, Op: operation, Request: requestJSON, Response: resp,
 	})
@@ -163,7 +167,7 @@ func TestReplayStressBasic(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	input := json.RawMessage(`{"UserID":"stress-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"stress-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 
 	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
@@ -243,7 +247,7 @@ func TestReplayStressRandomCrashPoints(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	input := json.RawMessage(`{"UserID":"crash-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"crash-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 
 	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
@@ -326,16 +330,17 @@ func TestReplayStressRandomCrashPoints(t *testing.T) {
 					splitAt, len(fullHistory)-splitAt, splitAt, len(replayCaller.calls))
 			}
 
-			// Verify the prefix events themselves were not re-executed by
-			// checking that no call has a step index matching the prefix range.
-			prefixSteps := make(map[int]bool)
-			for j := 0; j < splitAt; j++ {
-				prefixSteps[fullHistory[j].Step] = true
+			// Verify that no real call was made for any operation in the prefix.
+			prefixOps := make(map[string]bool)
+			for j := 0; j < splitAt && j < len(fullHistory); j++ {
+				if fullHistory[j].EventType == engine.EventTypeCall {
+					prefixOps[fullHistory[j].Service+"/"+fullHistory[j].Op] = true
+				}
 			}
 			for _, c := range replayCaller.calls {
-				if prefixSteps[c.Step] {
-					t.Errorf("Split=%d: real call made for prefix step %d (%s/%s)",
-						splitAt, c.Step, c.Service, c.Op)
+				if prefixOps[c.Service+"/"+c.Op] {
+					t.Errorf("Split=%d: real call made for prefix op %s/%s",
+						splitAt, c.Service, c.Op)
 				}
 			}
 		})
@@ -483,7 +488,7 @@ func TestReplayDivergenceDetection(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	input := json.RawMessage(`{"UserID":"div-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"div-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 
 	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
@@ -631,7 +636,7 @@ func TestReplayHashConsistency(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	input := json.RawMessage(`{"UserID":"hash-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"hash-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 
 	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
