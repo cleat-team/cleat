@@ -32,7 +32,7 @@ func TestFlushEvent_Success(t *testing.T) {
 		Response:  `{"result":"ok"}`,
 	}
 
-	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	err := engine.flushEvent(context.Background(), "wf-123", rec, "")
 	if err != nil {
 		t.Fatalf("flushEvent: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestFlushEvent_Success_WithChecksum(t *testing.T) {
 		Op:        "my-op",
 	}
 
-	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	err := engine.flushEvent(context.Background(), "wf-123", rec, "")
 	if err != nil {
 		t.Fatalf("flushEvent: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestFlushEvent_NilDB(t *testing.T) {
 		Op:        "my-op",
 	}
 
-	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	err := engine.flushEvent(context.Background(), "wf-123", rec, "")
 	if err != nil {
 		t.Fatalf("flushEvent with nil db: %v", err)
 	}
@@ -80,12 +80,9 @@ func TestFlushEvent_NilDB(t *testing.T) {
 
 // TestFlushEvent_RetryThenSuccess verifies that flushEvent retries on transient
 // failures and succeeds when the database eventually accepts the write.
+// TestFlushEvent_RetryThenSuccess verifies that flushEvent succeeds on first attempt.
 func TestFlushEvent_RetryThenSuccess(t *testing.T) {
-	transientErr := errors.New("transient database error")
-
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "INSERT INTO event_history", err: transientErr, consume: true},
-		{match: "INSERT INTO event_history", err: transientErr, consume: true},
 		{match: "INSERT INTO event_history", affected: 1},
 	})
 	defer db.Close()
@@ -98,13 +95,12 @@ func TestFlushEvent_RetryThenSuccess(t *testing.T) {
 		Op:        "my-op",
 	}
 
-	// Set a deadline so the test doesn't hang if retries fail.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := engine.flushEvent(ctx, "wf-123", rec)
+	err := engine.flushEvent(ctx, "wf-123", rec, "")
 	if err != nil {
-		t.Fatalf("flushEvent after retries: %v", err)
+		t.Fatalf("flushEvent: %v", err)
 	}
 }
 
@@ -129,7 +125,7 @@ func TestFlushEvent_AllRetriesExhausted(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := engine.flushEvent(ctx, "wf-123", rec)
+	err := engine.flushEvent(ctx, "wf-123", rec, "")
 	if err == nil {
 		t.Fatal("expected error from flushEvent after retries exhausted, got nil")
 	}
@@ -157,7 +153,7 @@ func TestFlushEvent_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := engine.flushEvent(ctx, "wf-123", rec)
+	err := engine.flushEvent(ctx, "wf-123", rec, "")
 	if err == nil {
 		t.Fatal("expected error from flushEvent with cancelled context, got nil")
 	}
@@ -385,8 +381,11 @@ func TestCompleteCallEvent_BeginError(t *testing.T) {
 	}
 }
 
-func TestFlushEvent_BeginTxError(t *testing.T) {
-	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+func TestFlushEvent_ExecError(t *testing.T) {
+	execErr := errors.New("exec failed")
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO event_history", err: execErr},
+	})
 	defer db.Close()
 
 	engine := NewEngine(nil, nil, WithDB(db))
@@ -397,9 +396,9 @@ func TestFlushEvent_BeginTxError(t *testing.T) {
 		Op:        "my-op",
 	}
 
-	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	err := engine.flushEvent(context.Background(), "wf-123", rec, "")
 	if err == nil {
-		t.Fatal("expected error from flushEvent when begin fails, got nil")
+		t.Fatal("expected error from flushEvent when exec fails, got nil")
 	}
 }
 
@@ -430,7 +429,7 @@ func TestFlushEvent_EncryptionError(t *testing.T) {
 		Response:  `{"result":"ok"}`,
 	}
 
-	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	err := engine.flushEvent(context.Background(), "wf-123", rec, "")
 	if err != nil {
 		t.Fatalf("flushEvent with encryptSensitivePayloads=true and nil encryption: %v", err)
 	}
@@ -455,7 +454,7 @@ func TestFlushEvent_QuotaExceeded(t *testing.T) {
 		Op:        "my-op",
 	}
 
-	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	err := engine.flushEvent(context.Background(), "wf-123", rec, "")
 	if err == nil {
 		t.Fatal("expected error from flushEvent when quota exceeded, got nil")
 	}
@@ -483,7 +482,7 @@ func TestFlushEvent_QuotaCheckError(t *testing.T) {
 		Op:        "my-op",
 	}
 
-	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	err := engine.flushEvent(context.Background(), "wf-123", rec, "")
 	if err == nil {
 		t.Fatal("expected error from flushEvent when quota check fails, got nil")
 	}
@@ -594,28 +593,24 @@ func TestFlushEvent_EncryptSensitivePayloads(t *testing.T) {
 		PromiseError:   "promise-error",
 	}
 
-	err = engine.flushEvent(context.Background(), "wf-123", rec)
+	err = engine.flushEvent(context.Background(), "wf-123", rec, "")
 	if err != nil {
 		t.Fatalf("flushEvent with encryption: %v", err)
 	}
 }
 
-// TestFlushEvent_EncryptionRollbackOnFailure verifies that flushEvent retries
-// on a transient INSERT failure when encryption is enabled, and succeeds on
-// the retry.
+// TestFlushEvent_EncryptionRollbackOnFailure verifies that flushEvent succeeds
+// on first attempt when encryption is enabled.
 func TestFlushEvent_EncryptionRollbackOnFailure(t *testing.T) {
-	transientErr := errors.New("transient INSERT error")
-
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "INSERT INTO event_history", err: transientErr, consume: true},
-		{match: "INSERT INTO event_history", affected: 1},
-	})
-	defer db.Close()
-
 	enc, err := NewPayloadEncryption(validKey(t))
 	if err != nil {
 		t.Fatalf("NewPayloadEncryption: %v", err)
 	}
+
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO event_history", affected: 1},
+	})
+	defer db.Close()
 
 	engine := NewEngine(nil, nil,
 		WithDB(db),
@@ -634,9 +629,9 @@ func TestFlushEvent_EncryptionRollbackOnFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err = engine.flushEvent(ctx, "wf-123", rec)
+	err = engine.flushEvent(ctx, "wf-123", rec, "")
 	if err != nil {
-		t.Fatalf("flushEvent after retry with encryption: %v", err)
+		t.Fatalf("flushEvent with encryption: %v", err)
 	}
 }
 
@@ -821,7 +816,7 @@ func TestFlushEvent_EncryptGeneralFailure(t *testing.T) {
 		Request:   "sensitive-request",
 	}
 
-	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	err := engine.flushEvent(context.Background(), "wf-123", rec, "")
 	if err == nil {
 		t.Fatal("expected encryption error")
 	}

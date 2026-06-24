@@ -73,6 +73,7 @@ func convertTypedef(name string, td plugin.TypeDef) TypeIR {
 	for fname, fd := range td.Fields {
 		tir.Fields = append(tir.Fields, fieldDefToFieldIR(fname, fd))
 	}
+	sortFields(tir.Fields)
 	return tir
 }
 
@@ -92,6 +93,7 @@ func fieldDefToFieldIR(name string, fd plugin.FieldDef) FieldIR {
 		for fn, ffd := range fd.Fields {
 			nested.Fields = append(nested.Fields, fieldDefToFieldIR(fn, ffd))
 		}
+		sortFields(nested.Fields)
 		fir.Nested = nested
 		fir.Type = "object"
 
@@ -104,6 +106,7 @@ func fieldDefToFieldIR(name string, fd plugin.FieldDef) FieldIR {
 				for fn, ffd := range fd.Items.Fields {
 					nested.Fields = append(nested.Fields, fieldDefToFieldIR(fn, ffd))
 				}
+				sortFields(nested.Fields)
 				fir.Nested = nested
 			} else {
 				// Reference to a named type.
@@ -123,6 +126,7 @@ func fieldDefToFieldIR(name string, fd plugin.FieldDef) FieldIR {
 				for fn, ffd := range fd.ValueType.Fields {
 					nested.Fields = append(nested.Fields, fieldDefToFieldIR(fn, ffd))
 				}
+				sortFields(nested.Fields)
 				fir.Nested = nested
 			} else {
 				fir.ValueType = fd.ValueType.Type
@@ -137,6 +141,7 @@ func fieldDefToFieldIR(name string, fd plugin.FieldDef) FieldIR {
 			for fn, ffd := range fd.Fields {
 				nested.Fields = append(nested.Fields, fieldDefToFieldIR(fn, ffd))
 			}
+			sortFields(nested.Fields)
 			fir.Nested = nested
 		}
 	}

@@ -21,12 +21,16 @@ const pendingSentinel = engine.PendingSentinel
 
 // ambigRecorder records all service calls for test assertions.
 type ambigRecorder struct {
-	calls []engine.EventRecord
+	calls     []engine.EventRecord
+	callCount int
 }
 
 func (r *ambigRecorder) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
 	resp := mockAmbigResponse(service, operation)
+	step := r.callCount
+	r.callCount++
 	r.calls = append(r.calls, engine.EventRecord{
+		Step:      step,
 		EventType: engine.EventTypeCall,
 		Service:   service,
 		Op:        operation,
@@ -95,7 +99,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 	defer rt.Close(ctx)
 
 	// Execute the place_order workflow to get full event history.
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"test-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 	result1, history, suspended, _, _, err := e.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -237,7 +241,7 @@ func TestPendingSentinelDetection(t *testing.T) {
 	rt, e, _ := setupEngine(t, ctx)
 	defer rt.Close(ctx)
 
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"test-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 	_, history, suspended, _, _, err := e.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -338,14 +342,18 @@ func TestPendingSentinelDetection(t *testing.T) {
 				t.Logf("Step %d: Replay succeeded (no top-level error): %s", tt.injectStep, tt.description)
 			}
 
-			// Verify no fresh calls were made for steps before the injection point.
+			// Verify no fresh calls were made for prefix history operations.
 			// Steps before injectStep should be served from cached history.
-			if len(replayCaller.calls) > 0 {
-				for _, c := range replayCaller.calls {
-					if c.Step < tt.injectStep {
-						t.Errorf("Fresh call made for step %d (%s/%s) which should have been served from cache",
-							c.Step, c.Service, c.Op)
-					}
+			prefixOps := make(map[string]bool)
+			for i := 0; i < tt.injectStep && i < len(history); i++ {
+				if history[i].EventType == engine.EventTypeCall {
+					prefixOps[history[i].Service+"/"+history[i].Op] = true
+				}
+			}
+			for _, c := range replayCaller.calls {
+				if prefixOps[c.Service+"/"+c.Op] {
+					t.Errorf("Fresh call made for %s/%s which should have been served from cache",
+						c.Service, c.Op)
 				}
 			}
 		})
@@ -376,7 +384,7 @@ func TestReplayWithInjectedCrashPoints(t *testing.T) {
 	rt, e, _ := setupEngine(t, ctx)
 	defer rt.Close(ctx)
 
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"test-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 	result1, history, suspended, _, _, err := e.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
