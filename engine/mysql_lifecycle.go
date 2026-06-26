@@ -44,10 +44,10 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	tqClause, tqArgs := s.taskQueueClause()
 
 	// Step 1: Select IDs with SKIP LOCKED.
-	// Arg order: task_queue values..., tenant_id, worker_id, limit
+	// Arg order: task_queue values..., tenant_id, limit
 	selArgs := make([]any, 0)
 	selArgs = append(selArgs, tqArgs...)
-	selArgs = append(selArgs, s.tenantID, workerID, limit)
+	selArgs = append(selArgs, s.tenantID, limit)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id FROM workflow_instances
 		WHERE status = 'ready'

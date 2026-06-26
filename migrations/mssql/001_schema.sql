@@ -10,6 +10,8 @@
 IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'admin')
     EXEC('CREATE SCHEMA admin');
 
+GO
+
 -- ===========================================================================
 -- Function: dbo.fn_tenant_filter
 -- Inline TVF used by SECURITY POLICY (native MSSQL RLS).
@@ -22,6 +24,7 @@ WITH SCHEMABINDING
 AS
 RETURN SELECT 1 AS access
     WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER);
+GO
 
 -- ===========================================================================
 -- Table: admin.tenants
@@ -421,30 +424,37 @@ IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Routi
     DROP SECURITY POLICY dbo.TenantFilter_Routing;
 
 -- Recreate security policies on all tenant-scoped tables.
+GO
 CREATE SECURITY POLICY dbo.TenantFilter_Defs
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_defs
     WITH (STATE = ON);
 
+GO
 CREATE SECURITY POLICY dbo.TenantFilter_Instances
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_instances
     WITH (STATE = ON);
 
+GO
 CREATE SECURITY POLICY dbo.TenantFilter_EventHistory
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.event_history
     WITH (STATE = ON);
 
+GO
 CREATE SECURITY POLICY dbo.TenantFilter_Signals
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_signals
     WITH (STATE = ON);
 
+GO
 CREATE SECURITY POLICY dbo.TenantFilter_Schedules
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_schedules
     WITH (STATE = ON);
 
+GO
 CREATE SECURITY POLICY dbo.TenantFilter_Tags
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_tags
     WITH (STATE = ON);
 
+GO
 CREATE SECURITY POLICY dbo.TenantFilter_Routing
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_routing
     WITH (STATE = ON);
