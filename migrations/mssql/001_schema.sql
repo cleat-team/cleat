@@ -1,6 +1,7 @@
--- cleat mssql tables (consolidated)
--- All CREATE TABLE statements with final columns compiled from migrations 001-011, 013.
--- Idempotent: all statements use IF NOT EXISTS guards.
+-- cleat mssql schema (consolidated)
+-- All CREATE TABLE, indexes, fn_tenant_filter, and security policies compiled from
+-- migrations 001-011 (excluding no-op 008_rls_fail_closed).
+-- Idempotent: all statements use IF NOT EXISTS / IF EXISTS guards.
 -- Target: fresh installs only.
 
 -- ===========================================================================
@@ -8,6 +9,19 @@
 -- ===========================================================================
 IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'admin')
     EXEC('CREATE SCHEMA admin');
+
+-- ===========================================================================
+-- Function: dbo.fn_tenant_filter
+-- Inline TVF used by SECURITY POLICY (native MSSQL RLS).
+-- Returns a row only when the table's tenant_id matches the session-scoped
+-- tenant_id set via sp_set_session_context 'tenant_id'.
+-- ===========================================================================
+CREATE OR ALTER FUNCTION dbo.fn_tenant_filter(@tenant_id UNIQUEIDENTIFIER)
+RETURNS TABLE
+WITH SCHEMABINDING
+AS
+RETURN SELECT 1 AS access
+    WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER);
 
 -- ===========================================================================
 -- Table: admin.tenants
@@ -133,6 +147,8 @@ CREATE TABLE dbo.workflow_instances (
     plugin_vers     NVARCHAR(MAX)   NOT NULL DEFAULT '{}',
     event_count     BIGINT          NOT NULL DEFAULT 0,
     allowed_signals NVARCHAR(MAX)   NULL,
+    generation      BIGINT          NOT NULL DEFAULT 0,
+    priority        INTEGER         NOT NULL DEFAULT 0,
     CONSTRAINT pk_workflow_instances PRIMARY KEY (id),
     CONSTRAINT fk_instances_def FOREIGN KEY (def_name, def_version)
         REFERENCES dbo.workflow_defs(name, version),
@@ -183,7 +199,7 @@ CREATE TABLE dbo.event_history (
     global_seq      BIGINT          NOT NULL DEFAULT 0,
     CONSTRAINT pk_event_history PRIMARY KEY (workflow_id, step),
     CONSTRAINT fk_event_history_workflow FOREIGN KEY (workflow_id)
-        REFERENCES dbo.workflow_instances(id)
+        REFERENCES dbo.workflow_instances(id) ON DELETE CASCADE
 );
 
 -- ===========================================================================
@@ -198,7 +214,7 @@ CREATE TABLE dbo.workflow_signals (
     tenant_id       UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     CONSTRAINT pk_workflow_signals PRIMARY KEY (workflow_id, signal_name),
     CONSTRAINT fk_signals_workflow FOREIGN KEY (workflow_id)
-        REFERENCES dbo.workflow_instances(id),
+        REFERENCES dbo.workflow_instances(id) ON DELETE CASCADE,
     CONSTRAINT ck_workflow_signals_payload CHECK (ISJSON(payload) = 1)
 );
 
@@ -219,7 +235,7 @@ CREATE TABLE dbo.workflow_promises (
     resolved_at     DATETIMEOFFSET  NULL,
     CONSTRAINT pk_workflow_promises PRIMARY KEY (workflow_id, promise_id),
     CONSTRAINT fk_promises_workflow FOREIGN KEY (workflow_id)
-        REFERENCES dbo.workflow_instances(id),
+        REFERENCES dbo.workflow_instances(id) ON DELETE CASCADE,
     CONSTRAINT ck_workflow_promises_result CHECK (result IS NULL OR ISJSON(result) = 1)
 );
 
@@ -255,7 +271,7 @@ CREATE TABLE dbo.concurrency_keys (
     tenant_id       UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     CONSTRAINT pk_concurrency_keys PRIMARY KEY (key_hash),
     CONSTRAINT fk_concurrency_keys_workflow FOREIGN KEY (workflow_id)
-        REFERENCES dbo.workflow_instances(id)
+        REFERENCES dbo.workflow_instances(id) ON DELETE CASCADE
 );
 
 -- ===========================================================================
@@ -291,7 +307,7 @@ CREATE TABLE dbo.workflow_update_requests (
     completed_at    DATETIMEOFFSET  NULL,
     CONSTRAINT pk_workflow_update_requests PRIMARY KEY (workflow_id, update_name),
     CONSTRAINT fk_update_requests_workflow FOREIGN KEY (workflow_id)
-        REFERENCES dbo.workflow_instances(id),
+        REFERENCES dbo.workflow_instances(id) ON DELETE CASCADE,
     CONSTRAINT ck_workflow_update_requests_payload CHECK (ISJSON(payload) = 1)
 );
 
@@ -349,3 +365,173 @@ CREATE TABLE dbo.workflow_memory_stats (
     updated_at    DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
     CONSTRAINT pk_workflow_memory_stats PRIMARY KEY (def_name)
 );
+
+-- ===========================================================================
+-- Table: dbo.workflow_tags (deployment tags for workflow versioning)
+-- ===========================================================================
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.workflow_tags') AND type = N'U')
+CREATE TABLE dbo.workflow_tags (
+    workflow_name NVARCHAR(255)   NOT NULL,
+    version       INT             NOT NULL,
+    tag           NVARCHAR(255)   NOT NULL,
+    created_at    DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),
+    tenant_id     UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    CONSTRAINT pk_workflow_tags PRIMARY KEY (workflow_name, tag),
+    CONSTRAINT fk_workflow_tags_def FOREIGN KEY (workflow_name, version)
+        REFERENCES dbo.workflow_defs(name, version)
+);
+
+-- ===========================================================================
+-- Table: dbo.workflow_routing (traffic routing for workflow versioning)
+-- ===========================================================================
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.workflow_routing') AND type = N'U')
+CREATE TABLE dbo.workflow_routing (
+    id              UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID(),
+    workflow_name   NVARCHAR(255)    NOT NULL,
+    target_version  INT              NOT NULL,
+    weight          FLOAT(53)        NOT NULL DEFAULT 1.0,
+    created_at      DATETIMEOFFSET   NOT NULL DEFAULT SYSUTCDATETIME(),
+    tenant_id       UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    CONSTRAINT pk_workflow_routing PRIMARY KEY (id),
+    CONSTRAINT fk_workflow_routing_def FOREIGN KEY (workflow_name, target_version)
+        REFERENCES dbo.workflow_defs(name, version),
+    CONSTRAINT ck_workflow_routing_weight CHECK (weight >= 0 AND weight <= 1)
+);
+
+-- ===========================================================================
+-- Row-Level Security: SECURITY POLICY using fn_tenant_filter
+-- Applies FILTER PREDICATE on every tenant-scoped table.
+-- Requires sp_set_session_context 'tenant_id' on each connection.
+-- ===========================================================================
+
+-- Drop existing policies (idempotent: no-op if they do not exist).
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
+    DROP SECURITY POLICY dbo.TenantFilter_Defs;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Instances')
+    DROP SECURITY POLICY dbo.TenantFilter_Instances;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_EventHistory')
+    DROP SECURITY POLICY dbo.TenantFilter_EventHistory;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Signals')
+    DROP SECURITY POLICY dbo.TenantFilter_Signals;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Schedules')
+    DROP SECURITY POLICY dbo.TenantFilter_Schedules;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Tags')
+    DROP SECURITY POLICY dbo.TenantFilter_Tags;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Routing')
+    DROP SECURITY POLICY dbo.TenantFilter_Routing;
+
+-- Recreate security policies on all tenant-scoped tables.
+CREATE SECURITY POLICY dbo.TenantFilter_Defs
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_defs
+    WITH (STATE = ON);
+
+CREATE SECURITY POLICY dbo.TenantFilter_Instances
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_instances
+    WITH (STATE = ON);
+
+CREATE SECURITY POLICY dbo.TenantFilter_EventHistory
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.event_history
+    WITH (STATE = ON);
+
+CREATE SECURITY POLICY dbo.TenantFilter_Signals
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_signals
+    WITH (STATE = ON);
+
+CREATE SECURITY POLICY dbo.TenantFilter_Schedules
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_schedules
+    WITH (STATE = ON);
+
+CREATE SECURITY POLICY dbo.TenantFilter_Tags
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_tags
+    WITH (STATE = ON);
+
+CREATE SECURITY POLICY dbo.TenantFilter_Routing
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_routing
+    WITH (STATE = ON);
+
+-- ===========================================================================
+-- Indexes
+-- ===========================================================================
+
+-- Zombie reaper: reclaim instances with stale heartbeats
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_heartbeat' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
+    CREATE INDEX idx_instances_heartbeat ON dbo.workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running';
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_stale' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
+    CREATE INDEX idx_instances_stale ON dbo.workflow_instances(status, heartbeat_at) WHERE status = 'running';
+
+-- Tenant-scoped definition lookups
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_defs_tenant_name_version' AND object_id = OBJECT_ID(N'dbo.workflow_defs'))
+    CREATE INDEX idx_defs_tenant_name_version ON dbo.workflow_defs(tenant_id, name, version DESC);
+
+-- Promise status lookups
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_promises_status' AND object_id = OBJECT_ID(N'dbo.workflow_promises'))
+    CREATE INDEX idx_promises_status ON dbo.workflow_promises(workflow_id, status);
+
+-- Concurrency key lookups by workflow
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_concurrency_keys_workflow' AND object_id = OBJECT_ID(N'dbo.concurrency_keys'))
+    CREATE INDEX idx_concurrency_keys_workflow ON dbo.concurrency_keys(workflow_id);
+
+-- Sticky worker assignments
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_sticky' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
+    CREATE INDEX idx_instances_sticky ON dbo.workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL;
+
+-- Pending update requests
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_update_requests_pending' AND object_id = OBJECT_ID(N'dbo.workflow_update_requests'))
+    CREATE INDEX idx_update_requests_pending ON dbo.workflow_update_requests(workflow_id, status);
+
+-- Tenant API key lookups (unrevoked only)
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_api_keys_hash' AND object_id = OBJECT_ID(N'dbo.tenant_api_keys'))
+    CREATE INDEX idx_api_keys_hash ON dbo.tenant_api_keys(key_hash) WHERE revoked_at IS NULL;
+
+-- Tenant + task-queue-scoped ready instance claims (includes priority)
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_tenant_queue_ready' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
+    CREATE INDEX idx_instances_tenant_queue_ready
+        ON dbo.workflow_instances(tenant_id, task_queue, status, priority ASC, next_wake_at)
+        WHERE status = 'ready';
+
+-- Tenant-scoped event history lookups
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_event_history_tenant_wf' AND object_id = OBJECT_ID(N'dbo.event_history'))
+    CREATE INDEX idx_event_history_tenant_wf ON dbo.event_history(tenant_id, workflow_id, step);
+
+-- Tenant-scoped signal lookups
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_signals_tenant_wf' AND object_id = OBJECT_ID(N'dbo.workflow_signals'))
+    CREATE INDEX idx_signals_tenant_wf ON dbo.workflow_signals(tenant_id, workflow_id, signal_name);
+
+-- Tenant-scoped schedule due lookups
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_schedules_tenant_enabled' AND object_id = OBJECT_ID(N'dbo.workflow_schedules'))
+    CREATE INDEX idx_schedules_tenant_enabled ON dbo.workflow_schedules(tenant_id, enabled, next_run_at);
+
+-- Idempotency key lookups by workflow
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_idempotency_workflow_id' AND object_id = OBJECT_ID(N'dbo.idempotency_keys'))
+    CREATE INDEX idx_idempotency_workflow_id ON dbo.idempotency_keys(workflow_id);
+
+-- Idempotency key expiration cleanup
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_idempotency_expires' AND object_id = OBJECT_ID(N'dbo.idempotency_keys'))
+    CREATE INDEX idx_idempotency_expires ON dbo.idempotency_keys(expires_at);
+
+-- Memory sample lookups by definition
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_mem_samples_def' AND object_id = OBJECT_ID(N'dbo.workflow_memory_samples'))
+    CREATE INDEX idx_mem_samples_def ON dbo.workflow_memory_samples (def_name, recorded_at DESC);
+
+-- List workflows ordered by creation date
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_created_at' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
+    CREATE INDEX idx_instances_created_at ON dbo.workflow_instances(tenant_id, created_at DESC);
+
+-- Terminal workflow cleanup queries
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_terminal_completed' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
+    CREATE INDEX idx_instances_terminal_completed ON dbo.workflow_instances(tenant_id, status, completed_at) WHERE status IN ('done','failed');
+
+-- Concurrency key expiration reaper
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_concurrency_keys_expires' AND object_id = OBJECT_ID(N'dbo.concurrency_keys'))
+    CREATE INDEX idx_concurrency_keys_expires ON dbo.concurrency_keys(expires_at);
+
+-- Parent close policy enforcement
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_parent_policy' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
+    CREATE INDEX idx_instances_parent_policy ON dbo.workflow_instances(parent_workflow_id, parent_close_policy, status);
+
+-- ClaimWorkflows ORDER BY: covers tenant+task_queue filter and priority+created_at sort
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_workflow_instances_ready_claim' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
+    CREATE INDEX idx_workflow_instances_ready_claim
+        ON dbo.workflow_instances (tenant_id, task_queue, priority ASC, created_at)
+        WHERE status = 'ready';

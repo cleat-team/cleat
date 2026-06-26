@@ -59,7 +59,7 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 			WHERE status = 'ready'
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
-			ORDER BY CASE WHEN sticky_worker_id = @p1 THEN 0 ELSE 1 END, priority DESC, created_at
+			ORDER BY priority ASC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
 		)
 	`, workerID, tqParam, limit)
@@ -457,9 +457,21 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 }
 
 // FinalizeWorkflowSegment atomically appends new events and updates the
-// workflow status in a single database transaction. finalStatus is one of
-// "done", "failed" or "ready" (suspend).
+// workflow status in a single database transaction. This eliminates the
+// race between AppendEventHistoryBatch and the subsequent CompleteWorkflow /
+// FailWorkflow / ReleaseWorkflow call.
+//
+// finalStatus must be one of:
+//   - "done"   — marks the workflow as completed with the given result
+//   - "failed" — marks the workflow as failed with the given error info
+//   - "ready"  — returns the workflow to the ready queue (suspend)
+//
+// Fields not relevant to the chosen status are ignored.
 func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	if !validFinalStatus(finalStatus) {
+		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("finalize workflow: begin tx: %w", err)
@@ -475,76 +487,22 @@ func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 		return fmt.Errorf("finalize workflow: append events: %w", err)
 	}
 
-	// Update workflow status based on finalStatus.
-	switch finalStatus {
-	case "done":
-		qsJSON, _ := json.Marshal(queryState)
-		if qsJSON == nil {
-			qsJSON = []byte("{}")
-		}
-		_, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
-			WHERE id = @p1 AND assigned_to = @p2 AND generation = @p5
-		`, runID, workerID, result, string(qsJSON), generation)
-	case "failed":
-		qsJSON, _ := json.Marshal(queryState)
-		if qsJSON == nil {
-			qsJSON = []byte("{}")
-		}
-		_, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = 'failed',
-			    error_msg = @p3,
-			    error_code = @p4,
-			    error_op = @p5,
-			    completed_at = SYSUTCDATETIME(),
-			    assigned_to = NULL,
-			    query_state = @p6
-			WHERE id = @p1 AND assigned_to = @p2 AND generation = @p7
-		`, runID, workerID, result, errorCode, errorOp, string(qsJSON), generation)
-	case "ready":
-		_, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = 'ready', assigned_to = NULL, next_wake_at = @p3
-			WHERE id = @p1 AND assigned_to = @p2 AND generation = @p4
-		`, runID, workerID, nextWakeAt, generation)
-	default:
-		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
+	// Delegate the terminal UPDATEs (status, idempotency, parent wake,
+	// await_child population) to a server-side stored procedure.
+	// This replaces 5 individual round-trips with 1 procedure call.
+	qsJSON, _ := json.Marshal(queryState)
+	if qsJSON == nil {
+		qsJSON = []byte("{}")
 	}
-	if err != nil {
-		return fmt.Errorf("finalize workflow: update status: %w", err)
+	resultJSON := result
+	if resultJSON == "" || !json.Valid([]byte(resultJSON)) {
+		resultJSON = "{}"
 	}
 
-	// Record idempotency outcome within the transaction (best-effort).
-	if finalStatus == "done" || finalStatus == "failed" {
-		switch finalStatus {
-		case "done":
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE idempotency_keys SET result = @p2 WHERE workflow_id = @p1`,
-				runID, result); err != nil {
-				log.Printf("idempotency update failed (non-fatal): %v", err)
-			}
-		case "failed":
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE idempotency_keys SET error_msg = @p2 WHERE workflow_id = @p1`,
-				runID, result); err != nil {
-				log.Printf("idempotency update failed (non-fatal): %v", err)
-			}
-		}
-
-		// Atomically wake the parent inside the same transaction.
-		// Committed atomically with the child's terminal status.
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET next_wake_at = SYSUTCDATETIME()
-			WHERE id = (
-				SELECT parent_workflow_id FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
-			)
-			AND status IN ('ready', 'suspended')
-		`, runID, s.tenantID); err != nil {
-			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
-		}
+	if _, err := tx.ExecContext(ctx, `
+		EXEC finalize_workflow_status @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10
+	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel); err != nil {
+		return fmt.Errorf("finalize workflow: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -557,6 +515,7 @@ func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
 	}
+
 	return nil
 }
 

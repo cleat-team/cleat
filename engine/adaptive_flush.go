@@ -400,9 +400,10 @@ func errIsRetryable(err error) bool {
 	if errors.Is(err, sql.ErrConnDone) {
 		return true
 	}
-	// PostgreSQL deadlock (40P01) and serialization failure (40001) are retryable.
+	// PostgreSQL deadlock (40P01), serialization failure (40001),
+	// MSSQL deadlock (1205), and MySQL deadlock (1213) are retryable.
 	msg := err.Error()
-	if strings.Contains(msg, "deadlock") || strings.Contains(msg, "serialization") || strings.Contains(msg, "could not serialize") {
+	if strings.Contains(msg, "deadlock") || strings.Contains(msg, "serialization") || strings.Contains(msg, "could not serialize") || strings.Contains(msg, "1205") || strings.Contains(msg, "1213") || strings.Contains(msg, "was chosen as the deadlock victim") || strings.Contains(msg, "try restarting transaction") {
 		return true
 	}
 	// Connection timeout / broken pipe — retryable.

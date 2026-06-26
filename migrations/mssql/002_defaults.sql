@@ -1,5 +1,5 @@
 -- cleat mssql default data (consolidated)
--- Data initialization compiled from migration 002.
+-- Data initialization compiled from migration 003_defaults.
 -- Idempotent: all INSERT statements use IF NOT EXISTS guards.
 
 -- ===========================================================================
@@ -12,7 +12,7 @@ IF NOT EXISTS (SELECT 1 FROM dbo.tenants WHERE tenant_id = '00000000-0000-0000-0
 -- ===========================================================================
 -- Backfill tenant_id on all tenant-scoped tables
 --
--- In the consolidated schema (001_tables.sql), tenant_id is already NOT NULL
+-- In the consolidated schema (001_schema.sql), tenant_id is already NOT NULL
 -- with a DEFAULT, so fresh installs never have NULL rows.
 -- These backfills protect databases migrated from old schema where tenant_id
 -- was initially NULL.

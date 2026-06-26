@@ -1,3 +1,15 @@
+-- cleat MySQL consolidated schema (001)
+-- Merge of: 001_tables, 002_constraints, 005_priority, 006_priority_promises_updates,
+--            007_event_history_cascade, 007_fk_cascade, 008_workflow_tags_routing,
+--            009_update_requests_tenant_id, 011_claim_workflows_index
+--
+-- CREATE TABLE IF NOT EXISTS guards idempotency.
+-- CREATE INDEX has no IF NOT EXISTS in MySQL 8.0; re-runs error harmlessly.
+
+-- ============================================================
+-- Tables
+-- ============================================================
+
 CREATE TABLE IF NOT EXISTS workflow_defs (
     name               VARCHAR(255) NOT NULL,
     version            INTEGER NOT NULL,
@@ -84,13 +96,15 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     query_state JSON DEFAULT ('{}'),
     trace_id VARCHAR(255),
     sticky_worker_id VARCHAR(255),
-    tenant_id CHAR(36),
+    tenant_id CHAR(36) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     task_queue VARCHAR(255) NOT NULL DEFAULT 'default',
     compaction_state JSON,
     compacted_at TIMESTAMP(6),
     compaction_step INTEGER,
     plugin_vers JSON NOT NULL DEFAULT ('{}'),
     event_count BIGINT NOT NULL DEFAULT 0,
+    priority INTEGER NOT NULL DEFAULT 0,
+    generation BIGINT NOT NULL DEFAULT 0,
     allowed_signals JSON DEFAULT NULL,
     FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version),
     PRIMARY KEY (id)
@@ -132,7 +146,7 @@ CREATE TABLE IF NOT EXISTS event_history (
     thread_id VARCHAR(255) NOT NULL DEFAULT 'main',
     local_step INTEGER NOT NULL DEFAULT 0,
     global_seq BIGINT NOT NULL DEFAULT 0,
-    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE,
     PRIMARY KEY (workflow_id, step)
 ) ENGINE=InnoDB;
 
@@ -142,7 +156,7 @@ CREATE TABLE IF NOT EXISTS workflow_signals (
     payload            JSON NOT NULL DEFAULT ('{}'),
     delivered_at       TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
     tenant_id CHAR(36),
-    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE,
     PRIMARY KEY (workflow_id, signal_name)
 ) ENGINE=InnoDB;
 
@@ -157,7 +171,7 @@ CREATE TABLE IF NOT EXISTS workflow_promises (
     error_msg          TEXT,
     created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
     resolved_at        TIMESTAMP(6),
-    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE,
     PRIMARY KEY (workflow_id, promise_id)
 ) ENGINE=InnoDB;
 
@@ -181,7 +195,8 @@ CREATE TABLE IF NOT EXISTS concurrency_keys (
     workflow_id        VARCHAR(255) NOT NULL,
     acquired_at        TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
     expires_at         TIMESTAMP(6) NOT NULL,
-    tenant_id          CHAR(36)
+    tenant_id          CHAR(36),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -206,8 +221,29 @@ CREATE TABLE IF NOT EXISTS workflow_update_requests (
     error_msg          TEXT,
     created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
     completed_at       TIMESTAMP(6),
-    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE,
     PRIMARY KEY (workflow_id, update_name)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS workflow_tags (
+    workflow_name VARCHAR(255) NOT NULL,
+    version INTEGER NOT NULL,
+    tag VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+    tenant_id CHAR(36),
+    PRIMARY KEY (workflow_name, tag),
+    FOREIGN KEY (workflow_name, version) REFERENCES workflow_defs(name, version)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS workflow_routing (
+    id CHAR(36) NOT NULL,
+    workflow_name VARCHAR(255) NOT NULL,
+    target_version INTEGER NOT NULL,
+    weight DOUBLE NOT NULL DEFAULT 1.0,
+    created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+    tenant_id CHAR(36),
+    PRIMARY KEY (id),
+    FOREIGN KEY (workflow_name, target_version) REFERENCES workflow_defs(name, version)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS workflow_memory_samples (
@@ -226,3 +262,31 @@ CREATE TABLE IF NOT EXISTS workflow_memory_stats (
     updated_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
     PRIMARY KEY (def_name)
 ) ENGINE=InnoDB;
+
+-- ============================================================
+-- Indexes (final definitions, no IF NOT EXISTS in MySQL 8.0)
+-- ============================================================
+
+CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at);
+CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at);
+CREATE INDEX idx_defs_active ON workflow_defs(name, version);
+CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at);
+CREATE INDEX idx_promises_status ON workflow_promises(workflow_id, status);
+CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id);
+CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id);
+CREATE INDEX idx_update_requests_pending ON workflow_update_requests(workflow_id, status);
+CREATE INDEX idx_api_keys_hash ON tenant_api_keys(key_hash);
+CREATE INDEX idx_defs_tenant_name_version ON workflow_defs(tenant_id, name, version);
+CREATE INDEX idx_instances_tenant_ready ON workflow_instances(tenant_id, status, next_wake_at);
+CREATE INDEX idx_event_history_tenant_wf ON event_history(tenant_id, workflow_id, step);
+CREATE INDEX idx_signals_tenant_wf ON workflow_signals(tenant_id, workflow_id, signal_name);
+CREATE INDEX idx_schedules_tenant_enabled ON workflow_schedules(tenant_id, enabled, next_run_at);
+CREATE INDEX idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority, next_wake_at);
+CREATE INDEX idx_idempotency_workflow_id ON idempotency_keys(workflow_id);
+CREATE INDEX idx_idempotency_expires ON idempotency_keys(expires_at);
+CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at);
+CREATE INDEX idx_instances_created_at ON workflow_instances(tenant_id, created_at);
+CREATE INDEX idx_instances_terminal_completed ON workflow_instances(tenant_id, status, completed_at);
+CREATE INDEX idx_concurrency_keys_expires ON concurrency_keys(expires_at);
+CREATE INDEX idx_instances_parent_policy ON workflow_instances(parent_workflow_id, parent_close_policy, status);
+CREATE INDEX idx_workflow_instances_ready_claim ON workflow_instances(tenant_id, task_queue, status, priority, created_at);
