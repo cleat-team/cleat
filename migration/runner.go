@@ -215,16 +215,22 @@ func (r *Runner) applyMigration(ctx context.Context, m migration) error {
 		_ = tx.Rollback()
 	}()
 
-	// MySQL driver does not support multi-statement execution by
-	// default, so split on semicolons. Postgres (pq) and MSSQL
-	// (go-mssqldb) handle multi-statement SQL natively.
-	if r.dialect == engine.DialectMySQL {
+	// MySQL and MSSQL drivers require statement splitting for
+	// multi-statement SQL. Postgres (pq) handles it natively.
+	switch r.dialect {
+	case engine.DialectMySQL:
 		for _, stmt := range splitSQL(m.sql) {
 			if _, err := tx.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("execute: %w", err)
 			}
 		}
-	} else {
+	case engine.DialectMSSQL:
+		for _, batch := range splitMSSQL(m.sql) {
+			if _, err := tx.ExecContext(ctx, batch); err != nil {
+				return fmt.Errorf("execute: %w", err)
+			}
+		}
+	default:
 		if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 			return fmt.Errorf("execute: %w", err)
 		}
@@ -255,6 +261,29 @@ func (r *Runner) applyMigration(ctx context.Context, m migration) error {
 	}
 
 	return nil
+}
+
+// splitMSSQL splits a MSSQL SQL string into batches on GO lines.
+// GO must appear on its own line (case-insensitive, optional trailing whitespace).
+func splitMSSQL(sql string) []string {
+	var batches []string
+	lines := strings.Split(sql, "\n")
+	start := 0
+	for i, line := range lines {
+		if strings.TrimSpace(strings.ToUpper(line)) == "GO" {
+			batch := strings.TrimSpace(strings.Join(lines[start:i], "\n"))
+			if batch != "" {
+				batches = append(batches, batch)
+			}
+			start = i + 1
+		}
+	}
+	// Final batch after last GO
+	batch := strings.TrimSpace(strings.Join(lines[start:], "\n"))
+	if batch != "" {
+		batches = append(batches, batch)
+	}
+	return batches
 }
 
 // splitSQL splits a multi-statement SQL string into individual statements

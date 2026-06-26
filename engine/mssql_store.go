@@ -74,6 +74,7 @@ type MSSQLStore struct {
 	tenantID          string
 	dialect           Dialect
 	idempotencyKeyTTL time.Duration
+	notifyChannel     string // MSSQL has no LISTEN/NOTIFY; empty = disabled (forward compat)
 
 	// Encryption at rest for sensitive event payloads.
 	// NOTE: MSSQL does not yet support encryption at rest; these fields are
