@@ -1616,9 +1616,7 @@ func TestMSSQLStore_ReleaseConcurrencyKey_Success(t *testing.T) {
 func TestMSSQLStore_FinalizeWorkflowSegment_Done(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'done'"},
-		{match: "idempotency_keys SET result"},
-		{match: "parent_workflow_id"},
+		{match: "finalize_workflow_status"},
 	})
 	defer db.Close()
 
@@ -1633,9 +1631,7 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Done(t *testing.T) {
 func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'failed'"},
-		{match: "idempotency_keys SET error_msg"},
-		{match: "parent_workflow_id"},
+		{match: "finalize_workflow_status"},
 	})
 	defer db.Close()
 
@@ -1650,7 +1646,7 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
 func TestMSSQLStore_FinalizeWorkflowSegment_Ready(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'ready'"},
+		{match: "finalize_workflow_status"},
 	})
 	defer db.Close()
 

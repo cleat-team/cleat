@@ -494,19 +494,13 @@ func TestMySQLIntegration_FinalizeWorkflowSegment(t *testing.T) {
 		t.Fatalf("FinalizeWorkflowSegment: %v", err)
 	}
 
-	// Events should be persisted.
+	// Events are cleaned up on terminal status by the stored procedure.
 	history, err := s.LoadEventHistory(ctx, wf.ID)
 	if err != nil {
 		t.Fatalf("LoadEventHistory: %v", err)
 	}
-	if len(history) != 2 {
-		t.Fatalf("expected 2 events, got %d", len(history))
-	}
-	if history[0].Step != 0 || history[0].Op != "op1" {
-		t.Errorf("event[0] = step=%d op=%s, want step=0 op=op1", history[0].Step, history[0].Op)
-	}
-	if history[1].Step != 1 || history[1].Op != "op2" {
-		t.Errorf("event[1] = step=%d op=%s, want step=1 op=op2", history[1].Step, history[1].Op)
+	if len(history) != 0 {
+		t.Fatalf("expected 0 events after terminal finalize, got %d", len(history))
 	}
 
 	// Status should be "done".

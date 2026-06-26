@@ -2238,15 +2238,15 @@ func TestMSSQLIntegration_FinalizeWorkflowSegment_Done(t *testing.T) {
 		t.Errorf("result = %s", result)
 	}
 
-	// Events should be recorded.
+	// Events are cleaned up on terminal status by the stored procedure.
 	var eventCount int
 	err = db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM event_history WHERE workflow_id = @p1`, wfID).Scan(&eventCount)
 	if err != nil {
 		t.Fatalf("count events: %v", err)
 	}
-	if eventCount != 1 {
-		t.Errorf("expected 1 event, got %d", eventCount)
+	if eventCount != 0 {
+		t.Errorf("expected 0 events after terminal finalize, got %d", eventCount)
 	}
 }
 

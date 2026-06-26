@@ -36,6 +36,11 @@ type mockExecResult struct {
 	affected int64
 	err      error // if non-nil, return this error from Exec
 	consume  bool  // if true, this result is removed after first use
+
+	// sideEffect is called after a successful Exec match (no error).
+	// It receives pointers to the shared row/exec result slices so it can
+	// simulate side effects like DELETE FROM event_history in a stored proc.
+	sideEffect func(rowsResults *[]mockRowsResult, execResults *[]mockExecResult)
 }
 
 // mockConnector implements driver.Connector and returns mock connections
@@ -121,6 +126,9 @@ func (s *mockStmt) Exec(_ []driver.Value) (driver.Result, error) {
 			}
 			if er.err != nil {
 				return nil, er.err
+			}
+			if er.sideEffect != nil {
+				er.sideEffect(&s.rowsResults, &s.execResults)
 			}
 			return &mockResult{affected: er.affected}, nil
 		}

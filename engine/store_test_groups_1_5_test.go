@@ -812,19 +812,13 @@ func TestFinalizeWorkflowSegment(t *testing.T) {
 				t.Fatalf("FinalizeWorkflowSegment: %v", err)
 			}
 
-			// Verify events were appended.
+			// Verify events were cleaned up on terminal status.
 			history, err := store.LoadEventHistory(ctx, wf.ID)
 			if err != nil {
 				t.Fatalf("LoadEventHistory: %v", err)
 			}
-			if len(history) != 2 {
-				t.Fatalf("expected 2 events, got %d", len(history))
-			}
-			if history[0].Step != 0 || history[0].Op != "o1" {
-				t.Errorf("unexpected first event: step=%d op=%s", history[0].Step, history[0].Op)
-			}
-			if history[1].Step != 1 || history[1].Op != "o2" {
-				t.Errorf("unexpected second event: step=%d op=%s", history[1].Step, history[1].Op)
+			if len(history) != 0 {
+				t.Fatalf("expected 0 events after terminal finalize, got %d", len(history))
 			}
 
 			// Verify status was updated.
