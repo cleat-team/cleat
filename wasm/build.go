@@ -146,9 +146,30 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
-	// main is required by the Go compiler for wasip1 but the engine calls
-	// exported functions directly.  It never runs the dispatcher main().
-	mainStub := "package main\n\nfunc main() {}\n"
+	// main is required by the Go compiler for wasip1.  The engine calls
+	// _start in a background goroutine before any exports.  main() must
+	// call cleatPollWorkImport to satisfy the Go runtime's expectation
+	// that WASM host functions are available during initialization.
+	// Without this check the runtime may abort wasmexport calls with
+	// "called before runtime initialization".
+	mainStub := `package main
+
+import "unsafe"
+
+func main() {
+	var entryNameBuf [256]byte
+	var argsBuf [65536]byte
+	ret := cleatPollWorkImport(
+		unsafe.Pointer(&entryNameBuf[0]), 256,
+		unsafe.Pointer(&argsBuf[0]), 65536,
+	)
+	entryNameLen := uint32(ret >> 32)
+	if entryNameLen == 0 {
+		return
+	}
+	// unreachable: cleat_poll_work always returns 0 in the engine.
+}
+`
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
 	}
@@ -397,16 +418,7 @@ func propagateReplaces(projectRoot, outDir, modPath string) error {
 		if err != nil {
 			continue
 		}
-		relToBuild, err := filepath.Rel(outDir, absReplace)
-		if err != nil {
-			relToBuild = absReplace
-		}
-		extra = append(extra, fmt.Sprintf("replace %s => %s", r.Old.Path, relToBuild))
-
-		linkName := filepath.Join(outDir, filepath.Base(relToBuild))
-		if _, err := os.Lstat(linkName); os.IsNotExist(err) {
-			os.Symlink(absReplace, linkName)
-		}
+		extra = append(extra, fmt.Sprintf("replace %s => %s", r.Old.Path, absReplace))
 	}
 
 	if len(extra) == 0 {
