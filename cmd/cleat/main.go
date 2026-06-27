@@ -377,6 +377,11 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// directly to the project root.
 	tidyCmd := exec.Command("go", "mod", "tidy")
 	tidyCmd.Dir = outDir
+	tidyCmd.Env = append(os.Environ(),
+		"GONOSUMCHECK=*",
+		"GONOSUMDB=*",
+		"GOPRIVATE=*",
+	)
 	if target == "tinygo" {
 		if tinygoGoroot := os.Getenv("CLEAT_TINYGO_GOROOT"); tinygoGoroot != "" {
 			tidyCmd.Env = append(os.Environ(),
