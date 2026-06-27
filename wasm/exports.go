@@ -252,11 +252,6 @@ func encodeJSONString(s string) string {
 		generateExport(&buf, fd, qual, target)
 	}
 
-	// For the "go" target, generate the dispatcher function that main() calls.
-	if target == GoTarget {
-		generateDispatch(&buf, result, qual)
-	}
-
 	return buf.Bytes()
 }
 
@@ -303,34 +298,24 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 	fmt.Fprintf(buf, "//go:wasmexport %s\n", exportName)
 	fmt.Fprintf(buf, "func %s(argsPtr unsafe.Pointer, argsLen uint32, outPtr unsafe.Pointer, maxOutLen uint32) int64 {\n", exportName)
 
-	if len(fields) > 0 {
-		buf.WriteString("\targsJSON := readString(argsPtr, argsLen)\n")
+	buf.WriteString("\targsJSON := readString(argsPtr, argsLen)\n")
+	if len(fields) == 1 && fields[0].GoType == "string" {
+		// Single string parameter: pass the raw argsJSON directly.
+		buf.WriteString(fmt.Sprintf("\t%s := argsJSON\n", fields[0].GoName))
+	} else if len(fields) > 0 {
 		for _, f := range fields {
 			switch f.GoType {
 			case "string":
 				fmt.Fprintf(buf, "\t%s := extractJSONString(argsJSON, %q)\n", f.GoName, f.JSONTag)
-				// When the engine passes the workflow input without an
-				// {"inputJSON":"..."} wrapper (e.g., StartWorkflow with no
-				// explicit entry_point), fall back to the raw args so the
-				// workflow receives the actual input.
-				if f.JSONTag == "inputJSON" {
-					fmt.Fprintf(buf, "\tif %s == \"\" {\n", f.GoName)
-					fmt.Fprintf(buf, "\t\t%s = argsJSON\n", f.GoName)
-					buf.WriteString("\t}\n")
-				}
 			case "int", "int64", "int32":
 				fmt.Fprintf(buf, "\t%s := extractJSONInt(argsJSON, %q)\n", f.GoName, f.JSONTag)
 			default:
-				// Use encoding/json for complex types.
 				fmt.Fprintf(buf, "\tvar %s %s\n", f.GoName, f.GoType)
 				fmt.Fprintf(buf, "\tif err := json.Unmarshal([]byte(extractJSONRaw(argsJSON, %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
 				fmt.Fprintf(buf, "\t\treturn writeErrorOut(outPtr, maxOutLen, fmt.Errorf(\"unmarshal %s: %%w\", err))\n", f.JSONTag)
 				buf.WriteString("\t}\n")
 			}
 		}
-	} else {
-		buf.WriteString("\t_ = argsPtr\n")
-		buf.WriteString("\t_ = argsLen\n")
 	}
 
 	buf.WriteString("\n\th := makeHostCalls()\n\n")
@@ -424,154 +409,10 @@ func hasComplexParams(result *analyzer.AnalysisResult) bool {
 	return false
 }
 
-// generateDispatch writes the cleatDispatch function for the "go" target
-// dispatcher main(). It maps entry point names to typed function calls using
-// the same JSON deserialization logic as the per-export wrappers.
-func generateDispatch(buf *bytes.Buffer, result *analyzer.AnalysisResult, qual types.Qualifier) {
-	buf.WriteString(`
-// cleatDispatch routes an entry point call from the main() dispatcher.
-// It parses argsJSON into typed parameters, calls the entry point, and
-// returns the JSON-encoded result or error.
-func cleatDispatch(entryName string, argsJSON []byte) []byte {
-	// Unwrap DispatchWrapper envelope set by host: {"inputJSON":"<inner>"}.
-	inner := extractJSONString(string(argsJSON), "inputJSON")
-		if inner != "" {
-			argsJSON = []byte(inner)
-		}
-	h := makeHostCalls()
-	switch entryName {
-`)
-
-	for _, epName := range result.EntryPoints {
-		fd := result.Funcs[epName]
-		if fd == nil || fd.Type == nil {
-			continue
-		}
-		sig := fd.Type
-		params := sig.Params()
-		var fields []struct {
-			GoName  string
-			GoType  string
-			JSONTag string
-		}
-		startIdx := 0
-		if params != nil && params.Len() > 0 {
-			if analyzer.IsHostCallsType(params.At(0).Type()) {
-				startIdx = 1
-			}
-			for i := startIdx; i < params.Len(); i++ {
-				p := params.At(i)
-				fields = append(fields, struct {
-					GoName  string
-					GoType  string
-					JSONTag string
-				}{
-					GoName:  capitalize(p.Name()),
-					GoType:  types.TypeString(p.Type(), qual),
-					JSONTag: p.Name(),
-				})
-			}
-		}
-
-		results := sig.Results()
-		var hasResultValue, hasErrorReturn bool
-		if results != nil {
-			for i := 0; i < results.Len(); i++ {
-				typeName := types.TypeString(results.At(i).Type(), qual)
-				if typeName == "error" {
-					hasErrorReturn = true
-				} else {
-					hasResultValue = true
-				}
-			}
-		}
-
-		snakeName := ToSnakeCase(fd.Name)
-		fmt.Fprintf(buf, "\tcase %q, %q:\n", fd.Name, snakeName)
-
-		// Parse args from JSON.
-		for _, f := range fields {
-			switch f.GoType {
-			case "string":
-				fmt.Fprintf(buf, "\t\t%s := extractJSONString(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
-			case "int", "int64", "int32":
-				fmt.Fprintf(buf, "\t\t%s := extractJSONInt(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
-			default:
-				// Complex type: use json.Unmarshal.
-				fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
-				fmt.Fprintf(buf, "\t\tif err := json.Unmarshal([]byte(extractJSONRaw(string(argsJSON), %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
-				fmt.Fprintf(buf, "\t\t\treturn []byte(`{\"error\":\"unmarshal %s: ` + err.Error() + `\"}`)\n", f.JSONTag)
-				buf.WriteString("\t\t}\n")
-			}
-		}
-
-		// Build call.
-		var callArgs []string
-		callArgs = append(callArgs, "h")
-		for _, f := range fields {
-			callArgs = append(callArgs, f.GoName)
-		}
-		argStr := strings.Join(callArgs, ", ")
-
-		// Declare result variables OUTSIDE the closure so they're
-		// accessible for result encoding after the closure ends.
-		if hasResultValue {
-			buf.WriteString("\t\tvar __r string\n")
-		}
-		buf.WriteString("\t\tvar __e error\n")
-		buf.WriteString("\t\t__susSuspended := false\n")
-		buf.WriteString("\t\tfunc() {\n")
-		buf.WriteString("\t\t\tdefer func() {\n")
-		buf.WriteString("\t\t\t\tif r := recover(); r != nil {\n")
-		buf.WriteString("\t\t\t\t\tif _, ok := r.(cleat.SuspendSentinel); ok {\n")
-		buf.WriteString("\t\t\t\t\t\t__susSuspended = true\n")
-		buf.WriteString("\t\t\t\t\t\treturn\n")
-		buf.WriteString("\t\t\t\t\t}\n")
-		buf.WriteString("\t\t\t\t\t// Report the error via cleatCompleteImport\n")
-		buf.WriteString("\t\t\t\t\t// before returning so the host can capture it.\n")
-		buf.WriteString("\t\t\t\t\terrStr := encodeJSONString(fmt.Sprintf(\"%v\", r))\n")
-		buf.WriteString("\t\t\t\t\terrPtr, errLen := stringPtr(errStr)\n")
-		buf.WriteString("\t\t\t\t\tcleatCompleteImport(1, errPtr, errLen)\n")
-		buf.WriteString("\t\t\t\t\t__e = fmt.Errorf(\"%v\", r)\n")
-		buf.WriteString("\t\t\t\t}\n")
-		buf.WriteString("\t\t\t}()\n")
-
-		if hasResultValue && hasErrorReturn {
-			fmt.Fprintf(buf, "\t\t\t__r, __e = %s(%s)\n", fd.Name, argStr)
-			buf.WriteString("\t\t\tif __e != nil { panic(__e) }\n")
-		} else if hasErrorReturn {
-			fmt.Fprintf(buf, "\t\t\t__e = %s(%s)\n", fd.Name, argStr)
-			buf.WriteString("\t\t\tif __e != nil { panic(__e) }\n")
-		} else if hasResultValue {
-			fmt.Fprintf(buf, "\t\t\t__r = %s(%s)\n", fd.Name, argStr)
-		} else {
-			fmt.Fprintf(buf, "\t\t\t%s(%s)\n", fd.Name, argStr)
-		}
-
-		buf.WriteString("\t\t}()\n")
-
-		// Encode result.
-		buf.WriteString("\t\tif __susSuspended {\n")
-		buf.WriteString("\t\t\treturn []byte(`\"__cleat_suspended__\"`)\n")
-		buf.WriteString("\t\t}\n")
-		buf.WriteString("\t\tif __e != nil {\n")
-		buf.WriteString("\t\t\treturn []byte(\"{\\\"error\\\":\\\"\" + encodeJSONString(__e.Error()) + \"\\\"}\")\n")
-		buf.WriteString("\t\t}\n")
-		if hasResultValue {
-			buf.WriteString("\t\treturn []byte(encodeJSONString(__r))\n")
-		} else {
-			buf.WriteString("\t\treturn []byte(`\"ok\"`)\n")
-		}
-
-		// Variables needed by the generated code.
-		buf.WriteString("\n")
-	}
-
-	buf.WriteString("\tdefault:\n")
-	buf.WriteString("\t\treturn []byte(`{\"error\":\"unknown entry point: ` + entryName + `\"}`)\n")
-	buf.WriteString("\t}\n")
-	buf.WriteString("}\n")
-}
+// The dispatcher poll-loop model (main() -> cleatPollWork -> cleatDispatch)
+// was removed. Each workflow execution gets a fresh WASM instance via direct
+// export calls, eliminating both the parameter-envelope mismatch and the risk
+// of state bleed between invocations violating determinism.
 
 func ToSnakeCase(s string) string {
 	var b strings.Builder

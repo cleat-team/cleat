@@ -146,34 +146,9 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
-	var mainStub string
-	if cfg.Target == "tinygo" {
-		mainStub = "package main\n\nfunc main() {\n\t<-make(chan struct{})\n}\n"
-	} else {
-		mainStub = `package main
-
-	import "unsafe"
-
-	func main() {
-		var entryNameBuf [256]byte
-		var argsBuf [65536]byte
-		ret := cleatPollWorkImport(
-			unsafe.Pointer(&entryNameBuf[0]), 256,
-			unsafe.Pointer(&argsBuf[0]), 65536,
-		)
-		entryNameLen := uint32(ret >> 32)
-		argsLen := uint32(ret)
-		if entryNameLen == 0 {
-			return
-		}
-		entryName := string(entryNameBuf[:entryNameLen])
-		args := argsBuf[:argsLen]
-		result := cleatDispatch(entryName, args)
-		resultPtr, resultLen := stringPtr(string(result))
-		cleatCompleteImport(0, resultPtr, resultLen)
-	}
-	`
-	}
+	// main is required by the Go compiler for wasip1 but the engine calls
+	// exported functions directly.  It never runs the dispatcher main().
+	mainStub := "package main\n\nfunc main() {}\n"
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
 	}
