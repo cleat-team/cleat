@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -86,6 +87,8 @@ type MSSQLStore struct {
 	// disableReadRedaction when true bypasses RedactOnRead on the read path.
 	// Set to true during replay to avoid the overhead of retroactive redaction.
 	disableReadRedaction bool
+
+	logger *slog.Logger
 }
 
 // NewMSSQLStore creates an MSSQLStore scoped to the given task queues.
@@ -130,6 +133,21 @@ func (s *MSSQLStore) WithEncryption(enc *PayloadEncryption, enabled bool) *MSSQL
 	cp.encryption = enc
 	cp.encryptSensitivePayloads = enabled
 	return &cp
+}
+
+// WithLogger returns a copy of the store with the given structured logger.
+func (s *MSSQLStore) WithLogger(l *slog.Logger) *MSSQLStore {
+	cp := *s
+	cp.logger = l
+	return &cp
+}
+
+// log returns the configured logger or the default logger.
+func (s *MSSQLStore) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
 }
 
 // WithTenant returns a copy of the store scoped to the given tenant ID.
@@ -197,6 +215,8 @@ type MSSQLStoreFactory struct {
 	tenantDBs         map[string]*sql.DB // per-tenant connection pools with RLS context
 	idempotencyKeyTTL  time.Duration
 	tenantPoolMaxConns int
+
+	logger *slog.Logger
 }
 
 // NewMSSQLStoreFactory creates an MSSQLStoreFactory.
@@ -212,6 +232,13 @@ func NewMSSQLStoreFactory(connStr string, idempotencyKeyTTL ...time.Duration) *M
 		idempotencyKeyTTL:  ttl,
 		tenantPoolMaxConns: 25,
 	}
+}
+
+// WithLogger sets the structured logger on the factory. Stores created by
+// OpenStore will inherit it.
+func (f *MSSQLStoreFactory) WithLogger(l *slog.Logger) *MSSQLStoreFactory {
+	f.logger = l
+	return f
 }
 
 // WithTenantPoolMaxConns sets the max open connections per tenant pool.
@@ -236,6 +263,7 @@ func (f *MSSQLStoreFactory) OpenStore(ctx context.Context, tenantID string, task
 	store := NewMSSQLStore(tenantDB, taskQueues...)
 	store.tenantID = tenantID
 	store = store.WithIdempotencyKeyTTL(f.idempotencyKeyTTL)
+	store = store.WithLogger(f.logger)
 	return store, mssqlNopCloser{}, nil
 }
 

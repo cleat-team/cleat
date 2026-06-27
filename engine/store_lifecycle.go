@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -324,7 +323,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1`,
 		workflowID, result); err != nil {
-		log.Printf("idempotency update failed (non-fatal): %v", err)
+		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -374,7 +373,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
 		workflowID, errorMsg); err != nil {
-		log.Printf("idempotency update failed (non-fatal): %v", err)
+		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -398,7 +397,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
-		log.Printf("[store] enforceParentClosePolicy: begin TERMINATE tx: %v", err)
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin TERMINATE tx failed", "error", err)
 		return
 	}
 	defer tx.Rollback()
@@ -413,7 +412,7 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 
 	tx2, err := s.beginTxWithRLS(ctx)
 	if err != nil {
-		log.Printf("[store] enforceParentClosePolicy: begin REQUEST_CANCEL tx: %v", err)
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin REQUEST_CANCEL tx failed", "error", err)
 		return
 	}
 	defer tx2.Rollback()
@@ -450,7 +449,7 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
 		workflowID, errMsg); err != nil {
-		log.Printf("idempotency update failed (non-fatal): %v", err)
+		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {

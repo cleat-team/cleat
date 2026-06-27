@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -354,7 +354,7 @@ func (l *PluginLoader) DeployPlugin(ctx context.Context, name string, version st
 		return fmt.Errorf("deploy plugin %s v%s: %w", name, version, err)
 	}
 
-	log.Printf("[plugin-loader] Deployed %s v%s (%d bytes)", name, version, len(wasmBytes))
+	slog.InfoContext(ctx, "plugin deployed", "name", name, "version", version, "size_bytes", len(wasmBytes))
 	return nil
 }
 
@@ -404,7 +404,7 @@ func (l *PluginLoader) DeprecatePlugin(ctx context.Context, name string, version
 	// Remove from cache.
 	l.cacheRemove(pluginCacheKey{Name: name, Version: version})
 
-	log.Printf("[plugin-loader] Deprecated %s v%s", name, version)
+	slog.InfoContext(ctx, "plugin deprecated", "name", name, "version", version)
 	return nil
 }
 

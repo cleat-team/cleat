@@ -229,6 +229,7 @@ func main() {
 
 			shardDBs[i] = sdb
 			f := engine.NewPostgresStoreFactory(sdb, cfg.Schema)
+			f.WithLogger(logger)
 			if payloadEncryption != nil {
 				f.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 			}
@@ -314,7 +315,7 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(max(10, *concurrency/2))
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel)
+			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel).WithLogger(logger)
 
 			// Create per-tenant database connection pools for tenant-scoped operations.
 			// PostgreSQL uses set_config('cleat.tenant_id', ...) per transaction for RLS,
@@ -352,7 +353,7 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL)).WithTenantPoolMaxConns(*tenantPoolMaxConns)
+			factory = engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL)).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
 
 			// Create plugin-dedicated connection pool.
 			if *maxPluginConnections > 0 {
@@ -369,7 +370,7 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		case "mssql":
-			factory = engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns)
+			factory = engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
 			// Open a connection to verify and for plugin/migration use.
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -452,7 +453,7 @@ func main() {
 				log.Fatalf("[worker %s] Invalid encryption key — expected a base64-encoded 256-bit AES key: %v", workerID, perr)
 			}
 			payloadEncryption = pe
-			log.Printf("[worker %s] Encryption at rest enabled for sensitive payload fields", workerID)
+			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
 		}
 
 		// Propagate encryption to the store factory.
@@ -787,7 +788,9 @@ func main() {
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
+	monitor.logger = logger
 	mc := NewMemoryController(monitor, store, workerID, *concurrency, *memorySoftLimit, *memoryHardLimit)
+	mc.logger = logger
 	if err := mc.LoadEstimates(ctx); err != nil {
 		logger.WarnContext(context.Background(), "failed to load memory estimates", "worker_id", workerID, "error", err)
 	}

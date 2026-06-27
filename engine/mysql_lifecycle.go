@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -254,7 +253,7 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET result = ? WHERE workflow_id = ?`,
 		result, workflowID); err != nil {
-		log.Printf("idempotency update failed (non-fatal): %v", err)
+		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -302,7 +301,7 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ?`,
 		errorMsg, workflowID); err != nil {
-		log.Printf("idempotency update failed (non-fatal): %v", err)
+		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -621,7 +620,7 @@ func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ?`,
 		errMsg, workflowID); err != nil {
-		log.Printf("idempotency update failed (non-fatal): %v", err)
+		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {

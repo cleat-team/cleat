@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -261,7 +260,7 @@ func (s *MSSQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET result = @p2 WHERE workflow_id = @p1`,
 		workflowID, result); err != nil {
-		log.Printf("idempotency update failed (non-fatal): %v", err)
+		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -307,7 +306,7 @@ func (s *MSSQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = @p2 WHERE workflow_id = @p1`,
 		workflowID, errorMsg); err != nil {
-		log.Printf("idempotency update failed (non-fatal): %v", err)
+		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -345,7 +344,7 @@ func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = @p2 WHERE workflow_id = @p1`,
 		workflowID, errMsg); err != nil {
-		log.Printf("idempotency update failed (non-fatal): %v", err)
+		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -657,7 +656,7 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
-		log.Printf("[store] enforceParentClosePolicy: begin TERMINATE tx: %v", err)
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin TERMINATE tx failed", "error", err)
 		return
 	}
 	defer tx.Rollback()
@@ -672,7 +671,7 @@ func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 
 	tx2, err := s.beginTxWithContext(ctx)
 	if err != nil {
-		log.Printf("[store] enforceParentClosePolicy: begin REQUEST_CANCEL tx: %v", err)
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin REQUEST_CANCEL tx failed", "error", err)
 		return
 	}
 	defer tx2.Rollback()

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	_ "github.com/microsoft/go-mssqldb"
@@ -146,7 +145,7 @@ func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 	// Best-effort cleanup.
 	s.ClearStickyWorker(context.Background(), workflowID)
 	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID); err != nil {
-		log.Printf("[db] release concurrency keys for run %s: %v", workflowID, err)
+		s.log().WarnContext(context.Background(), "release concurrency keys failed", "workflow_id", workflowID, "error", err)
 	}
 	return nil
 }
