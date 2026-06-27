@@ -309,6 +309,15 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 			switch f.GoType {
 			case "string":
 				fmt.Fprintf(buf, "\t%s := extractJSONString(argsJSON, %q)\n", f.GoName, f.JSONTag)
+				// When the engine passes the workflow input without an
+				// {"inputJSON":"..."} wrapper (e.g., StartWorkflow with no
+				// explicit entry_point), fall back to the raw args so the
+				// workflow receives the actual input.
+				if f.JSONTag == "inputJSON" {
+					fmt.Fprintf(buf, "\tif %s == \"\" {\n", f.GoName)
+					fmt.Fprintf(buf, "\t\t%s = argsJSON\n", f.GoName)
+					buf.WriteString("\t}\n")
+				}
 			case "int", "int64", "int32":
 				fmt.Fprintf(buf, "\t%s := extractJSONInt(argsJSON, %q)\n", f.GoName, f.JSONTag)
 			default:
@@ -425,7 +434,10 @@ func generateDispatch(buf *bytes.Buffer, result *analyzer.AnalysisResult, qual t
 // returns the JSON-encoded result or error.
 func cleatDispatch(entryName string, argsJSON []byte) []byte {
 	// Unwrap DispatchWrapper envelope set by host: {"inputJSON":"<inner>"}.
-	argsJSON = []byte(extractJSONString(string(argsJSON), "inputJSON"))
+	inner := extractJSONString(string(argsJSON), "inputJSON")
+		if inner != "" {
+			argsJSON = []byte(inner)
+		}
 	h := makeHostCalls()
 	switch entryName {
 `)
