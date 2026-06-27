@@ -146,35 +146,9 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
-	// main is required by Go wasip1.  The wasmtime backend calls _start
-	// which runs main().  main() polls for work via cleat_poll_work,
-	// dispatches to the entry point via cleatDispatch, and signals
-	// completion via cleatCompleteImport.  If no work is available
-	// (entryLen == 0, e.g. wazero backend), main() returns immediately
-	// and the backend calls exports directly instead.
-	mainStub := `package main
-
-import "unsafe"
-
-func main() {
-	var entryNameBuf [256]byte
-	var argsBuf [65536]byte
-	ret := cleatPollWorkImport(
-		unsafe.Pointer(&entryNameBuf[0]), 256,
-		unsafe.Pointer(&argsBuf[0]), 65536,
-	)
-	entryNameLen := uint32(ret >> 32)
-	argsLen := uint32(ret)
-	if entryNameLen == 0 {
-		return
-	}
-	entryName := string(entryNameBuf[:entryNameLen])
-	args := argsBuf[:argsLen]
-	result := cleatDispatch(entryName, args)
-	resultPtr, resultLen := stringPtr(string(result))
-	cleatCompleteImport(0, resultPtr, resultLen)
-}
-`
+	// main is required by the Go compiler for wasip1 but the engine calls
+	// exported functions directly.  It never runs the dispatcher main().
+	mainStub := "package main\n\nfunc main() {}\n"
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
 	}
@@ -423,16 +397,16 @@ func propagateReplaces(projectRoot, outDir, modPath string) error {
 		if err != nil {
 			continue
 		}
-			relToBuild, err := filepath.Rel(outDir, absReplace)
-			if err != nil {
-				relToBuild = absReplace
-			}
-			extra = append(extra, fmt.Sprintf("replace %s => %s", r.Old.Path, relToBuild))
+		relToBuild, err := filepath.Rel(outDir, absReplace)
+		if err != nil {
+			relToBuild = absReplace
+		}
+		extra = append(extra, fmt.Sprintf("replace %s => %s", r.Old.Path, relToBuild))
 
-			linkName := filepath.Join(outDir, filepath.Base(relToBuild))
-			if _, err := os.Lstat(linkName); os.IsNotExist(err) {
-				os.Symlink(absReplace, linkName)
-			}
+		linkName := filepath.Join(outDir, filepath.Base(relToBuild))
+		if _, err := os.Lstat(linkName); os.IsNotExist(err) {
+			os.Symlink(absReplace, linkName)
+		}
 	}
 
 	if len(extra) == 0 {
