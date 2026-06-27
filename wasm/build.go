@@ -423,7 +423,16 @@ func propagateReplaces(projectRoot, outDir, modPath string) error {
 		if err != nil {
 			continue
 		}
-		extra = append(extra, fmt.Sprintf("replace %s => %s", r.Old.Path, absReplace))
+			relToBuild, err := filepath.Rel(outDir, absReplace)
+			if err != nil {
+				relToBuild = absReplace
+			}
+			extra = append(extra, fmt.Sprintf("replace %s => %s", r.Old.Path, relToBuild))
+
+			linkName := filepath.Join(outDir, filepath.Base(relToBuild))
+			if _, err := os.Lstat(linkName); os.IsNotExist(err) {
+				os.Symlink(absReplace, linkName)
+			}
 	}
 
 	if len(extra) == 0 {
