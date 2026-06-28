@@ -146,12 +146,12 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
-	// main is required by the Go compiler for wasip1.  The engine calls
-	// _start in a background goroutine before any exports.  main() must
-	// call cleatPollWorkImport to satisfy the Go runtime's expectation
-	// that WASM host functions are available during initialization.
-	// Without this check the runtime may abort wasmexport calls with
-	// "called before runtime initialization".
+	// main is required by Go wasip1.  The wasmtime backend calls _start
+	// which runs main().  main() polls for work via cleat_poll_work,
+	// dispatches to the entry point via cleatDispatch, and signals
+	// completion via cleatCompleteImport.  If no work is available
+	// (entryLen == 0, e.g. wazero backend), main() returns immediately
+	// and the backend calls exports directly instead.
 	mainStub := `package main
 
 import "unsafe"
@@ -164,10 +164,15 @@ func main() {
 		unsafe.Pointer(&argsBuf[0]), 65536,
 	)
 	entryNameLen := uint32(ret >> 32)
+	argsLen := uint32(ret)
 	if entryNameLen == 0 {
 		return
 	}
-	// unreachable: cleat_poll_work always returns 0 in the engine.
+	entryName := string(entryNameBuf[:entryNameLen])
+	args := argsBuf[:argsLen]
+	result := cleatDispatch(entryName, args)
+	resultPtr, resultLen := stringPtr(string(result))
+	cleatCompleteImport(0, resultPtr, resultLen)
 }
 `
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
