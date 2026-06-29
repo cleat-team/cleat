@@ -537,7 +537,7 @@ func main() {
 	}
 
 	// Run core schema migrations before plugin migrations.
-	migrator := migration.NewRunner(db, factory.Dialect(), "migrations", *migrationLockTimeout)
+	migrator := migration.NewRunner(db, factory.Dialect(), "migrations")
 	if err := migrator.Run(ctx); err != nil {
 		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges", "worker_id", workerID, "error", err)
 		os.Exit(1)
@@ -557,7 +557,7 @@ func main() {
 				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations", *migrationLockTimeout)
+			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations")
 			if terr = tm.Run(ctx); terr != nil {
 				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)
@@ -584,13 +584,6 @@ func main() {
 			envCopy.DB = getPluginReadOnlyDB(db, pluginDB)
 		default: // DatabaseAccessReadWrite or empty (backward compat)
 			envCopy.DB = getPluginDB(db, pluginDB)
-		}
-		// Gate StartWorkflow capability.
-		if !lp.Plugin.Info().StartWorkflow {
-			pluginName := lp.Plugin.Info().Name
-			envCopy.StartWorkflow = func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
-				return "", fmt.Errorf("plugin %q does not have the start_workflow capability", pluginName)
-			}
 		}
 		// Wrap SignalWorkflow with signal authorization.
 		// The plugin name is the caller identity checked against allowed_signals.
@@ -843,14 +836,6 @@ func main() {
 		mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
 		mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
 		mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
-
-		// Instance inspection endpoints (always on behind auth).
-		mux.HandleFunc("/api/instances/", api.handleInstancesRoutes)
-
-		// Admin API endpoints (gated behind --enable-admin-api flag).
-		if *enableAdminAPI {
-			mux.HandleFunc("/api/admin/instances/", api.handleAdminRoutes)
-		}
 
 		// Workflow definitions endpoint.
 		mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
