@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -244,8 +244,8 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 	if metrics != nil {
 		metrics.AddCompactionEventsDeleted(ctx, int64(compactedStep))
 	}
-	log.Printf("compact: workflow=%s events=%d compacted=%d kept=%d state_size=%d",
-		workflowID, len(events), compactedStep, len(events)-keepStep, len(csJSON))
+	slog.InfoContext(ctx, "compact completed",
+		"workflow_id", workflowID, "events", len(events), "compacted", compactedStep, "kept", len(events)-keepStep, "state_size", len(csJSON))
 	return nil
 }
 

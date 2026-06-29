@@ -93,8 +93,10 @@ func main() {
 		var sizeReport bool
 		var runtime string
 		var buildChannel string
+		var workflowVersion int
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
+		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
 		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), tinygo (deprecated), rust, java, assemblyscript, python")
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: produce both)")
@@ -122,9 +124,9 @@ func main() {
 		}
 		if entry != "" {
 			// Use --entry as the pattern for Python builds.
-			runBuild(entry, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport)
+			runBuild(entry, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, workflowVersion)
 		} else {
-			runBuild(pattern, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport)
+			runBuild(pattern, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, workflowVersion)
 		}
 	case "vet":
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
@@ -199,7 +201,7 @@ func main() {
 	}
 }
 
-func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, diffOut bool, sizeReport bool) {
+func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, diffOut bool, sizeReport bool, workflowVersion int) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
@@ -377,6 +379,11 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// directly to the project root.
 	tidyCmd := exec.Command("go", "mod", "tidy")
 	tidyCmd.Dir = outDir
+	tidyCmd.Env = append(os.Environ(),
+		"GONOSUMCHECK=*",
+		"GONOSUMDB=*",
+		"GOPRIVATE=*",
+	)
 	if target == "tinygo" {
 		if tinygoGoroot := os.Getenv("CLEAT_TINYGO_GOROOT"); tinygoGoroot != "" {
 			tidyCmd.Env = append(os.Environ(),
@@ -461,7 +468,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	workflowName := wasmOutputName(result)
 	meta := &wasm.Metadata{
 		WorkflowName:         workflowName,
-		WorkflowVersion:      1,
+		WorkflowVersion:      workflowVersion,
 		ABIVersion:           wasm.CurrentABIVersion,
 		MinCompatibleVersion: wasm.CurrentABIVersion,
 		Language:             "go",
@@ -1022,11 +1029,18 @@ func runDeploy(args []string) {
 		os.Exit(1)
 	}
 
-	var version int
-	err = db.QueryRow("SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_defs WHERE name = $1", name).Scan(&version)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
-		os.Exit(1)
+	// Use the version embedded in WASM metadata if available; otherwise
+	// auto-increment.  Deploying the same version multiple times updates
+	// the existing row (idempotent).
+	version := 1
+	if metaErr == nil && meta.WorkflowVersion > 0 {
+		version = meta.WorkflowVersion
+	} else {
+		err = db.QueryRow("SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_defs WHERE name = $1", name).Scan(&version)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Build the SQL with metadata columns if available.
@@ -1042,7 +1056,15 @@ func runDeploy(args []string) {
 	}
 
 	_, err = db.Exec(
-		"INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)",
+		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+		 ON CONFLICT (name, version) DO UPDATE SET
+		   wasm_bytes = EXCLUDED.wasm_bytes,
+		   abi_version = EXCLUDED.abi_version,
+		   plugin_deps = EXCLUDED.plugin_deps,
+		   min_version = EXCLUDED.min_version,
+		   entry_points = EXCLUDED.entry_points,
+		   task_queue = EXCLUDED.task_queue`,
 		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag,
 	)
 	if err != nil {

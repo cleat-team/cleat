@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,8 @@ type MySQLStore struct {
 	// Set to true during replay to avoid the overhead of retroactive redaction
 	// on every event load. Default false.
 	disableReadRedaction bool
+
+	logger *slog.Logger
 }
 
 // NewMySQLStore creates a MySQLStore scoped to the given task queues.
@@ -118,6 +121,21 @@ func (s *MySQLStore) WithEncryption(enc *PayloadEncryption, enabled bool) *MySQL
 	cp.encryption = enc
 	cp.encryptSensitivePayloads = enabled
 	return &cp
+}
+
+// WithLogger returns a copy of the store with the given structured logger.
+func (s *MySQLStore) WithLogger(l *slog.Logger) *MySQLStore {
+	cp := *s
+	cp.logger = l
+	return &cp
+}
+
+// log returns the configured logger or the default logger.
+func (s *MySQLStore) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
 }
 
 // WithTenant returns a copy of the store scoped to the given tenant ID.
@@ -522,6 +540,8 @@ type MySQLStoreFactory struct {
 
 	idempotencyKeyTTL  time.Duration
 	tenantPoolMaxConns int
+
+	logger *slog.Logger
 }
 
 // NewMySQLStoreFactory creates a MySQLStoreFactory.
@@ -541,6 +561,13 @@ func NewMySQLStoreFactory(masterDB *sql.DB, baseDSN string, idempotencyKeyTTL ..
 		idempotencyKeyTTL: ttl,
 		tenantPoolMaxConns: 25,
 	}
+}
+
+// WithLogger sets the structured logger on the factory. Stores created by
+// OpenStore will inherit it.
+func (f *MySQLStoreFactory) WithLogger(l *slog.Logger) *MySQLStoreFactory {
+	f.logger = l
+	return f
 }
 
 // WithTenantPoolMaxConns sets the max open connections per tenant pool.
@@ -659,6 +686,7 @@ func (f *MySQLStoreFactory) OpenStore(ctx context.Context, tenantID string, task
 
 	store := NewMySQLStore(tenantDB, taskQueues...)
 	store.tenantID = tenantID
+	store = store.WithLogger(f.logger)
 	return store, nopCloser{}, nil
 }
 

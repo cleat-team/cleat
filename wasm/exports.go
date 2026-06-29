@@ -252,7 +252,9 @@ func encodeJSONString(s string) string {
 		generateExport(&buf, fd, qual, target)
 	}
 
-	// For the "go" target, generate the dispatcher function that main() calls.
+	// The wasmtime backend calls _start which calls main(), which uses
+	// cleat_poll_work + cleatDispatch to route work to entry points.
+	// The wazero backend calls exports directly. Both paths coexist.
 	if target == GoTarget {
 		generateDispatch(&buf, result, qual)
 	}
@@ -303,8 +305,11 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 	fmt.Fprintf(buf, "//go:wasmexport %s\n", exportName)
 	fmt.Fprintf(buf, "func %s(argsPtr unsafe.Pointer, argsLen uint32, outPtr unsafe.Pointer, maxOutLen uint32) int64 {\n", exportName)
 
-	if len(fields) > 0 {
-		buf.WriteString("\targsJSON := readString(argsPtr, argsLen)\n")
+	buf.WriteString("\targsJSON := readString(argsPtr, argsLen)\n")
+	if len(fields) == 1 && fields[0].GoType == "string" {
+		// Single string parameter: pass the raw argsJSON directly.
+		buf.WriteString(fmt.Sprintf("\t%s := argsJSON\n", fields[0].GoName))
+	} else if len(fields) > 0 {
 		for _, f := range fields {
 			switch f.GoType {
 			case "string":
@@ -312,16 +317,12 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 			case "int", "int64", "int32":
 				fmt.Fprintf(buf, "\t%s := extractJSONInt(argsJSON, %q)\n", f.GoName, f.JSONTag)
 			default:
-				// Use encoding/json for complex types.
 				fmt.Fprintf(buf, "\tvar %s %s\n", f.GoName, f.GoType)
 				fmt.Fprintf(buf, "\tif err := json.Unmarshal([]byte(extractJSONRaw(argsJSON, %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
 				fmt.Fprintf(buf, "\t\treturn writeErrorOut(outPtr, maxOutLen, fmt.Errorf(\"unmarshal %s: %%w\", err))\n", f.JSONTag)
 				buf.WriteString("\t}\n")
 			}
 		}
-	} else {
-		buf.WriteString("\t_ = argsPtr\n")
-		buf.WriteString("\t_ = argsLen\n")
 	}
 
 	buf.WriteString("\n\th := makeHostCalls()\n\n")
@@ -415,9 +416,32 @@ func hasComplexParams(result *analyzer.AnalysisResult) bool {
 	return false
 }
 
-// generateDispatch writes the cleatDispatch function for the "go" target
-// dispatcher main(). It maps entry point names to typed function calls using
-// the same JSON deserialization logic as the per-export wrappers.
+// The dispatcher poll-loop model (main() -> cleatPollWork -> cleatDispatch)
+// was removed. Each workflow execution gets a fresh WASM instance via direct
+// export calls, eliminating both the parameter-envelope mismatch and the risk
+// of state bleed between invocations violating determinism.
+
+func ToSnakeCase(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				b.WriteByte('_')
+			}
+			b.WriteByte(byte(r + 32))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
 func generateDispatch(buf *bytes.Buffer, result *analyzer.AnalysisResult, qual types.Qualifier) {
 	buf.WriteString(`
 // cleatDispatch routes an entry point call from the main() dispatcher.
@@ -425,7 +449,10 @@ func generateDispatch(buf *bytes.Buffer, result *analyzer.AnalysisResult, qual t
 // returns the JSON-encoded result or error.
 func cleatDispatch(entryName string, argsJSON []byte) []byte {
 	// Unwrap DispatchWrapper envelope set by host: {"inputJSON":"<inner>"}.
-	argsJSON = []byte(extractJSONString(string(argsJSON), "inputJSON"))
+	inner := extractJSONString(string(argsJSON), "inputJSON")
+		if inner != "" {
+			argsJSON = []byte(inner)
+		}
 	h := makeHostCalls()
 	switch entryName {
 `)
@@ -477,11 +504,16 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 		snakeName := ToSnakeCase(fd.Name)
 		fmt.Fprintf(buf, "\tcase %q, %q:\n", fd.Name, snakeName)
 
-		// Parse args from JSON.
-		for _, f := range fields {
-			switch f.GoType {
-			case "string":
-				fmt.Fprintf(buf, "\t\t%s := extractJSONString(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
+		// Parse args from JSON. For single-string-param entry points,
+		// pass the already-unwrapped argsJSON directly (the outer
+		// DispatchWrapper was removed above).
+		if len(fields) == 1 && fields[0].GoType == "string" {
+			fmt.Fprintf(buf, "\t\t%s := string(argsJSON)\n", fields[0].GoName)
+		} else {
+			for _, f := range fields {
+				switch f.GoType {
+				case "string":
+					fmt.Fprintf(buf, "\t\t%s := extractJSONString(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
 			case "int", "int64", "int32":
 				fmt.Fprintf(buf, "\t\t%s := extractJSONInt(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
 			default:
@@ -491,6 +523,7 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 				fmt.Fprintf(buf, "\t\t\treturn []byte(`{\"error\":\"unmarshal %s: ` + err.Error() + `\"}`)\n", f.JSONTag)
 				buf.WriteString("\t\t}\n")
 			}
+		}
 		}
 
 		// Build call.
@@ -561,24 +594,3 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 	buf.WriteString("}\n")
 }
 
-func ToSnakeCase(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteByte(byte(r + 32))
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-func capitalize(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
-}

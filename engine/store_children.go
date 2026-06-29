@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,8 +61,8 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		defName).Scan(&resolvedVersion); err != nil {
 		resolvedVersion = -2
 	}
-	log.Printf("[engine] StartChildWorkflowAtomic: defName=%q defVersion=%d resolvedVersion=%d tenantID=%s parentID=%s",
-		defName, defVersion, resolvedVersion, s.tenantID, parentID)
+	s.log().DebugContext(ctx, "StartChildWorkflowAtomic",
+		"def_name", defName, "def_version", defVersion, "resolved_version", resolvedVersion, "tenant_id", s.tenantID, "parent_id", parentID)
 
 	// 1. INSERT child workflow instance.
 	_, err = tx.ExecContext(ctx, `

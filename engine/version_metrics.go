@@ -3,7 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"time"
 )
@@ -158,9 +158,9 @@ func LogStaleAlerts(alerts []StaleVersionAlert) {
 	if len(alerts) == 0 {
 		return
 	}
-	log.Printf("[cleat][versions] %d stale version alert(s):", len(alerts))
+	slog.WarnContext(context.Background(), "stale version alerts", "count", len(alerts))
 	for _, a := range alerts {
-		log.Printf("[cleat][versions]   %s: %s", a.Name, a.Message)
+		slog.WarnContext(context.Background(), "stale version alert", "name", a.Name, "message", a.Message)
 	}
 }
 

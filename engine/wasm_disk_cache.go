@@ -1,10 +1,11 @@
 package engine
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,7 +49,7 @@ func NewWasmDiskCache(cacheDir string, maxLen int) *WasmDiskCache {
 		maxLen = 100
 	}
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		log.Printf("[wasm-disk-cache] cannot create directory %s: %v", cacheDir, err)
+		slog.WarnContext(context.Background(), "wasm disk cache: cannot create directory", "dir", cacheDir, "error", err)
 		return nil
 	}
 	c := &WasmDiskCache{dir: cacheDir, maxLen: maxLen}
@@ -112,17 +113,17 @@ func (c *WasmDiskCache) saveIndex(idx map[string]string) {
 	}
 	data, err := json.Marshal(entries)
 	if err != nil {
-		log.Printf("[wasm-disk-cache] marshal index: %v", err)
+		slog.WarnContext(context.Background(), "wasm disk cache: marshal index failed", "error", err)
 		return
 	}
 	tmpPath := c.indexFilePath() + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		log.Printf("[wasm-disk-cache] write index: %v", err)
+		slog.WarnContext(context.Background(), "wasm disk cache: write index failed", "error", err)
 		os.Remove(tmpPath)
 		return
 	}
 	if err := os.Rename(tmpPath, c.indexFilePath()); err != nil {
-		log.Printf("[wasm-disk-cache] rename index: %v", err)
+		slog.WarnContext(context.Background(), "wasm disk cache: rename index failed", "error", err)
 		os.Remove(tmpPath)
 	}
 }
@@ -157,10 +158,10 @@ func (c *WasmDiskCache) StoreDef(name string, version int, wasmBytes []byte) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		tmpPath := path + ".tmp"
 		if wErr := os.WriteFile(tmpPath, wasmBytes, 0644); wErr != nil {
-			log.Printf("[wasm-disk-cache] write %s: %v", hash, wErr)
+			slog.WarnContext(context.Background(), "wasm disk cache: write failed", "hash", hash, "error", wErr)
 			os.Remove(tmpPath)
 		} else if wErr := os.Rename(tmpPath, path); wErr != nil {
-			log.Printf("[wasm-disk-cache] rename %s: %v", hash, wErr)
+			slog.WarnContext(context.Background(), "wasm disk cache: rename failed", "hash", hash, "error", wErr)
 			os.Remove(tmpPath)
 		}
 	}
@@ -249,7 +250,7 @@ func (c *WasmDiskCache) evictLRU() {
 			evictedHashes[name[:len(name)-5]] = true
 		}
 		if err := os.Remove(wasmFiles[i]); err != nil {
-			log.Printf("[wasm-disk-cache] evict %s: %v", wasmFiles[i], err)
+			slog.WarnContext(context.Background(), "wasm disk cache: evict failed", "file", wasmFiles[i], "error", err)
 		}
 	}
 

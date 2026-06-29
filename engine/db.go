@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/lib/pq"
@@ -44,6 +44,8 @@ type PostgresStore struct {
 	disableReadRedaction bool
 
 	syncCommitOff bool // SET LOCAL synchronous_commit = off in finalize tx
+
+	logger *slog.Logger
 
 	Metrics *prometheus.Metrics
 }
@@ -84,6 +86,21 @@ func (s *PostgresStore) WithTenant(tenantID string) *PostgresStore {
 	cp := *s
 	cp.tenantID = tenantID
 	return &cp
+}
+
+// WithLogger returns a copy of the store with the given structured logger.
+func (s *PostgresStore) WithLogger(l *slog.Logger) *PostgresStore {
+	cp := *s
+	cp.logger = l
+	return &cp
+}
+
+// log returns the configured logger or the default logger.
+func (s *PostgresStore) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
 }
 
 // WithEncryption returns a copy of the store with encryption at rest enabled.
@@ -129,7 +146,7 @@ func (s *PostgresStore) decryptField(encrypted, fieldName, workflowID string, st
 		decrypted, err = s.encryption.DecryptString(encrypted)
 	}
 	if err != nil {
-		log.Printf("[store] decrypt %s failed for workflow %s step %d: %v", fieldName, workflowID, step, err)
+		s.log().WarnContext(context.Background(), "decrypt failed", "field", fieldName, "workflow_id", workflowID, "step", step, "error", err)
 		if s.Metrics != nil {
 			s.Metrics.RecordDecryptionError(context.Background())
 		}
@@ -179,7 +196,7 @@ func (s *PostgresStore) decryptPayloadJSON(payloadStr string) string {
 		if decrypted, err := s.encryption.DecryptJSON([]byte(payloadStr)); err == nil {
 			return string(decrypted)
 		} else {
-			log.Printf("[store] decrypt payload JSON failed: %v", err)
+			s.log().WarnContext(context.Background(), "decrypt payload JSON failed", "error", err)
 			if s.Metrics != nil {
 				s.Metrics.RecordDecryptionError(context.Background())
 			}
@@ -1060,7 +1077,7 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 	// Best-effort cleanup.
 	s.ClearStickyWorker(context.Background(), workflowID)
 	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID); err != nil {
-		log.Printf("[db] release concurrency keys for run %s: %v", workflowID, err)
+		s.log().WarnContext(context.Background(), "release concurrency keys failed", "workflow_id", workflowID, "error", err)
 	}
 	return nil
 }
@@ -1135,6 +1152,8 @@ type PostgresStoreFactory struct {
 	encryptSensitivePayloads bool
 		metrics                  *prometheus.Metrics
 	syncCommitOff bool
+
+	logger *slog.Logger
 }
 
 // WithSyncCommitOff sets synchronous_commit = off for finalize transactions.
@@ -1184,6 +1203,13 @@ func (f *PostgresStoreFactory) WithMetrics(m *prometheus.Metrics) *PostgresStore
 	return f
 }
 
+// WithLogger sets the structured logger on the factory. Stores created by
+// OpenStore will inherit it.
+func (f *PostgresStoreFactory) WithLogger(l *slog.Logger) *PostgresStoreFactory {
+	f.logger = l
+	return f
+}
+
 // OpenStore creates a PostgresStore scoped to the given tenant and task queues.
 func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
 	// Ensure the schema exists.
@@ -1198,6 +1224,7 @@ func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, t
 		store = store.WithEncryption(f.encryption, true)
 	}
 	store = store.WithIdempotencyKeyTTL(f.idempotencyKeyTTL)
+	store = store.WithLogger(f.logger)
 	if f.notifyChannel != "" {
 		store = store.WithNotifyChannel(f.notifyChannel)
 	}

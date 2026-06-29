@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -52,9 +51,9 @@ func StartAPIServer(cfg *Config, w *Worker, plugMux, plugHandler http.Handler, p
 	}
 
 	go func() {
-		log.Printf("[worker %s] HTTP API listening on %s", w.id, cfg.APIAddr)
+		w.logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", w.id, "addr", cfg.APIAddr)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-			log.Printf("[worker %s] HTTP server error: %v", w.id, err)
+			w.logger.ErrorContext(context.Background(), "HTTP server error", "worker_id", w.id, "error", err)
 		}
 	}()
 

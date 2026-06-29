@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
+	"golang.org/x/mod/modfile"
 )
 
 // BuildConfig holds the parameters for assembling a build directory.
@@ -140,38 +141,40 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 	if err := writeFile("gen_host_adapter.go", cfg.Outputs.Adapter); err != nil {
 		return err
 	}
+	patchAdapterImports(filepath.Join(cfg.OutDir, "gen_host_adapter.go"))
 	if err := writeFile("gen_wasm_exports.go", cfg.Outputs.Exports); err != nil {
 		return err
 	}
 
-	var mainStub string
-	if cfg.Target == "tinygo" {
-		mainStub = "package main\n\nfunc main() {\n\t<-make(chan struct{})\n}\n"
-	} else {
-		mainStub = `package main
+	// main is required by Go wasip1.  The wasmtime backend calls _start
+	// which runs main().  main() polls for work via cleat_poll_work,
+	// dispatches to the entry point via cleatDispatch, and signals
+	// completion via cleatCompleteImport.  If no work is available
+	// (entryLen == 0, e.g. wazero backend), main() returns immediately
+	// and the backend calls exports directly instead.
+	mainStub := `package main
 
-	import "unsafe"
+import "unsafe"
 
-	func main() {
-		var entryNameBuf [256]byte
-		var argsBuf [65536]byte
-		ret := cleatPollWorkImport(
-			unsafe.Pointer(&entryNameBuf[0]), 256,
-			unsafe.Pointer(&argsBuf[0]), 65536,
-		)
-		entryNameLen := uint32(ret >> 32)
-		argsLen := uint32(ret)
-		if entryNameLen == 0 {
-			return
-		}
-		entryName := string(entryNameBuf[:entryNameLen])
-		args := argsBuf[:argsLen]
-		result := cleatDispatch(entryName, args)
-		resultPtr, resultLen := stringPtr(string(result))
-		cleatCompleteImport(0, resultPtr, resultLen)
+func main() {
+	var entryNameBuf [256]byte
+	var argsBuf [65536]byte
+	ret := cleatPollWorkImport(
+		unsafe.Pointer(&entryNameBuf[0]), 256,
+		unsafe.Pointer(&argsBuf[0]), 65536,
+	)
+	entryNameLen := uint32(ret >> 32)
+	argsLen := uint32(ret)
+	if entryNameLen == 0 {
+		return
 	}
-	`
-	}
+	entryName := string(entryNameBuf[:entryNameLen])
+	args := argsBuf[:argsLen]
+	result := cleatDispatch(entryName, args)
+	resultPtr, resultLen := stringPtr(string(result))
+	cleatCompleteImport(0, resultPtr, resultLen)
+}
+`
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
 	}
@@ -214,6 +217,16 @@ replace %s => %s/cleat
 	modPath := filepath.Join(cfg.OutDir, "go.mod")
 	if err := os.WriteFile(modPath, []byte(modContent), 0644); err != nil {
 		return fmt.Errorf("writing go.mod: %w", err)
+	}
+
+	// Propagate replace directives from the source module's go.mod into the
+	// build directory.  The generated go.mod has a single replace for the
+	// cleat submodule, but workflows that import other local modules (e.g.
+	// protocol packages, sibling modules) need those path-based replaces
+	// carried forward so that go mod tidy resolves local files instead of
+	// trying to pull from the network.
+	if err := propagateReplaces(cfg.ProjectRoot, cfg.OutDir, modPath); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: propagating replace directives: %v\n", err)
 	}
 
 	return nil
@@ -375,4 +388,75 @@ func rewritePackageToMain(content []byte) []byte {
 		return content // no package declaration found, return as-is
 	}
 	return result
+}
+
+// propagateReplaces reads the source module's go.mod, extracts all replace
+// directives with local filesystem paths, adjusts paths to be relative to
+// the build directory, and appends them to the build directory's go.mod.
+// The generated go.mod only has a single replace for the cleat submodule,
+// but workflows often import other local modules that use path-based replaces.
+func propagateReplaces(projectRoot, outDir, modPath string) error {
+	srcModPath := filepath.Join(projectRoot, "go.mod")
+	data, err := os.ReadFile(srcModPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading source go.mod: %w", err)
+	}
+
+	modFile, err := modfile.Parse(srcModPath, data, nil)
+	if err != nil {
+		return fmt.Errorf("parsing source go.mod: %w", err)
+	}
+
+	if len(modFile.Replace) == 0 {
+		return nil
+	}
+
+	var extra []string
+	for _, r := range modFile.Replace {
+		if !modfile.IsDirectoryPath(r.New.Path) {
+			continue
+		}
+		absReplace, err := filepath.Abs(filepath.Join(projectRoot, r.New.Path))
+		if err != nil {
+			continue
+		}
+		extra = append(extra, fmt.Sprintf("replace %s => %s", r.Old.Path, absReplace))
+	}
+
+	if len(extra) == 0 {
+		return nil
+	}
+
+	f, err := os.OpenFile(modPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("appending to build go.mod: %w", err)
+	}
+	defer f.Close()
+
+	fmt.Fprintln(f, "")
+	for _, s := range extra {
+		fmt.Fprintln(f, s)
+	}
+	return nil
+}
+
+// patchAdapterImports adds missing "strings" import to the generated host adapter
+// if the adapter body references strings.* functions.
+func patchAdapterImports(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	content := string(data)
+	if !strings.Contains(content, "strings.") {
+		return
+	}
+	if strings.Contains(content, `"strings"`) {
+		return
+	}
+	content = strings.Replace(content, "import (", "import (\n\t\"strings\"", 1)
+	os.WriteFile(path, []byte(content), 0644)
 }

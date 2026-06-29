@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 
@@ -187,8 +187,8 @@ func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, w
 		return fmt.Errorf("deploy %s v%d: %w", name, version, err)
 	}
 
-	log.Printf("[workflow-loader] Deployed %s v%d (%d bytes, %d plugins, min_ver=%d)",
-		name, version, len(wasmBytes), len(pluginDeps), minVersion)
+	slog.InfoContext(ctx, "workflow deployed",
+		"name", name, "version", version, "size_bytes", len(wasmBytes), "plugins", len(pluginDeps), "min_version", minVersion)
 	return nil
 }
 
@@ -213,7 +213,7 @@ func (l *WorkflowLoader) Deprecate(ctx context.Context, name string, version int
 	key := defKey{Name: name, Version: version}
 	l.cacheRemove(key)
 
-	log.Printf("[workflow-loader] Deprecated %s v%d", name, version)
+	slog.InfoContext(ctx, "workflow deprecated", "name", name, "version", version)
 	return nil
 }
 
