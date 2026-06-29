@@ -886,6 +886,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		Name:       req.Name,
 		Version:    version,
 		WASMBytes:  wasmBytes,
+		ABIVersion: 1,
 		PluginDeps: req.PluginDeps,
 	}
 
