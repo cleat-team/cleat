@@ -39,6 +39,7 @@ type PluginInfo struct {
 	Author         string         `json:"author,omitempty"`
 	Requires       []string       `json:"requires,omitempty"`
 	DatabaseAccess DatabaseAccess `json:"database_access,omitempty"`
+	StartWorkflow  bool           `json:"start_workflow,omitempty"`
 }
 
 // RowScanner abstracts a single row result for single-row queries.
@@ -104,6 +105,12 @@ type Environment struct {
 	// deployment, deprecation, capability changes, and invocation events.
 	// May be nil if the audit log is not configured.
 	Audit *AuditLogger
+}
+
+// shallowCopy returns a shallow copy of the Environment.
+func (env *Environment) shallowCopy() *Environment {
+	cpy := *env
+	return &cpy
 }
 
 // AuditLogger is the interface for recording plugin lifecycle events.

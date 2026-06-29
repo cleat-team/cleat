@@ -16,10 +16,11 @@ import (
 
 func init() {
 	plugin.Register(plugin.PluginInfo{
-		Name:        "scheduler",
-		Version:     "0.1.0",
-		Description: "User-managed cron schedules for workflow execution",
-		Author:      "cleat",
+		Name:          "scheduler",
+		Version:       "0.1.0",
+		Description:   "User-managed cron schedules for workflow execution",
+		Author:        "cleat",
+		StartWorkflow: true,
 	}, func() plugin.Plugin {
 		return &Plugin{}
 	})
@@ -42,10 +43,11 @@ type Plugin struct {
 // Info returns plugin metadata for discovery and documentation.
 func (p *Plugin) Info() plugin.PluginInfo {
 	return plugin.PluginInfo{
-		Name:        "scheduler",
-		Version:     "0.1.0",
-		Description: "User-managed cron schedules for workflow execution",
-		Author:      "cleat",
+		Name:          "scheduler",
+		Version:       "0.1.0",
+		Description:   "User-managed cron schedules for workflow execution",
+		Author:        "cleat",
+		StartWorkflow: true,
 	}
 }
 

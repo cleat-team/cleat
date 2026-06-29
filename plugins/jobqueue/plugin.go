@@ -14,10 +14,11 @@ import (
 
 func init() {
 	plugin.Register(plugin.PluginInfo{
-		Name:        "jobqueue",
-		Version:     "0.1.0",
-		Description: "Standalone job queue",
-		Author:      "cleat",
+		Name:          "jobqueue",
+		Version:       "0.1.0",
+		Description:   "Standalone job queue",
+		Author:        "cleat",
+		StartWorkflow: true,
 	}, func() plugin.Plugin {
 		return &Plugin{}
 	})
@@ -40,10 +41,11 @@ type Plugin struct {
 // Info returns plugin metadata for discovery and documentation.
 func (p *Plugin) Info() plugin.PluginInfo {
 	return plugin.PluginInfo{
-		Name:        "jobqueue",
-		Version:     "0.1.0",
-		Description: "Standalone job queue",
-		Author:      "cleat",
+		Name:          "jobqueue",
+		Version:       "0.1.0",
+		Description:   "Standalone job queue",
+		Author:        "cleat",
+		StartWorkflow: true,
 	}
 }
 

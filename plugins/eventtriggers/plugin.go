@@ -17,10 +17,11 @@ var currentDialect plugin.Dialect
 
 func init() {
 	plugin.Register(plugin.PluginInfo{
-		Name:        "event-triggers",
-		Version:     "0.1.0",
-		Description: "Event-driven workflow triggers — subscribe workflows to domain events",
-		Author:      "cleat",
+		Name:          "event-triggers",
+		Version:       "0.1.0",
+		Description:   "Event-driven workflow triggers — subscribe workflows to domain events",
+		Author:        "cleat",
+		StartWorkflow: true,
 	}, func() plugin.Plugin { return &Plugin{} })
 }
 
@@ -46,10 +47,11 @@ type Plugin struct {
 // Info returns plugin metadata for discovery and documentation.
 func (p *Plugin) Info() plugin.PluginInfo {
 	return plugin.PluginInfo{
-		Name:        "event-triggers",
-		Version:     "0.1.0",
-		Description: "Event-driven workflow triggers — subscribe workflows to domain events",
-		Author:      "cleat",
+		Name:          "event-triggers",
+		Version:       "0.1.0",
+		Description:   "Event-driven workflow triggers — subscribe workflows to domain events",
+		Author:        "cleat",
+		StartWorkflow: true,
 	}
 }
 

@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -333,5 +334,95 @@ func TestCapabilityLimitsIsSet(t *testing.T) {
 
 	if !(CapabilityLimits{CallPlugin: []string{"foo"}}).IsSet() {
 		t.Error("expected IsSet() to be true when CallPlugin is set")
+	}
+}
+
+// startWorkflowTestPlugin captures the env it receives during Init for verification.
+type startWorkflowTestPlugin struct {
+	PluginInfo
+	initEnv *Environment
+}
+
+func (p *startWorkflowTestPlugin) Info() PluginInfo { return p.PluginInfo }
+
+func (p *startWorkflowTestPlugin) Init(ctx context.Context, env *Environment) error {
+	p.initEnv = env
+	return nil
+}
+
+func TestStartWorkflowCapabilityDenied(t *testing.T) {
+	env := &Environment{
+		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+			t.Error("underlying StartWorkflow should not be called")
+			return "ok", nil
+		},
+	}
+	p := &startWorkflowTestPlugin{PluginInfo: PluginInfo{Name: "test-denied", StartWorkflow: false}}
+	lp := &LoadedPlugin{Plugin: p, Healthy: true}
+	InitAll(context.Background(), env, []*LoadedPlugin{lp})
+
+	if p.initEnv == nil {
+		t.Fatal("expected plugin to receive an env in Init")
+	}
+	if p.initEnv.StartWorkflow == nil {
+		t.Fatal("expected StartWorkflow to be set (to an error func), got nil")
+	}
+	_, err := p.initEnv.StartWorkflow(context.Background(), "wf", nil)
+	if err == nil {
+		t.Fatal("expected error for StartWorkflow capability denied")
+	}
+	if !strings.Contains(err.Error(), "start_workflow") {
+		t.Errorf("expected 'start_workflow' in error, got: %v", err)
+	}
+}
+
+func TestStartWorkflowCapabilityAllowed(t *testing.T) {
+	var called bool
+	env := &Environment{
+		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+			called = true
+			return "run-1", nil
+		},
+	}
+	p := &startWorkflowTestPlugin{PluginInfo: PluginInfo{Name: "test-allowed", StartWorkflow: true}}
+	lp := &LoadedPlugin{Plugin: p, Healthy: true}
+	InitAll(context.Background(), env, []*LoadedPlugin{lp})
+
+	if p.initEnv == nil {
+		t.Fatal("expected plugin to receive an env in Init")
+	}
+	if p.initEnv.StartWorkflow == nil {
+		t.Fatal("expected StartWorkflow to be set, got nil")
+	}
+	runID, err := p.initEnv.StartWorkflow(context.Background(), "wf", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if runID != "run-1" {
+		t.Errorf("expected run-1, got %s", runID)
+	}
+	if !called {
+		t.Error("expected underlying StartWorkflow to be called")
+	}
+}
+
+func TestStartWorkflowCapabilityDefaultDenied(t *testing.T) {
+	// Default PluginInfo has StartWorkflow: false — should be denied.
+	env := &Environment{
+		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+			t.Error("underlying StartWorkflow should not be called")
+			return "ok", nil
+		},
+	}
+	p := &startWorkflowTestPlugin{PluginInfo: PluginInfo{Name: "test-default"}} // StartWorkflow defaults to false
+	lp := &LoadedPlugin{Plugin: p, Healthy: true}
+	InitAll(context.Background(), env, []*LoadedPlugin{lp})
+
+	if p.initEnv == nil || p.initEnv.StartWorkflow == nil {
+		t.Fatal("expected StartWorkflow to be set (to an error func)")
+	}
+	_, err := p.initEnv.StartWorkflow(context.Background(), "wf", nil)
+	if err == nil {
+		t.Fatal("expected error for implicit StartWorkflow denial")
 	}
 }

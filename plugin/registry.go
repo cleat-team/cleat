@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -84,15 +85,24 @@ func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
 			continue
 		}
 
-		// Create a per-plugin environment with database access restricted
-		// to the level declared by the plugin.
-		pluginEnv := env
+		// Per-plugin shallow copy so StartWorkflow and DB gating
+		// don't affect other plugins sharing the same base env.
+		pluginEnv := env.shallowCopy()
+
+		// Database access gating: restrict to declared level.
 		access := lp.Plugin.Info().DatabaseAccess
 		if access == DatabaseAccessNone || access == "" {
-			pluginEnv = env.withDB(nil)
+			pluginEnv.DB = nil
 		}
-		// ReadOnly and ReadWrite: use the raw Environment as-is.
-		// The caller is responsible for wrapping the DB appropriately.
+		// ReadOnly and ReadWrite: caller is responsible for wrapping DB.
+
+		// StartWorkflow capability gating.
+		if !lp.Plugin.Info().StartWorkflow {
+			pluginName := lp.Plugin.Info().Name
+			pluginEnv.StartWorkflow = func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+				return "", fmt.Errorf("plugin %q does not have the start_workflow capability", pluginName)
+			}
+		}
 
 		func() {
 			defer func() {
@@ -114,13 +124,6 @@ func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
 			}
 		}()
 	}
-}
-
-// withDB returns a shallow copy of env with DB replaced by db.
-func (env *Environment) withDB(db PluginDB) *Environment {
-	copy := *env
-	copy.DB = db
-	return &copy
 }
 
 // LoadAll instantiates all registered plugins in dependency order,
