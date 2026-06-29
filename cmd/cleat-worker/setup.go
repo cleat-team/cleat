@@ -360,6 +360,20 @@ func decodeULEB128(buf []byte, pos int) (uint32, int) {
 	return result, pos
 }
 
+// tryClaimCumulativeAllocation atomically adds byteEstimate to counter if the
+// new total would not exceed maxBytes. Returns true if the claim succeeded.
+func tryClaimCumulativeAllocation(counter *atomic.Int64, byteEstimate, maxBytes int64) bool {
+	for {
+		cur := counter.Load()
+		if cur+byteEstimate > maxBytes {
+			return false
+		}
+		if counter.CompareAndSwap(cur, cur+byteEstimate) {
+			return true
+		}
+	}
+}
+
 // pluginNames returns a sorted, human-readable list of plugin names from
 // a map, for use in error messages.
 func pluginNames(m map[string]string) string {
@@ -899,6 +913,8 @@ type Worker struct {
 	wasmMemoryMaxMB             *int
 	wasmInstructionLimit        *int
 	wasmDiskCache               *engine.WasmDiskCache
+	wasmCumulativeAllocationMaxBytes int64
+	cumulativeAlloc                  atomic.Int64
 	wasmtimeBackend             engine.WasmBackend
 
 	drainCh   chan struct{}
@@ -1335,6 +1351,23 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, engine.ErrUnknown.String(), "", nil)
 			return
 		}
+	}
+
+	// ---- Cumulative WASM allocation check ----
+	if w.wasmCumulativeAllocationMaxBytes > 0 {
+		requiredPages := wasm.ReadMemoryInitialPages(wasmBytes)
+		byteEstimate := int64(requiredPages) * 65536
+		if !tryClaimCumulativeAllocation(&w.cumulativeAlloc, byteEstimate, w.wasmCumulativeAllocationMaxBytes) {
+			cur := w.cumulativeAlloc.Load()
+			errMsg := fmt.Sprintf("cumulative WASM allocation limit reached: current %d bytes (%.0f MB) + required %d bytes (%.0f MB) exceeds max %d bytes (%.0f MB)",
+				cur, float64(cur)/1024/1024, byteEstimate, float64(byteEstimate)/1024/1024, w.wasmCumulativeAllocationMaxBytes, float64(w.wasmCumulativeAllocationMaxBytes)/1024/1024)
+			w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)
+			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, engine.ErrUnknown.String(), "", nil)
+			return
+		}
+		defer w.cumulativeAlloc.Add(-byteEstimate)
 	}
 
 	// ---- Load event history ----

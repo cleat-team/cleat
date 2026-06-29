@@ -9,6 +9,8 @@ import (
 	"os"
 	"time"
 
+	"sync/atomic"
+
 	"github.com/tetratelabs/wazero"
 
 	"github.com/cleat-team/cleat/monitoring/prometheus"
@@ -86,6 +88,9 @@ type Engine struct {
 	cancellationCheckInterval time.Duration // throttle PollCancellation; 0 = every step
 
 	Metrics *prometheus.Metrics
+
+	wasmCumulativeAllocMax int64          // max cumulative WASM allocation in bytes (0 = unlimited)
+	wasmCumulativeAlloc    *atomic.Int64  // shared cumulative allocation counter in bytes
 }
 
 // WithSignalStore sets the signal store.
@@ -197,6 +202,16 @@ func WithMaxQuotaChildren(n int) EngineOption { return func(e *Engine) { e.maxQu
 // WithMaxQuotaConcurrencyKeys sets the max concurrency keys per workflow.
 func WithMaxQuotaConcurrencyKeys(n int) EngineOption {
 	return func(e *Engine) { e.maxQuotaConcurrencyKeys = n }
+}
+
+// WithWasmCumulativeAllocationMax sets the max cumulative WASM linear memory
+// allocation in bytes (0 = unlimited) and the shared atomic counter used to
+// track current cumulative allocation across all concurrent engines.
+func WithWasmCumulativeAllocationMax(maxBytes int64, counter *atomic.Int64) EngineOption {
+	return func(e *Engine) {
+		e.wasmCumulativeAllocMax = maxBytes
+		e.wasmCumulativeAlloc = counter
+	}
 }
 
 // WithMaxRetryAttempts sets a ceiling on retry attempts.
