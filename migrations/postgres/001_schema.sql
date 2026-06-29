@@ -389,6 +389,7 @@ CREATE TABLE IF NOT EXISTS workflow_tags (
     workflow_name TEXT NOT NULL,
     version INTEGER NOT NULL,
     tag TEXT NOT NULL,
+    canary_weight INTEGER NOT NULL DEFAULT 0 CHECK (canary_weight >= 0 AND canary_weight <= 100),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     PRIMARY KEY (workflow_name, tag),
@@ -499,3 +500,6 @@ CREATE POLICY tenant_isolation_tags ON workflow_tags
 DROP POLICY IF EXISTS tenant_isolation_routing ON workflow_routing;
 CREATE POLICY tenant_isolation_routing ON workflow_routing
     FOR ALL USING (tenant_id = cleat.assert_tenant_set());
+
+-- ── Canary weight migration (idempotent) ─────────────────────────────────────
+ALTER TABLE workflow_tags ADD COLUMN IF NOT EXISTS canary_weight INTEGER NOT NULL DEFAULT 0;

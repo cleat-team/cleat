@@ -377,6 +377,7 @@ CREATE TABLE dbo.workflow_tags (
     workflow_name NVARCHAR(255)   NOT NULL,
     version       INT             NOT NULL,
     tag           NVARCHAR(255)   NOT NULL,
+    canary_weight INT             NOT NULL DEFAULT 0,
     created_at    DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),
     tenant_id     UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     CONSTRAINT pk_workflow_tags PRIMARY KEY (workflow_name, tag),
@@ -545,3 +546,8 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_workflow_instances_r
     CREATE INDEX idx_workflow_instances_ready_claim
         ON dbo.workflow_instances (tenant_id, task_queue, priority ASC, created_at)
         WHERE status = 'ready';
+
+-- Canary weight migration (idempotent)
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_tags') AND name = N'canary_weight')
+    ALTER TABLE dbo.workflow_tags ADD canary_weight INT NOT NULL DEFAULT 0;
+GO

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	mathrand "math/rand"
 	"time"
 
 	"github.com/google/uuid"
@@ -623,4 +624,67 @@ func (s *MSSQLStore) ResolveVersionByTag(ctx context.Context, workflowName strin
 		return 0, fmt.Errorf("resolve version by tag: %w", err)
 	}
 	return version, nil
+}
+
+// ResolveVersionWithCanary resolves the stable tag with canary traffic splitting.
+
+func (s *MSSQLStore) ResolveVersionWithCanary(ctx context.Context, workflowName string) (int, string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT tag, version, canary_weight FROM workflow_tags
+		WHERE workflow_name = @p1 AND tag IN ('stable', 'canary')
+	`, workflowName)
+	if err != nil {
+		return 0, "", fmt.Errorf("resolve version with canary: query tags: %w", err)
+	}
+	defer rows.Close()
+
+	var stableVersion, canaryVersion, canaryWeight int
+	hasStable, hasCanary := false, false
+	for rows.Next() {
+		var tag string
+		var version, weight int
+		if err := rows.Scan(&tag, &version, &weight); err != nil {
+			return 0, "", fmt.Errorf("resolve version with canary: scan: %w", err)
+		}
+		switch tag {
+		case "stable":
+			stableVersion = version
+			hasStable = true
+		case "canary":
+			canaryVersion = version
+			canaryWeight = weight
+			hasCanary = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, "", fmt.Errorf("resolve version with canary: rows: %w", err)
+	}
+
+	if !hasStable {
+		return 0, "", fmt.Errorf("resolve version with canary: no stable tag for workflow %s", workflowName)
+	}
+
+	if hasCanary && canaryWeight > 0 && mathrand.Intn(100) < canaryWeight {
+		return canaryVersion, "canary", nil
+	}
+	return stableVersion, "stable", nil
+}
+
+// SetCanaryWeight sets the canary_weight on an existing tag for a workflow.
+func (s *MSSQLStore) SetCanaryWeight(ctx context.Context, workflowName string, tag string, weight int) error {
+	if weight < 0 || weight > 100 {
+		return fmt.Errorf("set canary weight: weight must be 0-100, got %d", weight)
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_tags SET canary_weight = @p1
+		WHERE workflow_name = @p2 AND tag = @p3 AND tenant_id = @p4
+	`, weight, workflowName, tag, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("set canary weight: update: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("set canary weight: tag %q not found for workflow %s", tag, workflowName)
+	}
+	return nil
 }

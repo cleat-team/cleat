@@ -12,6 +12,12 @@ import (
 	"github.com/tetratelabs/wazero/api"
 )
 
+// canaryVersionResolver is an optional extension interface for stores that
+// support canary traffic splitting via ResolveVersionWithCanary.
+type canaryVersionResolver interface {
+	ResolveVersionWithCanary(ctx context.Context, workflowName string) (int, string, error)
+}
+
 func (s *execSession) ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
 	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, 0, 0, "", runIDPtr, runIDMaxLen)
 }
@@ -107,6 +113,20 @@ func (s *execSession) resolveChildVersion(ctx context.Context, name string, expl
 				"name", name)
 		case policy == "stable":
 			if s.engine.childWfStore != nil {
+				// Try canary routing if the store supports it.
+				if cr, ok := s.engine.childWfStore.(canaryVersionResolver); ok {
+					v, tag, err := cr.ResolveVersionWithCanary(ctx, name)
+					if err == nil && v > 0 {
+						s.engine.log().InfoContext(ctx, "child version resolved by stable policy (with canary)",
+							"name", name, "version", v, "tag", tag)
+						if s.engine.Metrics != nil {
+							s.engine.Metrics.RecordCanaryRouting(ctx, name, fmt.Sprintf("%d", v), tag)
+						}
+						return v
+					}
+					s.engine.log().InfoContext(ctx, "child version: canary routing failed, falling back",
+						"name", name, "error", err)
+				}
 				if v, err := s.engine.childWfStore.ResolveVersionByTag(ctx, name, "stable"); err == nil && v > 0 {
 					s.engine.log().InfoContext(ctx, "child version resolved by stable policy",
 						"name", name, "version", v)

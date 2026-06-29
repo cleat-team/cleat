@@ -139,6 +139,20 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 		})
 	}
 
+	// Augment DebugInfo with threading errors.
+	if cr.DebugInfo != nil {
+		for _, te := range errors {
+			for i, d := range cr.DebugInfo.Decisions {
+				if d.FuncName == te.FuncName {
+					cr.DebugInfo.Decisions[i].Reasons = append(
+						cr.DebugInfo.Decisions[i].Reasons,
+						"HostCalls threading error: "+te.Message)
+					break
+				}
+			}
+		}
+	}
+
 	return errors
 }
 

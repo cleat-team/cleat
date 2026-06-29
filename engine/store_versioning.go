@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	mathrand "math/rand"
 
 	"github.com/google/uuid"
 )
@@ -245,4 +246,83 @@ func (s *PostgresStore) ResolveVersionByTag(ctx context.Context, workflowName st
 	return version, tx.Commit()
 }
 
-// Heartbeat updates the heartbeat timestamp.
+// ResolveVersionWithCanary resolves the stable tag with canary traffic splitting.
+// If both "stable" and "canary" tags exist and the canary tag has canary_weight > 0,
+// randomly selects canary with probability weight/100. Otherwise returns the stable
+// version.
+
+func (s *PostgresStore) ResolveVersionWithCanary(ctx context.Context, workflowName string) (int, string, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, "", fmt.Errorf("resolve version with canary: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Look up stable and canary tags with their weights.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT tag, version, canary_weight FROM workflow_tags
+		WHERE workflow_name = $1 AND tag IN ('stable', 'canary')
+	`, workflowName)
+	if err != nil {
+		return 0, "", fmt.Errorf("resolve version with canary: query tags: %w", err)
+	}
+	defer rows.Close()
+
+	var stableVersion, canaryVersion, canaryWeight int
+	hasStable, hasCanary := false, false
+	for rows.Next() {
+		var tag string
+		var version, weight int
+		if err := rows.Scan(&tag, &version, &weight); err != nil {
+			return 0, "", fmt.Errorf("resolve version with canary: scan: %w", err)
+		}
+		switch tag {
+		case "stable":
+			stableVersion = version
+			hasStable = true
+		case "canary":
+			canaryVersion = version
+			canaryWeight = weight
+			hasCanary = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, "", fmt.Errorf("resolve version with canary: rows: %w", err)
+	}
+
+	if !hasStable {
+		return 0, "", fmt.Errorf("resolve version with canary: no stable tag for workflow %s", workflowName)
+	}
+
+	if hasCanary && canaryWeight > 0 && mathrand.Intn(100) < canaryWeight {
+		return canaryVersion, "canary", tx.Commit()
+	}
+	return stableVersion, "stable", tx.Commit()
+}
+
+// SetCanaryWeight sets the canary_weight on an existing tag for a workflow.
+// weight must be 0-100.
+
+func (s *PostgresStore) SetCanaryWeight(ctx context.Context, workflowName string, tag string, weight int) error {
+	if weight < 0 || weight > 100 {
+		return fmt.Errorf("set canary weight: weight must be 0-100, got %d", weight)
+	}
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("set canary weight: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE workflow_tags SET canary_weight = $1
+		WHERE workflow_name = $2 AND tag = $3 AND tenant_id = $4
+	`, weight, workflowName, tag, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("set canary weight: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("set canary weight: tag %q not found for workflow %s", tag, workflowName)
+	}
+	return tx.Commit()
+}

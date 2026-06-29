@@ -412,3 +412,72 @@ func TestComputeErrorsDetectsFloatInCondition(t *testing.T) {
 		}
 	}
 }
+
+func TestDebugInfoPopulated(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph failed: %v", err)
+	}
+
+	cr := Compute(result, cg)
+
+	if cr.DebugInfo == nil {
+		t.Fatal("DebugInfo should not be nil")
+	}
+	if len(cr.DebugInfo.Decisions) == 0 {
+		t.Fatal("DebugInfo.Decisions should not be empty")
+	}
+
+	// Verify each function has a decision with the correct tag.
+	byName := make(map[string]FunctionDecision)
+	for _, d := range cr.DebugInfo.Decisions {
+		byName[d.FuncName] = d
+	}
+
+	// BadWithGoroutine is a DurableLeaf with validation errors.
+	badName := "github.com/cleat-team/cleat/testdata/errors.BadWithGoroutine"
+	d, ok := byName[badName]
+	if !ok {
+		t.Fatalf("expected decision for %s", badName)
+	}
+	if !d.Included {
+		t.Errorf("expected %s to be included in DebugInfo", badName)
+	}
+	if d.Tag != "DurableLeaf" {
+		t.Errorf("expected %s to be DurableLeaf, got %s", badName, d.Tag)
+	}
+	hasValidationError := false
+	for _, r := range d.Reasons {
+		if len(r) >= 10 && r[:10] == "validation" {
+			hasValidationError = true
+			break
+		}
+	}
+	if !hasValidationError {
+		t.Errorf("expected %s to have a validation error reason, got reasons: %v", badName, d.Reasons)
+	}
+
+	// pureHelper is Pure (excluded).
+	pureName := "github.com/cleat-team/cleat/testdata/errors.pureHelper"
+	d, ok = byName[pureName]
+	if !ok {
+		t.Fatalf("expected decision for %s", pureName)
+	}
+	if d.Included {
+		t.Errorf("expected %s to be excluded (Pure)", pureName)
+	}
+	if d.Tag != "Pure" {
+		t.Errorf("expected %s to be Pure, got %s", pureName, d.Tag)
+	}
+	if len(d.Reasons) == 0 {
+		t.Errorf("expected %s to have exclusion reasons", pureName)
+	}
+
+	t.Logf("DebugInfo: %d decisions, %d errors, %d warnings", len(cr.DebugInfo.Decisions), cr.NumErrors(), cr.NumWarnings())
+}

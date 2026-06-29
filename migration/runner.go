@@ -21,11 +21,20 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
+const (
+	maxMigrationRetries = 3
+	migrationRetryDelay = 1 * time.Second
+)
+
 // Runner applies pending SQL migrations to a database.
 type Runner struct {
 	db            *sql.DB
 	dialect       engine.Dialect
 	migrationsDir string
+	lockTimeout   time.Duration
+	// applyMigrationFn is the function called to apply a single migration.
+	// Defaults to Runner.applyMigration; overridden in tests.
+	applyMigrationFn func(ctx context.Context, m migration) error
 }
 
 // migration represents a single versioned SQL migration file.
@@ -37,12 +46,16 @@ type migration struct {
 
 // NewRunner creates a migration runner that reads .sql files from the
 // dialect-specific subdirectory under dir and applies pending ones against db.
-func NewRunner(db *sql.DB, dialect engine.Dialect, dir string) *Runner {
-	return &Runner{
+// lockTimeout is the per-migration lock timeout (0 = no timeout).
+func NewRunner(db *sql.DB, dialect engine.Dialect, dir string, lockTimeout time.Duration) *Runner {
+	r := &Runner{
 		db:            db,
 		dialect:       dialect,
 		migrationsDir: dir,
+		lockTimeout:   lockTimeout,
 	}
+	r.applyMigrationFn = r.applyMigration
+	return r
 }
 
 // Run applies all pending migrations in version order within individual
@@ -71,17 +84,18 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("get applied versions: %w", err)
 	}
 
-	// 4. Apply each pending migration in order.
+	// 4. Apply each pending migration in order, retrying up to
+	//    maxMigrationRetries times on failure.
 	for _, m := range migrations {
 		if applied[m.version] {
 			continue
 		}
 
-		log.Printf("[migration] applying %s", m.name)
-		if err := r.applyMigration(ctx, m); err != nil {
-			return fmt.Errorf("migration %s: %w", m.name, err)
+		if err := runMigrationWithRetry(ctx, m.name, func(ctx context.Context) error {
+			return r.applyMigrationFn(ctx, m)
+		}); err != nil {
+			return err
 		}
-		log.Printf("[migration] applied %s", m.name)
 	}
 
 	return nil
@@ -201,6 +215,49 @@ func (r *Runner) getAppliedVersions(ctx context.Context) (map[int]bool, error) {
 	return applied, nil
 }
 
+// runMigrationWithRetry applies a single migration via applyFn, retrying
+// up to maxMigrationRetries times with migrationRetryDelay between attempts.
+// On final failure it returns an error including the migration name and
+// attempt count.
+func runMigrationWithRetry(ctx context.Context, name string, applyFn func(context.Context) error) error {
+	log.Printf("[migration] applying %s", name)
+	var lastErr error
+	for attempt := 1; attempt <= maxMigrationRetries; attempt++ {
+		if err := applyFn(ctx); err != nil {
+			lastErr = err
+			if attempt < maxMigrationRetries {
+				log.Printf("[migration] attempt %d/%d for %s failed: %v — retrying in %v",
+					attempt, maxMigrationRetries, name, err, migrationRetryDelay)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(migrationRetryDelay):
+				}
+				continue
+			}
+		} else {
+			log.Printf("[migration] applied %s", name)
+			return nil
+		}
+	}
+	return fmt.Errorf("migration %s failed after %d attempts: %w", name, maxMigrationRetries, lastErr)
+}
+
+// lockTimeoutSQL returns the dialect-specific SET statement for the
+// configured lock timeout. Returns empty string for unknown dialects.
+func (r *Runner) lockTimeoutSQL() string {
+	switch r.dialect {
+	case engine.DialectPostgres:
+		return fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", r.lockTimeout.Milliseconds())
+	case engine.DialectMySQL:
+		return fmt.Sprintf("SET SESSION innodb_lock_wait_timeout = %d", int(r.lockTimeout.Seconds()))
+	case engine.DialectMSSQL:
+		return fmt.Sprintf("SET LOCK_TIMEOUT %d", r.lockTimeout.Milliseconds())
+	default:
+		return ""
+	}
+}
+
 // applyMigration executes a single migration within its own transaction.
 // On success the version is recorded in schema_migrations and the
 // transaction is committed. On failure the transaction is rolled back
@@ -214,6 +271,14 @@ func (r *Runner) applyMigration(ctx context.Context, m migration) error {
 		// Rollback is a no-op after a successful Commit.
 		_ = tx.Rollback()
 	}()
+
+	// Set per-migration lock timeout so a blocked DDL statement fails
+	// quickly instead of hanging indefinitely.
+	if r.lockTimeout > 0 {
+		if _, err := tx.ExecContext(ctx, r.lockTimeoutSQL()); err != nil {
+			return fmt.Errorf("set lock timeout: %w", err)
+		}
+	}
 
 	// MySQL and MSSQL drivers require statement splitting for
 	// multi-statement SQL. Postgres (pq) handles it natively.

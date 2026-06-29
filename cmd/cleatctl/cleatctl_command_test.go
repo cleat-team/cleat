@@ -1793,3 +1793,23 @@ func (m *mockStore) PickVersionByRouting(ctx context.Context, workflowName strin
 func (m *mockStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	return 0, nil
 }
+
+func (m *mockStore) ResolveVersionWithCanary(ctx context.Context, workflowName string) (int, string, error) {
+	return 0, "stable", nil
+}
+
+func (m *mockStore) SetCanaryWeight(ctx context.Context, workflowName string, tag string, weight int) error {
+	return nil
+}
+
+func (m *mockStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	return nil
+}
+
+func (m *mockStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	return nil
+}
+
+func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	return nil
+}

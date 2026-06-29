@@ -388,6 +388,16 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 			memoryPages = 65536
 		}
 	}
+
+	// Cumulative WASM allocation check.
+	allocBytes, err := w.checkCumulativeAllocation(wasmBytes)
+	if err != nil {
+		w.logger.ErrorContext(context.Background(), "runDefers: cumulative WASM allocation limit reached", "worker_id", w.id, "error", err)
+		return
+	}
+	if allocBytes > 0 {
+		defer w.wasmCumulativeAllocBytes.Add(-allocBytes)
+	}
 	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 	rt.Metrics = w.Metrics
 	if err != nil {
@@ -897,9 +907,11 @@ type Worker struct {
 	disableChecksumVerification *bool
 	requireSignalAuth           *bool
 	wasmMemoryMaxMB             *int
-	wasmInstructionLimit        *int
-	wasmDiskCache               *engine.WasmDiskCache
-	wasmtimeBackend             engine.WasmBackend
+	wasmInstructionLimit           *int
+	wasmCumulativeAllocationMaxMB  *int
+	wasmCumulativeAllocBytes       *atomic.Int64
+	wasmDiskCache                  *engine.WasmDiskCache
+	wasmtimeBackend                engine.WasmBackend
 
 	drainCh   chan struct{}
 	drainOnce sync.Once
@@ -952,6 +964,29 @@ type Worker struct {
 	loopCtxMap map[string]*loopContext
 
 	loopMu sync.Mutex // protects loopFuncs and loopCtxMap from concurrent access
+}
+
+// checkCumulativeAllocation atomically reserves WASM memory allocation bytes
+// from the shared cumulative counter. Returns the number of bytes reserved
+// (0 when the limit is disabled) or an error if the limit would be exceeded.
+// The caller must defer w.wasmCumulativeAllocBytes.Add(-allocBytes) when
+// allocBytes > 0 to release the reservation.
+func (w *Worker) checkCumulativeAllocation(wasmBytes []byte) (int64, error) {
+	if w.wasmCumulativeAllocationMaxMB == nil || *w.wasmCumulativeAllocationMaxMB <= 0 {
+		return 0, nil
+	}
+	requiredPages := wasm.ReadMemoryInitialPages(wasmBytes)
+	allocBytes := int64(requiredPages) * 65536
+	maxBytes := int64(*w.wasmCumulativeAllocationMaxMB) * 1024 * 1024
+	newTotal := w.wasmCumulativeAllocBytes.Add(allocBytes)
+	if newTotal > maxBytes {
+		w.wasmCumulativeAllocBytes.Add(-allocBytes) // rollback
+		currentMB := float64(newTotal-allocBytes) / 1024 / 1024
+		requiredMB := float64(requiredPages) * 65536 / 1024 / 1024
+		return 0, fmt.Errorf("cumulative WASM allocation limit reached: current=%.0f MB, required=%.0f MB, limit=%d MB; increase --wasm-cumulative-allocation-max-mb or reduce concurrency",
+			currentMB, requiredMB, *w.wasmCumulativeAllocationMaxMB)
+	}
+	return allocBytes, nil
 }
 
 // DrainComplete returns a channel that is closed when the drain completes
@@ -1335,6 +1370,19 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, engine.ErrUnknown.String(), "", nil)
 			return
 		}
+	}
+
+	// ---- Cumulative WASM allocation check ----
+	allocBytes, err := w.checkCumulativeAllocation(wasmBytes)
+	if err != nil {
+		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
+		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrUnknown.String(), "", nil)
+		return
+	}
+	if allocBytes > 0 {
+		defer w.wasmCumulativeAllocBytes.Add(-allocBytes)
 	}
 
 	// ---- Load event history ----

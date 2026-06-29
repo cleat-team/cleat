@@ -83,6 +83,25 @@
 - **Migrations**: Schema changes go in all three backends
   (postgres/mysql/mssql). Test schemas must match production schemas.
 
+## Incoming Changes (cleat-238 through cleat-242, Jun 2026)
+
+- **cleat-238 (--dump-ir)**: New diagnostic output in `internal/closure/` —
+  `DebugInfo` struct with per-function inclusion/exclusion rationale. New
+  `--dump-ir` flag in `cmd/cleat/build.go` writes IR files to `<out>/ir/`.
+  Diagnostic only, no coupling changes.
+- **cleat-240 (Admin API)**: New `engine/admin_ops.go` for ForceComplete,
+  ForceFail, ReReplay. New HTTP endpoints under `/api/instances/` and
+  `/api/admin/` in worker. New `cmd/cleatctl/inspect.go` CLI. Destructive
+  ops gated behind `--enable-admin-api` (default off), audit events written
+  to `event_history`. New coupling: `cmd/cleatctl` → worker HTTP API (MEDIUM).
+- **cleat-241 (Canary traffic)**: New `canary_weight` column on
+  `workflow_tags` (migration 009, all 3 backends). Canary routing in
+  `engine/store_versioning.go`. New `cleatctl versions canary-weight`
+  subcommand. New metric: `cleat_canary_routing_total`.
+- **cleat-242 (Quick wins)**: F64 plugin capability enforcement, F67
+  migration lock timeout, F73 latency histogram buckets verification,
+  F79 WASM cumulative allocation tracking. All LOOSE coupled, independent.
+
 ## Known Sharp Edges
 
 - TinyGo compilation is deprecated (#36) — standard Go compilation is the

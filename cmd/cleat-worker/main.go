@@ -557,7 +557,7 @@ func main() {
 				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations")
+			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations", *migrationLockTimeout)
 			if terr = tm.Run(ctx); terr != nil {
 				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)

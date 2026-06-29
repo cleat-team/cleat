@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -27,6 +28,12 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 		Warnings:       make(map[string][]ValidationWarning),
 	}
 
+	// Track entry points.
+	entryPointSet := make(map[string]bool)
+	for _, ep := range result.EntryPoints {
+		entryPointSet[ep] = true
+	}
+
 	// Start with cleat leaves.
 	for name := range cg.DurableLeaves {
 		cr.DurableLeaves[name] = true
@@ -34,6 +41,7 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 
 	// Compute transitive closure: any function that calls a function
 	// in the cleat closure is itself in the cleat closure.
+	pulledInBy := make(map[string]string) // func → who pulled it in
 	changed := true
 	for changed {
 		changed = false
@@ -44,6 +52,7 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 			for callee := range callees {
 				if cr.DurableLeaves[callee] || cr.DurableClosure[callee] {
 					cr.DurableClosure[caller] = true
+					pulledInBy[caller] = callee
 					changed = true
 					break
 				}
@@ -61,6 +70,9 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 		}
 		cr.Pure[name] = true
 	}
+
+	// Build DebugInfo after tagging but before validation.
+	cr.DebugInfo = buildDebugInfo(result, cr, entryPointSet, pulledInBy)
 
 	// Update analysis result tags.
 	for name := range cr.DurableLeaves {
@@ -103,7 +115,74 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 	// Validate that init() functions do not call durable functions.
 	validateInitFunctions(result, cr)
 
+	// Augment DebugInfo with validation errors.
+	augmentDebugInfoWithErrors(cr)
+
 	return cr
+}
+
+// buildDebugInfo constructs the DebugInfo for the closure result.
+func buildDebugInfo(result *analyzer.AnalysisResult, cr *Result, entryPointSet map[string]bool, pulledInBy map[string]string) *DebugInfo {
+	var decisions []FunctionDecision
+	for name := range result.Funcs {
+		fd := FunctionDecision{FuncName: name}
+		if cr.DurableLeaves[name] {
+			fd.Included = true
+			fd.Tag = "DurableLeaf"
+			if entryPointSet[name] {
+				fd.Reasons = append(fd.Reasons, "entry point: exported function with HostCalls first parameter")
+			} else {
+				fd.Reasons = append(fd.Reasons, "directly calls HostCalls methods")
+			}
+		} else if cr.DurableClosure[name] {
+			fd.Included = true
+			fd.Tag = "DurableClosure"
+			if caller, ok := pulledInBy[name]; ok {
+				fd.Reasons = append(fd.Reasons, "transitively reaches durable leaf via call to "+caller)
+			} else {
+				fd.Reasons = append(fd.Reasons, "in the durable closure")
+			}
+		} else {
+			fd.Included = false
+			fd.Tag = "Pure"
+			fd.Reasons = append(fd.Reasons, "not reachable from any entry point")
+		}
+		decisions = append(decisions, fd)
+	}
+	sort.Slice(decisions, func(i, j int) bool { return decisions[i].FuncName < decisions[j].FuncName })
+	return &DebugInfo{Decisions: decisions}
+}
+
+// augmentDebugInfoWithErrors adds validation errors as reasons to the
+// corresponding function decisions in the DebugInfo.
+func augmentDebugInfoWithErrors(cr *Result) {
+	if cr.DebugInfo == nil {
+		return
+	}
+	for funcName, errs := range cr.Errors {
+		for i, d := range cr.DebugInfo.Decisions {
+			if d.FuncName == funcName {
+				for _, e := range errs {
+					cr.DebugInfo.Decisions[i].Reasons = append(
+						cr.DebugInfo.Decisions[i].Reasons,
+						"validation error: "+e.Code+": "+e.Message)
+				}
+				break
+			}
+		}
+	}
+	for funcName, warns := range cr.Warnings {
+		for i, d := range cr.DebugInfo.Decisions {
+			if d.FuncName == funcName {
+				for _, w := range warns {
+					cr.DebugInfo.Decisions[i].Reasons = append(
+						cr.DebugInfo.Decisions[i].Reasons,
+						"validation warning: "+w.Code+": "+w.Message)
+				}
+				break
+			}
+		}
+	}
 }
 
 // Result holds the results of closure computation and validation.
@@ -113,6 +192,21 @@ type Result struct {
 	Pure           map[string]bool
 	Errors         map[string][]ValidationError
 	Warnings       map[string][]ValidationWarning
+	DebugInfo      *DebugInfo
+}
+
+// FunctionDecision records why a function was included in or excluded from
+// the durable closure.
+type FunctionDecision struct {
+	FuncName string   `json:"func_name"`
+	Included bool     `json:"included"`
+	Tag      string   `json:"tag"`
+	Reasons  []string `json:"reasons"`
+}
+
+// DebugInfo holds diagnostic information about the closure computation.
+type DebugInfo struct {
+	Decisions []FunctionDecision `json:"decisions"`
 }
 
 // ValidationError represents a validation error with its error code.

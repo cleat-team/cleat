@@ -229,6 +229,7 @@ CREATE TABLE IF NOT EXISTS workflow_tags (
     workflow_name VARCHAR(255) NOT NULL,
     version INTEGER NOT NULL,
     tag VARCHAR(255) NOT NULL,
+    canary_weight INT NOT NULL DEFAULT 0,
     created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
     tenant_id CHAR(36),
     PRIMARY KEY (workflow_name, tag),
@@ -290,3 +291,6 @@ CREATE INDEX idx_instances_terminal_completed ON workflow_instances(tenant_id, s
 CREATE INDEX idx_concurrency_keys_expires ON concurrency_keys(expires_at);
 CREATE INDEX idx_instances_parent_policy ON workflow_instances(parent_workflow_id, parent_close_policy, status);
 CREATE INDEX idx_workflow_instances_ready_claim ON workflow_instances(tenant_id, task_queue, status, priority, created_at);
+
+-- Canary weight migration (idempotent, MySQL 8.0+)
+ALTER TABLE workflow_tags ADD COLUMN IF NOT EXISTS canary_weight INT NOT NULL DEFAULT 0;

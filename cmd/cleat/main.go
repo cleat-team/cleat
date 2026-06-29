@@ -101,9 +101,11 @@ func main() {
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: produce both)")
 		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
+		var dumpIR bool
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
 		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
+		fs.BoolVar(&dumpIR, "dump-ir", false, "write intermediate representations to <outdir>/ir/")
 		fs.Parse(os.Args[2:])
 		if !isValidTarget(target) {
 			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript, python\n", target)
@@ -124,9 +126,9 @@ func main() {
 		}
 		if entry != "" {
 			// Use --entry as the pattern for Python builds.
-			runBuild(entry, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, workflowVersion)
+			runBuild(entry, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, dumpIR, workflowVersion)
 		} else {
-			runBuild(pattern, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, workflowVersion)
+			runBuild(pattern, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, dumpIR, workflowVersion)
 		}
 	case "vet":
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
@@ -201,7 +203,7 @@ func main() {
 	}
 }
 
-func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, diffOut bool, sizeReport bool, workflowVersion int) {
+func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, diffOut bool, sizeReport bool, dumpIR bool, workflowVersion int) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
@@ -340,6 +342,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 			fmt.Fprintf(os.Stderr, "Error creating temp directory: %v\n", err)
 			os.Exit(1)
 		}
+		keepTempDir = dumpIR
 		defer func() {
 			if !keepTempDir {
 				os.RemoveAll(outDir)
@@ -372,6 +375,12 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	}
 
 	logBuildProgress("  Build directory: %s\n", jsonOut, outDir)
+
+	if dumpIR {
+		writeIRFiles(outDir, result, cg, cr, tr)
+		irDir := filepath.Join(outDir, "ir")
+		logBuildProgress("  IR files written to: %s\n", jsonOut, irDir)
+	}
 
 	// Run go mod tidy in the build directory to generate go.sum entries
 	// before compilation. For TinyGo, the .deps/ tree provides the cleat module
@@ -1694,4 +1703,191 @@ func runLock(args []string) {
 	for name, v := range resolved {
 		fmt.Printf("  %s: v%d\n", name, v)
 	}
+}
+
+// writeIRFiles writes intermediate representation files to <outDir>/ir/.
+func writeIRFiles(outDir string, result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *closure.Result, tr *transform.Result) {
+	irDir := filepath.Join(outDir, "ir")
+	if err := os.MkdirAll(irDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: creating IR directory: %v\n", err)
+		return
+	}
+
+	// 01-packages.json
+	writeIRJSON(filepath.Join(irDir, "01-packages.json"), buildPackagesIR(result))
+
+	// 02-callgraph.json
+	writeIRJSON(filepath.Join(irDir, "02-callgraph.json"), buildCallgraphIR(cg))
+
+	// 03-closure.json
+	writeIRJSON(filepath.Join(irDir, "03-closure.json"), buildClosureIR(cr))
+
+	// 04-transform.go
+	writeTransformIR(filepath.Join(irDir, "04-transform.go"), tr)
+}
+
+func writeIRJSON(path string, v any) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: serializing %s: %v\n", filepath.Base(path), err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: writing %s: %v\n", filepath.Base(path), err)
+	}
+}
+
+func writeTransformIR(path string, tr *transform.Result) {
+	var buf strings.Builder
+	for _, name := range sortedKeys(tr.Files) {
+		buf.WriteString("// ===== file: ")
+		buf.WriteString(filepath.Base(name))
+		buf.WriteString(" =====\n")
+		buf.Write(tr.Files[name])
+		buf.WriteString("\n")
+	}
+	if err := os.WriteFile(path, []byte(buf.String()), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: writing %s: %v\n", filepath.Base(path), err)
+	}
+}
+
+// ---- IR data types ----
+
+type packagesIR struct {
+	TargetPkg   string          `json:"target_package"`
+	ModulePath  string          `json:"module_path"`
+	GoVersion   string          `json:"go_version"`
+	NumFuncs    int             `json:"num_funcs"`
+	EntryPoints []string        `json:"entry_points"`
+	Packages    []packageIR     `json:"packages"`
+}
+
+type packageIR struct {
+	Path  string   `json:"path"`
+	Name  string   `json:"name"`
+	Dir   string   `json:"dir"`
+	Funcs []funcIR `json:"funcs"`
+}
+
+type funcIR struct {
+	Name          string `json:"name"`
+	FQName        string `json:"fq_name"`
+	IsExported    bool   `json:"is_exported"`
+	IsEntryPoint  bool   `json:"is_entry_point"`
+	DurabilityTag string `json:"durability_tag"`
+}
+
+type callgraphIR struct {
+	Edges         []edgeIR `json:"edges"`
+	DurableLeaves []string `json:"durable_leaves"`
+}
+
+type edgeIR struct {
+	Caller string `json:"caller"`
+	Callee string `json:"callee"`
+}
+
+type closureIR struct {
+	DurableLeaves  []string           `json:"durable_leaves"`
+	DurableClosure []string           `json:"durable_closure"`
+	Pure           []string           `json:"pure"`
+	DebugInfo      *closure.DebugInfo `json:"debug_info"`
+	NumErrors      int                `json:"num_errors"`
+	NumWarnings    int                `json:"num_warnings"`
+}
+
+// ---- IR builders ----
+
+func buildPackagesIR(result *analyzer.AnalysisResult) *packagesIR {
+	pir := &packagesIR{
+		TargetPkg:   result.TargetPkg.Path,
+		ModulePath:  result.ModulePath,
+		GoVersion:   result.GoVersion,
+		NumFuncs:    result.NumFuncs,
+		EntryPoints: result.EntryPoints,
+	}
+
+	// Group functions by package, sorted by FQ name.
+	pkgFuncs := make(map[string][]funcIR)
+	for fqname, fd := range result.Funcs {
+		pkgPath := fd.Pkg.Path
+		pkgFuncs[pkgPath] = append(pkgFuncs[pkgPath], funcIR{
+			Name:          fd.Name,
+			FQName:        fqname,
+			IsExported:    fd.IsExported,
+			IsEntryPoint:  fd.IsEntryPoint,
+			DurabilityTag: fd.DurabilityTag,
+		})
+	}
+	for _, funcs := range pkgFuncs {
+		sort.Slice(funcs, func(i, j int) bool { return funcs[i].FQName < funcs[j].FQName })
+	}
+
+	// Sort packages by path for deterministic output.
+	sortedPkgs := make([]*analyzer.Package, len(result.UserPkgs))
+	copy(sortedPkgs, result.UserPkgs)
+	sort.Slice(sortedPkgs, func(i, j int) bool { return sortedPkgs[i].Path < sortedPkgs[j].Path })
+
+	for _, pkg := range sortedPkgs {
+		funcs := pkgFuncs[pkg.Path]
+		if funcs == nil {
+			funcs = []funcIR{}
+		}
+		pir.Packages = append(pir.Packages, packageIR{
+			Path:  pkg.Path,
+			Name:  pkg.Name,
+			Dir:   pkg.Dir,
+			Funcs: funcs,
+		})
+	}
+	return pir
+}
+
+type edgeIRSlice []edgeIR
+
+func (s edgeIRSlice) Len() int           { return len(s) }
+func (s edgeIRSlice) Less(i, j int) bool { return s[i].Caller < s[j].Caller || (s[i].Caller == s[j].Caller && s[i].Callee < s[j].Callee) }
+func (s edgeIRSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+func buildCallgraphIR(cg *callgraph.Graph) *callgraphIR {
+	var edges []edgeIR
+	for caller, callees := range cg.Calls {
+		for callee := range callees {
+			edges = append(edges, edgeIR{Caller: caller, Callee: callee})
+		}
+	}
+	sort.Sort(edgeIRSlice(edges))
+	return &callgraphIR{
+		Edges:         edges,
+		DurableLeaves: sortedKeysBool(cg.DurableLeaves),
+	}
+}
+
+func buildClosureIR(cr *closure.Result) *closureIR {
+	return &closureIR{
+		DurableLeaves:  sortedKeysBool(cr.DurableLeaves),
+		DurableClosure: sortedKeysBool(cr.DurableClosure),
+		Pure:           sortedKeysBool(cr.Pure),
+		DebugInfo:      cr.DebugInfo,
+		NumErrors:      cr.NumErrors(),
+		NumWarnings:    cr.NumWarnings(),
+	}
+}
+
+func sortedKeysBool(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedKeys(m map[string][]byte) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

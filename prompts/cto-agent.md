@@ -95,6 +95,18 @@ sequence:
    (e.g. "task_state/clew-103/artifacts/dag.json"), and today's budget from
    your survey. Each entry in decomps_ready/decomps_needing_review needs:
    task_id, dag_path, and depends_on (array of parent task IDs that must
+
+	   **CRITICAL: You MUST also include a `dag_json` field** containing the
+	   FULL CONTENTS of the dag.json file. Read each dag.json file at the
+	   dag_path and include its entire content as a JSON object in the
+	   `dag_json` field. Without this inline content, the decompose child
+	   workflow cannot create leaf tasks in service mode. Example entry:
+	   {
+	     "task_id": "clew-103",
+	     "dag_path": "task_state/clew-103/artifacts/dag.json",
+	     "dag_json": {<full dag.json contents here>},
+	     "depends_on": []
+	   }
    complete first, empty array if none).
 
    Each entry in tasks_to_close needs: task_id and reason (one sentence).
