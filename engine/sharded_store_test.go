@@ -60,6 +60,9 @@ type mockShardStore struct {
 	listWorkflowDefsFn           func(ctx context.Context, name string) ([]WorkflowDef, error)
 	getWorkflowDefFn             func(ctx context.Context, name string, version int) (*WorkflowDef, error)
 	heartbeatFn                  func(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
+	adminForceCompleteFn         func(ctx context.Context, workflowID string, generation int64, result string, operator string) error
+	adminForceFailFn             func(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error
+	adminReReplayFn              func(ctx context.Context, workflowID string, generation int64, operator string) error
 
 	// Call tracking
 	mu     sync.Mutex
@@ -717,6 +720,30 @@ func (m *mockShardStore) TerminateWorkflow(ctx context.Context, workflowID, reas
 	return m.err
 }
 
+func (m *mockShardStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	m.recordCall("AdminForceComplete")
+	if m.adminForceCompleteFn != nil {
+		return m.adminForceCompleteFn(ctx, workflowID, generation, result, operator)
+	}
+	return m.err
+}
+
+func (m *mockShardStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	m.recordCall("AdminForceFail")
+	if m.adminForceFailFn != nil {
+		return m.adminForceFailFn(ctx, workflowID, generation, errorMsg, errorCode, operator)
+	}
+	return m.err
+}
+
+func (m *mockShardStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	m.recordCall("AdminReReplay")
+	if m.adminReReplayFn != nil {
+		return m.adminReReplayFn(ctx, workflowID, generation, operator)
+	}
+	return m.err
+}
+
 func (m *mockShardStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
 	m.recordCall("StreamEventHistory")
 	if m.streamEventHistoryFn != nil {
@@ -842,6 +869,20 @@ func (m *mockShardStore) ResolveVersionByTag(ctx context.Context, workflowName s
 		return 0, m.err
 	}
 	return 0, nil
+}
+func (m *mockShardStore) ResolveVersionWithCanary(ctx context.Context, workflowName string) (int, string, error) {
+	m.recordCall("ResolveVersionWithCanary")
+	if m.err != nil {
+		return 0, "", m.err
+	}
+	return 0, "", nil
+}
+func (m *mockShardStore) SetCanaryWeight(ctx context.Context, workflowName string, tag string, weight int) error {
+	m.recordCall("SetCanaryWeight")
+	if m.err != nil {
+		return m.err
+	}
+	return nil
 }
 
 // metricsStore implementation

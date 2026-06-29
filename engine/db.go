@@ -1082,6 +1082,195 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 	return nil
 }
 
+// AdminForceComplete force-completes a workflow, writing an audit event in the
+// same transaction. Generation check prevents stale writes.
+func (s *PostgresStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("admin force-complete: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Determine audit event step number.
+	var auditStep int
+	err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(step), -1) + 1 FROM event_history WHERE workflow_id = $1`,
+		workflowID).Scan(&auditStep)
+	if err != nil {
+		return fmt.Errorf("admin force-complete: get step: %w", err)
+	}
+
+	result2, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL
+		WHERE id = $1 AND generation = $2
+	`, workflowID, generation, result)
+	if err != nil {
+		return fmt.Errorf("admin force-complete: %w", err)
+	}
+	rows, _ := result2.RowsAffected()
+	if rows == 0 {
+		// Distinguish workflow not found from generation mismatch.
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE id = $1)`, workflowID).Scan(&exists)
+		if !exists {
+			return fmt.Errorf("admin force-complete: workflow %s not found", workflowID)
+		}
+		return fmt.Errorf("admin force-complete: generation mismatch for workflow %s", workflowID)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO event_history (workflow_id, step, event_type, service, op, err, timestamp_ms)
+		VALUES ($1, $2, 'admin_action', $3, 'force_complete', '', extract(epoch from now()) * 1000)
+		ON CONFLICT (workflow_id, step) DO NOTHING
+	`, workflowID, auditStep, operator)
+	if err != nil {
+		return fmt.Errorf("admin force-complete: insert audit event: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE workflow_instances SET event_count = event_count + 1 WHERE id = $1`,
+		workflowID)
+	if err != nil {
+		return fmt.Errorf("admin force-complete: increment event_count: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin force-complete commit: %w", err)
+	}
+
+	s.ClearStickyWorker(context.Background(), workflowID)
+	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID)
+	return nil
+}
+
+// AdminForceFail force-fails a workflow, writing an audit event in the same
+// transaction. Generation check prevents stale writes.
+func (s *PostgresStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("admin force-fail: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var auditStep int
+	err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(step), -1) + 1 FROM event_history WHERE workflow_id = $1`,
+		workflowID).Scan(&auditStep)
+	if err != nil {
+		return fmt.Errorf("admin force-fail: get step: %w", err)
+	}
+
+	result2, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'failed', error_msg = $3, error_code = $4,
+		    completed_at = now(), assigned_to = NULL
+		WHERE id = $1 AND generation = $2
+	`, workflowID, generation, errorMsg, errorCode)
+	if err != nil {
+		return fmt.Errorf("admin force-fail: %w", err)
+	}
+	rows, _ := result2.RowsAffected()
+	if rows == 0 {
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE id = $1)`, workflowID).Scan(&exists)
+		if !exists {
+			return fmt.Errorf("admin force-fail: workflow %s not found", workflowID)
+		}
+		return fmt.Errorf("admin force-fail: generation mismatch for workflow %s", workflowID)
+	}
+
+	reason := fmt.Sprintf("%s (code: %s)", errorMsg, errorCode)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO event_history (workflow_id, step, event_type, service, op, err, timestamp_ms)
+		VALUES ($1, $2, 'admin_action', $3, 'force_fail', $4, extract(epoch from now()) * 1000)
+		ON CONFLICT (workflow_id, step) DO NOTHING
+	`, workflowID, auditStep, operator, reason)
+	if err != nil {
+		return fmt.Errorf("admin force-fail: insert audit event: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE workflow_instances SET event_count = event_count + 1 WHERE id = $1`,
+		workflowID)
+	if err != nil {
+		return fmt.Errorf("admin force-fail: increment event_count: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin force-fail commit: %w", err)
+	}
+
+	s.ClearStickyWorker(context.Background(), workflowID)
+	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID)
+	return nil
+}
+
+// AdminReReplay resets a workflow to 'ready' state, writing an audit event in
+// the same transaction. Generation check prevents stale writes.
+func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("admin re-replay: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var auditStep int
+	err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(step), -1) + 1 FROM event_history WHERE workflow_id = $1`,
+		workflowID).Scan(&auditStep)
+	if err != nil {
+		return fmt.Errorf("admin re-replay: get step: %w", err)
+	}
+
+	result2, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		    error_msg = NULL, error_code = NULL, error_op = NULL,
+		    next_wake_at = now()
+		WHERE id = $1 AND generation = $2
+	`, workflowID, generation)
+	if err != nil {
+		return fmt.Errorf("admin re-replay: %w", err)
+	}
+	rows, _ := result2.RowsAffected()
+	if rows == 0 {
+		var exists bool
+		_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE id = $1)`, workflowID).Scan(&exists)
+		if !exists {
+			return fmt.Errorf("admin re-replay: workflow %s not found", workflowID)
+		}
+		return fmt.Errorf("admin re-replay: generation mismatch for workflow %s", workflowID)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO event_history (workflow_id, step, event_type, service, op, err, timestamp_ms)
+		VALUES ($1, $2, 'admin_action', $3, 're_replay', '', extract(epoch from now()) * 1000)
+		ON CONFLICT (workflow_id, step) DO NOTHING
+	`, workflowID, auditStep, operator)
+	if err != nil {
+		return fmt.Errorf("admin re-replay: insert audit event: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE workflow_instances SET event_count = event_count + 1 WHERE id = $1`,
+		workflowID)
+	if err != nil {
+		return fmt.Errorf("admin re-replay: increment event_count: %w", err)
+	}
+
+	pgNotify(ctx, tx, s.notifyChannel)
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin re-replay commit: %w", err)
+	}
+
+	s.ClearStickyWorker(context.Background(), workflowID)
+	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	return nil
+}
+
 // DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
 // whose completed_at is older than the cutoff. Child rows (event_history, signals,
 // promises, concurrency_keys, update_requests) are automatically deleted via

@@ -100,6 +100,9 @@ type mockStore struct {
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
 	terminateWorkflowFn                func(ctx context.Context, workflowID, reason string) error
+	adminForceCompleteFn               func(ctx context.Context, workflowID string, generation int64, result string, operator string) error
+	adminForceFailFn                   func(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error
+	adminReReplayFn                    func(ctx context.Context, workflowID string, generation int64, operator string) error
 }
 
 func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID string) (*engine.WorkflowInstance, error) {
@@ -3099,6 +3102,28 @@ func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason st
 	}
 	return nil
 }
+
+func (m *mockStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	if m.adminForceCompleteFn != nil {
+		return m.adminForceCompleteFn(ctx, workflowID, generation, result, operator)
+	}
+	return nil
+}
+
+func (m *mockStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	if m.adminForceFailFn != nil {
+		return m.adminForceFailFn(ctx, workflowID, generation, errorMsg, errorCode, operator)
+	}
+	return nil
+}
+
+func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	if m.adminReReplayFn != nil {
+		return m.adminReReplayFn(ctx, workflowID, generation, operator)
+	}
+	return nil
+}
+
 func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	return 0, nil
 }
@@ -3139,6 +3164,12 @@ func (m *mockStore) PickVersionByRouting(ctx context.Context, workflowName strin
 }
 func (m *mockStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	return 0, nil
+}
+func (m *mockStore) ResolveVersionWithCanary(ctx context.Context, workflowName string) (int, string, error) {
+	return 0, "", nil
+}
+func (m *mockStore) SetCanaryWeight(ctx context.Context, workflowName string, tag string, weight int) error {
+	return nil
 }
 
 // ---- healthTracker unit tests ----

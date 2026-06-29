@@ -551,6 +551,15 @@ func (m *mockCompactStore) FinalizeWorkflowSegment(ctx context.Context, runID, w
 func (m *mockCompactStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return nil
 }
+func (m *mockCompactStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	return nil
+}
+func (m *mockCompactStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	return nil
+}
+func (m *mockCompactStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	return nil
+}
 func (m *mockCompactStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
@@ -1677,6 +1686,12 @@ func (m *mockCompactStore) PickVersionByRouting(ctx context.Context, workflowNam
 }
 func (m *mockCompactStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	return 0, nil
+}
+func (m *mockCompactStore) ResolveVersionWithCanary(ctx context.Context, workflowName string) (int, string, error) {
+	return 0, "", nil
+}
+func (m *mockCompactStore) SetCanaryWeight(ctx context.Context, workflowName string, tag string, weight int) error {
+	return nil
 }
 
 // retryMockStore wraps mockCompactStore and fails CompactHistory a specified

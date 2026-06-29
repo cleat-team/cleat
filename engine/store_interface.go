@@ -312,6 +312,21 @@ type WorkflowStore interface {
 	// indeterminate state and should only be used when a workflow is truly stuck.
 	TerminateWorkflow(ctx context.Context, workflowID, reason string) error
 
+	// AdminForceComplete sets a workflow to 'done' status regardless of current
+	// worker assignment. Generation check prevents stale writes. An audit event
+	// is written atomically with the status change.
+	AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error
+
+	// AdminForceFail sets a workflow to 'failed' status regardless of current
+	// worker assignment. Generation check prevents stale writes. An audit event
+	// is written atomically with the status change.
+	AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error
+
+	// AdminReReplay resets a workflow to 'ready' state for re-execution.
+	// Generation check prevents stale writes. An audit event is written
+	// atomically with the status change.
+	AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error
+
 	// DeleteDeadLetteredWorkflows permanently deletes workflow instances that are
 	// in the dead_lettered state and whose completed_at is older than the cutoff.
 	// Child rows (event_history, signals, promises, concurrency_keys, update_requests)

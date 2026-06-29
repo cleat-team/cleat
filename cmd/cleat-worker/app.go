@@ -75,6 +75,10 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
 	mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
 	mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
+	mux.HandleFunc("/api/instances/", api.handleInstancesRoutes)
+	if enableAdminAPI != nil && *enableAdminAPI {
+		mux.HandleFunc("/api/admin/instances/", api.handleAdminRoutes)
+	}
 	return mux
 }
 

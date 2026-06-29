@@ -1577,6 +1577,18 @@ func (s *stubWorkflowStore) TerminateWorkflow(ctx context.Context, workflowID, r
 	return nil
 }
 
+func (s *stubWorkflowStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	return nil
+}
+
+func (s *stubWorkflowStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	return nil
+}
+
+func (s *stubWorkflowStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	return nil
+}
+
 func (s *stubWorkflowStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
@@ -2504,6 +2516,12 @@ func (s *stubWorkflowStore) PickVersionByRouting(ctx context.Context, workflowNa
 }
 func (s *stubWorkflowStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	return 0, nil
+}
+func (s *stubWorkflowStore) ResolveVersionWithCanary(ctx context.Context, workflowName string) (int, string, error) {
+	return 0, "", nil
+}
+func (s *stubWorkflowStore) SetCanaryWeight(ctx context.Context, workflowName string, tag string, weight int) error {
+	return nil
 }
 func (m *mockCollectMetricsStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
 	return nil, nil

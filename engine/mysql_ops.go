@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	mathrand "math/rand"
 	"sort"
 	"time"
 
@@ -1120,6 +1121,128 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 	return nil
 }
 
+// adminOpMySQL performs an admin operation on MySQL with audit event.
+func (s *MySQLStore) adminOpMySQL(ctx context.Context, workflowID string, generation int64, operator, action, opPrefix string, doUpdate func(tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%s: begin: %w", opPrefix, err)
+	}
+	defer tx.Rollback()
+
+	var auditStep int
+	err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(step), -1) + 1 FROM event_history WHERE workflow_id = ?`,
+		workflowID).Scan(&auditStep)
+	if err != nil {
+		return fmt.Errorf("%s: get step: %w", opPrefix, err)
+	}
+
+	if err := doUpdate(tx); err != nil {
+		return fmt.Errorf("%s: %w", opPrefix, err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT IGNORE INTO event_history (workflow_id, step, event_type, service, op, err, timestamp_ms)
+		VALUES (?, ?, 'admin_action', ?, ?, '', UNIX_TIMESTAMP(NOW(3)) * 1000)
+	`, workflowID, auditStep, operator, action)
+	if err != nil {
+		return fmt.Errorf("%s: insert audit event: %w", opPrefix, err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE workflow_instances SET event_count = event_count + 1 WHERE id = ?`,
+		workflowID)
+	if err != nil {
+		return fmt.Errorf("%s: increment event_count: %w", opPrefix, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%s commit: %w", opPrefix, err)
+	}
+
+	s.ClearStickyWorker(context.Background(), workflowID)
+	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	return nil
+}
+
+// AdminForceComplete force-completes a workflow on MySQL.
+func (s *MySQLStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	return s.adminOpMySQL(ctx, workflowID, generation, operator, "force_complete", "admin force-complete",
+		func(tx *sql.Tx) error {
+			r, err := tx.ExecContext(ctx, `
+				UPDATE workflow_instances
+				SET status = 'done', result = ?, completed_at = NOW(), assigned_to = NULL
+				WHERE id = ? AND generation = ? AND tenant_id = ?
+			`, result, workflowID, generation, s.tenantID)
+			if err != nil {
+				return err
+			}
+			rows, _ := r.RowsAffected()
+			if rows == 0 {
+				var exists bool
+				_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE id = ?)`, workflowID).Scan(&exists)
+				if !exists {
+					return fmt.Errorf("workflow %s not found", workflowID)
+				}
+				return fmt.Errorf("generation mismatch for workflow %s", workflowID)
+			}
+			return nil
+		})
+}
+
+// AdminForceFail force-fails a workflow on MySQL.
+func (s *MySQLStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	return s.adminOpMySQL(ctx, workflowID, generation, operator, "force_fail", "admin force-fail",
+		func(tx *sql.Tx) error {
+			r, err := tx.ExecContext(ctx, `
+				UPDATE workflow_instances
+				SET status = 'failed', error_msg = ?, error_code = ?,
+				    completed_at = NOW(), assigned_to = NULL
+				WHERE id = ? AND generation = ? AND tenant_id = ?
+			`, errorMsg, errorCode, workflowID, generation, s.tenantID)
+			if err != nil {
+				return err
+			}
+			rows, _ := r.RowsAffected()
+			if rows == 0 {
+				var exists bool
+				_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE id = ?)`, workflowID).Scan(&exists)
+				if !exists {
+					return fmt.Errorf("workflow %s not found", workflowID)
+				}
+				return fmt.Errorf("generation mismatch for workflow %s", workflowID)
+			}
+			return nil
+		})
+}
+
+// AdminReReplay resets a workflow to 'ready' on MySQL.
+func (s *MySQLStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	return s.adminOpMySQL(ctx, workflowID, generation, operator, "re_replay", "admin re-replay",
+		func(tx *sql.Tx) error {
+			r, err := tx.ExecContext(ctx, `
+				UPDATE workflow_instances
+				SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+				    error_msg = NULL, error_code = NULL, error_op = NULL,
+				    next_wake_at = NOW()
+				WHERE id = ? AND generation = ? AND tenant_id = ?
+			`, workflowID, generation, s.tenantID)
+			if err != nil {
+				return err
+			}
+			rows, _ := r.RowsAffected()
+			if rows == 0 {
+				var exists bool
+				_ = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE id = ?)`, workflowID).Scan(&exists)
+				if !exists {
+					return fmt.Errorf("workflow %s not found", workflowID)
+				}
+				return fmt.Errorf("generation mismatch for workflow %s", workflowID)
+			}
+			return nil
+		})
+}
+
 // DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
 // whose completed_at is older than the cutoff. Child rows (event_history, signals,
 // promises, concurrency_keys, update_requests) are automatically deleted via
@@ -1369,4 +1492,67 @@ func (s *MySQLStore) ResolveVersionByTag(ctx context.Context, workflowName strin
 		return 0, fmt.Errorf("ResolveVersionByTag: %w", err)
 	}
 	return version, nil
+}
+
+// ResolveVersionWithCanary resolves the stable tag with canary traffic splitting.
+
+func (s *MySQLStore) ResolveVersionWithCanary(ctx context.Context, workflowName string) (int, string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT tag, version, canary_weight FROM workflow_tags
+		WHERE workflow_name = ? AND tag IN ('stable', 'canary') AND tenant_id = ?
+	`, workflowName, s.tenantID)
+	if err != nil {
+		return 0, "", fmt.Errorf("ResolveVersionWithCanary: query tags: %w", err)
+	}
+	defer rows.Close()
+
+	var stableVersion, canaryVersion, canaryWeight int
+	hasStable, hasCanary := false, false
+	for rows.Next() {
+		var tag string
+		var version, weight int
+		if err := rows.Scan(&tag, &version, &weight); err != nil {
+			return 0, "", fmt.Errorf("ResolveVersionWithCanary: scan: %w", err)
+		}
+		switch tag {
+		case "stable":
+			stableVersion = version
+			hasStable = true
+		case "canary":
+			canaryVersion = version
+			canaryWeight = weight
+			hasCanary = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, "", fmt.Errorf("ResolveVersionWithCanary: rows: %w", err)
+	}
+
+	if !hasStable {
+		return 0, "", fmt.Errorf("ResolveVersionWithCanary: no stable tag for workflow %s", workflowName)
+	}
+
+	if hasCanary && canaryWeight > 0 && mathrand.Intn(100) < canaryWeight {
+		return canaryVersion, "canary", nil
+	}
+	return stableVersion, "stable", nil
+}
+
+// SetCanaryWeight sets the canary_weight on an existing tag for a workflow.
+func (s *MySQLStore) SetCanaryWeight(ctx context.Context, workflowName string, tag string, weight int) error {
+	if weight < 0 || weight > 100 {
+		return fmt.Errorf("SetCanaryWeight: weight must be 0-100, got %d", weight)
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_tags SET canary_weight = ?
+		WHERE workflow_name = ? AND tag = ? AND tenant_id = ?
+	`, weight, workflowName, tag, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("SetCanaryWeight: update: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("SetCanaryWeight: tag %q not found for workflow %s", tag, workflowName)
+	}
+	return nil
 }

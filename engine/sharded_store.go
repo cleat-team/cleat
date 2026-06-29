@@ -1286,6 +1286,33 @@ func (s *ShardedStore) TerminateWorkflow(ctx context.Context, workflowID, reason
 	return shard.Store.TerminateWorkflow(ctx, workflowID, reason)
 }
 
+// AdminForceComplete routes by workflow ID.
+func (s *ShardedStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("admin_force_complete: no shard available")
+	}
+	return shard.Store.AdminForceComplete(ctx, workflowID, generation, result, operator)
+}
+
+// AdminForceFail routes by workflow ID.
+func (s *ShardedStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("admin_force_fail: no shard available")
+	}
+	return shard.Store.AdminForceFail(ctx, workflowID, generation, errorMsg, errorCode, operator)
+}
+
+// AdminReReplay routes by workflow ID.
+func (s *ShardedStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("admin_re_replay: no shard available")
+	}
+	return shard.Store.AdminReReplay(ctx, workflowID, generation, operator)
+}
+
 // LoadEventHistoryBatch returns event histories for multiple workflow IDs
 // by dispatching per-ID to the appropriate shard.
 func (s *ShardedStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error) {
