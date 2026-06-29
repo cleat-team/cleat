@@ -26,8 +26,10 @@ import (
 		"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -128,11 +130,19 @@ func main() {
 	shutdownTelemetry := setupTelemetry(ctx, *otelEndpoint, *otelDisabled, workerID)
 	defer shutdownTelemetry()
 
+	// Parse latency histogram buckets.
+	parsedBuckets, bucketErr := parseHistogramBuckets(*latencyHistogramBuckets)
+	if bucketErr != nil {
+		logger.ErrorContext(context.Background(), "invalid --latency-histogram-buckets", "error", bucketErr)
+		os.Exit(1)
+	}
+
 	// Create OTel metrics instance.
 	var metricsInstance *prometheus.Metrics
 	{
 		m, mErr := prometheus.New(prometheus.Config{
-			WorkerID: workerID,
+			WorkerID:                workerID,
+			LatencyHistogramBuckets: parsedBuckets,
 		})
 		if mErr != nil {
 			logger.ErrorContext(context.Background(), "failed to create metrics", "worker_id", workerID, "error", mErr)
@@ -528,7 +538,7 @@ func main() {
 	}
 
 	// Run core schema migrations before plugin migrations.
-	migrator := migration.NewRunner(db, factory.Dialect(), "migrations")
+	migrator := migration.NewRunner(db, factory.Dialect(), "migrations", *migrationLockTimeout)
 	if err := migrator.Run(ctx); err != nil {
 		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges", "worker_id", workerID, "error", err)
 		os.Exit(1)
@@ -548,7 +558,7 @@ func main() {
 				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations")
+			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations", *migrationLockTimeout)
 			if terr = tm.Run(ctx); terr != nil {
 				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)
@@ -575,6 +585,13 @@ func main() {
 			envCopy.DB = getPluginReadOnlyDB(db, pluginDB)
 		default: // DatabaseAccessReadWrite or empty (backward compat)
 			envCopy.DB = getPluginDB(db, pluginDB)
+		}
+		// Gate StartWorkflow capability.
+		if !lp.Plugin.Info().StartWorkflow {
+			pluginName := lp.Plugin.Info().Name
+			envCopy.StartWorkflow = func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+				return "", fmt.Errorf("plugin %q does not have the start_workflow capability", pluginName)
+			}
 		}
 		// Wrap SignalWorkflow with signal authorization.
 		// The plugin name is the caller identity checked against allowed_signals.
@@ -769,6 +786,8 @@ func main() {
 		maxRetries:                  *maxRetries,
 		wasmMemoryMaxMB:             wasmMemoryMaxMB,
 		wasmInstructionLimit:        wasmInstructionLimit,
+		wasmCumulativeAllocationMaxMB: wasmCumulativeAllocationMaxMB,
+		wasmCumulativeAllocBytes:      new(atomic.Int64),
 		wasmDiskCache:               wasmDiskCache,
 		wasmtimeBackend:             wasmtimeBackend,
 		maxQuotaEvents:              *maxQuotaEvents,
@@ -827,6 +846,14 @@ func main() {
 		mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
 		mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
 		mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
+
+		// Instance inspection endpoints (always on behind auth).
+		mux.HandleFunc("/api/instances/", api.handleInstancesRoutes)
+
+		// Admin API endpoints (gated behind --enable-admin-api flag).
+		if *enableAdminAPI {
+			mux.HandleFunc("/api/admin/instances/", api.handleAdminRoutes)
+		}
 
 		// Workflow definitions endpoint.
 		mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
@@ -1009,3 +1036,28 @@ func main() {
 	logger.InfoContext(context.Background(), "shutdown complete", "worker_id", workerID)
 }
 
+// parseHistogramBuckets parses a comma-separated list of float64 bucket
+// boundaries. Returns an error if any value is not numeric or if boundaries
+// are not strictly ascending. Empty string returns nil, nil.
+func parseHistogramBuckets(raw string) ([]float64, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	buckets := make([]float64, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		v, err := strconv.ParseFloat(p, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid bucket boundary %q: not a valid float64", p)
+		}
+		if len(buckets) > 0 && v <= buckets[len(buckets)-1] {
+			return nil, fmt.Errorf("bucket boundaries must be strictly ascending: %v <= %v", v, buckets[len(buckets)-1])
+		}
+		buckets = append(buckets, v)
+	}
+	if len(buckets) == 0 {
+		return nil, fmt.Errorf("at least one bucket boundary is required")
+	}
+	return buckets, nil
+}

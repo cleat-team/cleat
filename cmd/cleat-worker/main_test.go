@@ -385,3 +385,110 @@ func TestOtelFlagsRegistered(t *testing.T) {
 		t.Errorf("expected --otel-disabled=true")
 	}
 }
+
+func TestParseHistogramBuckets_Valid(t *testing.T) {
+	buckets, err := parseHistogramBuckets("0.001,0.01,0.1,1.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := []float64{0.001, 0.01, 0.1, 1.0}
+	if len(buckets) != len(expected) {
+		t.Fatalf("expected %d buckets, got %d", len(expected), len(buckets))
+	}
+	for i, v := range expected {
+		if buckets[i] != v {
+			t.Errorf("bucket[%d]: expected %v, got %v", i, v, buckets[i])
+		}
+	}
+}
+
+func TestParseHistogramBuckets_Empty(t *testing.T) {
+	buckets, err := parseHistogramBuckets("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if buckets != nil {
+		t.Errorf("expected nil for empty input, got %v", buckets)
+	}
+}
+
+func TestParseHistogramBuckets_SingleValue(t *testing.T) {
+	buckets, err := parseHistogramBuckets("0.5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(buckets) != 1 || buckets[0] != 0.5 {
+		t.Errorf("expected [0.5], got %v", buckets)
+	}
+}
+
+func TestParseHistogramBuckets_WithSpaces(t *testing.T) {
+	buckets, err := parseHistogramBuckets(" 0.001 , 0.01 , 0.1 ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := []float64{0.001, 0.01, 0.1}
+	if len(buckets) != len(expected) {
+		t.Fatalf("expected %d buckets, got %d", len(expected), len(buckets))
+	}
+	for i, v := range expected {
+		if buckets[i] != v {
+			t.Errorf("bucket[%d]: expected %v, got %v", i, v, buckets[i])
+		}
+	}
+}
+
+func TestParseHistogramBuckets_NonNumeric(t *testing.T) {
+	_, err := parseHistogramBuckets("0.001,abc,0.1")
+	if err == nil {
+		t.Fatal("expected error for non-numeric value")
+	}
+	if !strings.Contains(err.Error(), "abc") {
+		t.Errorf("error should mention invalid value 'abc': %v", err)
+	}
+}
+
+func TestParseHistogramBuckets_NonAscending(t *testing.T) {
+	_, err := parseHistogramBuckets("0.1,0.01,0.001")
+	if err == nil {
+		t.Fatal("expected error for non-ascending values")
+	}
+	if !strings.Contains(err.Error(), "strictly ascending") {
+		t.Errorf("error should mention 'strictly ascending': %v", err)
+	}
+}
+
+func TestParseHistogramBuckets_EqualValues(t *testing.T) {
+	_, err := parseHistogramBuckets("0.1,0.1")
+	if err == nil {
+		t.Fatal("expected error for equal values (not strictly ascending)")
+	}
+	if !strings.Contains(err.Error(), "strictly ascending") {
+		t.Errorf("error should mention 'strictly ascending': %v", err)
+	}
+}
+
+func TestParseHistogramBuckets_WhitespaceOnly(t *testing.T) {
+	// "  ,  ,  " splits into ["  ", "  ", "  "], and after TrimSpace each is "".
+	// ParseFloat("") fails, so we should get an error.
+	_, err := parseHistogramBuckets("  ,  ,  ")
+	if err == nil {
+		t.Error("expected error for whitespace-only values")
+	}
+}
+
+func TestLatencyHistogramBucketsFlagRegistered(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	buckets := fs.String("latency-histogram-buckets", "", "Comma-separated histogram bucket boundaries in seconds")
+
+	if *buckets != "" {
+		t.Errorf("expected default --latency-histogram-buckets to be empty, got %q", *buckets)
+	}
+
+	if err := fs.Parse([]string{"--latency-histogram-buckets", "0.001,0.01,0.1,1,5"}); err != nil {
+		t.Fatalf("failed to parse flag: %v", err)
+	}
+	if *buckets != "0.001,0.01,0.1,1,5" {
+		t.Errorf("expected --latency-histogram-buckets='0.001,0.01,0.1,1,5', got %q", *buckets)
+	}
+}

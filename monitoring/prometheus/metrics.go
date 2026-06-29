@@ -40,6 +40,11 @@ type Config struct {
 	WorkerID string
 	// ServiceName identifies the service for the OTel meter.
 	ServiceName string
+	// LatencyHistogramBuckets overrides the default bucket boundaries for
+	// latency histogram metrics. When empty or nil, per-metric defaults are
+	// used. Execution-duration histograms (workflow, replay, fresh) are NOT
+	// affected by this setting.
+	LatencyHistogramBuckets []float64
 }
 
 // Metrics provides OpenTelemetry-based metrics instrumentation for the cleat
@@ -76,6 +81,7 @@ type Metrics struct {
 	backgroundLoopRestarts   metric.Int64Counter
 	reaperInstancesClaimed   metric.Int64Counter
 	httpRequests             metric.Int64Counter
+	canaryRouting            metric.Int64Counter
 
 	// --- UpDownCounters (Int64UpDownCounter) ---
 	workflowsActive              metric.Int64UpDownCounter
@@ -366,6 +372,14 @@ func New(cfg Config) (*Metrics, error) {
 		return nil, fmt.Errorf("cleat_apps_http_requests_total: %w", err)
 	}
 
+	m.canaryRouting, err = meter.Int64Counter(
+		"cleat_canary_routing_total",
+		metric.WithDescription("Total number of canary routing decisions"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_canary_routing_total: %w", err)
+	}
+
 	// --- Initialise UpDownCounters ---
 
 	m.workflowsActive, err = meter.Int64UpDownCounter(
@@ -606,13 +620,22 @@ func New(cfg Config) (*Metrics, error) {
 
 	// --- Initialise histograms ---
 
+	// bucketsOrDefault returns the custom bucket boundaries when set,
+	// otherwise falls back to the per-instrument defaults.
+	bucketsOrDefault := func(defaults ...float64) []float64 {
+		if len(cfg.LatencyHistogramBuckets) > 0 {
+			return cfg.LatencyHistogramBuckets
+		}
+		return defaults
+	}
+
 	m.claimLatency, err = meter.Float64Histogram(
 		"cleat_claim_latency_seconds",
 		metric.WithDescription("Time to claim a workflow from the queue"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
+		metric.WithExplicitBucketBoundaries(bucketsOrDefault(
 			0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000,
-		),
+		)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_claim_latency_seconds: %w", err)
@@ -622,9 +645,9 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_wasm_load_latency_seconds",
 		metric.WithDescription("Time to load a WASM module from storage"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
+		metric.WithExplicitBucketBoundaries(bucketsOrDefault(
 			0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000, 10.000,
-		),
+		)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_wasm_load_latency_seconds: %w", err)
@@ -634,9 +657,9 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_db_query_latency_seconds",
 		metric.WithDescription("Database query latency"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
+		metric.WithExplicitBucketBoundaries(bucketsOrDefault(
 			0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000, 10.000,
-		),
+		)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_db_query_latency_seconds: %w", err)
@@ -658,9 +681,9 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_plugin_call_duration_seconds",
 		metric.WithDescription("Plugin call duration by plugin and function"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
+		metric.WithExplicitBucketBoundaries(bucketsOrDefault(
 			0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30,
-		),
+		)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_plugin_call_duration_seconds: %w", err)
@@ -694,9 +717,9 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_poll_wait_seconds",
 		metric.WithDescription("Time spent waiting for work in poll queries"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
+		metric.WithExplicitBucketBoundaries(bucketsOrDefault(
 			0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1,
-		),
+		)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_poll_wait_seconds: %w", err)
@@ -706,9 +729,9 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_wasm_compile_duration_seconds",
 		metric.WithDescription("WASM compile duration by def_name"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
+		metric.WithExplicitBucketBoundaries(bucketsOrDefault(
 			0.01, 0.05, 0.1, 0.5, 1, 2, 5,
-		),
+		)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_wasm_compile_duration_seconds: %w", err)
@@ -718,9 +741,9 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_dispatch_latency_seconds",
 		metric.WithDescription("Time from workflow creation to claim by task_queue"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
+		metric.WithExplicitBucketBoundaries(bucketsOrDefault(
 			0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30,
-		),
+		)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_dispatch_latency_seconds: %w", err)
@@ -730,9 +753,9 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_apps_http_request_duration_seconds",
 		metric.WithDescription("HTTP request duration for backendkit apps"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
+		metric.WithExplicitBucketBoundaries(bucketsOrDefault(
 			0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
-		),
+		)...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_apps_http_request_duration_seconds: %w", err)
@@ -919,6 +942,16 @@ func (m *Metrics) RecordHTTPRequest(ctx context.Context, method, path, status st
 		attribute.String("status", status),
 	}, extraAttrs...)...)
 	m.httpRequests.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordCanaryRouting increments the canary-routing counter.
+func (m *Metrics) RecordCanaryRouting(ctx context.Context, workflowName, selectedVersion, selectedTag string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("workflow_name", workflowName),
+		attribute.String("selected_version", selectedVersion),
+		attribute.String("selected_tag", selectedTag),
+	}, extraAttrs...)...)
+	m.canaryRouting.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // --- UpDownCounter methods ---

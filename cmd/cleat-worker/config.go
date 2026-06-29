@@ -51,6 +51,7 @@ var (
 	shardsFile           = flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
 	pluginConfigFile     = flag.String("plugin-config", "", "path to plugin config JSON file")
 	memorySoftLimit      = flag.Float64("memory-soft-limit", 0.80, "Memory soft limit fraction 0.0-1.0 (stop claiming new work)")
+	migrationLockTimeout = flag.Duration("migration-lock-timeout", 5*time.Second, "Lock timeout per migration (0 = no timeout). Applied as: SET lock_timeout (Postgres), SET innodb_lock_wait_timeout (MySQL), SET LOCK_TIMEOUT (MSSQL)")
 	memoryHardLimit      = flag.Float64("memory-hard-limit", 0.95, "Memory hard limit fraction 0.0-1.0 (reject API workflows)")
 	memoryCheckInterval  = flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
 	memorySampleRetention = flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
@@ -75,6 +76,7 @@ var (
 	disableChecksumVerification = flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
 	wasmMemoryMaxMB      = flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
 	wasmInstructionLimit = flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; monitored via wazero function listener)")
+	wasmCumulativeAllocationMaxMB = flag.Int("wasm-cumulative-allocation-max-mb", 0, "Max cumulative WASM linear memory allocation in MB across all concurrent executions (0 = unlimited)")
 	noPerStepFlush       = flag.Bool("no-per-step-flush", false, "Skip per-step event flush; rely on batch finalization for persistence (higher throughput, weaker crash safety)")
 	batchFlushDisabled  = flag.Bool("batch-flush-disabled", false, "Disable adaptive batch flushing (always use direct per-step flush)")
 	batchFlushMaxWaitMs = flag.Int("batch-flush-max-wait-ms", 8, "Max milliseconds to wait accumulating events in batch mode")
@@ -98,12 +100,15 @@ var (
 	maxQuotaConcurrencyKeys = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
 	maxWorkflowDuration  = flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
 	healthCheckInterval  = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
+	enableAdminAPI       = flag.Bool("enable-admin-api", false, "Enable destructive admin API endpoints (force-complete, force-fail, re-replay)")
 	maxPluginConnections = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
 	otelEndpoint         = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
 	otelDisabled         = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
 	benchSvcURL          = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
 	tenantPoolMaxConns   = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool (MySQL/MSSQL only)")
-	logLevel             = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	logLevel                = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	latencyHistogramBuckets = flag.String("latency-histogram-buckets", "",
+		"Comma-separated histogram bucket boundaries in seconds (e.g., \"0.001,0.01,0.1,0.5,1,5\"). Must be strictly ascending. Empty uses per-metric defaults.")
 )
 
 func applyChildBindingOverrideEnv() {
