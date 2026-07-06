@@ -105,6 +105,7 @@ var (
 	benchSvcURL          = flag.String("bench-svc-url", "", "Base URL for bench-svc HTTP service (e.g., http://localhost:8080). When set, unknown service calls are forwarded to this endpoint.")
 	tenantPoolMaxConns   = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool (MySQL/MSSQL only)")
 	logLevel             = flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	enableAdminAPI       = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
 )
 
 func applyChildBindingOverrideEnv() {

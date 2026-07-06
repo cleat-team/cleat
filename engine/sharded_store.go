@@ -1451,3 +1451,30 @@ func (s *ShardedStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []by
 	}
 	return uuid.Nil, fmt.Errorf("tenant not found for API key")
 }
+
+// AdminForceComplete marks a workflow as done, bypassing worker ownership.
+func (s *ShardedStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("admin force-complete: no shard for workflow %s", workflowID)
+	}
+	return shard.Store.AdminForceComplete(ctx, workflowID, generation, result, operator)
+}
+
+// AdminForceFail marks a workflow as failed, bypassing worker ownership.
+func (s *ShardedStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("admin force-fail: no shard for workflow %s", workflowID)
+	}
+	return shard.Store.AdminForceFail(ctx, workflowID, generation, errorMsg, errorCode, operator)
+}
+
+// AdminReReplay replays a workflow's event history for debugging.
+func (s *ShardedStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("admin re-replay: no shard for workflow %s", workflowID)
+	}
+	return shard.Store.AdminReReplay(ctx, workflowID, generation, operator)
+}
