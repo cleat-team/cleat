@@ -378,6 +378,17 @@ type WorkflowStore interface {
 	// ResolveVersionByTag resolves a version tag to a version number.
 	// Special case: tag "latest" returns MAX(version) WHERE NOT deprecated.
 	ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error)
+
+	// ---- Admin operations ----
+
+	// AdminForceComplete marks a workflow as done, bypassing worker ownership.
+	AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error
+
+	// AdminForceFail marks a workflow as failed, bypassing worker ownership.
+	AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error
+
+	// AdminReReplay replays a workflow's event history for debugging.
+	AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error
 }
 
 // DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
