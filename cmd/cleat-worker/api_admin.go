@@ -109,9 +109,9 @@ func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request,
 	}
 
 	var req struct {
-		Generation  int64  `json:"generation"`
-		ErrorMsg    string `json:"error_message"`
-		ErrorCode   string `json:"error_code"`
+		Generation int64  `json:"generation"`
+		ErrorMsg   string `json:"error_message"`
+		ErrorCode  string `json:"error_code"`
 	}
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
