@@ -222,9 +222,10 @@ If a `cleat-worker` process is compromised:
   update notifications.
 - **Wazero**: As the WASM runtime, wazero is a critical dependency. We track
   wazero security advisories and update promptly.
-- **WASM toolchains**: TinyGo is the compilation tool for Go workflows, not a
-  runtime dependency. WASM binaries are compiled by the workflow author, not by
-  the cleat project infrastructure.
+- **WASM toolchains**: The standard Go toolchain (targeting wasip1) is the
+  compilation tool for Go workflows, not a runtime dependency. WASM binaries
+  are compiled by the workflow author, not by the cleat project
+  infrastructure.
 - **Node.js dependencies**: The web UI build dependencies are development-only
   and not present in the worker runtime binary.
 

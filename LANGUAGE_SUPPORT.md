@@ -210,7 +210,7 @@ AI-ready Python SDK with LangChain integration. The Go-native AI plugins
 ### Go — Already Done
 
 Full automated transformer pipeline: analyzer → callgraph → closure → transform →
-WASM compile via standard Go (`--target go`, default) or TinyGo (`--target tinygo`).
+WASM compile via the standard Go toolchain (`--target go`, default).
 ~3,000 lines of transformer code across 5 packages.
 
 ### Rust — Already Done
@@ -231,7 +231,7 @@ WASM compile via standard Go (`--target go`, default) or TinyGo (`--target tinyg
 | **TypeScript** | Javy/QuickJS (mature) | ~2-3 weeks | ~3-6 weeks | 1-5 MB | Binary size, debugging | 4th |
 | **Python** | componentize-py | ✅ Done (4.5K lines, 80 tests) | ✅ Done (@cleat_entry) | 5-20 MB | WASM FFI wiring (2-3 wks) | 5th |
 | **C#/.NET** | NativeAOT-LLVM (exp.) | ~3-5 weeks | ~4-8 weeks | 1-5 MB | Immature toolchain | 6th |
-| **Go** | go / tinygo | ✅ Done | ✅ Done | ~4-10 MB (go), ~50-200 KB (tinygo) | None | Done |
+| **Go** | go | ✅ Done | ✅ Done | ~4-10 MB | None | Done |
 | **Rust** | cargo build (built-in) | ✅ Done | ✅ Done | ~50-200 KB | None | Done |
 
 ---
@@ -242,7 +242,7 @@ Cleat stores WASM blobs in `workflow_defs.wasm_bytes` (PostgreSQL `BYTEA`). Each
 deploy creates a new row. With 10 versions of a workflow, you're storing 10× the
 binary size. This drives the ranking:
 
-- **Good** (< 500 KB): C, Zig, Rust, AssemblyScript, Java/TeaVM, Go/tinygo
+- **Good** (< 500 KB): C, Zig, Rust, AssemblyScript, Java/TeaVM
 - **OK** (500 KB - 2 MB): Go (standard), TypeScript/Javy (worst-case)
 - **Problematic** (> 2 MB): Python/CPython — makes the "deploy is an INSERT" model
   expensive. 20 MB × 10 versions × 50 workflows = 10 GB of WASM in Postgres.

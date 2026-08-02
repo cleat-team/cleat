@@ -51,14 +51,6 @@ func requireCargo(t *testing.T) {
 	}
 }
 
-// requireTinygo skips the test if tinygo is not installed.
-func requireTinygo(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not installed — skipping Go WASM cross-language test")
-	}
-}
-
 // buildRustWasm compiles the Rust workflow crate to WASM and returns the
 // path to the .wasm file.
 func buildRustWasm(t *testing.T, projectRoot string) string {
@@ -98,16 +90,9 @@ func buildGoWasm(t *testing.T, projectRoot, pkgPath string) string {
 	tmpDir := t.TempDir()
 	cmd := exec.Command("go", "run",
 		filepath.Join(projectRoot, "cmd", "cleat"),
-		"build", "--target", "go", "-o", tmpDir, pkgPath,
+		"build", "-o", tmpDir, pkgPath,
 	)
 	cmd.Dir = projectRoot
-	cmd.Env = os.Environ()
-	if goroot := os.Getenv("GOROOT"); goroot != "" {
-		cmd.Env = append(cmd.Env, "GOROOT="+goroot)
-	}
-	if tinygoroot := os.Getenv("TINYGOROOT"); tinygoroot != "" {
-		cmd.Env = append(cmd.Env, "TINYGOROOT="+tinygoroot)
-	}
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -4,7 +4,7 @@
 
 - Workflow execution is deterministic — replay of the same event history
   must produce identical results regardless of language (Go, Python, JS,
-  TinyGo/WASM)
+  WASM)
 - Tenant isolation is mandatory (RLS on all queries, tenant_id in every
   multi-tenant table, fail-closed)
 - Checksum verification runs by default on all workflow state transitions
@@ -15,8 +15,8 @@
 ## Design Decisions
 
 - **wasmtime for WASM execution** — single runtime, multi-language support
-  via WASM compilation (Go→WASM via TinyGo, Python/JS via their WASM
-  toolchains)
+  via WASM compilation (Go→WASM via the standard Go toolchain targeting
+  wasip1, Python/JS via their WASM toolchains)
 - **Event sourcing for workflow state** — event_history is the system of
   record; workflow state is reconstructed via replay
 - **PostgreSQL-first, MSSQL/MySQL compatibility** — same schema semantics
@@ -85,8 +85,6 @@
 
 ## Known Sharp Edges
 
-- TinyGo compilation is deprecated (#36) — standard Go compilation is the
-  default. TinyGo toolchain has WASM compatibility issues.
 - MSSQL `uniqueidentifier` type differs from PG `UUID` — scan carefully.
 - MySQL test schema historically lagged production schema (cleat-215 fixed
   this, but the pattern could recur).

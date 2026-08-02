@@ -48,9 +48,7 @@ Key conventions:
 ## Build
 
 - Go 1.25+, module `github.com/cleat-team/cleat`
-- WASM workflows are compiled with the standard Go toolchain (`--target go`, default) or
-  TinyGo (`--target tinygo`). TinyGo is deprecated (#36) and `internal/transform` skips
-  auto-threading of `HostCalls` for it — prefer the default target.
+- WASM workflows are compiled with the standard Go toolchain (`--target go`, default)
 - Tests use `go test`, fuzz tests, and behavioral test suites
 
 ### Two WASM backends

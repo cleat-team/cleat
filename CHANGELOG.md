@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Project renamed from "durable" to "cleat" across the codebase
 
+### Removed
+- TinyGo support for compiling Go workflows to WASM. TinyGo is an
+  embedded-systems toolchain and lacked the standard library coverage this
+  project needs. The standard Go toolchain targeting `wasip1` (`--target go`)
+  is now the only supported way to compile Go workflows to WASM.
+
 ## [0.1.0] - 2026-05-13
 
 ### Added

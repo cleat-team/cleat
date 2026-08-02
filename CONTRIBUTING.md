@@ -246,7 +246,7 @@ Workflows are compiled to WebAssembly using the `cleat build` command.
 ### Go WASM
 
 ```bash
-# Compile with TinyGo (the default and only Go WASM target)
+# Compile with the standard Go toolchain (the only Go WASM target)
 cleat build -o ./out ./path/to/workflow/package
 ```
 

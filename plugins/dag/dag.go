@@ -16,16 +16,22 @@ package dag
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"github.com/cleat-team/cleat/cleat"
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// RawMessage is a raw JSON-encoded value, replacing RawMessage
-// to avoid importing encoding/json in TinyGo WASM builds.
-type RawMessage []byte
+// RawMessage is a raw JSON-encoded value.
+//
+// This is an alias rather than a defined type, so map[string]RawMessage and
+// map[string]json.RawMessage are the same type and callers outside this
+// package can construct either. It previously existed as a distinct type
+// only to keep encoding/json out of TinyGo WASM builds.
+type RawMessage = json.RawMessage
 
 // Task represents a single node in the DAG.
 type Task struct {
@@ -173,8 +179,8 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input any, opts ExecuteOptio
 	running := make(map[string]*Task) // runID -> task
 	perTaskInputs, _ := input.(map[string]RawMessage)
 	if perTaskInputs == nil {
-		// Try map[string]string — callers outside the dag package can't
-		// construct map[string]RawMessage directly (TinyGo type identity).
+		// Also accept map[string]string as a convenience for callers holding
+		// pre-encoded JSON strings.
 		if strMap, ok := input.(map[string]string); ok {
 			perTaskInputs = make(map[string]RawMessage, len(strMap))
 			for k, v := range strMap {
@@ -260,41 +266,35 @@ func (d *DAG) startChild(h cleat.HostCalls, task *Task, defaultInput any, perTas
 
 // sortTasksByPriority sorts tasks by priority (lower = higher priority),
 // with name as tiebreaker for determinism.
-// Uses insertion sort to avoid sort.Slice which is not TinyGo-WASM-safe.
-// Safe to call with nil or empty slice.
+// Safe to call with a nil or empty slice; nil entries sort to the end.
 func sortTasksByPriority(tasks []*Task) {
-	if len(tasks) < 2 {
-		return
-	}
-	for i := 1; i < len(tasks); i++ {
-		key := tasks[i]
-		if key == nil {
-			continue
-		}
-		j := i - 1
-		for j >= 0 && taskLess(key, tasks[j]) {
-			tasks[j+1] = tasks[j]
-			j--
-		}
-		tasks[j+1] = key
-	}
+	sort.Slice(tasks, func(i, j int) bool {
+		return taskOrderLess(tasks[i], tasks[j])
+	})
 }
 
 // insertSortedByPriority inserts a task into a priority-sorted slice.
-// Uses linear scan to avoid sort.Search which is not TinyGo-WASM-safe.
-// Safe to call with nil or empty tasks slice.
+// Safe to call with a nil or empty tasks slice.
 func insertSortedByPriority(tasks []*Task, task *Task) []*Task {
 	if task == nil {
 		return tasks
 	}
-	i := 0
-	for i < len(tasks) && tasks[i] != nil && !taskLess(task, tasks[i]) {
-		i++
-	}
+	i := sort.Search(len(tasks), func(i int) bool {
+		return taskOrderLess(task, tasks[i])
+	})
 	tasks = append(tasks, nil)
 	copy(tasks[i+1:], tasks[i:])
 	tasks[i] = task
 	return tasks
+}
+
+// taskOrderLess is taskLess extended to tolerate nil entries, which sort last.
+// (Priority, Name) is a total order, so the sort needs no stability guarantee.
+func taskOrderLess(a, b *Task) bool {
+	if a == nil || b == nil {
+		return a != nil && b == nil
+	}
+	return taskLess(a, b)
 }
 
 // taskLess returns true if a should come before b (lower priority = higher precedence).
@@ -353,117 +353,32 @@ func (d *DAG) buildParentOutputs(task *Task, outputs map[string]string) map[stri
 	return result
 }
 
-// hex is a lookup table for JSON \u00XX hex escapes.
-const hex = "0123456789abcdef"
-
-// appendJSONEscaped appends a JSON-escaped copy of s to dst.
-// It escapes ", \, and control characters (< 0x20).
-func appendJSONEscaped(dst []byte, s string) []byte {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch c {
-		case '"':
-			dst = append(dst, '\\', '"')
-		case '\\':
-			dst = append(dst, '\\', '\\')
-		case '\n':
-			dst = append(dst, '\\', 'n')
-		case '\r':
-			dst = append(dst, '\\', 'r')
-		case '\t':
-			dst = append(dst, '\\', 't')
-		default:
-			if c < 0x20 {
-				dst = append(dst, '\\', 'u', '0', '0', hex[(c>>4)&0xf], hex[c&0xf])
-			} else {
-				dst = append(dst, c)
-			}
-		}
-	}
-	return dst
-}
-
-// appendQuotedJSON appends a JSON-quoted and escaped string to dst.
-func appendQuotedJSON(dst []byte, s string) []byte {
-	dst = append(dst, '"')
-	dst = appendJSONEscaped(dst, s)
-	dst = append(dst, '"')
-	return dst
-}
-
-// marshalToJSON encodes common types to JSON without encoding/json.
+// marshalToJSON encodes a task input value to JSON.
+//
+// Map keys are emitted in sorted order by encoding/json. That matters: this
+// produces the input recorded in event history and replayed later, so a
+// non-deterministic key order would surface as a spurious replay divergence.
+// An earlier hand-rolled encoder existed here purely to keep encoding/json out
+// of TinyGo builds, and it serialised maps in Go's randomised iteration order.
 func marshalToJSON(v any) ([]byte, error) {
 	switch val := v.(type) {
 	case RawMessage:
+		// Pass raw JSON through untouched; an empty value means "no input".
 		if len(val) == 0 {
 			return []byte("{}"), nil
 		}
 		return val, nil
-	case string:
-		return appendQuotedJSON(nil, val), nil
-	case map[string]string:
-		return buildStringMapJSON(val), nil
-	case map[string]any:
-		return buildInterfaceMapJSON(val)
 	case nil:
 		return []byte("{}"), nil
 	default:
-		return nil, fmt.Errorf("dag: cannot marshal %T to JSON", v)
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("dag: cannot marshal %T to JSON: %w", v, err)
+		}
+		return b, nil
 	}
 }
 
-func buildStringMapJSON(m map[string]string) []byte {
-	if len(m) == 0 {
-		return []byte("{}")
-	}
-	var b []byte
-	b = append(b, '{')
-	first := true
-	for k, v := range m {
-		if !first {
-			b = append(b, ',')
-		}
-		first = false
-		b = appendQuotedJSON(b, k)
-		b = append(b, ':')
-		b = appendQuotedJSON(b, v)
-	}
-	b = append(b, '}')
-	return b
-}
-
-func buildInterfaceMapJSON(m map[string]any) ([]byte, error) {
-	if len(m) == 0 {
-		return []byte("{}"), nil
-	}
-	var b []byte
-	b = append(b, '{')
-	first := true
-	for k, v := range m {
-		if !first {
-			b = append(b, ',')
-		}
-		first = false
-		b = appendQuotedJSON(b, k)
-		b = append(b, ':')
-		switch val := v.(type) {
-		case string:
-			b = appendQuotedJSON(b, val)
-		case RawMessage:
-			b = append(b, val...)
-		case map[string]string:
-			b = append(b, buildStringMapJSON(val)...)
-		case nil:
-			b = append(b, 'n', 'u', 'l', 'l')
-		default:
-			return nil, fmt.Errorf("dag: cannot marshal value of type %T in task input", v)
-		}
-	}
-	b = append(b, '}')
-	return b, nil
-}
-
-// validate checks that all parent references exist and there are no cycles.
 // validate checks that all parent references exist and there are no cycles.
 func (d *DAG) validate() error {
 	for name, task := range d.tasks {

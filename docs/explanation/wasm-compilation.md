@@ -45,7 +45,6 @@ Source Go Package
 +-------------------+
 | 5. wasm.Compile   |  Generate WASM import declarations, host adapter
 |                   |  code, and compile to wasip1 binary.
-|                   |  Supports "go" and "tinygo" targets.
 +-------------------+
      |
      v
@@ -140,18 +139,13 @@ Assembles the build directory and compiles:
    | `gen_wasm_memory.go` | Memory buffer setup for string passing |
    | `gen_host_adapter.go` | Adapter code that bridges Go types to WASM i64 values |
    | `gen_wasm_exports.go` | Named WASM exports for each entry point |
-   | `gen_main_stub.go` | `main()` that blocks forever (`select{}` for Go,
-   `<-make(chan struct{})` for TinyGo). The `--target go` stub does not
-   require a `.deps/` shim. |
+   | `gen_main_stub.go` | `main()` that blocks forever (`select{}`). |
 
 3. **Compilation**:
 
    ```bash
    # Standard Go target
    GOOS=wasip1 GOARCH=wasm go build -o output.wasm .
-
-   # TinyGo target (smaller binaries, ~60% size reduction)
-   tinygo build -o output.wasm -target=wasi .
    ```
 
 ## Auto-Threading
@@ -338,22 +332,9 @@ interface to scalar types only (i32, i64).
 - Uses `GOOS=wasip1 GOARCH=wasm` (bundled with Go 1.22+) — fully implemented.
 - Produces larger binaries (~2-5 MB for typical workflows) but full Go runtime
   and standard library support.
-- No TinyGo required; uses the standard `go build` toolchain.
+- Uses the standard `go build` toolchain — the only supported way to compile
+  Go workflows to WASM.
 - `main()` blocks with `select{}` to keep the WASM instance alive.
-
-### TinyGo (`--target tinygo`)
-
-- Uses `tinygo build -target=wasi`.
-- The default target is `go` (standard Go); use `--target tinygo` explicitly for
-  smaller binaries.
-- Produces smaller binaries (~60% size reduction over standard Go).
-- Limited to Go 1.24 compatibility (TinyGo 0.36-0.37 constraint).
-- Use `--target go` for full standard library support when binary size is not a
-  concern.
-- `main()` blocks on `<-make(chan struct{})` (TinyGo's asyncify scheduler
-  handles exports while main is blocked).
-- Requires a dependency shim in `.deps/` with an older `go.mod` for
-  compatibility.
 
 ### Rust (`--target rust`)
 

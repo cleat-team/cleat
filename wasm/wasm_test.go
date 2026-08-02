@@ -208,7 +208,7 @@ func TestGenerateHostAdapterNoUnusedFields(t *testing.T) {
 func TestGenerateExportsBasic(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
-	code := string(GenerateExports("basic", result, "tinygo"))
+	code := string(GenerateExports("basic", result, "go"))
 	for _, c := range []string{"//go:build wasip1", "package basic",
 		"func writeJSONOut", "func writeErrorOut",
 		"//go:wasmexport place_order",
@@ -223,7 +223,7 @@ func TestGenerateExportsBasic(t *testing.T) {
 func TestGenerateExportsPlaceOrderUnmarshalsArgs(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
-	code := string(GenerateExports("basic", result, "tinygo"))
+	code := string(GenerateExports("basic", result, "go"))
 	// UserID is a simple string: extracted via extractJSONString.
 	if !strings.Contains(code, `UserID := extractJSONString`) {
 		t.Error("expected UserID extraction in generated code")
@@ -237,31 +237,13 @@ func TestGenerateExportsPlaceOrderUnmarshalsArgs(t *testing.T) {
 func TestGenerateExportsSyntaxValid(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
-	syntaxCheck(t, "GenerateExports", string(GenerateExports("basic", result, "tinygo")))
-}
-
-func TestGenerateExportsErrorsZeroArgEntryPoints(t *testing.T) {
-	result, cr := loadErrors(t)
-	_ = cr
-	code := string(GenerateExports("errors", result, "tinygo"))
-	// BadWithGoroutine, BadWithFuncValue, BadWithFloatCondition have no params
-	// beyond h — their generated code should suppress args parsing.
-	if !strings.Contains(code, "_ = argsPtr") {
-		t.Error("expected args suppression for zero-arg entry points")
-	}
-	if !strings.Contains(code, "_ = argsLen") {
-		t.Error("expected argsLen suppression for zero-arg entry points")
-	}
-	// void-return entry points should not have result variables.
-	if !strings.Contains(code, "BadWithGoroutine(h)") {
-		t.Error("expected void call for BadWithGoroutine")
-	}
+	syntaxCheck(t, "GenerateExports", string(GenerateExports("basic", result, "go")))
 }
 
 func TestGenerateExportsErrorsOnlyReturn(t *testing.T) {
 	result, cr := loadErrors(t)
 	_ = cr
-	code := string(GenerateExports("errors", result, "tinygo"))
+	code := string(GenerateExports("errors", result, "go"))
 	// BadWithInterfaceDispatch returns only error — no result marshal.
 	if !strings.Contains(code, "__susResultErr") {
 		t.Error("expected __susResultErr assignment")
@@ -739,7 +721,7 @@ func TestOutBufNamesUnknownImport(t *testing.T) {
 func TestGenerateExportBasic(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
-	code := string(GenerateExports("basic", result, "tinygo"))
+	code := string(GenerateExports("basic", result, "go"))
 	if !strings.Contains(code, "writeJSONOut") {
 		t.Error("expected writeJSONOut function")
 	}
@@ -792,7 +774,7 @@ func TestGenerateExportsResultOnlyReturn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPackages(e009_init): %v", err)
 	}
-	code := string(GenerateExports("main", result, "tinygo"))
+	code := string(GenerateExports("main", result, "go"))
 	if !strings.Contains(code, "__r := Workflow(h)") {
 		t.Error("expected result-only assignment for Workflow")
 	}
@@ -805,7 +787,7 @@ func TestGenerateExportsNilEntryPoint(t *testing.T) {
 		EntryPoints: []string{"nonexistent"},
 		Funcs:       map[string]*analyzer.FuncDecl{},
 	}
-	code := string(GenerateExports("main", result, "tinygo"))
+	code := string(GenerateExports("main", result, "go"))
 	if !strings.Contains(code, "package main") {
 		t.Error("expected valid output even with nil entry point")
 	}

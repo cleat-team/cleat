@@ -97,7 +97,7 @@ func main() {
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
-		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), tinygo (deprecated), rust, java, assemblyscript, python")
+		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, assemblyscript, python")
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: produce both)")
 		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
@@ -105,8 +105,12 @@ func main() {
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
 		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
 		fs.Parse(os.Args[2:])
+		if target == "tinygo" {
+			fmt.Fprintf(os.Stderr, "Error: TinyGo support was removed; use the default Go/wasip1 target (--target go, or omit --target).\n")
+			os.Exit(1)
+		}
 		if !isValidTarget(target) {
-			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript, python\n", target)
+			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, rust, java, assemblyscript, python\n", target)
 			os.Exit(1)
 		}
 		// Default channel: when --db is provided, default to "stable".
@@ -230,7 +234,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		runBuildPython(pattern, outDir, runtime, channel)
 		return
 	}
-	result, cg, cr, threadingErrs, usage, tr := analyze(pattern, target)
+	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = cg
 
 	if jsonOut {
@@ -374,9 +378,8 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	logBuildProgress("  Build directory: %s\n", jsonOut, outDir)
 
 	// Run go mod tidy in the build directory to generate go.sum entries
-	// before compilation. For TinyGo, the .deps/ tree provides the cleat module
-	// locally via replace directives. For standard Go, the replace points
-	// directly to the project root.
+	// before compilation. The replace directive points directly to the
+	// project root.
 	tidyCmd := exec.Command("go", "mod", "tidy")
 	tidyCmd.Dir = outDir
 	tidyCmd.Env = append(os.Environ(),
@@ -384,15 +387,6 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		"GONOSUMDB=*",
 		"GOPRIVATE=*",
 	)
-	if target == "tinygo" {
-		if tinygoGoroot := os.Getenv("CLEAT_TINYGO_GOROOT"); tinygoGoroot != "" {
-			tidyCmd.Env = append(os.Environ(),
-				"GOROOT="+tinygoGoroot,
-				"PATH="+tinygoGoroot+"/bin:"+os.Getenv("PATH"),
-				"GOTOOLCHAIN=local",
-			)
-		}
-	}
 	if out, err := tidyCmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running go mod tidy in build directory: %v\n%s\n", err, out)
 		os.Exit(1)
@@ -400,50 +394,22 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 
 	wasmPath := filepath.Join(outDir, wasmFile)
 
-	if target == "go" {
-		// Standard Go wasip1 compilation.
-		logBuildProgress("  Compiling WASM module (go/wasip1)...\n", jsonOut)
-		cmd := exec.Command("go", "build",
-			"-o", wasmPath,
-			".",
-		)
-		cmd.Env = os.Environ()
-		cmd.Env = append(cmd.Env,
-			"GOOS=wasip1",
-			"GOARCH=wasm",
-		)
-		cmd.Dir = outDir
+	// Standard Go wasip1 compilation.
+	logBuildProgress("  Compiling WASM module (go/wasip1)...\n", jsonOut)
+	buildCmd := exec.Command("go", "build",
+		"-o", wasmPath,
+		".",
+	)
+	buildCmd.Env = os.Environ()
+	buildCmd.Env = append(buildCmd.Env,
+		"GOOS=wasip1",
+		"GOARCH=wasm",
+	)
+	buildCmd.Dir = outDir
 
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error compiling WASM module:\n%s\n", string(out))
-			os.Exit(1)
-		}
-	} else {
-		// TinyGo wasip1 compilation.
-		logBuildProgress("  Compiling WASM module (tinygo)...\n", jsonOut)
-		cmd := exec.Command("tinygo", "build",
-			"-target=wasip1",
-			"-o", wasmPath,
-			".",
-		)
-		cmd.Env = os.Environ()
-		if tinygoGoroot := os.Getenv("CLEAT_TINYGO_GOROOT"); tinygoGoroot != "" {
-			cmd.Env = append(cmd.Env, "GOROOT="+tinygoGoroot)
-			cmd.Env = append(cmd.Env, "PATH="+tinygoGoroot+"/bin:"+os.Getenv("PATH"))
-		} else if goroot := os.Getenv("GOROOT"); goroot != "" {
-			cmd.Env = append(cmd.Env, "GOROOT="+goroot)
-		}
-		if tinygoroot := os.Getenv("TINYGOROOT"); tinygoroot != "" {
-			cmd.Env = append(cmd.Env, "TINYGOROOT="+tinygoroot)
-		}
-		cmd.Dir = outDir
-
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error compiling WASM module:\n%s\n", string(out))
-			os.Exit(1)
-		}
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error compiling WASM module:\n%s\n", string(out))
+		os.Exit(1)
 	}
 
 	fi, err := os.Stat(wasmPath)
@@ -497,12 +463,10 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// functions from the "env" module that the closure analysis did
 	// not predict. These could indicate a bug in the closure analysis
 	// or unused imports the developer should investigate.
-	if target == "tinygo" || target == "go" {
-		if orphans := wasm.FindCleatOrphanedImports(wasmBytes, usage.Used); len(orphans) > 0 {
-			fmt.Println()
-			for _, orphan := range orphans {
-				fmt.Fprintf(os.Stderr, "  Warning: %s\n", orphan)
-			}
+	if orphans := wasm.FindCleatOrphanedImports(wasmBytes, usage.Used); len(orphans) > 0 {
+		fmt.Println()
+		for _, orphan := range orphans {
+			fmt.Fprintf(os.Stderr, "  Warning: %s\n", orphan)
 		}
 	}
 }
@@ -521,7 +485,7 @@ func printSizeReport(wasmPath string, totalSize int64, result *analyzer.Analysis
 	fmt.Printf("  Target: %s\n", target)
 
 	// Estimate package contributions based on known typical sizes.
-	// These are approximate and based on measurements of TinyGo wasip1 builds.
+	// These are approximate and based on measurements of Go wasip1 builds.
 	type pkgSize struct {
 		name string
 		size int64
@@ -635,7 +599,7 @@ func printSizeReport(wasmPath string, totalSize int64, result *analyzer.Analysis
 }
 
 func runVet(pattern string, jsonOut bool, ciOut bool) int {
-	result, _, cr, threadingErrs, usage, tr := analyze(pattern, "go")
+	result, _, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = usage
 	_ = tr
 
@@ -1080,7 +1044,7 @@ func runDeploy(args []string) {
 	}
 }
 
-func analyze(pattern, target string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {
+func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {
 	fset := token.NewFileSet()
 
 	result, err := analyzer.LoadPackages(pattern, fset)
@@ -1108,7 +1072,6 @@ func analyze(pattern, target string) (*analyzer.AnalysisResult, *callgraph.Graph
 		Result:    result,
 		CallGraph: cg,
 		Closure:   cr,
-		Target:    target,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error in AST transformation: %v\n", err)
@@ -1478,7 +1441,7 @@ func runSchedule(args []string) {
 
 func isValidTarget(t string) bool {
 	valid := map[string]bool{
-		"tinygo": true, "go": true, "rust": true,
+		"go": true, "rust": true,
 		"java": true, "assemblyscript": true, "python": true,
 	}
 	return valid[t]
@@ -1650,7 +1613,7 @@ func runLock(args []string) {
 			os.Exit(1)
 		}
 		pattern := remainder[0]
-		_, _, _, _, usage, _ := analyze(pattern, "go")
+		_, _, _, _, usage, _ := analyze(pattern)
 		children = usage.Children
 	}
 
