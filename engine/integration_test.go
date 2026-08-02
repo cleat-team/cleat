@@ -343,25 +343,37 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 	}
 
 	// ---- Step 3: Poll the signal back (atomic claim + delete) ----
-	payload, found, err := store.PollSignal(ctx, runID, "payment_confirmed")
+	//
+	// This step exercises "atomic claim + delete", so it must call
+	// PollAndClaimSignal, not PollSignal. Those are two distinct
+	// SignalStore methods with two distinct, documented contracts:
+	// PollSignal "checks for a delivered signal" (a plain, repeatable read
+	// -- see TestPollSignal_NonDestructive in
+	// store_test_groups_6_10_test.go and PostgresStore.PollSignal's doc
+	// comment in store_signals.go) while PollAndClaimSignal "atomically
+	// checks for AND CLAIMS" it (consumes it). This test used to call
+	// PollSignal for both steps 3 and 4 and assert the consuming behavior
+	// on it, which happened to pass only because PostgresStore.PollSignal
+	// used to be implemented as a bug-for-bug copy of PollAndClaimSignal.
+	payload, found, err := store.PollAndClaimSignal(ctx, runID, "payment_confirmed")
 	if err != nil {
-		t.Fatalf("PollSignal: %v", err)
+		t.Fatalf("PollAndClaimSignal: %v", err)
 	}
 	if !found {
-		t.Error("expected PollSignal to find the delivered signal")
+		t.Error("expected PollAndClaimSignal to find the delivered signal")
 	}
 	if normalizeJSON(payload) != normalizeJSON(signalPayload) {
 		t.Errorf("signal payload mismatch: expected=%q, got=%q", signalPayload, payload)
 	}
 	t.Logf("Signal delivered and polled successfully: %s", payload)
 
-	// ---- Step 4: Polling the same signal again returns not-found (consumed) ----
-	_, found, err = store.PollSignal(ctx, runID, "payment_confirmed")
+	// ---- Step 4: Claiming the same signal again returns not-found (consumed) ----
+	_, found, err = store.PollAndClaimSignal(ctx, runID, "payment_confirmed")
 	if err != nil {
-		t.Fatalf("second PollSignal: %v", err)
+		t.Fatalf("second PollAndClaimSignal: %v", err)
 	}
 	if found {
-		t.Error("expected second PollSignal to return not-found (signal was consumed)")
+		t.Error("expected second PollAndClaimSignal to return not-found (signal was consumed)")
 	}
 
 	// ---- Step 5: Persist the execution history ----
@@ -529,9 +541,30 @@ func TestIntegrationNewEventTypesPersistenceRoundTrip(t *testing.T) {
 
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
+		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
 	store := NewPostgresStore(db)
+
+	// event_history.workflow_id is a real foreign key into
+	// workflow_instances(id) (migrations/postgres/001_schema.sql), so a real
+	// instance must exist before appending events for it -- unlike the old
+	// hand-maintained test schema in engine/testutil/schema.go, which used to
+	// explicitly drop this FK "so tests insert events without workflow
+	// instances".
+	def := &WorkflowDef{
+		Name:       "int-new-events-workflow",
+		Version:    1,
+		WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1,
+		MinVersion: 1,
+	}
+	if err := store.DeployWorkflowDef(ctx, def); err != nil {
+		t.Fatalf("DeployWorkflowDef: %v", err)
+	}
+	if _, _, err := store.StartNewRun(ctx, runID, "int-new-events-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0); err != nil {
+		t.Fatalf("StartNewRun: %v", err)
+	}
 
 	// Create one EventRecord for each of the 7 new event types.
 	events := []EventRecord{
@@ -647,76 +680,73 @@ func TestIntegrationNewEventTypesPersistenceRoundTrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRLSTenantIsolation verifies that Row-Level Security correctly isolates
-// workflow instances between tenants. This test must hit the actual store, not
-// mock it -- it uses a real PostgreSQL database.
+// workflow instances between tenants. This test must hit the actual store,
+// not mock it -- it uses a real PostgreSQL database.
+//
+// This used to build its own ad hoc RLS policy at runtime
+// (`CREATE POLICY cleat_rls_test ...`) over the plain superuser/owner
+// connection that testDB(t) returns. That connection bypasses RLS
+// unconditionally -- Postgres never applies RLS to a superuser, and bypasses
+// it for the owning role too unless FORCE ROW LEVEL SECURITY is set -- so
+// the test always saw every row regardless of the policy it had just
+// created, and "tenant A: expected 1 workflow, got 2" was the inevitable
+// result the moment CLEAT_TEST_DB pointed at a real (superuser) Postgres
+// instead of being skipped. It also hand-duplicated a policy that the real
+// migrations/postgres/001_schema.sql now already defines (tenant_isolation_instances).
+//
+// Fixed to do what the test name promises: exercise the *real* schema
+// (including its real RLS policy) through a connection that cannot bypass
+// RLS -- see testutil.OpenPostgresRLSTestDB -- and to create its fixture
+// data through the store (which sets the `cleat.tenant_id` session variable
+// the real policy checks), not through raw SQL that bypasses the store layer
+// entirely.
 func TestRLSTenantIsolation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping RLS integration test in short mode")
 	}
 
-	db := testDB(t)
-	defer db.Close()
+	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
+	defer adminDB.Close()
+	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
+	testutil.CleanupPostgresTestData(t, adminDB)
+
+	appDB := testutil.OpenPostgresRLSTestDB(t, adminDB)
+	defer appDB.Close()
+	// Deferred after appDB.Close() so it runs first (defers are LIFO) --
+	// i.e. before either connection closes, not after both.
+	defer testutil.CleanupPostgresTestData(t, adminDB)
 
 	ctx := context.Background()
-
-	// Ensure tenant_id column exists on workflow_instances. testDB creates the
-	// column via ALTER TABLE ADD COLUMN IF NOT EXISTS, but a previous test that
-	// used setupFullTestSchema may have dropped and recreated the table without
-	// the column, so we add it here to be safe.
-	if _, err := db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS tenant_id TEXT`); err != nil {
-		t.Fatalf("add tenant_id column: %v", err)
-	}
-
-	// Enable RLS on workflow_instances.
-	if _, err := db.Exec(`ALTER TABLE workflow_instances ENABLE ROW LEVEL SECURITY`); err != nil {
-		t.Fatalf("enable RLS: %v", err)
-	}
-
-	// Create the tenant isolation policy. When the cleat.tenant_id session
-	// variable is set (via set_config), the policy filters rows by tenant_id.
-	// If the variable is not set, it falls back to the default tenant UUID.
-	if _, err := db.Exec(`DROP POLICY IF EXISTS cleat_rls_test ON workflow_instances`); err != nil {
-		t.Fatalf("drop existing policy: %v", err)
-	}
-	if _, err := db.Exec(`CREATE POLICY cleat_rls_test ON workflow_instances
-		FOR ALL
-		USING (tenant_id = COALESCE(current_setting('cleat.tenant_id', true), '00000000-0000-0000-0000-000000000000')::uuid)`); err != nil {
-		t.Fatalf("create RLS policy: %v", err)
-	}
-
-	// Cleanup: disable RLS (DDL, not subject to RLS), drop the policy, then
-	// delete test rows. Using t.Cleanup ensures this runs even on t.Fatalf.
-	t.Cleanup(func() {
-		db.Exec(`ALTER TABLE workflow_instances DISABLE ROW LEVEL SECURITY`)
-		db.Exec(`DROP POLICY IF EXISTS cleat_rls_test ON workflow_instances`)
-		db.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'rls-test-%'`)
-	})
 
 	// Create two tenants with different UUIDs.
 	tenantA := "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
 	tenantB := "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
 
-	runID_A := fmt.Sprintf("rls-test-a-%d", time.Now().UnixNano())
-	runID_B := fmt.Sprintf("rls-test-b-%d", time.Now().UnixNano())
+	storeA := NewPostgresStore(appDB).WithTenant(tenantA)
+	storeB := NewPostgresStore(appDB).WithTenant(tenantB)
 
-	// Insert workflow instances for both tenants using direct SQL. INSERT
-	// bypasses the RLS USING clause, so this works regardless of the current
-	// RLS session variable. Set next_wake_at in the past so ClaimWorkflows
-	// immediately qualifies them.
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, next_wake_at)
-		VALUES ($1, 'wf-tenant-a', 1, 'ready', '{}', $2, now() - interval '1 hour')`,
-		runID_A, tenantA); err != nil {
-		t.Fatalf("insert tenant A workflow: %v", err)
+	def := &WorkflowDef{
+		Name:       "rls-test-workflow",
+		Version:    1,
+		WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1,
+		MinVersion: 1,
+	}
+	if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
+		t.Fatalf("DeployWorkflowDef: %v", err)
 	}
 
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, next_wake_at)
-		VALUES ($1, 'wf-tenant-b', 1, 'ready', '{}', $2, now() - interval '1 hour')`,
-		runID_B, tenantB); err != nil {
-		t.Fatalf("insert tenant B workflow: %v", err)
+	runIDA := fmt.Sprintf("rls-test-a-%d", time.Now().UnixNano())
+	runIDB := fmt.Sprintf("rls-test-b-%d", time.Now().UnixNano())
+
+	if _, _, err := storeA.StartNewRun(ctx, runIDA, "rls-test-workflow", 1, json.RawMessage(`{}`), "", tenantA, 0); err != nil {
+		t.Fatalf("StartNewRun tenant A: %v", err)
+	}
+	if _, _, err := storeB.StartNewRun(ctx, runIDB, "rls-test-workflow", 1, json.RawMessage(`{}`), "", tenantB, 0); err != nil {
+		t.Fatalf("StartNewRun tenant B: %v", err)
 	}
 
 	// ---- Test 1: Tenant A's store should only see tenant A's workflow ----
-	storeA := NewPostgresStore(db).WithTenant(tenantA)
 	wfsA, err := storeA.ClaimWorkflows(ctx, "worker-a", 10)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows tenant A: %v", err)
@@ -725,15 +755,15 @@ func TestRLSTenantIsolation(t *testing.T) {
 	if len(wfsA) != 1 {
 		t.Errorf("tenant A: expected 1 workflow, got %d", len(wfsA))
 	} else {
-		if wfsA[0].ID != runID_A {
-			t.Errorf("tenant A: expected workflow %q, got %q", runID_A, wfsA[0].ID)
+		if wfsA[0].ID != runIDA {
+			t.Errorf("tenant A: expected workflow %q, got %q", runIDA, wfsA[0].ID)
 		}
 		if wfsA[0].TenantID != tenantA {
 			t.Errorf("tenant A: expected tenant_id %q, got %q", tenantA, wfsA[0].TenantID)
 		}
 		// Verify tenant A did NOT see tenant B's workflow.
 		for _, wf := range wfsA {
-			if wf.ID == runID_B {
+			if wf.ID == runIDB {
 				t.Error("tenant A should not see tenant B's workflow")
 			}
 		}
@@ -745,7 +775,6 @@ func TestRLSTenantIsolation(t *testing.T) {
 	}
 
 	// ---- Test 2: Tenant B's store should only see tenant B's workflow ----
-	storeB := NewPostgresStore(db).WithTenant(tenantB)
 	wfsB, err := storeB.ClaimWorkflows(ctx, "worker-b", 10)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows tenant B: %v", err)
@@ -754,21 +783,29 @@ func TestRLSTenantIsolation(t *testing.T) {
 	if len(wfsB) != 1 {
 		t.Errorf("tenant B: expected 1 workflow, got %d", len(wfsB))
 	} else {
-		if wfsB[0].ID != runID_B {
-			t.Errorf("tenant B: expected workflow %q, got %q", runID_B, wfsB[0].ID)
+		if wfsB[0].ID != runIDB {
+			t.Errorf("tenant B: expected workflow %q, got %q", runIDB, wfsB[0].ID)
 		}
 		if wfsB[0].TenantID != tenantB {
 			t.Errorf("tenant B: expected tenant_id %q, got %q", tenantB, wfsB[0].TenantID)
 		}
 		// Verify tenant B did NOT see tenant A's workflow.
 		for _, wf := range wfsB {
-			if wf.ID == runID_A {
+			if wf.ID == runIDA {
 				t.Error("tenant B should not see tenant A's workflow")
 			}
 		}
 	}
 
-	t.Log("RLS tenant isolation test passed")
+	// Only claim success, not merely "the test function reached the end" --
+	// t.Failed() reflects every t.Error/t.Errorf recorded above. Logging
+	// unconditionally here was the exact defect class this investigation was
+	// looking for: integration_test.go used to print "RLS tenant isolation
+	// test passed" even on a run that had just recorded two isolation
+	// failures above.
+	if !t.Failed() {
+		t.Log("RLS tenant isolation test passed")
+	}
 }
 
 // TestIntegrationWorkflowMaxDuration verifies that the WithDefaultWorkflowTimeout

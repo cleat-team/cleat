@@ -1765,10 +1765,19 @@ func TestPostgresStore_CleanupMemorySamples_WithDefs(t *testing.T) {
 // PollSignal / PollCancellation wrappers
 // ---------------------------------------------------------------------------
 
+// TestPostgresStore_PollSignal covers PollSignal's plain, non-destructive
+// SELECT. It used to share PollAndClaimSignal's DELETE ... RETURNING
+// implementation (mocked here as "DELETE FROM workflow_signals"), which
+// meant a second poll for the same signal would always come back
+// found=false -- the opposite of what SignalStore's doc comment promises
+// for PollSignal ("checks for a delivered signal", no mention of consuming
+// it) and what PollAndClaimSignal's own doc comment promises only for
+// itself ("checks for AND CLAIMS"). See TestPollSignal_NonDestructive in
+// store_test_groups_6_10_test.go for the real-database regression test.
 func TestPostgresStore_PollSignal(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "DELETE FROM workflow_signals",
+			match: "SELECT payload FROM workflow_signals",
 			data:  [][]driver.Value{{`{"polled":true}`}},
 		},
 	}, nil)

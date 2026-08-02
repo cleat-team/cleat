@@ -59,16 +59,31 @@ func (b *PostgresBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	return store, teardown
 }
 
+// SetupForTenant returns a store that genuinely enforces Row-Level Security.
+//
+// The superuser/owner connection that adminDB (and Setup, above) uses
+// bypasses RLS entirely -- that's a hard PostgreSQL rule for superusers, and
+// applies to the table-owning role too unless FORCE ROW LEVEL SECURITY is
+// set. So the WorkflowStore returned here is built on a *second* connection,
+// authenticated as testutil.PostgresRLSTestRole: an ordinary, non-owning
+// role for which Postgres always evaluates RLS policies. Without this,
+// every cross-tenant isolation assertion in tenant_isolation_test.go would
+// trivially "pass" by seeing every row and simply not asserting on the ones
+// it shouldn't -- or, worse, silently prove nothing about whether RLS
+// actually blocks cross-tenant access. See testutil.OpenPostgresRLSTestDB.
 func (b *PostgresBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowStore, func()) {
 	t.Helper()
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
-	testutil.CleanupPostgresTestData(t, db)
-	store := NewPostgresStore(db)
+	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
+	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
+	testutil.CleanupPostgresTestData(t, adminDB)
+
+	appDB := testutil.OpenPostgresRLSTestDB(t, adminDB)
+	store := NewPostgresStore(appDB)
 	store.tenantID = tenantID
 	teardown := func() {
-		testutil.CleanupPostgresTestData(t, db)
-		db.Close()
+		testutil.CleanupPostgresTestData(t, adminDB)
+		appDB.Close()
+		adminDB.Close()
 	}
 	return store, teardown
 }

@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS workflow_promises (
     error_msg TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     resolved_at TIMESTAMPTZ,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     PRIMARY KEY (workflow_id, promise_id)
 );
 
@@ -470,11 +471,29 @@ ALTER TABLE workflow_signals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workflow_schedules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workflow_tags ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workflow_routing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workflow_promises ENABLE ROW LEVEL SECURITY;
 
 -- Fail-closed policies using cleat.assert_tenant_set() (from 008, no COALESCE)
+--
+-- workflow_defs is a partial exception: its PRIMARY KEY is (name, version)
+-- with no tenant_id component, and DeployWorkflowDef (engine/store_deployment.go)
+-- always writes tenant_id = '00000000-...' (DefaultTenantUUID) regardless of
+-- the calling store's tenant, because workflow definitions are a
+-- shared/global registry, not tenant-partitioned data (see the "visible to
+-- all tenants" comment on TestTenantSelfAccess in
+-- engine/tenant_isolation_test.go). A strict tenant_id = assert_tenant_set()
+-- policy here would make DeployWorkflowDef fail-closed for every tenant
+-- except the default one as soon as RLS is enforced by a non-superuser,
+-- non-owner connection, which is the opposite of the intended behavior.
+-- The policy below therefore also allows the shared default-tenant rows to
+-- be read (and written, matching what DeployWorkflowDef already does
+-- unconditionally today) by any tenant.
 DROP POLICY IF EXISTS tenant_isolation_defs ON workflow_defs;
 CREATE POLICY tenant_isolation_defs ON workflow_defs
-    FOR ALL USING (tenant_id = cleat.assert_tenant_set());
+    FOR ALL USING (
+        tenant_id = cleat.assert_tenant_set()
+        OR tenant_id = '00000000-0000-0000-0000-000000000000'
+    );
 
 DROP POLICY IF EXISTS tenant_isolation_instances ON workflow_instances;
 CREATE POLICY tenant_isolation_instances ON workflow_instances
@@ -492,6 +511,10 @@ DROP POLICY IF EXISTS tenant_isolation_schedules ON workflow_schedules;
 CREATE POLICY tenant_isolation_schedules ON workflow_schedules
     FOR ALL USING (tenant_id = cleat.assert_tenant_set());
 
+DROP POLICY IF EXISTS tenant_isolation_promises ON workflow_promises;
+CREATE POLICY tenant_isolation_promises ON workflow_promises
+    FOR ALL USING (tenant_id = cleat.assert_tenant_set());
+
 DROP POLICY IF EXISTS tenant_isolation_tags ON workflow_tags;
 CREATE POLICY tenant_isolation_tags ON workflow_tags
     FOR ALL USING (tenant_id = cleat.assert_tenant_set());
@@ -499,3 +522,21 @@ CREATE POLICY tenant_isolation_tags ON workflow_tags
 DROP POLICY IF EXISTS tenant_isolation_routing ON workflow_routing;
 CREATE POLICY tenant_isolation_routing ON workflow_routing
     FOR ALL USING (tenant_id = cleat.assert_tenant_set());
+
+-- FORCE ROW LEVEL SECURITY: without this, RLS is silently bypassed for the
+-- table OWNER (in addition to superusers, who bypass RLS unconditionally
+-- and cannot be forced). Since the role that runs migrations is normally
+-- also the role the worker connects as -- i.e. the table owner -- omitting
+-- FORCE means the policies above enforce nothing for that role. FORCE does
+-- NOT help against a superuser connection (Postgres never applies RLS to
+-- superusers, forced or not); a non-superuser, non-owner connecting role is
+-- the only way to get real enforcement from a superuser-provisioned
+-- database. See docs/reference/multi-tenancy.md.
+ALTER TABLE workflow_defs FORCE ROW LEVEL SECURITY;
+ALTER TABLE workflow_instances FORCE ROW LEVEL SECURITY;
+ALTER TABLE event_history FORCE ROW LEVEL SECURITY;
+ALTER TABLE workflow_signals FORCE ROW LEVEL SECURITY;
+ALTER TABLE workflow_schedules FORCE ROW LEVEL SECURITY;
+ALTER TABLE workflow_tags FORCE ROW LEVEL SECURITY;
+ALTER TABLE workflow_routing FORCE ROW LEVEL SECURITY;
+ALTER TABLE workflow_promises FORCE ROW LEVEL SECURITY;

@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -126,6 +128,15 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (strin
 		return "", false, fmt.Errorf("get child result: %w", err)
 	}
 	if status == "done" || status == "failed" {
+		// Compact, matching the convention GetWorkflowByID and
+		// GetPromise/ListPromises already follow for JSONB result/payload
+		// columns: PostgreSQL's jsonb text output always inserts a space
+		// after every ':' and ',', so a result written as `{"child":"done"}`
+		// otherwise comes back as `{"child": "done"}`.
+		compacted := bytes.NewBuffer(nil)
+		if err := json.Compact(compacted, []byte(result)); err == nil {
+			result = compacted.String()
+		}
 		return result, true, tx.Commit()
 	}
 	return "", false, tx.Commit()

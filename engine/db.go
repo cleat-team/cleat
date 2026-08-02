@@ -327,11 +327,18 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		icol := d.castExpr("input")
 		rcol := d.castExpr("result")
 		n := qb.NextPos()
-		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s)",
+		// Search matches the workflow's def_name in addition to its
+		// input/result/error content: a general "Search" box (as opposed to
+		// the more targeted InputContains/ErrorContains filters) is most
+		// often used to find workflows of a given type by name, e.g. an
+		// admin dashboard search box (cmd/cleat-worker/server.go passes the
+		// "search" query param straight through to this filter).
+		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
 			d.likeExpr(icol, n, true),
 			d.likeExpr(rcol, n+1, true),
-			d.likeExpr("error_msg", n+2, true)))
-		qb.AddArgs(pattern, pattern, pattern)
+			d.likeExpr("error_msg", n+2, true),
+			d.likeExpr("def_name", n+3, true)))
+		qb.AddArgs(pattern, pattern, pattern, pattern)
 	}
 
 	qb.AddRaw("ORDER BY created_at DESC")
@@ -444,9 +451,9 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID)
 	if err != nil {
 		return err
 	}

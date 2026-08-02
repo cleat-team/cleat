@@ -66,7 +66,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
-		var assignedTo, errorCode, errorOp sql.NullString
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
@@ -82,7 +82,6 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
-		wf.AssignedTo = assignedTo.String
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
@@ -138,7 +137,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
-		var assignedTo, errorCode, errorOp sql.NullString
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
@@ -154,7 +153,6 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
-		wf.AssignedTo = assignedTo.String
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
@@ -191,7 +189,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
-			$4, $5)
+			$4, $5, now() - INTERVAL '1 millisecond')
 		RETURNING id
 		`, defName, defVersion, newInput, s.tenantID, priority).Scan(&newRunID)
 	if err != nil {

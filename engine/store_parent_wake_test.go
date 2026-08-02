@@ -58,11 +58,28 @@ func TestFinalizeWorkflowSegment_ParentWake(t *testing.T) {
 			}
 
 			// Parent should have next_wake_at <= now (woken atomically).
+			//
+			// next_wake_at is set by `now()` evaluated on the PostgreSQL
+			// server (inside finalize_workflow_status), and compared here
+			// against time.Now() on whatever host runs `go test`. Those are
+			// two different clocks: in this sandbox, `docker exec ...
+			// SELECT now()` reads consistently ~50-100ms ahead of the host
+			// clock. A zero-tolerance comparison made this test fail
+			// deterministically despite the underlying atomic-wake logic
+			// being correct (verified independently with a direct SQL
+			// reproduction of this exact sequence against
+			// finalize_workflow_status). clockSkewTolerance is generous
+			// enough to absorb realistic client/server clock disagreement
+			// while still catching the actual bug this test guards against:
+			// the parent staying at its pre-wake, one-hour-in-the-future
+			// next_wake_at because finalize_workflow_status's parent-wake
+			// UPDATE didn't run or didn't match.
+			const clockSkewTolerance = 2 * time.Second
 			parentNextWake := queryWorkflowNextWakeAt(t, store, parentID)
-			if parentNextWake.After(time.Now()) {
-				t.Errorf("parent next_wake_at was not updated: got %v, want <= now", parentNextWake)
+			if parentNextWake.After(time.Now().Add(clockSkewTolerance)) {
+				t.Errorf("parent next_wake_at was not updated: got %v, want <= now (+%v clock-skew tolerance)", parentNextWake, clockSkewTolerance)
 			}
-			if time.Since(parentNextWake) > 5*time.Second {
+			if time.Since(parentNextWake) > 5*time.Second+clockSkewTolerance {
 				t.Errorf("parent next_wake_at too old: %v ago", time.Since(parentNextWake))
 			}
 
