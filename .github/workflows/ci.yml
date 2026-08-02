@@ -55,6 +55,9 @@ jobs:
       - name: CI package-coverage guard
         run: scripts/check-ci-package-coverage.sh
 
+      - name: ABI doc/code consistency guard
+        run: scripts/check-doc-consistency.sh
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
