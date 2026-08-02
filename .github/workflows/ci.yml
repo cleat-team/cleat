@@ -60,6 +60,11 @@ jobs:
         with:
           go-version: stable
 
+      # Must run after Setup Go (it shells out to `go mod tidy -diff`), unlike
+      # the package-coverage guard above, which is pure bash.
+      - name: Cross-module go.mod tidiness guard
+        run: scripts/check-go-mod-tidy.sh
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
