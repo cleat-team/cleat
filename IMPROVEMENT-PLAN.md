@@ -92,12 +92,11 @@ whole of Phase 2, `cmd/cleat-worker` gofmt, and the four items below.
 These are known-and-recorded, not fixed. Each is a place where the suite is greener than
 the code.
 
-1. **`TestASTransform/compiles_to_wasm` never compiles anything.** It skips. The fixture's
-   `package.json` installs `assemblyscript` but not `@cleat/sdk`, while the transform
-   unconditionally injects an `@cleat/sdk` import into the wrapper it generates, so `asc`
-   fails at parse time and the test skips on "no `.wasm` produced". `93f8abf` only made the
-   skip *say* that. A test named `compiles_to_wasm` that has never compiled to wasm is the
-   Phase 3 failure mode in miniature. Fix: install `@cleat/sdk` into the fixture.
+1. ~~**`TestASTransform/compiles_to_wasm` never compiles anything.**~~ ✅ **Fixed** in
+   `d732ea9`. The fixture now installs `@cleat/sdk` from the checkout, imports the real
+   types instead of inline look-alikes, and a compile failure is a `t.Fatalf` rather than a
+   `t.Skipf` — that skip is what made the subtest unfalsifiable, since any asc error at all
+   was indistinguishable from the missing dependency. Proven to bite.
 
 2. **`testutil.TestDB` skips instead of failing when Postgres is unreachable.** Its
    `MySQLTestDB`/`MSSQLTestDB` siblings already `t.Fatalf`; the Postgres path calls
@@ -110,11 +109,11 @@ the code.
    `store_test_groups_*_test.go`, and `tenant_isolation_test.go`. Fix it in
    `engine/testutil/schema.go` and delete the local helper.
 
-3. **Migration 004 is verified on Postgres only.** MySQL and SQL Server have equivalent 004
-   files and neither has been executed. MSSQL uses `CREATE OR ALTER PROCEDURE`, which has no
-   return-type problem; MySQL needs checking for the same `DROP` requirement Postgres had.
-   Until `CLEAT_TEST_MYSQL`/`CLEAT_TEST_MSSQL` are pointed at real servers, "fixed across
-   three dialects" is a claim about two unrun files.
+3. ~~**Migration 004 is verified on Postgres only.**~~ ✅ **Closed.** All three dialects now
+   run it. SQL Server passed first time (`CREATE OR ALTER PROCEDURE` has no return-type
+   problem). MySQL needed no `DROP PROCEDURE` — 004 already had one — and signals fence-held
+   via a trailing `SELECT` row that the Go call site already read correctly. Getting the
+   MySQL lane far enough to execute 004 is what exposed 1.8.
 
 4. **`schema.sql` and `migrations/postgres/001_schema.sql` are two hand-maintained copies of
    one schema.** `93f8abf` resynchronised them. Nothing stops them diverging again, and the
@@ -264,6 +263,57 @@ request is then served from one hardcoded scope. Real RLS exists underneath and 
   **Fix before implementing them.**
 - Test: multi-tenant isolation (see 2.6).
 
+### 1.8 MySQL never worked — fixed in `9fc2a81`
+
+The most severe defect found so far, and the clearest illustration of the thesis.
+
+`engine/mysql_lifecycle.go` passed a zero `time.Time{}` as `p_next_wake_at`.
+`go-sql-driver/mysql` encodes that as MySQL's legacy `0000-00-00 00:00:00` sentinel, which
+the default `sql_mode` rejects — `NO_ZERO_DATE` and `STRICT_TRANS_TABLES` have been on by
+default since 5.7.
+
+It is the *normal* path, not an edge case. `cmd/cleat-worker/setup.go:1704`:
+
+```go
+finalStatus := "done"
+var nextWakeAt time.Time        // zero
+if suspended != nil {
+    finalStatus = "ready"
+    nextWakeAt = suspended.SuspendUntil
+}
+```
+
+Every workflow that finishes normally takes it. Verified against a real MySQL 8.4 with the
+fix reverted:
+
+```
+Error 1292 (22007): Incorrect datetime value: '0000-00-00'
+for column 'p_next_wake_at' at row 1
+```
+
+**On MySQL, no workflow could reach a terminal state.** Postgres and SQL Server accept a
+year-1 timestamp, so nothing else surfaced it.
+
+Why it survived: the MySQL CI lane failed *earlier*, on a collation error, so execution never
+reached this call. That collation error was itself harness-only — `engine/testutil/mysql_schema.go`
+pinned `utf8mb4_unicode_ci` while the migrations inherit the server default. So a
+**test-harness defect masked a total product failure**, and the harness defect was the third
+`engine/testutil/` ↔ `migrations/` drift found this session, after nullable `generation` and
+the stale root `schema.sql`.
+
+Three consequences worth carrying forward:
+
+1. **A green lane can hide an ungreen product.** The MySQL job was red for a harness reason.
+   Red for the wrong reason is nearly as bad as green for the wrong reason: both stop you
+   looking.
+2. **`engine/testutil/` must stop being a hand-maintained copy of the schema.** Three drifts,
+   three separate failures, one of them concealing a total outage. Deriving the test schema
+   from `migrations/` is the structural fix (in progress).
+3. **The MySQL/SQL Server differentiator is not yet real.** Phase 4 proposes leading on the
+   two backends no competitor supports. As of today MySQL could not complete a workflow, and
+   SQL Server's entire retry path is unwired (see 2.8 results). Both need to work before that
+   claim is made in public.
+
 ---
 
 ## Phase 2 — The seam test suite
@@ -280,12 +330,48 @@ This is the part that prevents recurrence, and the highest-value work in the pla
 | 2.5 | **Resource exhaustion.** Deploy an infinite-loop workflow. Assert the worker survives and the workflow is terminated. Run per backend. | 1.5 |
 | 2.6 | **Tenant isolation.** Two tenants; assert A cannot read, list, cancel, or admin-act on B's workflows through the HTTP API. Run against all three backends. | 1.7 |
 | 2.7 | **Deploy manifests.** Actually start `k8s/`, `charts/cleat/`, `docker-compose.cluster.yml` and assert the worker reaches ready. | `--namespace`/`--tenant-id` crash-loop; all three are currently broken |
-| 2.8 | **Dead-code detector.** Static check: functions with test callers but zero production callers, failing the build on new instances. | 1.4 class — the single highest-signal cheap check |
+| 2.8 | **Dead-code detector.** ✅ **Done** — `scripts/check-test-only-code.sh`. See below; it was indeed the highest-signal cheap check. | 1.4 class — the single highest-signal cheap check |
 | 2.9 | **Doc/code consistency.** Assert `ABI.md` version == `wasm/metadata.go:47 CurrentABIVersion`; documented worker flags exist in the binary; documented buffer sizes match `engine/memory.go:39`. | ABI.md claiming v4/5 while code ships v1; the 65536-vs-1048576 buffer mismatch |
 
 Note on 2.2–2.6: these need real databases and process control, so they belong in a
 nightly/pre-merge job, not the fast unit lane. Accept the runtime. They are the only tests
 that would have caught anything found today.
+
+### 2.8 results — 89 findings, and one that changes a support claim
+
+`scripts/check-test-only-code.sh` runs `staticcheck -checks=U1000 -tests=false ./...`.
+Excluding `_test.go` files is the whole trick: anything reachable only from a test then
+reads as unused. It cost one command and found 89 entries, 55 of them functions.
+
+U1000 does not flag exported identifiers in library packages, so a public API with no
+internal caller is correctly ignored. Everything below is unexported.
+
+Two clusters matter.
+
+**`(*Engine).flushCallIntent` and `(*Engine).completeCallEvent`** (`engine/flush.go:186`,
+`:221`) — item 1.4, found automatically. The read side of crash recovery is live and
+correct; it searches for a sentinel that nothing writes.
+
+**SQL Server transient-error handling is entirely disconnected.** `mssqlRetry`
+(`engine/mssql_retry.go:12`) plus the classification family in `engine/mssql_errors.go` —
+`isMSSQLDeadlock`, `isMSSQLDuplicateKey`, `isMSSQLSnapshotError`, `isMSSQLTimeout`,
+`isMSSQLRetryable`, `isMSSQLConnectionError`, `mapMSSQLError` — have **no production
+caller.** `engine/mssql_retry_test.go` covers this code thoroughly: deadlock retry,
+exponential backoff, context cancellation, retry exhaustion, roughly a dozen cases, all
+passing. They pass because they are the only callers.
+
+The consequence is a support claim: **on SQL Server, a deadlock is a hard error today.**
+Nothing retries it. MySQL has the same shape in `engine/mysql_store.go` with
+`isDuplicateKeyError` and `isLockWaitTimeout`. Given that Phase 4 positions MySQL and SQL
+Server as the differentiator no competitor covers, this needs wiring before that claim is
+made in public.
+
+This is the thesis in one artifact: **a passing test suite is not evidence that code runs.**
+Coverage measures what tests reach, and tests reached all of this.
+
+The guard is baselined rather than zeroed — 89 pre-existing entries are recorded in
+`scripts/deadcode-baseline.txt` and new ones fail the build. Clearing the backlog is
+follow-up work; the point is to stop it growing.
 
 ---
 
