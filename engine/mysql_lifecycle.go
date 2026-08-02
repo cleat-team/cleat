@@ -564,10 +564,23 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 		resultJSON = "{}"
 	}
 
+	// p_next_wake_at is only meaningful for the "ready" status; callers
+	// finalizing as "done"/"failed" routinely pass the zero time.Time{}.
+	// The go-sql-driver/mysql driver encodes a Go zero time as MySQL's
+	// legacy zero-date sentinel "0000-00-00 00:00:00", which MySQL's
+	// default strict sql_mode (NO_ZERO_DATE, on by default since 5.7)
+	// rejects with Error 1292 "Incorrect datetime value". Postgres and
+	// MSSQL both accept a year-1 timestamp fine, so this is MySQL-only.
+	// Pass NULL instead when the caller didn't supply a real time.
+	var nextWakeParam interface{}
+	if !nextWakeAt.IsZero() {
+		nextWakeParam = nextWakeAt
+	}
+
 	var fenceHeld bool
 	if err := tx.QueryRowContext(ctx, `
 		CALL finalize_workflow_status(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel).Scan(&fenceHeld); err != nil {
+	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeParam, s.notifyChannel).Scan(&fenceHeld); err != nil {
 		return fmt.Errorf("finalize workflow: %w", err)
 	}
 

@@ -365,3 +365,108 @@ func TestFinalizeWorkflowStatus_SQLFenceGuard(t *testing.T) {
 		}
 	}
 }
+
+// TestFinalizeWorkflowStatus_SQLFenceGuard_MySQL is the MySQL counterpart of
+// TestFinalizeWorkflowStatus_SQLFenceGuard above -- see that test's doc
+// comment for why it exists. Before this test was added, MySQL had no
+// coverage that could actually detect a missing/broken SQL-level fence
+// guard in migrations/mysql/004_fix_finalize_workflow_status_fence.sql:
+// TestFinalizeWorkflowSegment_ZombieWriterFence/mysql calls
+// finalize_workflow_status through MySQLStore.FinalizeWorkflowSegment
+// (engine/mysql_lifecycle.go), which wraps the CALL in its own
+// tx.BeginTx/tx.Rollback and returns ErrFenceLost *before* tx.Commit() on a
+// lost fence -- the deferred Rollback then discards everything the
+// procedure did, including an unconditional DELETE FROM event_history,
+// regardless of whether the SQL guard
+// (`IF v_rows_updated > 0 AND (p_final_status = 'done' OR ...)`) is present.
+// That means the existing zombie-writer test cannot tell whether the SQL
+// guard itself does anything on MySQL, same as documented for Postgres.
+//
+// This test calls the procedure directly against a plain *sql.DB (no
+// enclosing transaction, ordinary MySQL autocommit) so the SQL guard is what
+// is actually under test, with no Go-level rollback to fall back on.
+func TestFinalizeWorkflowStatus_SQLFenceGuard_MySQL(t *testing.T) {
+	requireBackendReachable(t, "mysql")
+
+	backend := &MySQLBackend{}
+	if !backend.Enabled() {
+		t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
+	}
+	store, teardown := backend.Setup(t)
+	defer teardown()
+	setupTestData(t, store)
+	truncateAll(t, store)
+	ctx := context.Background()
+
+	mysqlStore, ok := store.(*MySQLStore)
+	if !ok {
+		t.Fatalf("expected *MySQLStore, got %T", store)
+	}
+
+	scenario := buildZombieWriterScenario(t, ctx, store)
+
+	// ---- Call finalize_workflow_status directly: worker A's stale fence,
+	// plain *sql.DB, ordinary autocommit, no enclosing transaction and so no
+	// rollback available to cover for a missing SQL guard. ----
+
+	var fenceHeld bool
+	err := mysqlStore.db.QueryRowContext(ctx, `
+		CALL finalize_workflow_status(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		scenario.childID,
+		scenario.staleWorkerID,
+		scenario.staleGeneration,
+		"done",
+		`{"stale":"result-from-A-direct-sql"}`,
+		"",   // p_error_code
+		"",   // p_error_op
+		"{}", // p_query_state
+		nil,  // p_next_wake_at -- NULL; irrelevant to a "done" call and MySQL
+		// rejects the Go zero time.Time{} sentinel under strict sql_mode
+		"", // p_notify_channel
+	).Scan(&fenceHeld)
+	if err != nil {
+		t.Fatalf("direct finalize_workflow_status call: %v", err)
+	}
+	if fenceHeld {
+		t.Fatalf("finalize_workflow_status($4=%q stale worker/generation) returned fence held = true, want false -- the SQL-level generation fence did not hold", scenario.staleWorkerID)
+	}
+
+	// ---- event_history must be completely untouched: no DELETE ran,
+	// because the terminal side-effect block must not have executed for a
+	// caller whose fenced UPDATE matched zero rows. ----
+
+	after, err := store.LoadEventHistory(ctx, scenario.childID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory (after A's direct stale call): %v", err)
+	}
+	if len(after) != 1 || after[0].Response != "live-response-from-B" {
+		t.Fatalf("event_history was corrupted by the stale writer's direct SQL call: got %+v, want B's single live event untouched", after)
+	}
+
+	// ---- The child's ownership/status must still reflect B. ----
+
+	childAfter, err := store.GetWorkflowByID(ctx, scenario.childID)
+	if err != nil {
+		t.Fatalf("GetWorkflowByID (child): %v", err)
+	}
+	if childAfter.Status != "ready" {
+		t.Errorf("child status = %q, want %q (untouched by A's direct stale call)", childAfter.Status, "ready")
+	}
+	if childAfter.Generation != scenario.liveGeneration {
+		t.Errorf("child generation = %d, want %d (B's, untouched by A)", childAfter.Generation, scenario.liveGeneration)
+	}
+
+	// ---- The parent's await_child event must not have been injected with
+	// A's stale result. ----
+
+	parentEvents, err := store.LoadEventHistory(ctx, scenario.parentID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory (parent): %v", err)
+	}
+	for _, ev := range parentEvents {
+		if ev.EventType == "await_child" && ev.RunID == scenario.childID && strings.Contains(ev.Response, "stale") {
+			t.Fatalf("parent's await_child event was corrupted by the stale writer's direct SQL call: %+v", ev)
+		}
+	}
+}
