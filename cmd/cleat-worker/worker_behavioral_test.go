@@ -86,7 +86,24 @@ func TestDispatchLoop_StickyReclaim(t *testing.T) {
 	loadWASMCh := make(chan struct{})
 	claimedCh := make(chan struct{})
 
+	// Only return the sticky workflow on the first call. Without this guard,
+	// dispatchLoop's very next iteration (nothing throttles it: the batch
+	// didn't fill and inflight has room) calls ClaimStickyWorkflows again,
+	// and this mock — unlike a real store, which would no longer return a
+	// workflow it has already marked assigned — would hand back the same
+	// instance a second time. That spawns a second executeWorkflow
+	// goroutine for the same workflow ID, which reaches the loadWASM mock
+	// and calls close(claimedCh) on an already-closed channel: a panic,
+	// recovered by executeWorkflow's own defer, which then runs its
+	// deferred inflight.Delete — racing with (and sometimes winning against)
+	// the assertion below. Matches the pattern already used by the sibling
+	// TestDispatchLoop_ClaimsWorkflows above.
+	stickyCalls := 0
 	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
+		stickyCalls++
+		if stickyCalls > 1 {
+			return nil, nil
+		}
 		return []*engine.WorkflowInstance{
 			{ID: "wf-sticky-reclaim", DefName: "test", DefVersion: 1, Status: "ready"},
 		}, nil

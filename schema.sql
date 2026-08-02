@@ -1,5 +1,18 @@
 -- cleat workflow definitions and instances schema
--- Run this against your PostgreSQL database before deploying workflows.
+--
+-- This is a bootstrap schema for local/dev use (e.g. docker-compose.cluster.yml
+-- mounts it into postgres:/docker-entrypoint-initdb.d). It intentionally
+-- creates the full, current table shapes directly rather than an incremental
+-- history of ALTER TABLEs, so it stays a straightforward no-op superset when
+-- engine/testutil.SetupFullSchema (the idempotent CREATE TABLE IF NOT EXISTS /
+-- ALTER TABLE ADD COLUMN IF NOT EXISTS test-schema helper) runs against it.
+--
+-- The authoritative, versioned production schema lives in migrations/postgres/
+-- (applied via the engine's own migration path); this file is kept in sync
+-- with engine/testutil/schema.go's PostgreSQL dialect by hand and is not a
+-- substitute for those migrations.
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS workflow_defs (
     name TEXT NOT NULL,
@@ -7,14 +20,21 @@ CREATE TABLE IF NOT EXISTS workflow_defs (
     wasm_bytes BYTEA NOT NULL,
     entry_points TEXT[] NOT NULL DEFAULT '{}',
     min_version INTEGER NOT NULL DEFAULT 0,
+    max_history_length INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    abi_version INTEGER NOT NULL DEFAULT 1,
+    plugin_deps JSONB NOT NULL DEFAULT '{}',
+    deprecated BOOLEAN NOT NULL DEFAULT false,
+    tenant_id UUID,
+    task_queue TEXT NOT NULL DEFAULT 'default',
+    dag_spec JSONB DEFAULT NULL,
     PRIMARY KEY (name, version)
 );
 
 CREATE TABLE IF NOT EXISTS workflow_instances (
     id TEXT PRIMARY KEY,
     def_name TEXT NOT NULL,
-    def_version INTEGER NOT NULL,
+    def_version INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'ready',
     input JSONB NOT NULL DEFAULT '{}',
     assigned_to TEXT,
@@ -22,110 +42,82 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
+    result JSONB,
+    error_msg TEXT,
+    error_code TEXT,
+    error_op TEXT,
+    parent_workflow_id TEXT,
+    parent_close_policy TEXT DEFAULT 'ABANDON',
+    trace_id TEXT,
+    query_state JSONB DEFAULT '{}',
+    task_queue TEXT NOT NULL DEFAULT 'default',
+    cancellation_requested BOOLEAN NOT NULL DEFAULT false,
+    cancellation_reason TEXT,
+    sticky_worker_id TEXT,
+    tenant_id UUID,
+    compaction_state JSONB,
+    compacted_at TIMESTAMPTZ,
+    compaction_step INTEGER,
+    plugin_vers JSONB NOT NULL DEFAULT '{}',
+    event_count BIGINT NOT NULL DEFAULT 0,
     priority INTEGER NOT NULL DEFAULT 0,
     allowed_signals JSONB DEFAULT NULL,
-    FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
+    generation BIGINT NOT NULL DEFAULT 0
+    -- No FK to workflow_defs(name, version): engine/testutil's schema (the
+    -- authoritative test-schema shape this file mirrors) does not have one
+    -- either, and tests insert workflow_instances rows without a matching
+    -- workflow_defs row.
 );
 
 CREATE TABLE IF NOT EXISTS event_history (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     step INTEGER NOT NULL,
-    service TEXT NOT NULL,
-    operation TEXT NOT NULL,
-    request JSONB NOT NULL,
-    response JSONB,
+    event_type TEXT NOT NULL DEFAULT 'call',
+    service TEXT,
+    operation TEXT,
+    request TEXT,
+    response TEXT,
     error TEXT,
+    duration_ms BIGINT,
+    signal_names TEXT,
+    timeout_ms BIGINT,
+    signal_name TEXT,
+    signal_payload TEXT,
+    defer_description TEXT,
+    defer_id TEXT,
+    child_name TEXT,
+    child_input TEXT,
+    run_id TEXT,
+    new_input TEXT,
+    plugin_name TEXT,
+    plugin_func TEXT,
+    plugin_input TEXT,
+    plugin_output TEXT,
+    plugin_error TEXT,
+    promise_name TEXT,
+    promise_id TEXT,
+    promise_result TEXT,
+    promise_error TEXT,
+    tenant_id UUID,
+    payload JSONB,
+    checksum TEXT,
+    thread_id TEXT NOT NULL DEFAULT 'main',
+    local_step INTEGER NOT NULL DEFAULT 0,
+    global_seq BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (workflow_id, step)
+    PRIMARY KEY (workflow_id, step),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_instances_ready ON workflow_instances(status, next_wake_at) WHERE status = 'ready';
-CREATE INDEX IF NOT EXISTS idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running';
-CREATE INDEX IF NOT EXISTS idx_defs_active ON workflow_defs(name, version DESC);
-
--- ---------------------------------------------------------------------------
--- Migrations: extend event_history for multiple event types
--- ---------------------------------------------------------------------------
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT 'call';
-ALTER TABLE event_history ALTER COLUMN service DROP NOT NULL;
-ALTER TABLE event_history ALTER COLUMN operation DROP NOT NULL;
-ALTER TABLE event_history ALTER COLUMN request DROP NOT NULL;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS duration_ms BIGINT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS signal_names TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS timeout_ms BIGINT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS signal_name TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS signal_payload JSONB;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS defer_description TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS defer_id TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS child_name TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS child_input JSONB;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS run_id TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS new_input JSONB;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_name TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_func TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_input JSONB;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_output JSONB;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_error TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS promise_name TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS promise_id TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS promise_result TEXT;
-ALTER TABLE event_history ADD COLUMN IF NOT EXISTS promise_error TEXT;
-
--- ---------------------------------------------------------------------------
--- Migrations: extend workflow_instances
--- ---------------------------------------------------------------------------
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS cancellation_requested BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS result JSONB;
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS error_msg TEXT;
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS error_code TEXT NOT NULL DEFAULT '';
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS error_op TEXT NOT NULL DEFAULT '';
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS parent_workflow_id TEXT;
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS parent_close_policy TEXT DEFAULT 'ABANDON';
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS query_state JSONB DEFAULT '{}';
-
--- Migration: add min_version column to workflow_defs
-ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS min_version INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS namespace TEXT NOT NULL DEFAULT 'default';
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS namespace TEXT NOT NULL DEFAULT 'default';
-ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS max_history_length INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS trace_id TEXT;
-
--- Index for zombie instance reaper (reclaim instances with stale heartbeats)
-CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running';
--- Index for namespace-routed workflow claims
-CREATE INDEX IF NOT EXISTS idx_instances_namespace_ready ON workflow_instances(namespace, status, next_wake_at) WHERE status = 'ready';
-
--- ---------------------------------------------------------------------------
--- New: workflow_signals table
--- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS workflow_signals (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     signal_name TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}',
     delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tenant_id UUID,
     PRIMARY KEY (workflow_id, signal_name)
 );
 
--- ---------------------------------------------------------------------------
--- New: workflow_promises table
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS workflow_promises (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
-    promise_id TEXT NOT NULL,
-    promise_name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    result JSONB,
-    error_msg TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    resolved_at TIMESTAMPTZ,
-    PRIMARY KEY (workflow_id, promise_id)
-);
-CREATE INDEX IF NOT EXISTS idx_promises_status ON workflow_promises(workflow_id, status);
-
--- ---------------------------------------------------------------------------
--- Schedules: cron-based recurring workflow execution
--- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS workflow_schedules (
     name TEXT PRIMARY KEY,
     def_name TEXT NOT NULL,
@@ -135,43 +127,83 @@ CREATE TABLE IF NOT EXISTS workflow_schedules (
     enabled BOOLEAN NOT NULL DEFAULT true,
     next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_run_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tenant_id UUID
 );
 
--- ---------------------------------------------------------------------------
--- New: concurrency_keys table (Feature 5: Per-Key Concurrency Control)
--- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS concurrency_keys (
     key_hash BYTEA PRIMARY KEY,
     key_text TEXT NOT NULL,
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    tenant_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS workflow_promises (
+    workflow_id TEXT NOT NULL,
+    promise_id TEXT NOT NULL,
+    promise_name TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    result JSONB,
+    error_msg TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ,
+    tenant_id UUID,
+    PRIMARY KEY (workflow_id, promise_id)
+);
+
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    key_hash BYTEA NOT NULL PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    result JSONB,
+    error_msg TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id);
 
--- ---------------------------------------------------------------------------
--- Migration: add dag_spec JSONB to workflow_defs for DAG visualization (Wave 3)
-ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS dag_spec JSONB DEFAULT NULL;
-
--- Migration: add sticky_worker_id for sticky sessions (Feature 10)
--- ---------------------------------------------------------------------------
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS sticky_worker_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL;
-
--- ---------------------------------------------------------------------------
--- New: workflow_update_requests table (Feature 3: Update Handler)
--- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS workflow_update_requests (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     update_name TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
     payload JSONB NOT NULL DEFAULT '{}',
     promise_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     result JSONB,
     error_msg TEXT,
+    tenant_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
     PRIMARY KEY (workflow_id, update_name)
 );
+
+CREATE TABLE IF NOT EXISTS workflow_memory_samples (
+    id BIGSERIAL PRIMARY KEY,
+    def_name TEXT NOT NULL,
+    sample_bytes BIGINT NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS workflow_memory_stats (
+    def_name TEXT PRIMARY KEY,
+    mean_bytes DOUBLE PRECISION NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    alpha DOUBLE PRECISION NOT NULL DEFAULT 0.3,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- Indexes
+-- ---------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_defs_active ON workflow_defs(name, version DESC);
+CREATE INDEX IF NOT EXISTS idx_instances_ready ON workflow_instances(status, next_wake_at) WHERE status = 'ready';
+CREATE INDEX IF NOT EXISTS idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running';
+CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running';
+CREATE INDEX IF NOT EXISTS idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority ASC, next_wake_at) WHERE status = 'ready';
+CREATE INDEX IF NOT EXISTS idx_promises_status ON workflow_promises(workflow_id, status);
+CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires ON idempotency_keys(expires_at);
 CREATE INDEX IF NOT EXISTS idx_update_requests_pending ON workflow_update_requests(workflow_id, status);
+CREATE INDEX IF NOT EXISTS idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC);

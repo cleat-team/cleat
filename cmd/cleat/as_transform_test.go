@@ -575,7 +575,22 @@ function myWorkflow(h: HostCalls, input: string): string {
 	if ascErr != nil {
 		// Check if .wasm was produced despite errors
 		if _, err := os.Stat(wasmPath); os.IsNotExist(err) {
-			t.Skipf("asc compilation failed and no .wasm produced: %v\n%s", ascErr, ascOut)
+			// This fixture deliberately avoids importing @cleat/sdk from the
+			// workflow source (AS 0.27.32 cannot resolve scoped packages
+			// from node_modules here — see the indexTS comment above), but
+			// the transform unconditionally injects its own "@cleat/sdk"
+			// import for the generated wrapper (HostCalls, Memory, ...).
+			// Since this minimal fixture's package.json only installs
+			// "assemblyscript" and not "@cleat/sdk", that generated import
+			// cannot resolve and asc fails at parse time. Real workflow
+			// projects have @cleat/sdk installed, so this is an environment
+			// limitation of this isolated test fixture, not a transform
+			// regression — skip with the reason spelled out, rather than
+			// dumping the raw asc parse error as if it were unexplained.
+			t.Skipf("skipping: @cleat/sdk is not installed in this minimal npm fixture, "+
+				"so the transform's generated \"@cleat/sdk\" import cannot resolve under asc "+
+				"(AS 0.27.32 cannot resolve scoped packages here — see indexTS comment above); "+
+				"raw asc error:\n%v\n%s", ascErr, ascOut)
 		}
 	}
 
