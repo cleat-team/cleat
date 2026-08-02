@@ -48,15 +48,74 @@ STATICCHECK="honnef.co/go/tools/cmd/staticcheck@2025.1.1"
 # so that moving a function within its file does not churn the baseline.
 # Input:  engine/flush.go:186:18: func (*Engine).flushCallIntent is unused (U1000)
 # Output: engine<TAB>func (*Engine).flushCallIntent
+#
+# The analysis is pinned to GOOS=linux so the baseline is portable. Build
+# constraints mean staticcheck sees a different set of files per platform, so a
+# baseline generated on darwin does not match one generated on the CI runner
+# and the difference surfaces as phantom "new" entries.
+#
+# The tool itself must still be built for the host: `GOOS=linux go run` would
+# cross-compile staticcheck and then fail to execute it ("exec format error").
+# So it is installed for the host first and only its analysis is retargeted.
+#
+# LC_ALL=C pins the collation, which otherwise differs between a developer's
+# locale and the runner's.
+TOOLDIR="$(mktemp -d)"
+trap 'rm -rf "$TOOLDIR"' EXIT
+
 scan() {
-  CGO_ENABLED=0 go run "$STATICCHECK" -checks=U1000 -tests=false ./... 2>&1 |
+  if [ ! -x "$TOOLDIR/staticcheck" ]; then
+    if ! GOBIN="$TOOLDIR" go install "$STATICCHECK" >&2; then
+      echo "ERROR: could not install $STATICCHECK" >&2
+      exit 1
+    fi
+  fi
+
+  local out
+  out="$(LC_ALL=C GOOS=linux CGO_ENABLED=0 "$TOOLDIR/staticcheck" \
+    -checks=U1000 -tests=false ./... 2>&1)"
+
+  local findings
+  findings="$(printf '%s\n' "$out" |
     grep '(U1000)$' |
     sed -E 's|^([^:]*)/[^/:]*\.go:[0-9]+:[0-9]+: (.*) is unused \(U1000\)$|\1\t\2|' |
-    sort -u
+    LC_ALL=C sort -u)"
+
+  # A scan that finds nothing is far more likely to be a broken scan than a
+  # clean tree -- a cross-compile failure, a build error, a changed message
+  # format. Treating that as "no findings" would leave the guard passing
+  # vacuously, which is the exact failure mode it exists to catch. This repo
+  # has a real backlog, so zero is never legitimate.
+  if [ -z "$findings" ]; then
+    echo "ERROR: staticcheck reported no U1000 findings at all." >&2
+    echo "That almost certainly means the scan failed rather than that the" >&2
+    echo "tree is clean. Raw output follows:" >&2
+    printf '%s\n' "$out" | head -20 | sed 's/^/    /' >&2
+    # NOT exit: scan runs inside a command substitution, so exit would only
+    # leave the subshell and the caller would carry on with an empty result
+    # and report OK -- a vacuous pass by the guard against vacuous passes.
+    # Callers check for the sentinel instead.
+    echo "$SCAN_FAILED"
+    return
+  fi
+
+  printf '%s\n' "$findings"
+}
+
+# Emitted by scan() when it produced nothing, so callers can distinguish a
+# failed scan from a clean tree across the command-substitution boundary.
+SCAN_FAILED="__scan_failed__"
+
+die_if_scan_failed() {
+  if [ "$1" = "$SCAN_FAILED" ]; then
+    exit 1
+  fi
 }
 
 if [ "${1:-}" = "--update" ]; then
-  scan > "$BASELINE"
+  fresh="$(scan)"
+  die_if_scan_failed "$fresh"
+  printf '%s\n' "$fresh" > "$BASELINE"
   echo "Wrote $(wc -l < "$BASELINE" | tr -d ' ') entries to $BASELINE"
   exit 0
 fi
@@ -68,9 +127,16 @@ if [ ! -f "$BASELINE" ]; then
 fi
 
 current="$(scan)"
+die_if_scan_failed "$current"
 
 # Anything present now but absent from the baseline is new.
-new="$(comm -13 "$BASELINE" <(printf '%s\n' "$current"))"
+#
+# grep -Fxv rather than comm: comm requires both inputs to be sorted in the
+# *same* collation it uses, and silently emits "file 1 is not in sorted order"
+# plus garbage results when they disagree -- which is exactly what happened
+# between a darwin-generated baseline and the CI runner. A set-membership test
+# has no ordering requirement at all.
+new="$(printf '%s\n' "$current" | grep -Fxv -f "$BASELINE" || true)"
 
 if [ -n "$new" ]; then
   echo "ERROR: new code that only tests reference:" >&2

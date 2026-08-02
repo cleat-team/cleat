@@ -158,6 +158,15 @@ jobs:
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: cleat
+        # Required. This job runs directly on the runner, not inside a
+        # container, so the service's network is not shared with it -- without
+        # an explicit host port mapping the container is simply unreachable,
+        # and no amount of fixing the DSN helps. Combined with the localhost
+        # -> ::1 issue and testutil.TestDB's t.Skipf, this job declared a
+        # Postgres service, never once connected to it, and reported green for
+        # its entire existence.
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -594,15 +603,55 @@ jobs:
         run: docker compose -f docker-compose.cluster.yml up -d
 
       - name: Wait for cluster readiness
+        shell: bash
         run: |
-          echo "Waiting for Postgres to be healthy..."
+          # pg_isready alone is not a readiness signal for this job. During
+          # initialisation the postgres entrypoint runs a temporary server on
+          # a local socket to execute /docker-entrypoint-initdb.d, so
+          # `docker exec ... pg_isready` reports ready while the schema is
+          # still being applied -- or was never applied at all. The tests then
+          # fail with a bare "relation \"workflow_defs\" does not exist",
+          # which says nothing about why.
+          #
+          # So wait on the actual precondition: the schema exists.
+          echo "Waiting for Postgres to accept connections..."
           for i in $(seq 1 30); do
-            if docker exec cleat-postgres pg_isready -U cleat -d cleat &>/dev/null; then
-              echo "Postgres is ready."
+            docker exec cleat-postgres pg_isready -U cleat -d cleat &>/dev/null && break
+            sleep 2
+          done
+
+          echo "Waiting for the initdb migrations to produce a usable schema..."
+          ok=""
+          for i in $(seq 1 30); do
+            if docker exec cleat-postgres psql -U cleat -d cleat -tAc \
+                 "SELECT to_regclass('public.workflow_defs') IS NOT NULL
+                     AND to_regproc('public.finalize_workflow_status') IS NOT NULL" \
+                 2>/dev/null | grep -q '^t$'; then
+              ok=1
               break
             fi
             sleep 2
           done
+
+          if [ -z "$ok" ]; then
+            echo "::error title=Cluster schema missing::Postgres came up without the cleat schema."
+            echo
+            echo "docker-compose.cluster.yml mounts ./migrations/postgres into"
+            echo "/docker-entrypoint-initdb.d. The entrypoint only runs those files on a"
+            echo "FIRST initialisation of an empty data directory, and if one of them"
+            echo "fails it exits -- with restart: unless-stopped the container then comes"
+            echo "back up on the now-non-empty directory and skips them entirely, which"
+            echo "looks like a database that started fine and has no tables."
+            echo
+            echo "--- what the container sees in /docker-entrypoint-initdb.d ---"
+            docker exec cleat-postgres ls -la /docker-entrypoint-initdb.d/ || true
+            echo
+            echo "--- postgres container log ---"
+            docker logs cleat-postgres 2>&1 | tail -80 || true
+            exit 1
+          fi
+          echo "Schema is present."
+
           echo "Waiting for workers to register..."
           sleep 10
 

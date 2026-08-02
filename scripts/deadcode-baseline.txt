@@ -1,10 +1,10 @@
 cmd/cleat-worker	field backoffUntil
 cmd/cleat-worker	field circuitOpen
 cmd/cleat-worker	field pluginStreamRegistry
-cmd/cleat-worker	func (*apiServer).inflightCount
-cmd/cleat-worker	func (*healthTracker).maxAge
 cmd/cleat-worker	func (*Worker).compactionLoop
 cmd/cleat-worker	func (*Worker).waitForDB
+cmd/cleat-worker	func (*apiServer).inflightCount
+cmd/cleat-worker	func (*healthTracker).maxAge
 cmd/cleat-worker	func baseDSNFromDSN
 cmd/cleat-worker	var lastFreshStepCount
 cmd/cleat/templates/workflow	var h
@@ -17,12 +17,12 @@ engine	func (*Engine).completeCallEvent
 engine	func (*Engine).flushCallIntent
 engine	func (*FaultInjector).applyLatencySleep
 engine	func (*ShardedStore).tryEachShard
-engine	func contextWithRawMemBuf
 engine	func Dialect.batchLimit
 engine	func Dialect.intervalExpr
 engine	func Dialect.nowExpr
 engine	func Dialect.timestampDiffExpr
 engine	func Dialect.workflowInstanceColumnsExtra
+engine	func contextWithRawMemBuf
 engine	func eventStreamToJSON
 engine	func isDeadlockError
 engine	func isDuplicateKeyError
