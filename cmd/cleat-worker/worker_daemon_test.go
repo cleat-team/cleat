@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -584,7 +585,7 @@ func newTestWorker(ms *mockStore) *Worker {
 	mc := NewMemoryController(monitor, ms, "test-worker", 5, 1<<40, 1<<40)
 	testMetrics := newTestPrometheus()
 	return &Worker{
-		Metrics: testMetrics,
+		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
 		concurrency:         5,
@@ -611,7 +612,7 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 	mc := NewMemoryController(monitor, ms, "test-worker", concurrency, 1<<40, 1<<40)
 	testMetrics := newTestPrometheus()
 	return &Worker{
-		Metrics: testMetrics,
+		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
 		concurrency:         concurrency,
@@ -3056,10 +3057,23 @@ func TestCanAcceptAPIWorkflows_Default(t *testing.T) {
 // readMemTotal tests
 // ---------------------------------------------------------------------------
 
+// readMemTotal reads /proc/meminfo, so it only works on Linux. Its caller
+// treats a false return as "memory monitoring unavailable" and disables the
+// feature rather than failing, so on other platforms the correct behaviour is
+// a clean false — which is worth asserting rather than skipping past.
 func TestReadMemTotal(t *testing.T) {
 	total, ok := readMemTotal()
+
+	if runtime.GOOS != "linux" {
+		if ok {
+			t.Errorf("readMemTotal() = (%d, true) on %s; /proc/meminfo should not exist there",
+				total, runtime.GOOS)
+		}
+		return
+	}
+
 	if !ok {
-		t.Fatal("readMemTotal() returned false — /proc/meminfo may not be available")
+		t.Fatal("readMemTotal() returned false on Linux — /proc/meminfo should be readable")
 	}
 	if total == 0 {
 		t.Error("readMemTotal() returned 0 bytes, expected > 0")
