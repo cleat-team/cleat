@@ -68,6 +68,13 @@ jobs:
       - name: Cross-module go.mod tidiness guard
         run: scripts/check-go-mod-tidy.sh
 
+      # Catches code that is written, tested, passing, and wired to nothing --
+      # which a test suite cannot catch, because the tests pass precisely
+      # because they are the only callers. The baseline records the existing
+      # backlog (63 entries); only new additions fail.
+      - name: Test-only code guard
+        run: scripts/check-test-only-code.sh
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
