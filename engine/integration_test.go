@@ -815,6 +815,32 @@ func TestIntegrationWorkflowMaxDuration(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
+	// This test has never exercised the thing it names, and is skipped rather
+	// than left reporting a pass it did not earn.
+	//
+	// The workload is testdata/basic's LongRunning, which loops `iterations`
+	// times calling h.DurableCall("noop", "", ""). Measured directly, that
+	// call fails on the very first iteration -- the guest gets error
+	// 0xFF000000 out of the host-call path -- so LongRunning returns an error
+	// result in ~200ms no matter what `iterations` is set to:
+	//
+	//   input={"iterations":0}        elapsed=207ms  res="done"
+	//   input={"iterations":100000}   elapsed=199ms  res={"error":"durable call noop.: [4278190080] ...
+	//   input={"iterations":5000000}  elapsed=200ms  res={"error":"durable call noop.: [4278190080] ...
+	//
+	// The wall-clock limit therefore never fires because of the workload. On
+	// CI it fired anyway, because `go test -race` slowed instantiation past
+	// the 1s budget (the trap reported 999.9ms), so the test passed for a
+	// reason unrelated to its subject -- and failed on a fast machine without
+	// -race, where startup is quick and the assertion sees a nil error.
+	// Retuning the iteration count cannot fix that; the loop body never runs.
+	//
+	// Two defects are hiding behind it: DurableCall to this service fails at
+	// the ABI boundary (note the closure-analysis warnings `cleat build` emits
+	// for this fixture), and the workflow duration limit has no honest test.
+	// Both are recorded in IMPROVEMENT-PLAN.md 2.10.
+	t.Skip("known broken: the workload never loops; see the comment above and IMPROVEMENT-PLAN.md 2.10")
+
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
 	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
@@ -837,8 +863,18 @@ func TestIntegrationWorkflowMaxDuration(t *testing.T) {
 	}
 
 	// Insert a workflow instance in 'ready' status.
-	// 500000 HostCall iterations takes ~5s wall-clock time, beyond the 1s timeout.
-	input := `{"iterations":500000}`
+	// The iteration count has to be large enough that no machine finishes it
+	// inside the 1s limit, because the assertion below is that the limit
+	// *fires*. At 500000 it was tuned to some particular machine's speed: CI
+	// took ~1s and tripped the limit, while an Apple Silicon dev machine
+	// finished the whole workload well inside 1s and failed with "expected
+	// timeout error, got nil". A test whose outcome depends on how fast the
+	// host is cannot be trusted in either direction.
+	//
+	// Overshooting costs nothing: execution is interrupted at the 1s limit, so
+	// the test's wall-clock time is bounded by the timeout, not by the
+	// iteration count.
+	input := `{"iterations":50000000}`
 	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input) VALUES ($1, $2, $3, $4, $5)`,
 		runID, defName, 1, "ready", input); err != nil {
 		t.Fatalf("insert workflow_instances: %v", err)
@@ -863,11 +899,34 @@ func TestIntegrationWorkflowMaxDuration(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "error 1") && !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("expected context.DeadlineExceeded or timeout, got: %v", err)
+	// The wasmtime backend enforces this limit with epoch interruption (added
+	// in 7faa157), which traps inside the guest and reports the elapsed time
+	// directly:
+	//
+	//   wasm trap: host: export "long_running": execution time limit exceeded
+	//   (999.945668ms ...) / Caused by: wasm trap: interrupt
+	//
+	// That is the limit working, and more precise than what came before -- the
+	// call used to run to completion and surface as a context deadline on the
+	// Go side. The assertion below accepts either, since the wazero backend
+	// still takes the context path.
+	//
+	// "error 1" was in the accepted set and is not a timeout signal at all; it
+	// matches any error whose text happens to contain that substring. It is
+	// dropped rather than carried forward.
+	timedOut := errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(err.Error(), "timed out") ||
+		strings.Contains(err.Error(), "execution time limit exceeded") ||
+		strings.Contains(err.Error(), "interrupt")
+	if !timedOut {
+		t.Errorf("expected a timeout or an execution-time-limit trap, got: %v", err)
 	}
 
-	t.Log("Workflow max duration integration test passed")
+	// Gated on !t.Failed(): this line used to print unconditionally, so a
+	// failing run still ended with "test passed" in the log.
+	if !t.Failed() {
+		t.Log("Workflow max duration integration test passed")
+	}
 }
 
 // normalizeJSON unmarshals and re-marshals a JSON string to produce a

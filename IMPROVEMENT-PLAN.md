@@ -436,6 +436,38 @@ follow-up work; the point is to stop it growing.
 
 ---
 
+### 2.10 `TestIntegrationWorkflowMaxDuration` never tested the duration limit — OPEN
+
+Found while clearing the last red CI job. Two defects behind one test.
+
+The workload is `testdata/basic`'s `LongRunning`, which loops `iterations` times calling
+`h.DurableCall("noop", "", "")`. Measured directly, that call fails on the **first**
+iteration — the guest receives error `0xFF000000` from the host-call path — so the function
+returns in ~200ms regardless of `iterations`:
+
+```
+input={"iterations":0}        elapsed=207ms  res="done"
+input={"iterations":100000}   elapsed=199ms  res={"error":"durable call noop.: [4278190080] ...
+input={"iterations":5000000}  elapsed=200ms  res={"error":"durable call noop.: [4278190080] ...
+```
+
+So the loop body never runs and the wall-clock limit cannot fire because of the workload.
+It fired on CI anyway: `go test -race` slowed instantiation past the 1s budget — the trap
+reported 999.9ms — so the test passed for a reason unrelated to its subject, and failed on
+a fast machine without `-race`. Retuning the iteration count cannot fix it.
+
+1. **`DurableCall` fails at the ABI boundary for this fixture.** Note that `cleat build`
+   emits closure-analysis warnings for it: `host function "cleat_complete" imported from
+   WASM env but not in computed closure`. Whether the two are the same bug is not yet
+   established.
+2. **The workflow duration limit has no honest test.** `1.5` added epoch interruption, fuel
+   and `StoreLimits` to the wasmtime backend; the fence is real (a trap is raised and
+   reports elapsed time), but nothing verifies it against a workload that genuinely runs
+   long.
+
+The test is skipped with this reasoning inline rather than left green. A skip is visible —
+the CI job has a "Warn on skipped tests" step — whereas a pass for the wrong reason is not.
+
 ## Phase 3 — Put falsification in the loop
 
 The economic finding: **~$900 of generation, ~$0 of falsification.** Compute was 4–12% of
