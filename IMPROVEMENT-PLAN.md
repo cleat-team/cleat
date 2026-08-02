@@ -106,7 +106,24 @@ completion.
   `_ string` and discards it, which is why 2,560 engine tests passed against dead code.
 - Test: cancellation e2e (see 2.3).
 
-### 1.4 Crash-recovery machinery has zero callers (~2–3 sessions)
+### 1.4 Crash-recovery: the detector works, nothing writes what it detects (~2–3 sessions)
+
+> **Sharpened 2026-08-02 by empirical test, not grep.** The original framing here — "the
+> whole feature is dead" — was too coarse. The *read* side is live and correct: a
+> `pendingSentinel` in history is caught at `engine/durablecalls.go:150` and reported to the
+> workflow as `[AMBIGUOUS] call outcome unknown at step N …`. `TestPendingSentinelDetection`
+> now proves this for steps 0–4, with step 5 correctly showing no ambiguity because that
+> workflow discards the call result with `_`.
+>
+> The gap is the *write* side. Nothing calls `flushCallIntent` before dispatching a real
+> external call, so in an actual crash **no sentinel is ever written and the detector has
+> nothing to find.** Detection is real but unreachable in production. The fix is to wire the
+> intent write into `freshCall` / `freshCallWithRetry` / `freshCallWithHeartbeat` — the
+> detector needs no changes.
+>
+> Note also that both ambiguity and replay divergence are reported *inside the workflow
+> result string*, not as a Go error from `Engine.Replay`. Any future test or operator
+> tooling must check the result, not just `err`. Two separate test suites got this wrong.
 
 `flushCallIntent` / `completeCallEvent` implement a real write-ahead-intent pattern so a
 crash mid-external-call is detectable on replay as `[AMBIGUOUS]`. 48 test references,
