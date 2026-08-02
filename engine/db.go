@@ -37,7 +37,7 @@ type PostgresStore struct {
 	// that flow through both paths. Until the paths are unified or
 	// exclusive, full coverage requires routing all events through the per-event path.
 	encryptSensitivePayloads bool
-		metrics                  *prometheus.Metrics
+	metrics                  *prometheus.Metrics
 
 	// disableReadRedaction when true bypasses RedactOnRead on the read path.
 	// Set to true during replay to avoid the overhead of retroactive redaction.
@@ -1150,8 +1150,8 @@ type PostgresStoreFactory struct {
 
 	encryption               *PayloadEncryption
 	encryptSensitivePayloads bool
-		metrics                  *prometheus.Metrics
-	syncCommitOff bool
+	metrics                  *prometheus.Metrics
+	syncCommitOff            bool
 
 	logger *slog.Logger
 }

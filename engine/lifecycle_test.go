@@ -1447,7 +1447,6 @@ func TestSendSignalAndWait_ReplayPastEnd(t *testing.T) {
 	_ = result
 }
 
-
 func TestJsonParse(t *testing.T) {
 	ctx := context.Background()
 	rt := wazero.NewRuntime(ctx)

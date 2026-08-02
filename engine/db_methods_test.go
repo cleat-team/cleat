@@ -219,38 +219,17 @@ var testCtx = context.Background()
 // Exec-only methods (work with the basic noop driver)
 // ---------------------------------------------------------------------------
 
-
-
-
-
-
-
-
-
-
-
-
-
 // ---- Schedule methods ----
-
-
-
-
 
 // ---- DeliverSignal ----
 
-
 // ---- ReleaseWorkflow ----
-
 
 // ---- RequestCancellation ----
 
-
 // ---- RecordWorkflowMemorySample ----
 
-
 // ---- CompactHistory ----
-
 
 // ---------------------------------------------------------------------------
 // Methods needing RowsAffected
@@ -357,7 +336,6 @@ func TestPostgresStore_LoadWASM_Success(t *testing.T) {
 	}
 }
 
-
 func TestPostgresStore_LoadWorkflowConfig_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT max_history_length", data: [][]driver.Value{{int64(500)}}},
@@ -373,7 +351,6 @@ func TestPostgresStore_LoadWorkflowConfig_Success(t *testing.T) {
 		t.Errorf("expected 500, got %d", maxHist)
 	}
 }
-
 
 func TestPostgresStore_LoadDAGSpec_Success(t *testing.T) {
 	specJSON := json.RawMessage(`{"steps":["a","b"]}`)
@@ -391,7 +368,6 @@ func TestPostgresStore_LoadDAGSpec_Success(t *testing.T) {
 		t.Errorf("expected %q, got %q", specJSON, spec)
 	}
 }
-
 
 func TestPostgresStore_CountActiveInstances(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
@@ -512,7 +488,6 @@ func TestPostgresStore_ValidateVersion_False(t *testing.T) {
 	}
 }
 
-
 func TestPostgresStore_GetChildResult_Done(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT COALESCE", data: [][]driver.Value{{`{"result":"ok"}`, "done"}}},
@@ -582,7 +557,6 @@ func TestPostgresStore_GetQueryState_Found(t *testing.T) {
 		t.Errorf("expected 'my-value', got %q", val)
 	}
 }
-
 
 func TestPostgresStore_GetWorkflowDef_Success(t *testing.T) {
 	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -654,7 +628,6 @@ func TestPostgresStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 	}
 }
 
-
 func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	heartbeatAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -698,8 +671,6 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 	}
 }
 
-
-
 func TestPostgresStore_GetPromise_Resolved(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
@@ -734,7 +705,6 @@ func TestPostgresStore_LoadCompactionState_Empty(t *testing.T) {
 		t.Error("expected nil for empty compaction state")
 	}
 }
-
 
 func TestPostgresStore_LoadCompactionState_Present(t *testing.T) {
 	csJSON := []byte(`{"version":1,"compacted_step":50}`)
@@ -819,7 +789,6 @@ func TestPostgresStore_ListVersions(t *testing.T) {
 		t.Errorf("unexpected versions: %v", versions)
 	}
 }
-
 
 func TestPostgresStore_ListWorkflowDefs_All(t *testing.T) {
 	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -928,7 +897,6 @@ func TestPostgresStore_GetActiveInstanceCountsByVersion(t *testing.T) {
 		t.Errorf("expected test-wf:3=1, got %d", counts["test-wf:3"])
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // Version Management — error path tests
@@ -1171,7 +1139,6 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 	}
 }
 
-
 func TestPostgresStore_ListSchedules(t *testing.T) {
 	nextRunAt := time.Date(2025, 1, 1, 2, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
@@ -1225,7 +1192,6 @@ func TestPostgresStore_GetDueSchedules(t *testing.T) {
 		t.Errorf("unexpected name: %q", scheds[0].Name)
 	}
 }
-
 
 func TestPostgresStore_ListPromises(t *testing.T) {
 	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -1335,7 +1301,6 @@ func TestPostgresStore_LoadMemoryEstimates(t *testing.T) {
 	}
 }
 
-
 func TestPostgresStore_LoadMemoryStats(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
@@ -1363,11 +1328,9 @@ func TestPostgresStore_LoadMemoryStats(t *testing.T) {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // ClaimWorkflows (complex UPDATE ... RETURNING)
 // ---------------------------------------------------------------------------
-
 
 func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -1420,7 +1383,6 @@ func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 	}
 }
 
-
 func TestPostgresStore_ClaimStickyWorkflows_Success(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
@@ -1450,7 +1412,6 @@ func TestPostgresStore_ClaimStickyWorkflows_Success(t *testing.T) {
 // ClaimWorkflow wrapper (implements WorkflowStore.ClaimWorkflow)
 // ---------------------------------------------------------------------------
 
-
 func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
@@ -1479,7 +1440,6 @@ func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 // ---------------------------------------------------------------------------
 // LoadEventHistory
 // ---------------------------------------------------------------------------
-
 
 func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
@@ -1558,13 +1518,9 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 // AppendEventHistoryBatch
 // ---------------------------------------------------------------------------
 
-
-
-
 // ---------------------------------------------------------------------------
 // AppendEventHistory (single event wrapper)
 // ---------------------------------------------------------------------------
-
 
 // ---------------------------------------------------------------------------
 // StartNewRun
@@ -1695,7 +1651,6 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_InsertError(t *testing.T) 
 // PollAndClaimSignal
 // ---------------------------------------------------------------------------
 
-
 func TestPostgresStore_PollAndClaimSignal_Found(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
@@ -1721,11 +1676,6 @@ func TestPostgresStore_PollAndClaimSignal_Found(t *testing.T) {
 // ---------------------------------------------------------------------------
 // CompleteWorkflow and FailWorkflow (complex, with best-effort cleanup)
 // ---------------------------------------------------------------------------
-
-
-
-
-
 
 func TestPostgresStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
 	// Idempotency UPDATE is best-effort. When it fails, the error is logged
@@ -1786,11 +1736,9 @@ func TestPostgresStore_AcquireConcurrencyKey_Success(t *testing.T) {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // CleanupMemorySamples
 // ---------------------------------------------------------------------------
-
 
 func TestPostgresStore_CleanupMemorySamples_WithDefs(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
@@ -2298,7 +2246,6 @@ func TestPostgresStore_GetEventCount_BeginError(t *testing.T) {
 // AcquireConcurrencyKey — additional edge cases
 // ---------------------------------------------------------------------------
 
-
 func TestPostgresStore_AcquireConcurrencyKey_ZeroTTL(t *testing.T) {
 	// TTL of 0 should still work — the interval becomes "0 seconds".
 	db := newMockDBForPostgres(t, []mockRowsResult{
@@ -2495,7 +2442,6 @@ func TestPostgresStore_ResolveVersionByTag_Latest(t *testing.T) {
 	}
 }
 
-
 func TestPostgresStore_ResolveVersionByTag_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT version FROM workflow_tags", err: errors.New("query failed")},
@@ -2626,7 +2572,6 @@ func TestPostgresStore_GetWorkflowTag_Success(t *testing.T) {
 	}
 }
 
-
 func TestPostgresStore_GetWorkflowTag_BeginError(t *testing.T) {
 	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
 	defer db.Close()
@@ -2685,7 +2630,6 @@ func TestPostgresStore_GetWorkflowTags_Success(t *testing.T) {
 		t.Errorf("unexpected tags: %v", tags)
 	}
 }
-
 
 func TestPostgresStore_GetWorkflowTags_BeginError(t *testing.T) {
 	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
@@ -2816,7 +2760,6 @@ func TestPostgresStore_GetRoutingRules_Success(t *testing.T) {
 		t.Fatalf("expected 2 rules, got %d", len(rules))
 	}
 }
-
 
 func TestPostgresStore_GetRoutingRules_BeginError(t *testing.T) {
 	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
@@ -3035,7 +2978,6 @@ func TestPostgresStore_FinalizeWorkflowSegment_Suspend(t *testing.T) {
 		t.Fatalf("FinalizeWorkflowSegment(suspend): %v", err)
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // StreamEventHistory
@@ -3424,7 +3366,6 @@ func TestPostgresStore_StartChildWorkflow_QueryError(t *testing.T) {
 // PickVersionByRouting
 // ---------------------------------------------------------------------------
 
-
 func TestPostgresStore_PickVersionByRouting_WithRules(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
@@ -3539,7 +3480,6 @@ func TestPostgresStore_MoveToDeadLetterQueue_BeginError(t *testing.T) {
 		t.Fatal("expected error from begin failure")
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // BatchHeartbeat (Postgres variant) — error paths
@@ -4363,7 +4303,7 @@ func TestEventRecordToPayload_Fetch(t *testing.T) {
 		Step: 0, EventType: "fetch",
 		FetchMethod: "GET", FetchURL: "http://example.com",
 		FetchHeaders: `{"Accept":"text/plain"}`,
-		FetchBody: `{"q":"search"}`, FetchResponse: `{"status":"ok"}`,
+		FetchBody:    `{"q":"search"}`, FetchResponse: `{"status":"ok"}`,
 	}
 	data, err := eventRecordToPayload(rec)
 	if err != nil {
@@ -5395,4 +5335,3 @@ func TestPostgresStore_GetChildResult_ScanError(t *testing.T) {
 		t.Errorf("expected 'get child result' error, got: %v", err)
 	}
 }
-

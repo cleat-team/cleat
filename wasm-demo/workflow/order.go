@@ -101,8 +101,8 @@ func checkItemAvailability(h cleat.HostCalls, sku string) error {
 
 func reserveInventory(h cleat.HostCalls, userID string, items []CartItem) (Reservation, error) {
 	type reserveReq struct {
-		UserID    string     `json:"user_id"`
-		Items     []CartItem `json:"items"`
+		UserID string     `json:"user_id"`
+		Items  []CartItem `json:"items"`
 	}
 	_, err := h.DurableCall("inventory", "Reserve", mustMarshal(reserveReq{UserID: userID, Items: items}))
 	if err != nil {

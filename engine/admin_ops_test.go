@@ -57,7 +57,7 @@ func TestAdminActionEventConversion(t *testing.T) {
 
 // adminOpsTestStore is a minimal WorkflowStore stub for testing admin ops.
 type adminOpsTestStore struct {
-	WorkflowStore // embed to satisfy interface; only override what we need
+	WorkflowStore    // embed to satisfy interface; only override what we need
 	forceCompleteErr error
 	forceFailErr     error
 	reReplayErr      error

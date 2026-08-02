@@ -107,11 +107,11 @@ type Compensation struct {
 // ---------------------------------------------------------------------------
 
 type Analyzer struct {
-	Checkpoints  []Checkpoint
-	CachedCalls  []CachedCall
+	Checkpoints   []Checkpoint
+	CachedCalls   []CachedCall
 	Compensations []Compensation
-	Errors       []string
-	fset         *token.FileSet
+	Errors        []string
+	fset          *token.FileSet
 }
 
 func (a *Analyzer) Analyze(source string) {
@@ -378,12 +378,12 @@ func isAPICall(name string) bool {
 	// Heuristic: calls that start with a capital letter and are not builtins
 	// are assumed to be external API calls that need caching.
 	apiCalls := map[string]bool{
-		"ReserveInventory":  true,
-		"ReleaseInventory":  true,
-		"ChargeCustomer":    true,
-		"RefundCustomer":    true,
-		"CreateShipment":    true,
-		"SendConfirmation":  true,
+		"ReserveInventory": true,
+		"ReleaseInventory": true,
+		"ChargeCustomer":   true,
+		"RefundCustomer":   true,
+		"CreateShipment":   true,
+		"SendConfirmation": true,
 	}
 	return apiCalls[name]
 }

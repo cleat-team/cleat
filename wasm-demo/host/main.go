@@ -51,9 +51,9 @@ type host struct {
 	state     *workflowState
 	stepCount int
 	isReplay  bool
-	crashAt   int    // if > 0, crash after this many steps (simulates failure)
-	epoch     int64  // fencing token; incremented when a new worker claims this workflow
-	fenced    bool   // when true, all DurableCall return error immediately — simulates lost heartbeat ownership
+	crashAt   int   // if > 0, crash after this many steps (simulates failure)
+	epoch     int64 // fencing token; incremented when a new worker claims this workflow
+	fenced    bool  // when true, all DurableCall return error immediately — simulates lost heartbeat ownership
 }
 
 func newHost(workflowID string) *host {

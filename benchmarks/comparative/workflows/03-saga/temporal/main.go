@@ -97,7 +97,7 @@ func FailingForwardActivity(ctx context.Context) (string, error) {
 // overhead, activity dispatch).
 func SagaWorkflow(ctx workflow.Context, input SagaInput) (SagaOutput, error) {
 	type step struct {
-		name    string
+		name       string
 		compensate func(workflow.Context) error
 	}
 
@@ -229,8 +229,8 @@ func runBenchmark(
 		id := atomic.AddInt64(&idSeq, 1)
 		wfID := fmt.Sprintf("bench-%s-%d", workflowName, id)
 		opts := client.StartWorkflowOptions{
-			ID:                 wfID,
-			TaskQueue:          cfg.TaskQueue,
+			ID:                  wfID,
+			TaskQueue:           cfg.TaskQueue,
 			WorkflowTaskTimeout: 30 * time.Second,
 		}
 		run, err := c.ExecuteWorkflow(context.Background(), opts, wfFn, input)
@@ -364,7 +364,7 @@ func main() {
 
 	// ---- Failure path (SagaWithCompensationWorkflow) ----
 	failureCases := []struct {
-		steps int
+		steps  int
 		failAt int
 	}{
 		{steps: 10, failAt: 9},   // last step fails

@@ -385,7 +385,10 @@ func TestSagaCompensatesInReverseOrderOnFailure(t *testing.T) {
 		func(h HostCalls) error { order = append(order, "comp2"); return nil },
 	)
 	s.AddStep("step3",
-		func(h HostCalls) (string, error) { order = append(order, "step3"); return "", NewTerminalError(errors.New("step3 failed")) },
+		func(h HostCalls) (string, error) {
+			order = append(order, "step3")
+			return "", NewTerminalError(errors.New("step3 failed"))
+		},
 		func(h HostCalls) error { order = append(order, "comp3"); return nil },
 	)
 
@@ -423,7 +426,10 @@ func TestSagaRunsCompensationEvenIfSomeCompensationsFail(t *testing.T) {
 		func(h HostCalls) error { order = append(order, "comp2"); return nil },
 	)
 	s.AddStep("step3",
-		func(h HostCalls) (string, error) { order = append(order, "step3"); return "", NewTerminalError(errors.New("step3 failed")) },
+		func(h HostCalls) (string, error) {
+			order = append(order, "step3")
+			return "", NewTerminalError(errors.New("step3 failed"))
+		},
 		func(h HostCalls) error { order = append(order, "comp3"); return nil },
 	)
 
@@ -2130,7 +2136,7 @@ func TestDurableCallTypedWithOptions_StartToCloseTimeoutDoesNotFire(t *testing.T
 func TestAwaitSignalsWithQuorum_DelegatesToHostFunction(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		AwaitSignalsWithQuorum: func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error) {
-			
+
 			return []SignalResult{{Name: "sig1", Payload: `{"data":"ok"}`, TimedOut: false}}, nil
 		},
 	})

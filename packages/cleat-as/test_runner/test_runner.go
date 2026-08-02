@@ -67,16 +67,16 @@ type CallRecord struct {
 // It loads a WASM binary, instantiates it with mock host functions, and
 // provides methods to stub calls, invoke workflows, and inspect call history.
 type WASMTestEnv struct {
-	t            TestingT
-	ctx          context.Context
-	wasmBytes    []byte
-	module       api.Module
-	runtime      wazero.Runtime
-	callHistory  []CallRecord
-	callStubs    []callStub
-	mu           sync.Mutex
-	nowMs        int64
-	memory       []byte // scratch buffer for string I/O
+	t           TestingT
+	ctx         context.Context
+	wasmBytes   []byte
+	module      api.Module
+	runtime     wazero.Runtime
+	callHistory []CallRecord
+	callStubs   []callStub
+	mu          sync.Mutex
+	nowMs       int64
+	memory      []byte // scratch buffer for string I/O
 }
 
 // callStub stores a registered stub for a durable call.
@@ -142,8 +142,8 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 		ctx:       ctx,
 		wasmBytes: wasmBytes,
 		runtime:   r,
-		nowMs:    time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(),
-		memory:   make([]byte, 10*1024*1024+65536), // 10 MiB scratch + 64 KiB output
+		nowMs:     time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(),
+		memory:    make([]byte, 10*1024*1024+65536), // 10 MiB scratch + 64 KiB output
 	}
 
 	// Build the host module with all cleat imports.
@@ -367,7 +367,7 @@ func (e *WASMTestEnv) CallWorkflow(name, inputJSON string) (string, error) {
 	scratchBase := uint32(10 * 1024 * 1024) // 0xA00000
 	e.writeMemory(scratchBase, inputBytes)
 
-	outOffset := scratchBase + 65536   // OUTPUT_OFFSET
+	outOffset := scratchBase + 65536 // OUTPUT_OFFSET
 	maxOutLen := uint32(65536)
 
 	ctx := context.Background()

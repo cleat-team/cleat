@@ -34,4 +34,3 @@ func TestFreshStepCount(t *testing.T) {
 		t.Errorf("FreshStepCount() = %d, want 7", got)
 	}
 }
-

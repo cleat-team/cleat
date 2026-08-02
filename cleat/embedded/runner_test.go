@@ -1249,8 +1249,8 @@ func TestHTTPFetch_DefaultsMethodToGET(t *testing.T) {
 		h := ctx.H()
 		// URL with no method should default to GET then fail at connection.
 		_, err := h.DurableCall("http", "fetch", `{"url":"http://127.0.0.1:1/"}`)
-			if err == nil {
-				// On the off chance the request succeeded: highly unlikely.
+		if err == nil {
+			// On the off chance the request succeeded: highly unlikely.
 			t.Log("unexpectedly got a response from port 1")
 		}
 		ctx.SetOutput(`{"ok":true}`)

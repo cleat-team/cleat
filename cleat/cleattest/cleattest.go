@@ -25,11 +25,11 @@ type TestingT interface {
 
 // CallRecord records a single durable API call made through the test env.
 type CallRecord struct {
-	Service   string
-	Operation string
-	Request   string
-	Response  string
-	Err       error
+	Service    string
+	Operation  string
+	Request    string
+	Response   string
+	Err        error
 	RetryCount int // Number of retry attempts before this call succeeded (0 if no retry)
 }
 
@@ -303,9 +303,9 @@ type TestEnv struct {
 	// childWorkflowCallHistory records all child workflow invocations.
 	childWorkflowCallHistory []ChildWorkflowCallRecord
 
-	ConcurrencyKeys           map[string]string
-	AcquireConcurrencyKeyFn   func(key, workflowID string) (bool, error)
-	ReleaseConcurrencyKeysFn  func(workflowID string)
+	ConcurrencyKeys          map[string]string
+	AcquireConcurrencyKeyFn  func(key, workflowID string) (bool, error)
+	ReleaseConcurrencyKeysFn func(workflowID string)
 
 	pluginCallStubs []*pluginCallStub
 
@@ -342,59 +342,59 @@ type TestEnv struct {
 // (e.g., WithRetrySimulation).
 func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 	e := &TestEnv{
-		nowMs:         time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(),
-		versionVal:    1,
-		minVersionVal: 1,
-		queryState:    make(map[string]string),
-		promises:      make(map[string]promiseState),
-		childWorkflowStubs: make(map[string]*childWorkflowStub),
-		childResults:       make(map[string]*childStubResult),
-		childWorkflowHandlers: make(map[string]func(inputJSON string) (resultJSON string, err error)),
-		retryBehaviors:       make(map[string]*retryBehavior),
+		nowMs:                    time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(),
+		versionVal:               1,
+		minVersionVal:            1,
+		queryState:               make(map[string]string),
+		promises:                 make(map[string]promiseState),
+		childWorkflowStubs:       make(map[string]*childWorkflowStub),
+		childResults:             make(map[string]*childStubResult),
+		childWorkflowHandlers:    make(map[string]func(inputJSON string) (resultJSON string, err error)),
+		retryBehaviors:           make(map[string]*retryBehavior),
 		childWorkflowCallHistory: make([]ChildWorkflowCallRecord, 0),
-		ConcurrencyKeys: make(map[string]string),
-			signalReplyChannels: make(map[string]chan string),
+		ConcurrencyKeys:          make(map[string]string),
+		signalReplyChannels:      make(map[string]chan string),
 	}
 	for _, opt := range opts {
 		opt(e)
 	}
 	e.clock = &simClock{env: e}
 	e.h = cleat.NewHostCalls(cleat.HostCallsOptions{
-		DurableCall:                  e.durableCallImpl,
-		DurableCallWithOptions:       e.durableCallWithOptionsImpl,
-		DurableSleep:                 e.durableSleepImpl,
-		DurableAwaitSignals:          e.durableAwaitSignalsImpl,
-		DurableDefer:                 e.durableDeferImpl,
-		DurableLog:                   e.durableLogImpl,
-		PollCancellation:             e.pollCancellationImpl,
-		PollSignal:                   e.pollSignalImpl,
-		ContinueAsNew:                e.continueAsNewImpl,
-		ChildWorkflow:                e.childWorkflowImpl,
-		AwaitChild:                   e.awaitChildImpl,
-		AwaitAllChildren:             e.awaitAllChildrenImpl,
-		ChildWorkflowTyped:           e.childWorkflowTypedImpl,
-		AwaitChildTyped:              e.awaitChildTypedImpl,
+		DurableCall:                   e.durableCallImpl,
+		DurableCallWithOptions:        e.durableCallWithOptionsImpl,
+		DurableSleep:                  e.durableSleepImpl,
+		DurableAwaitSignals:           e.durableAwaitSignalsImpl,
+		DurableDefer:                  e.durableDeferImpl,
+		DurableLog:                    e.durableLogImpl,
+		PollCancellation:              e.pollCancellationImpl,
+		PollSignal:                    e.pollSignalImpl,
+		ContinueAsNew:                 e.continueAsNewImpl,
+		ChildWorkflow:                 e.childWorkflowImpl,
+		AwaitChild:                    e.awaitChildImpl,
+		AwaitAllChildren:              e.awaitAllChildrenImpl,
+		ChildWorkflowTyped:            e.childWorkflowTypedImpl,
+		AwaitChildTyped:               e.awaitChildTypedImpl,
 		DurableCallTypedWithHeartbeat: e.durableCallTypedWithHeartbeatImpl,
-		Version:                      e.versionImpl,
-		MinVersion:                   e.minVersionImpl,
-		SetQueryState:                e.setQueryStateImpl,
-		Now:                          e.nowImpl,
-		Random:                       e.randomImpl,
-		CreatePromise:                e.createPromiseImpl,
-		AwaitPromise:                 e.awaitPromiseImpl,
-		RegisterUpdateHandler:        e.registerUpdateHandlerImpl,
-		RegisterQueryHandler:        e.registerQueryHandlerImpl,
-		RunDetached:                  e.runDetachedImpl,
-		PluginCall: e.pluginCallImpl,
-			DurableSend:                   e.durableSendImpl,
-			ScheduleInvoke:                e.durableScheduleInvokeImpl,
-			SendSignalAndWait:            e.sendSignalAndWaitImpl,
-			ReplyToSignal:                e.replyToSignalImpl,
-			SignalWorkflow:               e.signalWorkflowImpl,
-			AcquireLock:                   e.acquireLockImpl,
-			ReleaseLock:                   e.releaseLockImpl,
-			AwaitCondition:               e.awaitConditionImpl,
-			SideEffect:                    e.sideEffectImpl,
+		Version:                       e.versionImpl,
+		MinVersion:                    e.minVersionImpl,
+		SetQueryState:                 e.setQueryStateImpl,
+		Now:                           e.nowImpl,
+		Random:                        e.randomImpl,
+		CreatePromise:                 e.createPromiseImpl,
+		AwaitPromise:                  e.awaitPromiseImpl,
+		RegisterUpdateHandler:         e.registerUpdateHandlerImpl,
+		RegisterQueryHandler:          e.registerQueryHandlerImpl,
+		RunDetached:                   e.runDetachedImpl,
+		PluginCall:                    e.pluginCallImpl,
+		DurableSend:                   e.durableSendImpl,
+		ScheduleInvoke:                e.durableScheduleInvokeImpl,
+		SendSignalAndWait:             e.sendSignalAndWaitImpl,
+		ReplyToSignal:                 e.replyToSignalImpl,
+		SignalWorkflow:                e.signalWorkflowImpl,
+		AcquireLock:                   e.acquireLockImpl,
+		ReleaseLock:                   e.releaseLockImpl,
+		AwaitCondition:                e.awaitConditionImpl,
+		SideEffect:                    e.sideEffectImpl,
 	})
 	return e
 }
@@ -639,7 +639,7 @@ func (e *TestEnv) Reset() {
 	e.childWorkflowCallHistory = nil
 	e.ConcurrencyKeys = make(map[string]string)
 	e.pluginCallStubs = nil
-		e.signalReplyChannels = make(map[string]chan string)
+	e.signalReplyChannels = make(map[string]chan string)
 	e.replayMode = false
 	e.replayHistory = nil
 	e.replayDivergence = 0
@@ -1198,7 +1198,6 @@ func (e *TestEnv) registerQueryHandlerImpl(name string) {
 	_ = name // no-op for testing; hostCallsImpl stores handler in queryHandlers map
 }
 
-
 // HandleQuery invokes a registered query handler by name with the given payload.
 // If the underlying HostCalls supports it, the host-provided handler is used.
 // Otherwise, falls back to the local queryHandlers map in hostCallsImpl.
@@ -1341,7 +1340,6 @@ func (e *TestEnv) replyToSignalImpl(correlationID, response string) error {
 	return nil
 }
 
-
 // signalWorkflowImpl delivers a signal to a target workflow.
 // In the test env, the target workflow is the current workflow itself.
 func (e *TestEnv) signalWorkflowImpl(targetRunID, signalName, payload string) error {
@@ -1361,7 +1359,6 @@ func (e *TestEnv) signalWorkflowImpl(targetRunID, signalName, payload string) er
 	e.mu.Unlock()
 	return nil
 }
-
 
 // ResolvePromise resolves a promise with the given result.
 func (e *TestEnv) ResolvePromise(promiseID, result string) {
@@ -1482,7 +1479,7 @@ func (e *TestEnv) sideEffectImpl(computedResult string) (resp string, retErr err
 }
 
 func (e *TestEnv) AcquireConcurrencyKey(key, workflowID string) (bool, error) {
-		if e.AcquireConcurrencyKeyFn != nil {
+	if e.AcquireConcurrencyKeyFn != nil {
 		return e.AcquireConcurrencyKeyFn(key, workflowID)
 	}
 	e.mu.Lock()

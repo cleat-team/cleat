@@ -8,11 +8,11 @@ import "github.com/cleat-team/cleat/plugin"
 
 // Types
 type (
-	PluginInfo    = plugin.PluginInfo
-	Plugin        = plugin.Plugin
-	Environment   = plugin.Environment
-	Migration     = plugin.Migration
-	PluginDB      = plugin.PluginDB
+	PluginInfo     = plugin.PluginInfo
+	Plugin         = plugin.Plugin
+	Environment    = plugin.Environment
+	Migration      = plugin.Migration
+	PluginDB       = plugin.PluginDB
 	DatabaseAccess = plugin.DatabaseAccess
 )
 

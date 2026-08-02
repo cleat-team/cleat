@@ -86,10 +86,10 @@ type host struct {
 // stdinChannel implements io.Reader using a channel.
 // The host sends one JSON-encoded callResponse at a time.
 type stdinChannel struct {
-	mu       sync.Mutex
-	buf      []byte
-	cond     *sync.Cond
-	closed   bool
+	mu     sync.Mutex
+	buf    []byte
+	cond   *sync.Cond
+	closed bool
 }
 
 func newStdinChannel() *stdinChannel {

@@ -37,7 +37,7 @@ type WorkflowDef struct {
 type WorkflowInstance struct {
 	ID         string
 	DefName    string
-	DefVersion int    // ← THIS is what determines which WASM blob to load
+	DefVersion int // ← THIS is what determines which WASM blob to load
 	Status     string
 	Input      string
 	AssignedTo string

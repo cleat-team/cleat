@@ -842,7 +842,6 @@ func (s *ShardedStore) ResolveVersionByTag(ctx context.Context, workflowName str
 	return shard.Store.ResolveVersionByTag(ctx, workflowName, tag)
 }
 
-
 // SetWorkflowTag assigns a tag to a specific version.
 // Delegates to the shard determined by the workflow name.
 func (s *ShardedStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
@@ -912,6 +911,7 @@ func (s *ShardedStore) GetRoutingRules(ctx context.Context, workflowName string)
 	}
 	return shard.Store.GetRoutingRules(ctx, workflowName)
 }
+
 // CreatePromise routes by workflow ID.
 func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	shard := s.getShard(workflowID)

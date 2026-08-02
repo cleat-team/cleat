@@ -36,7 +36,7 @@ func NewTenantPools(ownerDB *sql.DB, baseDSN string, maxConns int) *TenantPools 
 		OwnerDB:  ownerDB,
 		pools:    make(map[string]*sql.DB),
 		maxConns: maxConns,
-		connStr: baseDSN,
+		connStr:  baseDSN,
 	}
 }
 

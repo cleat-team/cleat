@@ -7,12 +7,12 @@ import (
 	"encoding/json"
 	"unsafe"
 
-	"github.com/cleat-team/cleat/cleat"
 	"durable-wasm-demo/workflow"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 type PlaceOrderArgs struct {
-	UserID string           `json:"user_id"`
+	UserID string              `json:"user_id"`
 	Cart   []workflow.CartItem `json:"cart"`
 }
 

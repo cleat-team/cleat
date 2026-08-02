@@ -37,12 +37,12 @@ func TestCompactionReducesEventCount(t *testing.T) {
 	var events []engine.EventRecord
 	for i := 0; i < numEvents; i++ {
 		events = append(events, engine.EventRecord{
-			Step:     i,
+			Step:      i,
 			EventType: engine.EventTypeCall,
-			Service:  "svc",
-			Op:       fmt.Sprintf("op-%d", i),
-			Request:  `{}`,
-			Response: `{"ok":true}`,
+			Service:   "svc",
+			Op:        fmt.Sprintf("op-%d", i),
+			Request:   `{}`,
+			Response:  `{"ok":true}`,
 		})
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {

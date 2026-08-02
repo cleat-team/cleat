@@ -281,7 +281,7 @@ func TestRunRestoreWorkflow_WithChildInstance(t *testing.T) {
 
 	// Both the parent workflow (matched by id) and the child workflow
 	// (matched by parent_workflow_id) should be restored.
-	
+
 	if !strings.Contains(out, "2 workflow instance rows") {
 		t.Errorf("expected 2 workflow instance rows, got: %s", out)
 	}

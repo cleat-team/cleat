@@ -13,6 +13,7 @@ type adapterParam struct {
 	Name string // parameter name
 	Type string // "string", "int64", "[]string"
 }
+
 var adapterDefs = map[string]adapterDef{
 	"DurableCall": {
 		FieldName:  "DurableCall",

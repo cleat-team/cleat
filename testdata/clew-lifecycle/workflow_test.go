@@ -90,13 +90,13 @@ func TestReviewLoopSHOULDFIXThenPASS(t *testing.T) {
 	// Sequence: [PASS(explore), PASS(plan), SHOULD_FIX(review_plan),
 	//             PASS(re-plan), PASS(re-review), PASS(implement), PASS(review_impl)]
 	responses := []PluginCallOutput{
-		passResp,                              // 0: explore
-		passResp,                              // 1: plan
+		passResp, // 0: explore
+		passResp, // 1: plan
 		{ExitCode: 0, ReviewOutcome: "SHOULD_FIX"}, // 2: review_plan → loop
-		passResp,                              // 3: re-plan (round 1)
-		passResp,                              // 4: re-review (round 1) → PASS
-		passResp,                              // 5: implement
-		passResp,                              // 6: review_impl
+		passResp, // 3: re-plan (round 1)
+		passResp, // 4: re-review (round 1) → PASS
+		passResp, // 5: implement
+		passResp, // 6: review_impl
 	}
 	ch, h := newCountingHostCalls(responses)
 
@@ -122,14 +122,14 @@ func TestReviewLoopMaxRoundsExhausted(t *testing.T) {
 	// Sequence: PASS(explore), PASS(plan), SHOULD_FIX(review_plan),
 	// then 3 rounds of [PASS(re-plan), SHOULD_FIX(re-review)] → 9 total
 	responses := []PluginCallOutput{
-		passResp,                              // 0: explore
-		passResp,                              // 1: plan
+		passResp, // 0: explore
+		passResp, // 1: plan
 		{ExitCode: 0, ReviewOutcome: "SHOULD_FIX"}, // 2: review_plan → loop
-		passResp,                              // 3: re-plan round 1
+		passResp, // 3: re-plan round 1
 		{ExitCode: 0, ReviewOutcome: "SHOULD_FIX"}, // 4: re-review round 1
-		passResp,                              // 5: re-plan round 2
+		passResp, // 5: re-plan round 2
 		{ExitCode: 0, ReviewOutcome: "SHOULD_FIX"}, // 6: re-review round 2
-		passResp,                              // 7: re-plan round 3
+		passResp, // 7: re-plan round 3
 		{ExitCode: 0, ReviewOutcome: "SHOULD_FIX"}, // 8: re-review round 3
 	}
 	ch, h := newCountingHostCalls(responses)
@@ -158,8 +158,8 @@ func TestReviewLoopMaxRoundsExhausted(t *testing.T) {
 
 func TestBLOCKEROnFirstReview(t *testing.T) {
 	responses := []PluginCallOutput{
-		passResp,                              // 0: explore
-		passResp,                              // 1: plan
+		passResp,                                // 0: explore
+		passResp,                                // 1: plan
 		{ExitCode: 0, ReviewOutcome: "BLOCKER"}, // 2: review_plan → BLOCKER
 	}
 	ch, h := newCountingHostCalls(responses)
@@ -188,11 +188,11 @@ func TestBLOCKEROnFirstReview(t *testing.T) {
 func TestBLOCKERDuringReviewLoop(t *testing.T) {
 	// First review SHOULD_FIX → re-plan PASS → second review BLOCKER.
 	responses := []PluginCallOutput{
-		passResp,                              // 0: explore
-		passResp,                              // 1: plan
+		passResp, // 0: explore
+		passResp, // 1: plan
 		{ExitCode: 0, ReviewOutcome: "SHOULD_FIX"}, // 2: review_plan → loop
-		passResp,                              // 3: re-plan round 1
-		{ExitCode: 0, ReviewOutcome: "BLOCKER"},    // 4: re-review round 1 → BLOCKER
+		passResp,                                // 3: re-plan round 1
+		{ExitCode: 0, ReviewOutcome: "BLOCKER"}, // 4: re-review round 1 → BLOCKER
 	}
 	ch, h := newCountingHostCalls(responses)
 
@@ -254,10 +254,10 @@ func TestNonZeroExitCode(t *testing.T) {
 func TestRePlanNonZeroExit(t *testing.T) {
 	// Review SHOULD_FIX → re-plan crashes (exit_code=1).
 	responses := []PluginCallOutput{
-		passResp,                              // 0: explore
-		passResp,                              // 1: plan
+		passResp, // 0: explore
+		passResp, // 1: plan
 		{ExitCode: 0, ReviewOutcome: "SHOULD_FIX"}, // 2: review_plan → loop
-		{ExitCode: 1, ReviewOutcome: "PASS"}, // 3: re-plan → crash
+		{ExitCode: 1, ReviewOutcome: "PASS"},       // 3: re-plan → crash
 	}
 	ch, h := newCountingHostCalls(responses)
 
@@ -357,8 +357,8 @@ func TestParentSignalOnSuccess(t *testing.T) {
 
 func TestParentSignalNotSentOnBlocked(t *testing.T) {
 	responses := []PluginCallOutput{
-		passResp,                              // 0: explore
-		passResp,                              // 1: plan
+		passResp,                                // 0: explore
+		passResp,                                // 1: plan
 		{ExitCode: 0, ReviewOutcome: "BLOCKER"}, // 2: review_plan → BLOCKER
 	}
 	ch, h := newCountingHostCalls(responses)

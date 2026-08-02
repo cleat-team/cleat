@@ -1961,35 +1961,35 @@ func TestMSSQLStore_LoadEventHistory_Success(t *testing.T) {
 	now := time.Now()
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM event_history", data: [][]driver.Value{{
-			int64(0),                    // step
-			string(EventTypeCall),       // event_type
-			"my-svc",                    // service
-			"my-op",                     // operation
-			`{"key":"val"}`,             // request
-			`{"result":"ok"}`,           // response
-			"",                          // error
-			int64(100),                  // duration_ms
-			"",                          // signal_names
-			int64(0),                    // timeout_ms
-			"",                          // signal_name
-			"",                          // signal_payload
-			"",                          // defer_description
-			"",                          // defer_id
-			"",                          // child_name
-			"",                          // child_input
-			"",                          // run_id
-			"",                          // new_input
-			"",                          // plugin_name
-			"",                          // plugin_func
-			"",                          // plugin_input
-			"",                          // plugin_output
-			"",                          // plugin_error
-			"",                          // payload
-			"",                          // promise_name
-			"",                          // promise_id
-			"",                          // promise_result
-			"",                          // promise_error
-			now,                         // created_at
+			int64(0),              // step
+			string(EventTypeCall), // event_type
+			"my-svc",              // service
+			"my-op",               // operation
+			`{"key":"val"}`,       // request
+			`{"result":"ok"}`,     // response
+			"",                    // error
+			int64(100),            // duration_ms
+			"",                    // signal_names
+			int64(0),              // timeout_ms
+			"",                    // signal_name
+			"",                    // signal_payload
+			"",                    // defer_description
+			"",                    // defer_id
+			"",                    // child_name
+			"",                    // child_input
+			"",                    // run_id
+			"",                    // new_input
+			"",                    // plugin_name
+			"",                    // plugin_func
+			"",                    // plugin_input
+			"",                    // plugin_output
+			"",                    // plugin_error
+			"",                    // payload
+			"",                    // promise_name
+			"",                    // promise_id
+			"",                    // promise_result
+			"",                    // promise_error
+			now,                   // created_at
 		}}},
 	}, nil)
 	defer db.Close()

@@ -31,8 +31,8 @@ type SubscriptionInput struct {
 }
 
 type ChargeResult struct {
-	ChargeID   string `json:"charge_id"`
-	Success    bool   `json:"success"`
+	ChargeID      string `json:"charge_id"`
+	Success       bool   `json:"success"`
 	DeclineReason string `json:"decline_reason,omitempty"`
 }
 

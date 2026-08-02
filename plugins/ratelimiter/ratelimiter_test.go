@@ -1,10 +1,10 @@
 package ratelimiter
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"github.com/cleat-team/cleat/engine"
-	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"

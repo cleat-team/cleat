@@ -143,10 +143,10 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-		case strings.Contains(query, "SELECT version FROM kv_store"):
-			c.store.mu.RLock()
-			defer c.store.mu.RUnlock()
-			return c.queryVersion(args)
+	case strings.Contains(query, "SELECT version FROM kv_store"):
+		c.store.mu.RLock()
+		defer c.store.mu.RUnlock()
+		return c.queryVersion(args)
 	case strings.Contains(query, "AND key ="):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()

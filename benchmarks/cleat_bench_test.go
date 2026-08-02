@@ -144,8 +144,8 @@ func (bh *benchHarness) randomFn() int64 {
 	return 42 // deterministic
 }
 
-func (bh *benchHarness) version() int       { return 1 }
-func (bh *benchHarness) minVersion() int    { return 1 }
+func (bh *benchHarness) version() int              { return 1 }
+func (bh *benchHarness) minVersion() int           { return 1 }
 func (bh *benchHarness) setQueryState(_, _ string) {}
 
 func (bh *benchHarness) durableLog(_ string) {}

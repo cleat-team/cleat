@@ -28,9 +28,9 @@ type callRequest struct {
 }
 
 type callResponse struct {
-	Type     string `json:"type"` // "response"
-	Result   string `json:"result"`
-	Err      string `json:"err,omitempty"`
+	Type   string `json:"type"` // "response"
+	Result string `json:"result"`
+	Err    string `json:"err,omitempty"`
 }
 
 type logMessage struct {

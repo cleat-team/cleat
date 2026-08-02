@@ -96,12 +96,12 @@ type DB interface {
 // ==========================================================================
 
 type simulatedDB struct {
-	mu           sync.Mutex
-	workflows    map[string]*WorkflowInstance
-	histories    map[string][]EventRecord
-	connected    bool
-	failAfter    int // fail after this many operations (0 = never)
-	opCount      int
+	mu        sync.Mutex
+	workflows map[string]*WorkflowInstance
+	histories map[string][]EventRecord
+	connected bool
+	failAfter int // fail after this many operations (0 = never)
+	opCount   int
 }
 
 func newSimulatedDB() *simulatedDB {
@@ -260,9 +260,9 @@ func (db *simulatedDB) simulateFailover(duration time.Duration, label string) {
 // ==========================================================================
 
 type Worker struct {
-	id         string
-	db         DB
-	concurrency int
+	id                string
+	db                DB
+	concurrency       int
 	heartbeatInterval time.Duration
 
 	inflight sync.Map // map[workflowID]*WorkflowInstance

@@ -527,8 +527,8 @@ func (scanErrorConnector) Driver() driver.Driver { return &fakeDrv{} }
 type scanErrorConn struct{}
 
 func (*scanErrorConn) Prepare(_ string) (driver.Stmt, error) { return nil, fmt.Errorf("stub") }
-func (*scanErrorConn) Close() error                           { return nil }
-func (*scanErrorConn) Begin() (driver.Tx, error)              { return &fakeTx{}, nil }
+func (*scanErrorConn) Close() error                          { return nil }
+func (*scanErrorConn) Begin() (driver.Tx, error)             { return &fakeTx{}, nil }
 func (*scanErrorConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
 	return &fakeResult{rowsAffected: 0}, nil
 }

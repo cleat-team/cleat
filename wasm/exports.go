@@ -514,16 +514,16 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 				switch f.GoType {
 				case "string":
 					fmt.Fprintf(buf, "\t\t%s := extractJSONString(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
-			case "int", "int64", "int32":
-				fmt.Fprintf(buf, "\t\t%s := extractJSONInt(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
-			default:
-				// Complex type: use json.Unmarshal.
-				fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
-				fmt.Fprintf(buf, "\t\tif err := json.Unmarshal([]byte(extractJSONRaw(string(argsJSON), %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
-				fmt.Fprintf(buf, "\t\t\treturn []byte(`{\"error\":\"unmarshal %s: ` + err.Error() + `\"}`)\n", f.JSONTag)
-				buf.WriteString("\t\t}\n")
+				case "int", "int64", "int32":
+					fmt.Fprintf(buf, "\t\t%s := extractJSONInt(string(argsJSON), %q)\n", f.GoName, f.JSONTag)
+				default:
+					// Complex type: use json.Unmarshal.
+					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
+					fmt.Fprintf(buf, "\t\tif err := json.Unmarshal([]byte(extractJSONRaw(string(argsJSON), %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
+					fmt.Fprintf(buf, "\t\t\treturn []byte(`{\"error\":\"unmarshal %s: ` + err.Error() + `\"}`)\n", f.JSONTag)
+					buf.WriteString("\t\t}\n")
+				}
 			}
-		}
 		}
 
 		// Build call.
@@ -593,4 +593,3 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 	buf.WriteString("\t}\n")
 	buf.WriteString("}\n")
 }
-
