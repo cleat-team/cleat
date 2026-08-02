@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,9 +22,9 @@ func TestDispatchLoop_CapacityLimit(t *testing.T) {
 	// When inflight reaches the concurrency limit, the dispatch loop should
 	// skip claiming and sleep instead.
 	ms := &mockStore{}
-	claimAttempts := 0
+	var claimAttempts atomic.Int32
 	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
-		claimAttempts++
+		claimAttempts.Add(1)
 		return nil, nil
 	}
 	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
@@ -32,14 +33,13 @@ func TestDispatchLoop_CapacityLimit(t *testing.T) {
 
 	w := newTestWorkerWithConcurrency(ms, 1)
 
-	// Fill inflight to capacity.
+	// Fill inflight to capacity. This is a synthetic entry with no goroutine
+	// backing it, so it will never clear on its own — it must be removed
+	// explicitly below before the loop can be allowed to exit (see the
+	// shutdown drain logic in dispatchLoop, setup.go, which intentionally
+	// blocks until inflight reaches zero so real in-flight workflows finish
+	// cleanly before the worker stops claiming).
 	w.inflight.Store("wf-busy-1", &engine.WorkflowInstance{ID: "wf-busy-1", DefName: "test", DefVersion: 1})
-
-	// Run briefly then cancel.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	w.ctx = ctx
-	w.cancel = cancel
 
 	done := make(chan struct{})
 	w.wg.Add(1)
@@ -48,10 +48,30 @@ func TestDispatchLoop_CapacityLimit(t *testing.T) {
 		close(done)
 	}()
 
-	<-done
+	// Let the loop run several poll cycles while at capacity, then snapshot
+	// the claim count. This is the actual property under test: while the
+	// worker is genuinely at capacity, no claims are attempted.
+	time.Sleep(50 * time.Millisecond)
+	attemptsAtCapacity := claimAttempts.Load()
 
-	if claimAttempts > 0 {
-		t.Errorf("expected 0 claim attempts when at capacity, got %d", claimAttempts)
+	// Now unwind the test: cancel and clear the synthetic in-flight entry so
+	// the loop's shutdown drain sees zero in-flight work and returns. A
+	// claim slipping in during this shutdown transition (the in-flight loop
+	// iteration that was already past its capacity check when we cancelled)
+	// doesn't violate the capacity invariant above and is intentionally not
+	// asserted on here — it's an artifact of tearing the loop down, not of
+	// being at capacity.
+	w.cancel()
+	w.inflight.Delete("wf-busy-1")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatchLoop did not stop within 2s of context cancellation")
+	}
+
+	if attemptsAtCapacity > 0 {
+		t.Errorf("expected 0 claim attempts when at capacity, got %d", attemptsAtCapacity)
 	}
 }
 
