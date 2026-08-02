@@ -599,8 +599,8 @@ jobs:
       - name: Build Docker image
         run: docker build -t cleat-worker:latest .
 
-      - name: Start cluster
-        run: docker compose -f docker-compose.cluster.yml up -d
+      - name: Start Postgres and apply the schema
+        run: docker compose -f docker-compose.cluster.yml up -d postgres
 
       - name: Wait for cluster readiness
         shell: bash
@@ -614,15 +614,18 @@ jobs:
           # which says nothing about why.
           #
           # So wait on the actual precondition: the schema exists.
-          echo "Waiting for Postgres to accept connections..."
-          for i in $(seq 1 30); do
-            docker exec cleat-postgres pg_isready -U cleat -d cleat &>/dev/null && break
-            sleep 2
-          done
-
+          # No pg_isready pre-loop: it returns ready within a fraction of a
+          # second because the entrypoint's temporary init-time server is
+          # already listening, so it buys nothing and reads as a real check.
+          # The schema poll below subsumes it -- psql simply fails until the
+          # server is genuinely up.
+          #
+          # 180s, not 60s. Applying the full migration set takes appreciably
+          # longer than the single small schema.sql this job used to mount,
+          # and a 60s budget expired while 003/004 were still executing.
           echo "Waiting for the initdb migrations to produce a usable schema..."
           ok=""
-          for i in $(seq 1 30); do
+          for i in $(seq 1 90); do
             if docker exec cleat-postgres psql -U cleat -d cleat -tAc \
                  "SELECT to_regclass('public.workflow_defs') IS NOT NULL
                      AND to_regproc('public.finalize_workflow_status') IS NOT NULL" \
@@ -651,6 +654,14 @@ jobs:
             exit 1
           fi
           echo "Schema is present."
+
+          # Only now start the workers. Previously the whole cluster came up at
+          # once, so the workers connected while initdb was still running and
+          # raced it -- the postgres log filled with "relation
+          # \"tenant_api_keys\" does not exist" and duplicate-key errors on
+          # pg_type from concurrent DDL, and their contention slowed the
+          # migrations further.
+          docker compose -f docker-compose.cluster.yml up -d
 
           echo "Waiting for workers to register..."
           sleep 10

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1850,5 +1851,43 @@ func TestMustMarshalJSON_Error(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dag:") {
 		t.Errorf("expected error to contain 'dag:', got %v", err)
+	}
+}
+
+// TestWasmOutputName_IsDeterministic pins the property that
+// TestWasmOutputName_FromRealAnalysis only samples.
+//
+// analyzer.LoadPackages collects entry points by ranging over a map, so before
+// internal/analyzer/loader.go sorted the result, EntryPoints came back in Go's
+// randomized iteration order. wasmOutputName derives the build artifact's
+// filename from EntryPoints[0], so `cleat build` on testdata/basic -- which
+// has three entry points -- produced place_order.wasm, cancel_order.wasm or
+// long_running.wasm at random, a different one roughly every third run.
+//
+// That made the failure a ~1-in-3 flake, which is exactly the kind of thing
+// that gets re-diagnosed as "CI being flaky" and retried until green. Asserting
+// the sorted invariant directly fails 100% of the time if the sort is removed.
+func TestWasmOutputName_IsDeterministic(t *testing.T) {
+	pattern := filepath.Join(testdataDir(t), "basic")
+
+	result, _, _, _, _, _ := analyze(pattern)
+	if len(result.EntryPoints) < 2 {
+		t.Fatalf("fixture needs >1 entry point to test ordering, got %d: %v",
+			len(result.EntryPoints), result.EntryPoints)
+	}
+
+	if !sort.StringsAreSorted(result.EntryPoints) {
+		t.Errorf("EntryPoints is not sorted, so its order depends on map iteration: %v",
+			result.EntryPoints)
+	}
+
+	// And the derived name must not vary between loads in the same process.
+	first := wasmOutputName(result)
+	for i := 0; i < 3; i++ {
+		again, _, _, _, _, _ := analyze(pattern)
+		if got := wasmOutputName(again); got != first {
+			t.Fatalf("wasmOutputName differs between loads: %q then %q (entry points %v vs %v)",
+				first, got, result.EntryPoints, again.EntryPoints)
+		}
 	}
 }
