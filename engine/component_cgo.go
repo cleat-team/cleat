@@ -124,6 +124,7 @@ package engine
 //     wasmtime_component_val_t *results, size_t nresults);
 import "C"
 import (
+	"context"
 	"fmt"
 	"sync"
 	"unsafe"
@@ -571,6 +572,9 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	if _, err := b.configureStore(context.Background(), store); err != nil {
+		return nil, err
+	}
 	wasiConfig := wasmtime.NewWasiConfig()
 	wasiConfig.InheritStderr()
 	wasiConfig.SetEnv([]string{"PYTHONHOME", "PYTHONPATH"}, []string{"/", "/"})

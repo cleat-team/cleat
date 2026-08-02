@@ -15,15 +15,15 @@ package main
 
 import (
 	"context"
-	_ "net/http/pprof"
 	"database/sql"
 	"encoding/json"
-		"flag"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log"
 	"log/slog"
-		"net/http"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -36,7 +36,7 @@ import (
 	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
-		"github.com/google/uuid"
+	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
 	// Database drivers
@@ -47,6 +47,7 @@ import (
 	_ "github.com/cleat-team/cleat/plugins/llm"
 	// _ "github.com/cleat-team/cleat/plugins/pgvector"  // requires pgvector extension
 )
+
 func main() {
 	flag.Parse()
 
@@ -55,8 +56,6 @@ func main() {
 
 	// Fall back to DATABASE_URL env var if --db is empty.
 	resolveDBURL()
-
-
 
 	// Set WASM output buffer size before any Runtime is created.
 	engine.OutBufSize = uint32(*wasmOutputBufferSize)
@@ -270,7 +269,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
+				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -339,7 +338,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
+				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -365,7 +364,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
+				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -392,7 +391,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
+				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -682,7 +681,7 @@ func main() {
 					return
 				case <-ticker.C:
 					stats := pluginDB.Stats()
-						metricsInstance.SetPluginConnectionsInUse(context.Background(), int64(stats.InUse))
+					metricsInstance.SetPluginConnectionsInUse(context.Background(), int64(stats.InUse))
 					openConns := stats.OpenConnections
 					if openConns > 0 && *maxPluginConnections > 0 && float64(openConns) > 0.8*float64(*maxPluginConnections) {
 						logger.WarnContext(context.Background(), "plugin DB connections near limit", "worker_id", workerID, "used", openConns, "max", *maxPluginConnections, "pct", 100*float64(openConns)/float64(*maxPluginConnections))
@@ -702,9 +701,24 @@ func main() {
 	// available (e.g., libwasmtime.so not found), fall back to the legacy
 	// wazero runtime by leaving the backend as nil.
 	var wasmtimeBackend engine.WasmBackend
-	if wt, err := engine.NewWasmtimeBackend(ctx); err == nil {
+	// Bound wasmtime execution: epoch interruption (wall-clock, primary
+	// defense against a runaway workflow hanging the worker — see
+	// IMPROVEMENT-PLAN.md 1.5) and StoreLimits (memory/table/instance
+	// ceilings), plus optional fuel-based instruction metering when
+	// --wasm-instruction-limit is set. The memory ceiling reuses
+	// --wasm-memory-max-mb, the same flag already applied to the wazero
+	// backend below, rather than inventing a parallel wasmtime-only knob.
+	wasmtimeMemoryLimitBytes := int64(0) // 0 => wasmtimeBackend applies its own default
+	if *wasmMemoryMaxMB > 0 {
+		wasmtimeMemoryLimitBytes = int64(*wasmMemoryMaxMB) * 1024 * 1024
+	}
+	if wt, err := engine.NewWasmtimeBackend(ctx,
+		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
+		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
+		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
+	); err == nil {
 		wasmtimeBackend = wt
-		logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID)
+		logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes)
 	} else {
 		logger.WarnContext(context.Background(), "wasmtime backend unavailable, using legacy wazero for Go WASM", "worker_id", workerID, "error", err)
 	}
@@ -743,48 +757,49 @@ func main() {
 		logger.InfoContext(ctx, "adaptive flusher registry enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
 	}
 	w := &Worker{
-		Metrics:                     metricsInstance,
-		id:                          workerID,
-		logger:                      logger,
-		store:                       store,
-		concurrency:                 *concurrency,
-		maxQueued:                   *maxQueued,
-		heartbeatInterval:           *heartbeatInterval,
-		pollInterval:                *pollInterval,
-		ctx:                         ctx,
-		cancel:                      cancel,
-		wasmCache:                   newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
-		scheduleInterval:            15 * time.Second,
-		compactionThreshold:         *compactionThreshold,
-		compactionInterval:          *compactionInterval,
-		pluginRegistry:              pluginRegistry,
-		plugList:                    plugList,
-		tenantPools:                 tenantPools,
-		memorySampleRetention:       *memorySampleRetention,
-		retentionDays:               *retentionDays,
-		schemaName:                  *schemaName,
-		peerSchemas:                 parsePeerSchemas(*peerSchemas),
-		disableChecksumVerification: disableChecksumVerification,
-		requireSignalAuth:           requireSignalAuth,
-		maxRetries:                  *maxRetries,
-		wasmMemoryMaxMB:                    wasmMemoryMaxMB,
-		wasmInstructionLimit:               wasmInstructionLimit,
-		wasmCumulativeAllocationMaxBytes:    int64(*wasmCumulativeAllocationMaxMB) * 1024 * 1024,
-		wasmDiskCache:               wasmDiskCache,
-		wasmtimeBackend:             wasmtimeBackend,
-		maxQuotaEvents:              *maxQuotaEvents,
-		maxQuotaChildren:            *maxQuotaChildren,
-		maxQuotaConcurrencyKeys:     *maxQuotaConcurrencyKeys,
-		maxWorkflowDuration:         *maxWorkflowDuration,
-		childBindingOverride:        *childBindingOverride,
-		healthCheckInterval:         *healthCheckInterval,
-		encryption:                  payloadEncryption,
-		encryptSensitivePayloads:    *encryptSensitivePayloads,
-		drainCh:                     make(chan struct{}),
-		parentWakeCh:                make(chan struct{}, 1),
-		notifyCh:                    notifyCh,
-		flusherRegistry:             flusherRegistry,
-		db:                          db,
+		Metrics:                          metricsInstance,
+		id:                               workerID,
+		logger:                           logger,
+		store:                            store,
+		concurrency:                      *concurrency,
+		maxQueued:                        *maxQueued,
+		heartbeatInterval:                *heartbeatInterval,
+		pollInterval:                     *pollInterval,
+		ctx:                              ctx,
+		cancel:                           cancel,
+		wasmCache:                        newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
+		scheduleInterval:                 15 * time.Second,
+		compactionThreshold:              *compactionThreshold,
+		compactionInterval:               *compactionInterval,
+		pluginRegistry:                   pluginRegistry,
+		plugList:                         plugList,
+		tenantPools:                      tenantPools,
+		memorySampleRetention:            *memorySampleRetention,
+		retentionDays:                    *retentionDays,
+		schemaName:                       *schemaName,
+		peerSchemas:                      parsePeerSchemas(*peerSchemas),
+		disableChecksumVerification:      disableChecksumVerification,
+		requireSignalAuth:                requireSignalAuth,
+		maxRetries:                       *maxRetries,
+		wasmMemoryMaxMB:                  wasmMemoryMaxMB,
+		wasmInstructionLimit:             wasmInstructionLimit,
+		wasmInstanceTimeout:              *wasmInstanceTimeout,
+		wasmCumulativeAllocationMaxBytes: int64(*wasmCumulativeAllocationMaxMB) * 1024 * 1024,
+		wasmDiskCache:                    wasmDiskCache,
+		wasmtimeBackend:                  wasmtimeBackend,
+		maxQuotaEvents:                   *maxQuotaEvents,
+		maxQuotaChildren:                 *maxQuotaChildren,
+		maxQuotaConcurrencyKeys:          *maxQuotaConcurrencyKeys,
+		maxWorkflowDuration:              *maxWorkflowDuration,
+		childBindingOverride:             *childBindingOverride,
+		healthCheckInterval:              *healthCheckInterval,
+		encryption:                       payloadEncryption,
+		encryptSensitivePayloads:         *encryptSensitivePayloads,
+		drainCh:                          make(chan struct{}),
+		parentWakeCh:                     make(chan struct{}, 1),
+		notifyCh:                         notifyCh,
+		flusherRegistry:                  flusherRegistry,
+		db:                               db,
 	}
 
 	// Initialize memory-aware concurrency controller.
@@ -799,14 +814,14 @@ func main() {
 	metricsInstance.RecordDesiredConcurrency(context.Background(), int64(*concurrency))
 	globalWorker = w
 
-		// Set metrics on the store factory so stores created during workflow
-		// execution inherit the OTel metrics instance.
-		if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
-			pf.WithMetrics(metricsInstance)
-			if syncCommitOff != nil && *syncCommitOff {
-				pf.WithSyncCommitOff(true)
-			}
+	// Set metrics on the store factory so stores created during workflow
+	// execution inherit the OTel metrics instance.
+	if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
+		pf.WithMetrics(metricsInstance)
+		if syncCommitOff != nil && *syncCommitOff {
+			pf.WithSyncCommitOff(true)
 		}
+	}
 	// Start HTTP API server if configured.
 
 	if *apiAddr != "" {
@@ -954,16 +969,15 @@ func main() {
 		}()
 	}
 
-
-		// Start pprof server on a separate port for CPU profiling.
-		if *pprofAddr != "" {
-			go func() {
-				logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
-				if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
-					logger.ErrorContext(context.Background(), "pprof server error", "worker_id", workerID, "error", err)
-				}
-			}()
-		}
+	// Start pprof server on a separate port for CPU profiling.
+	if *pprofAddr != "" {
+		go func() {
+			logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				logger.ErrorContext(context.Background(), "pprof server error", "worker_id", workerID, "error", err)
+			}
+		}()
+	}
 
 	// Handle shutdown signals.
 	sigCh := make(chan os.Signal, 1)
@@ -1009,4 +1023,3 @@ func main() {
 	}
 	logger.InfoContext(context.Background(), "shutdown complete", "worker_id", workerID)
 }
-
