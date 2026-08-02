@@ -1065,7 +1065,8 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 		SET status = 'terminated',
 		    error_msg = $2,
 		    completed_at = now(),
-		    assigned_to = NULL
+		    assigned_to = NULL,
+		    generation = generation + 1
 		WHERE id = $1
 	`, workflowID, reason)
 	if err != nil {

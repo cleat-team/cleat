@@ -1681,8 +1681,8 @@ func TestPostgresStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
 	// Idempotency UPDATE is best-effort. When it fails, the error is logged
 	// but CompleteWorkflow still succeeds.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		// Main workflow status update succeeds.
-		{match: "UPDATE workflow_instances SET status = 'done'", affected: 1},
+		// Main workflow status update succeeds (fence held).
+		{match: "SET status = 'done'", affected: 1},
 		// Idempotency update fails — logged but non-fatal.
 		{match: "UPDATE idempotency_keys SET result =", err: sql.ErrConnDone},
 	})
@@ -1699,8 +1699,8 @@ func TestPostgresStore_FailWorkflow_IdempotencyUpdateFails(t *testing.T) {
 	// Idempotency error UPDATE is best-effort. When it fails, the error is
 	// logged but FailWorkflow still succeeds.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		// Main workflow status update succeeds.
-		{match: "UPDATE workflow_instances SET status = 'failed'", affected: 1},
+		// Main workflow status update succeeds (fence held).
+		{match: "SET status = 'failed'", affected: 1},
 		// Idempotency update fails — logged but non-fatal.
 		{match: "UPDATE idempotency_keys SET error_msg =", err: sql.ErrConnDone},
 	})
@@ -2936,9 +2936,11 @@ func TestPostgresStore_GetDueSchedules_QueryError(t *testing.T) {
 func TestPostgresStore_FinalizeWorkflowSegment_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT generation", data: [][]driver.Value{{int64(1)}}},
+		// finalize_workflow_status is now called via QueryRow (it returns
+		// whether the generation fence held) rather than Exec.
+		{match: "SELECT finalize_workflow_status", data: [][]driver.Value{{true}}},
 	}, []mockExecResult{
 		{match: "INSERT INTO event_history", affected: 1},
-		{match: "SET status = 'done'", affected: 1},
 	})
 	defer db.Close()
 
@@ -2967,9 +2969,10 @@ func TestPostgresStore_FinalizeWorkflowSegment_Suspend(t *testing.T) {
 	nextWake := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT generation", data: [][]driver.Value{{int64(1)}}},
-	}, []mockExecResult{
-		{match: "SET status = 'ready'", affected: 1},
-	})
+		// finalize_workflow_status is now called via QueryRow (it returns
+		// whether the generation fence held) rather than Exec.
+		{match: "SELECT finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
@@ -5265,16 +5268,23 @@ func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_CompleteWorkflow_ZeroRowsAffected(t *testing.T) {
+	// CLEAT-1.2: when the fenced status UPDATE affects zero rows (another
+	// worker now owns this workflow, e.g. after reaping), CompleteWorkflow
+	// must report ErrFenceLost and must NOT run the idempotency-key write.
+	// If the idempotency mock below were matched, its zero-value result
+	// would silently succeed, so a regression back to the old
+	// "always continue" behavior would only be caught by the RowsAffected
+	// assertions here -- not by an error from that statement.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET status = 'done'", affected: 0},
+		{match: "SET status = 'done'", affected: 0},
 		{match: "UPDATE idempotency_keys SET result =", affected: 0},
 	})
 	defer db.Close()
 
 	store := NewPostgresStore(db)
 	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", 0, `{}`, nil)
-	if err != nil {
-		t.Fatalf("CompleteWorkflow should succeed even with 0 rows affected: %v", err)
+	if !errors.Is(err, ErrFenceLost) {
+		t.Fatalf("CompleteWorkflow with 0 rows affected: err = %v, want ErrFenceLost", err)
 	}
 }
 

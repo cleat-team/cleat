@@ -203,13 +203,24 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
 	`, currentRunID, workerID, result, qsJSON, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("continue as new: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: this also discards the new run row we just inserted, so
+		// a lost fence leaves no orphaned, unreachable continuation run
+		// behind.
+		return "", ErrFenceLost
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -268,10 +279,20 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		resultJSON = "{}"
 	}
 
-	if _, err := tx.ExecContext(ctx, `
+	var fenceHeld bool
+	if err := tx.QueryRowContext(ctx, `
 		SELECT finalize_workflow_status($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel); err != nil {
+	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel).Scan(&fenceHeld); err != nil {
 		return fmt.Errorf("finalize workflow: %w", err)
+	}
+
+	if !fenceHeld {
+		// Another worker now owns this workflow (e.g. this worker stalled,
+		// was reaped, and the workflow was reclaimed). Roll back rather
+		// than commit: the events we just appended belong to a segment
+		// that is no longer valid, and none of the post-commit cleanup
+		// below is safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -310,13 +331,23 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
 	`, workflowID, workerID, result, qsJSON, generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency result within the transaction (best-effort).
@@ -354,7 +385,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
 		    error_msg = $3,
@@ -367,6 +398,16 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("fail workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency error within the transaction (best-effort).
@@ -436,7 +477,7 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
 		    completed_at = now(), assigned_to = NULL
@@ -444,6 +485,16 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 	// Record idempotency error within the transaction (best-effort).
 	if _, err := tx.ExecContext(ctx,
@@ -621,7 +672,7 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < now() - $1::interval
 	`, fmt.Sprintf("%d seconds", int(timeout.Seconds())))

@@ -408,7 +408,9 @@ func TestGap_LoadEventHistoryPaginated_BeginError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGap_MoveToDeadLetterQueue(t *testing.T) {
-	db := newNoopDB(t)
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "SET status = 'dead_lettered'", affected: 1},
+	})
 	defer db.Close()
 
 	store := NewPostgresStore(db)

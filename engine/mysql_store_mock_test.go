@@ -123,7 +123,7 @@ func TestMySQLStore_ClaimWorkflow_SelectError(t *testing.T) {
 
 func TestMySQLStore_CompleteWorkflow_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET status = 'done'", affected: 1},
+		{match: "SET status = 'done'", affected: 1},
 		{match: "UPDATE idempotency_keys SET result", affected: 1},
 	})
 	defer db.Close()
@@ -137,7 +137,7 @@ func TestMySQLStore_CompleteWorkflow_Success(t *testing.T) {
 
 func TestMySQLStore_CompleteWorkflow_NilQueryState(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET status = 'done'", affected: 1},
+		{match: "SET status = 'done'", affected: 1},
 	})
 	defer db.Close()
 
@@ -180,7 +180,7 @@ func TestMySQLStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
 	// Idempotency UPDATE is best-effort. When it fails, the error is logged
 	// but CompleteWorkflow still succeeds.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET status = 'done'", affected: 1},
+		{match: "SET status = 'done'", affected: 1},
 		{match: "UPDATE idempotency_keys SET result", err: errors.New("idempotency update failed")},
 	})
 	defer db.Close()

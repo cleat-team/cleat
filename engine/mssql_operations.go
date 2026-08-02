@@ -19,7 +19,7 @@ func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME())
 		  AND tenant_id = @p2
@@ -133,7 +133,8 @@ func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 		SET status = 'terminated',
 		    error_msg = @p2,
 		    completed_at = GETDATE(),
-		    assigned_to = NULL
+		    assigned_to = NULL,
+		    generation = generation + 1
 		WHERE id = @p1
 	`, sql.Named("p1", workflowID), sql.Named("p2", reason))
 	if err != nil {

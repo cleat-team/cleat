@@ -49,6 +49,7 @@ func (b *PostgresBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	t.Helper()
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	applyPostgresProcedures(t, db)
 	testutil.CleanupPostgresTestData(t, db)
 	store := NewPostgresStore(db)
 	teardown := func() {
@@ -90,6 +91,7 @@ func (b *MySQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	}
 	db := testutil.MySQLTestDB(t)
 	testutil.SetupMySQLFullSchema(t, db)
+	applyMySQLProcedures(t, db)
 	testutil.CleanupMySQLTestData(t, db)
 	store := NewMySQLStore(db)
 	teardown := func() {
@@ -134,6 +136,7 @@ func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	}
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
+	applyMSSQLProcedures(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 	store := NewMSSQLStore(db)
 	teardown := func() {

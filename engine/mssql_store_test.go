@@ -1068,7 +1068,7 @@ func TestMSSQLStore_BatchHeartbeat_Zero(t *testing.T) {
 func TestMSSQLStore_CompleteWorkflow_SuccessMock(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'done'"},
+		{match: "SET status = 'done'", affected: 1},
 		{match: "idempotency_keys SET result"},
 	})
 	defer db.Close()
@@ -1094,7 +1094,7 @@ func TestMSSQLStore_CompleteWorkflow_BeginErrorMock(t *testing.T) {
 func TestMSSQLStore_FailWorkflow_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'failed'"},
+		{match: "SET status = 'failed'", affected: 1},
 		{match: "idempotency_keys SET error_msg"},
 	})
 	defer db.Close()
@@ -1614,9 +1614,12 @@ func TestMSSQLStore_ReleaseConcurrencyKey_Success(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMSSQLStore_FinalizeWorkflowSegment_Done(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		// finalize_workflow_status is called via QueryRow (it emits a
+		// trailing SELECT reporting whether the generation fence held).
+		{match: "finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "finalize_workflow_status"},
 	})
 	defer db.Close()
 
@@ -1629,9 +1632,10 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Done(t *testing.T) {
 }
 
 func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "finalize_workflow_status"},
 	})
 	defer db.Close()
 
@@ -1644,9 +1648,10 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
 }
 
 func TestMSSQLStore_FinalizeWorkflowSegment_Ready(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "finalize_workflow_status"},
 	})
 	defer db.Close()
 
