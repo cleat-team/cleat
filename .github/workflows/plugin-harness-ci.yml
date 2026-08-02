@@ -88,7 +88,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
       CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=master
       CLEAT_TEST_SKIP_REAL_SERVICES: '1'
@@ -135,7 +135,7 @@ jobs:
           --health-retries 5
         command: server /data
     env:
-      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
       CLEAT_TEST_S3_ENDPOINT: http://localhost:9000
       CLEAT_TEST_S3_ACCESS_KEY: minioadmin
       CLEAT_TEST_S3_SECRET_KEY: minioadmin

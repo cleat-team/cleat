@@ -154,7 +154,13 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      CLEAT_TEST_DB: postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable
+      # 127.0.0.1, NOT localhost. On GitHub runners localhost resolves to ::1
+      # first, while a service container publishes its port on IPv4 only, so
+      # the connection is refused. Until the requireBackendReachable preflight
+      # was added in f9bce35, testutil.TestDB turned that refusal into a
+      # t.Skipf -- so this job spun up a Postgres service, never reached it,
+      # skipped every Postgres-backed test, and reported green.
+      CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
     strategy:
       fail-fast: false
       matrix:
@@ -559,7 +565,7 @@ jobs:
     name: Cluster Integration Tests
     runs-on: ubuntu-latest
     env:
-      CLEAT_TEST_DB: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
