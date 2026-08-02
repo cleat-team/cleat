@@ -24,6 +24,12 @@
 --   HINT:  Use DROP FUNCTION finalize_workflow_status(...) first.
 -- so the old signature must be dropped first. The argument list below must
 -- match 003's exactly, or the DROP matches nothing and the CREATE fails again.
+-- Pin the creation target; see the note in 001_schema.sql. The default
+-- search_path is "$user", public, so unqualified names below would resolve
+-- against a schema named after the connecting role -- and 001 creates a schema
+-- called "cleat" while the shipped compose connects as POSTGRES_USER=cleat.
+SET search_path = public;
+
 DROP FUNCTION IF EXISTS finalize_workflow_status(
     TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, JSONB, TIMESTAMPTZ, TEXT
 );

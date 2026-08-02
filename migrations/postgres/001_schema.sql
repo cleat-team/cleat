@@ -9,6 +9,18 @@
 -- All admin functions use CREATE OR REPLACE.  All tables/indexes use idempotent guards.
 
 -- ── Extensions & schemas ──────────────────────────────────────────────────────
+-- Pin the creation target. The default search_path is "$user", public, so
+-- every unqualified CREATE below lands in a schema named after the connecting
+-- role whenever such a schema exists. This file creates a schema called
+-- "cleat", and docker-compose.cluster.yml connects as POSTGRES_USER=cleat --
+-- so the entire schema was being built inside the "cleat" schema instead of
+-- public. Verified on PostgreSQL 16: 14 tables and finalize_workflow_status
+-- all landed in "cleat", psql still found them via "$user" so it looked
+-- healthy, and anything addressing public.* failed (create_tenant_role's
+-- GRANTs on public.workflow_defs among them). Without this line the shipped
+-- cluster deployment is broken by nothing more than its own username.
+SET search_path = public;
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE SCHEMA IF NOT EXISTS admin;

@@ -351,3 +351,68 @@ func TestShippedSchema_IsIdempotent(t *testing.T) {
 			"the fence.", returnType)
 	}
 }
+
+// TestShippedSchema_CreatesObjectsInPublic asserts that the migrations build the
+// schema in `public` regardless of what the connecting role is called.
+//
+// PostgreSQL's default search_path is "$user", public. 001_schema.sql creates a
+// schema named "cleat", and docker-compose.cluster.yml connects as
+// POSTGRES_USER=cleat -- so "$user" resolved to that freshly-created schema and
+// every unqualified CREATE landed inside it. Measured on PostgreSQL 16 before
+// the fix, against a database built exactly as the shipped compose builds one:
+//
+//	 nspname | tables
+//	---------+--------
+//	 admin   |      4
+//	 cleat   |     14      <- should have been public
+//
+// finalize_workflow_status went the same way. Nothing looked wrong from psql,
+// because the same "$user" entry that misplaced the objects also found them
+// again; but anything naming public.* broke, including create_tenant_role's
+// GRANTs on public.workflow_defs, and the engine could not see its own tables.
+//
+// The migrations now pin `SET search_path = public`. This test only has teeth
+// when the connecting role happens to share a name with a schema -- which is
+// precisely the shipped configuration, and what the cluster CI job uses.
+func TestShippedSchema_CreatesObjectsInPublic(t *testing.T) {
+	db := bootstrapScratchDB(t)
+
+	rows, err := db.Query(`
+		SELECT n.nspname, count(*)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relkind = 'r'
+		  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		GROUP BY n.nspname
+	`)
+	if err != nil {
+		t.Fatalf("query table namespaces: %v", err)
+	}
+	defer rows.Close()
+
+	counts := map[string]int{}
+	for rows.Next() {
+		var ns string
+		var n int
+		if err := rows.Scan(&ns, &n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		counts[ns] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+
+	if counts["public"] == 0 {
+		t.Errorf("no tables in the public schema; the migrations built the schema "+
+			"somewhere else entirely. Table counts by schema: %v", counts)
+	}
+	for ns, n := range counts {
+		if ns != "public" && ns != "admin" {
+			t.Errorf("%d table(s) created in schema %q; the migrations must create "+
+				"application tables in public regardless of the connecting role's "+
+				"name (search_path is \"$user\", public). Counts by schema: %v",
+				n, ns, counts)
+		}
+	}
+}

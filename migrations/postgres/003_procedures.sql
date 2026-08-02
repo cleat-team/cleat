@@ -7,7 +7,14 @@
 -- flush_event_step() is a per-step event INSERT (from 013).
 -- batch_flush_events() is the bulk variant using jsonb_populate_recordset (016).
 
+-- Pin the creation target; see the note in 001_schema.sql. The default
+-- search_path is "$user", public, so unqualified names below would resolve
+-- against a schema named after the connecting role -- and 001 creates a schema
+-- called "cleat" while the shipped compose connects as POSTGRES_USER=cleat.
+SET search_path = public;
+
 -- ── Drop FK on event_history (no longer needed; events are deleted on terminal) ─
+
 ALTER TABLE event_history DROP CONSTRAINT IF EXISTS fk_event_history_workflow;
 
 -- ── Finalize workflow status ─────────────────────────────────────────────────
