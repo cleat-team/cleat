@@ -75,6 +75,14 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
 	mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
 	mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
+
+	// Instance inspection endpoints (always on behind auth).
+	mux.HandleFunc("/api/instances/", api.handleInstancesRoutes)
+
+	// Admin API endpoints. Destructive operations are additionally gated
+	// behind --enable-admin-api at request time in handleAdminRoutes (see
+	// api_admin.go), so the route itself can always be registered.
+	mux.HandleFunc("/api/admin/instances/", api.handleAdminRoutes)
 	return mux
 }
 

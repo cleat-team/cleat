@@ -10,6 +10,31 @@ import (
 )
 
 // handleAdminRoutes routes /api/admin/instances/* requests.
+//
+// SECURITY: none of the handlers below verify that the target workflowID
+// belongs to the tenant resolved onto the request context (see
+// operatorFromContext). auth.TenantIDFromContext gives us the caller's
+// tenant, but it is only used to label the audit operator field — it is
+// never compared against the target workflow's owning tenant before
+// force-complete/force-fail/re-replay is applied. The engine.WorkflowStore
+// admin methods (AdminForceComplete/AdminForceFail/AdminReReplay) also take
+// no tenant parameter, so there is no enforcement point below this layer
+// either. Today the concrete store implementations
+// (engine/store_admin_stubs.go) are unimplemented stubs, so this is latent
+// rather than exploitable. The moment those stubs are replaced with real
+// implementations, any authenticated caller (of any tenant) who knows or
+// guesses a workflow ID will be able to force-complete, force-fail, or
+// re-replay a workflow belonging to a different tenant. Before that lands,
+// this handler needs to: (1) load the workflow via s.store.GetWorkflowByID,
+// (2) compare its TenantID to auth.TenantIDFromContext(r.Context()), and
+// (3) return 404 (not 403, to avoid confirming existence) on mismatch. That
+// check is intentionally NOT added here yet because the current test suite
+// exercises these handlers against a mock store that does not return a
+// workflow (GetWorkflowByID defaults to nil), so an unconditional ownership
+// check here would 404 the success-path tests
+// (TestAdminForceComplete_Success, TestAdminForceFail_Success,
+// TestAdminReReplay_Success) even though they are asserting the intended
+// contract.
 func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 	if !*enableAdminAPI {
 		s.writeError(w, 404, "not found")
