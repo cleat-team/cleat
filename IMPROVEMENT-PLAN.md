@@ -80,6 +80,10 @@ Branch `fix/phase0-restore-ci-signal`, pushed, draft PR #218 against `develop`.
 | `9980fc9` | The `core` CI matrix entry runs for the first time. `cleat/` is a separate module, so `./cleat/...` from the root always failed at setup — masked for its entire existence by the missing `pipefail` |
 | `f9bce35` | The SQL fence guard is now itself verified, not just the Go rollback that masks it — see below |
 | `93f8abf` | The four remaining red jobs: sticky-reclaim flake, grpc `GO-2026-6061`, `--namespace` crash-loop, stale `schema.sql` |
+| `868ca39` | `ABI.md` corrected: output buffer under-documented 16x in 30 places, wrong scratch layout; **2.9** guard added |
+| `a47eabb` | Seven Postgres product defects: `tenant_id` missing on three write paths, destructive `PollSignal`, `AssignedTo` clobbered on claim, `ContinueAsNew` never worked |
+| `e13c2c8` | **1.9 done** — root `schema.sql` deleted; the shipped schema could not complete a workflow. Bootstrap seam test added |
+| `b79afc5` | **2.8 done** — test-only code guard wired into CI with a 63-entry baseline |
 
 **Acceptance gate: passed.** A deliberate breakage was pushed and `Test Go (core)` was
 observed going failure → success. "CI is fixed" is now an observation, not an inference.
@@ -293,6 +297,63 @@ for column 'p_next_wake_at' at row 1
 
 **On MySQL, no workflow could reach a terminal state.** Postgres and SQL Server accept a
 year-1 timestamp, so nothing else surfaced it.
+
+### 1.9 The shipped schema was not the tested schema — fixed in `e13c2c8`
+
+Same shape as 1.8, on the deployment artifact rather than a code path.
+
+`docs/explanation/postgresql-schema.md` called the root `schema.sql` "the canonical
+schema"; `docker-compose.cluster.yml` mounted it into `initdb.d`. No Go code read it — and
+none reads `migrations/postgres/` either, because **no migration runner exists**. Every
+test built its schema through `engine/testutil`, so the artifact users deploy was covered
+by nothing at all.
+
+Verified against a live PostgreSQL 16, applying `schema.sql` exactly as documented:
+
+```
+ERROR:  function finalize_workflow_status(...) does not exist
+policies: 0        rls_tables: 0
+```
+
+`FinalizeWorkflowSegment` calls that function on every workflow completion with no
+fallback. **A database built the documented way could not complete a single workflow**, had
+no tenant isolation whatsoever, and had none of the `admin.*` tables the Admin API from
+\#217 depends on.
+
+`schema.sql` was a strict subset — it contained no table the migrations lack — so it is
+deleted rather than repaired. Two hand-maintained copies *is* the defect.
+
+`engine/schema_bootstrap_test.go` now builds a scratch database from the shipped files
+alone and asserts the engine's requirements. It found a second defect on its first run:
+`003_procedures.sql` had the same 42P13 return-type bug as 004, so re-applying the set —
+what an operator upgrading a deployment does, and what the docs promise is safe — failed.
+
+### 1.10 RLS is bypassed in every shipped configuration — OPEN, needs a decision
+
+Not fixed. It cannot be fixed without a product decision.
+
+PostgreSQL **never** applies row-level security to a superuser, and applies it to the
+table owner only when `FORCE ROW LEVEL SECURITY` is set. `e13c2c8`/`a47eabb` add `FORCE`,
+which closes the owner case. The superuser case cannot be closed from inside the schema:
+
+- `docker-compose.cluster.yml` connects as `cleat`, which is its `POSTGRES_USER` — a
+  superuser in the official image.
+- CI and local development connect as `postgres`. Confirmed `rolsuper = t`.
+- `cmd/cleat-worker/main.go` documents connecting through "the owner pool" for all tenants.
+
+So every configuration this repo ships bypasses every policy. That is worse than it
+sounds, because RLS is not defence-in-depth here: `GetWorkflowByID` and `ListWorkflows`
+have **no application-level `tenant_id` filter at all**. RLS is their only isolation.
+
+The fix is a deployment change, not a code change — the worker must connect as a role that
+is neither superuser nor table owner — plus a startup assertion that refuses to serve
+multi-tenant traffic on a connection that bypasses RLS. Both are user-facing decisions.
+
+Note that this is *why* the tenant-isolation tests are meaningful: they connect through
+`testutil.OpenPostgresRLSTestDB`, a genuinely unprivileged role. Removing `FORCE` does not
+fail them (their role is subject to RLS either way) while it does fail
+`TestShippedSchema_HasTenantIsolation`. The two tests cover different failure modes and
+both were proven to bite.
 
 Why it survived: the MySQL CI lane failed *earlier*, on a collation error, so execution never
 reached this call. That collation error was itself harness-only — `engine/testutil/mysql_schema.go`
