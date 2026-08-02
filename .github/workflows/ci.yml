@@ -155,8 +155,14 @@ jobs:
       matrix:
         go-version: ["1.26"]
         package:
+          # cleat/ is a SEPARATE Go module (see the replace directive in
+          # go.mod), so `go test ./cleat/...` from the repo root fails with
+          # "main module does not contain package". It must run from inside
+          # that module. This entry silently failed at setup for its entire
+          # existence, masked by the missing pipefail.
           - name: core
-            path: ./cleat/...
+            dir: cleat
+            path: ./...
           - name: engine
             path: ./engine/...
           - name: wasm
@@ -185,6 +191,7 @@ jobs:
 
       - name: Run tests
         shell: bash
+        working-directory: ${{ matrix.package.dir || '.' }}
         run: |
           # pipefail is required: without it `tee` supplies the exit status and
           # a failing `go test` is silently reported as a green step.
@@ -195,6 +202,7 @@ jobs:
 
       - name: Warn on skipped tests
         if: always()
+        working-directory: ${{ matrix.package.dir || '.' }}
         run: |
           if [ -f test-report.json ]; then
             SKIP_COUNT=$(grep -c '"Action":"skip"' test-report.json || echo 0)

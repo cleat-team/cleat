@@ -39,10 +39,17 @@ go_dirs="$(find . -mindepth 2 -name '*.go' -not -path './node_modules/*' \
              -not -path '*/node_modules/*' 2>/dev/null |
   sed 's|^\./||' | cut -d/ -f1 | sort -u)"
 
-# The set of paths named in the matrix, e.g. "./engine/..." -> "engine".
-matrix_dirs="$(grep -oE 'path: .*' "$CI_FILE" |
-  grep -oE '\./[A-Za-z0-9_-]+/\.\.\.' |
-  sed 's|^\./||; s|/\.\.\.$||' | sort -u)"
+# The set of directories covered by the matrix. Two forms count:
+#   path: ./engine/...   -> engine
+#   dir: cleat           -> cleat   (a separate Go module, tested from inside
+#                                    it with `path: ./...`; see ci.yml)
+matrix_dirs="$( {
+  grep -oE 'path: .*' "$CI_FILE" |
+    grep -oE '\./[A-Za-z0-9_-]+/\.\.\.' |
+    sed 's|^\./||; s|/\.\.\.$||'
+  grep -oE '^[[:space:]]*dir: [A-Za-z0-9_/-]+' "$CI_FILE" |
+    sed 's|.*dir: ||'
+} | sort -u)"
 
 missing=""
 count=0
