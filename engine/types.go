@@ -47,6 +47,7 @@ const (
 	EventTypeFetch                 EventType = "fetch"
 	EventTypePollChild             EventType = "poll_child"
 	EventTypeAwaitAnyChild         EventType = "await_any_child"
+	EventTypeAdminAction           EventType = "admin_action"
 )
 
 // EventRecord is a single event in a workflow's execution history.

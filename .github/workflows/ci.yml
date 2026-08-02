@@ -49,9 +49,11 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      - name: CI package-coverage guard
+        run: scripts/check-ci-package-coverage.sh
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -155,10 +157,16 @@ jobs:
         package:
           - name: core
             path: ./cleat/...
+          - name: engine
+            path: ./engine/...
+          - name: wasm
+            path: ./wasm/... ./wasmrw/...
           - name: internal
             path: ./internal/...
           - name: plugins
             path: ./plugins/...
+          - name: support
+            path: ./plugin/... ./pluginapi/... ./auth/... ./migration/... ./monitoring/...
           - name: commands
             path: ./cmd/...
     steps:
@@ -176,7 +184,14 @@ jobs:
           targets: wasm32-wasip1
 
       - name: Run tests
-        run: go test -race -count=1 -json "${{ matrix.package.path }}" 2>&1 | tee test-report.json
+        shell: bash
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          # Unquoted on purpose: some matrix entries list several package patterns
+          # and rely on word splitting. Values are controlled by this file only.
+          go test -race -count=1 -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
 
       - name: Warn on skipped tests
         if: always()
@@ -417,7 +432,6 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -564,7 +578,12 @@ jobs:
           sleep 10
 
       - name: Run integration tests
-        run: go test -count=1 -timeout=120s -json ./engine/... 2>&1 | tee test-report.json
+        shell: bash
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          go test -count=1 -timeout=120s -json ./engine/... 2>&1 | tee test-report.json
 
       - name: Warn on skipped tests
         if: always()

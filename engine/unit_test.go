@@ -102,22 +102,35 @@ func TestValidateVersionCompatibility_NilDefs(t *testing.T) {
 	}
 }
 
-func TestValidateVersionCompatibility_VersionMustIncrease(t *testing.T) {
+// Version may stay the same but must never go backwards. Same-version replay is
+// deliberately allowed so a suspended workflow can resume without a version bump
+// (see the contract in version_compat.go). This test previously asserted the older
+// strictly-increasing rule and the older "must be greater" wording; both were changed
+// in the code without updating it here, and the failure stayed invisible while the
+// engine test package did not compile.
+func TestValidateVersionCompatibility_VersionMustNotDecrease(t *testing.T) {
 	oldDef := &WorkflowDef{Version: 2, MinVersion: 1, ABIVersion: 1}
 
 	tests := []struct {
 		name    string
 		newDef  *WorkflowDef
-		wantErr string
+		wantErr string // empty means no error expected
 	}{
-		{"same version", &WorkflowDef{Version: 2, MinVersion: 1, ABIVersion: 1}, "must be greater"},
-		{"lower version", &WorkflowDef{Version: 1, MinVersion: 1, ABIVersion: 1}, "must be greater"},
+		{"same version is allowed", &WorkflowDef{Version: 2, MinVersion: 1, ABIVersion: 1}, ""},
+		{"higher version is allowed", &WorkflowDef{Version: 3, MinVersion: 1, ABIVersion: 1}, ""},
+		{"lower version is rejected", &WorkflowDef{Version: 1, MinVersion: 1, ABIVersion: 1}, "must be >="},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := ValidateVersionCompatibility(oldDef, tt.newDef)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("got %v, want no error", err)
+				}
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("got %v, want %q", err, tt.wantErr)
+				t.Errorf("got %v, want error containing %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -1594,6 +1607,18 @@ func (s *stubWorkflowStore) ContinueAsNew(ctx context.Context, currentRunID, wor
 }
 
 func (s *stubWorkflowStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	return nil
+}
+
+func (s *stubWorkflowStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	return nil
+}
+
+func (s *stubWorkflowStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	return nil
+}
+
+func (s *stubWorkflowStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
 	return nil
 }
 

@@ -1752,6 +1752,15 @@ func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, p
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return nil
 }
+func (m *mockStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	return nil
+}
+func (m *mockStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	return nil
+}
+func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	return nil
+}
 func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	return 0, nil
 }

@@ -1,9 +1,44 @@
-//go:build cgo
+//go:build cgo && wasmtime_component_cgo
+
+// This file (plus component_callbacks.go and cgo_test_helpers.go) calls
+// the wasmtime Component Model C API directly via cgo, using types like
+// wasmtime_component_val_t that github.com/bytecodealliance/wasmtime-go/v44
+// does not expose through its Go bindings. That means these files need a
+// `-I` to wasmtime's C headers (wasmtime.h, wasmtime/component/*.h), and cgo
+// has no portable way to derive that path automatically -- `${SRCDIR}` in a
+// #cgo directive only expands to *this* file's own directory, not to an
+// imported module's directory, and the wasmtime-go module itself doesn't
+// live at a fixed location (module cache path depends on GOPATH/GOMODCACHE,
+// which vary per machine/CI runner).
+//
+// So this native fast path is opt-in, gated behind the wasmtime_component_cgo
+// build tag, and NOT part of a plain `go build ./...` (with or without
+// CGO_ENABLED=1). Without the tag, ExecuteComponentCGo resolves to the stub
+// in component_cgo_stub.go, which always returns an error; callers (see
+// backend_wasmtime.go's Execute) already treat that as "fast path
+// unavailable" and fall back to the pure wasmtime-go ExecuteComponent path,
+// so component-model WASM still runs correctly by default -- just without
+// this optimization.
+//
+// To build with the fast path enabled:
+//
+//	WTDIR=$(go list -m -f '{{.Dir}}' github.com/bytecodealliance/wasmtime-go/v44)
+//	CGO_CFLAGS="-I${WTDIR}/build/include" \
+//	  go build -tags wasmtime_component_cgo ./...
+//
+// (No extra CGO_LDFLAGS is needed: wasmtime-go's own ffi.go already declares
+// `#cgo LDFLAGS: -L${SRCDIR}/build/<platform> -lwasmtime ...`, and cgo LDFLAGS
+// from every cgo-using package in the import graph are combined at final
+// link time, so linking against libwasmtime "just works" once wasmtime-go
+// itself is imported.)
+//
+// The vendored wasmtime-go v44 module already bundles a wasmtime C library
+// build recent enough to satisfy every symbol these files use (verified by
+// building successfully against it) -- there is no need for a newer/separate
+// wasmtime C API install.
 
 package engine
 
-// #cgo CFLAGS:-I/tmp/wasmtime-v45/wasmtime-v45.0.0-x86_64-linux-c-api/include -I/home/rcownie/go/pkg/mod/github.com/bytecodealliance/wasmtime-go/v44@v44.0.0/build/include
-// #cgo linux,amd64 LDFLAGS:-L/tmp/wasmtime-v45/wasmtime-v45.0.0-x86_64-linux-c-api/lib -lwasmtime -lm -ldl -pthread
 // #include <wasmtime.h>
 // #include <wasmtime/component/component.h>
 // #include <wasmtime/component/linker.h>

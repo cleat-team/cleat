@@ -2578,13 +2578,6 @@ func TestClosure_MoreErrorPaths(t *testing.T) {
 	}
 }
 
-func TestCgotestMakeU32Arg(t *testing.T) {
-	p := cgotestMakeU32Arg(42)
-	if p == nil {
-		t.Fatal("expected non-nil pointer")
-	}
-}
-
 func TestClosure_FinalErrorPaths(t *testing.T) {
 	type testCase struct {
 		importName string
