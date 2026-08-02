@@ -27,8 +27,16 @@ validating cleat's architecture against real-world code.
    it enables language-agnostic workflows and deterministic replay, but forces
    developers to extract I/O, DB access, and network calls to host-side services.
 
-5. **88M steps/sec core throughput** means WASM overhead is negligible. The
-   bottleneck is always I/O, not the sandbox.
+5. **WASM overhead has not been measured.** This section previously claimed
+   "88M steps/sec core throughput means WASM overhead is negligible". That number
+   came from `benchmarks/cleat_bench_test.go`, whose `durableCall` returns a
+   hardcoded `{"status":"ok"}` with no database, no persistence and **no WASM** —
+   the file's own package comment says it "avoids WASM compilation overhead".
+   It measures in-process function-call cost and says nothing about the sandbox.
+   For a durable figure, `docs/contributor/design/cleat-execution-design.md`
+   estimates roughly 500 steps/sec on a single PostgreSQL instance.
+   `benchmarks/comparative/` has Temporal and DBOS harnesses written but
+   `results/` contains only a template — no head-to-head numbers exist yet.
 
 ---
 

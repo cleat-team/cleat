@@ -4,7 +4,13 @@ This document defines the exact WebAssembly contract between workflow modules an
 
 ## Version
 
-ABI version: 4. The ABI is versioned separately from the workflow definition version. The host runtime supports all ABI versions it was compiled for.
+ABI version: 1 — the value of `CurrentABIVersion` in `wasm/metadata.go`, stamped into every
+compiled workflow and used to gate redeploy compatibility in `engine/version_compat.go`.
+The ABI is versioned separately from the workflow definition version. The host runtime
+supports all ABI versions it was compiled for.
+
+> This document previously claimed version 4, and its changelog below claimed 5. Neither
+> was ever the shipped value. If you change `CurrentABIVersion`, change it here too.
 
 ---
 
