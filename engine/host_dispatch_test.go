@@ -534,12 +534,191 @@ func TestReleaseLockReplayPastEnd(t *testing.T) {
 // PollCancellation edge cases.
 // ---------------------------------------------------------------------------
 
+// keyedCancellationStore implements SignalStore and only reports a workflow
+// as cancelled when PollCancellation is queried with the exact workflowID
+// that RequestCancellation (or the cancelledWorkflowID field, for brevity in
+// simpler tests) was given. This is stricter than mockCancellationStore: it
+// proves the caller actually threads the real workflow ID through, because
+// querying with the wrong ID (e.g. the historical "" bug) yields "not
+// cancelled" even though *some* workflow was cancelled.
+type keyedCancellationStore struct {
+	// cancelledWorkflowID and reason may be set directly for simple tests,
+	// or populated via RequestCancellation to mimic a real caller.
+	cancelledWorkflowID string
+	reason              string
+
+	mu          sync.Mutex
+	queriedWith []string
+}
+
+// RequestCancellation mimics Store.RequestCancellation: it records that the
+// given workflowID has been cancelled, for the given reason.
+func (k *keyedCancellationStore) RequestCancellation(_ context.Context, workflowID, reason string) error {
+	k.mu.Lock()
+	k.cancelledWorkflowID = workflowID
+	k.reason = reason
+	k.mu.Unlock()
+	return nil
+}
+
+func (k *keyedCancellationStore) PollCancellation(_ context.Context, workflowID string) (bool, string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.queriedWith = append(k.queriedWith, workflowID)
+	if workflowID != "" && workflowID == k.cancelledWorkflowID {
+		return true, k.reason, nil
+	}
+	return false, "", nil
+}
+
+func (k *keyedCancellationStore) DeliverSignal(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (k *keyedCancellationStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
+	return "", false, nil
+}
+
+// TestPollCancellationCancelled proves that a workflow actually observes a
+// cancellation request made against its own workflow ID. It uses a store
+// that only reports "cancelled" when queried with the exact workflow ID that
+// was cancelled, so if the call site regresses to passing "" (the original
+// bug), this test fails: the store would be queried with "" instead of
+// "wf-cancel-me" and would report "not cancelled".
 func TestPollCancellationCancelled(t *testing.T) {
 	s := newTestExecSession()
-	// With nil signalStore and not in replay, returns 0 (not cancelled).
+	s.engine.workflowID = "wf-cancel-me"
+
+	store := &keyedCancellationStore{
+		cancelledWorkflowID: "wf-cancel-me",
+		reason:              "user requested cancellation",
+	}
+	s.engine.signalStore = store
+
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+
+	result := s.PollCancellation(ctx, nil, 0, uint32(len(buf)))
+
+	cancelledFlag := uint32(result & 0xFFFFFFFF)
+	if cancelledFlag != 1 {
+		t.Fatalf("expected cancelled flag=1, got result=%d (flag=%d)", result, cancelledFlag)
+	}
+	reasonLen := uint32(result >> 32)
+	written := string(buf[:reasonLen])
+	if written != "user requested cancellation" {
+		t.Errorf("expected reason %q written to buffer, got %q", "user requested cancellation", written)
+	}
+
+	store.mu.Lock()
+	queried := append([]string(nil), store.queriedWith...)
+	store.mu.Unlock()
+	if len(queried) == 0 {
+		t.Fatal("expected PollCancellation to be called at least once")
+	}
+	for _, id := range queried {
+		if id != "wf-cancel-me" {
+			t.Errorf("expected PollCancellation queried with workflowID %q, got %q", "wf-cancel-me", id)
+		}
+	}
+}
+
+// TestPollCancellationWrongWorkflowIDNotObserved documents the failure mode
+// of the original bug directly: if PollCancellation is queried with an ID
+// that doesn't match the cancelled workflow (e.g. "" instead of the real
+// workflow ID), the cancellation is never observed.
+func TestPollCancellationWrongWorkflowIDNotObserved(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.workflowID = "" // simulates the historical hardcoded "" bug
+
+	store := &keyedCancellationStore{
+		cancelledWorkflowID: "wf-cancel-me",
+		reason:              "user requested cancellation",
+	}
+	s.engine.signalStore = store
+
 	result := s.PollCancellation(context.Background(), nil, 0, 0)
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	cancelledFlag := uint32(result & 0xFFFFFFFF)
+	if cancelledFlag != 0 {
+		t.Errorf("expected cancellation to NOT be observed when queried with wrong/empty workflowID, got flag=%d", cancelledFlag)
+	}
+}
+
+// TestCancellationObservedEndToEnd is the regression test for the dead
+// cancellation bug (IMPROVEMENT-PLAN item 1.3): RequestCancellation is
+// called for a specific workflow, and a subsequent DurableCall against that
+// same workflow's session must observe the cancellation and stop -- it must
+// neither invoke the real downstream service nor report success. This
+// exercises the actual production freshCall path (DurableCall -> freshCall),
+// not just the PollCancellation host function in isolation.
+//
+// Per engine convention, cancellation surfaces as an error flag on the guest
+// response buffer plus a "workflow cancelled" result string, not as a Go
+// error, so this asserts on the packed result/buffer contents rather than
+// only checking for a nil/non-nil error.
+func TestCancellationObservedEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	store := &keyedCancellationStore{}
+
+	caller := &mockCaller{}
+	s := newTestExecSession()
+	s.engine.workflowID = "wf-target"
+	s.engine.caller = caller
+	s.engine.signalStore = store
+
+	// Request cancellation for this exact workflow, as an operator would via
+	// Store.RequestCancellation (e.g. through the admin API).
+	if err := store.RequestCancellation(ctx, "wf-target", "operator requested stop"); err != nil {
+		t.Fatalf("RequestCancellation: %v", err)
+	}
+
+	buf := make([]byte, 256)
+	memCtx := contextWithRawMemBuf(ctx, buf)
+
+	result := s.DurableCall(memCtx, nil, "my-svc", "my-op", `{"key":"val"}`, 0, uint32(len(buf)))
+
+	// The workflow must not have actually invoked the downstream service.
+	if len(caller.calls) != 0 {
+		t.Errorf("expected 0 calls to the real service after cancellation, got %d: %+v", len(caller.calls), caller.calls)
+	}
+
+	errCode := byte(result & 0xFF)
+	callErrorCode := byte((result >> 8) & 0xFF)
+	if errCode != 1 || callErrorCode != 1 {
+		t.Fatalf("expected cancellation error flags (errCode=1, callErrorCode=1), got errCode=%d callErrorCode=%d (raw=%d)", errCode, callErrorCode, result)
+	}
+	respLen := uint32(result >> 40)
+	written := string(buf[:respLen])
+	if written != "workflow cancelled" {
+		t.Errorf("expected response %q, got %q", "workflow cancelled", written)
+	}
+}
+
+// TestCancellationNotObservedForDifferentWorkflow proves the store is keyed
+// correctly: cancelling one workflow must not affect another workflow's
+// session (i.e. the fix must not degenerate into "always cancelled").
+func TestCancellationNotObservedForDifferentWorkflow(t *testing.T) {
+	ctx := context.Background()
+	store := &keyedCancellationStore{}
+
+	caller := &mockCaller{}
+	s := newTestExecSession()
+	s.engine.workflowID = "wf-innocent"
+	s.engine.caller = caller
+	s.engine.signalStore = store
+
+	if err := store.RequestCancellation(ctx, "wf-other", "cancel the other one"); err != nil {
+		t.Fatalf("RequestCancellation: %v", err)
+	}
+
+	result := s.DurableCall(ctx, nil, "my-svc", "my-op", `{"key":"val"}`, 0, 0)
+
+	if len(caller.calls) != 1 {
+		t.Errorf("expected the uncancelled workflow's call to proceed, got %d calls", len(caller.calls))
+	}
+	errCode := byte(result & 0xFF)
+	if errCode != 0 {
+		t.Errorf("expected no cancellation error for an unrelated workflow, got errCode=%d", errCode)
 	}
 }
 

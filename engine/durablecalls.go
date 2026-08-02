@@ -48,7 +48,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// Check cancellation before making the call.
 	callCtx := ctx
 	if s.engine.signalStore != nil {
-		cancelled, _, err := s.engine.signalStore.PollCancellation(ctx, "")
+		cancelled, _, err := s.engine.signalStore.PollCancellation(ctx, s.engine.workflowID)
 		if err == nil && cancelled {
 			written, _ := s.writeResult(ctx, m, responsePtr, "workflow cancelled", responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
