@@ -18,6 +18,16 @@
 -- fence held, so Go callers can detect a lost fence and treat it as the
 -- normal "reassigned to another worker" case rather than an error.
 
+-- 003 defines this function RETURNS VOID; this one returns BOOLEAN.
+-- PostgreSQL rejects a return-type change through CREATE OR REPLACE:
+--   ERROR: cannot change return type of existing function (42P13)
+--   HINT:  Use DROP FUNCTION finalize_workflow_status(...) first.
+-- so the old signature must be dropped first. The argument list below must
+-- match 003's exactly, or the DROP matches nothing and the CREATE fails again.
+DROP FUNCTION IF EXISTS finalize_workflow_status(
+    TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, JSONB, TIMESTAMPTZ, TEXT
+);
+
 CREATE OR REPLACE FUNCTION finalize_workflow_status(
     p_workflow_id      TEXT,
     p_worker_id        TEXT,
