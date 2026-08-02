@@ -5,12 +5,26 @@ roles: blob store, state store, work queue, and timer service.
 
 ## Schema File
 
-The canonical schema is in `schema.sql` at the project root. Run it against a
-PostgreSQL 14+ database before deploying workflows:
+The canonical schema is `migrations/postgres/`. Apply every file, in
+lexical order, against a PostgreSQL 14+ database before deploying workflows:
 
 ```bash
-psql -U postgres -d cleat -f schema.sql
+for f in migrations/postgres/*.sql; do psql -U postgres -d cleat -f "$f"; done
 ```
+
+All files are idempotent, so re-running them is safe.
+
+Apply **all** of them, not just `001_schema.sql`. `003_procedures.sql`
+creates `finalize_workflow_status`, which the engine calls on every workflow
+completion with no fallback — a database without it cannot finish a single
+workflow.
+
+> This document previously named a root `schema.sql` as canonical. That file
+> was a second, hand-maintained copy that had drifted into a strict subset of
+> the migrations: no stored procedures, no row-level security policies, and
+> no `admin.tenants`. It has been deleted rather than repaired, so there is
+> now exactly one source. See `engine/schema_bootstrap_test.go`, which builds
+> a database from these files and asserts the engine's requirements hold.
 
 ## Core Tables
 
@@ -275,7 +289,7 @@ CREATE TABLE workflow_update_requests (
 ### Current State
 
 Schema migrations are currently **manual**. There is no automated migration
-tool. Changes are applied by running `schema.sql` (which uses
+tool. Changes are applied by running `migrations/postgres/*.sql` (which use
 `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
 for idempotent application).
 

@@ -16,7 +16,18 @@ services:
       start_period: 10s
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      # Mount the migrations directory, not a hand-maintained copy of it.
+      # docker-entrypoint-initdb.d executes *.sql in lexical order, which is
+      # exactly 001_schema -> 002_defaults -> 003_procedures -> 004_fix_*.
+      #
+      # This used to mount a root schema.sql that was a second, hand-kept
+      # copy. It had drifted into a strict subset: no finalize_workflow_status
+      # (so FinalizeWorkflowSegment failed on every workflow completion --
+      # engine/store_lifecycle.go calls it with no fallback), no RLS policies
+      # at all, and no admin.tenants/admin.tenant_api_keys (so the Admin API
+      # could not work either). Tests only ever read migrations/postgres/,
+      # so nothing caught it.
+      - ./migrations/postgres:/docker-entrypoint-initdb.d:ro
     networks:
       - cleat-cluster
     ports:

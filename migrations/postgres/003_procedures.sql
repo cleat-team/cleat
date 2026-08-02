@@ -17,6 +17,23 @@ ALTER TABLE event_history DROP CONSTRAINT IF EXISTS fk_event_history_workflow;
 -- Called within an existing transaction after events have been appended and
 -- event_count has been incremented.
 
+-- Drop before creating, for the same reason 004 does: this file declares
+-- RETURNS VOID and 004 replaces it with RETURNS BOOLEAN, and PostgreSQL
+-- rejects a return-type change through CREATE OR REPLACE with
+--   ERROR: cannot change return type of existing function (42P13)
+-- Re-applying the migration set to a database that already has 004's version
+-- would otherwise fail here -- and re-applying is exactly what an operator
+-- upgrading an existing deployment does. The files are advertised as
+-- idempotent (docs/explanation/postgresql-schema.md) and
+-- TestShippedSchema_IsIdempotent enforces it.
+--
+-- Dropping 004's version here is safe: 004 sorts after 003, so any run that
+-- applies this file also re-applies 004 afterwards and the BOOLEAN version
+-- with the fence guard is always the end state.
+DROP FUNCTION IF EXISTS finalize_workflow_status(
+    TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, JSONB, TIMESTAMPTZ, TEXT
+);
+
 CREATE OR REPLACE FUNCTION finalize_workflow_status(
     p_workflow_id      TEXT,
     p_worker_id        TEXT,
