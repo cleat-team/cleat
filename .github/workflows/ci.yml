@@ -625,11 +625,17 @@ jobs:
           # and a 60s budget expired while 003/004 were still executing.
           echo "Waiting for the initdb migrations to produce a usable schema..."
           ok=""
+          probe_out=""
           for i in $(seq 1 90); do
-            if docker exec cleat-postgres psql -U cleat -d cleat -tAc \
-                 "SELECT to_regclass('public.workflow_defs') IS NOT NULL
-                     AND to_regproc('public.finalize_workflow_status') IS NOT NULL" \
-                 2>/dev/null | grep -q '^t$'; then
+            # Exit status, not output matching. psql exits non-zero if the
+            # relation or function is missing, so there is no dependence on how
+            # to_regclass/to_regproc spell "absent" (both return NULL rather
+            # than erroring, including for an ambiguous name -- which made an
+            # earlier `IS NOT NULL` formulation silently never become true).
+            if probe_out="$(docker exec cleat-postgres psql -U cleat -d cleat \
+                 -v ON_ERROR_STOP=1 -tAc \
+                 "SELECT count(*) FROM workflow_defs;
+                  SELECT 'finalize_workflow_status'::regproc;" 2>&1)"; then
               ok=1
               break
             fi
@@ -645,6 +651,9 @@ jobs:
             echo "fails it exits -- with restart: unless-stopped the container then comes"
             echo "back up on the now-non-empty directory and skips them entirely, which"
             echo "looks like a database that started fine and has no tables."
+            echo
+            echo "--- last probe output ---"
+            echo "${probe_out:-(no output captured)}"
             echo
             echo "--- what the container sees in /docker-entrypoint-initdb.d ---"
             docker exec cleat-postgres ls -la /docker-entrypoint-initdb.d/ || true
