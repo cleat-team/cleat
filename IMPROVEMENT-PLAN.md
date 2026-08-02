@@ -62,7 +62,7 @@ CI must go red. Revert. If it stayed green, Phase 0 is not done.
 
 ## Progress — 2026-08-02
 
-Branch `fix/phase0-restore-ci-signal`, not yet pushed.
+Branch `fix/phase0-restore-ci-signal`, pushed, draft PR #218 against `develop`.
 
 | Commit | What |
 |---|---|
@@ -73,14 +73,53 @@ Branch `fix/phase0-restore-ci-signal`, not yet pushed.
 | `9292e2d` | Admin + instance API routes registered; store methods are still stubs and the tenant-ownership gap is now documented in code |
 | `465e142` | Falsifiable claims corrected: ABI version, the 88M benchmark, multi-DB parity, the TLA+ module terminator |
 | `0452141` | gofmt (75 files) |
+| `4de546c` | Dispatch-loop tests no longer hang the package to the 10-minute timeout |
+| `82b5e44` | `TestReadMemTotal` made platform-aware (it read `/proc/meminfo` unconditionally) |
+| `8d44300` | **1.1/1.2 done** — the unfenced `DELETE FROM event_history`; `finalize_workflow_status` now returns whether the fence held, and `FinalizeWorkflowSegment` rolls back on `ErrFenceLost` |
+| `7faa157` | **1.5 done** — wasmtime epoch interruption, fuel, and `StoreLimits`; the `_start` path had been discarding errors and reporting `Result: "ok"` for interrupted infinite loops |
+| `9980fc9` | The `core` CI matrix entry runs for the first time. `cleat/` is a separate module, so `./cleat/...` from the root always failed at setup — masked for its entire existence by the missing `pipefail` |
+| `f9bce35` | The SQL fence guard is now itself verified, not just the Go rollback that masks it — see below |
+| `93f8abf` | The four remaining red jobs: sticky-reclaim flake, grpc `GO-2026-6061`, `--namespace` crash-loop, stale `schema.sql` |
 
-**Still open:** 1.1/1.2 (unfenced terminal side effects), 1.4 (wire `flushCallIntent`),
-1.5 (wasmtime execution limits), 1.7 (tenant scoping at the HTTP layer), the whole of
-Phase 2, `cmd/cleat-worker` gofmt.
+**Acceptance gate: passed.** A deliberate breakage was pushed and `Test Go (core)` was
+observed going failure → success. "CI is fixed" is now an observation, not an inference.
 
-**Not yet done and it matters:** the Phase 0 acceptance gate has never run. Everything above
-is verified locally only. Until a deliberate breakage is pushed and observed turning CI red,
-"CI is fixed" is an inference, not a fact.
+**Still open:** 1.4 (wire `flushCallIntent`), 1.7 (tenant scoping at the HTTP layer), the
+whole of Phase 2, `cmd/cleat-worker` gofmt, and the four items below.
+
+### Caveats carried by this branch
+
+These are known-and-recorded, not fixed. Each is a place where the suite is greener than
+the code.
+
+1. **`TestASTransform/compiles_to_wasm` never compiles anything.** It skips. The fixture's
+   `package.json` installs `assemblyscript` but not `@cleat/sdk`, while the transform
+   unconditionally injects an `@cleat/sdk` import into the wrapper it generates, so `asc`
+   fails at parse time and the test skips on "no `.wasm` produced". `93f8abf` only made the
+   skip *say* that. A test named `compiles_to_wasm` that has never compiled to wasm is the
+   Phase 3 failure mode in miniature. Fix: install `@cleat/sdk` into the fixture.
+
+2. **`testutil.TestDB` skips instead of failing when Postgres is unreachable.** Its
+   `MySQLTestDB`/`MSSQLTestDB` siblings already `t.Fatalf`; the Postgres path calls
+   `t.Skipf` on any ping failure, even when the DSN came from an explicit
+   `CLEAT_TEST_POSTGRES`/`CLEAT_TEST_DB` rather than its `localhost` fallback. A container
+   that stops between runs therefore reports `ok`. `f9bce35` adds `requireBackendReachable`
+   to *one* file. Roughly twelve others reach the same code path through
+   `registeredBackends`: `fault_test.go`, `integration_test.go`, `plugin_migrations_test.go`,
+   `store_backends_test.go`, `store_parent_wake_test.go`, the five
+   `store_test_groups_*_test.go`, and `tenant_isolation_test.go`. Fix it in
+   `engine/testutil/schema.go` and delete the local helper.
+
+3. **Migration 004 is verified on Postgres only.** MySQL and SQL Server have equivalent 004
+   files and neither has been executed. MSSQL uses `CREATE OR ALTER PROCEDURE`, which has no
+   return-type problem; MySQL needs checking for the same `DROP` requirement Postgres had.
+   Until `CLEAT_TEST_MYSQL`/`CLEAT_TEST_MSSQL` are pointed at real servers, "fixed across
+   three dialects" is a claim about two unrun files.
+
+4. **`schema.sql` and `migrations/postgres/001_schema.sql` are two hand-maintained copies of
+   one schema.** `93f8abf` resynchronised them. Nothing stops them diverging again, and the
+   last divergence cost a debugging session (`generation` nullable in one, `NOT NULL DEFAULT
+   0` in the other). Candidate for Phase 2: assert the two agree, or generate one.
 
 **Process note for future sessions.** Two commits had to be rewound because `git add -A` was
 run while subagents were mid-edit; one nearly shipped a call site an agent had *deliberately*
@@ -108,6 +147,26 @@ into the parent's `await_child` event.
 - Files: `migrations/postgres/003_procedures.sql:20-118`,
   `migrations/mysql/003_procedures.sql:13-108`, `migrations/mssql/003_procedures.sql:17+`
 - Test: two-worker race harness (see 2.2).
+
+**Done in `8d44300` + `f9bce35`, with one lesson worth keeping.** The first test written for
+this — `TestFinalizeWorkflowSegment_ZombieWriterFence`, which drives the real store against a
+real PostgreSQL — passes *whether or not the SQL guard exists.* Confirmed by deleting the
+guard, reinstating the original bug in full, and re-running: still `ok`.
+
+The reason is that `FinalizeWorkflowSegment` returns `ErrFenceLost` **before** `tx.Commit()`,
+so the deferred `tx.Rollback()` discards everything the procedure did inside that transaction,
+`DELETE` included. That is a real fix and a sound one — but it is a *Go-layer* fix, and it
+means the SQL guard could be stripped from all three dialects without a single test noticing.
+
+`TestFinalizeWorkflowStatus_SQLFenceGuard` closes the gap by calling the procedure directly on
+a plain `*sql.DB`, outside any transaction, where the guard is the only thing standing between
+a stale worker and the delete. With the guard removed it reports
+`event_history was corrupted … got []` — the whole history gone.
+
+The general form: **an end-to-end test can pass because of a layer other than the one you
+think you are testing.** The only way to know which layer is holding is to break the specific
+one and watch. This is the same defect class as the `tee` without `pipefail` and the mock that
+discarded its argument — a green result produced by something other than the thing under test.
 
 ### 1.2 Systemic unchecked `RowsAffected` (~1 session)
 
