@@ -60,6 +60,34 @@ CI must go red. Revert. If it stayed green, Phase 0 is not done.
 
 ---
 
+## Progress — 2026-08-02
+
+Branch `fix/phase0-restore-ci-signal`, not yet pushed.
+
+| Commit | What |
+|---|---|
+| `9a38f6e` | **Phase 0 complete.** pipefail, 8 missing packages added to the CI matrix, drift guard, `continue-on-error` off lint+build, cgo paths, engine compiles again |
+| `6324015` | TinyGo removed. Includes a **replay-determinism fix** in `plugins/dag` — a hand-rolled JSON encoder that existed only for TinyGo serialised maps in randomised order, so task inputs recorded in event history differed run to run |
+| `f4322e3` | `tests/integrity` and `tests/cross-language` now actually execute (they had skipped on a missing `tinygo` binary since they were written) |
+| `b729cad` | **1.3 done** — cancellation wired, mock that discarded the argument fixed, tests proven to fail against the original bug |
+| `9292e2d` | Admin + instance API routes registered; store methods are still stubs and the tenant-ownership gap is now documented in code |
+| `465e142` | Falsifiable claims corrected: ABI version, the 88M benchmark, multi-DB parity, the TLA+ module terminator |
+| `0452141` | gofmt (75 files) |
+
+**Still open:** 1.1/1.2 (unfenced terminal side effects), 1.4 (wire `flushCallIntent`),
+1.5 (wasmtime execution limits), 1.7 (tenant scoping at the HTTP layer), the whole of
+Phase 2, `cmd/cleat-worker` gofmt.
+
+**Not yet done and it matters:** the Phase 0 acceptance gate has never run. Everything above
+is verified locally only. Until a deliberate breakage is pushed and observed turning CI red,
+"CI is fixed" is an inference, not a fact.
+
+**Process note for future sessions.** Two commits had to be rewound because `git add -A` was
+run while subagents were mid-edit; one nearly shipped a call site an agent had *deliberately*
+broken to prove a test bites. Use explicit paths, and run `git show --stat` before every
+commit. A commit message asserting "docs only" over a diff full of functional code is the
+same defect class this plan exists to fix.
+
 ## Phase 1 — Paired test + fix, by severity
 
 For each item: **write the failing test first, watch it fail, then fix.** A passing unit test
