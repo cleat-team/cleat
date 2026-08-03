@@ -139,7 +139,17 @@ Do §2.16 at the same time rather than after. It is the reason all eight went un
 wasmtime closure tests install `mockHostHandler` and assert `got != 0`, which no
 implementation defect can fail. It has now produced defects twice; treat it as confirmed.
 
-### 5. Confirm or kill §2.20 before ranking it
+### 5. Confirm or kill §2.20 before ranking it  —  ✅ **done**, see §2.20
+
+> **Confirmed, and it did outrank item 4.** Reproduced under a genuinely RLS-enforcing
+> connection: the insert is *rejected*, the transaction aborts, and child-workflow spawning
+> fails outright wherever RLS is in force — which includes the shipped cluster deployment,
+> since it connects workers as `cleat_app`. Fixed, with the regression test as the
+> deliverable. One caveat in the entry was wrong and is corrected there: `FORCE ROW LEVEL
+> SECURITY` means an *owner* connection is rejected too, not just a tenant role.
+>
+> The original framing is kept below.
+
 
 `StartChildWorkflowAtomic` omits `tenant_id` from its `event_history` insert, and the RLS
 policy has no explicit `WITH CHECK`, so PostgreSQL should *reject* the row rather than
@@ -1298,7 +1308,46 @@ Fix is two characters of shift, but it should land with a guest-level assertion,
 host-level one; §2.18 and §2.19 mask each other, and fixing either alone leaves
 `WorkflowID()` still returning `""`. That mutual masking is probably why neither was noticed.
 
-### 2.20 Child-workflow spawning inserts an event with no `tenant_id` — OPEN
+### 2.20 Child-workflow spawning inserts an event with no `tenant_id` — ✅ **CONFIRMED and FIXED**
+
+> **Reproduced, then fixed.** Driving the real `PostgresStore` through
+> `testutil.OpenPostgresRLSTestDB` (a role that is neither superuser nor table owner)
+> against PostgreSQL 16.14, `StartChildWorkflowAtomic` fails outright:
+>
+> ```
+> start child workflow atomic: insert event:
+> pq: new row violates row-level security policy for table "event_history" (42501)
+> ```
+>
+> Rejected, not defaulted — the schema reasoning below held. A raw-SQL A/B isolated the
+> cause to the single column: the `store_children.go` form is rejected, the
+> `store_event_write.go` form with `tenant_id` supplied returns `INSERT 0 1`, everything
+> else identical.
+>
+> **It is live in the shipped multi-tenant configuration.** `StartChildWorkflowAtomic`
+> calls `setRLSOnTx(tx)` at `store_children.go:55` — it activates the tenant GUC on the
+> very transaction whose next insert omits the column. `migrations/postgres/005_app_role.sql:68`
+> makes `cleat_app` `NOSUPERUSER … NOBYPASSRLS` and non-owning, `deploy/postgres/900-app-role.sh`
+> raises if it ever gains an exemption, and `ci.yml:810` connects cluster workers as it.
+>
+> **Correction to the caveat below:** it says "an owner connection … inserts the zero-UUID
+> successfully." That is wrong. `FORCE ROW LEVEL SECURITY` exists precisely to apply RLS to
+> the table owner, so an owner connection with `cleat.tenant_id` set is rejected too. Only a
+> **superuser** bypasses, forced or not. The exemption is narrower than this entry claimed.
+>
+> **Why CI never saw it** — the two halves miss each other. Test DSNs point at `postgres`,
+> a superuser, so RLS is a no-op in every existing test; and the one deployment that does
+> enforce RLS has no child-workflow coverage at all (`grep -rl child tests/cluster/` is
+> empty).
+>
+> Fix: `tenant_id` added as `$9`, matching the sibling insert. Safe — `setRLSOnTx` already
+> refuses an empty `tenantID`, so the insert is unreachable with one. Regression test at
+> `engine/store_children_rls_test.go`, verified to fail against the unfixed code and pass
+> with the fix. The `engine` package is green.
+>
+> The original framing is kept below.
+
+#### Original framing
 
 `StartChildWorkflowAtomic` (`engine/store_children.go`) does two inserts in one transaction.
 The first passes `tenant_id` (`$7 = s.tenantID`, line 70). The second, into `event_history`
