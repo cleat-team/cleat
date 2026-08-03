@@ -94,7 +94,7 @@ func (b *wasmtimeBackend) registerCleatUUID(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.UUID(context.Background(), nil, seed, uint32(uuidPtr), uint32(uuidMaxLen))
+		return h.UUID(ctxWithMem(context.Background(), buf), nil, seed, uint32(uuidPtr), uint32(uuidMaxLen))
 	})
 }
 
@@ -106,11 +106,11 @@ func (b *wasmtimeBackend) registerCleatWorkflowID(linker *wasmtime.Linker) error
 	return linker.FuncWrap("env", "cleat_workflow_id", func(caller *wasmtime.Caller,
 		idPtr, idMaxLen int32) int64 {
 		h := b.handler
-		_, _, err := callerMemBuf(caller)
+		buf, _, err := callerMemBuf(caller)
 		if err != nil {
 			return errBadParamInt64
 		}
-		return h.WorkflowID(context.Background(), nil, uint32(idPtr), uint32(idMaxLen))
+		return h.WorkflowID(ctxWithMem(context.Background(), buf), nil, uint32(idPtr), uint32(idMaxLen))
 	})
 }
 
@@ -122,11 +122,11 @@ func (b *wasmtimeBackend) registerCleatRunID(linker *wasmtime.Linker) error {
 	return linker.FuncWrap("env", "cleat_run_id", func(caller *wasmtime.Caller,
 		idPtr, idMaxLen int32) int64 {
 		h := b.handler
-		_, _, err := callerMemBuf(caller)
+		buf, _, err := callerMemBuf(caller)
 		if err != nil {
 			return errBadParamInt64
 		}
-		return h.RunID(context.Background(), nil, uint32(idPtr), uint32(idMaxLen))
+		return h.RunID(ctxWithMem(context.Background(), buf), nil, uint32(idPtr), uint32(idMaxLen))
 	})
 }
 
@@ -226,7 +226,7 @@ func (b *wasmtimeBackend) registerCleatGetState(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.GetState(context.Background(), nil, key, uint32(valuePtr), uint32(valueMaxLen))
+		return h.GetState(ctxWithMem(context.Background(), buf), nil, key, uint32(valuePtr), uint32(valueMaxLen))
 	})
 }
 
@@ -307,7 +307,7 @@ func (b *wasmtimeBackend) registerCleatListState(linker *wasmtime.Linker) error 
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.ListState(context.Background(), nil, prefix, uint32(keysPtr), uint32(keysMaxLen))
+		return h.ListState(ctxWithMem(context.Background(), buf), nil, prefix, uint32(keysPtr), uint32(keysMaxLen))
 	})
 }
 
@@ -340,7 +340,7 @@ func (b *wasmtimeBackend) registerCleatFetch(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.Fetch(context.Background(), nil, method, url, headersJSON, body, uint32(responsePtr), uint32(responseMaxLen))
+		return h.Fetch(ctxWithMem(context.Background(), buf), nil, method, url, headersJSON, body, uint32(responsePtr), uint32(responseMaxLen))
 	})
 }
 

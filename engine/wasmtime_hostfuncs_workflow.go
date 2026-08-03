@@ -24,7 +24,7 @@ func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.DurableDefer(context.Background(), nil, desc, uint32(deferIDPtr), uint32(deferIDMaxLen))
+		return h.DurableDefer(ctxWithMem(context.Background(), buf), nil, desc, uint32(deferIDPtr), uint32(deferIDMaxLen))
 	})
 }
 
@@ -36,11 +36,11 @@ func (b *wasmtimeBackend) registerCleatPollCancellation(linker *wasmtime.Linker)
 	return linker.FuncWrap("env", "cleat_poll_cancellation", func(caller *wasmtime.Caller,
 		reasonPtr, reasonMaxLen int32) int64 {
 		h := b.handler
-		_, _, err := callerMemBuf(caller)
+		buf, _, err := callerMemBuf(caller)
 		if err != nil {
 			return errBadParamInt64
 		}
-		return h.PollCancellation(context.Background(), nil, uint32(reasonPtr), uint32(reasonMaxLen))
+		return h.PollCancellation(ctxWithMem(context.Background(), buf), nil, uint32(reasonPtr), uint32(reasonMaxLen))
 	})
 }
 
@@ -60,7 +60,7 @@ func (b *wasmtimeBackend) registerCleatPollSignal(linker *wasmtime.Linker) error
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.PollSignal(context.Background(), nil, name, uint32(payloadPtr), uint32(payloadMaxLen))
+		return h.PollSignal(ctxWithMem(context.Background(), buf), nil, name, uint32(payloadPtr), uint32(payloadMaxLen))
 	})
 }
 
@@ -195,7 +195,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Li
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.ChildWorkflowInSchema(context.Background(), nil, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
+		return h.ChildWorkflowInSchema(ctxWithMem(context.Background(), buf), nil, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
 	})
 }
 
@@ -270,7 +270,7 @@ func (b *wasmtimeBackend) registerCleatCallRetry(linker *wasmtime.Linker) error 
 		if !ok {
 			return badParamDurableCall
 		}
-		return h.DurableCallWithRetry(context.Background(), nil, service, op, req,
+		return h.DurableCallWithRetry(ctxWithMem(context.Background(), buf), nil, service, op, req,
 			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
 			nonRetryableErrorsJSON, uint32(respPtr), uint32(respMaxLen))
 	})
@@ -348,7 +348,7 @@ func (b *wasmtimeBackend) registerCleatCallHeartbeat(linker *wasmtime.Linker) er
 		if !ok {
 			return badParamDurableCall
 		}
-		return h.DurableCallWithHeartbeat(context.Background(), nil, service, op, req, heartbeatIntervalMs, uint32(respPtr), uint32(respMaxLen))
+		return h.DurableCallWithHeartbeat(ctxWithMem(context.Background(), buf), nil, service, op, req, heartbeatIntervalMs, uint32(respPtr), uint32(respMaxLen))
 	})
 }
 
@@ -398,7 +398,7 @@ func (b *wasmtimeBackend) registerCleatSendSignalAndWait(linker *wasmtime.Linker
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.SendSignalAndWait(context.Background(), nil, targetRunID, signalName, payload, timeoutMs, uint32(respPtr), uint32(respMaxLen))
+		return h.SendSignalAndWait(ctxWithMem(context.Background(), buf), nil, targetRunID, signalName, payload, timeoutMs, uint32(respPtr), uint32(respMaxLen))
 	})
 }
 
@@ -476,7 +476,7 @@ func (b *wasmtimeBackend) registerCleatSetScope(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.SetScope(context.Background(), nil, objType, instKey, uint32(prevScopePtr), uint32(prevScopeMaxLen))
+		return h.SetScope(ctxWithMem(context.Background(), buf), nil, objType, instKey, uint32(prevScopePtr), uint32(prevScopeMaxLen))
 	})
 }
 
@@ -488,11 +488,11 @@ func (b *wasmtimeBackend) registerCleatGetScope(linker *wasmtime.Linker) error {
 	return linker.FuncWrap("env", "cleat_get_scope", func(caller *wasmtime.Caller,
 		objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen int32) int64 {
 		h := b.handler
-		_, _, err := callerMemBuf(caller)
+		buf, _, err := callerMemBuf(caller)
 		if err != nil {
 			return errBadParamInt64
 		}
-		return h.GetScope(context.Background(), nil, uint32(objTypePtr), uint32(objTypeMaxLen), uint32(instKeyPtr), uint32(instKeyMaxLen))
+		return h.GetScope(ctxWithMem(context.Background(), buf), nil, uint32(objTypePtr), uint32(objTypeMaxLen), uint32(instKeyPtr), uint32(instKeyMaxLen))
 	})
 }
 
@@ -512,7 +512,7 @@ func (b *wasmtimeBackend) registerCleatSideEffect(linker *wasmtime.Linker) error
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.SideEffect(context.Background(), nil, result, uint32(outPtr), uint32(outMaxLen))
+		return h.SideEffect(ctxWithMem(context.Background(), buf), nil, result, uint32(outPtr), uint32(outMaxLen))
 	})
 }
 

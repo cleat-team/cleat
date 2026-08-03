@@ -89,7 +89,7 @@ func (b *wasmtimeBackend) registerCleatCreatePromise(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.CreatePromise(context.Background(), nil, name, uint32(promiseIDPtr), uint32(promiseIDMaxLen))
+		return h.CreatePromise(ctxWithMem(context.Background(), buf), nil, name, uint32(promiseIDPtr), uint32(promiseIDMaxLen))
 	})
 }
 
@@ -110,7 +110,7 @@ func (b *wasmtimeBackend) registerCleatAwaitPromise(linker *wasmtime.Linker) err
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.AwaitPromise(context.Background(), nil, promiseID, timeoutMs, uint32(resultPtr), uint32(resultMaxLen))
+		return h.AwaitPromise(ctxWithMem(context.Background(), buf), nil, promiseID, timeoutMs, uint32(resultPtr), uint32(resultMaxLen))
 	})
 }
 
