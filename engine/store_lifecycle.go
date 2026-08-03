@@ -38,13 +38,23 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// The candidate set is selected in a CTE, not an IN (SELECT ... LIMIT n)
+	// sublink, and that is load-bearing rather than stylistic.
+	//
+	// When an UPDATE meets a row another transaction has concurrently
+	// modified, PostgreSQL re-reads that row and re-evaluates the WHERE
+	// clause against the new version (EvalPlanQual). Re-evaluating a WHERE
+	// clause that contains `id IN (SELECT ... ORDER BY ... LIMIT n FOR UPDATE
+	// SKIP LOCKED)` re-executes the sublink, which returns a *different* n
+	// rows each time -- so a claim for n could update far more than n. It was
+	// observed asking for 3 and returning 10 (every eligible row) whenever
+	// other workers were claiming from the same table, which is precisely
+	// when a worker must not exceed its concurrency budget.
+	//
+	// A CTE is evaluated once, so the limit holds however much concurrency
+	// there is.
 	rows, err := tx.QueryContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'running',
-		    assigned_to = $1,
-		    heartbeat_at = now(),
-		    generation = generation + 1
-		WHERE id IN (
+		WITH candidates AS (
 			SELECT id FROM workflow_instances
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
@@ -53,7 +63,14 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
+		UPDATE workflow_instances w
+		SET status = 'running',
+		    assigned_to = $1,
+		    heartbeat_at = now(),
+		    generation = generation + 1
+		FROM candidates c
+		WHERE w.id = c.id
+		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
@@ -108,13 +125,11 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// CTE rather than an IN (SELECT ... LIMIT n) sublink, for the reason
+	// documented in ClaimWorkflows above: the sublink is re-executed on an
+	// EvalPlanQual recheck and the limit stops holding under concurrency.
 	rows, err := tx.QueryContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'running',
-		    assigned_to = $1,
-		    heartbeat_at = now(),
-		    generation = generation + 1
-		WHERE id IN (
+		WITH candidates AS (
 			SELECT id FROM workflow_instances
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
@@ -124,7 +139,14 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
+		UPDATE workflow_instances w
+		SET status = 'running',
+		    assigned_to = $1,
+		    heartbeat_at = now(),
+		    generation = generation + 1
+		FROM candidates c
+		WHERE w.id = c.id
+		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)

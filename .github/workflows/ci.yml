@@ -617,7 +617,19 @@ jobs:
     name: Cluster Integration Tests
     runs-on: ubuntu-latest
     env:
-      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
+      # A database of the tests' own, on the same server as the cluster but
+      # not the one the workers use.
+      #
+      # This job's purpose is to prove the cluster comes up and stays up. It
+      # was also pointing `go test ./engine/...` at the cluster's own
+      # database, so the store tests -- which create rows and then assert on
+      # exactly those rows -- shared a table with four live workers claiming
+      # from it. TestClaimWorkflow found its ready workflow already `running`;
+      # TestListWorkflows_ByStatus found nothing ready; TestClaimSkipLocked
+      # asked for 3 and got 10. Those tests are correct and the setup was not:
+      # they assume exclusive ownership of the table, which no test sharing a
+      # database with a running cluster can have.
+      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat_tests?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -716,6 +728,18 @@ jobs:
           # Each service has a healthcheck in docker-compose.cluster.yml; wait
           # for every one of them to reach "healthy" rather than assuming a
           # fixed delay is enough.
+          # The test database, separate from the cluster's own (see
+          # CLEAT_TEST_DB above). Left empty: engine/testutil builds the
+          # schema from migrations/postgres/ on first use.
+          #
+          # Checked before creating rather than `|| true`, so that a genuine
+          # failure to create it is not swallowed along with "already exists".
+          if ! docker exec cleat-postgres psql -U cleat -d cleat -tAc \
+                 "SELECT 1 FROM pg_database WHERE datname = 'cleat_tests'" | grep -q 1; then
+            docker exec cleat-postgres psql -v ON_ERROR_STOP=1 -U cleat -d cleat \
+              -c "CREATE DATABASE cleat_tests"
+          fi
+
           echo "Waiting for workers to become healthy..."
           SERVICES="cleat-worker-1 cleat-worker-2 cleat-worker-3 cleat-dashboard"
           DEADLINE=$(( SECONDS + 120 ))
@@ -762,7 +786,15 @@ jobs:
           # pipefail is required: without it `tee` supplies the exit status and
           # a failing `go test` is silently reported as a green step.
           set -o pipefail
-          go test -count=1 -timeout=120s -json ./engine/... 2>&1 | tee test-report.json
+          # -p 1: ./engine/... is two packages, engine and engine/testutil,
+          # and `go test` runs packages in parallel by default. Both build
+          # their schema in, and wipe rows from, the one database this job
+          # gives them -- so in parallel they race on the DDL in
+          # 001_schema.sql (observed: a duplicate key on pg_extension_name_index,
+          # and a deadlock) and delete each other's fixtures mid-test. That
+          # was invisible while they shared the cluster's already-migrated
+          # database and only appeared once this job got one of its own.
+          go test -p 1 -count=1 -timeout=180s -json ./engine/... 2>&1 | tee test-report.json
 
       - name: Warn on skipped tests
         if: always()

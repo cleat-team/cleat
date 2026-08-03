@@ -588,28 +588,49 @@ the CI job has a "Warn on skipped tests" step — whereas a pass for the wrong r
 
 ---
 
-### 2.11 Three store tests fail intermittently, cause unknown — OPEN, instrumented
+### 2.11 Three store tests failed against a database live workers were mutating — fixed; one part still open
 
-`TestClaimWorkflow`, `TestClaimSkipLocked` and `TestListWorkflows_ByStatus` fail on some
-machines and in the cluster CI job, with `ClaimWorkflow returned nil`,
-`first claim returned 10, want 3` and `expected at least 1 result`.
+`TestClaimWorkflow`, `TestClaimSkipLocked` and `TestListWorkflows_ByStatus` failed in the
+cluster CI job with `ClaimWorkflow returned nil`, `first claim returned 10, want 3` and
+`expected at least 1 result`.
 
-They were expected to be collateral from 1.11 — the cluster job ran them against a database
-four crash-looping workers were hammering with DDL. They are not, or not only: the same
-three fail locally with no worker running, in bursts, and then stop. Repeated runs of the
-same command give FAIL FAIL FAIL ok, then ok ok ok ok. An extracted probe that performs the
-identical sequence through the same API has not reproduced it in 20 attempts.
+The instrumentation added for this (`describeClaimState`) answered it on its first
+failure, which is the whole argument for adding it rather than guessing:
 
-The `want 3, got 10` case in particular has no explanation yet. `ClaimWorkflows` issues one
-`UPDATE ... WHERE id IN (SELECT ... LIMIT $3 FOR UPDATE SKIP LOCKED) RETURNING`, and running
-that statement by hand against the same database, with the same ten rows and `LIMIT 3`,
-returns exactly three. The Go path returns three as well when called from a probe. **No
-cause has been established, and none should be asserted until one is.**
+```
+claim state: workflow_instances total=10 ready=0 ready+due=0 running=10
+claim state:   task_queue="default" status="running" count=10
+first claim returned 10, want 3
+```
 
-What has been done instead of guessing: the three assertions now call `describeClaimState`,
-which logs the row counts by status, whether they are due, their `task_queue` values, and
-the store's own `taskQueues`/`tenantID`, so the next failure carries the evidence rather
-than a bare count. The next occurrence should be diagnosed from that output.
+The job ran `go test ./engine/...` against the cluster's *own* database, so the store
+tests -- which create rows and then assert on exactly those rows -- shared a table with
+four live workers claiming from it. The tests are correct; the setup was not. They assume
+exclusive ownership of the table, which nothing sharing a database with a running cluster
+can have. The job now gets a database of its own.
+
+Two further findings fell out of that:
+
+- **`go test ./engine/...` runs two packages in parallel against one database.** `engine`
+  and `engine/testutil` each build the schema in, and wipe rows from, whichever database
+  they are given. On the cluster's already-migrated database this was invisible; against a
+  fresh one they raced on the DDL in `001_schema.sql` (a duplicate key on
+  `pg_extension_name_index`, and a deadlock) and deleted each other's fixtures. The job
+  now runs with `-p 1`.
+
+- **A claim for 3 returned 10 — still unexplained.** All ten rows were left `running`, so
+  one statement updated all of them. The suspected mechanism is that PostgreSQL
+  re-evaluates an UPDATE's WHERE clause against the new version of a concurrently-modified
+  row (EvalPlanQual), and re-evaluating `id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`
+  re-executes the sublink. `ClaimWorkflows` and `ClaimStickyWorkflows` now select
+  candidates in a CTE, which is evaluated once.
+
+  **That fix is not falsified.** `TestClaimWorkflows_RespectsLimitUnderConcurrency` was run
+  against the old form repeatedly -- with concurrent claimers, and with a background sweep
+  updating the same rows without `SKIP LOCKED` -- and passed every time. So the CTE is a
+  defensive change on a plausible mechanism, and the test is a regression guard for the
+  invariant rather than a reproduction. Both are labelled that way in the source. Anyone
+  picking this up should start by reproducing the over-claim, not by trusting the fix.
 
 ---
 
