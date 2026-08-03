@@ -1,6 +1,9 @@
 package plugin
 
 import (
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -86,4 +89,47 @@ func LimitClause(placeholder string, d Dialect) string {
 		return "OFFSET 0 ROWS FETCH NEXT " + placeholder + " ROWS ONLY"
 	}
 	return "LIMIT " + placeholder
+}
+
+// JSONColumn scans a JSON-valued column into json.RawMessage regardless of
+// whether the driver delivers it as []byte or as string.
+//
+// database/sql will convert a driver string into *[]byte, but not into a
+// *json.RawMessage: json.RawMessage is a named []byte type and the conversion
+// is not in convertAssign's fast path. lib/pq returns jsonb as []byte, so
+// scanning straight into json.RawMessage works on PostgreSQL and hides the
+// problem; go-mssqldb returns NVARCHAR as string, and every read of a JSON
+// column failed with
+//
+//	sql: Scan error on column index 0, name "value": unsupported Scan,
+//	storing driver.Value type string into type *json.RawMessage
+//
+// That surfaced as HTTP 500 on single-row reads and as silently empty lists,
+// because the row-scan error was logged and the row skipped.
+type JSONColumn struct {
+	Raw json.RawMessage
+}
+
+// Scan implements sql.Scanner.
+func (j *JSONColumn) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		j.Raw = nil
+	case []byte:
+		// Copied: the driver may reuse the buffer for the next row.
+		j.Raw = append(json.RawMessage(nil), v...)
+	case string:
+		j.Raw = json.RawMessage(v)
+	default:
+		return fmt.Errorf("plugin: cannot scan %T into a JSON column", src)
+	}
+	return nil
+}
+
+// Value implements driver.Valuer so the same type can be used for writes.
+func (j JSONColumn) Value() (driver.Value, error) {
+	if len(j.Raw) == 0 {
+		return nil, nil
+	}
+	return []byte(j.Raw), nil
 }

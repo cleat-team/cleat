@@ -64,7 +64,7 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		name              sql.NullString
 		description       sql.NullString
 		enabled           bool
-		rulesJSON         []byte
+		rulesJSON         plugin.JSONColumn
 		rolloutPercentage int
 	)
 
@@ -90,7 +90,7 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		Name:              name.String,
 		Description:       description.String,
 		Enabled:           enabled,
-		Rules:             rulesJSON,
+		Rules:             rulesJSON.Raw,
 		RolloutPercentage: rolloutPercentage,
 	}
 

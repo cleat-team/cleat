@@ -60,7 +60,10 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var value json.RawMessage
+	// plugin.JSONColumn rather than json.RawMessage: SQL Server returns the
+	// column as a string and database/sql will not scan that into a named
+	// []byte type. See plugin.JSONColumn.
+	var value plugin.JSONColumn
 	var version int
 	var createdAt, updatedAt time.Time
 
@@ -82,7 +85,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", strconv.Itoa(version))
 	p.writeJSON(w, 200, map[string]any{
 		"key":        key,
-		"value":      value,
+		"value":      value.Raw,
 		"version":    version,
 		"created_at": createdAt,
 		"updated_at": updatedAt,
@@ -299,13 +302,20 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	var entries []kvEntry
 	for rows.Next() {
 		var entry kvEntry
+		// See plugin.JSONColumn: SQL Server hands JSON back as a string.
+		var value plugin.JSONColumn
 		if err := rows.Scan(
-			&entry.Key, &entry.Value, &entry.Version,
+			&entry.Key, &value, &entry.Version,
 			&entry.CreatedAt, &entry.UpdatedAt,
 		); err != nil {
+			// Not a continue: skipping the row turned a driver-level type
+			// mismatch into a silently short list, which is how this went
+			// unnoticed on SQL Server.
 			p.logger.Error("kvstore: scan row", "error", err)
-			continue
+			p.writeError(w, 500, "failed to list keys")
+			return
 		}
+		entry.Value = value.Raw
 		entries = append(entries, entry)
 	}
 

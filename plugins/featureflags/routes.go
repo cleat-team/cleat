@@ -182,11 +182,19 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	var flags []flagJSON
 	for rows.Next() {
 		var f flagJSON
+		// See plugin.JSONColumn: SQL Server returns JSON columns as strings,
+		// which database/sql will not scan into json.RawMessage.
+		var rules plugin.JSONColumn
 		if err := rows.Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
-			&f.Enabled, &f.Rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt); err != nil {
+			&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt); err != nil {
+			// Not a continue: skipping the row turned a driver-level type
+			// mismatch into a silently short list, which is how this went
+			// unnoticed on SQL Server.
 			p.logger.Error("feature-flags: scan row", "error", err)
-			continue
+			p.writeError(w, 500, "failed to list feature flags")
+			return
 		}
+		f.Rules = rules.Raw
 		flags = append(flags, f)
 	}
 
@@ -214,12 +222,14 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var f flagJSON
+	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
+	var rules plugin.JSONColumn
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE id = $1 AND tenant_id = $2
 		`, p.dialect), id, tid).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
-		&f.Enabled, &f.Rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
+		&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "feature flag not found")
 		return
@@ -229,6 +239,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 		p.writeError(w, 500, "failed to retrieve feature flag")
 		return
 	}
+	f.Rules = rules.Raw
 
 	p.writeJSON(w, 200, f)
 }
@@ -322,17 +333,20 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	// Return the updated flag.
 	var f flagJSON
+	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
+	var rules plugin.JSONColumn
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE id = $1 AND tenant_id = $2
 		`, p.dialect), id, tid).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
-		&f.Enabled, &f.Rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
+		&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		p.logger.Error("feature-flags: re-fetch after update", "id", id, "error", err)
 		p.writeError(w, 500, "flag updated but failed to retrieve")
 		return
 	}
+	f.Rules = rules.Raw
 
 	p.logger.Info("feature-flags: updated",
 		"id", id,
@@ -405,12 +419,14 @@ func (p *Plugin) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 
 	// Look up the flag by tenant_id and key.
 	var f flagJSON
+	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
+	var rules plugin.JSONColumn
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
 		`, p.dialect), tid, req.Key).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
-		&f.Enabled, &f.Rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
+		&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "feature flag not found")
 		return
@@ -420,6 +436,7 @@ func (p *Plugin) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		p.writeError(w, 500, "failed to look up feature flag")
 		return
 	}
+	f.Rules = rules.Raw
 
 	flag := &Flag{
 		ID:                f.ID.String(),

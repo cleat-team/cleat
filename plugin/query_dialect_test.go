@@ -64,3 +64,67 @@ func TestRebind_UnknownDialectPassesThrough(t *testing.T) {
 		t.Errorf("MSSQL rebind = %q", got)
 	}
 }
+
+func TestJSONColumn_Scan(t *testing.T) {
+	cases := []struct {
+		name string
+		src  any
+		want string
+		err  bool
+	}{
+		// lib/pq hands jsonb back as []byte, which is why scanning straight
+		// into json.RawMessage worked on PostgreSQL and hid the problem.
+		{"bytes", []byte(`{"a":1}`), `{"a":1}`, false},
+		// go-mssqldb hands NVARCHAR back as string. This is the case that
+		// failed every JSON read on SQL Server.
+		{"string", `{"a":1}`, `{"a":1}`, false},
+		{"nil", nil, "", false},
+		{"wrong type", 42, "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var j JSONColumn
+			err := j.Scan(c.src)
+			if c.err {
+				if err == nil {
+					t.Fatalf("Scan(%T) = nil error, want one", c.src)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Scan(%T): %v", c.src, err)
+			}
+			if string(j.Raw) != c.want {
+				t.Errorf("Scan(%T) = %q, want %q", c.src, j.Raw, c.want)
+			}
+		})
+	}
+}
+
+// TestJSONColumn_ScanCopiesBytes pins the copy: drivers are allowed to reuse
+// the slice they hand to Scan for the next row, so retaining it would make
+// every row in a result set alias the last one.
+func TestJSONColumn_ScanCopiesBytes(t *testing.T) {
+	buf := []byte(`{"a":1}`)
+	var j JSONColumn
+	if err := j.Scan(buf); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	copy(buf, []byte(`{"b":2}`))
+	if string(j.Raw) != `{"a":1}` {
+		t.Errorf("Raw aliases the driver buffer: %q", j.Raw)
+	}
+}
+
+func TestJSONColumn_Value(t *testing.T) {
+	v, err := JSONColumn{Raw: []byte(`{"a":1}`)}.Value()
+	if err != nil {
+		t.Fatalf("Value: %v", err)
+	}
+	if string(v.([]byte)) != `{"a":1}` {
+		t.Errorf("Value = %v", v)
+	}
+	if v, err := (JSONColumn{}).Value(); err != nil || v != nil {
+		t.Errorf("empty JSONColumn Value = %v, %v; want nil, nil", v, err)
+	}
+}
