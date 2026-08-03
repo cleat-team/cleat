@@ -43,7 +43,16 @@ detection and careful review.
 
 ## 2. Tier 1 — Live work
 
-### `fix/wasm-build-replace-propagation` — **PR #208 open** · POST · 2026-06-29
+### ~~`fix/wasm-build-replace-propagation`~~ — **PR #208 CLOSED unmerged, branch deleted** (2026-08-03)
+
+> **Superseded. The assessment below was wrong and is kept only as a record of how.**
+> "Only 3 behind" was inferred from commit counts; by the time it was acted on the branch
+> was 19 ahead / 9 behind and `CONFLICTING`, and its headline fix — replace-directive
+> propagation — had already landed on `develop` verbatim via `c26c332`
+> (`git diff develop...df1119a -- wasm/build.go` is empty). See the salvage register at the
+> end of Phase 2 in `IMPROVEMENT-PLAN.md` for what was worth keeping, what was dropped, and
+> the head SHA `df1119a` if any of it needs recovering.
+
 19 commits · 49 files · +2304/−87 · only 3 behind
 
 The only open PR and by far the most current branch. Bundles several distinct things:
@@ -232,7 +241,8 @@ In both cases the useful action is to verify the *behaviour* in `develop`, not t
 
 ## 10. Suggested order
 
-1. **`fix/wasm-build-replace-propagation`** (PR #208) — squash-merge. Only 3 behind.
+1. ~~**`fix/wasm-build-replace-propagation`** (PR #208) — squash-merge. Only 3 behind.~~
+   **Done differently: closed unmerged 2026-08-03**, its fix having landed independently.
 2. **`feature/ci-multi-db-fixes`** — get CI green so later merges are trustworthy.
 3. **`feature/review-quality-fixes`** — decide now; cost grows with every `engine/` change.
 4. **Tier 3 coverage fleet** — consolidate into one branch, drop the two proven subsets.
