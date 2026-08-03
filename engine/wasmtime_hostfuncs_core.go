@@ -50,7 +50,7 @@ func (b *wasmtimeBackend) registerCleatLog(linker *wasmtime.Linker) error {
 		if err != nil {
 			return errBadParamInt64
 		}
-		msg, ok := wasmtimeReadStringValidated(buf, msgPtr, msgLen, int32(MaxWasmStringLen))
+		msg, ok := wasmtimeReadPayload(buf, msgPtr, msgLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -90,7 +90,7 @@ func (b *wasmtimeBackend) registerCleatUUID(linker *wasmtime.Linker) error {
 		if err != nil {
 			return errBadParamInt64
 		}
-		seed, ok := wasmtimeReadStringValidated(buf, seedPtr, seedLen, int32(MaxWasmStringLen))
+		seed, ok := wasmtimeReadPayload(buf, seedPtr, seedLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -150,7 +150,7 @@ func (b *wasmtimeBackend) registerCleatSend(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParamInt64
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
+		req, ok := wasmtimeReadPayload(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -178,7 +178,7 @@ func (b *wasmtimeBackend) registerCleatScheduleInvoke(linker *wasmtime.Linker) e
 		if !ok {
 			return errBadParamInt64
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
+		req, ok := wasmtimeReadPayload(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -202,7 +202,7 @@ func (b *wasmtimeBackend) registerCleatSetState(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParamInt64
 		}
-		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, int32(MaxWasmStringLen))
+		value, ok := wasmtimeReadPayload(buf, valPtr, valLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -302,7 +302,8 @@ func (b *wasmtimeBackend) registerCleatListState(linker *wasmtime.Linker) error 
 		if err != nil {
 			return errBadParamInt64
 		}
-		prefix, ok := wasmtimeReadStringValidated(buf, prefixPtr, prefixLen, int32(MaxWasmStringLen))
+		// Empty lists every key; see ListState.
+		prefix, ok := wasmtimeReadPayload(buf, prefixPtr, prefixLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -331,11 +332,11 @@ func (b *wasmtimeBackend) registerCleatFetch(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParamInt64
 		}
-		headersJSON, ok := wasmtimeReadStringValidated(buf, headersPtr, headersLen, int32(MaxWasmStringLen))
+		headersJSON, ok := wasmtimeReadPayload(buf, headersPtr, headersLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
-		body, ok := wasmtimeReadStringValidated(buf, bodyPtr, bodyLen, int32(MaxWasmStringLen))
+		body, ok := wasmtimeReadPayload(buf, bodyPtr, bodyLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}

@@ -20,7 +20,7 @@ func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
 		if err != nil {
 			return errBadParamInt64
 		}
-		desc, ok := wasmtimeReadStringValidated(buf, descPtr, descLen, int32(MaxWasmStringLen))
+		desc, ok := wasmtimeReadPayload(buf, descPtr, descLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -175,7 +175,8 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Li
 		if err != nil {
 			return errBadParamInt64
 		}
-		targetSchema, ok := wasmtimeReadServiceName(buf, schemaPtr, schemaLen)
+		// Empty means the local schema; see children.go.
+		targetSchema, ok := wasmtimeReadOptionalServiceName(buf, schemaPtr, schemaLen)
 		if !ok {
 			return errBadParamInt64
 		}
@@ -187,7 +188,10 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Li
 		if !ok {
 			return errBadParamInt64
 		}
-		parentClosePolicy, ok := wasmtimeReadServiceName(buf, policyPtr, policyLen)
+		// Empty means the default policy. wazero guarded this with an inline
+		// policyLen > 0 check and wasmtime did not, so the same guest call
+		// worked on one backend and was refused on the other.
+		parentClosePolicy, ok := wasmtimeReadOptionalServiceName(buf, policyPtr, policyLen)
 		if !ok {
 			return errBadParamInt64
 		}
@@ -310,7 +314,7 @@ func (b *wasmtimeBackend) registerCleatSetQueryState(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParamInt64
 		}
-		val, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, int32(MaxWasmStringLen))
+		val, ok := wasmtimeReadPayload(buf, valPtr, valLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -390,7 +394,7 @@ func (b *wasmtimeBackend) registerCleatSendSignalAndWait(linker *wasmtime.Linker
 		if !ok {
 			return errBadParamInt64
 		}
-		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, int32(MaxWasmStringLen))
+		payload, ok := wasmtimeReadPayload(buf, payloadPtr, payloadLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -414,7 +418,7 @@ func (b *wasmtimeBackend) registerCleatReplyToSignal(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParamInt64
 		}
-		response, ok := wasmtimeReadStringValidated(buf, respPtr, respLen, int32(MaxWasmStringLen))
+		response, ok := wasmtimeReadPayload(buf, respPtr, respLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -442,7 +446,7 @@ func (b *wasmtimeBackend) registerCleatSignalWorkflow(linker *wasmtime.Linker) e
 		if !ok {
 			return errBadParamInt64
 		}
-		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, int32(MaxWasmStringLen))
+		payload, ok := wasmtimeReadPayload(buf, payloadPtr, payloadLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -463,11 +467,12 @@ func (b *wasmtimeBackend) registerCleatSetScope(linker *wasmtime.Linker) error {
 		if err != nil {
 			return errBadParamInt64
 		}
-		objType, ok := wasmtimeReadServiceName(buf, objTypePtr, objTypeLen)
+		// Both empty clears the scope; see scope.go.
+		objType, ok := wasmtimeReadOptionalServiceName(buf, objTypePtr, objTypeLen)
 		if !ok {
 			return errBadParamInt64
 		}
-		instKey, ok := wasmtimeReadServiceName(buf, instKeyPtr, instKeyLen)
+		instKey, ok := wasmtimeReadOptionalServiceName(buf, instKeyPtr, instKeyLen)
 		if !ok {
 			return errBadParamInt64
 		}
@@ -503,7 +508,7 @@ func (b *wasmtimeBackend) registerCleatSideEffect(linker *wasmtime.Linker) error
 		if err != nil {
 			return errBadParamInt64
 		}
-		result, ok := wasmtimeReadStringValidated(buf, resultPtr, resultLen, int32(MaxWasmStringLen))
+		result, ok := wasmtimeReadPayload(buf, resultPtr, resultLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}

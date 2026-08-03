@@ -154,7 +154,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 	// cleat_log: (ptr,len) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module, msgPtr, msgLen uint32) uint64 {
 		mem := m.Memory()
-		msg, ok := readWasmStringValidated(mem, msgPtr, msgLen, MaxWasmStringLen)
+		msg, ok := readWasmPayload(mem, msgPtr, msgLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -175,7 +175,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		descPtr, descLen, deferIDPtr, deferIDMaxLen uint32) uint64 {
 		mem := m.Memory()
-		desc, ok := readWasmStringValidated(mem, descPtr, descLen, MaxWasmStringLen)
+		desc, ok := readWasmPayload(mem, descPtr, descLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -266,7 +266,9 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
 		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
 		mem := m.Memory()
-		targetSchema, ok := readServiceName(mem, schemaPtr, schemaLen)
+		// An empty targetSchema means "the local schema" -- see
+		// ChildWorkflowInSchema in children.go.
+		targetSchema, ok := readOptionalServiceName(mem, schemaPtr, schemaLen)
 		if !ok {
 			return errBadParam
 		}
@@ -278,13 +280,13 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		parentClosePolicy := ""
-		if policyLen > 0 {
-			var ok bool
-			parentClosePolicy, ok = readServiceName(mem, policyPtr, policyLen)
-			if !ok {
-				return errBadParam
-			}
+		// An empty policy means the default. This was already handled here
+		// with an inline policyLen > 0 guard; the helper says the same thing
+		// and is what the wasmtime side now uses too, where the guard was
+		// missing entirely.
+		parentClosePolicy, ok := readOptionalServiceName(mem, policyPtr, policyLen)
+		if !ok {
+			return errBadParam
 		}
 		return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_in_schema")
@@ -352,7 +354,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		val, ok := readWasmStringValidated(mem, valPtr, valLen, MaxWasmStringLen)
+		val, ok := readWasmPayload(mem, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -513,7 +515,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, MaxWasmStringLen)
+		payload, ok := readWasmPayload(mem, payloadPtr, payloadLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -529,7 +531,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		response, ok := readWasmStringValidated(mem, respPtr, respLen, MaxWasmStringLen)
+		response, ok := readWasmPayload(mem, respPtr, respLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -549,7 +551,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, MaxWasmStringLen)
+		payload, ok := readWasmPayload(mem, payloadPtr, payloadLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -562,11 +564,13 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		prevScopePtr, prevScopeMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		objType, ok := readServiceName(mem, objTypePtr, objTypeLen)
+		// Both empty is the documented "clear the scope" call -- see
+		// freshSetScope in scope.go.
+		objType, ok := readOptionalServiceName(mem, objTypePtr, objTypeLen)
 		if !ok {
 			return errBadParam
 		}
-		instKey, ok := readServiceName(mem, instKeyPtr, instKeyLen)
+		instKey, ok := readOptionalServiceName(mem, instKeyPtr, instKeyLen)
 		if !ok {
 			return errBadParam
 		}
@@ -585,7 +589,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		seedPtr, seedLen, uuidPtr, uuidMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		seed, ok := readWasmStringValidated(mem, seedPtr, seedLen, MaxWasmStringLen)
+		seed, ok := readWasmPayload(mem, seedPtr, seedLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -621,7 +625,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		resultPtr, resultLen, outPtr, outMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		result, ok := readWasmStringValidated(mem, resultPtr, resultLen, MaxWasmStringLen)
+		result, ok := readWasmPayload(mem, resultPtr, resultLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -649,7 +653,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		value, ok := readWasmStringValidated(mem, valPtr, valLen, MaxWasmStringLen)
+		value, ok := readWasmPayload(mem, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -665,7 +669,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		errMsg, ok := readWasmStringValidated(mem, errPtr, errLen, MaxWasmStringLen)
+		errMsg, ok := readWasmPayload(mem, errPtr, errLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -685,7 +689,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -705,7 +709,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -749,7 +753,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		value, ok := readWasmStringValidated(mem, valPtr, valLen, MaxWasmStringLen)
+		value, ok := readWasmPayload(mem, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -809,7 +813,9 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		prefixPtr, prefixLen, keysPtr, keysMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		prefix, ok := readWasmStringValidated(mem, prefixPtr, prefixLen, MaxWasmStringLen)
+		// An empty prefix lists every key: ListState filters with
+		// strings.HasPrefix, and HasPrefix(k, "") is true for all k.
+		prefix, ok := readWasmPayload(mem, prefixPtr, prefixLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -830,11 +836,11 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		headersJSON, ok := readWasmStringValidated(mem, headersPtr, headersLen, MaxWasmStringLen)
+		headersJSON, ok := readWasmPayload(mem, headersPtr, headersLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
-		body, ok := readWasmStringValidated(mem, bodyPtr, bodyLen, MaxWasmStringLen)
+		body, ok := readWasmPayload(mem, bodyPtr, bodyLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}

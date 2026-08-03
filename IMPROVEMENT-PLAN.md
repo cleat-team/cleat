@@ -917,34 +917,62 @@ somebody had asserted without observing.
 
 ---
 
-### 2.13 Empty-string payloads are refused across the rest of the ABI — OPEN
+### 2.13 Empty-string payloads were refused across the rest of the ABI — FIXED
 
-The `readWasmStringValidated` `length == 0` rejection described in 2.10 is repo-wide: ~54
-host-function parameters are read with it, and only the durable-call family was fixed. In
-several cases the **host handler already implements behaviour that the ABI boundary makes
-unreachable**. Verified by reading the handlers:
+`readWasmStringValidated` treats a zero length as invalid and every caller turns that into
+`errBadParam`, so any parameter whose emptiness is meaningful was unreachable from a guest.
+2.10 fixed the durable-call family; this closes the rest. 15 parameters on each backend, 30
+call sites, all verified against the handler code rather than assumed.
 
-- `cleat_set_scope` — `engine/scope.go:48`: `if objectType == "" && instanceKey == "" {
-  s.ClearScope(ctx); return 0 }`. Clearing scope is unreachable from WASM, both backends.
-- `cleat_list_state` — `engine/lifecycle.go:543`: `strings.HasPrefix(k, prefix)`. An empty
-  prefix means "list all keys", which is unreachable.
-- `cleat_child_workflow_in_schema` — `engine/children.go:32` documents "an empty
-  targetSchema falls back to the local schema"; unreachable.
-- `cleat_fetch` — an empty `body` and empty `headersJSON` are refused, so a GET with no
-  body cannot be issued. The Python SDK's `host_fetch` defaults both to `""`.
-- Also `cleat_uuid`'s `seed` and `cleat_side_effect`'s `result`, both of which the host
-  handles correctly for `""`.
+**Three documented behaviours were unreachable.** These are the real bugs, not tidiness:
 
-Not fixed here because it is a different blast radius: several existing tests assert
-`errBadParam` for an empty first parameter (`TestClosure_MoreErrorPaths`,
-`TestClosure_FinalErrorPaths`, `TestHostFunc_CleatLog_EmptyMsg`) and would need revisiting
-per-parameter. Do it as its own change, parameter by parameter, with the same
-payload-vs-name distinction 2.10 established.
+| host function | parameter | what could not be asked for |
+|---|---|---|
+| `cleat_set_scope` | `objectType` + `instanceKey` | clearing the scope (`scope.go` `freshSetScope`) |
+| `cleat_list_state` | `prefix` | listing every key — `HasPrefix(k, "")` is true for all `k` |
+| `cleat_child_workflow_in_schema` | `targetSchema` | the local-schema fallback (`children.go`) |
 
-**Backend divergence found in passing:** `cleat_child_workflow_in_schema`'s `policy` is
-correctly optional on wazero (`engine/imports.go`, guarded by `policyLen > 0`) but
-unconditionally required on wasmtime (`engine/wasmtime_hostfuncs_workflow.go`). Its sibling
-`cleat_child_workflow_with_options` guards it on both.
+**And one live backend divergence.** `cleat_child_workflow_in_schema`'s `parentClosePolicy`
+was guarded by an inline `policyLen > 0` on wazero and read unconditionally on wasmtime, so
+the same guest call succeeded on one backend and was refused on the other. Its sibling
+`cleat_child_workflow_with_options` guarded it on both, which is what makes this a slip
+rather than a decision.
+
+`readOptionalServiceName` / `wasmtimeReadOptionalServiceName` handle the name-shaped cases:
+they relax *only* emptiness, so a non-empty value still has to pass the `[a-zA-Z0-9._-]+`
+check. The payload-shaped cases use the existing `readWasmPayload` / `wasmtimeReadPayload`.
+
+The remaining 12 parameters are payloads whose handlers store or forward them opaquely:
+`cleat_log` message (`DurableLog` does not read it at all), `cleat_set_state` /
+`set_query_state` value, `cleat_uuid` seed (concatenated into a hash input),
+`cleat_side_effect` result (compared with `!=` on replay, so `""` round-trips),
+`cleat_resolve_promise` value, `cleat_reject_promise` errMsg, the three signal payloads,
+`cleat_send` / `cleat_schedule_invoke` requestJSON, `cleat_defer` description, and
+`cleat_fetch` body / headersJSON.
+
+Two things checked specifically because they looked like they could break, and did not:
+
+- Signal payloads reach a JSONB column, but `engine/store_signals.go` already wraps a
+  non-JSON payload with `if !json.Valid(...)`, so `""` becomes the valid JSON literal `""`.
+- `cleat_fetch`'s `headersJSON` is never unmarshalled — because **there is no production
+  implementation of the `Fetcher` interface in this repo at all**. Only test stubs
+  implement it, and nothing in `cmd/`, `cleat/` or `plugins/` wires one. So the earlier
+  claim that "a GET with no body is impossible" was true but moot: the whole `cleat_fetch`
+  path is unimplemented in production. The ABI boundary is fixed regardless, so a future
+  `Fetcher` starts from a correct contract — but that implementation should guard its own
+  `json.Unmarshal(headersJSON)` against `""`.
+
+**Four tests asserted the bug as the contract** and were updated, not worked around: the two
+`cleat_log` empty-message tests now assert acceptance, and the `cleat_side_effect` and
+`cleat_defer` rows were removed from the all-zero-argument error tables (as `cleat_list_state`
+was). Every other `errBadParam` assertion still holds, because those calls fail on an earlier,
+still-required name parameter before reaching the relaxed one.
+
+New ABI-level tests drive the *registered host function* with a real `execSession` behind it
+for all three unreachable behaviours, and all three fail against the unfixed readers. That
+level matters: `TestSetScopeEmptyClears` had asserted the clear-scope path for a long time by
+calling `execSession.SetScope` directly, and passed throughout, because the gap was in the
+seam between wrapper and handler rather than in either one. See 2.16.
 
 ---
 
