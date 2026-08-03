@@ -625,12 +625,17 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 	return packSimpleResult(0, written)
 }
 
-func (s *execSession) JsonParse(ctx context.Context, m api.Module, jsonPtr, jsonLen, outPtr, outMaxLen uint32) int64 {
-	mem := m.Memory()
-	input, ok := readWasmStringValidated(mem, jsonPtr, jsonLen, MaxWasmStringLen)
-	if !ok {
-		return packSimpleResult(1)
-	}
+// JsonParse validates and canonicalises input using the host's encoding/json.
+//
+// input arrives already decoded, and output goes through writeResult. Both
+// matter: this handler used to take raw (ptr, len) and call m.Memory()
+// directly, which made it the only host function reading its own input out of
+// guest memory. The wasmtime backend passes a nil api.Module by design -- the
+// memory is handed over in the context instead (see writeResult) -- so
+// m.Memory() was a nil dereference and every cleat_json_parse call from a
+// guest crashed the execution on the primary backend. See
+// IMPROVEMENT-PLAN.md 2.14.
+func (s *execSession) JsonParse(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
 	var v any
 	if err := json.Unmarshal([]byte(input), &v); err != nil {
 		return packSimpleResult(1)
@@ -639,19 +644,16 @@ func (s *execSession) JsonParse(ctx context.Context, m api.Module, jsonPtr, json
 	if err != nil {
 		return packSimpleResult(1)
 	}
-	written, err := writeWasmString(mem, outPtr, string(normalized), outMaxLen)
+	written, err := s.writeResult(ctx, m, outPtr, string(normalized), outMaxLen)
 	if err != nil {
 		return packSimpleResult(1)
 	}
 	return packSimpleResult(0, written)
 }
 
-func (s *execSession) JsonStringify(ctx context.Context, m api.Module, ptr, length, outPtr, outMaxLen uint32) int64 {
-	mem := m.Memory()
-	input, ok := readWasmStringValidated(mem, ptr, length, MaxWasmStringLen)
-	if !ok {
-		return packSimpleResult(1)
-	}
+// JsonStringify re-serialises input via the host's encoding/json. See
+// JsonParse for why input is a string rather than a (ptr, len) pair.
+func (s *execSession) JsonStringify(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
 	var v any
 	if err := json.Unmarshal([]byte(input), &v); err != nil {
 		return packSimpleResult(1)
@@ -660,7 +662,7 @@ func (s *execSession) JsonStringify(ctx context.Context, m api.Module, ptr, leng
 	if err != nil {
 		return packSimpleResult(1)
 	}
-	written, err := writeWasmString(mem, outPtr, string(serialized), outMaxLen)
+	written, err := s.writeResult(ctx, m, outPtr, string(serialized), outMaxLen)
 	if err != nil {
 		return packSimpleResult(1)
 	}

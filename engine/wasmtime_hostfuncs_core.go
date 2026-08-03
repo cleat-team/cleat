@@ -355,8 +355,14 @@ func (b *wasmtimeBackend) registerCleatJsonParse(linker *wasmtime.Linker) error 
 		if err != nil {
 			return errBadParamInt64
 		}
+		// Read here, like every other wasmtime wrapper. m stays nil: the
+		// memory travels in the context, which is what writeResult uses.
+		input, ok := wasmtimeReadStringValidated(buf, jsonPtr, jsonLen, int32(MaxWasmStringLen))
+		if !ok {
+			return packSimpleResult(1)
+		}
 		callCtx := ctxWithMem(context.Background(), buf)
-		return h.JsonParse(callCtx, nil, uint32(jsonPtr), uint32(jsonLen), uint32(outPtr), uint32(outMaxLen))
+		return h.JsonParse(callCtx, nil, input, uint32(outPtr), uint32(outMaxLen))
 	})
 }
 
@@ -372,7 +378,11 @@ func (b *wasmtimeBackend) registerCleatJsonStringify(linker *wasmtime.Linker) er
 		if err != nil {
 			return errBadParamInt64
 		}
+		input, ok := wasmtimeReadStringValidated(buf, ptr, len, int32(MaxWasmStringLen))
+		if !ok {
+			return packSimpleResult(1)
+		}
 		callCtx := ctxWithMem(context.Background(), buf)
-		return h.JsonStringify(callCtx, nil, uint32(ptr), uint32(len), uint32(outPtr), uint32(outMaxLen))
+		return h.JsonStringify(callCtx, nil, input, uint32(outPtr), uint32(outMaxLen))
 	})
 }

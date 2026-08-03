@@ -139,10 +139,10 @@ func (h *stubHostHandler) RunDetached(_ context.Context, _ api.Module, _, _ stri
 func (h *stubHostHandler) Fetch(_ context.Context, _ api.Module, _, _, _, _ string, _, _ uint32) int64 {
 	return 0
 }
-func (h *stubHostHandler) JsonParse(_ context.Context, _ api.Module, _, _, _, _ uint32) int64 {
+func (h *stubHostHandler) JsonParse(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
 	return 0
 }
-func (h *stubHostHandler) JsonStringify(_ context.Context, _ api.Module, _, _, _, _ uint32) int64 {
+func (h *stubHostHandler) JsonStringify(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
 	return 0
 }
 
