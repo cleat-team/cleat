@@ -376,6 +376,20 @@ concurrent runners fail with the exact constraint names seen in CI. New coverage
 `plugin/migration_concurrency_test.go`. End-to-end, four workers now boot against one
 database, exactly one applies the migrations, and all four report healthy.
 
+**Plugin tables were created in the wrong schema.** Found immediately after, because the
+fix above let the workers boot and so changed what the cluster job's database contained.
+`plugin.RunMigrations` applies each plugin's DDL unqualified (`CREATE TABLE kv_store ...`)
+on a pooled connection whose `search_path` is the default `"$user", public` — so on the
+configuration cleat ships (`POSTGRES_USER=cleat`, and `001_schema.sql` creates a schema
+called `cleat`) all 27 plugin tables landed in the role's schema rather than `public`. The
+run now happens on a pinned connection with `search_path = public`, reset on release.
+
+`TestPluginMigrations_AllDialects` could not see this, for a reason worth recording: it
+asserted "RunMigrations created these tables" while running against the shared
+`CLEAT_TEST_DB` database, where the tables already existed. It was passing on evidence it
+had not produced. Pointed at a database built from `migrations/postgres/` and nothing else,
+it failed on all 27 tables — the assertion only became real once the precondition did.
+
 **The cluster CI job could not tell a running cluster from no cluster.** It started the
 compose file, slept 10 seconds and ran the tests. Every worker was crash-looping and the
 only symptom was three unrelated-looking store tests failing. `.github/workflows/ci.yml`

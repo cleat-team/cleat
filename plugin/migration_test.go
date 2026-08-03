@@ -88,12 +88,13 @@ func (c *migrationTestConn) BeginTx(ctx context.Context, opts driver.TxOptions) 
 
 // ExecContext implements driver.ExecerContext.
 func (c *migrationTestConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	// Advisory lock/unlock is transport for RunMigrations, not one of the
-	// migration statements the assertions below are about. Recording it in
-	// execCalls would shift every index and count in this file by one and say
-	// nothing extra; it is tracked separately instead, and
-	// TestRunMigrations_TakesAdvisoryLockOnPostgresOnly asserts on it.
-	if strings.Contains(query, "pg_advisory_") {
+	// Session setup -- the advisory lock and the search_path pin -- is
+	// transport for RunMigrations, not one of the migration statements the
+	// assertions below are about. Recording it in execCalls would shift every
+	// index and count in this file and say nothing extra; it is tracked
+	// separately instead, and TestRunMigrations_PostgresSessionSetup asserts
+	// on it.
+	if strings.Contains(query, "pg_advisory_") || strings.Contains(query, "search_path") {
 		c.lockCalls = append(c.lockCalls, query)
 		return &migrationTestResult{rowsAffected: 1}, nil
 	}
@@ -545,14 +546,21 @@ func TestRunMigrations_CreatesMigrationTable(t *testing.T) {
 	}
 }
 
-// TestRunMigrations_TakesAdvisoryLockOnPostgresOnly pins the serialisation
-// added after four concurrently-starting workers killed each other's
-// migrations (see lockPluginMigrations). MySQL and SQL Server have no
-// pg_advisory_lock, so sending it there would break them outright.
-func TestRunMigrations_TakesAdvisoryLockOnPostgresOnly(t *testing.T) {
+// TestRunMigrations_PostgresSessionSetup pins the two things RunMigrations
+// must do to its connection before applying anything, both of which were
+// missing and both of which broke real deployments (see
+// pluginMigrationSession):
+//
+//   - an advisory lock, because four workers start at once and killed each
+//     other's migrations;
+//   - search_path = public, because plugin DDL is unqualified and otherwise
+//     landed in a schema named after the connecting role.
+//
+// Neither may be sent to MySQL or SQL Server, which have neither.
+func TestRunMigrations_PostgresSessionSetup(t *testing.T) {
 	for _, tc := range []struct {
-		dialect  Dialect
-		wantLock bool
+		dialect Dialect
+		wantPG  bool
 	}{
 		{DialectPostgres, true},
 		{DialectMySQL, false},
@@ -563,19 +571,28 @@ func TestRunMigrations_TakesAdvisoryLockOnPostgresOnly(t *testing.T) {
 			if err := RunMigrations(context.Background(), db, tc.dialect, nil, nil); err != nil {
 				t.Fatalf("RunMigrations: %v", err)
 			}
-			if got := len(conn.lockCalls) > 0; got != tc.wantLock {
-				t.Errorf("advisory lock taken = %v, want %v (calls: %v)",
-					got, tc.wantLock, conn.lockCalls)
-			}
-			if !tc.wantLock {
+			joined := strings.Join(conn.lockCalls, " | ")
+			if !tc.wantPG {
+				if len(conn.lockCalls) != 0 {
+					t.Errorf("%s: sent PostgreSQL-only session setup: %s", tc.dialect, joined)
+				}
 				return
 			}
-			// Taken and released: a lock held past the run would block every
-			// later migration attempt against that database.
-			if len(conn.lockCalls) != 2 ||
-				!strings.Contains(conn.lockCalls[0], "pg_advisory_lock") ||
-				!strings.Contains(conn.lockCalls[1], "pg_advisory_unlock") {
-				t.Errorf("want lock then unlock, got %v", conn.lockCalls)
+			for _, want := range []string{
+				"pg_advisory_lock",
+				"SET search_path = public",
+				"RESET search_path",
+				"pg_advisory_unlock",
+			} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("session setup missing %q; got: %s", want, joined)
+				}
+			}
+			// Released as well as taken: a lock held past the run, or a
+			// search_path left set on a pooled connection, outlives the run
+			// and affects unrelated queries.
+			if !strings.Contains(conn.lockCalls[0], "pg_advisory_lock") {
+				t.Errorf("lock must be taken first, got: %s", joined)
 			}
 		})
 	}

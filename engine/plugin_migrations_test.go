@@ -11,6 +11,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/microsoft/go-mssqldb"
 
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
 
@@ -54,8 +55,23 @@ var pluginTestBackends = []pluginTestBackend{
 		dialect: plugin.DialectPostgres,
 		setup: func(t *testing.T) (*sql.DB, func()) {
 			t.Helper()
-			db := testutil.TestDB(t, testutil.DialectPostgres)
-			return db, func() { db.Close() }
+			// A database of its own, built from migrations/postgres/.
+			//
+			// This test asserts that RunMigrations *creates* each plugin's
+			// tables, and RunMigrations is idempotent: it skips any version
+			// already recorded in plugin_migrations. Sharing the CLEAT_TEST_DB
+			// database therefore made the assertion vacuous the moment
+			// anything else had migrated it -- and once the workers in
+			// docker-compose.cluster.yml could boot (they could not before
+			// 9f7b4a1), they did exactly that, on the same database the
+			// cluster CI job runs this test against. The test then reported
+			// every plugin table as "not created" when in truth it had asked
+			// for no work to be done.
+			//
+			// Starting from an unmigrated database is what makes the
+			// assertion mean what it says.
+			db := engine.BootstrapScratchDB(t, "cleat_plugin_migrations_test")
+			return db, func() {}
 		},
 		enabled: func() bool { return true },
 	},

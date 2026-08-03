@@ -54,7 +54,7 @@ func migrationsDir(t *testing.T) string {
 // It deliberately does NOT use engine/testutil: the point is to exercise the
 // shipped path, so borrowing the test harness's schema setup would defeat the
 // test entirely.
-func bootstrapScratchDB(t *testing.T) *sql.DB {
+func bootstrapScratchDB(t *testing.T, dbName ...string) *sql.DB {
 	t.Helper()
 	requireBackendReachable(t, "postgres")
 
@@ -68,7 +68,13 @@ func bootstrapScratchDB(t *testing.T) *sql.DB {
 		t.Skipf("no postgres available: %v", err)
 	}
 
-	const scratch = "cleat_schema_bootstrap_test"
+	// Callers that need their own database (so that what they assert about a
+	// fresh schema is not affected by another test's, or a live worker's,
+	// migrations) pass a name.
+	scratch := "cleat_schema_bootstrap_test"
+	if len(dbName) > 0 && dbName[0] != "" {
+		scratch = dbName[0]
+	}
 	// CREATE/DROP DATABASE cannot run inside a transaction, hence plain Exec.
 	if _, err := admin.Exec(`DROP DATABASE IF EXISTS ` + scratch); err != nil {
 		t.Fatalf("drop scratch database: %v", err)
@@ -126,6 +132,15 @@ func bootstrapScratchDB(t *testing.T) *sql.DB {
 		}
 	}
 	return db
+}
+
+// BootstrapScratchDB exposes bootstrapScratchDB to the engine_test package,
+// which cannot see unexported identifiers of package engine.
+// TestPluginMigrations_AllDialects uses it to get a database no other test and
+// no live worker has migrated; see the comment on the postgres backend there.
+func BootstrapScratchDB(t *testing.T, name string) *sql.DB {
+	t.Helper()
+	return bootstrapScratchDB(t, name)
 }
 
 // testutilPostgresDSN resolves the Postgres DSN with the same env-var
