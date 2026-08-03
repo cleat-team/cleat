@@ -115,12 +115,37 @@ commits mid-claim, a larger candidate set, and `EXPLAIN (ANALYZE, VERBOSE)` on t
 sublink form under contention. If it cannot be reproduced, say so in 2.11 and leave the
 CTE as documented defence — do not upgrade it to "fixed".
 
-### 4. Then Phase 2's remaining seam tests
+### 4. Six wasmtime host functions return empty results  —  see §2.18, §2.19
+
+The highest-yield open item, and the cheapest. On the primary backend `cleat_uuid`,
+`cleat_workflow_id`, `cleat_run_id`, `cleat_get_state`, `cleat_list_state` and `cleat_fetch`
+all report success and write zero bytes, because their wrappers never call `ctxWithMem`.
+This is §2.14's defect in six more places; §2.14 fixed two and nobody checked the rest.
+`cleat_get_state` is the dangerous one — an empty read looks like "unset" to a workflow.
+
+§2.19 is a separate bug in the same two ID functions, guest-side this time. They mask each
+other: fix either alone and `WorkflowID()` still returns `""`. Fix both, in one change, with
+one guest-level test that would have caught the pair.
+
+Do §2.16 at the same time rather than after. It is the reason all eight went unseen — the
+wasmtime closure tests install `mockHostHandler` and assert `got != 0`, which no
+implementation defect can fail. It has now produced defects twice; treat it as confirmed.
+
+### 5. Confirm or kill §2.20 before ranking it
+
+`StartChildWorkflowAtomic` omits `tenant_id` from its `event_history` insert, and the RLS
+policy has no explicit `WITH CHECK`, so PostgreSQL should *reject* the row rather than
+default it — meaning child spawning fails outright under a real tenant role. That is
+reasoned from the schema, not observed. **Reproduce it first.** If it holds it outranks
+everything above; if the connection never runs as a tenant role in practice, it is a
+one-line hygiene fix. Either way the test is the deliverable.
+
+### 6. Then Phase 2's remaining seam tests
 
 2.1 golden path, 2.2 two-worker race, 2.3 cancellation e2e, 2.4 crash recovery, 2.7 deploy
 manifests. 2.6 (tenant isolation through the HTTP API) is now worth more than it was: RLS
 is genuinely enforced as of 1.10, so an end-to-end test can finally prove isolation rather
-than prove a policy exists.
+than prove a policy exists — and §2.20 gives it a concrete first target.
 
 ### Standing constraints, carried forward
 
@@ -130,9 +155,10 @@ than prove a policy exists.
   it has already broken once that way.
 - **Two DSNs now.** `--db` is the unprivileged `cleat_app`; `--migrate-db` is the owner.
   A worker that cannot run DDL is behaving correctly.
-- **Still open, needing a decision:** PR #208 (open, CONFLICTING). `BRANCH-TRIAGE.md`
-  covers the rest of the unmerged branches; several predate `3eeb74e` and will not merge
-  cleanly.
+- **PR #208 is closed, unmerged** (2026-08-03). Its headline fix was already on `develop`
+  verbatim; what was still worth having is written up in the salvage register at the end of
+  Phase 2, along with what was deliberately dropped and why. `BRANCH-TRIAGE.md` covers the
+  rest of the unmerged branches; several predate `3eeb74e` and will not merge cleanly.
 
 ---
 
@@ -1129,6 +1155,268 @@ Options, none of them free:
 Left unfixed deliberately: choosing between these changes the latency characteristics of
 the claim path, and that is a decision worth making on purpose rather than as a side effect
 of a documentation fix.
+
+---
+
+### 2.18 Six wasmtime host functions fetch the guest memory and throw it away — OPEN
+
+Found while assessing PR #208 for salvage (see the salvage register below), and verified
+directly against `develop`. **This is the same defect as §2.14, in six more places.** §2.14
+fixed `cleat_json_parse` / `cleat_json_stringify`; nobody checked whether the pattern
+repeated. It does.
+
+`writeResult` (`engine/flush.go:17`) writes through one of two channels: a raw buffer
+carried in the context under `wasmMemBufKey{}`, or `m.Memory()`. On the wasmtime backend
+`m` is **always** `nil` — memory travels in the context. So a wasmtime wrapper that does not
+call `ctxWithMem` cannot write anything, and `writeResult` returns `(0, nil)` — no error.
+
+`engine/wasmtime_hostfuncs_core.go` gets this right for the two functions §2.14 touched:
+
+```go
+callCtx := ctxWithMem(context.Background(), buf)          // line 365, cleat_json_parse
+return h.JsonParse(callCtx, nil, input, ...)
+```
+
+and wrong for six others. `registerCleatWorkflowID` is the clearest case — it fetches the
+buffer purely to test the error, then discards it:
+
+```go
+_, _, err := callerMemBuf(caller)                          // line 111: buf dropped on the floor
+if err != nil {
+    return errBadParamInt64
+}
+return h.WorkflowID(context.Background(), nil, uint32(idPtr), uint32(idMaxLen))
+```
+
+The handler then does `written, _ := s.writeResult(ctx, m, ...)` with `ctx` empty and `m`
+nil, gets `0`, and returns `packSimpleResult(0, 0)` — **errCode 0, length 0. Success, no
+bytes.** Affected, all in `engine/wasmtime_hostfuncs_core.go`:
+
+| line | host function | guest sees |
+|---|---|---|
+| 97 | `cleat_uuid` | empty string |
+| 113 | `cleat_workflow_id` | empty string |
+| 129 | `cleat_run_id` | empty string |
+| 229 | `cleat_get_state` | empty value — indistinguishable from "unset" |
+| 310 | `cleat_list_state` | empty key list |
+| 343 | `cleat_fetch` | empty response body |
+
+`cleat_get_state` is the one to worry about: an empty read is not obviously wrong to a
+workflow, so this corrupts state-machine logic silently rather than failing.
+
+**Why no test caught it — this is §2.16 again.** `TestClosure_UUID`, `TestClosure_WorkflowID`
+and friends (`engine/backend_wasmtime_test.go:1950-2100`) install
+`b.handler = &mockHostHandler{ret: 0}` and assert only `got != 0`. The mock returns a canned
+value without touching memory, so the assertion is vacuous — exactly the shape §2.14
+documented for the JSON pair. §2.16 is now less a hypothesis than a confirmed generator of
+defects; it should be promoted above the remaining Phase 2 work.
+
+Fix: `callCtx := ctxWithMem(context.Background(), buf)` at all six sites, and port the
+`json_hostfuncs_cgo_test.go` pattern — real `execSession`, assert on the bytes written — to
+cover them. The patch applies cleanly to `develop` today.
+
+### 2.19 `WorkflowID` / `RunID` decode the wrong half of the result word — OPEN
+
+Independent of §2.18, same two functions, and it would still bite after §2.18 is fixed.
+
+`packSimpleResult` (`engine/memory.go:247`) packs the written length into the **high** 32
+bits and the error code into the low bits:
+
+```go
+v = uint64(extra[0]) << 32
+return int64(v | uint64(errCode))
+```
+
+Every generated adapter in `wasm/adapter_metadata.go` decodes that correctly —
+`uint32(uint64(result) >> 32)` — at thirteen call sites. Two do not:
+
+```go
+"idLen := uint32(result)",                    // lines 338 and 346
+"return unsafe.String(&idBuf[0], int(idLen))",
+```
+
+`uint32(result)` takes the **low** half, which is the error code. On success that is 0, so
+the guest builds a zero-length string: `WorkflowID()` and `RunID()` return `""` on the
+Go target regardless of what the host wrote. The file's own thirteen-to-two split is the
+proof — no reasoning about the ABI is needed, just contrast.
+
+Fix is two characters of shift, but it should land with a guest-level assertion, not just a
+host-level one; §2.18 and §2.19 mask each other, and fixing either alone leaves
+`WorkflowID()` still returning `""`. That mutual masking is probably why neither was noticed.
+
+### 2.20 Child-workflow spawning inserts an event with no `tenant_id` — OPEN
+
+`StartChildWorkflowAtomic` (`engine/store_children.go`) does two inserts in one transaction.
+The first passes `tenant_id` (`$7 = s.tenantID`, line 70). The second, into `event_history`
+at line 91, **omits the column entirely**:
+
+```go
+INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input,
+                           run_id, created_at, checksum)
+```
+
+Every other `event_history` insert in the engine passes it — `engine/store_event_write.go:46`
+and `:86`, `engine/flush.go:41`. This one site is the outlier.
+
+The consequence is more severe than "the row gets the default zero-UUID". `event_history`
+carries `FORCE ROW LEVEL SECURITY` (`migrations/postgres/001_schema.sql:549`) and the policy
+is declared `FOR ALL USING (tenant_id = cleat.assert_tenant_set())` with **no explicit
+`WITH CHECK`** (line 515). PostgreSQL reuses the `USING` expression as the `WITH CHECK`
+expression when the latter is omitted, so the insert does not quietly land as zero-UUID —
+**it is rejected**, the transaction aborts, and child-workflow spawning fails outright for
+any connection using a real tenant role.
+
+Two caveats before treating this as a P0. It bites only where RLS is actually in force —
+a non-owner tenant role with `cleat.tenant_id` set; an owner connection or single-tenant
+deployment inserts the zero-UUID successfully and merely leaves an unattributed row. And
+this is reasoned from the schema, not from a run. **Confirm it with an actual RLS-enabled
+child spawn before ranking it** — that reproduction is the first task, not the fix. Note
+§1.10 records that RLS was bypassed in every shipped configuration until recently, which
+would explain how this survived: the enforcement that exposes it is new.
+
+The fix is one column and one parameter. The test is the valuable part, and there is
+currently no test that spawns a child workflow under an RLS-enforcing connection.
+
+### 2.21 `applyPostgresSchemaFile` races itself, and its doc comment says it cannot — OPEN
+
+Caught flaking CI on the docs PR that recorded §2.18–§2.20. Same commit, three Multi-DB CI
+runs, **success / failure / success** — so it is a flake, and the kind that erodes exactly
+the signal Phase 0 spent effort restoring.
+
+```
+kvstore_multidb_test.go:36: apply migrations/postgres/001_schema.sql:
+  pq: duplicate key value violates unique constraint "pg_extension_name_index" (23505)
+```
+
+`engine/testutil/schema.go:73-79` claims the file is safe to reapply:
+
+> All statements in it are idempotent (CREATE ... IF NOT EXISTS, CREATE OR REPLACE,
+> DROP POLICY IF EXISTS ... CREATE POLICY), so it is safe to call more than once against
+> the same database
+
+That is true **sequentially and false concurrently**, which is the only way CI runs it.
+PostgreSQL's `IF NOT EXISTS` forms are not atomic: two sessions both observe the object
+missing, both insert the catalog row, and one loses on the unique index.
+`CREATE EXTENSION IF NOT EXISTS pgcrypto` (`migrations/postgres/001_schema.sql:24`) is the
+one that lost here, but `CREATE TABLE IF NOT EXISTS` has the same hazard.
+
+`go test ./plugins/...` compiles and runs distinct packages in parallel (`-p` defaults to
+NumCPU), and every one of them points at the same `CLEAT_TEST_POSTGRES` database, so several
+call `applyPostgresSchemaFile` at once against one server. Nothing serialises them.
+
+Options: take a Postgres advisory lock around the apply (`pg_advisory_lock` on a fixed key,
+released on close) — smallest change, keeps one shared database; or give each package its
+own database; or apply the schema once in the workflow before the test step and stop
+applying it per-package. The advisory lock is probably right: it is three lines, needs no CI
+change, and matches the existing "one shared DB" assumption.
+
+Whatever the fix, **correct the doc comment**. A comment asserting a safety property the
+code does not have is worse than no comment, and it is why the failure reads as mysterious
+rather than obvious.
+
+---
+
+## Salvage register — PR #208, closed unmerged
+
+PR #208 (`fix/wasm-build-replace-propagation`) was closed without merging on 2026-08-03.
+Recorded here so nothing below has to be rediscovered from scratch.
+
+- **PR:** https://github.com/cleat-team/cleat/pull/208 (closed, not deleted — the diff is
+  still readable on GitHub)
+- **Head SHA:** `df1119a14adaab9d6ec730f30c2de1f28dc1f540`
+- **Merge base:** `1e10460`
+
+**Why it was closed rather than merged.** 19 commits that add the dispatcher model, remove
+it, restore it, then revert parts of the revert, plus three `chore: trigger CI re-run`
+commits and a merge of `develop`. `mergeable: CONFLICTING`. By the time it was assessed it
+was 19 ahead / 9 behind, missing #215–#223, and its last CI run was 31 pass / 2 fail — the
+two failures being MySQL and SQL Server, the backends it modified. Most importantly, its
+headline fix had already landed independently: `git diff develop...df1119a -- wasm/build.go
+wasm/exports.go` is **empty**. The replace-directive propagation the branch was named for is
+on `develop` verbatim via `c26c332`.
+
+Three agents assessed the diff by area. §2.18, §2.19 and §2.20 above came out of that and
+are recorded as defects in their own right — those are the real yield, and none of them
+needs the branch.
+
+**Worth rebuilding (not worth cherry-picking):**
+
+1. **Real `AdminForceComplete` / `AdminForceFail` / `AdminReReplay` bodies.** The largest
+   coherent chunk of work in the PR: ~445 lines across `engine/db.go`, `mysql_ops.go`,
+   `mssql_operations.go`, each with a generation check, not-found-vs-stale disambiguation,
+   an `admin_action` audit event in the same transaction, and post-commit
+   `ClearStickyWorker` / `ReleaseWorkflowConcurrencyKeys`. #217 landed the interface,
+   the event type and every mock; `engine/store_admin_stubs.go` is still literal
+   `"not implemented yet"`. **Do not port as written:** the inserts use columns `op`,
+   `err` and `timestamp_ms`, none of which exist — the schema has `operation`, `error` and
+   `created_at`. The MSSQL variant also drops the `tenant_id` filter from its `UPDATE`
+   while the MySQL sibling keeps it, which is precisely the ownership gap §1.7 says to
+   close first. There were no tests for any of the three bodies.
+2. **Plugin `StartWorkflow` capability gating** (`plugin/plugin.go`, `plugin/registry.go`,
+   `plugins/{eventtriggers,jobqueue,scheduler}/plugin.go`). Applies cleanly; three genuine
+   tests. The three plugin declarations are *required*, not optional — those plugins call
+   `env.StartWorkflow` today (`plugins/eventtriggers/publish.go:138`,
+   `plugins/jobqueue/background.go:154`, `plugins/scheduler/background.go:154`) and would
+   break under the gate without them. Related latent hazard worth fixing alongside:
+   `InitAll` does `pluginEnv := env` (`plugin/registry.go:81`), so every ReadOnly/ReadWrite
+   plugin shares one `*Environment`. Harmless today because nothing mutates per-plugin
+   fields — the capability feature is exactly what would make it load-bearing, which is why
+   the branch added a `shallowCopy()`.
+3. **`--migration-lock-timeout` + retry** (`migration/runner.go`, ~79 lines). Adds
+   `maxMigrationRetries = 3`, `runMigrationWithRetry` (1s delay, honours ctx cancellation)
+   and per-dialect lock timeouts — Postgres `SET LOCAL lock_timeout`, MySQL
+   `SET SESSION innodb_lock_wait_timeout`, MSSQL `SET LOCK_TIMEOUT`. Real tests:
+   `TestRunMigrationWithRetry_SuccessAfterFailures` counts actual attempts,
+   `TestLockTimeoutSQL_*` assert exact per-dialect SQL. Needs a rebase (`develop`'s runner
+   grew a `trackingTable()` helper), a 4th `NewRunner` param at both call sites
+   (`cmd/cleat-worker/main.go:550,593`), and a decision on the default — 0, i.e. today's
+   behaviour, opt-in.
+4. **`--latency-histogram-buckets`.** Absent from `develop`, applies cleanly, wraps 8
+   latency histograms and correctly leaves execution-duration histograms alone. 13 of its
+   14 tests are genuine — real `sdkmetric.ManualReader` assertions on observed bucket
+   bounds. Two catches: the `metrics.go` hunk smuggles in an unrelated
+   `cleat_canary_routing_total` counter that must be dropped, and full wiring needs a
+   `prometheus.Config.LatencyHistogramBuckets` field that does not exist yet.
+5. **`cleat build --dump-ir`** + `internal/closure` `DebugInfo`. Useful for answering "why
+   was this function pulled into the durable closure". The `internal/closure` half applies
+   cleanly; the `cmd/cleat/main.go` half collides with the already-landed `--version` flag
+   and needs one more bool threaded through `runBuild`. `TestDebugInfoPopulated` checks real
+   `Tag`/`Reasons` content. Lowest priority of the five.
+
+**Deliberately dropped, with reasons — do not resurrect:**
+
+- *Replace-directive propagation, the dispatcher model, `--version` on `cleat build`,
+  `ABIVersion: 1`, idempotent upsert-deploy, `>=` version-compat, `prompts/cto-agent.md`* —
+  all already on `develop`, byte-identical, via `c26c332` / `9cb5d01` / `6f6cdf1` / #216.
+- *Admin route gating.* #208 registers `/api/admin/instances/` only when the flag is on;
+  `develop` (`cmd/cleat-worker/app.go:79-85`) always registers and gates destructive
+  operations at request time. `develop`'s design is better — it keeps read-only admin
+  inspection working with the flag off, where #208 would 404 the whole namespace.
+- *Canary version routing* (`canary_weight` column + `ResolveVersionWithCanary` /
+  `SetCanaryWeight`, Postgres-only). `develop` already has the strictly more general
+  `workflow_routing` table with full CRUD (`engine/store_versioning.go:108-224`, mirrored
+  in MySQL and MSSQL): N-way weighted routing, versus #208's binary stable/canary split.
+  Adding `canary_weight` would be a second, weaker concept for the same job. **But there is
+  a real gap underneath it:** `resolveChildVersion` (`engine/children.go:58-131`) has no
+  routing case at all — its `stable` branch calls `ResolveVersionByTag` and nothing ever
+  consults `workflow_routing`. Worth fixing by wiring the existing `PickVersionByRouting`
+  in — no new column, no new migration.
+- *Cumulative WASM allocation limit.* Superseded by a better-integrated equivalent on
+  `develop`: `WithWasmCumulativeAllocationMax` (`engine/engine.go:92`) plus
+  `tryClaimCumulativeAllocation`, already flag-wired and tested. #208's version calls
+  `wasm.ReadMemoryInitialPages`, which does not exist on `develop`, and its
+  `cumulative_alloc_test.go` collides by name with `develop`'s.
+- *`ARCHITECTURE.md` edits.* Stale and self-contradictory — the diff *reverts* the correct
+  wasip1 description back to TinyGo while adding a TinyGo-deprecation note two paragraphs
+  later, and lists the Admin API as "incoming" after #217 shipped it. Salvage only the note
+  that cleat-238 (`--dump-ir`) and cleat-241 (canary routing) remain unbuilt.
+
+**Method note for Phase 3.** Every "already on develop" verdict above was settled by
+diffing against `develop` and by `git apply --check`, not by reading commit messages — the
+mistake §0.2's correction calls out. Three of the four highest-value findings (§2.18, §2.19,
+§2.20) are defects on `develop` that the PR happened to touch, not features the PR added.
+Assessing a stale branch for salvage turned out to be a decent defect-finding technique in
+its own right, because it forces a line-by-line read of code nobody has looked at recently.
 
 ---
 
