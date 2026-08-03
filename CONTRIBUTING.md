@@ -82,11 +82,13 @@ one of these prefixes:
 |--------|---------|---------|
 | `feature/` | New functionality | `feature/multi-db-support` |
 | `bugfix/` | Bug fixes | `bugfix/claim-race-condition` |
+| `fix/` | CI, config, and tooling fixes | `fix/ci-token` |
+| `docs/` | Documentation only | `docs/branch-conventions` |
 | `release/` | Release preparation | `release/v1.2.0` |
 | `hotfix/` | Critical production fixes | `hotfix/worker-panic-on-nil-input` |
 
 Branch names must be lowercase, use hyphens (not underscores), and be concise
-but descriptive. The prefix must be one of the four listed above.
+but descriptive. The prefix must be one of those listed above.
 
 A CI check validates branch naming on pull requests. Branches opened by
 dependabot or with the `bot` label are exempt.
@@ -335,7 +337,7 @@ CI runs automatically on every push. The following checks must all pass:
 |-------|-----------------|
 | DCO | Every commit has a `Signed-off-by` line |
 | Semantic PR title | Title follows `type(scope): description` format |
-| Branch naming | Branch name follows `feature/`, `bugfix/`, `release/`, or `hotfix/` prefix convention |
+| Branch naming | Branch name follows `feature/`, `bugfix/`, `fix/`, `docs/`, `release/`, or `hotfix/` prefix convention |
 | CLA (first-time only) | First-time contributors have the ICLA statement in the PR description |
 | Lint | `go vet`, `golangci-lint`, `ruff`, `shellcheck`, `clippy` |
 | Test | Go (1.22/1.23/1.24 matrix), Python (3.10–3.12), Java, Rust, AssemblyScript |
