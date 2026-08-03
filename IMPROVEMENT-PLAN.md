@@ -21,7 +21,11 @@ Effort is given in solo+AI sessions (a session ≈ half a day of your attention)
 PR #218 landed as `c26c332`: the CI signal is restored and every workflow is genuinely
 green. What follows is ordered by yield, not by section number.
 
-### 1. Audit the 166 environment-conditional skips  ·  ~1 session  ·  highest yield
+### 1. Audit the 166 environment-conditional skips  —  ✅ **done**, see §2.12
+
+> **Done.** 231 sites (not 225 — see §2.12 for why the grep undercounted) reduced to 184,
+> with two new guards to stop the number growing again. Three defects fell out of it, one
+> of them a live cross-tenant gap on MySQL. The original framing is kept below.
 
 `grep -rn "t.Skip" --include='*_test.go' .` returns 225 sites, 166 of which skip on an
 environment condition. **Every one is currently indistinguishable from a pass**, and that
@@ -722,6 +726,94 @@ Two further findings fell out of that:
   defensive change on a plausible mechanism, and the test is a regression guard for the
   invariant rather than a reproduction. Both are labelled that way in the source. Anyone
   picking this up should start by reproducing the over-claim, not by trusting the fix.
+
+---
+
+### 2.12 The conditional-skip audit — 231 → 184, and three defects behind the skips
+
+Two guards now exist, both shaped after `scripts/check-test-only-code.sh`:
+
+- **`scripts/check-skips.sh`** — every skip site in the tree is baselined as
+  `<package><TAB><enclosing func><TAB><count>`. A new skip, or a growing count, fails the
+  lint job. A count that *falls* never fails; it prints a note to tighten the baseline.
+- **`scripts/check-skip-budget.sh`** — the runtime half, since a static scan cannot see
+  that a skip *fired*. Per-job ceilings in `scripts/skip-budget.txt`, checked against
+  `go test -json` output. A missing report, or one with no test results at all, fails:
+  a job that died before producing output has skipped everything.
+
+The three `Warn on skipped tests` steps are gone. A warning on a green job is not a signal
+— the multi-DB Postgres bug (1.13) emitted one for its entire existence.
+
+**The grep in §1 undercounted, in both directions.** 225 included four prose comments
+discussing `t.Skipf`, and missed the two `unavailable := t.Skipf` sites where the skip is
+taken as a *function value* — which is the shape of the already-fixed `TestDB` pattern
+itself — plus five in `engine/testutil/`, which is not a `_test.go` file but decides
+whether every database-backed test in the repo runs. Real total: 231. The guard counts all
+three forms.
+
+**Three defects were behind skips, each found by converting one.**
+
+1. **MySQL had no unauthenticated-query rejection at all.** `TestUnauthenticatedQueryRejection`'s
+   type switch had no `case *MySQLStore`, so the MySQL subtest fell to `default:` and
+   skipped — unconditionally, every run, including in `multi-db-ci.yml`'s `test-mysql` job,
+   which exists to test MySQL. Writing the case proved the gap against a real MySQL 8.4:
+   `GetActiveInstanceCountsByVersion` with an empty `tenantID` returned **no error**,
+   just an empty result. `MSSQLStore` has had this check since it was written
+   (`setSessionContext`); MySQL had **90 references to `s.tenantID` and not one guard**.
+   Since MySQL also has zero RLS policies (1.7), nothing else was scoping the query.
+   `requireTenant` added and applied to that one method. **The other ~89 call sites are
+   not audited** — that is 1.7, and the helper's doc comment says so explicitly rather
+   than letting its presence imply the problem is solved.
+
+2. **33 skips that could not mean what they said.** `engine/backend_wasmtime_test.go` and
+   `..._limits_test.go` are `//go:build cgo`; the `!cgo` stub returning "requires CGO" is
+   unreachable from them. So `t.Skipf("wasmtime backend not available")` could only fire
+   on a genuine init failure of the **primary** backend — silently deleting the whole
+   suite, including the four regression tests for the runaway-workflow hang (1.5). Now
+   `t.Fatalf`.
+
+3. **`TestVetPython` was vacuous in every environment.** `runVetPython` exits 0 when it
+   finds violations, so the test's `if err != nil { skip }` never meant "vet found the
+   violation" — it meant `cleat_sdk` was unimportable, which it always was, because
+   `findPythonSDKDir()` resolves relative to a cwd that is never the repo root under
+   `go test`. The non-skip branch asserted nothing either. It now sets `PYTHONPATH` and
+   asserts `PY002` is present; deliberately breaking the expectation was confirmed to fail it.
+
+**Found on the way, not fixed — these are the honest leftovers.**
+
+- **Six of the seven `tests/` suites are run by nothing.** `tests/cluster`, `integrity`,
+  `upgrade`, `soak`, `scale` and `cross-language` are named by no workflow file. The
+  `cluster` CI job runs `./engine/...`, not `tests/cluster/`; `e2e-cross-language.yml`
+  runs `./engine/...` with a `-run` filter, not `tests/cross-language/`. Only
+  `tests/plugin-harness` is actually executed. Note this contradicts `f4322e3`'s claim
+  that `tests/integrity` and `tests/cross-language` "now actually execute" — they execute
+  if run, and nothing runs them.
+- **`check-ci-package-coverage.sh` exempted `tests` on the stated grounds that its suites
+  are "driven by their own dedicated CI jobs".** That was an assertion, not a check, and
+  it was false — the same rot the guard exists to catch, inside the guard's own exemption
+  list. It now verifies the claim, with the six unwired suites baselined.
+- **`plugin-harness-ci.yml`'s `test-multi-db` job is entirely vacuous.** It provisions
+  PostgreSQL, MySQL and SQL Server, sets all three DSNs, and runs exactly one test —
+  `TestPluginCalls_MultiDB` — whose first statement is an unconditional `t.Skip` for a
+  wazero v1.11.1 nil-Sys panic. Budgeted at 1 so it is recorded rather than breaking the
+  build; drop to 0 when the skip goes.
+- **`Makefile`'s `test-cluster` ran `./internal/host/...`**, a path dead since `3eeb74e`.
+  Repointed at `./engine/...` with `-p 1`, matching the CI job.
+- **`TestMySQLStoreFactory` gates on `CLEAT_TEST_MYSQL` and then ignores its value**,
+  hardcoding `tcp(127.0.0.1:3306)`. Harmless in CI, but the same config-drift family.
+- **`plugins/scheduler`'s `TestNextRun_Feb29NonLeapYear`** is not environment-conditional
+  at all: `nextRun`'s one-year search window cannot find a Feb 29 more than a year out.
+  A real scheduler gap wearing a skip's clothing.
+
+**What did not change, deliberately.** The ~112 `mysql` and 112 `mssql` dialect subtests
+that skip in the `engine` job are correct: that job configures PostgreSQL only. A skip is
+allowed to mean "nobody asked for this" and nothing else — that is the whole rule, and
+the budget of 343 records it rather than hiding it.
+
+Budgets were measured, not estimated, against a live PostgreSQL 16 and MySQL 8.4:
+core 0, engine 343, wasm 1, internal 0, plugins 1, support 2, commands 4. The `cluster`
+budget is seeded at 0 and unverified — colima cannot mount this repo's path, so
+`docker-compose.cluster.yml` remains CI-only.
 
 ---
 
