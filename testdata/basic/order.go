@@ -171,10 +171,18 @@ func refundPayment(h cleat.HostCalls, chargeID string) error {
 // LongRunning performs many HostCalls in a tight loop to burn wall-clock time
 // without triggering WASM suspension. Each DurableCall is sub-millisecond so
 // the engine keeps executing -- the context deadline is the only exit path.
-// iterations controls how many calls are made; 500_000 is roughly 5 seconds.
+//
+// The operation name must be non-empty. This loop used to call
+// DurableCall("noop", "", ""), and the host rejected every one of those on the
+// spot: service and operation names are validated against [a-zA-Z0-9._-]+ (see
+// engine/memory.go validServiceName), so an empty operation is a malformed
+// call target, not a call to an unnamed method. The loop body therefore never
+// ran -- the first iteration returned an error and LongRunning bailed out in
+// ~200ms regardless of `iterations`, which silently made this fixture useless
+// for the one thing it exists to do. See IMPROVEMENT-PLAN.md 2.10.
 func LongRunning(h cleat.HostCalls, iterations int) (string, error) {
 	for i := 0; i < iterations; i++ {
-		if _, err := h.DurableCall("noop", "", ""); err != nil {
+		if _, err := h.DurableCall("noop", "Noop", "{}"); err != nil {
 			return "", err
 		}
 	}

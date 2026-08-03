@@ -248,23 +248,23 @@ func (b *wasmtimeBackend) registerCleatCallRetry(linker *wasmtime.Linker) error 
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		service, ok := wasmtimeReadServiceName(buf, svcPtr, svcLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		op, ok := wasmtimeReadServiceName(buf, opPtr, opLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
+		req, ok := wasmtimeReadPayload(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
-		nonRetryableErrorsJSON, ok := wasmtimeReadStringValidated(buf, nonRetryPtr, nonRetryLen, int32(MaxWasmStringLen))
+		nonRetryableErrorsJSON, ok := wasmtimeReadPayload(buf, nonRetryPtr, nonRetryLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		return h.DurableCallWithRetry(context.Background(), nil, service, op, req,
 			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
@@ -330,19 +330,19 @@ func (b *wasmtimeBackend) registerCleatCallHeartbeat(linker *wasmtime.Linker) er
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		service, ok := wasmtimeReadServiceName(buf, svcPtr, svcLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		op, ok := wasmtimeReadServiceName(buf, opPtr, opLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
+		req, ok := wasmtimeReadPayload(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		return h.DurableCallWithHeartbeat(context.Background(), nil, service, op, req, heartbeatIntervalMs, uint32(respPtr), uint32(respMaxLen))
 	})

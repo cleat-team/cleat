@@ -27,19 +27,21 @@ func (b *wasmtimeBackend) registerCleatCall(linker *wasmtime.Linker, completeRes
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		service, ok := wasmtimeReadServiceName(buf, svcPtr, svcLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		op, ok := wasmtimeReadServiceName(buf, opPtr, opLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
+		// wasmtimeReadPayload, not wasmtimeReadStringValidated: a durable call
+		// that takes no arguments passes "" here and must be allowed.
+		req, ok := wasmtimeReadPayload(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		t1 := time.Now()
 		callCtx := ctxWithMem(context.Background(), buf)

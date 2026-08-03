@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -808,83 +807,47 @@ func TestRLSTenantIsolation(t *testing.T) {
 	}
 }
 
-// TestIntegrationWorkflowMaxDuration verifies that the WithDefaultWorkflowTimeout
-// option cancels execution when a workflow exceeds its wall-clock duration limit.
+// TestIntegrationWorkflowMaxDuration verifies that WithDefaultWorkflowTimeout
+// stops a workflow that exceeds its wall-clock duration limit.
+//
+// This test was skipped for a long time because it never exercised its subject,
+// and the two reasons are worth keeping written down.
+//
+// The workload was testdata/basic's LongRunning, which looped on
+// h.DurableCall("noop", "", ""). The empty operation name was rejected by the
+// host on the first iteration, so the loop body never ran and the call returned
+// in ~200ms regardless of the iteration count. Retuning the count could not fix
+// that. It is fixed at the source now (see IMPROVEMENT-PLAN.md 2.10), but
+// LongRunning is still the wrong workload here: each durable call records an
+// event costing ~2.9 KB of host memory, so spinning one for a whole second
+// means ~170k calls and ~500 MB of heap.
+//
+// It also once passed on CI for a reason unrelated to its subject: `go test
+// -race` slowed *instantiation* past the 1s budget, the trap reported 999.9ms,
+// and the assertion was satisfied without the guest ever running long. The
+// budget covers instantiation as well as execution, so that will happen to any
+// limit tight enough for startup to consume it.
+//
+// So: the workload is testdata/spin, a pure arithmetic loop that allocates
+// nothing and never enters the host, and the limit is set well clear of
+// instantiation. The assertions below check that the fence fired *and* that the
+// guest actually ran until it did -- an early return is the failure this test
+// exists to catch.
 func TestIntegrationWorkflowMaxDuration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	// This test has never exercised the thing it names, and is skipped rather
-	// than left reporting a pass it did not earn.
-	//
-	// The workload is testdata/basic's LongRunning, which loops `iterations`
-	// times calling h.DurableCall("noop", "", ""). Measured directly, that
-	// call fails on the very first iteration -- the guest gets error
-	// 0xFF000000 out of the host-call path -- so LongRunning returns an error
-	// result in ~200ms no matter what `iterations` is set to:
-	//
-	//   input={"iterations":0}        elapsed=207ms  res="done"
-	//   input={"iterations":100000}   elapsed=199ms  res={"error":"durable call noop.: [4278190080] ...
-	//   input={"iterations":5000000}  elapsed=200ms  res={"error":"durable call noop.: [4278190080] ...
-	//
-	// The wall-clock limit therefore never fires because of the workload. On
-	// CI it fired anyway, because `go test -race` slowed instantiation past
-	// the 1s budget (the trap reported 999.9ms), so the test passed for a
-	// reason unrelated to its subject -- and failed on a fast machine without
-	// -race, where startup is quick and the assertion sees a nil error.
-	// Retuning the iteration count cannot fix that; the loop body never runs.
-	//
-	// Two defects are hiding behind it: DurableCall to this service fails at
-	// the ABI boundary (note the closure-analysis warnings `cleat build` emits
-	// for this fixture), and the workflow duration limit has no honest test.
-	// Both are recorded in IMPROVEMENT-PLAN.md 2.10.
-	t.Skip("known broken: the workload never loops; see the comment above and IMPROVEMENT-PLAN.md 2.10")
-
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	defer db.Close()
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
-
+	// No database: Execute takes the WASM bytes directly, so the workflow_defs
+	// and workflow_instances rows this test used to insert were never read.
+	// Dropping them takes the test out of the "needs PostgreSQL" class.
 	ctx := context.Background()
-	runID := fmt.Sprintf("int-timeout-%d", time.Now().UnixNano())
-	defName := "test-timeout-workflow"
 
-	// Build WASM from testdata/basic (includes LongRunning export).
-	wasmPath := buildTestWasm(t)
+	wasmPath := buildFixtureWasm(t, "spin")
 	wasmBytes, err := os.ReadFile(wasmPath)
 	if err != nil {
 		t.Fatalf("read WASM: %v", err)
 	}
-
-	// Insert workflow definition.
-	if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points) VALUES ($1, $2, $3, $4)`,
-		defName, 1, wasmBytes, `{long_running}`); err != nil {
-		t.Fatalf("insert workflow_defs: %v", err)
-	}
-
-	// Insert a workflow instance in 'ready' status.
-	// The iteration count has to be large enough that no machine finishes it
-	// inside the 1s limit, because the assertion below is that the limit
-	// *fires*. At 500000 it was tuned to some particular machine's speed: CI
-	// took ~1s and tripped the limit, while an Apple Silicon dev machine
-	// finished the whole workload well inside 1s and failed with "expected
-	// timeout error, got nil". A test whose outcome depends on how fast the
-	// host is cannot be trusted in either direction.
-	//
-	// Overshooting costs nothing: execution is interrupted at the 1s limit, so
-	// the test's wall-clock time is bounded by the timeout, not by the
-	// iteration count.
-	input := `{"iterations":50000000}`
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input) VALUES ($1, $2, $3, $4, $5)`,
-		runID, defName, 1, "ready", input); err != nil {
-		t.Fatalf("insert workflow_instances: %v", err)
-	}
-
-	defer func() {
-		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
-		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
-		db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
-	}()
 
 	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
@@ -892,40 +855,64 @@ func TestIntegrationWorkflowMaxDuration(t *testing.T) {
 	}
 	defer rt.Close(ctx)
 
-	// Create engine with a 1-second timeout (well below 5s execution time).
-	engine := NewEngine(rt, &mockCaller{}, withWasmtimeBackend(t), WithDefaultWorkflowTimeout(1*time.Second))
+	// 2s rather than 1s so that instantiation (~175ms here, more under -race)
+	// is a small fraction of the budget and the guest is certain to get a long
+	// spin in. Iterations are set to something no machine finishes: measured at
+	// ~5.5e8 iterations/sec, 1e11 would take roughly three minutes.
+	const limit = 2 * time.Second
+	const iterations = 100000000000
 
-	_, _, _, _, _, err = engine.Execute(ctx, wasmBytes, "long_running", json.RawMessage(input))
+	engine := NewEngine(rt, &mockCaller{}, withWasmtimeBackend(t), WithDefaultWorkflowTimeout(limit))
+
+	start := time.Now()
+	res, _, _, _, _, err := engine.Execute(ctx, wasmBytes, "spin",
+		json.RawMessage(fmt.Sprintf(`{"iterations":%d}`, iterations)))
+	elapsed := time.Since(start)
+
 	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	// The wasmtime backend enforces this limit with epoch interruption (added
-	// in 7faa157), which traps inside the guest and reports the elapsed time
-	// directly:
-	//
-	//   wasm trap: host: export "long_running": execution time limit exceeded
-	//   (999.945668ms ...) / Caused by: wasm trap: interrupt
-	//
-	// That is the limit working, and more precise than what came before -- the
-	// call used to run to completion and surface as a context deadline on the
-	// Go side. The assertion below accepts either, since the wazero backend
-	// still takes the context path.
-	//
-	// "error 1" was in the accepted set and is not a timeout signal at all; it
-	// matches any error whose text happens to contain that substring. It is
-	// dropped rather than carried forward.
-	timedOut := errors.Is(err, context.DeadlineExceeded) ||
-		strings.Contains(err.Error(), "timed out") ||
-		strings.Contains(err.Error(), "execution time limit exceeded") ||
-		strings.Contains(err.Error(), "interrupt")
-	if !timedOut {
-		t.Errorf("expected a timeout or an execution-time-limit trap, got: %v", err)
+		t.Fatalf("expected the execution-time limit to fire, got nil after %v (result %s)",
+			elapsed, res)
 	}
 
-	// Gated on !t.Failed(): this line used to print unconditionally, so a
-	// failing run still ended with "test passed" in the log.
-	if !t.Failed() {
-		t.Log("Workflow max duration integration test passed")
+	// Identify the trap precisely rather than accepting any error. Matching on
+	// loose substrings is how the previous version of this assertion accepted
+	// "error 1" -- which is not a timeout signal at all -- as evidence of a
+	// timeout.
+	if !isExecutionInterruptTrap(err) {
+		t.Fatalf("expected a wasmtime interrupt trap (epoch interruption), got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "execution time limit exceeded") {
+		t.Errorf("trap was an interrupt but the error does not name the limit: %v", err)
+	}
+
+	// The assertion that catches the original defect. When the workload
+	// returned early -- LongRunning bailing out on its first iteration --
+	// elapsed was ~200ms. Requiring the guest to have run for essentially the
+	// whole budget is what distinguishes "the fence stopped a long workload"
+	// from "the workload stopped by itself".
+	//
+	// The lower bound allows two epoch ticks of slack because the deadline is
+	// expressed in whole ticks: configureStore computes
+	// uint64(timeout / epochTickInterval), which truncates, so a 2s budget is
+	// enforced at 1.95s. One tick for that, one for scheduling jitter.
+	// 100ms = two 50ms epoch ticks. Spelled as a literal because
+	// epochTickInterval lives behind //go:build cgo and this file compiles
+	// without it; TestEpochTickIntervalMatchesDurationTestSlack pins the two
+	// together so the literal cannot drift.
+	const tickSlack = 100 * time.Millisecond
+	minElapsed := limit - tickSlack
+	if elapsed < minElapsed {
+		t.Errorf("execution stopped after %v, before the %v limit could plausibly "+
+			"have fired (expected at least %v). The guest returned early instead "+
+			"of running long -- the fence is not what stopped it.",
+			elapsed, limit, minElapsed)
+	}
+
+	// And the other direction: the fence must actually cut execution off,
+	// rather than the workload happening to finish.
+	if maxElapsed := limit + 10*time.Second; elapsed > maxElapsed {
+		t.Errorf("execution took %v, well past the %v limit; the fence did not "+
+			"interrupt promptly", elapsed, limit)
 	}
 }
 

@@ -42,6 +42,20 @@ func wasmtimeReadStringValidated(buf []byte, ptr, length, maxLen int32) (string,
 	return string(buf[pu : pu+lu]), true
 }
 
+// wasmtimeReadPayload is the wasmtime twin of readWasmPayload: a zero length
+// yields ("", true) because an empty payload is a value, not a fault. See
+// readWasmPayload in memory.go for why that distinction matters.
+//
+// A *negative* length is still rejected. These parameters arrive as i32, so
+// negative is a corrupt argument rather than an empty payload, and it falls
+// through to the strict reader which refuses it.
+func wasmtimeReadPayload(buf []byte, ptr, length, maxLen int32) (string, bool) {
+	if length == 0 {
+		return "", true
+	}
+	return wasmtimeReadStringValidated(buf, ptr, length, maxLen)
+}
+
 func wasmtimeReadServiceName(buf []byte, ptr, length int32) (string, bool) {
 	s, ok := wasmtimeReadStringValidated(buf, ptr, length, int32(MaxWasmStringLen))
 	if !ok {

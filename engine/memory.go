@@ -113,6 +113,30 @@ func readWasmStringValidated(mem api.Memory, ptr, length, maxLen uint32) (string
 	return string(data), true
 }
 
+// readWasmPayload reads a payload argument -- a request body, an HTTP body, a
+// stored value -- from WASM linear memory.
+//
+// It differs from readWasmStringValidated in one respect: a zero length is
+// accepted and yields ("", true). Emptiness is a property of a payload, not a
+// defect in it. A durable call that takes no arguments, an HTTP GET with no
+// body and a state entry set to the empty string are all ordinary things for a
+// guest to ask for.
+//
+// readWasmStringValidated conflates the two, and every caller turns its false
+// into errBadParam, so a guest passing "" was indistinguishable from a guest
+// passing a corrupt pointer -- and was refused. That is what made
+// testdata/basic's LongRunning fail on its first iteration for years. Use this
+// for payloads and readServiceName/readWasmStringValidated for anything whose
+// emptiness really is meaningless, such as a name or a key.
+//
+// See IMPROVEMENT-PLAN.md 2.10.
+func readWasmPayload(mem api.Memory, ptr, length, maxLen uint32) (string, bool) {
+	if length == 0 {
+		return "", true
+	}
+	return readWasmStringValidated(mem, ptr, length, maxLen)
+}
+
 // readServiceName reads a service or operation name from WASM linear memory
 // and validates both its length (must not exceed MaxWasmStringLen) and
 // character set (must match [a-zA-Z0-9._-]+).
@@ -155,6 +179,43 @@ func writeWasmStringOrTrap(mem api.Memory, ptr uint32, s string, maxLen uint32) 
 func packDurableCallResult(responseLen int, callErrorCode, errCode byte) int64 {
 	return int64(uint64(responseLen)<<40 | uint64(callErrorCode)<<8 | uint64(errCode))
 }
+
+// callErrorInvalidRequest mirrors cleat.CallErrorInvalidRequest, the guest-side
+// classification for a request the host refused to interpret.
+//
+// It is redeclared here rather than imported because engine does not depend on
+// the cleat package. TestCallErrorCodeMatchesGuestSDK asserts the two agree, so
+// this cannot drift silently.
+const callErrorInvalidRequest byte = 4
+
+// badParamDurableCall is the bad-parameter result for the host functions whose
+// guest adapter decodes the packDurableCallResult layout: cleat_call,
+// cleat_call_retry, cleat_call_heartbeat, cleat_plugin_call and
+// cleat_plugin_call_streaming.
+//
+// Those five must not return the raw errBadParam sentinel. errBadParam is
+// 0xFFFFFFFF_00000001 -- a value picked so that a decoder reading a low byte,
+// or the low 32 bits, sees something nonzero. But this layout splits the word
+// 24/32/8, and the sentinel lands across all three fields at once. A guest
+// decoding it gets:
+//
+//	responseLen   = 0xFFFFFF     (16 MB, against a 64 KB response buffer)
+//	callErrorCode = 0xFF000000   (not a cleat.CallErrorCode at all)
+//	errCode       = 1
+//
+// which surfaced to workflow authors as `[4278190080] cleat_call: error 1
+// (0=unknown 1=timeout ...)`: a malformed argument reported as a *retryable
+// timeout*, carrying a Code that matches no enum member and so falls through
+// every `switch e.Code`. The oversized responseLen is caught by the generated
+// callErrorMessage's bounds check, so it degrades to the generic message
+// rather than reading out of bounds -- but that bounds check was the only
+// thing standing between this and a 16 MB out-of-range read.
+//
+// Encoding the refusal in the layout the caller actually decodes gives
+// responseLen=0, a real CallErrorCode, and a nonzero errCode.
+//
+// See IMPROVEMENT-PLAN.md 2.10.
+var badParamDurableCall = packDurableCallResult(0, callErrorInvalidRequest, 1)
 
 // packSimpleResult matches adapter.go for functions returning only an errCode
 // with optional extra data in the upper bits.

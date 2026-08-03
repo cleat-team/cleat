@@ -149,7 +149,17 @@ func (e *Engine) executeWithBackend(
 		}
 		session.releaseHeldScopes(context.Background())
 		if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
+			// wasmTrapError, not fmt.Errorf("%s"): resolveWasmTrap returns an
+			// enriched *string*, and formatting it with %s dropped callErr out
+			// of the chain, so errors.Is/errors.As stopped working for exactly
+			// the errors that carry the most information -- traps. That is the
+			// opposite of what wasmTrapError.Unwrap was written for. Keeping
+			// the enriched text as the message and callErr as the cause gives
+			// both.
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, &wasmTrapError{
+				cause: callErr,
+				msg:   fmt.Sprintf("host: workflow %s: execution failed: %s", e.workflowID, enriched),
+			}
 		}
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr)
 	}
@@ -352,7 +362,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// consistent formatting and serves as a hook for future custom
 		// DWARF parsing from the raw wasm binary.
 		if enriched := resolveWasmTrap(wasmBytes, err.Error()); enriched != "" {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
+			// See the note at the other resolveWasmTrap site: %s dropped the
+			// cause and broke errors.Is/errors.As for every trap.
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, &wasmTrapError{
+				cause: err,
+				msg:   fmt.Sprintf("host: workflow %s: execution failed: %s", e.workflowID, enriched),
+			}
 		}
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, err)
 	}

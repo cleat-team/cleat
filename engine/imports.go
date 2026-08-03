@@ -121,15 +121,17 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		service, ok := readServiceName(mem, svcPtr, svcLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		op, ok := readServiceName(mem, opPtr, opLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		// readWasmPayload, not readWasmStringValidated: a durable call that
+		// takes no arguments passes "" here and must be allowed.
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.DurableCall(ctx, m, service, op, req, respPtr, respMaxLen))
 	}).Export("cleat_call")
@@ -308,19 +310,21 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		service, ok := readServiceName(mem, svcPtr, svcLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		op, ok := readServiceName(mem, opPtr, opLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		nonRetryableErrorsJSON, ok := readWasmStringValidated(mem, nonRetryPtr, nonRetryLen, MaxWasmStringLen)
+		// An empty non-retryable-errors list is the common case: most calls
+		// name no non-retryable errors at all.
+		nonRetryableErrorsJSON, ok := readWasmPayload(mem, nonRetryPtr, nonRetryLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.DurableCallWithRetry(ctx, m, service, op, req,
 			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
@@ -364,15 +368,15 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		service, ok := readServiceName(mem, svcPtr, svcLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		op, ok := readServiceName(mem, opPtr, opLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.DurableCallWithHeartbeat(ctx, m, service, op, req, heartbeatIntervalMs, respPtr, respMaxLen))
 	}).Export("cleat_call_heartbeat")
@@ -423,15 +427,16 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		pluginName, ok := readServiceName(mem, pluginNamePtr, pluginNameLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		funcName, ok := readServiceName(mem, funcNamePtr, funcNameLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
+		// Empty input is legitimate: plenty of plugin functions take none.
+		inputJSON, ok := readWasmPayload(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.PluginCallStreaming(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
 	}).Export("plugin_call_streaming")
@@ -446,15 +451,16 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		pluginName, ok := readServiceName(mem, pluginNamePtr, pluginNameLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		funcName, ok := readServiceName(mem, funcNamePtr, funcNameLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
+		// Empty input is legitimate: plenty of plugin functions take none.
+		inputJSON, ok := readWasmPayload(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.PluginCall(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
 	}).Export("plugin_call")
