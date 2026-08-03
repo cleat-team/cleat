@@ -423,6 +423,29 @@ reports both.
 
 ---
 
+### 1.13 Multi-DB CI was green without ever connecting to PostgreSQL — fixed in `HEAD`
+
+The `test-plugin-migrations` job in `.github/workflows/multi-db-ci.yml` declares a
+`postgres:16` service and sets `CLEAT_TEST_POSTGRES` to it. The job runs directly on the
+runner, not in a container, so it does not share the service network — and unlike the mysql
+and mssql services beside it, the postgres service published no port. It was unreachable
+for the workflow's entire existence.
+
+The job was green throughout, because `testutil.TestDB` responded to an unreachable
+database with `t.Skipf`. Identical in shape to the `test-go` job's missing `ports:` (fixed
+earlier this session) and to `DURABLE_TEST_DB` in `cmd/cleat-worker/auth_test.go`: **a skip
+that is indistinguishable from a pass.**
+
+Two changes. The service now publishes 5432. And `testutil.TestDB` distinguishes the two
+cases it had been conflating: with no DSN configured it still skips, but when a DSN *is*
+configured and cannot be reached it fails, with the DSN (password redacted) in the message.
+Asking for a database and not getting one is a broken configuration, not an absent one.
+
+Falsified both ways: with an unreachable DSN set the test now fails and names it; with the
+environment unset it still skips.
+
+---
+
 ### 1.10 RLS is bypassed in every shipped configuration — OPEN, needs a decision
 
 Not fixed. It cannot be fixed without a product decision.

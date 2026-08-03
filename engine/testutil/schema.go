@@ -550,15 +550,47 @@ func TestDB(t *testing.T, dialect Dialect) *sql.DB {
 		t.Fatalf("TestDB: unknown dialect: %s", dialect)
 	}
 
+	// An unreachable database is only a reason to skip when nobody asked for
+	// one. If a DSN was configured explicitly, being unable to connect to it
+	// is a failure of the configuration, and skipping hides it: the Multi-DB
+	// CI workflow set CLEAT_TEST_POSTGRES for a service container it had not
+	// published a port for, so every PostgreSQL subtest skipped itself and the
+	// job reported green for its whole existence without connecting once. The
+	// same treatment is applied in cmd/cleat-worker/auth_test.go.
+	configured := os.Getenv("CLEAT_TEST_POSTGRES") != "" ||
+		os.Getenv("CLEAT_TEST_DB") != "" ||
+		os.Getenv("CLEAT_TEST_MYSQL") != "" ||
+		os.Getenv("CLEAT_TEST_MSSQL") != ""
+	unavailable := t.Skipf
+	if configured {
+		unavailable = t.Fatalf
+	}
+
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
-		t.Skipf("Skipping test: no database available: %v", err)
+		unavailable("no database available at %s: %v", redactDSN(dsn), err)
+		return nil
 	}
 	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping test: cannot ping database: %v", err)
+		unavailable("configured database at %s is unreachable: %v", redactDSN(dsn), err)
+		return nil
 	}
 	SetupMinimalSchema(t, db, dialect)
 	return db
+}
+
+// redactDSN strips the password from a DSN so it can appear in test output.
+func redactDSN(dsn string) string {
+	if u, err := url.Parse(dsn); err == nil && u.User != nil {
+		u.User = url.User(u.User.Username())
+		return u.String()
+	}
+	// Not a URL (the MySQL driver uses its own format); drop anything that
+	// looks like credentials before an @.
+	if i := strings.LastIndex(dsn, "@"); i >= 0 {
+		return "***@" + dsn[i+1:]
+	}
+	return dsn
 }
 
 // PostgresTestDSN resolves the PostgreSQL test DSN the same way
