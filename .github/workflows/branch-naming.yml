@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Branch Naming Check — validates PR source branches follow gitflow convention
 #
-# Expected prefixes: feature/, bugfix/, fix/, release/, hotfix/
+# Expected prefixes: feature/, bugfix/, fix/, docs/, release/, hotfix/
 # Examples: feature/multi-db-support, bugfix/claim-race, release/v1.2.0
 #
 # Exemptions: branches opened by dependabot, or PRs labeled "bot"
@@ -44,7 +44,7 @@ jobs:
               return;
             }
 
-            const validPrefixes = ['feature/', 'bugfix/', 'fix/', 'release/', 'hotfix/'];
+            const validPrefixes = ['feature/', 'bugfix/', 'fix/', 'docs/', 'release/', 'hotfix/'];
             const isValid = validPrefixes.some(p => branch.startsWith(p));
 
             if (!isValid) {
@@ -54,6 +54,7 @@ jobs:
                 `  feature/   — new functionality      (e.g. feature/multi-db-support)\n` +
                 `  bugfix/    — bug fixes               (e.g. bugfix/claim-race-condition)\n` +
                 `  fix/       — CI, config, tooling fixes (e.g. fix/ci-token)\n` +
+                `  docs/      — documentation only      (e.g. docs/branch-conventions)\n` +
                 `  release/   — release preparation     (e.g. release/v1.2.0)\n` +
                 `  hotfix/    — critical production fix (e.g. hotfix/worker-panic)\n\n` +
                 `Use lowercase, hyphens (not underscores), and keep names concise.\n\n` +
@@ -63,6 +64,9 @@ jobs:
                 `  git push origin --delete ${branch}\n\n` +
                 `See CONTRIBUTING.md#branch-naming for the full convention.`
               );
+              // core.setFailed does not stop execution; without this return the
+              // job logs the rejection and then claims the name is fine.
+              return;
             }
 
             console.log(`Branch name "${branch}" follows convention.`);
