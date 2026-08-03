@@ -21,19 +21,20 @@ func (b *wasmtimeBackend) registerCleatPluginCall(linker *wasmtime.Linker) error
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		pluginName, ok := wasmtimeReadServiceName(buf, pluginNamePtr, pluginNameLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		funcName, ok := wasmtimeReadServiceName(buf, funcNamePtr, funcNameLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
-		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
+		// Empty input is legitimate: plenty of plugin functions take none.
+		inputJSON, ok := wasmtimeReadPayload(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		return h.PluginCall(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
 	})
@@ -52,19 +53,20 @@ func (b *wasmtimeBackend) registerCleatPluginCallStreaming(linker *wasmtime.Link
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		pluginName, ok := wasmtimeReadServiceName(buf, pluginNamePtr, pluginNameLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		funcName, ok := wasmtimeReadServiceName(buf, funcNamePtr, funcNameLen)
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
-		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
+		// Empty input is legitimate: plenty of plugin functions take none.
+		inputJSON, ok := wasmtimeReadPayload(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParamInt64
+			return badParamDurableCall
 		}
 		return h.PluginCallStreaming(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
 	})

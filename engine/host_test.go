@@ -1148,6 +1148,13 @@ func minimalWasm() []byte {
 
 func buildTestWasm(t *testing.T) string {
 	t.Helper()
+	return buildFixtureWasm(t, "basic")
+}
+
+// buildFixtureWasm compiles testdata/<fixture> to WASM with `cleat build` and
+// returns the path of the resulting module.
+func buildFixtureWasm(t *testing.T, fixture string) string {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping WASM compilation in short mode")
 	}
@@ -1166,7 +1173,7 @@ func buildTestWasm(t *testing.T) string {
 
 	tmpDir := t.TempDir()
 	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "cleat"),
-		"build", "--target", "go", "-o", tmpDir, filepath.Join(projectRoot, "testdata", "basic"))
+		"build", "--target", "go", "-o", tmpDir, filepath.Join(projectRoot, "testdata", fixture))
 	cmd.Dir = projectRoot
 	cmd.Env = os.Environ()
 

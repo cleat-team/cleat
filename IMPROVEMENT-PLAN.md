@@ -53,7 +53,27 @@ per dialect. Apply it everywhere:
 Mechanical, cheap, and it closes the single most productive defect-hiding mechanism in the
 repo. Do it first.
 
-### 2. `DurableCall` fails at the ABI boundary  ·  1–2 sessions  ·  see 2.10
+### 2. `DurableCall` fails at the ABI boundary  —  ✅ **done**, see §2.10
+
+> **Done, and the framing below was wrong in an instructive way.** There is no `DurableCall`
+> ABI bug: the fixture passed an **empty operation name** and the host was right to refuse
+> it. What made that hard to see was a real defect — the refusal came back as the raw
+> `errBadParam` sentinel, which `cleat_call`'s 24/32/8 result layout cannot carry, so a
+> malformed argument surfaced to workflow authors as a *retryable timeout* with a `Code` of
+> 4278190080 that matches no enum member. That is fixed, along with a second defect found
+> on the way (empty request payloads were refused outright, so a no-argument durable call
+> could not be made). `TestIntegrationWorkflowMaxDuration` is un-skipped and now runs
+> against a new pure-compute fixture, `testdata/spin`.
+>
+> Both open questions are answered: the `cleat_complete` closure warning is a universal
+> false positive and **not** the same defect, and the wazero `clock_time_get` panic is a
+> **separate** bug that needs `CGO_ENABLED=0` and has nothing to do with `DurableCall`.
+> Three further defects were found and deliberately **not** fixed — see §2.13 (empty
+> payloads refused across the rest of the ABI), §2.14 (`cleat_json_parse` panics on
+> wasmtime — confirmed by running it), §2.15 (all durable-call failures classified as
+> retryable timeouts). §2.14 is the one to do next: it is a crash on the backend of record.
+>
+> The original framing is kept below.
 
 `testdata/basic`'s `LongRunning` gets error `0xFF000000` from the host-call path on
 iteration 0, and under wazero the worker logs a nil-pointer panic in
@@ -649,37 +669,101 @@ follow-up work; the point is to stop it growing.
 
 ---
 
-### 2.10 `TestIntegrationWorkflowMaxDuration` never tested the duration limit — OPEN
+### 2.10 `TestIntegrationWorkflowMaxDuration` never tested the duration limit — FIXED
 
-Found while clearing the last red CI job. Two defects behind one test.
+Both defects are closed, and both open questions the plan raised are answered. The headline
+finding is that **there was no `DurableCall` ABI bug**: the fixture was malformed and the
+host was right to refuse it. What made that take so long to see is a real defect, and it is
+fixed too.
 
-The workload is `testdata/basic`'s `LongRunning`, which loops `iterations` times calling
-`h.DurableCall("noop", "", "")`. Measured directly, that call fails on the **first**
-iteration — the guest receives error `0xFF000000` from the host-call path — so the function
-returns in ~200ms regardless of `iterations`:
+**What actually happened.** `testdata/basic`'s `LongRunning` looped on
+`h.DurableCall("noop", "", "")` — an **empty operation name**. Service and operation names
+are validated against `[a-zA-Z0-9._-]+` (`engine/memory.go` `validServiceName`), so the
+host rejected every call on the spot and the loop body never ran. The fixture now calls
+`h.DurableCall("noop", "Noop", "{}")` and loops as intended.
+
+**Why it read as an ABI failure.** The refusal was returned as the raw `errBadParam`
+sentinel, `0xFFFFFFFF_00000001`. That value is fine for a decoder reading a low byte, but
+`cleat_call`'s guest adapter splits the word 24/32/8, so the sentinel lands across all
+three fields at once:
 
 ```
-input={"iterations":0}        elapsed=207ms  res="done"
-input={"iterations":100000}   elapsed=199ms  res={"error":"durable call noop.: [4278190080] ...
-input={"iterations":5000000}  elapsed=200ms  res={"error":"durable call noop.: [4278190080] ...
+responseLen   = 0xFFFFFF     (16 MB, against a 64 KB response buffer)
+callErrorCode = 0xFF000000   (4278190080 — not a cleat.CallErrorCode at all)
+errCode       = 1
 ```
 
-So the loop body never runs and the wall-clock limit cannot fire because of the workload.
-It fired on CI anyway: `go test -race` slowed instantiation past the 1s budget — the trap
-reported 999.9ms — so the test passed for a reason unrelated to its subject, and failed on
-a fast machine without `-race`. Retuning the iteration count cannot fix it.
+So a malformed argument surfaced as `[4278190080] cleat_call: error 1 (0=unknown
+1=timeout ...)` — a **retryable timeout**, carrying a `Code` matching no enum member, so
+every `switch e.Code` on the guest falls through. The oversized `responseLen` was contained
+only by the generated `callErrorMessage`'s bounds check; that check was all that stood
+between this and a 16 MB out-of-range read.
 
-1. **`DurableCall` fails at the ABI boundary for this fixture.** Note that `cleat build`
-   emits closure-analysis warnings for it: `host function "cleat_complete" imported from
-   WASM env but not in computed closure`. Whether the two are the same bug is not yet
-   established.
-2. **The workflow duration limit has no honest test.** `1.5` added epoch interruption, fuel
-   and `StoreLimits` to the wasmtime backend; the fence is real (a trap is raised and
-   reports elapsed time), but nothing verifies it against a workload that genuinely runs
-   long.
+Fixed by `badParamDurableCall` (`engine/memory.go`), which encodes the refusal in the
+layout the caller actually decodes: `responseLen=0`, `callErrorCode=CallErrorInvalidRequest`,
+`errCode=1`. Applied to the five host functions whose guest adapter uses that layout —
+`cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`,
+`plugin_call_streaming` — on **both** backends.
 
-The test is skipped with this reasoning inline rather than left green. A skip is visible —
-the CI job has a "Warn on skipped tests" step — whereas a pass for the wrong reason is not.
+The message the author reads was wrong in the same way, and separately. The generated
+`callErrorMessage` was handed `errCode` — the bits 0-7 "did it fail" flag, which is 1 for
+essentially every failure — but printed it against a legend enumerating **`CallErrorCode`**
+values. So the two halves of the same error contradicted each other:
+
+```
+before:  durable call noop.Noop: [4278190080] cleat_call: error 1 (... 1=timeout ...)
+after:   durable call noop.Noop: [4]          cleat_call: error 4 (... 4=invalid ...)
+```
+
+The three durable-call adapters now pass `callErrorCode`, pinned by
+`TestHostAdapterReportsCallErrorCodeNotErrCode` and verified end-to-end through a real WASM
+guest. Note the legend is pasted into ~20 other adapter defs where there is no
+`callErrorCode` field at all — for those it is decorative and misleading, and removing it is
+cosmetic follow-up rather than a correctness fix.
+
+**A second, independent defect found on the way: empty payloads were refused.**
+`readWasmStringValidated` treats length 0 as invalid, and every caller turns that into
+`errBadParam`. But emptiness is a property of a payload, not a defect in it. A durable call
+that takes no arguments could not be made at all. `readWasmPayload` / `wasmtimeReadPayload`
+now accept a zero length (still rejecting negative lengths and out-of-range pointers), and
+the durable-call family uses them for request payloads. Names and keys keep the strict rule.
+
+**The duration limit now has an honest test.** The workload is a new fixture,
+`testdata/spin`: a pure arithmetic loop that allocates nothing and never enters the host.
+`LongRunning` is the wrong workload even when fixed — each durable call records an event
+costing ~2.9 KB of host memory, so spinning one for a second means ~170k calls and ~500 MB
+of heap. Epoch interruption instruments loop backedges, so it fires on a pure loop just the
+same. The test asserts the trap *type* (`wasmtime.Interrupt`) rather than matching
+substrings, and — the assertion that would have caught the original bug — that execution
+actually ran for essentially the whole budget, rather than returning early. Verified by
+falsification: with a short workload it fails with `got nil after 159ms`.
+
+Two incidental fixes were needed to get there:
+
+- `engine/executor.go` rebuilt trap errors from `resolveWasmTrap`'s enriched string with
+  `%s`, discarding the cause, so `errors.Is`/`errors.As` stopped working for exactly the
+  errors carrying the most information. `wasmTrapError.Unwrap` exists to preserve that
+  chain; one layer was throwing away what the other kept. Both sites now wrap properly.
+- The test no longer touches PostgreSQL. It inserted `workflow_defs` / `workflow_instances`
+  rows that `Execute` never read, which put it in the "needs a database" class for nothing.
+
+**Answering the two open questions.**
+
+1. *Is the `cleat_complete` closure warning the same defect?* **No, and it never could be.**
+   `cleat_complete` and `cleat_poll_work` are emitted unconditionally by `GenerateImports`
+   (`wasm/generator.go`) and are absent from the `hostFunctions` table `AnalyzeUsage` walks,
+   so `usage.Used` can never contain them — the warning fires on every Go-target build.
+   Confirmed independently: it fires on `testdata/spin`, which uses **zero** host functions.
+   Runtime host-function registration does not consult the closure at all; it rescans the
+   built binary (`wasm.NeededEnvImports`, `engine/backend_wasmtime.go`). The warning is a
+   universal false positive. Silencing it is cosmetic follow-up, not a correctness issue.
+2. *Is the wazero `clock_time_get` nil-pointer panic the same bug?* **No — two bugs.** It
+   does not reproduce on `LongRunning` at any iteration count, with or without the bad
+   arguments. It reproduces only under `CGO_ENABLED=0`, inside the Go wasip1 allocator
+   (`mallocgc` → `nanotime1`) during a **successful** `PluginCall` in a different workflow.
+   It is the same panic `TestPluginCalls_Wasm_Go` and `TestPluginCalls_MultiDB` already skip
+   on, and therefore the same thing `scripts/skip-budget.txt` records as
+   `plugin-harness/multi-db 1`. wazero `v1.11.1-0.20260508161934-e6dd6c0c144f`.
 
 ---
 
@@ -832,6 +916,69 @@ exactly what it was built to do on its first outing, which was to disagree with 
 somebody had asserted without observing.
 
 ---
+
+### 2.13 Empty-string payloads are refused across the rest of the ABI — OPEN
+
+The `readWasmStringValidated` `length == 0` rejection described in 2.10 is repo-wide: ~54
+host-function parameters are read with it, and only the durable-call family was fixed. In
+several cases the **host handler already implements behaviour that the ABI boundary makes
+unreachable**. Verified by reading the handlers:
+
+- `cleat_set_scope` — `engine/scope.go:48`: `if objectType == "" && instanceKey == "" {
+  s.ClearScope(ctx); return 0 }`. Clearing scope is unreachable from WASM, both backends.
+- `cleat_list_state` — `engine/lifecycle.go:543`: `strings.HasPrefix(k, prefix)`. An empty
+  prefix means "list all keys", which is unreachable.
+- `cleat_child_workflow_in_schema` — `engine/children.go:32` documents "an empty
+  targetSchema falls back to the local schema"; unreachable.
+- `cleat_fetch` — an empty `body` and empty `headersJSON` are refused, so a GET with no
+  body cannot be issued. The Python SDK's `host_fetch` defaults both to `""`.
+- Also `cleat_uuid`'s `seed` and `cleat_side_effect`'s `result`, both of which the host
+  handles correctly for `""`.
+
+Not fixed here because it is a different blast radius: several existing tests assert
+`errBadParam` for an empty first parameter (`TestClosure_MoreErrorPaths`,
+`TestClosure_FinalErrorPaths`, `TestHostFunc_CleatLog_EmptyMsg`) and would need revisiting
+per-parameter. Do it as its own change, parameter by parameter, with the same
+payload-vs-name distinction 2.10 established.
+
+**Backend divergence found in passing:** `cleat_child_workflow_in_schema`'s `policy` is
+correctly optional on wazero (`engine/imports.go`, guarded by `policyLen > 0`) but
+unconditionally required on wasmtime (`engine/wasmtime_hostfuncs_workflow.go`). Its sibling
+`cleat_child_workflow_with_options` guards it on both.
+
+---
+
+### 2.14 `cleat_json_parse` / `cleat_json_stringify` panic on the primary backend — OPEN
+
+**Confirmed by running it**, not by inspection alone: a nil-pointer dereference.
+
+`engine/wasmtime_hostfuncs_core.go` passes a literal `nil` for the `api.Module` argument
+(`h.JsonParse(callCtx, nil, ...)`), and `engine/lifecycle.go:629` immediately calls
+`m.Memory()` on it. Any guest calling these two host functions under wasmtime — the
+backend of record — crashes the execution. wazero passes a real module and is unaffected.
+
+The fix is presumably the `ctx.Value(wasmMemBufKey{})` fallback `engine/flush.go`'s
+`writeResult` already uses for exactly this reason. Unrelated to 2.10 beyond having been
+found in the same sweep; recorded here rather than fixed so it gets its own change and its
+own regression test.
+
+---
+
+### 2.15 Durable call failures are all classified as retryable timeouts — OPEN
+
+`cleat.CallErrorCode` exists "so callers can distinguish retryable from non-retryable errors
+without string-matching" (`cleat/runtime.go`). It cannot currently do that. Every failure
+path in `engine/durablecalls.go` and `engine/heartbeats.go` packs `callErrorCode = 1`,
+which the guest enum reads as `CallErrorTimeout` — **retryable** — whether the underlying
+cause was a service error, a replay divergence, a cancellation or an ambiguous result.
+`engine/plugins.go` packs `0` (`CallErrorUnknown`) throughout instead.
+
+So a permanent failure is reported to workflow authors as a transient one. Fixing it means
+classifying errors at the `ServiceCaller` boundary, which is a design change rather than a
+patch, and is why it was left out of the 2.10 work.
+
+---
+
 
 ## Phase 3 — Put falsification in the loop
 

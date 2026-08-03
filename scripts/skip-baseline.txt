@@ -23,7 +23,7 @@ engine	TestIntegrationMultiStepSleep	1
 engine	TestIntegrationNewEventTypesPersistenceRoundTrip	1
 engine	TestIntegrationReplayDivergence	1
 engine	TestIntegrationSignalAndResume	1
-engine	TestIntegrationWorkflowMaxDuration	2
+engine	TestIntegrationWorkflowMaxDuration	1
 engine	TestJavaWorkflowExecute	3
 engine	TestMSSQLFactoryClose	2
 engine	TestMSSQLStoreBasic	1
@@ -52,9 +52,9 @@ engine	TestTenantIsolation_Signals	1
 engine	TestUnauthenticatedQueryRejection	2
 engine	bootstrapScratchDB	1
 engine	buildAssemblyScriptWasm	4
+engine	buildFixtureWasm	1
 engine	buildJavaWasm	4
 engine	buildRustWasm	2
-engine	buildTestWasm	1
 engine	forEachBackend	1
 engine	mysqlIntegrationStore	2
 engine	setupMSSQLIntegrationTest	2
