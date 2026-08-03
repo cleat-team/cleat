@@ -773,6 +773,28 @@ jobs:
           done
           echo "All workers healthy."
 
+          # Assert the property, do not infer it. --rls-check=auto refuses to
+          # start when --require-auth is set and the connection bypasses
+          # row-level security, so a healthy worker implies RLS is enforced --
+          # but that is a chain of reasoning through two defaults, either of
+          # which could change. The worker says so directly; check that it did.
+          #
+          # This is the whole point of the deployment: the compose file
+          # connects workers as cleat_app rather than the superuser that owns
+          # the schema, because PostgreSQL never applies RLS to a superuser and
+          # RLS is the only tenant isolation GetWorkflowByID and ListWorkflows
+          # have (IMPROVEMENT-PLAN 1.10).
+          for svc in $SERVICES; do
+            if ! docker logs "$svc" 2>&1 | grep -q "row-level security is enforced on this connection"; then
+              echo "::error title=RLS not enforced::$svc did not report row-level security as enforced."
+              echo "The worker is on a connection exempt from the tenant isolation policies,"
+              echo "so GetWorkflowByID and ListWorkflows return every tenant's data."
+              docker logs --tail=40 "$svc" 2>&1 || true
+              exit 1
+            fi
+          done
+          echo "All workers report row-level security enforced."
+
           # A worker that boots, dies and is restarted by `restart:
           # unless-stopped` can be momentarily healthy. Restarts mean the
           # cluster is not stable, so fail on any.
