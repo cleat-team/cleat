@@ -126,7 +126,20 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 
 // --- QueryContext ---
 
-func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+// normalizeKVQuery strips identifier quoting so these fakes match on the shape
+// of the SQL rather than on which dialect's quote characters it carries. The
+// plugin quotes `key` (a reserved word in MySQL and SQL Server) via
+// plugin.QuoteIdent, and matching the raw text broke the moment it did.
+func normalizeKVQuery(query string) string {
+	q := query
+	for _, ch := range []string{`"`, "`", "[", "]"} {
+		q = strings.ReplaceAll(q, ch, "")
+	}
+	return q
+}
+
+func (c *fakeConn) QueryContext(_ context.Context, rawQuery string, args []driver.NamedValue) (driver.Rows, error) {
+	query := normalizeKVQuery(rawQuery)
 	if c.shouldFail(query) {
 		return nil, fmt.Errorf("fakeConn: injected error")
 	}

@@ -127,7 +127,7 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
-			INSERT INTO feature_flags (tenant_id, id, key, name, description, enabled, rules, rollout_percentage, created_at, updated_at)
+			INSERT INTO feature_flags (tenant_id, id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		`, p.dialect), tid, id, req.Key, req.Name, req.Description, req.Enabled, rulesJSON, rollout, now, now)
 	if err != nil {
@@ -167,7 +167,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
-			SELECT id, tenant_id, key, name, description, enabled, rules, rollout_percentage, created_at, updated_at
+			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE tenant_id = $1
 			ORDER BY created_at DESC
@@ -215,7 +215,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	var f flagJSON
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, tenant_id, key, name, description, enabled, rules, rollout_percentage, created_at, updated_at
+			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE id = $1 AND tenant_id = $2
 		`, p.dialect), id, tid).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
@@ -270,7 +270,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	argIdx := 2
 
 	if req.Key != nil {
-		query += fmt.Sprintf(", key = $%d", argIdx)
+		query += fmt.Sprintf(", %s = $%d", plugin.QuoteIdent("key", p.dialect), argIdx)
 		args = append(args, *req.Key)
 		argIdx++
 	}
@@ -323,7 +323,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Return the updated flag.
 	var f flagJSON
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, tenant_id, key, name, description, enabled, rules, rollout_percentage, created_at, updated_at
+			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE id = $1 AND tenant_id = $2
 		`, p.dialect), id, tid).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
@@ -406,9 +406,9 @@ func (p *Plugin) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	// Look up the flag by tenant_id and key.
 	var f flagJSON
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, tenant_id, key, name, description, enabled, rules, rollout_percentage, created_at, updated_at
+			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
-			WHERE tenant_id = $1 AND key = $2
+			WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
 		`, p.dialect), tid, req.Key).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 		&f.Enabled, &f.Rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {

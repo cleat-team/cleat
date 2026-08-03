@@ -67,7 +67,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT value, version, created_at, updated_at
 		FROM kv_store
-		WHERE tenant_id = $1 AND key = $2
+		WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
 	`, p.dialect), tid, key).Scan(&value, &version, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "key not found")
@@ -152,7 +152,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 				p.writeError(w, 409, "conflict: version mismatch")
 				return
 			}
-			err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND key = $2`, p.dialect), tid, key).Scan(&newVersion)
+			err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, p.dialect), tid, key).Scan(&newVersion)
 		} else {
 			err = p.db.QueryRow(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
 				value, tid, key, expectedVersion).Scan(&newVersion)
@@ -186,7 +186,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 			p.writeError(w, 500, "failed to store value")
 			return
 		}
-		err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND key = $2`, p.dialect), tid, key).Scan(&newVersion)
+		err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, p.dialect), tid, key).Scan(&newVersion)
 	} else {
 		err = p.db.QueryRow(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
 			tid, key, value).Scan(&newVersion)
@@ -228,7 +228,7 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
 		DELETE FROM kv_store
-		WHERE tenant_id = $1 AND key = $2
+		WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
 	`, p.dialect), tid, key)
 	if err != nil {
 		p.logger.Error("kvstore: delete", "key", key, "error", err)
@@ -263,7 +263,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := `
-		SELECT key, value, version, created_at, updated_at
+		SELECT ` + plugin.QuoteIdent("key", p.dialect) + `, value, version, created_at, updated_at
 		FROM kv_store
 		WHERE tenant_id = $1
 		`
@@ -271,13 +271,13 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	argIdx := 2
 
 	if prefix != "" {
-		query += " AND key LIKE " + fmt.Sprintf("$%d", argIdx)
+		query += " AND " + plugin.QuoteIdent("key", p.dialect) + " LIKE " + fmt.Sprintf("$%d", argIdx)
 		args = append(args, prefix+"%")
 		argIdx++
 	}
 
-	query += " ORDER BY key ASC"
-	query += " LIMIT " + fmt.Sprintf("$%d", argIdx)
+	query += " ORDER BY " + plugin.QuoteIdent("key", p.dialect) + " ASC"
+	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)

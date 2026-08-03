@@ -75,6 +75,16 @@ func TestFFBehavioral_MultiBackend(t *testing.T) {
 			}
 
 			// Initialise the plugin with the real database connection.
+			//
+			// p.dialect is load-bearing and was previously left unset. Every
+			// query goes through plugin.Rebind(query, p.dialect), and Rebind
+			// passes a query through unchanged for a dialect it does not
+			// recognise -- so with the zero value the plugin sent PostgreSQL
+			// $1 placeholders to MySQL and SQL Server and every route returned
+			// 500. Init sets this field; this test built the plugin field by
+			// field instead, and so exercised an object no deployment
+			// produces.
+			p.dialect = pluginDialect
 			p.db = &engine.SQLDBAdapter{DB: be.DB}
 			p.mux = http.NewServeMux()
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -118,12 +128,14 @@ func cleanupFeatureFlags(t *testing.T, p *Plugin) {
 	if p.db == nil {
 		return
 	}
+	// Rebound like every other query the plugin issues: an unrebound $1 is
+	// an unknown column on MySQL and a money literal on SQL Server.
 	_, err := p.db.Exec(context.Background(),
-		`DELETE FROM feature_flags WHERE tenant_id = $1`, testBackendTenantID)
+		plugin.Rebind(`DELETE FROM feature_flags WHERE tenant_id = $1`, p.dialect), testBackendTenantID)
 	if err != nil {
-		// Log rather than fail — the table may not exist on backends that
-		// were not properly set up.
-		t.Logf("cleanup: %v", err)
+		// Not a log: the list scenarios below assert exact counts, so a
+		// cleanup that did not happen silently invalidates them.
+		t.Fatalf("cleanup: clearing feature_flags for tenant %s failed: %v", testBackendTenantID, err)
 	}
 }
 

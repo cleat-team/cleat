@@ -132,7 +132,7 @@ func (c *ffConn) ExecContext(_ context.Context, query string, args []driver.Name
 	c.db.mu.Lock()
 	defer c.db.mu.Unlock()
 
-	q := strings.ReplaceAll(query, "\n", " ")
+	q := normalizeFFQuery(query)
 	switch {
 	case strings.Contains(q, "INSERT INTO feature_flags"):
 		return c.execInsert(args)
@@ -232,11 +232,24 @@ func (c *ffConn) execDelete(args []driver.NamedValue) (driver.Result, error) {
 
 // ---- QueryContext ----
 
+// normalizeFFQuery flattens a query for substring matching and strips
+// identifier quoting, so these fakes match on the shape of the SQL rather than
+// on which dialect's quote characters it happens to carry. The plugin quotes
+// `key` (a reserved word in MySQL and SQL Server) via plugin.QuoteIdent, and
+// matching the raw text made these tests fail the moment it did.
+func normalizeFFQuery(query string) string {
+	q := strings.ReplaceAll(query, "\n", " ")
+	for _, ch := range []string{`"`, "`", "[", "]"} {
+		q = strings.ReplaceAll(q, ch, "")
+	}
+	return q
+}
+
 func (c *ffConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.db.mu.RLock()
 	defer c.db.mu.RUnlock()
 
-	q := strings.ReplaceAll(query, "\n", " ")
+	q := normalizeFFQuery(query)
 	switch {
 	case strings.Contains(q, "FROM feature_flags") && strings.Contains(q, "WHERE tenant_id") && strings.Contains(q, "AND key") && strings.Contains(q, "created_at"):
 		return c.queryByTenantAndKey10(args)
