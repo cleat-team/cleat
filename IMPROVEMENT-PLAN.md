@@ -705,6 +705,22 @@ layout the caller actually decodes: `responseLen=0`, `callErrorCode=CallErrorInv
 `cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`,
 `plugin_call_streaming` — on **both** backends.
 
+The message the author reads was wrong in the same way, and separately. The generated
+`callErrorMessage` was handed `errCode` — the bits 0-7 "did it fail" flag, which is 1 for
+essentially every failure — but printed it against a legend enumerating **`CallErrorCode`**
+values. So the two halves of the same error contradicted each other:
+
+```
+before:  durable call noop.Noop: [4278190080] cleat_call: error 1 (... 1=timeout ...)
+after:   durable call noop.Noop: [4]          cleat_call: error 4 (... 4=invalid ...)
+```
+
+The three durable-call adapters now pass `callErrorCode`, pinned by
+`TestHostAdapterReportsCallErrorCodeNotErrCode` and verified end-to-end through a real WASM
+guest. Note the legend is pasted into ~20 other adapter defs where there is no
+`callErrorCode` field at all — for those it is decorative and misleading, and removing it is
+cosmetic follow-up rather than a correctness fix.
+
 **A second, independent defect found on the way: empty payloads were refused.**
 `readWasmStringValidated` treats length 0 as invalid, and every caller turns that into
 `errBadParam`. But emptiness is a property of a payload, not a defect in it. A durable call

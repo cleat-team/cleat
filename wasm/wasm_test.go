@@ -802,3 +802,30 @@ func TestCollectHostCallsCallsNilBody(t *testing.T) {
 	collectHostCallsCalls(fd, info)
 	// Should not panic when Ast is nil.
 }
+
+// TestHostAdapterReportsCallErrorCodeNotErrCode pins which of the two decoded
+// codes reaches the error message.
+//
+// The generated adapter decodes two separate fields: callErrorCode (bits 8-39,
+// a cleat.CallErrorCode) and errCode (bits 0-7, a "did it fail" flag that is 1
+// for essentially every failure). callErrorMessage's legend enumerates
+// CallErrorCode values, so passing errCode made the message contradict the
+// CallError.Code beside it -- a refused durable call reported Code 4 (invalid
+// request) and then said "error 1", which the legend reads as a *timeout*.
+// That is the same mis-signalling IMPROVEMENT-PLAN.md 2.10 is about, on the
+// human-readable side rather than the structured one.
+func TestHostAdapterReportsCallErrorCodeNotErrCode(t *testing.T) {
+	result, cr := loadBasic(t)
+	usage := AnalyzeUsage(result, cr)
+	code := string(GenerateHostAdapter("basic", usage, "go"))
+
+	want := `callErrorMessage("cleat_call", responseBuf, responseLen, uint32(callErrorCode))`
+	if !strings.Contains(code, want) {
+		t.Errorf("generated adapter does not pass callErrorCode to callErrorMessage.\nwant substring: %s", want)
+	}
+	if strings.Contains(code, `callErrorMessage("cleat_call", responseBuf, responseLen, errCode)`) {
+		t.Error("generated adapter passes errCode to callErrorMessage; the legend in " +
+			"that message describes CallErrorCode values, so this reports a refused " +
+			"call as a timeout")
+	}
+}

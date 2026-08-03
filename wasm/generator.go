@@ -390,11 +390,19 @@ func stringPtr(s string) (unsafe.Pointer, uint32) {
 // callErrorMessage builds an error message for a cleat host call failure.
 // If the host wrote a response even on error (e.g. replay divergence details),
 // the response text is included; otherwise a generic message is used.
-func callErrorMessage(callName string, responseBuf []byte, responseLen uint32, errCode uint32) string {
+//
+// The code printed here is the callErrorCode -- the same value that goes into
+// CallError.Code -- and not the errCode. The legend below enumerates
+// cleat.CallErrorCode values, so pairing it with errCode (the 0-7 bit "did it
+// fail" flag, which is 1 for essentially every failure) made the message
+// contradict the Code beside it: a refused call reported Code 4 (invalid) and
+// then said "error 1", which the legend reads as a timeout. See
+// IMPROVEMENT-PLAN.md 2.10.
+func callErrorMessage(callName string, responseBuf []byte, responseLen uint32, callErrorCode uint32) string {
 	if responseLen > 0 && int(responseLen) <= len(responseBuf) {
 		return string(responseBuf[:responseLen])
 	}
-	return fmt.Sprintf("%s: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", callName, errCode)
+	return fmt.Sprintf("%s: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", callName, callErrorCode)
 }
 
 `)
