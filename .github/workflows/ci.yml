@@ -811,11 +811,36 @@ jobs:
           # the schema, because PostgreSQL never applies RLS to a superuser and
           # RLS is the only tenant isolation GetWorkflowByID and ListWorkflows
           # have (IMPROVEMENT-PLAN 1.10).
+          # Retried, because a single `docker logs` read is not a reliable
+          # witness. Observed twice on 2026-08-03: the grep below reported
+          # cleat-worker-3 had not logged the line at 14:05:53.445, and the
+          # `docker logs --tail=40` dump in this very failure branch printed
+          # that exact line 9ms later, from a write timestamped 14:05:46.992 --
+          # six seconds before the grep. The same flake hit cleat-dashboard on
+          # develop (99543da0). Whether docker logs returned truncated output
+          # or failed outright, piping it straight into grep cannot tell the
+          # difference between "the line is absent" and "the read did not work"
+          # -- an error message on stderr just fails to match.
+          #
+          # So: capture the output, so a failed read is a failed read, and give
+          # it a bounded number of attempts. A worker that genuinely never
+          # reports RLS still fails the job, roughly 20s later than before.
           for svc in $SERVICES; do
-            if ! docker logs "$svc" 2>&1 | grep -q "row-level security is enforced on this connection"; then
+            RLS_OK=0
+            for _ in $(seq 1 10); do
+              if LOGS="$(docker logs "$svc" 2>&1)" &&
+                 printf '%s' "$LOGS" | grep -q "row-level security is enforced on this connection"; then
+                RLS_OK=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$RLS_OK" -ne 1 ]; then
               echo "::error title=RLS not enforced::$svc did not report row-level security as enforced."
               echo "The worker is on a connection exempt from the tenant isolation policies,"
               echo "so GetWorkflowByID and ListWorkflows return every tenant's data."
+              echo "Checked 10 times over ~20s, so this is not the log-read race"
+              echo "that produced false failures before 2026-08-03."
               docker logs --tail=40 "$svc" 2>&1 || true
               exit 1
             fi

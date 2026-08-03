@@ -38,21 +38,40 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// The candidate set is selected in a CTE, not an IN (SELECT ... LIMIT n)
-	// sublink, and that is load-bearing rather than stylistic.
+	// The candidate set is selected in a CTE rather than an
+	// `id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` sublink. Both forms
+	// respect the limit; this one is kept because it is evaluated once by
+	// construction rather than by argument.
 	//
-	// When an UPDATE meets a row another transaction has concurrently
-	// modified, PostgreSQL re-reads that row and re-evaluates the WHERE
-	// clause against the new version (EvalPlanQual). Re-evaluating a WHERE
-	// clause that contains `id IN (SELECT ... ORDER BY ... LIMIT n FOR UPDATE
-	// SKIP LOCKED)` re-executes the sublink, which returns a *different* n
-	// rows each time -- so a claim for n could update far more than n. It was
-	// observed asking for 3 and returning 10 (every eligible row) whenever
-	// other workers were claiming from the same table, which is precisely
-	// when a worker must not exceed its concurrency budget.
+	// This comment used to claim the sublink form was unsafe -- that an
+	// EvalPlanQual recheck re-executes it and a claim for n could update far
+	// more than n. That explanation is wrong, and is corrected here rather
+	// than left in place, because a plausible-sounding false mechanism in a
+	// comment is worse than no comment. Two independent reasons it cannot
+	// happen, on PostgreSQL 16:
 	//
-	// A CTE is evaluated once, so the limit holds however much concurrency
-	// there is.
+	//   - The sublink is uncorrelated, so the planner pulls it up into a
+	//     semi-join. EXPLAIN (ANALYZE, VERBOSE) of the old form shows the
+	//     candidate subquery as the *outer* side of a nested loop, executed
+	//     once (loops=1) and unique-ified through a HashAggregate, with a
+	//     primary-key index scan on the inner side. The UPDATE therefore
+	//     visits exactly the candidate rows and no others. EvalPlanQual can
+	//     only keep or drop a row the UPDATE already visits; it cannot add
+	//     rows to the update set.
+	//   - The sublink's LockRows node takes FOR UPDATE on the candidates
+	//     before the outer UPDATE reaches them, so no concurrent transaction
+	//     can modify those rows mid-statement. EvalPlanQual has nothing to
+	//     fire on.
+	//
+	// Also checked empirically against the old form: 24,000 claims with 12
+	// concurrent claimers and 10 disrupting transactions committing mid-claim
+	// -- including ones mutating `status`, which the sublink's own WHERE
+	// clause reads -- over candidate sets of 40, 400 and 5010 rows. The most
+	// any single claim ever returned was exactly the limit.
+	//
+	// So the "asked for 3, got 10" observation in IMPROVEMENT-PLAN.md 2.11 is
+	// still unexplained, but it is not this. Do not treat the CTE as the fix
+	// for it.
 	rows, err := tx.QueryContext(ctx, `
 		WITH candidates AS (
 			SELECT id FROM workflow_instances
@@ -125,9 +144,9 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// CTE rather than an IN (SELECT ... LIMIT n) sublink, for the reason
-	// documented in ClaimWorkflows above: the sublink is re-executed on an
-	// EvalPlanQual recheck and the limit stops holding under concurrency.
+	// CTE rather than an IN (SELECT ... LIMIT n) sublink, for consistency with
+	// ClaimWorkflows above -- see the note there, including why the
+	// EvalPlanQual explanation this comment used to give is wrong.
 	rows, err := tx.QueryContext(ctx, `
 		WITH candidates AS (
 			SELECT id FROM workflow_instances

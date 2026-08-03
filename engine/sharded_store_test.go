@@ -3714,3 +3714,89 @@ func TestGetRoutingRules_NoShard(t *testing.T) {
 		t.Fatal("expected error for nil shard")
 	}
 }
+
+// TestShardedClaimWorkflows_OverClaimsAcrossShards pins a defect rather than a
+// desired behaviour, and is written to fail loudly when someone fixes it.
+//
+// ClaimWorkflows fans out to every shard concurrently and passes each one the
+// *full* limit, then truncates the merged slice with `all = all[:limit]`. The
+// return value therefore respects the limit, which is why nothing noticed. But
+// the rows beyond it have already been updated to status='running' with
+// assigned_to set to this worker, in their own shards, inside committed
+// transactions. Truncating the slice does not release them: they are claimed
+// by a worker that will never execute them, and stay that way until the lease
+// or heartbeat reaper takes them back.
+//
+// With S shards and limit L a single poll can strand up to (S-1)*L workflows.
+// It cannot bite a single-shard deployment, which is presumably why it has
+// survived. ShardedStore is wired in production at cmd/cleat-worker/main.go.
+//
+// Note the doc comment on ClaimWorkflows describes the *correct* behaviour --
+// "Iterates through shards collecting workflows until limit is reached or
+// shards exhausted" -- which is not what the code does. See
+// IMPROVEMENT-PLAN.md 2.17 for the options.
+func TestShardedClaimWorkflows_OverClaimsAcrossShards(t *testing.T) {
+	const shardCount, limit = 3, 2
+
+	var mu sync.Mutex
+	askedFor := []int{}
+	claimedInDB := 0
+
+	stores := make([]WorkflowStore, shardCount)
+	configs := make([]ShardConfig, shardCount)
+	closers := make([]func() error, shardCount)
+	for i := 0; i < shardCount; i++ {
+		i := i
+		stores[i] = &mockShardStore{
+			claimWorkflowsFn: func(_ context.Context, worker string, l int) ([]*WorkflowInstance, error) {
+				// A shard with plenty of ready work claims everything it is
+				// allowed to, and those rows are 'running' from here on.
+				mu.Lock()
+				askedFor = append(askedFor, l)
+				claimedInDB += l
+				mu.Unlock()
+				out := make([]*WorkflowInstance, l)
+				for k := range out {
+					out[k] = &WorkflowInstance{ID: fmt.Sprintf("s%d-%d", i, k), Status: "running", AssignedTo: worker}
+				}
+				return out, nil
+			},
+		}
+		configs[i] = ShardConfig{Name: fmt.Sprintf("shard%d", i)}
+		closers[i] = func() error { return nil }
+	}
+
+	s, err := NewShardedStore(configs, stores, closers)
+	if err != nil {
+		t.Fatalf("NewShardedStore: %v", err)
+	}
+
+	got, err := s.ClaimWorkflows(context.Background(), "worker-1", limit)
+	if err != nil {
+		t.Fatalf("ClaimWorkflows: %v", err)
+	}
+
+	// The visible half of the contract holds.
+	if len(got) != limit {
+		t.Errorf("returned %d workflows, want %d", len(got), limit)
+	}
+
+	// The invisible half does not. Every shard was handed the whole budget.
+	mu.Lock()
+	defer mu.Unlock()
+	for _, l := range askedFor {
+		if l != limit {
+			t.Errorf("a shard was asked for %d, expected the un-apportioned %d "+
+				"-- if this changed, the limit is now being divided across "+
+				"shards and this test should become an assertion that "+
+				"claimedInDB == limit", l, limit)
+		}
+	}
+	stranded := claimedInDB - len(got)
+	if stranded != (shardCount-1)*limit {
+		t.Errorf("stranded %d workflows, expected %d; the over-claim has "+
+			"changed shape -- reread IMPROVEMENT-PLAN.md 2.17", stranded, (shardCount-1)*limit)
+	}
+	t.Logf("claimed %d rows in the databases, returned %d, stranded %d "+
+		"as running with no executor", claimedInDB, len(got), stranded)
+}

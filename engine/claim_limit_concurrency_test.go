@@ -15,20 +15,22 @@ import (
 //
 // Honest statement of what this does and does not establish. The cluster CI
 // job produced a claim for 3 that returned 10 -- every eligible row -- and the
-// diagnostic in describeClaimState confirmed all ten were left `running`, so a
-// single statement updated all of them. The suspected mechanism is that
-// PostgreSQL re-evaluates an UPDATE's WHERE clause against the new version of
-// any concurrently-modified row (EvalPlanQual), and re-evaluating
-// `id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` re-executes the sublink,
-// which can select different rows each time. ClaimWorkflows now selects its
-// candidates in a CTE, which is evaluated once.
+// diagnostic in describeClaimState confirmed all ten were left `running`.
 //
-// **This test has not been shown to fail against the old form.** It was run
-// against it repeatedly, with concurrent claimers and with a background sweep
-// updating the same rows without SKIP LOCKED, and passed every time. So it is
-// a regression guard for the invariant, not a reproduction of the observed
-// failure, and the CTE is a defensive change rather than a proven fix. The
-// reproduction is still open -- see IMPROVEMENT-PLAN.md 2.11.
+// The mechanism previously suspected, and written into this comment and the
+// query, was an EvalPlanQual recheck re-executing the
+// `id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` sublink. **That has now
+// been ruled out**, both mechanically and empirically -- see the note on
+// ClaimWorkflows in store_lifecycle.go, and IMPROVEMENT-PLAN.md 2.11. The
+// SQL, in either form, cannot return more rows than its limit.
+//
+// So this remains a regression guard for the invariant rather than a
+// reproduction of the observed failure, and the cause of that failure is still
+// unexplained. What it is *not* is a guard against the one over-claim that has
+// since been demonstrated: ShardedStore hands every shard the full limit and
+// discards the excess after the shards have already marked those rows running
+// (TestShardedClaimWorkflows_OverClaimsAcrossShards, IMPROVEMENT-PLAN.md 2.17).
+// This test uses a single store and cannot see that.
 func TestClaimWorkflows_RespectsLimitUnderConcurrency(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
