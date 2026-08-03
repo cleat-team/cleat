@@ -1,6 +1,6 @@
 # Improvement Plan — seam hardening
 
-**Generated:** 2026-08-02 · **`develop` @ `a2b220c`**
+**Generated:** 2026-08-02 · **Last updated:** 2026-08-03 · **`develop` @ `c26c332`**
 
 Derived from a nine-agent adversarial review. The finding that organises this plan:
 
@@ -13,6 +13,83 @@ layer that would have caught it.** Not "fix everything, then add tests." The who
 this codebase is that unit tests passed while the feature was dead.
 
 Effort is given in solo+AI sessions (a session ≈ half a day of your attention).
+
+---
+
+## Start here — next session
+
+PR #218 landed as `c26c332`: the CI signal is restored and every workflow is genuinely
+green. What follows is ordered by yield, not by section number.
+
+### 1. Audit the 166 environment-conditional skips  ·  ~1 session  ·  highest yield
+
+`grep -rn "t.Skip" --include='*_test.go' .` returns 225 sites, 166 of which skip on an
+environment condition. **Every one is currently indistinguishable from a pass**, and that
+exact mechanism accounted for four separate findings in the last session:
+
+| Finding | What the skip hid |
+|---|---|
+| 1.13 | Multi-DB CI never reached PostgreSQL — green for months |
+| 1.9 | `test-go`'s Postgres service had no published port |
+| 2.9 | `DURABLE_TEST_DB` had been renamed; nothing noticed |
+| 1.11 | Cluster workers crash-looping while the job reported success |
+
+The fix pattern is already in the tree — `engine/testutil.TestDB` now distinguishes *no
+database was asked for* (skip) from *a database was asked for and is unreachable* (fail),
+per dialect. Apply it everywhere:
+
+1. Enumerate the 166 and classify: (a) genuinely optional capability, (b) configured-but-
+   unreachable, (c) skip that should just be a `t.Fatal`, (d) dead skip whose condition can
+   no longer be true.
+2. Convert (b) and (c). Delete (d).
+3. Add a guard — a CI step that fails when the skip count in a job exceeds a baseline, the
+   same shape as `scripts/check-test-only-code.sh`. The cluster job already warns on
+   skips; make it a number that cannot silently grow.
+
+Mechanical, cheap, and it closes the single most productive defect-hiding mechanism in the
+repo. Do it first.
+
+### 2. `DurableCall` fails at the ABI boundary  ·  1–2 sessions  ·  see 2.10
+
+`testdata/basic`'s `LongRunning` gets error `0xFF000000` from the host-call path on
+iteration 0, and under wazero the worker logs a nil-pointer panic in
+`wasi_snapshot_preview1.clock_time_get` beneath `DurableCall`. Whether those are one bug or
+two is not established. This is in the **examples**, not the tests, and it is why
+`TestIntegrationWorkflowMaxDuration` is honestly skipped rather than passing.
+
+Reproduce under **wasmtime** first (`CLAUDE.md`: wasmtime is the behaviour of record;
+wazero has its own bug tail). Note `cleat build` emits
+`host function "cleat_complete" imported from WASM env but not in computed closure` for
+this fixture — establish whether that is the same defect before assuming it is.
+
+### 3. Reproduce the `limit=3 → 10` over-claim  ·  ~0.5 session  ·  see 2.11
+
+The CTE in `ClaimWorkflows`/`ClaimStickyWorkflows` is **defensive and unfalsified**. Start
+by reproducing the bug, not by trusting the fix. What has already been tried and did *not*
+reproduce it: concurrent claimers; a background sweep updating the same rows without
+`SKIP LOCKED`. What has not: a competing `UPDATE` inside an explicit transaction that
+commits mid-claim, a larger candidate set, and `EXPLAIN (ANALYZE, VERBOSE)` on the old
+sublink form under contention. If it cannot be reproduced, say so in 2.11 and leave the
+CTE as documented defence — do not upgrade it to "fixed".
+
+### 4. Then Phase 2's remaining seam tests
+
+2.1 golden path, 2.2 two-worker race, 2.3 cancellation e2e, 2.4 crash recovery, 2.7 deploy
+manifests. 2.6 (tenant isolation through the HTTP API) is now worth more than it was: RLS
+is genuinely enforced as of 1.10, so an end-to-end test can finally prove isolation rather
+than prove a policy exists.
+
+### Standing constraints, carried forward
+
+- **`docker-compose.cluster.yml` is only ever exercised in CI.** colima cannot share this
+  repo's path (`/Users/Shared/localssd/...`), so compose changes cannot be tested locally.
+  Verify scripts inside a container, expect a CI round trip for mount wiring, and remember
+  it has already broken once that way.
+- **Two DSNs now.** `--db` is the unprivileged `cleat_app`; `--migrate-db` is the owner.
+  A worker that cannot run DDL is behaving correctly.
+- **Still open, needing a decision:** PR #208 (open, CONFLICTING). `BRANCH-TRIAGE.md`
+  covers the rest of the unmerged branches; several predate `3eeb74e` and will not merge
+  cleanly.
 
 ---
 
