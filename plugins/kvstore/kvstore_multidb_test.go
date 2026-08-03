@@ -3,10 +3,10 @@
 // MSSQL). These tests complement the existing in-memory fake-driver tests
 // in kvstore_test.go and are kept in a separate file to keep them distinct.
 //
-// When a backend lacks dialect-specific migration SQL (e.g. UpMySQL or
-// UpMSSQL is empty), the test skips with a descriptive message rather than
-// failing. Currently the kvstore plugin only has a PostgreSQL migration, so
-// only the postgres backend exercises real queries.
+// migrations.go provides full UpMySQL and UpMSSQL DDL alongside the
+// PostgreSQL Up field, so every backend testutil.NewPluginTestBackends
+// returns exercises real queries -- there is no dialect this suite still
+// needs to skip.
 package kvstore
 
 import (
@@ -40,16 +40,6 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 
 			p := &Plugin{}
 			ctx := context.Background()
-
-			// Check whether this dialect has migration SQL. The kvstore plugin
-			// currently only provides a PostgreSQL migration (the Up field). For
-			// MySQL and MSSQL the plugin has no dialect-specific DDL, so
-			// RunMigrations skips it and the table is never created.
-			if be.Dialect == testutil.DialectMySQL || be.Dialect == testutil.DialectMSSQL {
-				if !pluginHasDialectMigration(p, be.Dialect) {
-					t.Skipf("kvstore plugin does not have %s migrations yet", be.Name)
-				}
-			}
 
 			// Run plugin migrations to create the kv_store table.
 			pluginDialect := plugin.Dialect(string(be.Dialect))
@@ -140,28 +130,6 @@ func cleanupKVStore(t *testing.T, p *Plugin) {
 		// not happen silently invalidates the assertions that follow it.
 		t.Fatalf("cleanup: clearing kv_store for tenant %s failed: %v", testTenantID, err)
 	}
-}
-
-// pluginHasDialectMigration returns true if the plugin has at least one
-// migration with dialect-specific DDL (UpMySQL or UpMSSQL) for the given
-// dialect. For PostgreSQL we always return true since the Up field is the
-// default and is always populated.
-func pluginHasDialectMigration(p *Plugin, dialect testutil.Dialect) bool {
-	for _, m := range p.Migrations() {
-		var ddl string
-		switch dialect {
-		case testutil.DialectMySQL:
-			ddl = m.UpMySQL
-		case testutil.DialectMSSQL:
-			ddl = m.UpMSSQL
-		default:
-			return true // PostgreSQL always has the Up field
-		}
-		if ddl != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // beReq creates an HTTP request authenticated with the test tenant ID. The

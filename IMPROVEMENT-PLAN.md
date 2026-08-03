@@ -1,6 +1,6 @@
 # Improvement Plan — seam hardening
 
-**Generated:** 2026-08-02 · **`develop` @ `a2b220c`**
+**Generated:** 2026-08-02 · **Last updated:** 2026-08-03 · **`develop` @ `c26c332`**
 
 Derived from a nine-agent adversarial review. The finding that organises this plan:
 
@@ -13,6 +13,87 @@ layer that would have caught it.** Not "fix everything, then add tests." The who
 this codebase is that unit tests passed while the feature was dead.
 
 Effort is given in solo+AI sessions (a session ≈ half a day of your attention).
+
+---
+
+## Start here — next session
+
+PR #218 landed as `c26c332`: the CI signal is restored and every workflow is genuinely
+green. What follows is ordered by yield, not by section number.
+
+### 1. Audit the 166 environment-conditional skips  —  ✅ **done**, see §2.12
+
+> **Done.** 231 sites (not 225 — see §2.12 for why the grep undercounted) reduced to 184,
+> with two new guards to stop the number growing again. Three defects fell out of it, one
+> of them a live cross-tenant gap on MySQL. The original framing is kept below.
+
+`grep -rn "t.Skip" --include='*_test.go' .` returns 225 sites, 166 of which skip on an
+environment condition. **Every one is currently indistinguishable from a pass**, and that
+exact mechanism accounted for four separate findings in the last session:
+
+| Finding | What the skip hid |
+|---|---|
+| 1.13 | Multi-DB CI never reached PostgreSQL — green for months |
+| 1.9 | `test-go`'s Postgres service had no published port |
+| 2.9 | `DURABLE_TEST_DB` had been renamed; nothing noticed |
+| 1.11 | Cluster workers crash-looping while the job reported success |
+
+The fix pattern is already in the tree — `engine/testutil.TestDB` now distinguishes *no
+database was asked for* (skip) from *a database was asked for and is unreachable* (fail),
+per dialect. Apply it everywhere:
+
+1. Enumerate the 166 and classify: (a) genuinely optional capability, (b) configured-but-
+   unreachable, (c) skip that should just be a `t.Fatal`, (d) dead skip whose condition can
+   no longer be true.
+2. Convert (b) and (c). Delete (d).
+3. Add a guard — a CI step that fails when the skip count in a job exceeds a baseline, the
+   same shape as `scripts/check-test-only-code.sh`. The cluster job already warns on
+   skips; make it a number that cannot silently grow.
+
+Mechanical, cheap, and it closes the single most productive defect-hiding mechanism in the
+repo. Do it first.
+
+### 2. `DurableCall` fails at the ABI boundary  ·  1–2 sessions  ·  see 2.10
+
+`testdata/basic`'s `LongRunning` gets error `0xFF000000` from the host-call path on
+iteration 0, and under wazero the worker logs a nil-pointer panic in
+`wasi_snapshot_preview1.clock_time_get` beneath `DurableCall`. Whether those are one bug or
+two is not established. This is in the **examples**, not the tests, and it is why
+`TestIntegrationWorkflowMaxDuration` is honestly skipped rather than passing.
+
+Reproduce under **wasmtime** first (`CLAUDE.md`: wasmtime is the behaviour of record;
+wazero has its own bug tail). Note `cleat build` emits
+`host function "cleat_complete" imported from WASM env but not in computed closure` for
+this fixture — establish whether that is the same defect before assuming it is.
+
+### 3. Reproduce the `limit=3 → 10` over-claim  ·  ~0.5 session  ·  see 2.11
+
+The CTE in `ClaimWorkflows`/`ClaimStickyWorkflows` is **defensive and unfalsified**. Start
+by reproducing the bug, not by trusting the fix. What has already been tried and did *not*
+reproduce it: concurrent claimers; a background sweep updating the same rows without
+`SKIP LOCKED`. What has not: a competing `UPDATE` inside an explicit transaction that
+commits mid-claim, a larger candidate set, and `EXPLAIN (ANALYZE, VERBOSE)` on the old
+sublink form under contention. If it cannot be reproduced, say so in 2.11 and leave the
+CTE as documented defence — do not upgrade it to "fixed".
+
+### 4. Then Phase 2's remaining seam tests
+
+2.1 golden path, 2.2 two-worker race, 2.3 cancellation e2e, 2.4 crash recovery, 2.7 deploy
+manifests. 2.6 (tenant isolation through the HTTP API) is now worth more than it was: RLS
+is genuinely enforced as of 1.10, so an end-to-end test can finally prove isolation rather
+than prove a policy exists.
+
+### Standing constraints, carried forward
+
+- **`docker-compose.cluster.yml` is only ever exercised in CI.** colima cannot share this
+  repo's path (`/Users/Shared/localssd/...`), so compose changes cannot be tested locally.
+  Verify scripts inside a container, expect a CI round trip for mount wiring, and remember
+  it has already broken once that way.
+- **Two DSNs now.** `--db` is the unprivileged `cleat_app`; `--migrate-db` is the owner.
+  A worker that cannot run DDL is behaving correctly.
+- **Still open, needing a decision:** PR #208 (open, CONFLICTING). `BRANCH-TRIAGE.md`
+  covers the rest of the unmerged branches; several predate `3eeb74e` and will not merge
+  cleanly.
 
 ---
 
@@ -645,6 +726,110 @@ Two further findings fell out of that:
   defensive change on a plausible mechanism, and the test is a regression guard for the
   invariant rather than a reproduction. Both are labelled that way in the source. Anyone
   picking this up should start by reproducing the over-claim, not by trusting the fix.
+
+---
+
+### 2.12 The conditional-skip audit — 231 → 184, and three defects behind the skips
+
+Two guards now exist, both shaped after `scripts/check-test-only-code.sh`:
+
+- **`scripts/check-skips.sh`** — every skip site in the tree is baselined as
+  `<package><TAB><enclosing func><TAB><count>`. A new skip, or a growing count, fails the
+  lint job. A count that *falls* never fails; it prints a note to tighten the baseline.
+- **`scripts/check-skip-budget.sh`** — the runtime half, since a static scan cannot see
+  that a skip *fired*. Per-job ceilings in `scripts/skip-budget.txt`, checked against
+  `go test -json` output. A missing report, or one with no test results at all, fails:
+  a job that died before producing output has skipped everything.
+
+The three `Warn on skipped tests` steps are gone. A warning on a green job is not a signal
+— the multi-DB Postgres bug (1.13) emitted one for its entire existence.
+
+**The grep in §1 undercounted, in both directions.** 225 included four prose comments
+discussing `t.Skipf`, and missed the two `unavailable := t.Skipf` sites where the skip is
+taken as a *function value* — which is the shape of the already-fixed `TestDB` pattern
+itself — plus five in `engine/testutil/`, which is not a `_test.go` file but decides
+whether every database-backed test in the repo runs. Real total: 231. The guard counts all
+three forms.
+
+**Three defects were behind skips, each found by converting one.**
+
+1. **MySQL had no unauthenticated-query rejection at all.** `TestUnauthenticatedQueryRejection`'s
+   type switch had no `case *MySQLStore`, so the MySQL subtest fell to `default:` and
+   skipped — unconditionally, every run, including in `multi-db-ci.yml`'s `test-mysql` job,
+   which exists to test MySQL. Writing the case proved the gap against a real MySQL 8.4:
+   `GetActiveInstanceCountsByVersion` with an empty `tenantID` returned **no error**,
+   just an empty result. `MSSQLStore` has had this check since it was written
+   (`setSessionContext`); MySQL had **90 references to `s.tenantID` and not one guard**.
+   Since MySQL also has zero RLS policies (1.7), nothing else was scoping the query.
+   `requireTenant` added and applied to that one method. **The other ~89 call sites are
+   not audited** — that is 1.7, and the helper's doc comment says so explicitly rather
+   than letting its presence imply the problem is solved.
+
+2. **33 skips that could not mean what they said.** `engine/backend_wasmtime_test.go` and
+   `..._limits_test.go` are `//go:build cgo`; the `!cgo` stub returning "requires CGO" is
+   unreachable from them. So `t.Skipf("wasmtime backend not available")` could only fire
+   on a genuine init failure of the **primary** backend — silently deleting the whole
+   suite, including the four regression tests for the runaway-workflow hang (1.5). Now
+   `t.Fatalf`.
+
+3. **`TestVetPython` was vacuous in every environment.** `runVetPython` exits 0 when it
+   finds violations, so the test's `if err != nil { skip }` never meant "vet found the
+   violation" — it meant `cleat_sdk` was unimportable, which it always was, because
+   `findPythonSDKDir()` resolves relative to a cwd that is never the repo root under
+   `go test`. The non-skip branch asserted nothing either. It now sets `PYTHONPATH` and
+   asserts `PY002` is present; deliberately breaking the expectation was confirmed to fail it.
+
+**Found on the way, not fixed — these are the honest leftovers.**
+
+- **Six of the seven `tests/` suites are run by nothing.** `tests/cluster`, `integrity`,
+  `upgrade`, `soak`, `scale` and `cross-language` are named by no workflow file. The
+  `cluster` CI job runs `./engine/...`, not `tests/cluster/`; `e2e-cross-language.yml`
+  runs `./engine/...` with a `-run` filter, not `tests/cross-language/`. Only
+  `tests/plugin-harness` is actually executed. Note this contradicts `f4322e3`'s claim
+  that `tests/integrity` and `tests/cross-language` "now actually execute" — they execute
+  if run, and nothing runs them.
+- **`check-ci-package-coverage.sh` exempted `tests` on the stated grounds that its suites
+  are "driven by their own dedicated CI jobs".** That was an assertion, not a check, and
+  it was false — the same rot the guard exists to catch, inside the guard's own exemption
+  list. It now verifies the claim, with the six unwired suites baselined.
+- **`plugin-harness-ci.yml`'s `test-multi-db` job is entirely vacuous.** It provisions
+  PostgreSQL, MySQL and SQL Server, sets all three DSNs, and runs exactly one test —
+  `TestPluginCalls_MultiDB` — whose first statement is an unconditional `t.Skip` for a
+  wazero v1.11.1 nil-Sys panic. Budgeted at 1 so it is recorded rather than breaking the
+  build; drop to 0 when the skip goes.
+- **`Makefile`'s `test-cluster` ran `./internal/host/...`**, a path dead since `3eeb74e`.
+  Repointed at `./engine/...` with `-p 1`, matching the CI job.
+- **`TestMySQLStoreFactory` gates on `CLEAT_TEST_MYSQL` and then ignores its value**,
+  hardcoding `tcp(127.0.0.1:3306)`. Harmless in CI, but the same config-drift family.
+- **`plugins/scheduler`'s `TestNextRun_Feb29NonLeapYear`** is not environment-conditional
+  at all: `nextRun`'s one-year search window cannot find a Feb 29 more than a year out.
+  A real scheduler gap wearing a skip's clothing.
+
+**What did not change, deliberately.** The 112 `mysql` and 112 `mssql` dialect subtests
+that skip in the `engine` job are correct: that job configures PostgreSQL only. A skip is
+allowed to mean "nobody asked for this" and nothing else — that is the whole rule, and
+the budget of 347 records those rather than hiding them.
+
+Budgets: core 0, engine 347, cluster 347, wasm 1, internal 0, plugins 1, support 2,
+commands 4, fuzz 1, plugin-harness/multi-db 1.
+
+**Two were wrong on the first CI run, in a way worth recording.** Both were seeded from a
+local machine and both failed for the same underlying reason — a budget is a claim about
+an environment, and the environment used to measure it was not the one it describes.
+
+- `engine` was seeded at 343 from a darwin machine that had **cargo installed**. The four
+  `TestRustWorkflow*` tests passed there and skip on the runner, which installs Rust only
+  for the `internal` matrix entry. The measuring environment was *richer* than CI, so the
+  budget was too tight. Corrected to 347.
+- `cluster` was seeded at 0 on the reasoning that a job bringing up four workers and a
+  database has provisioned everything its tests need. That was wrong about *which* tests
+  it runs: it executes `go test ./engine/...`, which carries the entire MySQL and SQL
+  Server suite, and the job configures neither. Corrected to 347. Cluster health is
+  asserted by the healthcheck and restart-count steps, not by the skip count.
+
+Neither run had a single test *failure* — `passed=2984 failed=0` in both. The guard did
+exactly what it was built to do on its first outing, which was to disagree with a number
+somebody had asserted without observing.
 
 ---
 

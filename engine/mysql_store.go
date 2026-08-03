@@ -55,6 +55,12 @@ func isDeadlockError(err error) bool {
 // tenant's database, making cross-tenant data access impossible at the
 // connection level. WHERE tenant_id = ? clauses are retained as
 // defense-in-depth.
+//
+// Because there is no RLS, those WHERE clauses are the only thing scoping a
+// query to a tenant once a connection is open — PostgreSQL's seven policies
+// have no MySQL equivalent (IMPROVEMENT-PLAN.md 1.7). A tenantID of "" is
+// therefore not a harmless empty filter: it is a query running with no
+// identity and no database-level backstop. See requireTenant below.
 type MySQLStore struct {
 	db                *sql.DB
 	taskQueues        []string
@@ -136,6 +142,37 @@ func (s *MySQLStore) log() *slog.Logger {
 		return s.logger
 	}
 	return slog.Default()
+}
+
+// requireTenant rejects an operation attempted with no tenant set.
+//
+// MSSQLStore has had this check since it was written, in setSessionContext:
+// "tenant ID must be set before setting session context for an RLS-scoped
+// transaction". MySQL had no equivalent anywhere — 90 references to s.tenantID
+// across mysql_ops.go, mysql_events.go, mysql_lifecycle.go and this file, and
+// not one guard. An empty tenantID simply produced a comparison against the
+// empty string, which matches nothing, returns no rows and no error, and so
+// reads to the caller as "this tenant has no data" rather than "this query had
+// no identity".
+//
+// This was invisible because TestUnauthenticatedQueryRejection's type switch
+// had no case for *MySQLStore: the MySQL subtest fell through to default: and
+// skipped itself, unconditionally, every time — including in multi-db-ci.yml's
+// test-mysql job, which exists to test MySQL. The conditional-skip audit turned
+// that skip into a failure, which is how this surfaced.
+//
+// Scope, stated plainly: this guard is currently applied to
+// GetActiveInstanceCountsByVersion only, the one method the test covers.
+// Auditing the other ~89 tenant-scoped MySQL call sites, and deciding which
+// legitimately run without a tenant, is IMPROVEMENT-PLAN.md 1.7 and is not
+// done. Do not read the presence of this helper as a claim that MySQL tenant
+// scoping is enforced.
+func (s *MySQLStore) requireTenant(op string) error {
+	if s.tenantID == "" {
+		return fmt.Errorf("%s: tenant ID must be set; MySQL has no row-level "+
+			"security, so an unscoped query has no database-level backstop", op)
+	}
+	return nil
 }
 
 // WithTenant returns a copy of the store scoped to the given tenant ID.

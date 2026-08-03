@@ -13,6 +13,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // The Runner in this package is what every cleat-worker executes against the
@@ -51,15 +52,34 @@ func migrationsRoot(t *testing.T) string {
 	return root
 }
 
-func postgresDSN(t *testing.T) string {
+// postgresDSN resolves the admin connection string via
+// testutil.PostgresTestDSN, so this package's env-var precedence
+// (CLEAT_TEST_POSTGRES, then CLEAT_TEST_DB, then a localhost fallback) can
+// never drift from engine/testutil's.
+//
+// configured reports whether a DSN was explicitly supplied, as opposed to
+// the hardcoded localhost fallback. Before this change the function returned
+// only the DSN, and newScratchDB's Ping failure always turned into a Skip --
+// exactly the bug f9bce35 fixed in engine/testutil.TestDB (a service
+// container with no published port made every subtest skip silently instead
+// of failing, so the CI job reported green without ever connecting). This
+// package predates that fix and never received it. ci.yml's test-go job,
+// matrix entry "support" (which covers ./migration/...), always sets
+// CLEAT_TEST_DB to a Postgres service with a published port, so an
+// unreachable Ping there is a broken environment, not an absent one -- and
+// this is the regression test file for the two defects that used to crash
+// every cleat-worker at boot (see the file header), so silently skipping it
+// is the single worst place in the repo for this bug to recur.
+//
+// testutil.PostgresTestDSN() itself doesn't return the "configured" bit, and
+// there is no exported helper for it, so that check is replicated here
+// rather than shared -- it's two os.Getenv calls, not worth adding new
+// exported surface to testutil for.
+func postgresDSN(t *testing.T) (dsn string, configured bool) {
 	t.Helper()
-	if v := os.Getenv("CLEAT_TEST_POSTGRES"); v != "" {
-		return v
-	}
-	if v := os.Getenv("CLEAT_TEST_DB"); v != "" {
-		return v
-	}
-	return "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+	dsn = testutil.PostgresTestDSN()
+	configured = os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
+	return dsn, configured
 }
 
 // newScratchDB creates an empty database and returns a handle to it.
@@ -70,14 +90,22 @@ func postgresDSN(t *testing.T) string {
 func newScratchDB(t *testing.T, name string) *sql.DB {
 	t.Helper()
 
-	adminDSN := postgresDSN(t)
+	adminDSN, configured := postgresDSN(t)
 	admin, err := sql.Open("postgres", adminDSN)
 	if err != nil {
 		t.Fatalf("open admin connection: %v", err)
 	}
 	defer admin.Close()
 	if err := admin.Ping(); err != nil {
-		t.Skipf("no postgres available at %s: %v", redactDSN(adminDSN), err)
+		// See postgresDSN: only skip when nobody asked for a database at all.
+		// A configured-but-unreachable Postgres must fail loud, because this
+		// file is the regression test for the boot-time defects described in
+		// the file header, and ci.yml always configures CLEAT_TEST_DB for the
+		// job that runs this package.
+		if configured {
+			t.Fatalf("configured postgres database at %s is unreachable: %v", redactDSN(adminDSN), err)
+		}
+		t.Skipf("no postgres database at %s (default DSN, none configured): %v", redactDSN(adminDSN), err)
 	}
 
 	// A previous run that was killed mid-test (a timeout, a ^C) can leave

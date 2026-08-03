@@ -170,6 +170,20 @@ func tableExists(ctx context.Context, db *sql.DB, dialect plugin.Dialect, tableN
 func TestPluginMigrations_AllDialects(t *testing.T) {
 	for _, backend := range pluginTestBackends {
 		t.Run(backend.name, func(t *testing.T) {
+			// This guard is live for mysql/mssql: their enabled() reads
+			// CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL, correctly skipping when
+			// nobody asked for that backend (e.g. in ci.yml's test-go job,
+			// which sets neither var) and running for real in
+			// multi-db-ci.yml's test-plugin-migrations, which sets all
+			// three. It is provably dead for postgres: that entry's
+			// enabled() (above) hardcodes `return true`, mirroring
+			// PostgresBackend.Enabled() in store_backends_test.go, so this
+			// branch can never fire on that leg -- the real "is postgres
+			// actually reachable" check lives entirely inside
+			// backend.setup() -> engine.BootstrapScratchDB, which already
+			// distinguishes configured-but-unreachable (Fatal) from
+			// nothing-configured (Skip). Kept, unchanged, because it is
+			// still the correct gate for mysql/mssql.
 			if !backend.enabled() {
 				t.Skipf("%s not available: set CLEAT_TEST_%s or start a local instance",
 					backend.name, strings.ToUpper(backend.name))

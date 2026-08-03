@@ -209,8 +209,19 @@ func TestWriteWasmString_Failure(t *testing.T) {
 	// byte-by-byte via WriteByte, which fails when the offset exceeds
 	// the configured max. Each write of 1 byte at offset 65535 succeeds;
 	// offset 65536 fails. So a 65536-byte write at offset 1 should fail.
+	//
+	// This is an assertion about a pinned dependency (the exact wazero
+	// version in go.mod), not an environment fact -- it does not vary by OS,
+	// CI job, or machine the way a missing toolchain does. The guard used to
+	// read "if the write succeeds, t.Skip": that inverts the usual skip
+	// shape (skip when a resource is *missing*) into "skip when the
+	// assumption under test turns out false", which means a wazero upgrade
+	// that changed Write to auto-grow instead of failing would report this
+	// suite green having verified nothing. The whole purpose of this test is
+	// to catch exactly that kind of semantics change, so it must fail loudly
+	// when it happens, not disappear.
 	if mem.Write(1, make([]byte, 65536)) {
-		t.Skip("wazero Memory.Write grows, not constrained to initial size")
+		t.Fatalf("wazero Memory.Write grew past the configured max instead of failing -- this pinned-dependency assumption changed (check go.mod wazero version); writeWasmString's failure handling needs updating to match, not this test skipping")
 	}
 }
 

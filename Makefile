@@ -78,11 +78,28 @@ test-java:
 test-as:
 	cd packages/cleat-as && npm test
 
+# ./engine/... , not ./internal/host/... : commit 3eeb74e moved internal/host/
+# to engine/, so this target has been running `go test` against a path that
+# does not exist. `go test` on a non-existent pattern exits non-zero, so the
+# target has been failing rather than silently passing -- but it means the
+# cluster suite has had no working local entry point since that rename.
+#
+# -p 1 for the same reason ci.yml's cluster job uses it: ./engine/... is two
+# packages, engine and engine/testutil, and both build their schema into, and
+# wipe rows from, the single database this target points them at. Run in
+# parallel they race on the DDL in 001_schema.sql and delete each other's
+# fixtures.
+#
+# Note this does NOT run ./tests/cluster/... . That suite is currently run by
+# nothing at all -- see the UNWIRED_SUITES list in
+# scripts/check-ci-package-coverage.sh. Pointing this target at it without
+# first establishing that it passes would be trading a visibly broken target
+# for a quietly broken one.
 .PHONY: test-cluster
 test-cluster: build-go cluster-up
 	@echo "Waiting for cluster to be ready..."
 	@sleep 10
-	go test -count=1 -timeout=120s ./internal/host/...
+	go test -p 1 -count=1 -timeout=180s ./engine/...
 	$(MAKE) cluster-down
 
 # ---- plugin harness -------------------------------------------------------

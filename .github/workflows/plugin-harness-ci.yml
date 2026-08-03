@@ -97,9 +97,29 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - run: go test -count=1 -timeout=600s ./tests/plugin-harness/... -run 'TestPluginCalls_MultiDB'
+      # This job is currently vacuous, and the budget below is what says so.
+      #
+      # It provisions PostgreSQL, MySQL and SQL Server, sets all three DSNs,
+      # and then runs exactly one test -- TestPluginCalls_MultiDB -- whose
+      # first statement is an unconditional t.Skip for a wazero v1.11.1 nil Sys
+      # context panic. So three database containers start, nothing is tested,
+      # and the job reports success. Every dialect claim this job is supposed
+      # to back is currently unverified by it.
+      #
+      # The budget is 1 rather than 0 so the state is recorded rather than
+      # breaking the build on a known upstream bug -- the same treatment as the
+      # 89-entry deadcode baseline and the 63-entry test-only-code baseline.
+      # Drop it to 0 when the skip is removed. It cannot grow silently.
+      # No `|| true` here. Redirecting to a file keeps go test's exit status as
+      # the step's exit status, so a real failure still fails the job; the
+      # budget step below runs regardless via `if: always()`.
+      - run: go test -count=1 -timeout=600s -json ./tests/plugin-harness/... -run 'TestPluginCalls_MultiDB' > test-report.json 2>&1
         env:
           CGO_ENABLED: "0"
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh plugin-harness/multi-db test-report.json
 
   # --------------------------------------------------------------------------
   # Blobstore S3 round-trip (MinIO)

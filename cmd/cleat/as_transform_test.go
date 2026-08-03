@@ -631,9 +631,15 @@ console.log(JSON.stringify({ funcNames: names, all: allExports }));
 	}
 
 	// The transform should have generated a wrapper that exports myWorkflow.
-	// NOTE: AS 0.27.32 provides afterParse with parser.sources but the
-	// transform checks parser.program (undefined in this AS version).
-	// If myWorkflow is missing, explain the known issue rather than failing.
+	// This used to be a t.Skipf, on the theory that AS 0.27.32's afterParse
+	// provides parser.sources but not parser.program, so the transform (which
+	// read parser.program) could never detect @cleatEntry and myWorkflow could
+	// legitimately go missing. That bug was real but was fixed in
+	// packages/cleat-as/transform/index.js (afterParse now reads this.program,
+	// which AS sets on the prototype, instead of the absent parser.program) --
+	// see the comment there. Confirmed live: this test now finds myWorkflow
+	// every run. A missing export here is a real transform regression, not an
+	// expected AS-version quirk, so it must fail rather than skip.
 	found := false
 	for _, name := range verifyResult.FuncNames {
 		if name == "myWorkflow" {
@@ -643,10 +649,7 @@ console.log(JSON.stringify({ funcNames: names, all: allExports }));
 	}
 
 	if !found {
-		t.Skipf("WASM compiled but 'myWorkflow' export not found (got functions: %v). "+
-			"This is expected when the transform does not detect @cleatEntry due to "+
-			"an AS 0.27 API compatibility issue: the transform checks parser.program "+
-			"but AS 0.27 provides parser.sources instead.", verifyResult.FuncNames)
+		t.Fatalf("WASM compiled but 'myWorkflow' export not found (got functions: %v)", verifyResult.FuncNames)
 	}
 
 	t.Logf("WASM exports %d functions including 'myWorkflow': %v",

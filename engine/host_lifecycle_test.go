@@ -237,13 +237,43 @@ func TestUUIDDeterminism(t *testing.T) {
 }
 
 func TestUUIDDifferentSeed(t *testing.T) {
-	t.Skip("needs real WASM module — raw memory buffer does not expose UUID hash to return value")
-	// s := newTestExecSession()
-	// s.workflowID = "wf-uuid-test"
-	// ctx := contextWithRawMemBuf(context.Background(), make([]byte, 64))
-	// u1 := s.UUID(ctx, nil, "seed-a", 0, 64)
-	// u2 := s.UUID(ctx, nil, "seed-b", 0, 64)
-	// if u1 == u2 { t.Error(...) }
+	// This used to be an unconditional t.Skip with its entire body commented
+	// out -- not environment-conditional at all, just a disabled test
+	// reporting as a skip, which is strictly worse than no test: it reads as
+	// coverage that "different seeds produce different UUIDs" exists when it
+	// does not. The stated reason ("raw memory buffer does not expose UUID
+	// hash to return value") is correct about the *packed* result -- s.UUID
+	// returns packSimpleResult(0, written), which encodes only the error
+	// code and the number of bytes written, not their content, so comparing
+	// the two int64 results directly can never distinguish seeds (both
+	// produce a 36-byte UUID string, so both pack to the same written
+	// length). But contextWithRawMemBuf hands the test the actual
+	// destination []byte, exactly as TestUUIDDeterminism above uses it, so
+	// the UUID text itself is readable directly from the buffer -- no real
+	// WASM module is needed, just decoding the written length the same way
+	// the rest of this file already does (see TestWorkflowIDUnknown,
+	// TestRunID) and slicing the buffer.
+	s := newTestExecSession()
+	s.workflowID = "wf-uuid-test"
+
+	buf1 := make([]byte, 64)
+	ctx1 := contextWithRawMemBuf(context.Background(), buf1)
+	r1 := s.UUID(ctx1, nil, "seed-a", 0, uint32(len(buf1)))
+	n1 := uint32(r1 >> 32)
+	uuid1 := string(buf1[:n1])
+
+	buf2 := make([]byte, 64)
+	ctx2 := contextWithRawMemBuf(context.Background(), buf2)
+	r2 := s.UUID(ctx2, nil, "seed-b", 0, uint32(len(buf2)))
+	n2 := uint32(r2 >> 32)
+	uuid2 := string(buf2[:n2])
+
+	if uuid1 == "" || uuid2 == "" {
+		t.Fatalf("expected non-empty UUIDs, got %q and %q", uuid1, uuid2)
+	}
+	if uuid1 == uuid2 {
+		t.Errorf("expected different UUIDs for different seeds, got %q for both", uuid1)
+	}
 }
 
 func TestUUIDUnknownWorkflowID(t *testing.T) {

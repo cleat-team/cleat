@@ -55,6 +55,15 @@ jobs:
       - name: CI package-coverage guard
         run: scripts/check-ci-package-coverage.sh
 
+      # A t.Skip is reported by `go test` as neither a pass nor a failure, and
+      # so is read as a pass. That mechanism hid four separate defects found in
+      # one session: a Postgres service with no published port (twice), a
+      # renamed DURABLE_TEST_DB, and a compose cluster whose workers were all
+      # crash-looping while the job reported success. The baseline records
+      # every skip that exists today; a new one, or a growing one, fails here.
+      - name: Conditional-skip guard
+        run: scripts/check-skips.sh
+
       - name: ABI doc/code consistency guard
         run: scripts/check-doc-consistency.sh
 
@@ -208,10 +217,16 @@ jobs:
     env:
       # 127.0.0.1, NOT localhost. On GitHub runners localhost resolves to ::1
       # first, while a service container publishes its port on IPv4 only, so
-      # the connection is refused. Until the requireBackendReachable preflight
-      # was added in f9bce35, testutil.TestDB turned that refusal into a
-      # t.Skipf -- so this job spun up a Postgres service, never reached it,
-      # skipped every Postgres-backed test, and reported green.
+      # the connection is refused. testutil.TestDB used to turn that refusal
+      # into a t.Skipf -- so this job spun up a Postgres service, never reached
+      # it, skipped every Postgres-backed test, and reported green.
+      #
+      # TestDB now makes that distinction itself, per dialect: unconfigured is
+      # a skip, configured-but-unreachable is a failure naming the redacted
+      # DSN. (The requireBackendReachable preflight that f9bce35 bolted onto
+      # one file was made redundant by that and has been removed.) Because this
+      # variable is set here, a Postgres that stops being reachable now fails
+      # this job instead of emptying it.
       CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
     strategy:
       fail-fast: false
@@ -263,16 +278,19 @@ jobs:
           # and rely on word splitting. Values are controlled by this file only.
           go test -race -count=1 -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
 
-      - name: Warn on skipped tests
+      # A warning here was not enough. This job spun up a Postgres service it
+      # could not reach, skipped every Postgres-backed test, emitted exactly
+      # this warning, and reported green for its entire existence -- nobody
+      # reads a warning on a green job. The budget makes it a failure.
+      #
+      # Budgets live in scripts/skip-budget.txt, one line per job key. The
+      # check also fails when the report is missing or contains no test results
+      # at all, because a test step that died before producing output has
+      # skipped everything, which is the strongest form of the same bug.
+      - name: Skip budget
         if: always()
         working-directory: ${{ matrix.package.dir || '.' }}
-        run: |
-          if [ -f test-report.json ]; then
-            SKIP_COUNT=$(grep -c '"Action":"skip"' test-report.json || echo 0)
-            if [ "$SKIP_COUNT" -gt 0 ]; then
-              echo "::warning title=Skipped Tests (${{ matrix.package.name }})::${SKIP_COUNT} test(s) were skipped. Verify that all test dependencies (PostgreSQL, Rust/cargo) are available."
-            fi
-          fi
+        run: ${{ github.workspace }}/scripts/check-skip-budget.sh 'test-go/${{ matrix.package.name }}' test-report.json
 
   # -------------------------------------------------------------------------
   # Test Python (matrix: 3.10 / 3.11 / 3.12)
@@ -450,13 +468,22 @@ jobs:
           go test -fuzz=FuzzWASMMetadata -fuzztime=30s -run=^$ ./wasm/...
           go test -fuzz=FuzzULEB128 -fuzztime=30s -run=^$ ./wasm/...
 
-      - name: Warn on skipped tests
+      # 2>&1 rather than the warn-only version's 2>/dev/null, which discarded
+      # the very output that would explain why a run produced no tests and then
+      # reported "0 skipped". The budget check treats a report with no test
+      # results at all as a failure, so that output has to be kept.
+      #
+      # Two steps, not one: a single `run:` block aborts on the first failing
+      # command, so a failing go test would skip the check entirely. Splitting
+      # them lets `if: always()` guarantee the budget is evaluated either way,
+      # without `|| true` throwing away the exit status.
+      - name: Collect wasm test report
         if: always()
-        run: |
-          SKIP_COUNT=$(go test -json -count=1 ./wasm/... 2>/dev/null | grep -c '"Action":"skip"' || echo 0)
-          if [ "$SKIP_COUNT" -gt 0 ]; then
-            echo "::warning title=Skipped Tests (fuzz)::${SKIP_COUNT} test(s) were skipped."
-          fi
+        run: go test -json -count=1 ./wasm/... > fuzz-report.json 2>&1
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh fuzz fuzz-report.json
 
   # -------------------------------------------------------------------------
   # Benchmarks (push to main only)
@@ -823,15 +850,14 @@ jobs:
           # database and only appeared once this job got one of its own.
           go test -p 1 -count=1 -timeout=180s -json ./engine/... 2>&1 | tee test-report.json
 
-      - name: Warn on skipped tests
+      # This job brings up a real four-worker cluster and a real database, so
+      # it has asked for everything its tests need: any skip here means
+      # something it provisioned did not arrive. That is a failure, not a
+      # warning -- this job previously reported success while every worker in
+      # the compose file was crash-looping.
+      - name: Skip budget
         if: always()
-        run: |
-          if [ -f test-report.json ]; then
-            SKIP_COUNT=$(grep -c '"Action":"skip"' test-report.json || echo 0)
-            if [ "$SKIP_COUNT" -gt 0 ]; then
-              echo "::warning title=Skipped Tests (cluster)::${SKIP_COUNT} test(s) were skipped. Verify that CLEAT_TEST_DB and PostgreSQL are configured."
-            fi
-          fi
+        run: scripts/check-skip-budget.sh cluster test-report.json
 
       - name: Cluster logs (on failure)
         if: failure()

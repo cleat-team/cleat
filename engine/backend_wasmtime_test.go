@@ -1,5 +1,26 @@
 //go:build cgo
 
+// A failure of NewWasmtimeBackend in this file is fatal, never a skip.
+//
+// The build tag is the whole argument. backend_wasmtime_stub.go is
+// //go:build !cgo and its NewWasmtimeBackend returns "wasmtime backend
+// requires CGO" -- that is the only condition under which the backend is
+// legitimately "not available", and this file cannot be compiled in it. Under
+// //go:build cgo the real implementation from backend_wasmtime.go is linked
+// in, so an error here means wasmtime itself failed to initialise.
+//
+// These tests used to t.Skipf on that error with the message "wasmtime backend
+// not available", which describes the stub's condition rather than the one that
+// can actually occur. wasmtime is the primary backend (CLAUDE.md: the behaviour
+// of record; wazero is the fallback), and ci.yml's test-go/engine entry and the
+// cluster-tests job both run with CGO enabled. So a broken wasmtime meant this
+// entire suite evaporated and the job stayed green -- including the four
+// execution-bound regression tests in backend_wasmtime_limits_test.go that
+// exist because a runaway workflow previously hung a worker forever
+// (IMPROVEMENT-PLAN.md 1.5).
+//
+// A skip is indistinguishable from a pass. Losing the primary backend must not
+// be.
 package engine
 
 import (
@@ -255,7 +276,7 @@ func TestWasmtimeBackend_Name(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -268,7 +289,7 @@ func TestWasmtimeBackend_PerExecution(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -300,7 +321,7 @@ func TestWasmtimeBackend_Close(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 
 	if err := b.Close(ctx); err != nil {
@@ -327,7 +348,7 @@ func TestWasmtimeBackend_Execute_CompileError(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -346,7 +367,7 @@ func TestWasmtimeBackend_Execute_MinimalModule(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -371,7 +392,7 @@ func TestRegisterWasiStubs_DoubleRegistration(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -394,7 +415,7 @@ func TestRegisterWasiStubs_ResetAdapterStateAlreadyDefined(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -416,7 +437,7 @@ func TestRegisterTeavmStubs_FreshLinker(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -433,7 +454,7 @@ func TestRegisterTeavmStubs_AlreadyDefined_ErrorPropagation(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -458,7 +479,7 @@ func TestRegisterAllImports_NeedsWasiTrue(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -475,7 +496,7 @@ func TestRegisterAllImports_NeedsWasiFalse(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -492,7 +513,7 @@ func TestRegisterAllImports_WasiErrorPropagation(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -716,7 +737,7 @@ func TestWriteWorkToFixedMemory(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -850,7 +871,7 @@ func TestClosure_CleatNow(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -904,7 +925,7 @@ func TestClosure_CleatRandom(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -958,7 +979,7 @@ func TestClosure_CleatVersion(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1012,7 +1033,7 @@ func TestClosure_CleatMinVersion(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1066,7 +1087,7 @@ func TestClosure_CleatSleep(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1120,7 +1141,7 @@ func TestClosure_CleatLog(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1203,7 +1224,7 @@ func TestClosure_CleatComplete(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1262,7 +1283,7 @@ func TestClosure_CleatComplete_WithResult(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1322,7 +1343,7 @@ func TestClosure_CleatComplete_ErrorStatus(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1381,7 +1402,7 @@ func TestClosure_CleatPollWork(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1449,7 +1470,7 @@ func TestClosure_CleatPollWork_Truncation(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1518,7 +1539,7 @@ func TestExecute_ComponentWasmBytes(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1545,7 +1566,7 @@ func TestExecute_GoModuleWithoutStart(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1570,7 +1591,7 @@ func TestExecute_ExportNotFound(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1593,7 +1614,7 @@ func TestExecute_CompileError_BeforeHandler(t *testing.T) {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -1632,7 +1653,7 @@ func newClosureSetup(t *testing.T, imports []struct {
 	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	t.Cleanup(func() { b.Close(ctx) })
 	b.handler = &mockHostHandler{ret: 0}

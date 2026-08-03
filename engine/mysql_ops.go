@@ -824,6 +824,9 @@ func (s *MySQLStore) ValidateVersion(ctx context.Context, defName string, defVer
 // GetActiveInstanceCountsByVersion returns a map of "name:version" -> count for
 // all workflow definitions that have active instances.
 func (s *MySQLStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
+	if err := s.requireTenant("GetActiveInstanceCountsByVersion"); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
