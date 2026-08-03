@@ -690,18 +690,23 @@ jobs:
           if [ -z "$ok" ]; then
             echo "::error title=Cluster schema missing::Postgres came up without the cleat schema."
             echo
-            echo "docker-compose.cluster.yml mounts ./migrations/postgres into"
-            echo "/docker-entrypoint-initdb.d. The entrypoint only runs those files on a"
-            echo "FIRST initialisation of an empty data directory, and if one of them"
-            echo "fails it exits -- with restart: unless-stopped the container then comes"
-            echo "back up on the now-non-empty directory and skips them entirely, which"
-            echo "looks like a database that started fine and has no tables."
+            echo "docker-compose.cluster.yml mounts ./deploy/postgres into"
+            echo "/docker-entrypoint-initdb.d, and ./migrations/postgres into"
+            echo "/opt/cleat/migrations; 100-apply-migrations.sh applies the latter. The"
+            echo "entrypoint only runs initdb.d on a FIRST initialisation of an empty data"
+            echo "directory, and if a script fails it exits -- with restart:"
+            echo "unless-stopped the container then comes back up on the now-non-empty"
+            echo "directory and skips them entirely, which looks like a database that"
+            echo "started fine and has no tables."
             echo
             echo "--- last probe output ---"
             echo "${probe_out:-(no output captured)}"
             echo
             echo "--- what the container sees in /docker-entrypoint-initdb.d ---"
             docker exec cleat-postgres ls -la /docker-entrypoint-initdb.d/ || true
+            echo
+            echo "--- and in /opt/cleat/migrations ---"
+            docker exec cleat-postgres ls -la /opt/cleat/migrations/ || true
             echo
             echo "--- postgres container log ---"
             docker logs cleat-postgres 2>&1 | tail -80 || true

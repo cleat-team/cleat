@@ -22,22 +22,22 @@ services:
       start_period: 10s
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Mount the migrations directory, not a hand-maintained copy of it.
-      # docker-entrypoint-initdb.d executes *.sql in lexical order, which is
-      # exactly 001_schema -> 002_defaults -> 003_procedures -> 004_fix_*.
+      # The migrations, read-only and somewhere neutral. They are not mounted
+      # as initdb.d itself: that made the directory serve two masters (the
+      # migration set the Go runner reads, and the literal contents of
+      # initdb.d) so nothing else could be placed there, and mounting a second
+      # file over the top fails at container init -- a bind mount inside a
+      # read-only bind mount cannot create its mountpoint.
       #
-      # This used to mount a root schema.sql that was a second, hand-kept
-      # copy. It had drifted into a strict subset: no finalize_workflow_status
-      # (so FinalizeWorkflowSegment failed on every workflow completion --
-      # engine/store_lifecycle.go calls it with no fallback), no RLS policies
-      # at all, and no admin.tenants/admin.tenant_api_keys (so the Admin API
-      # could not work either). Tests only ever read migrations/postgres/,
-      # so nothing caught it.
-      - ./migrations/postgres:/docker-entrypoint-initdb.d:ro
-      # Mounted over the directory above, and named to sort after the numbered
-      # migrations. 005_app_role.sql creates cleat_app without a password (a
-      # credential does not belong in a committed file); this gives it one.
-      - ./deploy/postgres/900-app-role.sh:/docker-entrypoint-initdb.d/900-app-role.sh:ro
+      # This used to mount a root schema.sql that was a second, hand-kept copy.
+      # It had drifted into a strict subset: no finalize_workflow_status (so
+      # every workflow completion failed -- engine/store_lifecycle.go calls it
+      # with no fallback), no RLS policies at all, and no admin.tenants. Tests
+      # only ever read migrations/postgres/, so nothing caught it.
+      - ./migrations/postgres:/opt/cleat/migrations:ro
+      # initdb.d: 100-apply-migrations.sh applies the files above in order,
+      # then 900-app-role.sh gives cleat_app a password.
+      - ./deploy/postgres:/docker-entrypoint-initdb.d:ro
     networks:
       - cleat-cluster
     ports:
