@@ -42,11 +42,13 @@ import (
 // testutil.OpenPostgresRLSTestDB, a connection that is neither superuser nor
 // table owner and so cannot bypass RLS. Against the unfixed code it fails with
 // "new row violates row-level security policy for table \"event_history\"".
+// Deliberately no testing.Short() guard. The sibling RLS tests carry one, but
+// this test runs in ~40ms, so the skip would buy nothing and cost the thing
+// scripts/check-skips.sh exists to protect: a skip is indistinguishable from a
+// pass. testutil.TestDB already draws the only distinction that matters here --
+// no database asked for is a skip, a configured-but-unreachable database is a
+// failure -- and a second skip layered on top would only blunt that.
 func TestStartChildWorkflowAtomicUnderRLS(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping RLS integration test in short mode")
-	}
-
 	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
 	defer adminDB.Close()
 	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
