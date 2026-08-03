@@ -86,7 +86,26 @@ wazero has its own bug tail). Note `cleat build` emits
 `host function "cleat_complete" imported from WASM env but not in computed closure` for
 this fixture — establish whether that is the same defect before assuming it is.
 
-### 3. Reproduce the `limit=3 → 10` over-claim  ·  ~0.5 session  ·  see 2.11
+### 3. Reproduce the `limit=3 → 10` over-claim  —  ✅ **done**, see §2.11
+
+> **Done, and it does not reproduce.** The suspected mechanism is ruled out both
+> mechanically and empirically: the sublink is uncorrelated, so PostgreSQL pulls it up into
+> a semi-join and executes it **once** (`EXPLAIN (ANALYZE, VERBOSE)`, `loops=1`), and its
+> `LockRows` node holds `FOR UPDATE` on the candidates before the outer UPDATE reaches
+> them, so EvalPlanQual has nothing to fire on. 24,000 claims under 12 concurrent claimers
+> and 10 transactions committing mid-claim never returned more than the limit.
+>
+> Per this item's own instruction the CTE is **not** upgraded to "fixed" — it stays, and
+> the comments that asserted the false mechanism are corrected. What caused the original
+> observation is still unknown.
+>
+> The investigation did find a real over-claim, in production-wired code and of a different
+> kind: **§2.17**, `ShardedStore` handing every shard the full limit and stranding the
+> excess as `running` with no executor. Demonstrated at 3 shards / limit 2: claimed 6,
+> returned 2, stranded 4. Left unfixed on purpose — the three available fixes trade off
+> differently on the hot claim path.
+>
+> The original framing is kept below.
 
 The CTE in `ClaimWorkflows`/`ClaimStickyWorkflows` is **defensive and unfalsified**. Start
 by reproducing the bug, not by trusting the fix. What has already been tried and did *not*
@@ -804,12 +823,42 @@ Two further findings fell out of that:
   re-executes the sublink. `ClaimWorkflows` and `ClaimStickyWorkflows` now select
   candidates in a CTE, which is evaluated once.
 
-  **That fix is not falsified.** `TestClaimWorkflows_RespectsLimitUnderConcurrency` was run
-  against the old form repeatedly -- with concurrent claimers, and with a background sweep
-  updating the same rows without `SKIP LOCKED` -- and passed every time. So the CTE is a
-  defensive change on a plausible mechanism, and the test is a regression guard for the
-  invariant rather than a reproduction. Both are labelled that way in the source. Anyone
-  picking this up should start by reproducing the over-claim, not by trusting the fix.
+  **The suspected mechanism has now been ruled out, and the observation is still
+  unexplained.** Investigated as "Start here" item 3; see the correction below.
+
+#### Correction — the EvalPlanQual explanation is wrong
+
+The CTE was introduced on the theory that an EvalPlanQual recheck re-executes the
+`id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` sublink, letting a claim for n update
+more than n. That is not what PostgreSQL does. Two independent reasons, on 16.14:
+
+- **The sublink is executed once.** It is uncorrelated, so the planner pulls it up into a
+  semi-join. `EXPLAIN (ANALYZE, VERBOSE)` of the old form shows the candidate subquery as
+  the *outer* side of a nested loop, `loops=1`, unique-ified through a HashAggregate, with
+  a primary-key index scan on the inner side at `loops=n`. The UPDATE visits exactly the
+  candidate rows. EvalPlanQual can only keep or drop a row the UPDATE already visits — it
+  cannot add rows to the update set. Same plan shape at 10, 400 and 5010 candidate rows.
+- **The candidates are already locked.** The sublink's `LockRows` node takes `FOR UPDATE`
+  on them before the outer UPDATE reaches them, so no concurrent transaction can modify
+  those rows mid-statement. There is nothing for EvalPlanQual to fire on.
+
+Empirically, against the old form: **24,000 claims**, 12 concurrent claimers, 10 disrupting
+transactions committing mid-claim — including ones mutating `status`, which the sublink's
+own WHERE clause reads — over candidate sets of 40, 400 and 5010 rows. The largest number
+of rows any single claim ever returned was exactly the limit. This covers the scenario 2.11
+listed as untried ("a competing UPDATE inside an explicit transaction that commits
+mid-claim") and the two it listed as already tried.
+
+Per the plan's own instruction, the CTE is **not** upgraded to "fixed". It stays, because
+it is evaluated once by construction rather than by argument, but the comments in
+`store_lifecycle.go` and `claim_limit_concurrency_test.go` that asserted the false
+mechanism are corrected. A plausible-sounding wrong explanation in a comment is worse than
+no explanation: it stops the next person looking.
+
+**What actually caused "asked for 3, got 10" is still unknown.** Ruled out: the SQL in
+either form; `ShardedStore` (the test builds a plain `NewPostgresStore`, and its truncation
+predates the failure); a retry wrapper (there is none). If it recurs, capture the statement
+and its plan rather than reasoning from the row count.
 
 ---
 
@@ -1005,6 +1054,21 @@ handler.
 
 ---
 
+### 2.15 Durable call failures are all classified as retryable timeouts — OPEN
+
+`cleat.CallErrorCode` exists "so callers can distinguish retryable from non-retryable errors
+without string-matching" (`cleat/runtime.go`). It cannot currently do that. Every failure
+path in `engine/durablecalls.go` and `engine/heartbeats.go` packs `callErrorCode = 1`,
+which the guest enum reads as `CallErrorTimeout` — **retryable** — whether the underlying
+cause was a service error, a replay divergence, a cancellation or an ambiguous result.
+`engine/plugins.go` packs `0` (`CallErrorUnknown`) throughout instead.
+
+So a permanent failure is reported to workflow authors as a transient one. Fixing it means
+classifying errors at the `ServiceCaller` boundary, which is a design change rather than a
+patch, and is why it was left out of the 2.10 work.
+
+---
+
 ### 2.16 Most wasmtime closure tests cannot see a handler defect — OPEN
 
 Generalising the previous item. 34 of the 48 `TestClosure_*` tests in
@@ -1023,18 +1087,48 @@ behaviour is worth a test that drives the real `execSession`, as
 `json_hostfuncs_cgo_test.go` now does, and to stop treating the `TestClosure_*` family as
 evidence that a host function *works*. It is evidence that it is *wired up*.
 
-### 2.15 Durable call failures are all classified as retryable timeouts — OPEN
 
-`cleat.CallErrorCode` exists "so callers can distinguish retryable from non-retryable errors
-without string-matching" (`cleat/runtime.go`). It cannot currently do that. Every failure
-path in `engine/durablecalls.go` and `engine/heartbeats.go` packs `callErrorCode = 1`,
-which the guest enum reads as `CallErrorTimeout` — **retryable** — whether the underlying
-cause was a service error, a replay divergence, a cancellation or an ambiguous result.
-`engine/plugins.go` packs `0` (`CallErrorUnknown`) throughout instead.
+### 2.17 `ShardedStore` claims `limit` from *every* shard and strands the excess — OPEN
 
-So a permanent failure is reported to workflow authors as a transient one. Fixing it means
-classifying errors at the `ServiceCaller` boundary, which is a design change rather than a
-patch, and is why it was left out of the 2.10 work.
+Found while investigating 2.11. This is a real over-claim, in production-wired code
+(`cmd/cleat-worker/main.go`), and it is not the one 2.11 was chasing.
+
+`ShardedStore.ClaimWorkflows` and `ClaimStickyWorkflows` fan out to every shard
+concurrently, passing each the **full** limit, then truncate the merged slice:
+
+```go
+wfs, err := sh.Store.ClaimWorkflows(ctx, workerID, limit)   // every shard, full limit
+...
+if len(all) > limit { all = all[:limit] }                   // return value respects it
+```
+
+The return value respects the limit, which is why nothing noticed. But the rows beyond it
+have already been updated to `status='running'` with `assigned_to` set to this worker, in
+their own shards, in committed transactions. Truncating the slice does not release them:
+they are claimed by a worker that will never run them, and stay that way until the lease or
+heartbeat reaper takes them back.
+
+With S shards and limit L, one poll can strand up to `(S-1)*L` workflows. Demonstrated by
+`TestShardedClaimWorkflows_OverClaimsAcrossShards`: 3 shards, limit 2 — **claimed 6,
+returned 2, stranded 4**. A single-shard deployment cannot hit it, which is presumably how
+it survived.
+
+Note that `ClaimWorkflows`'s own doc comment describes the correct behaviour — "Iterates
+through shards collecting workflows until limit is reached or shards exhausted" — which is
+not what the code does.
+
+Options, none of them free:
+
+1. **Sequential with a decreasing budget**, which is what the doc comment already claims.
+   Correct and simple; serialises the fan-out on a hot polling path.
+2. **Apportion the limit** across shards up front. Keeps the parallelism; under-claims when
+   ready work is skewed towards one shard.
+3. **Release the excess** after truncation. Keeps both, but needs an unclaim path and is
+   racy against the reaper.
+
+Left unfixed deliberately: choosing between these changes the latency characteristics of
+the claim path, and that is a decision worth making on purpose rather than as a side effect
+of a documentation fix.
 
 ---
 
