@@ -71,3 +71,69 @@ if [ -n "$missing" ]; then
 fi
 
 echo "OK: all $count top-level Go package dirs are covered or exempt."
+
+# ---------------------------------------------------------------------------
+# Second check: the `tests` exemption has to be true.
+#
+# `tests` is exempt above on the stated grounds that its suites are "driven by
+# their own dedicated CI jobs". That was an assertion, not a check, and it was
+# false for six of the seven suites: tests/cluster, tests/integrity,
+# tests/upgrade, tests/soak, tests/scale and tests/cross-language are named by
+# no workflow file at all. Only tests/plugin-harness is actually run.
+#
+# That is the same defect this whole guard exists to catch -- an enumeration
+# that rotted -- hiding inside the guard's own exemption list. An exemption
+# that says "covered elsewhere" is a claim about CI, so it gets verified like
+# any other.
+#
+# Worth knowing when wiring these up: the Makefile's `test-cluster` target is
+# also dead, running `./internal/host/...`, a path that has not existed since
+# commit 3eeb74e moved internal/host/ to engine/.
+#
+# Suites known to be unwired are listed here rather than silently tolerated,
+# so the set cannot grow without an edit to this file. Baselined rather than
+# zeroed, the same as scripts/deadcode-baseline.txt -- clearing the backlog is
+# tracked in IMPROVEMENT-PLAN.md Phase 2. Removing a name from this list when
+# you wire its suite up must never fail the build; adding one requires saying
+# why here.
+UNWIRED_SUITES="cluster cross-language integrity scale soak upgrade"
+
+unreferenced=""
+regressed=""
+for suite_dir in tests/*/; do
+  suite="$(basename "$suite_dir")"
+  # Only suites that actually contain Go tests are in scope.
+  if ! find "$suite_dir" -name '*_test.go' -print -quit 2>/dev/null | grep -q .; then
+    continue
+  fi
+  if grep -rqF "tests/$suite" .github/workflows/ 2>/dev/null; then
+    case " $UNWIRED_SUITES " in
+      *" $suite "*)
+        regressed="$regressed $suite"
+        ;;
+    esac
+    continue
+  fi
+  case " $UNWIRED_SUITES " in
+    *" $suite "*) continue ;;
+  esac
+  unreferenced="$unreferenced $suite"
+done
+
+if [ -n "$unreferenced" ]; then
+  echo "ERROR: these test suites under tests/ contain Go tests but are named by" >&2
+  echo "       no file under .github/workflows/, so nothing runs them:" >&2
+  for s in $unreferenced; do echo "  - tests/$s" >&2; done
+  echo >&2
+  echo "A suite no job runs is not coverage. Wire it into a workflow, or add it" >&2
+  echo "to UNWIRED_SUITES in $0 with a reason." >&2
+  exit 1
+fi
+
+if [ -n "$regressed" ]; then
+  echo "NOTE: now referenced by a workflow and can be dropped from"
+  echo "      UNWIRED_SUITES in $0:"
+  for s in $regressed; do echo "  - tests/$s"; done
+fi
+
+echo "OK: every tests/ suite is either run by a workflow or listed as unwired."

@@ -29,6 +29,24 @@ concurrency:
 env:
   GO_VERSION: "1.26"
 
+  # Declares the "first-class" policy above to the tests themselves.
+  #
+  # engine/rust_workflow_test.go and engine/python_wasm_e2e_test.go need to
+  # tell "nobody asked for this toolchain" (a developer's laptop, or ci.yml's
+  # engine matrix entry, whose Setup Rust step is gated to the internal
+  # package) from "the job that promised this toolchain cannot find it". The
+  # first is a skip; the second is a silently-failed setup step and must be a
+  # failure.
+  #
+  # This is an explicit variable rather than a check on $GITHUB_WORKFLOW
+  # because that would match on this workflow's display `name:` field.
+  # Renaming a workflow is a cosmetic edit that nobody would expect to change
+  # test behaviour, and it would silently return both files to skipping --
+  # which is exactly how DURABLE_TEST_DB was renamed with nothing noticing
+  # (IMPROVEMENT-PLAN.md 2.9). A CLEAT_REQUIRE_* variable reads as
+  # load-bearing and greps to its consumers.
+  CLEAT_REQUIRE_TOOLCHAINS: "rust,python"
+
 permissions:
   contents: read
 

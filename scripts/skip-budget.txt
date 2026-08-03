@@ -1,0 +1,43 @@
+# Per-job ceilings on the number of tests that may SKIP when a job runs.
+#
+# Format: <job key><TAB><max skipped tests><TAB># why
+# Checked by scripts/check-skip-budget.sh. See that script for the reasoning.
+#
+# A budget is not a target. Where a job provisions a resource, the right number
+# is 0: a skip then means something it set up did not arrive. Where a number is
+# larger, it is because the job deliberately does not configure something --
+# the engine job runs against PostgreSQL only, so its MySQL and SQL Server
+# subtests are "nobody asked", which is the one thing a skip is allowed to mean.
+#
+# Numbers below were MEASURED on darwin against a live PostgreSQL 16 and, where
+# noted, a live MySQL 8.4 -- not estimated. They may still differ by a few on
+# the Linux runners, since build tags and toolchain availability change which
+# tests exist at all. Reconcile on the first CI run rather than padding them
+# now: check-skip-budget.sh prints every skipped test by name when it trips, so
+# a mismatch is a one-line fix and not a mystery.
+
+test-go/core	0	# measured: 693 pass, 0 skip
+# 343 = 112 mysql + 112 mssql dialect subtests, plus ~118 MySQL/MSSQL-specific
+# top-level tests and one Python toolchain test. This job configures PostgreSQL
+# only (CLEAT_TEST_DB); the other dialects are multi-db-ci.yml's job. The number
+# is large but every one is "nobody asked". A PostgreSQL problem cannot hide
+# under it: testutil.TestDB now fails rather than skips when a configured DSN is
+# unreachable, so that shows up as a failure, not as a bigger skip count.
+test-go/engine	343	# measured: 2988 pass, 343 skip
+test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
+test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
+test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
+test-go/support	2	# measured: TestRunMigrations_{ExecInTxError,InsertRecordError}
+test-go/commands	4	# measured: TestAPIMetrics, TestHelperProcess, TestRunBuild_PythonTarget_WasmRoundtrip
+fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
+cluster	0	# seeded, NOT measured: colima cannot mount this repo's path, so
+	# docker-compose.cluster.yml is only ever exercised in CI. 0 is the correct
+	# intent -- the job brings up four workers and a database, so nothing it
+	# needs is absent -- but the first run may need reconciling.
+# plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
+# unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
+# starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is
+# recorded rather than zeroed so a known upstream bug does not break the build,
+# the same treatment as the deadcode and test-only-code baselines. Drop it to 0
+# when the skip is removed.
+plugin-harness/multi-db	1
