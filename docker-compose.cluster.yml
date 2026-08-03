@@ -8,6 +8,12 @@ services:
       POSTGRES_USER: cleat
       POSTGRES_PASSWORD: cleat
       POSTGRES_DB: cleat
+      # Password for the unprivileged role the workers connect as. The
+      # superuser above owns the schema and runs migrations; it must not be
+      # what serves traffic, because PostgreSQL never applies row-level
+      # security to a superuser and RLS is the only tenant isolation
+      # GetWorkflowByID and ListWorkflows have.
+      CLEAT_APP_PASSWORD: ${CLEAT_APP_PASSWORD:-cleat-app-local-dev}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
       interval: 3s
@@ -16,7 +22,22 @@ services:
       start_period: 10s
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      # The migrations, read-only and somewhere neutral. They are not mounted
+      # as initdb.d itself: that made the directory serve two masters (the
+      # migration set the Go runner reads, and the literal contents of
+      # initdb.d) so nothing else could be placed there, and mounting a second
+      # file over the top fails at container init -- a bind mount inside a
+      # read-only bind mount cannot create its mountpoint.
+      #
+      # This used to mount a root schema.sql that was a second, hand-kept copy.
+      # It had drifted into a strict subset: no finalize_workflow_status (so
+      # every workflow completion failed -- engine/store_lifecycle.go calls it
+      # with no fallback), no RLS policies at all, and no admin.tenants. Tests
+      # only ever read migrations/postgres/, so nothing caught it.
+      - ./migrations/postgres:/opt/cleat/migrations:ro
+      # initdb.d: 100-apply-migrations.sh applies the files above in order,
+      # then 900-app-role.sh gives cleat_app a password.
+      - ./deploy/postgres:/docker-entrypoint-initdb.d:ro
     networks:
       - cleat-cluster
     ports:
@@ -30,11 +51,11 @@ services:
       context: .
       dockerfile: Dockerfile
     command:
-      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"
+      - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
       - "--api-addr=:8080"
       - "--task-queue=queue-1"
       - "--concurrency=10"
-      - "--namespace=default"
     ports:
       - "8081:8080"
     depends_on:
@@ -57,11 +78,11 @@ services:
       context: .
       dockerfile: Dockerfile
     command:
-      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"
+      - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
       - "--api-addr=:8080"
       - "--task-queue=queue-2"
       - "--concurrency=10"
-      - "--namespace=default"
     ports:
       - "8082:8080"
     depends_on:
@@ -84,11 +105,11 @@ services:
       context: .
       dockerfile: Dockerfile
     command:
-      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"
+      - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
       - "--api-addr=:8080"
       - "--task-queue=queue-3"
       - "--concurrency=10"
-      - "--namespace=default"
     ports:
       - "8083:8080"
     depends_on:
@@ -111,11 +132,11 @@ services:
       context: .
       dockerfile: Dockerfile
     command:
-      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"
+      - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
       - "--api-addr=:8080"
       - "--task-queue=dashboard"
       - "--concurrency=2"
-      - "--namespace=default"
     ports:
       - "8080:8080"
     depends_on:

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -19,6 +20,17 @@ import (
 
 	"github.com/cleat-team/cleat/wasm"
 )
+
+// epochTickInterval controls how often the background goroutine started by
+// NewWasmtimeBackend advances the shared wasmtime engine's epoch (see
+// startEpochTicker). Epoch interruption overhead is a fixed, tiny check
+// inserted at loop back-edges and function entries regardless of tick
+// rate, so a fine-grained tick mostly costs ticker wakeups, not steady
+// -state execution overhead; 50ms bounds worst-case timeout overrun (the
+// gap between "deadline passed" and "next epoch increment observed") to
+// +50ms, which is negligible next to the multi-second timeouts this
+// backend is configured with.
+const epochTickInterval = 50 * time.Millisecond
 
 // Compile-time check: wasmtimeBackend implements WasmBackend.
 var _ WasmBackend = (*wasmtimeBackend)(nil)
@@ -62,28 +74,217 @@ type wasmtimeBackend struct {
 	// Work data for the Go dispatcher (cleat_poll_work).
 	workEntryPoint string
 	workInput      []byte
+
+	// limits bounds every store this backend creates: wall-clock time
+	// (epoch interruption), optional instruction count (fuel), and linear
+	// memory / table / instance ceilings (StoreLimits). See
+	// wasmtimeLimits and configureStore. Shared by value across
+	// PerExecution copies (copied, not pointed to, so each execution's
+	// store sees a consistent snapshot even if this were ever mutated
+	// concurrently, which it isn't after construction).
+	limits wasmtimeLimits
+
+	// epochStop, when non-nil, stops the background epoch-ticker goroutine
+	// on Close. Only set on the backend returned directly by
+	// NewWasmtimeBackend ("the root") — PerExecution copies share the same
+	// underlying *wasmtime.Engine and must not each start their own
+	// ticker or race to close it.
+	epochStop chan struct{}
+	closeOnce sync.Once // guards closing epochStop so Close is idempotent
 }
 
-// NewWasmtimeBackend creates a new wasmtimeBackend with a fresh engine.
-func NewWasmtimeBackend(ctx context.Context) (*wasmtimeBackend, error) {
-	engine := wasmtime.NewEngine()
-	return &wasmtimeBackend{engine: engine, moduleCache: new(sync.Map), compileLocks: new(sync.Map), metaCache: new(sync.Map)}, nil
+// NewWasmtimeBackend creates a new wasmtimeBackend with a fresh engine
+// configured to bound WASM execution: epoch interruption is always enabled
+// (see epochTickInterval / DefaultWasmtimeExecutionTimeout below) so a
+// runaway workflow cannot hang the worker permanently, which is the bug
+// this backend previously had with a bare wasmtime.NewEngine() and no
+// Config at all. Fuel-based instruction metering is enabled additionally
+// when WithWasmtimeInstructionLimit(n) is passed with n > 0.
+func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeBackend, error) {
+	lim := wasmtimeLimits{}
+	for _, opt := range opts {
+		opt(&lim)
+	}
+	if lim.executionTimeout <= 0 {
+		lim.executionTimeout = DefaultWasmtimeExecutionTimeout
+	}
+	if lim.memoryLimitBytes <= 0 {
+		lim.memoryLimitBytes = DefaultWasmtimeMemoryLimitBytes
+	}
+	if lim.tableElementsLimit <= 0 {
+		lim.tableElementsLimit = DefaultWasmtimeTableElementsLimit
+	}
+	if lim.instancesLimit <= 0 {
+		lim.instancesLimit = DefaultWasmtimeInstancesLimit
+	}
+
+	cfg := wasmtime.NewConfig()
+	cfg.SetEpochInterruption(true)
+	if lim.instructionLimit > 0 {
+		cfg.SetConsumeFuel(true)
+	}
+	eng := wasmtime.NewEngineWithConfig(cfg)
+
+	b := &wasmtimeBackend{
+		engine:       eng,
+		moduleCache:  new(sync.Map),
+		compileLocks: new(sync.Map),
+		metaCache:    new(sync.Map),
+		limits:       lim,
+		epochStop:    make(chan struct{}),
+	}
+	b.startEpochTicker()
+	return b, nil
+}
+
+// startEpochTicker launches a background goroutine that advances the
+// shared wasmtime engine's epoch every epochTickInterval. Engine.IncrementEpoch
+// is documented as safe to call from any goroutine. Combined with the
+// per-store relative deadline set in configureStore, this turns wall-clock
+// time into a hard interrupt of running WASM code — including tight loops
+// that never call back into the host — which context cancellation alone
+// cannot do for wasmtime (wasmtime-go does not observe ctx.Done() while a
+// WASM export call is in progress).
+func (b *wasmtimeBackend) startEpochTicker() {
+	ticker := time.NewTicker(epochTickInterval)
+	stop := b.epochStop
+	eng := b.engine
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				eng.IncrementEpoch()
+			}
+		}
+	}()
 }
 
 // Name returns "wasmtime" for diagnostics.
 func (b *wasmtimeBackend) Name() string { return "wasmtime" }
 
-// Close releases the wasmtime engine resources.
+// Close releases the wasmtime engine resources, including stopping the
+// background epoch ticker started by NewWasmtimeBackend. Only meaningful
+// on the root backend (epochStop is nil on PerExecution copies). Idempotent:
+// closeOnce guards the channel close so a second Close (already a documented
+// requirement — see engine.Close's own doc comment) does not panic.
 func (b *wasmtimeBackend) Close(ctx context.Context) error {
+	if b.epochStop != nil {
+		b.closeOnce.Do(func() { close(b.epochStop) })
+	}
 	b.engine.Close()
 	return nil
 }
 
 // PerExecution returns a new backend that shares the wasmtime Engine
 // but has its own per-execution handler and work data, eliminating
-// the data race when Execute is called concurrently.
+// the data race when Execute is called concurrently. The resource limits
+// configured on the root backend are copied so every execution enforces
+// the same bounds; epochStop is deliberately left nil (see its doc).
 func (b *wasmtimeBackend) PerExecution() WasmBackend {
-	return &wasmtimeBackend{engine: b.engine, moduleCache: b.moduleCache, compileLocks: b.compileLocks, metaCache: b.metaCache}
+	return &wasmtimeBackend{
+		engine:       b.engine,
+		moduleCache:  b.moduleCache,
+		compileLocks: b.compileLocks,
+		metaCache:    b.metaCache,
+		limits:       b.limits,
+	}
+}
+
+// configureStore applies this backend's resource bounds to a freshly
+// created store, before it is used to instantiate or run any WASM code:
+//
+//   - Wall-clock timeout via epoch interruption (store.SetEpochDeadline).
+//     Prefers ctx's deadline when it is tighter than the backend's
+//     configured executionTimeout, so the engine-level timeouts
+//     (engine.WithWASMInstanceTimeout, engine.WithDefaultWorkflowTimeout —
+//     both wired into ctx by executor.go) still take priority when set
+//     tighter than the worker's --wasm-instance-timeout default. Never
+//     widens past either: the tighter of the two always wins.
+//   - Fuel-based instruction budget (store.SetFuel), only when the backend
+//     was constructed with WithWasmtimeInstructionLimit(n > 0) — Config
+//     must have SetConsumeFuel(true) called on it beforehand, which
+//     NewWasmtimeBackend does whenever a nonzero instruction limit is
+//     configured.
+//   - Linear memory / table element / instance ceilings (store.Limiter),
+//     so a workflow cannot exhaust host memory by growing memory (or
+//     tables, or spawning instances) without bound.
+//
+// It returns the wall-clock timeout it actually applied (after reconciling
+// with ctx's deadline) so callers can pass it to resourceLimitError for a
+// precise error message.
+func (b *wasmtimeBackend) configureStore(ctx context.Context, store *wasmtime.Store) (time.Duration, error) {
+	timeout := b.limits.executionTimeout
+	if timeout <= 0 {
+		timeout = DefaultWasmtimeExecutionTimeout
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			if remaining <= 0 {
+				// ctx is already past its deadline; still apply a bound
+				// (rather than skip epoch interruption entirely) so the
+				// module is interrupted at the next tick instead of
+				// running unbounded.
+				remaining = time.Millisecond
+			}
+			timeout = remaining
+		}
+	}
+	ticks := uint64(timeout / epochTickInterval)
+	if ticks == 0 {
+		ticks = 1
+	}
+	store.SetEpochDeadline(ticks)
+
+	if b.limits.instructionLimit > 0 {
+		if err := store.SetFuel(b.limits.instructionLimit); err != nil {
+			return timeout, fmt.Errorf("host: enable wasm instruction budget: %w", err)
+		}
+	}
+
+	memLimit := int64(-1)
+	if b.limits.memoryLimitBytes > 0 {
+		memLimit = b.limits.memoryLimitBytes
+	}
+	tblLimit := int64(-1)
+	if b.limits.tableElementsLimit > 0 {
+		tblLimit = b.limits.tableElementsLimit
+	}
+	instLimit := int64(-1)
+	if b.limits.instancesLimit > 0 {
+		instLimit = b.limits.instancesLimit
+	}
+	store.Limiter(memLimit, tblLimit, instLimit, -1, -1)
+	return timeout, nil
+}
+
+// resourceLimitError recognizes traps caused by the resource bounds
+// configureStore applies (epoch interruption, fuel exhaustion) and turns
+// them into a clear, actionable message naming the limit that was hit and
+// its configured value. Returns nil for any other error (including other
+// kinds of traps), so the caller should fall back to its normal error
+// wrapping in that case.
+func (b *wasmtimeBackend) resourceLimitError(err error, timeout time.Duration) error {
+	if err == nil {
+		return nil
+	}
+	var trap *wasmtime.Trap
+	if !errors.As(err, &trap) {
+		return nil
+	}
+	code := trap.Code()
+	if code == nil {
+		return nil
+	}
+	switch *code {
+	case wasmtime.Interrupt:
+		return fmt.Errorf("execution time limit exceeded (%s wall-clock budget; configure with --wasm-instance-timeout): %w", timeout, err)
+	case wasmtime.OutOfFuel:
+		return fmt.Errorf("instruction limit exceeded (%d fuel units; configure with --wasm-instruction-limit): %w", b.limits.instructionLimit, err)
+	}
+	return nil
 }
 
 // Execute compiles, instantiates, and runs a core WASM module via wasmtime.
@@ -101,6 +302,10 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Create per-execution store with WASI configuration.
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	execTimeout, err := b.configureStore(ctx, store)
+	if err != nil {
+		return nil, err
+	}
 	t1 := time.Now()
 
 	// Configure WASI for Go wasip1 module support.
@@ -237,6 +442,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			// with specific import counts.
 			b.writeWorkToFixedMemory(mem, store, entryPoint, []byte(input))
 
+			var startErr error
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -245,7 +451,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 						}
 					}
 				}()
-				startFn.Call(store)
+				_, startErr = startFn.Call(store)
 			}()
 
 			if completeResult == `"__cleat_suspended__"` {
@@ -258,6 +464,23 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			if completeErr != "" {
 				return &ExecResult{Result: completeErr, Suspended: false}, nil
 			}
+			// Neither cleat_complete outcome was recorded. Normally that
+			// means the module hasn't reached cleat_complete yet but is
+			// about to exit cleanly (Go's wasip1 runtime traps via
+			// proc_exit when main() returns, which surfaces as a non-nil
+			// startErr even on success — the historical reason this
+			// branch used to ignore startErr entirely and assume "ok").
+			// But if startErr is a resource-limit trap (epoch
+			// interruption / fuel exhaustion from configureStore above),
+			// the module was killed mid-execution — most likely stuck in
+			// an infinite loop — and never got the chance to call
+			// cleat_complete. That must surface as a real error, not a
+			// silent "ok".
+			if startErr != nil {
+				if limitErr := b.resourceLimitError(startErr, execTimeout); limitErr != nil {
+					return nil, fmt.Errorf("host: export %q: %w", entryPoint, limitErr)
+				}
+			}
 			return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 		}
 	} else if lang == "java" {
@@ -266,6 +489,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		// can be called. Call it synchronously and wait for return.
 		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
 			if _, err := startFn.Call(store); err != nil {
+				if limitErr := b.resourceLimitError(err, execTimeout); limitErr != nil {
+					err = limitErr
+				}
 				return nil, fmt.Errorf("host: teaVM _start failed: %w", err)
 			}
 		}
@@ -287,7 +513,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if currentSize < needed {
 		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
 		if _, err := mem.Grow(store, pagesNeeded); err != nil {
-			return nil, fmt.Errorf("host: grow memory: %w", err)
+			return nil, fmt.Errorf("host: grow memory: exceeded configured wasm memory limit (%d bytes; configure with --wasm-memory-max-mb): %w", b.limits.memoryLimitBytes, err)
 		}
 	}
 
@@ -349,6 +575,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	}
 
 	if callErr != nil {
+		if limitErr := b.resourceLimitError(callErr, execTimeout); limitErr != nil {
+			callErr = limitErr
+		}
 		return nil, fmt.Errorf("host: export %q: %w", entryPoint, callErr)
 	}
 
@@ -434,6 +663,10 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 	// ---- Step 2: Create store with WASI ----
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	execTimeout, err := b.configureStore(ctx, store)
+	if err != nil {
+		return nil, err
+	}
 	wasiConfig := wasmtime.NewWasiConfig()
 	wasiConfig.InheritStderr()
 	store.SetWasi(wasiConfig)
@@ -970,7 +1203,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 	if currentSize < needed {
 		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
 		if _, err := mem.Grow(store, pagesNeeded); err != nil {
-			return nil, fmt.Errorf("host: grow memory: %w", err)
+			return nil, fmt.Errorf("host: grow memory: exceeded configured wasm memory limit (%d bytes; configure with --wasm-memory-max-mb): %w", b.limits.memoryLimitBytes, err)
 		}
 	}
 
@@ -997,7 +1230,10 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 	}()
 
 	if callErr != nil {
-		return nil, callErr
+		if limitErr := b.resourceLimitError(callErr, execTimeout); limitErr != nil {
+			callErr = limitErr
+		}
+		return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr)
 	}
 	if results == nil {
 		return nil, fmt.Errorf("host: export %q returned no results", entryPoint)

@@ -129,11 +129,11 @@ func RunCoreMigrations(t *testing.T, db *sql.DB, dialect plugin.Dialect, schemaN
 		if err != nil {
 			t.Fatalf("RunCoreMigrations: read %s: %v", path, err)
 		}
-			sqlStr := string(sqlBytes)
-			if prefix := schemaPrefix(dialect, schemaName); prefix != "" {
-				sqlStr = prefix + ";" + "\n" + sqlStr
-			}
-			statements := splitSQL(sqlStr)
+		sqlStr := string(sqlBytes)
+		if prefix := schemaPrefix(dialect, schemaName); prefix != "" {
+			sqlStr = prefix + ";" + "\n" + sqlStr
+		}
+		statements := splitSQL(sqlStr)
 		for _, stmt := range statements {
 			if _, err := conn.ExecContext(ctx, stmt); err != nil {
 				t.Fatalf("RunCoreMigrations: execute %s: %v", f.Name(), err)
@@ -236,7 +236,7 @@ func SeedPluginConfig(t *testing.T, db *sql.DB, dialect plugin.Dialect) {
 	}{
 		{
 			table: "feature_flags",
-				sql:   placeholderSQL(dialect, fmt.Sprintf("INSERT INTO feature_flags (tenant_id, id, %s, name, enabled) VALUES (%%s, %%s, %%s, %%s, %%s)", quoteIdent(dialect, "key"))),
+			sql:   placeholderSQL(dialect, fmt.Sprintf("INSERT INTO feature_flags (tenant_id, id, %s, name, enabled) VALUES (%%s, %%s, %%s, %%s, %%s)", quoteIdent(dialect, "key"))),
 			args:  []interface{}{defaultTenant, "00000000-0000-0000-0000-000000000010", "test-flag", "Test Flag", false},
 		},
 		{
@@ -520,9 +520,13 @@ func splitSQL(sql string) []string {
 		// Split on newline-bounded GO batch separator (MSSQL).
 		if !inDollar && c == '\n' {
 			j := i + 1
-			for j < n && (sql[j] == ' ' || sql[j] == '\t') { j++ }
+			for j < n && (sql[j] == ' ' || sql[j] == '\t') {
+				j++
+			}
 			k := j
-			for k < n && sql[k] != '\n' && sql[k] != '\r' && sql[k] != ';' { k++ }
+			for k < n && sql[k] != '\n' && sql[k] != '\r' && sql[k] != ';' {
+				k++
+			}
 			if isGO(j, k) {
 				// Emit any buffered statement before the GO.
 				trimmed := strings.TrimSpace(buf.String())

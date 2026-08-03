@@ -49,19 +49,69 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      - name: CI package-coverage guard
+        run: scripts/check-ci-package-coverage.sh
+
+      - name: ABI doc/code consistency guard
+        run: scripts/check-doc-consistency.sh
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: stable
 
+      # Must run after Setup Go (it shells out to `go mod tidy -diff`), unlike
+      # the package-coverage guard above, which is pure bash.
+      - name: Cross-module go.mod tidiness guard
+        run: scripts/check-go-mod-tidy.sh
+
+      # Catches code that is written, tested, passing, and wired to nothing --
+      # which a test suite cannot catch, because the tests pass precisely
+      # because they are the only callers. The baseline records the existing
+      # backlog (63 entries); only new additions fail.
+      - name: Test-only code guard
+        run: scripts/check-test-only-code.sh
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # A workflow file that does not parse produces a run with *no jobs* --
+      # a "startup failure" that reports red but cannot report why, and that
+      # no step inside that workflow can ever catch. ai-pr-review.yml and
+      # release-notes-check.yml were both in that state: an unindented block
+      # inside a `script:`/`run:` scalar ended it early, so neither check had
+      # ever actually run on any PR. This step catches the next one, from a
+      # workflow that does parse.
+      - name: Workflow files parse
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          python3 - <<'PY'
+          import glob, sys, yaml
+          bad = []
+          files = sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
+          if not files:
+              sys.exit("no workflow files found -- this check would pass vacuously")
+          for path in files:
+              try:
+                  doc = yaml.safe_load(open(path))
+              except yaml.YAMLError as e:
+                  bad.append(f"{path}: {e}")
+                  continue
+              # `on:` parses as the boolean True in YAML 1.1, which is why it
+              # is checked by identity rather than by name.
+              if not isinstance(doc, dict) or "jobs" not in doc:
+                  bad.append(f"{path}: parsed but has no top-level 'jobs:' key")
+          for b in bad:
+              print(f"::error title=Unparseable workflow::{b}")
+          print(f"checked {len(files)} workflow files, {len(bad)} broken")
+          sys.exit(1 if bad else 0)
+          PY
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -141,24 +191,51 @@ jobs:
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: cleat
+        # Required. This job runs directly on the runner, not inside a
+        # container, so the service's network is not shared with it -- without
+        # an explicit host port mapping the container is simply unreachable,
+        # and no amount of fixing the DSN helps. Combined with the localhost
+        # -> ::1 issue and testutil.TestDB's t.Skipf, this job declared a
+        # Postgres service, never once connected to it, and reported green for
+        # its entire existence.
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
     env:
-      CLEAT_TEST_DB: postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable
+      # 127.0.0.1, NOT localhost. On GitHub runners localhost resolves to ::1
+      # first, while a service container publishes its port on IPv4 only, so
+      # the connection is refused. Until the requireBackendReachable preflight
+      # was added in f9bce35, testutil.TestDB turned that refusal into a
+      # t.Skipf -- so this job spun up a Postgres service, never reached it,
+      # skipped every Postgres-backed test, and reported green.
+      CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
     strategy:
       fail-fast: false
       matrix:
         go-version: ["1.26"]
         package:
+          # cleat/ is a SEPARATE Go module (see the replace directive in
+          # go.mod), so `go test ./cleat/...` from the repo root fails with
+          # "main module does not contain package". It must run from inside
+          # that module. This entry silently failed at setup for its entire
+          # existence, masked by the missing pipefail.
           - name: core
-            path: ./cleat/...
+            dir: cleat
+            path: ./...
+          - name: engine
+            path: ./engine/...
+          - name: wasm
+            path: ./wasm/... ./wasmrw/...
           - name: internal
             path: ./internal/...
           - name: plugins
             path: ./plugins/...
+          - name: support
+            path: ./plugin/... ./pluginapi/... ./auth/... ./migration/... ./monitoring/...
           - name: commands
             path: ./cmd/...
     steps:
@@ -176,10 +253,19 @@ jobs:
           targets: wasm32-wasip1
 
       - name: Run tests
-        run: go test -race -count=1 -json "${{ matrix.package.path }}" 2>&1 | tee test-report.json
+        shell: bash
+        working-directory: ${{ matrix.package.dir || '.' }}
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          # Unquoted on purpose: some matrix entries list several package patterns
+          # and rely on word splitting. Values are controlled by this file only.
+          go test -race -count=1 -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
 
       - name: Warn on skipped tests
         if: always()
+        working-directory: ${{ matrix.package.dir || '.' }}
         run: |
           if [ -f test-report.json ]; then
             SKIP_COUNT=$(grep -c '"Action":"skip"' test-report.json || echo 0)
@@ -417,7 +503,6 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -532,7 +617,19 @@ jobs:
     name: Cluster Integration Tests
     runs-on: ubuntu-latest
     env:
-      CLEAT_TEST_DB: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+      # A database of the tests' own, on the same server as the cluster but
+      # not the one the workers use.
+      #
+      # This job's purpose is to prove the cluster comes up and stays up. It
+      # was also pointing `go test ./engine/...` at the cluster's own
+      # database, so the store tests -- which create rows and then assert on
+      # exactly those rows -- shared a table with four live workers claiming
+      # from it. TestClaimWorkflow found its ready workflow already `running`;
+      # TestListWorkflows_ByStatus found nothing ready; TestClaimSkipLocked
+      # asked for 3 and got 10. Those tests are correct and the setup was not:
+      # they assume exclusive ownership of the table, which no test sharing a
+      # database with a running cluster can have.
+      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat_tests?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -547,24 +644,184 @@ jobs:
       - name: Build Docker image
         run: docker build -t cleat-worker:latest .
 
-      - name: Start cluster
-        run: docker compose -f docker-compose.cluster.yml up -d
+      - name: Start Postgres and apply the schema
+        run: docker compose -f docker-compose.cluster.yml up -d postgres
 
       - name: Wait for cluster readiness
+        shell: bash
         run: |
-          echo "Waiting for Postgres to be healthy..."
-          for i in $(seq 1 30); do
-            if docker exec cleat-postgres pg_isready -U cleat -d cleat &>/dev/null; then
-              echo "Postgres is ready."
+          # pg_isready alone is not a readiness signal for this job. During
+          # initialisation the postgres entrypoint runs a temporary server on
+          # a local socket to execute /docker-entrypoint-initdb.d, so
+          # `docker exec ... pg_isready` reports ready while the schema is
+          # still being applied -- or was never applied at all. The tests then
+          # fail with a bare "relation \"workflow_defs\" does not exist",
+          # which says nothing about why.
+          #
+          # So wait on the actual precondition: the schema exists.
+          # No pg_isready pre-loop: it returns ready within a fraction of a
+          # second because the entrypoint's temporary init-time server is
+          # already listening, so it buys nothing and reads as a real check.
+          # The schema poll below subsumes it -- psql simply fails until the
+          # server is genuinely up.
+          #
+          # 180s, not 60s. Applying the full migration set takes appreciably
+          # longer than the single small schema.sql this job used to mount,
+          # and a 60s budget expired while 003/004 were still executing.
+          echo "Waiting for the initdb migrations to produce a usable schema..."
+          ok=""
+          probe_out=""
+          for i in $(seq 1 90); do
+            # Exit status, not output matching. psql exits non-zero if the
+            # relation or function is missing, so there is no dependence on how
+            # to_regclass/to_regproc spell "absent" (both return NULL rather
+            # than erroring, including for an ambiguous name -- which made an
+            # earlier `IS NOT NULL` formulation silently never become true).
+            if probe_out="$(docker exec cleat-postgres psql -U cleat -d cleat \
+                 -v ON_ERROR_STOP=1 -tAc \
+                 "SELECT count(*) FROM workflow_defs;
+                  SELECT 'finalize_workflow_status'::regproc;" 2>&1)"; then
+              ok=1
               break
             fi
             sleep 2
           done
-          echo "Waiting for workers to register..."
-          sleep 10
+
+          if [ -z "$ok" ]; then
+            echo "::error title=Cluster schema missing::Postgres came up without the cleat schema."
+            echo
+            echo "docker-compose.cluster.yml mounts ./deploy/postgres into"
+            echo "/docker-entrypoint-initdb.d, and ./migrations/postgres into"
+            echo "/opt/cleat/migrations; 100-apply-migrations.sh applies the latter. The"
+            echo "entrypoint only runs initdb.d on a FIRST initialisation of an empty data"
+            echo "directory, and if a script fails it exits -- with restart:"
+            echo "unless-stopped the container then comes back up on the now-non-empty"
+            echo "directory and skips them entirely, which looks like a database that"
+            echo "started fine and has no tables."
+            echo
+            echo "--- last probe output ---"
+            echo "${probe_out:-(no output captured)}"
+            echo
+            echo "--- what the container sees in /docker-entrypoint-initdb.d ---"
+            docker exec cleat-postgres ls -la /docker-entrypoint-initdb.d/ || true
+            echo
+            echo "--- and in /opt/cleat/migrations ---"
+            docker exec cleat-postgres ls -la /opt/cleat/migrations/ || true
+            echo
+            echo "--- postgres container log ---"
+            docker logs cleat-postgres 2>&1 | tail -80 || true
+            exit 1
+          fi
+          echo "Schema is present."
+
+          # Only now start the workers. Previously the whole cluster came up at
+          # once, so the workers connected while initdb was still running and
+          # raced it -- the postgres log filled with "relation
+          # \"tenant_api_keys\" does not exist" and duplicate-key errors on
+          # pg_type from concurrent DDL, and their contention slowed the
+          # migrations further.
+          docker compose -f docker-compose.cluster.yml up -d
+
+          # Assert the cluster actually came up.
+          #
+          # This step used to be `sleep 10` and nothing else, so the job called
+          # itself "Cluster Integration Tests" while every worker was in a
+          # crash-restart loop, and the only symptom was three unrelated-looking
+          # store tests failing. A job that cannot tell the difference between a
+          # running cluster and no cluster at all is not testing a cluster.
+          #
+          # Each service has a healthcheck in docker-compose.cluster.yml; wait
+          # for every one of them to reach "healthy" rather than assuming a
+          # fixed delay is enough.
+          # The test database, separate from the cluster's own (see
+          # CLEAT_TEST_DB above). Left empty: engine/testutil builds the
+          # schema from migrations/postgres/ on first use.
+          #
+          # Checked before creating rather than `|| true`, so that a genuine
+          # failure to create it is not swallowed along with "already exists".
+          if ! docker exec cleat-postgres psql -U cleat -d cleat -tAc \
+                 "SELECT 1 FROM pg_database WHERE datname = 'cleat_tests'" | grep -q 1; then
+            docker exec cleat-postgres psql -v ON_ERROR_STOP=1 -U cleat -d cleat \
+              -c "CREATE DATABASE cleat_tests"
+          fi
+
+          echo "Waiting for workers to become healthy..."
+          SERVICES="cleat-worker-1 cleat-worker-2 cleat-worker-3 cleat-dashboard"
+          DEADLINE=$(( SECONDS + 120 ))
+          while :; do
+            UNHEALTHY=""
+            for svc in $SERVICES; do
+              STATE="$(docker inspect -f '{{.State.Status}}:{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$svc" 2>/dev/null || echo "missing:missing")"
+              case "$STATE" in
+                running:healthy) ;;
+                *) UNHEALTHY="$UNHEALTHY $svc($STATE)" ;;
+              esac
+            done
+            [ -z "$UNHEALTHY" ] && break
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error title=Cluster workers unhealthy::Not healthy after 120s:$UNHEALTHY"
+              echo
+              echo "Worker logs follow. A worker that exits at boot is usually a"
+              echo "schema or migration problem, not a test problem."
+              for svc in $SERVICES; do
+                echo "--- $svc ---"
+                docker logs --tail=60 "$svc" 2>&1 || true
+              done
+              exit 1
+            fi
+            sleep 3
+          done
+          echo "All workers healthy."
+
+          # Assert the property, do not infer it. --rls-check=auto refuses to
+          # start when --require-auth is set and the connection bypasses
+          # row-level security, so a healthy worker implies RLS is enforced --
+          # but that is a chain of reasoning through two defaults, either of
+          # which could change. The worker says so directly; check that it did.
+          #
+          # This is the whole point of the deployment: the compose file
+          # connects workers as cleat_app rather than the superuser that owns
+          # the schema, because PostgreSQL never applies RLS to a superuser and
+          # RLS is the only tenant isolation GetWorkflowByID and ListWorkflows
+          # have (IMPROVEMENT-PLAN 1.10).
+          for svc in $SERVICES; do
+            if ! docker logs "$svc" 2>&1 | grep -q "row-level security is enforced on this connection"; then
+              echo "::error title=RLS not enforced::$svc did not report row-level security as enforced."
+              echo "The worker is on a connection exempt from the tenant isolation policies,"
+              echo "so GetWorkflowByID and ListWorkflows return every tenant's data."
+              docker logs --tail=40 "$svc" 2>&1 || true
+              exit 1
+            fi
+          done
+          echo "All workers report row-level security enforced."
+
+          # A worker that boots, dies and is restarted by `restart:
+          # unless-stopped` can be momentarily healthy. Restarts mean the
+          # cluster is not stable, so fail on any.
+          for svc in $SERVICES; do
+            RESTARTS="$(docker inspect -f '{{.RestartCount}}' "$svc")"
+            if [ "$RESTARTS" -ne 0 ]; then
+              echo "::error title=Worker restarting::$svc has restarted $RESTARTS time(s); it is crash-looping."
+              docker logs --tail=60 "$svc" 2>&1 || true
+              exit 1
+            fi
+          done
 
       - name: Run integration tests
-        run: go test -count=1 -timeout=120s -json ./engine/... 2>&1 | tee test-report.json
+        shell: bash
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          # -p 1: ./engine/... is two packages, engine and engine/testutil,
+          # and `go test` runs packages in parallel by default. Both build
+          # their schema in, and wipe rows from, the one database this job
+          # gives them -- so in parallel they race on the DDL in
+          # 001_schema.sql (observed: a duplicate key on pg_extension_name_index,
+          # and a deadlock) and delete each other's fixtures mid-test. That
+          # was invisible while they shared the cluster's already-migrated
+          # database and only appeared once this job got one of its own.
+          go test -p 1 -count=1 -timeout=180s -json ./engine/... 2>&1 | tee test-report.json
 
       - name: Warn on skipped tests
         if: always()

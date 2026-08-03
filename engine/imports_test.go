@@ -398,7 +398,6 @@ func TestHostFunctionNames_AllRegistered(t *testing.T) {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // Cleanup: verify that withHandler stores the handler under the right key
 // ---------------------------------------------------------------------------
@@ -804,8 +803,8 @@ func makeImportWasm(fieldName string, paramTypes, resultTypes []byte, withMem bo
 	// --- Type section (id=1) ---
 	{
 		var sec bytes.Buffer
-		sec.WriteByte(1)               // 1 type
-		sec.WriteByte(0x60)            // functype
+		sec.WriteByte(1)    // 1 type
+		sec.WriteByte(0x60) // functype
 		sec.WriteByte(byte(len(paramTypes)))
 		sec.Write(paramTypes)
 		sec.WriteByte(byte(len(resultTypes)))
@@ -1387,11 +1386,11 @@ func TestHostFunc_CleatFetch(t *testing.T) {
 	}
 
 	result, err := h.call(
-		0, uint64(len(method)),    // method ptr, len
-		64, uint64(len(url)),      // url ptr, len
+		0, uint64(len(method)), // method ptr, len
+		64, uint64(len(url)), // url ptr, len
 		256, uint64(len(headers)), // headers ptr, len
-		512, uint64(len(body)),    // body ptr, len
-		768, 4096,                 // response ptr, maxLen
+		512, uint64(len(body)), // body ptr, len
+		768, 4096, // response ptr, maxLen
 	)
 	if err != nil {
 		t.Fatalf("call cleat_fetch: %v", err)

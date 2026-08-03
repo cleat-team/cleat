@@ -116,6 +116,15 @@ jobs:
     services:
       postgres:
         image: postgres:16
+        # Required, and the only service here that was missing it. A job
+        # running directly on the runner does not share the service
+        # network, so without a published port the container is simply
+        # unreachable. The mysql and mssql services below already
+        # --publish in their options; postgres did not, so every
+        # postgres subtest in this workflow skipped itself and the job
+        # reported green without ever connecting.
+        ports:
+          - 5432:5432
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

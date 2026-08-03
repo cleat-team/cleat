@@ -16,26 +16,26 @@ import (
 // PrepareEntry before submission, so the batch-flusher goroutine does minimal
 // work per entry.
 type BatchFlusher struct {
-	db                      *sql.DB
-	ch                      chan batchEntry
-	tenantID                string
-	maxWait                 time.Duration
-	maxBatch                int
+	db                       *sql.DB
+	ch                       chan batchEntry
+	tenantID                 string
+	maxWait                  time.Duration
+	maxBatch                 int
 	encryptSensitivePayloads bool
-	encryption              *PayloadEncryption
+	encryption               *PayloadEncryption
 }
 
 // NewBatchFlusher creates a BatchFlusher.  The internal channel capacity is
 // 2 * maxBatch to absorb brief bursts without blocking callers.
 func NewBatchFlusher(db *sql.DB, tenantID string, maxWait time.Duration, maxBatch int, encrypt bool, enc *PayloadEncryption) *BatchFlusher {
 	return &BatchFlusher{
-		db:                      db,
-		ch:                      make(chan batchEntry, 2*maxBatch),
-		tenantID:                tenantID,
-		maxWait:                 maxWait,
-		maxBatch:                maxBatch,
+		db:                       db,
+		ch:                       make(chan batchEntry, 2*maxBatch),
+		tenantID:                 tenantID,
+		maxWait:                  maxWait,
+		maxBatch:                 maxBatch,
 		encryptSensitivePayloads: encrypt,
-		encryption:              enc,
+		encryption:               enc,
 	}
 }
 

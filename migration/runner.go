@@ -35,6 +35,58 @@ type migration struct {
 	sql     string
 }
 
+// migrationsLockKey is the pg_advisory_lock key used to serialise migration
+// runs. Every worker runs migrations at boot, so in a cluster N workers start
+// applying the same DDL at the same instant. That produced two distinct
+// failures against a database that was still being built:
+//
+//	duplicate key value violates unique constraint "pg_type_typname_nsp_index"
+//	relation "tenant_api_keys" does not exist
+//
+// The first is PostgreSQL's well-known CREATE TABLE IF NOT EXISTS race: the
+// existence check and the catalogue insert are not atomic with respect to
+// another session doing the same thing. The second is one worker reading a
+// half-applied schema while another is still writing it.
+//
+// The value is arbitrary but must never change: it is the identity of the
+// lock, and two cleat versions that disagree about it would not exclude each
+// other.
+const migrationsLockKey int64 = 7215842093104561
+
+// trackingTable returns the schema_migrations reference to use for this
+// dialect.
+//
+// On PostgreSQL it is schema-qualified, and that qualification is load-bearing
+// rather than stylistic. The migration files begin with
+//
+//	SET search_path = public;
+//
+// (see the header of migrations/postgres/001_schema.sql for why). A bare SET
+// is session-scoped, not transaction-scoped, so it outlives the transaction
+// that applyMigration runs the file in and changes name resolution for every
+// later statement on that pooled connection -- including this runner's own
+// bookkeeping. Unqualified, the tracking table was created under the default
+// search_path ("$user", public) before any migration ran, and then looked up
+// under the changed one afterwards:
+//
+//	[migration] applying 001_schema.sql
+//	ERROR: relation "schema_migrations" does not exist (42P01)
+//	  INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)
+//
+// which aborted the transaction, rolled 001 back, and failed the worker's
+// boot outright. Qualifying the name makes the runner independent of whatever
+// the migration files do to search_path.
+//
+// SET LOCAL is not an alternative: the same files are also applied by
+// docker-entrypoint-initdb.d via psql, where each statement runs in its own
+// implicit transaction and a LOCAL setting would be discarded immediately.
+func (r *Runner) trackingTable() string {
+	if r.dialect == engine.DialectPostgres {
+		return "public.schema_migrations"
+	}
+	return "schema_migrations"
+}
+
 // NewRunner creates a migration runner that reads .sql files from the
 // dialect-specific subdirectory under dir and applies pending ones against db.
 func NewRunner(db *sql.DB, dialect engine.Dialect, dir string) *Runner {
@@ -50,8 +102,23 @@ func NewRunner(db *sql.DB, dialect engine.Dialect, dir string) *Runner {
 // does not already exist. Run returns the first error encountered;
 // no further migrations are attempted after a failure.
 func (r *Runner) Run(ctx context.Context) error {
+	// 0. Pin one connection and serialise against other processes running
+	//    migrations concurrently.
+	//
+	//    Everything below runs on that same connection. A session-level
+	//    advisory lock belongs to the connection that took it, so the lock
+	//    would have to be held on a connection of its own otherwise -- and a
+	//    Runner that needs two connections deadlocks against a pool of one,
+	//    which is a legitimate configuration for a process whose only job at
+	//    that moment is to migrate.
+	session, release, err := r.session(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	// 1. Ensure the tracking table exists.
-	if err := r.ensureMigrationsTable(ctx); err != nil {
+	if err := r.ensureMigrationsTable(ctx, session); err != nil {
 		return fmt.Errorf("create schema_migrations table: %w", err)
 	}
 
@@ -66,7 +133,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// 3. Determine which versions have already been applied.
-	applied, err := r.getAppliedVersions(ctx)
+	applied, err := r.getAppliedVersions(ctx, session)
 	if err != nil {
 		return fmt.Errorf("get applied versions: %w", err)
 	}
@@ -78,7 +145,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 
 		log.Printf("[migration] applying %s", m.name)
-		if err := r.applyMigration(ctx, m); err != nil {
+		if err := r.applyMigration(ctx, session, m); err != nil {
 			return fmt.Errorf("migration %s: %w", m.name, err)
 		}
 		log.Printf("[migration] applied %s", m.name)
@@ -87,14 +154,60 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
+// sqlSession is the subset of *sql.DB and *sql.Conn the runner uses. Both
+// types satisfy it, which lets Run pin a single connection on PostgreSQL while
+// the other dialects keep using the pool.
+type sqlSession interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
+// session returns the handle the run should use and a release function.
+//
+// On PostgreSQL it pins one connection and takes a database-wide advisory lock
+// on it, so that only one process applies migrations at a time. Every worker
+// migrates at boot and docker-compose.cluster.yml starts four at once; see
+// migrationsLockKey for what that produced without the lock.
+//
+// Only PostgreSQL is covered. MySQL (GET_LOCK) and SQL Server (sp_getapplock)
+// have equivalents, but cleat only ships a multi-worker topology for
+// PostgreSQL, and untested locking code for the other two would be worse than
+// none: there, this returns the pool unchanged and the behaviour is exactly
+// what it was before.
+func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
+	if r.dialect != engine.DialectPostgres {
+		return r.db, func() {}, nil
+	}
+
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("acquire migration lock: connection: %w", err)
+	}
+	// pg_advisory_lock blocks until the lock is free; ctx bounds the wait.
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", migrationsLockKey); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("acquire migration lock: %w", err)
+	}
+	return conn, func() {
+		// Closing the connection releases the lock on its own, but unlocking
+		// explicitly returns it promptly even if the driver keeps the
+		// connection around. WithoutCancel so release still works when the
+		// run was cut short by a cancelled context.
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx),
+			"SELECT pg_advisory_unlock($1)", migrationsLockKey)
+		conn.Close()
+	}, nil
+}
+
 // ensureMigrationsTable creates the schema_migrations tracking table if it
 // does not already exist, using the appropriate DDL for each dialect.
-func (r *Runner) ensureMigrationsTable(ctx context.Context) error {
+func (r *Runner) ensureMigrationsTable(ctx context.Context, session sqlSession) error {
 	var ddl string
 	switch r.dialect {
 	case engine.DialectPostgres:
 		ddl = `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
+		CREATE TABLE IF NOT EXISTS ` + r.trackingTable() + ` (
 			version    TEXT PRIMARY KEY,
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)
@@ -117,7 +230,7 @@ func (r *Runner) ensureMigrationsTable(ctx context.Context) error {
 	default:
 		return fmt.Errorf("unsupported dialect: %s", r.dialect)
 	}
-	_, err := r.db.ExecContext(ctx, ddl)
+	_, err := session.ExecContext(ctx, ddl)
 	return err
 }
 
@@ -173,8 +286,8 @@ func (r *Runner) readMigrations() ([]migration, error) {
 
 // getAppliedVersions returns the set of version numbers that are already
 // recorded in the schema_migrations table.
-func (r *Runner) getAppliedVersions(ctx context.Context) (map[int]bool, error) {
-	rows, err := r.db.QueryContext(ctx, "SELECT version FROM schema_migrations")
+func (r *Runner) getAppliedVersions(ctx context.Context, session sqlSession) (map[int]bool, error) {
+	rows, err := session.QueryContext(ctx, "SELECT version FROM "+r.trackingTable())
 	if err != nil {
 		return nil, err
 	}
@@ -205,8 +318,8 @@ func (r *Runner) getAppliedVersions(ctx context.Context) (map[int]bool, error) {
 // On success the version is recorded in schema_migrations and the
 // transaction is committed. On failure the transaction is rolled back
 // and the error is returned.
-func (r *Runner) applyMigration(ctx context.Context, m migration) error {
-	tx, err := r.db.BeginTx(ctx, nil)
+func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migration) error {
+	tx, err := session.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -236,12 +349,23 @@ func (r *Runner) applyMigration(ctx context.Context, m migration) error {
 		}
 	}
 
+	// Undo any session-level SET the migration file performed, so that this
+	// connection goes back into the pool configured the same way as every
+	// other one. The files do set search_path (see trackingTable), and a pool
+	// where one connection resolves unqualified names differently from the
+	// rest is a source of failures that only reproduce under load.
+	if r.dialect == engine.DialectPostgres {
+		if _, err := tx.ExecContext(ctx, "RESET search_path"); err != nil {
+			return fmt.Errorf("reset search_path: %w", err)
+		}
+	}
+
 	versionStr := strconv.Itoa(m.version)
 	var recordSQL string
 	var recordArgs []interface{}
 	switch r.dialect {
 	case engine.DialectPostgres:
-		recordSQL = "INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING"
+		recordSQL = "INSERT INTO " + r.trackingTable() + " (version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING"
 		recordArgs = []interface{}{versionStr, time.Now()}
 	case engine.DialectMySQL:
 		recordSQL = "INSERT IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)"

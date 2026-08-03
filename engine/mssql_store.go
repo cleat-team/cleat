@@ -210,9 +210,9 @@ func (mssqlNopCloser) Close() error { return nil }
 // It manages per-tenant connection pools with sp_set_session_context
 // baked into the connector, enforcing RLS at the connection level.
 type MSSQLStoreFactory struct {
-	mu                sync.RWMutex
-	connStr           string             // connection string for SQL Server
-	tenantDBs         map[string]*sql.DB // per-tenant connection pools with RLS context
+	mu                 sync.RWMutex
+	connStr            string             // connection string for SQL Server
+	tenantDBs          map[string]*sql.DB // per-tenant connection pools with RLS context
 	idempotencyKeyTTL  time.Duration
 	tenantPoolMaxConns int
 

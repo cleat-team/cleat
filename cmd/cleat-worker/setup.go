@@ -902,20 +902,21 @@ type Worker struct {
 	compactionThreshold int
 	compactionInterval  time.Duration
 
-	memoryController            *MemoryController
-	maxRetries                  int
-	memorySampleRetention       int
-	retentionDays               int
-	schemaName                  string
-	peerSchemas                 []string
-	disableChecksumVerification *bool
-	requireSignalAuth           *bool
-	wasmMemoryMaxMB             *int
-	wasmInstructionLimit        *int
-	wasmDiskCache               *engine.WasmDiskCache
+	memoryController                 *MemoryController
+	maxRetries                       int
+	memorySampleRetention            int
+	retentionDays                    int
+	schemaName                       string
+	peerSchemas                      []string
+	disableChecksumVerification      *bool
+	requireSignalAuth                *bool
+	wasmMemoryMaxMB                  *int
+	wasmInstructionLimit             *int
+	wasmInstanceTimeout              time.Duration
+	wasmDiskCache                    *engine.WasmDiskCache
 	wasmCumulativeAllocationMaxBytes int64
 	cumulativeAlloc                  atomic.Int64
-	wasmtimeBackend             engine.WasmBackend
+	wasmtimeBackend                  engine.WasmBackend
 
 	drainCh   chan struct{}
 	drainOnce sync.Once
@@ -1521,6 +1522,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithMaxQuotaChildren(w.maxQuotaChildren),
 		engine.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
 		engine.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
+		engine.WithWASMInstanceTimeout(w.wasmInstanceTimeout),
 		engine.WithChildBindingPolicy(childBindingPolicy),
 		engine.WithChildBindingOverride(w.childBindingOverride),
 	}
@@ -1614,7 +1616,6 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	eng := engine.NewEngine(rt, caller, engineOpts...)
 	eng.Metrics = w.Metrics
 
-
 	w.execEngines.Store(wf.ID, eng)
 
 	// ---- Execute/Resume ----
@@ -1678,6 +1679,14 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// complete the current one — all in a single database transaction.
 		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
+		if errors.Is(err, engine.ErrFenceLost) {
+			// Normal and expected under reaping: another worker now owns
+			// this workflow (this one was reaped as stale and reclaimed).
+			// Not an error -- return cleanly without retrying or failing
+			// the workflow out from under its new owner.
+			w.logger.DebugContext(context.Background(), "continue_as_new: fence lost, workflow reassigned to another worker", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+			return
+		}
 		if err != nil {
 			w.logger.ErrorContext(context.Background(), "continue_as_new failed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
@@ -1703,6 +1712,15 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	queryStart := time.Now()
 	err = w.store.FinalizeWorkflowSegment(w.ctx, wf.ID, w.id, wf.Generation, newEvents, finalStatus, result, "", "", queryState, nextWakeAt)
 	finalizeElapsed := time.Since(queryStart)
+	if errors.Is(err, engine.ErrFenceLost) {
+		// Normal and expected under reaping: another worker now owns this
+		// workflow (this one was reaped as stale and reclaimed). Not an
+		// error -- return cleanly without retrying or failing the
+		// workflow out from under its new owner.
+		w.Metrics.RecordDBQueryLatency(context.Background(), time.Since(queryStart), "finalize")
+		w.logger.DebugContext(context.Background(), "finalize: fence lost, workflow reassigned to another worker", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return
+	}
 	if err != nil {
 		if engine.DebugTiming {
 			w.logger.InfoContext(context.Background(), "TIMING: finalize error", "worker_id", w.id, "workflow_id", wf.ID, "elapsed_ms", finalizeElapsed.Milliseconds())

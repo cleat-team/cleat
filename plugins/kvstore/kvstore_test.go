@@ -126,7 +126,20 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 
 // --- QueryContext ---
 
-func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+// normalizeKVQuery strips identifier quoting so these fakes match on the shape
+// of the SQL rather than on which dialect's quote characters it carries. The
+// plugin quotes `key` (a reserved word in MySQL and SQL Server) via
+// plugin.QuoteIdent, and matching the raw text broke the moment it did.
+func normalizeKVQuery(query string) string {
+	q := query
+	for _, ch := range []string{`"`, "`", "[", "]"} {
+		q = strings.ReplaceAll(q, ch, "")
+	}
+	return q
+}
+
+func (c *fakeConn) QueryContext(_ context.Context, rawQuery string, args []driver.NamedValue) (driver.Rows, error) {
+	query := normalizeKVQuery(rawQuery)
 	if c.shouldFail(query) {
 		return nil, fmt.Errorf("fakeConn: injected error")
 	}
@@ -143,10 +156,10 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-		case strings.Contains(query, "SELECT version FROM kv_store"):
-			c.store.mu.RLock()
-			defer c.store.mu.RUnlock()
-			return c.queryVersion(args)
+	case strings.Contains(query, "SELECT version FROM kv_store"):
+		c.store.mu.RLock()
+		defer c.store.mu.RUnlock()
+		return c.queryVersion(args)
 	case strings.Contains(query, "AND key ="):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
@@ -528,14 +541,21 @@ func argString(args []driver.NamedValue, ordinal int) (string, error) {
 	return "", fmt.Errorf("arg %d not found", ordinal)
 }
 
+// argBytes accepts either representation a JSON argument may arrive as.
+// plugin.JSONColumn deliberately yields a string rather than []byte (a []byte
+// becomes VARBINARY on SQL Server), and a fake that insists on one form tests
+// the plumbing rather than the plugin.
 func argBytes(args []driver.NamedValue, ordinal int) ([]byte, error) {
 	for _, a := range args {
 		if a.Ordinal == ordinal {
-			b, ok := a.Value.([]byte)
-			if !ok {
-				return nil, fmt.Errorf("arg %d: want []byte, got %T", ordinal, a.Value)
+			switch v := a.Value.(type) {
+			case []byte:
+				return v, nil
+			case string:
+				return []byte(v), nil
+			default:
+				return nil, fmt.Errorf("arg %d: want []byte or string, got %T", ordinal, a.Value)
 			}
-			return b, nil
 		}
 	}
 	return nil, fmt.Errorf("arg %d not found", ordinal)

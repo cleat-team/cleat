@@ -1068,7 +1068,7 @@ func TestMSSQLStore_BatchHeartbeat_Zero(t *testing.T) {
 func TestMSSQLStore_CompleteWorkflow_SuccessMock(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'done'"},
+		{match: "SET status = 'done'", affected: 1},
 		{match: "idempotency_keys SET result"},
 	})
 	defer db.Close()
@@ -1094,7 +1094,7 @@ func TestMSSQLStore_CompleteWorkflow_BeginErrorMock(t *testing.T) {
 func TestMSSQLStore_FailWorkflow_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'failed'"},
+		{match: "SET status = 'failed'", affected: 1},
 		{match: "idempotency_keys SET error_msg"},
 	})
 	defer db.Close()
@@ -1614,9 +1614,12 @@ func TestMSSQLStore_ReleaseConcurrencyKey_Success(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMSSQLStore_FinalizeWorkflowSegment_Done(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		// finalize_workflow_status is called via QueryRow (it emits a
+		// trailing SELECT reporting whether the generation fence held).
+		{match: "finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "finalize_workflow_status"},
 	})
 	defer db.Close()
 
@@ -1629,9 +1632,10 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Done(t *testing.T) {
 }
 
 func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "finalize_workflow_status"},
 	})
 	defer db.Close()
 
@@ -1644,9 +1648,10 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
 }
 
 func TestMSSQLStore_FinalizeWorkflowSegment_Ready(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "finalize_workflow_status"},
 	})
 	defer db.Close()
 
@@ -1961,35 +1966,35 @@ func TestMSSQLStore_LoadEventHistory_Success(t *testing.T) {
 	now := time.Now()
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM event_history", data: [][]driver.Value{{
-			int64(0),                    // step
-			string(EventTypeCall),       // event_type
-			"my-svc",                    // service
-			"my-op",                     // operation
-			`{"key":"val"}`,             // request
-			`{"result":"ok"}`,           // response
-			"",                          // error
-			int64(100),                  // duration_ms
-			"",                          // signal_names
-			int64(0),                    // timeout_ms
-			"",                          // signal_name
-			"",                          // signal_payload
-			"",                          // defer_description
-			"",                          // defer_id
-			"",                          // child_name
-			"",                          // child_input
-			"",                          // run_id
-			"",                          // new_input
-			"",                          // plugin_name
-			"",                          // plugin_func
-			"",                          // plugin_input
-			"",                          // plugin_output
-			"",                          // plugin_error
-			"",                          // payload
-			"",                          // promise_name
-			"",                          // promise_id
-			"",                          // promise_result
-			"",                          // promise_error
-			now,                         // created_at
+			int64(0),              // step
+			string(EventTypeCall), // event_type
+			"my-svc",              // service
+			"my-op",               // operation
+			`{"key":"val"}`,       // request
+			`{"result":"ok"}`,     // response
+			"",                    // error
+			int64(100),            // duration_ms
+			"",                    // signal_names
+			int64(0),              // timeout_ms
+			"",                    // signal_name
+			"",                    // signal_payload
+			"",                    // defer_description
+			"",                    // defer_id
+			"",                    // child_name
+			"",                    // child_input
+			"",                    // run_id
+			"",                    // new_input
+			"",                    // plugin_name
+			"",                    // plugin_func
+			"",                    // plugin_input
+			"",                    // plugin_output
+			"",                    // plugin_error
+			"",                    // payload
+			"",                    // promise_name
+			"",                    // promise_id
+			"",                    // promise_result
+			"",                    // promise_error
+			now,                   // created_at
 		}}},
 	}, nil)
 	defer db.Close()

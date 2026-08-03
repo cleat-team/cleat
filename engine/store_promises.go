@@ -21,10 +21,10 @@ func (s *PostgresStore) CreatePromise(ctx context.Context, workflowID, promiseNa
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_promises (workflow_id, promise_id, promise_name, status)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO workflow_promises (workflow_id, promise_id, promise_name, status, tenant_id)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (workflow_id, promise_id) DO NOTHING
-	`, workflowID, promiseID, promiseName, "pending")
+	`, workflowID, promiseID, promiseName, "pending", s.tenantID)
 	if err != nil {
 		return err
 	}

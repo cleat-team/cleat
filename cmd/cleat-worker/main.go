@@ -15,15 +15,15 @@ package main
 
 import (
 	"context"
-	_ "net/http/pprof"
 	"database/sql"
 	"encoding/json"
-		"flag"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log"
 	"log/slog"
-		"net/http"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -36,7 +36,7 @@ import (
 	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
-		"github.com/google/uuid"
+	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
 	// Database drivers
@@ -47,6 +47,7 @@ import (
 	_ "github.com/cleat-team/cleat/plugins/llm"
 	// _ "github.com/cleat-team/cleat/plugins/pgvector"  // requires pgvector extension
 )
+
 func main() {
 	flag.Parse()
 
@@ -55,8 +56,6 @@ func main() {
 
 	// Fall back to DATABASE_URL env var if --db is empty.
 	resolveDBURL()
-
-
 
 	// Set WASM output buffer size before any Runtime is created.
 	engine.OutBufSize = uint32(*wasmOutputBufferSize)
@@ -270,7 +269,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
+				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -339,7 +338,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
+				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -365,7 +364,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
+				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -392,7 +391,7 @@ func main() {
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
-					metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
+				metricsInstance.SetPluginConnectionsMax(context.Background(), int64(*maxPluginConnections))
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
@@ -528,15 +527,58 @@ func main() {
 	}
 
 	// Run core schema migrations before plugin migrations.
-	migrator := migration.NewRunner(db, factory.Dialect(), "migrations")
+	//
+	// On a separate connection when --migrate-db is set: --db may be an
+	// unprivileged role (see migrations/postgres/005_app_role.sql), which is
+	// what makes it subject to row-level security, and such a role cannot
+	// run DDL. Falls back to db so an unsplit deployment behaves as before.
+	migrateDB := db
+	if *migrateDBURL != "" {
+		mdb, mErr := sql.Open(sqlDriverName(*driver), dsnWithSchema(*migrateDBURL, *schemaName))
+		if mErr != nil {
+			logger.ErrorContext(context.Background(), "failed to connect to the migration database (--migrate-db)", "worker_id", workerID, "error", mErr)
+			os.Exit(1)
+		}
+		// Migrations are serialised by an advisory lock and run once at boot;
+		// a couple of connections is plenty, and this pool must not compete
+		// with the runtime one.
+		mdb.SetMaxOpenConns(2)
+		defer mdb.Close()
+		migrateDB = mdb
+	}
+
+	migrator := migration.NewRunner(migrateDB, factory.Dialect(), "migrations")
 	if err := migrator.Run(ctx); err != nil {
-		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges", "worker_id", workerID, "error", err)
+		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
 		os.Exit(1)
 	}
 
-	if err := plugin.RunMigrations(ctx, db, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
+	if err := plugin.RunMigrations(ctx, migrateDB, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
 		logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
 		os.Exit(1)
+	}
+
+	// Now that the schema (and its policies) exist, check that the *runtime*
+	// connection is actually subject to them. See engine.CheckRLSEnforced:
+	// GetWorkflowByID and ListWorkflows have no application-level tenant
+	// filter, so on a connection that bypasses RLS they return every tenant's
+	// data. Every configuration cleat shipped connected as a superuser.
+	if *driver == "postgres" && *rlsCheck != "off" {
+		reasons, rErr := engine.CheckRLSEnforced(ctx, db)
+		switch {
+		case rErr != nil:
+			// Could not tell. Refusing on an inconclusive check would make an
+			// unrelated database hiccup fatal, so this is reported and the
+			// worker continues.
+			logger.WarnContext(context.Background(), "could not verify row-level security enforcement", "worker_id", workerID, "error", rErr)
+		case len(reasons) == 0:
+			logger.InfoContext(context.Background(), "row-level security is enforced on this connection", "worker_id", workerID)
+		case *rlsCheck == "require" || (*rlsCheck == "auto" && *requireAuth):
+			logger.ErrorContext(context.Background(), "refusing to start: "+engine.FormatRLSBypass(reasons), "worker_id", workerID)
+			os.Exit(1)
+		default:
+			logger.WarnContext(context.Background(), engine.FormatRLSBypass(reasons), "worker_id", workerID)
+		}
 	}
 
 	// For MySQL, the factory creates a per-tenant database that needs its
@@ -682,7 +724,7 @@ func main() {
 					return
 				case <-ticker.C:
 					stats := pluginDB.Stats()
-						metricsInstance.SetPluginConnectionsInUse(context.Background(), int64(stats.InUse))
+					metricsInstance.SetPluginConnectionsInUse(context.Background(), int64(stats.InUse))
 					openConns := stats.OpenConnections
 					if openConns > 0 && *maxPluginConnections > 0 && float64(openConns) > 0.8*float64(*maxPluginConnections) {
 						logger.WarnContext(context.Background(), "plugin DB connections near limit", "worker_id", workerID, "used", openConns, "max", *maxPluginConnections, "pct", 100*float64(openConns)/float64(*maxPluginConnections))
@@ -702,9 +744,24 @@ func main() {
 	// available (e.g., libwasmtime.so not found), fall back to the legacy
 	// wazero runtime by leaving the backend as nil.
 	var wasmtimeBackend engine.WasmBackend
-	if wt, err := engine.NewWasmtimeBackend(ctx); err == nil {
+	// Bound wasmtime execution: epoch interruption (wall-clock, primary
+	// defense against a runaway workflow hanging the worker — see
+	// IMPROVEMENT-PLAN.md 1.5) and StoreLimits (memory/table/instance
+	// ceilings), plus optional fuel-based instruction metering when
+	// --wasm-instruction-limit is set. The memory ceiling reuses
+	// --wasm-memory-max-mb, the same flag already applied to the wazero
+	// backend below, rather than inventing a parallel wasmtime-only knob.
+	wasmtimeMemoryLimitBytes := int64(0) // 0 => wasmtimeBackend applies its own default
+	if *wasmMemoryMaxMB > 0 {
+		wasmtimeMemoryLimitBytes = int64(*wasmMemoryMaxMB) * 1024 * 1024
+	}
+	if wt, err := engine.NewWasmtimeBackend(ctx,
+		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
+		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
+		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
+	); err == nil {
 		wasmtimeBackend = wt
-		logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID)
+		logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes)
 	} else {
 		logger.WarnContext(context.Background(), "wasmtime backend unavailable, using legacy wazero for Go WASM", "worker_id", workerID, "error", err)
 	}
@@ -743,48 +800,49 @@ func main() {
 		logger.InfoContext(ctx, "adaptive flusher registry enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
 	}
 	w := &Worker{
-		Metrics:                     metricsInstance,
-		id:                          workerID,
-		logger:                      logger,
-		store:                       store,
-		concurrency:                 *concurrency,
-		maxQueued:                   *maxQueued,
-		heartbeatInterval:           *heartbeatInterval,
-		pollInterval:                *pollInterval,
-		ctx:                         ctx,
-		cancel:                      cancel,
-		wasmCache:                   newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
-		scheduleInterval:            15 * time.Second,
-		compactionThreshold:         *compactionThreshold,
-		compactionInterval:          *compactionInterval,
-		pluginRegistry:              pluginRegistry,
-		plugList:                    plugList,
-		tenantPools:                 tenantPools,
-		memorySampleRetention:       *memorySampleRetention,
-		retentionDays:               *retentionDays,
-		schemaName:                  *schemaName,
-		peerSchemas:                 parsePeerSchemas(*peerSchemas),
-		disableChecksumVerification: disableChecksumVerification,
-		requireSignalAuth:           requireSignalAuth,
-		maxRetries:                  *maxRetries,
-		wasmMemoryMaxMB:                    wasmMemoryMaxMB,
-		wasmInstructionLimit:               wasmInstructionLimit,
-		wasmCumulativeAllocationMaxBytes:    int64(*wasmCumulativeAllocationMaxMB) * 1024 * 1024,
-		wasmDiskCache:               wasmDiskCache,
-		wasmtimeBackend:             wasmtimeBackend,
-		maxQuotaEvents:              *maxQuotaEvents,
-		maxQuotaChildren:            *maxQuotaChildren,
-		maxQuotaConcurrencyKeys:     *maxQuotaConcurrencyKeys,
-		maxWorkflowDuration:         *maxWorkflowDuration,
-		childBindingOverride:        *childBindingOverride,
-		healthCheckInterval:         *healthCheckInterval,
-		encryption:                  payloadEncryption,
-		encryptSensitivePayloads:    *encryptSensitivePayloads,
-		drainCh:                     make(chan struct{}),
-		parentWakeCh:                make(chan struct{}, 1),
-		notifyCh:                    notifyCh,
-		flusherRegistry:             flusherRegistry,
-		db:                          db,
+		Metrics:                          metricsInstance,
+		id:                               workerID,
+		logger:                           logger,
+		store:                            store,
+		concurrency:                      *concurrency,
+		maxQueued:                        *maxQueued,
+		heartbeatInterval:                *heartbeatInterval,
+		pollInterval:                     *pollInterval,
+		ctx:                              ctx,
+		cancel:                           cancel,
+		wasmCache:                        newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
+		scheduleInterval:                 15 * time.Second,
+		compactionThreshold:              *compactionThreshold,
+		compactionInterval:               *compactionInterval,
+		pluginRegistry:                   pluginRegistry,
+		plugList:                         plugList,
+		tenantPools:                      tenantPools,
+		memorySampleRetention:            *memorySampleRetention,
+		retentionDays:                    *retentionDays,
+		schemaName:                       *schemaName,
+		peerSchemas:                      parsePeerSchemas(*peerSchemas),
+		disableChecksumVerification:      disableChecksumVerification,
+		requireSignalAuth:                requireSignalAuth,
+		maxRetries:                       *maxRetries,
+		wasmMemoryMaxMB:                  wasmMemoryMaxMB,
+		wasmInstructionLimit:             wasmInstructionLimit,
+		wasmInstanceTimeout:              *wasmInstanceTimeout,
+		wasmCumulativeAllocationMaxBytes: int64(*wasmCumulativeAllocationMaxMB) * 1024 * 1024,
+		wasmDiskCache:                    wasmDiskCache,
+		wasmtimeBackend:                  wasmtimeBackend,
+		maxQuotaEvents:                   *maxQuotaEvents,
+		maxQuotaChildren:                 *maxQuotaChildren,
+		maxQuotaConcurrencyKeys:          *maxQuotaConcurrencyKeys,
+		maxWorkflowDuration:              *maxWorkflowDuration,
+		childBindingOverride:             *childBindingOverride,
+		healthCheckInterval:              *healthCheckInterval,
+		encryption:                       payloadEncryption,
+		encryptSensitivePayloads:         *encryptSensitivePayloads,
+		drainCh:                          make(chan struct{}),
+		parentWakeCh:                     make(chan struct{}, 1),
+		notifyCh:                         notifyCh,
+		flusherRegistry:                  flusherRegistry,
+		db:                               db,
 	}
 
 	// Initialize memory-aware concurrency controller.
@@ -799,14 +857,14 @@ func main() {
 	metricsInstance.RecordDesiredConcurrency(context.Background(), int64(*concurrency))
 	globalWorker = w
 
-		// Set metrics on the store factory so stores created during workflow
-		// execution inherit the OTel metrics instance.
-		if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
-			pf.WithMetrics(metricsInstance)
-			if syncCommitOff != nil && *syncCommitOff {
-				pf.WithSyncCommitOff(true)
-			}
+	// Set metrics on the store factory so stores created during workflow
+	// execution inherit the OTel metrics instance.
+	if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
+		pf.WithMetrics(metricsInstance)
+		if syncCommitOff != nil && *syncCommitOff {
+			pf.WithSyncCommitOff(true)
 		}
+	}
 	// Start HTTP API server if configured.
 
 	if *apiAddr != "" {
@@ -886,9 +944,28 @@ func main() {
 			handler = auth.Middleware(store, true)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
+			//
+			// The table is admin.tenant_api_keys on PostgreSQL, and this was
+			// the one site that named it unqualified -- every other Postgres
+			// caller (engine/store_deployment.go, auth/tenant_store.go) gets
+			// it right. The default search_path does not include admin, so
+			// this always failed with 42P01 and the only trace was a warning:
+			// no startup key was ever generated on a fresh PostgreSQL
+			// deployment, while --require-auth defaults to true. MySQL and
+			// SQL Server keep the unqualified name; there the table is not in
+			// a separate schema.
+			keyCountQuery := `SELECT COUNT(*) FROM tenant_api_keys`
+			if *driver == "postgres" {
+				keyCountQuery = `SELECT COUNT(*) FROM admin.tenant_api_keys`
+			}
 			var keyCount int
-			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenant_api_keys`).Scan(&keyCount); err != nil {
-				logger.WarnContext(context.Background(), "cannot check API key count", "worker_id", workerID, "error", err)
+			if err := db.QueryRowContext(ctx, keyCountQuery).Scan(&keyCount); err != nil {
+				// ERROR, not WARN: if this query fails the auth middleware
+				// reads the same table on every request, so the API is
+				// unusable rather than merely missing a convenience.
+				logger.ErrorContext(context.Background(),
+					"cannot read the API key table; authentication will not work and no startup key will be generated",
+					"worker_id", workerID, "query", keyCountQuery, "error", err)
 			} else if keyCount == 0 {
 				key := auth.GenerateAPIKey()
 				defaultTenantID := uuid.MustParse("00000000-0000-0000-0000-000000000000")
@@ -954,16 +1031,15 @@ func main() {
 		}()
 	}
 
-
-		// Start pprof server on a separate port for CPU profiling.
-		if *pprofAddr != "" {
-			go func() {
-				logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
-				if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
-					logger.ErrorContext(context.Background(), "pprof server error", "worker_id", workerID, "error", err)
-				}
-			}()
-		}
+	// Start pprof server on a separate port for CPU profiling.
+	if *pprofAddr != "" {
+		go func() {
+			logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				logger.ErrorContext(context.Background(), "pprof server error", "worker_id", workerID, "error", err)
+			}
+		}()
+	}
 
 	// Handle shutdown signals.
 	sigCh := make(chan os.Signal, 1)
@@ -1009,4 +1085,3 @@ func main() {
 	}
 	logger.InfoContext(context.Background(), "shutdown complete", "worker_id", workerID)
 }
-

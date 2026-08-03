@@ -299,12 +299,12 @@ func TestPatchEmptyImportModuleName_AllNamed(t *testing.T) {
 	}
 	// Verify the import module names were preserved (not corrupted).
 	names, err := readImportModuleNames(result)
-		if err != nil {
-			t.Fatalf("readImportModuleNames: %v", err)
-		}
-		if err != nil {
-			t.Fatalf("readImportModuleNames: %v", err)
-		}
+	if err != nil {
+		t.Fatalf("readImportModuleNames: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("readImportModuleNames: %v", err)
+	}
 	if len(names) != 2 {
 		t.Fatalf("expected 2 imports, got %d", len(names))
 	}
@@ -420,9 +420,9 @@ func TestParseComponentExportSection_Default(t *testing.T) {
 		0x02,       // count: 2 exports
 		0x00, 0x03, // name length: 3
 		0x72, 0x75, 0x6e, // "run"
-		0x01, // sort: func
-		0x00, // index: 0
-		0x00, // no type reference
+		0x01,       // sort: func
+		0x00,       // index: 0
+		0x00,       // no type reference
 		0x00, 0x05, // name length: 5
 		0x74, 0x61, 0x62, 0x6c, 0x65, // "table"
 		0x02, // sort: table (uses default case in parser)

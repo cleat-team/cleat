@@ -40,7 +40,8 @@ type BuildConfig struct {
 	// (e.g., "place_order.wasm").
 	WASMOutput string
 
-	// Target is the compilation target: "tinygo" for Go code.
+	// Target is the compilation target. Only "go" (standard Go/wasip1) is
+	// currently supported.
 	Target string
 
 	// XfrmSource, if non-nil, provides transformed source files to write
@@ -49,7 +50,7 @@ type BuildConfig struct {
 }
 
 // PrepareBuildDir assembles the build directory: copies user source files,
-// writes generated files, and creates a go.mod for TinyGo compilation.
+// writes generated files, and creates a go.mod for wasip1 compilation.
 func PrepareBuildDir(cfg *BuildConfig) error {
 	// Create the build directory.
 	if err := os.MkdirAll(cfg.OutDir, 0755); err != nil {
@@ -180,29 +181,13 @@ func main() {
 	}
 
 	// Create go.mod with replace directive pointing to the project root.
-	// TinyGo caps the go version to its supported maximum, so we use a
-	// vendored .deps/ with go 1.23 for tinygo builds.
-	var goVersion, replaceRoot string
-	if cfg.Target == "tinygo" {
+	goVersion := cfg.GoVersion
+	if goVersion == "" {
 		goVersion = "1.23"
-		depsDir := filepath.Join(cfg.OutDir, ".deps")
-		if err := copyCleatSDKToDeps(cfg.ProjectRoot, cfg.ModulePath, depsDir); err != nil {
-			return err
-		}
-		absDeps, err := filepath.Abs(depsDir)
-		if err != nil {
-			return fmt.Errorf("resolving .deps path: %w", err)
-		}
-		replaceRoot = absDeps
-	} else {
-		goVersion = cfg.GoVersion
-		if goVersion == "" {
-			goVersion = "1.23"
-		}
-		replaceRoot = cfg.ProjectRoot
 	}
+	replaceRoot := cfg.ProjectRoot
 
-	// Write a minimal go.mod for Go/TinyGo compilation.
+	// Write a minimal go.mod for wasip1 compilation.
 	// The cleat/cleat submodule is replaced directly (not via the root
 	// module), and go mod tidy is run by the caller to generate go.sum.
 	modContent := fmt.Sprintf(`module cleat-build
@@ -230,59 +215,6 @@ replace %s => %s/cleat
 	}
 
 	return nil
-}
-
-// copyCleatSDKToDeps copies the cleat SDK and go.mod/go.sum into a .deps/
-// vendored directory, creating a go 1.23-compatible dependency tree for
-// TinyGo compilation.
-func copyCleatSDKToDeps(projectRoot, modulePath, depsDir string) error {
-	srcCleat := filepath.Join(projectRoot, "cleat")
-	if err := os.MkdirAll(filepath.Join(depsDir, "cleat"), 0755); err != nil {
-		return fmt.Errorf("creating .deps/cleat: %w", err)
-	}
-	goFiles, err := filepath.Glob(filepath.Join(srcCleat, "*.go"))
-	if err != nil {
-		return fmt.Errorf("globbing cleat source: %w", err)
-	}
-	for _, gf := range goFiles {
-		base := filepath.Base(gf)
-		if strings.HasPrefix(base, "gen_") {
-			continue
-		}
-		content, err := os.ReadFile(gf)
-		if err != nil {
-			return fmt.Errorf("reading %s: %w", base, err)
-		}
-		if err := os.WriteFile(filepath.Join(depsDir, "cleat", base), content, 0644); err != nil {
-			return fmt.Errorf("writing %s: %w", base, err)
-		}
-	}
-	for _, modFile := range []string{"go.mod", "go.sum"} {
-		srcMod := filepath.Join(srcCleat, modFile)
-		if data, err := os.ReadFile(srcMod); err == nil {
-			_ = os.WriteFile(filepath.Join(depsDir, "cleat", modFile), data, 0644)
-		}
-	}
-	srcCleattest := filepath.Join(srcCleat, "cleattest")
-	if st, err := os.Stat(srcCleattest); err == nil && st.IsDir() {
-		if err := os.MkdirAll(filepath.Join(depsDir, "cleattest"), 0755); err != nil {
-			return fmt.Errorf("creating .deps/cleattest: %w", err)
-		}
-		testGoFiles, _ := filepath.Glob(filepath.Join(srcCleattest, "*.go"))
-		for _, gf := range testGoFiles {
-			base := filepath.Base(gf)
-			content, err := os.ReadFile(gf)
-			if err != nil {
-				continue
-			}
-			_ = os.WriteFile(filepath.Join(depsDir, "cleattest", base), content, 0644)
-		}
-	}
-	depsMod := fmt.Sprintf(`module %s
-
-go 1.23
-`, modulePath)
-	return os.WriteFile(filepath.Join(depsDir, "go.mod"), []byte(depsMod), 0644)
 }
 
 // FindRepoRoot walks up from the given directory looking for go.mod to

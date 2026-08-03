@@ -640,8 +640,8 @@ type cvMockErrorStmt struct {
 	err error
 }
 
-func (s *cvMockErrorStmt) Close() error    { return nil }
-func (s *cvMockErrorStmt) NumInput() int    { return -1 }
+func (s *cvMockErrorStmt) Close() error  { return nil }
+func (s *cvMockErrorStmt) NumInput() int { return -1 }
 func (s *cvMockErrorStmt) Exec(args []driver.Value) (driver.Result, error) {
 	return &cvMockResult{}, nil
 }
@@ -739,34 +739,34 @@ func TestResolveChildVersion_VersionExistsFallthrough_Rule2(t *testing.T) {
 }
 
 func TestResolveChildVersion_LatestCompatibleNil_FallsToLatest(t *testing.T) {
-		// versionExists returns false, latestCompatibleVersion 0 (no compatible) →
-		// fall through to latestVersion = 8.
-		callCount := 0
-		db := newMockDB(func(query string) []driver.Value {
-			callCount++
-			switch callCount {
-			case 1:
-				return []driver.Value{int64(0)} // versionExists: not found
-			case 2:
-				return []driver.Value{int64(0)} // latestCompatibleVersion: none (COALESCE = 0)
-			case 3:
-				return []driver.Value{int64(8)} // latestVersion = 8
-			default:
-				return []driver.Value{int64(0)}
-			}
-		})
-		defer db.Close()
+	// versionExists returns false, latestCompatibleVersion 0 (no compatible) →
+	// fall through to latestVersion = 8.
+	callCount := 0
+	db := newMockDB(func(query string) []driver.Value {
+		callCount++
+		switch callCount {
+		case 1:
+			return []driver.Value{int64(0)} // versionExists: not found
+		case 2:
+			return []driver.Value{int64(0)} // latestCompatibleVersion: none (COALESCE = 0)
+		case 3:
+			return []driver.Value{int64(8)} // latestVersion = 8
+		default:
+			return []driver.Value{int64(0)}
+		}
+	})
+	defer db.Close()
 
-		ctx := context.Background()
-		opts := ChildWorkflowOptions{Version: 0}
-		v, err := ResolveChildVersion(ctx, db, "wf", 7, opts)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if v != 8 {
-			t.Errorf("expected version 8 (latest), got %d", v)
-		}
+	ctx := context.Background()
+	opts := ChildWorkflowOptions{Version: 0}
+	v, err := ResolveChildVersion(ctx, db, "wf", 7, opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	if v != 8 {
+		t.Errorf("expected version 8 (latest), got %d", v)
+	}
+}
 
 func TestResolveChildVersion_LatestVersionNil_Error(t *testing.T) {
 	// versionExists false, latestCompatibleVersion 0, latestVersion nil → error.

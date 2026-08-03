@@ -69,15 +69,11 @@ func stressMockResponse(service, operation string) string {
 }
 
 // buildStressWasm compiles the testdata/basic workflow to WASM via the cleat
-// build pipeline with the tinygo target. It skips the test if tinygo is not
-// available.
+// build pipeline using the default Go/wasip1 target.
 func buildStressWasm(t *testing.T) []byte {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping WASM compilation in short mode")
-	}
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not installed -- skipping WASM test")
 	}
 
 	cwd, err := os.Getwd()
@@ -96,18 +92,10 @@ func buildStressWasm(t *testing.T) []byte {
 
 	tmpDir := t.TempDir()
 	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "cleat"),
-		"build", "--target", "tinygo", "-o", tmpDir,
+		"build", "-o", tmpDir,
 		filepath.Join(projectRoot, "testdata", "basic"),
 	)
 	cmd.Dir = projectRoot
-
-	cmd.Env = os.Environ()
-	if goroot := os.Getenv("GOROOT"); goroot != "" {
-		cmd.Env = append(cmd.Env, "GOROOT="+goroot)
-	}
-	if tinygoroot := os.Getenv("TINYGOROOT"); tinygoroot != "" {
-		cmd.Env = append(cmd.Env, "TINYGOROOT="+tinygoroot)
-	}
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -131,6 +119,46 @@ func buildStressWasm(t *testing.T) []byte {
 	return nil
 }
 
+// newStressEngine builds an Engine wired with the wasmtime backend for the
+// "go" language. `cleat build`'s default Go/wasip1 target generates a main()
+// that uses the cleat_poll_work dispatch protocol (see gen_main_stub.go);
+// the default wazero Runtime only stubs cleat_poll_work (it always reports
+// "no work"), which races the module's background _start goroutine into
+// calling proc_exit before an exported entry point can be invoked directly,
+// surfacing as "wasm trap: exit(code=0)". The wasmtime backend implements
+// the real dispatch protocol and does not have this problem. This mirrors
+// engine/host_test.go's withWasmtimeBackend helper, which documents the
+// same constraint for engine-package tests.
+func newStressEngine(t *testing.T, rt *engine.Runtime, caller engine.ServiceCaller) *engine.Engine {
+	t.Helper()
+	ctx := context.Background()
+	wt, err := engine.NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+	return engine.NewEngine(rt, caller, engine.WithBackend("go", wt))
+}
+
+// requireDivergenceDetected asserts that a replay was rejected as diverged.
+// With the wasmtime backend, divergence is detected inside the workflow and
+// reported as part of the result string (containing "replay divergence")
+// rather than as an engine-level error — see engine/integration_test.go's
+// TestIntegrationReplayDivergence, which documents the same behavior. This
+// helper accepts either form.
+func requireDivergenceDetected(t *testing.T, label, result string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Logf("Divergence detected (%s, engine error): %v", label, err)
+		return
+	}
+	if strings.Contains(result, "replay divergence") {
+		t.Logf("Divergence detected (%s, workflow result): %s", label, result)
+		return
+	}
+	t.Errorf("expected divergence for %s, got err=nil result=%q", label, result)
+}
+
 // executePlaceOrder runs the place_order workflow to completion and returns the
 // result string, event history, and the mock caller used (for call-count
 // assertions). The wasmBytes parameter should come from a single call to
@@ -138,7 +166,7 @@ func buildStressWasm(t *testing.T) []byte {
 func executePlaceOrder(ctx context.Context, t *testing.T, rt *engine.Runtime, wasmBytes []byte, input json.RawMessage) (string, []engine.EventRecord, *stressMockCaller) {
 	t.Helper()
 	caller := &stressMockCaller{}
-	eng := engine.NewEngine(rt, caller)
+	eng := newStressEngine(t, rt, caller)
 
 	result, history, suspended, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
@@ -188,7 +216,7 @@ func TestReplayStressBasic(t *testing.T) {
 	const replayCount = 100
 	for i := 0; i < replayCount; i++ {
 		replayCaller := &stressMockCaller{}
-		eng := engine.NewEngine(rt, replayCaller)
+		eng := newStressEngine(t, rt, replayCaller)
 
 		result2, history2, suspended2, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, history)
 		if err != nil {
@@ -291,7 +319,7 @@ func TestReplayStressRandomCrashPoints(t *testing.T) {
 			prefix := fullHistory[:splitAt]
 
 			replayCaller := &stressMockCaller{}
-			eng := engine.NewEngine(rt, replayCaller)
+			eng := newStressEngine(t, rt, replayCaller)
 
 			// Replay from the truncated history. The engine replays the prefix
 			// events, then continues execution for steps beyond the prefix.
@@ -512,19 +540,11 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		tampered[0].Service = "tampered_service"
 
 		caller := &stressMockCaller{}
-		eng := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
-		if err == nil {
-			t.Fatal("expected divergence error for changed service name, got nil")
-		}
-		t.Logf("Divergence detected (service name): %v", err)
+		eng := newStressEngine(t, rt, caller)
+		result, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		requireDivergenceDetected(t, "service name", result, err)
 		if len(caller.calls) > 0 {
 			t.Errorf("failed replay made %d real service calls (expected 0)", len(caller.calls))
-		}
-		// Verify the error message contains useful diagnostic info.
-		errMsg := err.Error()
-		if !strings.Contains(errMsg, "tampered_service") && !strings.Contains(errMsg, "divergence") && !strings.Contains(errMsg, "mismatch") {
-			t.Logf("Warning: error message may lack diagnostic info: %q", errMsg)
 		}
 	})
 
@@ -534,12 +554,9 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		tampered[0].Op = "tampered_operation"
 
 		caller := &stressMockCaller{}
-		eng := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
-		if err == nil {
-			t.Fatal("expected divergence error for changed operation name, got nil")
-		}
-		t.Logf("Divergence detected (operation name): %v", err)
+		eng := newStressEngine(t, rt, caller)
+		result, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		requireDivergenceDetected(t, "operation name", result, err)
 		if len(caller.calls) > 0 {
 			t.Errorf("failed replay made %d real service calls (expected 0)", len(caller.calls))
 		}
@@ -555,12 +572,9 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		tampered[1].TimeoutMs = 5000
 
 		caller := &stressMockCaller{}
-		eng := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
-		if err == nil {
-			t.Fatalf("expected divergence error for changed event type (%s -> await_signals), got nil", oldType)
-		}
-		t.Logf("Divergence detected (event type): %v", err)
+		eng := newStressEngine(t, rt, caller)
+		result, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		requireDivergenceDetected(t, fmt.Sprintf("event type (%s -> await_signals)", oldType), result, err)
 		if len(caller.calls) > 0 {
 			t.Errorf("failed replay made %d real service calls (expected 0)", len(caller.calls))
 		}
@@ -586,12 +600,9 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		}
 
 		caller := &stressMockCaller{}
-		eng := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
-		if err == nil {
-			t.Fatal("expected divergence error for inserted extra event, got nil")
-		}
-		t.Logf("Divergence detected (inserted event): %v", err)
+		eng := newStressEngine(t, rt, caller)
+		result, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		requireDivergenceDetected(t, "inserted extra event", result, err)
 		if len(caller.calls) > 0 {
 			t.Errorf("failed replay made %d real service calls (expected 0)", len(caller.calls))
 		}
@@ -611,12 +622,9 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		}
 
 		caller := &stressMockCaller{}
-		eng := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
-		if err == nil {
-			t.Fatal("expected divergence error for removed event, got nil")
-		}
-		t.Logf("Divergence detected (removed event): %v", err)
+		eng := newStressEngine(t, rt, caller)
+		result, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		requireDivergenceDetected(t, "removed event", result, err)
 		if len(caller.calls) > 0 {
 			t.Errorf("failed replay made %d real service calls (expected 0)", len(caller.calls))
 		}
@@ -655,7 +663,7 @@ func TestReplayHashConsistency(t *testing.T) {
 	const replayCount = 20
 	for i := 0; i < replayCount; i++ {
 		caller := &stressMockCaller{}
-		eng := engine.NewEngine(rt, caller)
+		eng := newStressEngine(t, rt, caller)
 		_, resultHistory, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, history)
 		if err != nil {
 			t.Fatalf("Replay %d: %v", i, err)
@@ -719,32 +727,32 @@ func fuzzSeed(typeCode byte, strs []string, ints ...int64) []byte {
 func parseFuzzEvents(data []byte) []engine.EventRecord {
 	// Event type codes (must match those in compaction_fuzz_test.go).
 	const (
-		eventCodeCall              = 0
-		eventCodeAwaitSignals      = 1
-		eventCodeSignalReceived    = 2
-		eventCodeDefer             = 3
-		eventCodeChildWorkflow     = 4
-		eventCodeAwaitChild        = 5
-		eventCodeContinueAsNew     = 6
-		eventCodeHeartbeat         = 7
-		eventCodeAwaitAllChildren  = 8
-		eventCodePluginCall        = 9
-		eventCodePluginCallStream  = 10
-		eventCodeCreatePromise     = 11
-		eventCodeAwaitPromise      = 12
-		eventCodePromiseResolved   = 13
-		eventCodePromiseRejected   = 14
-		eventCodeUpdateHandler     = 15
-		eventCodeStateMutation     = 16
-		eventCodeRunDetached       = 17
-		eventCodeSideEffect        = 18
-		eventCodeScopeAcquired     = 19
-		eventCodeAcquireLock       = 20
-		eventCodeReleaseLock       = 21
-		eventCodeFetch             = 22
-		eventCodeDurableLog        = 23
-		eventCodeDurableSend       = 24
-		eventCodeDurableSchedule   = 25
+		eventCodeCall             = 0
+		eventCodeAwaitSignals     = 1
+		eventCodeSignalReceived   = 2
+		eventCodeDefer            = 3
+		eventCodeChildWorkflow    = 4
+		eventCodeAwaitChild       = 5
+		eventCodeContinueAsNew    = 6
+		eventCodeHeartbeat        = 7
+		eventCodeAwaitAllChildren = 8
+		eventCodePluginCall       = 9
+		eventCodePluginCallStream = 10
+		eventCodeCreatePromise    = 11
+		eventCodeAwaitPromise     = 12
+		eventCodePromiseResolved  = 13
+		eventCodePromiseRejected  = 14
+		eventCodeUpdateHandler    = 15
+		eventCodeStateMutation    = 16
+		eventCodeRunDetached      = 17
+		eventCodeSideEffect       = 18
+		eventCodeScopeAcquired    = 19
+		eventCodeAcquireLock      = 20
+		eventCodeReleaseLock      = 21
+		eventCodeFetch            = 22
+		eventCodeDurableLog       = 23
+		eventCodeDurableSend      = 24
+		eventCodeDurableSchedule  = 25
 	)
 
 	codeToEventType := map[int]engine.EventType{

@@ -12,7 +12,7 @@ func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_defer") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_defer", func(caller *wasmtime.Caller,
 		descPtr, descLen, deferIDPtr, deferIDMaxLen int32) int64 {
 		h := b.handler
@@ -32,7 +32,7 @@ func (b *wasmtimeBackend) registerCleatPollCancellation(linker *wasmtime.Linker)
 	if b.skipIfNotNeeded("cleat_poll_cancellation") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_poll_cancellation", func(caller *wasmtime.Caller,
 		reasonPtr, reasonMaxLen int32) int64 {
 		h := b.handler
@@ -48,7 +48,7 @@ func (b *wasmtimeBackend) registerCleatPollSignal(linker *wasmtime.Linker) error
 	if b.skipIfNotNeeded("cleat_poll_signal") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_poll_signal", func(caller *wasmtime.Caller,
 		namePtr, nameLen, payloadPtr, payloadMaxLen int32) int64 {
 		h := b.handler
@@ -68,7 +68,7 @@ func (b *wasmtimeBackend) registerCleatContinueAsNew(linker *wasmtime.Linker) er
 	if b.skipIfNotNeeded("cleat_continue_as_new") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_continue_as_new", func(caller *wasmtime.Caller,
 		inputPtr, inputLen int32) int64 {
 		h := b.handler
@@ -88,7 +88,7 @@ func (b *wasmtimeBackend) registerCleatContinueAsNewVersioned(linker *wasmtime.L
 	if b.skipIfNotNeeded("cleat_continue_as_new_versioned") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_continue_as_new_versioned", func(caller *wasmtime.Caller,
 		inputPtr, inputLen int32, newVersion int32) int64 {
 		h := b.handler
@@ -108,7 +108,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflow(linker *wasmtime.Linker) er
 	if b.skipIfNotNeeded("cleat_child_workflow") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_child_workflow", func(caller *wasmtime.Caller,
 		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen int32) int64 {
 		h := b.handler
@@ -132,7 +132,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 	if b.skipIfNotNeeded("cleat_child_workflow_with_options") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_child_workflow_with_options", func(caller *wasmtime.Caller,
 		namePtr, nameLen, inputPtr, inputLen int32, version int64, priority int64,
 		policyPtr, policyLen, runIDPtr, runIDMaxLen int32) int64 {
@@ -166,7 +166,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Li
 	if b.skipIfNotNeeded("cleat_child_workflow_in_schema") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_child_workflow_in_schema", func(caller *wasmtime.Caller,
 		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen int32, version int64, priority int64,
 		policyPtr, policyLen, runIDPtr, runIDMaxLen int32) int64 {
@@ -199,7 +199,7 @@ func (b *wasmtimeBackend) registerCleatAwaitChild(linker *wasmtime.Linker) error
 	if b.skipIfNotNeeded("cleat_await_child") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_await_child", func(caller *wasmtime.Caller,
 		runIDPtr, runIDLen, resultPtr, resultMaxLen int32) int64 {
 		h := b.handler
@@ -219,7 +219,7 @@ func (b *wasmtimeBackend) registerCleatAwaitAllChildren(linker *wasmtime.Linker)
 	if b.skipIfNotNeeded("cleat_await_all_children") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_await_all_children", func(caller *wasmtime.Caller,
 		idsPtr, idsLen, resultsPtr, resultsMaxLen int32) int64 {
 		h := b.handler
@@ -239,7 +239,7 @@ func (b *wasmtimeBackend) registerCleatCallRetry(linker *wasmtime.Linker) error 
 	if b.skipIfNotNeeded("cleat_call_retry") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_call_retry", func(caller *wasmtime.Caller,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
@@ -276,7 +276,7 @@ func (b *wasmtimeBackend) registerCleatAwaitSignals(linker *wasmtime.Linker) err
 	if b.skipIfNotNeeded("cleat_await_signals") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_await_signals", func(caller *wasmtime.Caller,
 		namesPtr, namesLen int32, timeoutMs int64,
 		sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen int32) int64 {
@@ -298,7 +298,7 @@ func (b *wasmtimeBackend) registerCleatSetQueryState(linker *wasmtime.Linker) er
 	if b.skipIfNotNeeded("set_query_state") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "set_query_state", func(caller *wasmtime.Caller,
 		keyPtr, keyLen, valPtr, valLen int32) int64 {
 		h := b.handler
@@ -322,7 +322,7 @@ func (b *wasmtimeBackend) registerCleatCallHeartbeat(linker *wasmtime.Linker) er
 	if b.skipIfNotNeeded("cleat_call_heartbeat") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_call_heartbeat", func(caller *wasmtime.Caller,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		heartbeatIntervalMs int64,
@@ -352,7 +352,7 @@ func (b *wasmtimeBackend) registerCleatRegisterUpdateHandler(linker *wasmtime.Li
 	if b.skipIfNotNeeded("cleat_register_update_handler") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_register_update_handler", func(caller *wasmtime.Caller,
 		namePtr, nameLen int32) int64 {
 		h := b.handler
@@ -372,7 +372,7 @@ func (b *wasmtimeBackend) registerCleatSendSignalAndWait(linker *wasmtime.Linker
 	if b.skipIfNotNeeded("cleat_send_signal_and_wait") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_send_signal_and_wait", func(caller *wasmtime.Caller,
 		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen int32,
 		timeoutMs int64,
@@ -402,7 +402,7 @@ func (b *wasmtimeBackend) registerCleatReplyToSignal(linker *wasmtime.Linker) er
 	if b.skipIfNotNeeded("cleat_reply_to_signal") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_reply_to_signal", func(caller *wasmtime.Caller,
 		correlationPtr, correlationLen, respPtr, respLen int32) int64 {
 		h := b.handler
@@ -426,7 +426,7 @@ func (b *wasmtimeBackend) registerCleatSignalWorkflow(linker *wasmtime.Linker) e
 	if b.skipIfNotNeeded("cleat_signal_workflow") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_signal_workflow", func(caller *wasmtime.Caller,
 		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen int32) int64 {
 		h := b.handler
@@ -454,7 +454,7 @@ func (b *wasmtimeBackend) registerCleatSetScope(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_set_scope") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_set_scope", func(caller *wasmtime.Caller,
 		objTypePtr, objTypeLen, instKeyPtr, instKeyLen int32,
 		prevScopePtr, prevScopeMaxLen int32) int64 {
@@ -479,7 +479,7 @@ func (b *wasmtimeBackend) registerCleatGetScope(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_get_scope") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_get_scope", func(caller *wasmtime.Caller,
 		objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen int32) int64 {
 		h := b.handler
@@ -495,7 +495,7 @@ func (b *wasmtimeBackend) registerCleatSideEffect(linker *wasmtime.Linker) error
 	if b.skipIfNotNeeded("cleat_side_effect") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_side_effect", func(caller *wasmtime.Caller,
 		resultPtr, resultLen, outPtr, outMaxLen int32) int64 {
 		h := b.handler
@@ -515,7 +515,7 @@ func (b *wasmtimeBackend) registerCleatRegisterQueryHandler(linker *wasmtime.Lin
 	if b.skipIfNotNeeded("cleat_register_query_handler") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_register_query_handler", func(caller *wasmtime.Caller,
 		namePtr, nameLen int32) int64 {
 		h := b.handler
@@ -535,7 +535,7 @@ func (b *wasmtimeBackend) registerCleatRunDetached(linker *wasmtime.Linker) erro
 	if b.skipIfNotNeeded("cleat_run_detached") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_run_detached", func(caller *wasmtime.Caller,
 		namePtr, nameLen, inputPtr, inputLen int32) int64 {
 		h := b.handler
@@ -559,7 +559,7 @@ func (b *wasmtimeBackend) registerCleatPollChild(linker *wasmtime.Linker) error 
 	if b.skipIfNotNeeded("cleat_poll_child") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_poll_child", func(caller *wasmtime.Caller,
 		runIDPtr, runIDLen, resultPtr, resultMaxLen int32) int64 {
 		h := b.handler
@@ -579,7 +579,7 @@ func (b *wasmtimeBackend) registerCleatAwaitAnyChild(linker *wasmtime.Linker) er
 	if b.skipIfNotNeeded("cleat_await_any_child") {
 		return nil
 	}
-	
+
 	return linker.FuncWrap("env", "cleat_await_any_child", func(caller *wasmtime.Caller,
 		idsPtr, idsLen, resultPtr, resultMaxLen int32) int64 {
 		h := b.handler

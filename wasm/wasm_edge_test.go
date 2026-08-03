@@ -1255,7 +1255,7 @@ func TestGenerateExportsEmptyEntryPoints(t *testing.T) {
 	result.EntryPoints = nil
 	defer func() { result.EntryPoints = ep }()
 
-	code := string(GenerateExports("mypkg", result, "tinygo"))
+	code := string(GenerateExports("mypkg", result, "go"))
 	for _, c := range []string{
 		"//go:build wasip1",
 		"package mypkg",

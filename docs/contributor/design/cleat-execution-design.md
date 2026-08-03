@@ -117,7 +117,7 @@ A source transformer (using `go/parser`, `go/types`, and SSA from the Go standar
 3. **Generate WASM bindings** — for each function in the durable set, generate `//go:wasmimport` stubs and a host adapter that bridges the user's `HostCalls` interface to the low-level WASM imports.
 4. **Generate the WASM export** — a `//go:wasmexport` entry point that the host calls to start or resume the workflow.
 
-The user's code is never modified. The transformer generates the glue layer and compiles the combined result to WASM via `GOOS=wasip1 GOARCH=wasm` (standard Go) or tinygo.
+The user's code is never modified. The transformer generates the glue layer and compiles the combined result to WASM via `GOOS=wasip1 GOARCH=wasm` (standard Go).
 
 Critically, the transformer does NOT modify the user's business logic. It generates the adapter layer that sits between the user's clean Go code and the WASM host interface. The user's code calls `h.DurableCall(...)`. The generated adapter converts that to the low-level `//go:wasmimport` calls that cross the WASM boundary.
 
@@ -170,7 +170,7 @@ Each language needs a transformer that generates the WASM bindings and host adap
 
 | Language | WASM compilation | Maturity | Transformer effort |
 |---|---|---|---|
-| **Go** | `GOOS=wasip1` or tinygo | Production-ready | ~12 weeks (see 8.12) |
+| **Go** | `GOOS=wasip1` | Production-ready | ~12 weeks (see 8.12) |
 | **Rust** | `wasm32-wasip1` target, wasm-bindgen | Production-ready | ~8 weeks |
 | **C** | Clang `--target=wasm32-wasip1` | Production-ready | ~6 weeks |
 | **Zig** | `zig build-exe -target wasm32-wasip1` | Production-ready | ~6 weeks |

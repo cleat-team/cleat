@@ -101,3 +101,9 @@ ports-round2/*/build/
 crates/cleat-java/.gradle/
 crates/cleat-java/build/
 examples/*/node_modules/
+
+# Gradle build artifacts anywhere (these were being swept into commits from
+# examples/ because the rules above were path-specific).
+.gradle/
+**/.gradle/
+examples/*/build/

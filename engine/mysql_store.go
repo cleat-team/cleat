@@ -555,10 +555,10 @@ func NewMySQLStoreFactory(masterDB *sql.DB, baseDSN string, idempotencyKeyTTL ..
 		ttl = idempotencyKeyTTL[0]
 	}
 	return &MySQLStoreFactory{
-		masterDB:          masterDB,
-		baseDSN:           baseDSN,
-		tenantDBs:         make(map[string]*sql.DB),
-		idempotencyKeyTTL: ttl,
+		masterDB:           masterDB,
+		baseDSN:            baseDSN,
+		tenantDBs:          make(map[string]*sql.DB),
+		idempotencyKeyTTL:  ttl,
 		tenantPoolMaxConns: 25,
 	}
 }

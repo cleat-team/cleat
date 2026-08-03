@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -100,6 +101,9 @@ type mockStore struct {
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
 	terminateWorkflowFn                func(ctx context.Context, workflowID, reason string) error
+	adminForceCompleteFn               func(ctx context.Context, workflowID string, generation int64, result string, operator string) error
+	adminForceFailFn                   func(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error
+	adminReReplayFn                    func(ctx context.Context, workflowID string, generation int64, operator string) error
 }
 
 func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID string) (*engine.WorkflowInstance, error) {
@@ -581,7 +585,7 @@ func newTestWorker(ms *mockStore) *Worker {
 	mc := NewMemoryController(monitor, ms, "test-worker", 5, 1<<40, 1<<40)
 	testMetrics := newTestPrometheus()
 	return &Worker{
-		Metrics: testMetrics,
+		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
 		concurrency:         5,
@@ -608,7 +612,7 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 	mc := NewMemoryController(monitor, ms, "test-worker", concurrency, 1<<40, 1<<40)
 	testMetrics := newTestPrometheus()
 	return &Worker{
-		Metrics: testMetrics,
+		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
 		concurrency:         concurrency,
@@ -830,9 +834,9 @@ func TestDispatchLoop_EmptyQueuesNoCrash(t *testing.T) {
 
 func TestDispatchLoop_AtCapacity(t *testing.T) {
 	ms := &mockStore{}
-	claimAttempts := 0
+	var claimAttempts atomic.Int32
 	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
-		claimAttempts++
+		claimAttempts.Add(1)
 		return nil, nil
 	}
 	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
@@ -841,13 +845,13 @@ func TestDispatchLoop_AtCapacity(t *testing.T) {
 
 	w := newTestWorkerWithConcurrency(ms, 1)
 
-	// Fill the inflight map to capacity.
+	// Fill the inflight map to capacity. This is a synthetic entry with no
+	// goroutine backing it, so it will never clear on its own — it must be
+	// removed explicitly below before the loop can be allowed to exit (see
+	// the shutdown drain logic in dispatchLoop, setup.go, which intentionally
+	// blocks until inflight reaches zero so real in-flight workflows finish
+	// cleanly before the worker stops claiming).
 	w.inflight.Store("wf-busy-1", &engine.WorkflowInstance{ID: "wf-busy-1", DefName: "test", DefVersion: 1})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	w.ctx = ctx
-	w.cancel = cancel
 
 	done := make(chan struct{})
 	w.wg.Add(1)
@@ -856,11 +860,31 @@ func TestDispatchLoop_AtCapacity(t *testing.T) {
 		close(done)
 	}()
 
-	<-done
+	// Let the loop run several poll cycles while at capacity, then snapshot
+	// the claim count. This is the actual property under test: while the
+	// worker is genuinely at capacity, no claims are attempted.
+	time.Sleep(50 * time.Millisecond)
+	attemptsAtCapacity := claimAttempts.Load()
+
+	// Now unwind the test: cancel and clear the synthetic in-flight entry so
+	// the loop's shutdown drain sees zero in-flight work and returns. A
+	// claim slipping in during this shutdown transition (the in-flight loop
+	// iteration that was already past its capacity check when we cancelled)
+	// doesn't violate the capacity invariant above and is intentionally not
+	// asserted on here — it's an artifact of tearing the loop down, not of
+	// being at capacity.
+	w.cancel()
+	w.inflight.Delete("wf-busy-1")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatchLoop did not stop within 2s of context cancellation")
+	}
 
 	// With capacity full, no claim attempts should happen.
-	if claimAttempts > 0 {
-		t.Errorf("expected 0 claim attempts when at capacity, got %d", claimAttempts)
+	if attemptsAtCapacity > 0 {
+		t.Errorf("expected 0 claim attempts when at capacity, got %d", attemptsAtCapacity)
 	}
 }
 
@@ -3033,10 +3057,23 @@ func TestCanAcceptAPIWorkflows_Default(t *testing.T) {
 // readMemTotal tests
 // ---------------------------------------------------------------------------
 
+// readMemTotal reads /proc/meminfo, so it only works on Linux. Its caller
+// treats a false return as "memory monitoring unavailable" and disables the
+// feature rather than failing, so on other platforms the correct behaviour is
+// a clean false — which is worth asserting rather than skipping past.
 func TestReadMemTotal(t *testing.T) {
 	total, ok := readMemTotal()
+
+	if runtime.GOOS != "linux" {
+		if ok {
+			t.Errorf("readMemTotal() = (%d, true) on %s; /proc/meminfo should not exist there",
+				total, runtime.GOOS)
+		}
+		return
+	}
+
 	if !ok {
-		t.Fatal("readMemTotal() returned false — /proc/meminfo may not be available")
+		t.Fatal("readMemTotal() returned false on Linux — /proc/meminfo should be readable")
 	}
 	if total == 0 {
 		t.Error("readMemTotal() returned 0 bytes, expected > 0")
@@ -3096,6 +3133,24 @@ func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, p
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	if m.terminateWorkflowFn != nil {
 		return m.terminateWorkflowFn(ctx, workflowID, reason)
+	}
+	return nil
+}
+func (m *mockStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	if m.adminForceCompleteFn != nil {
+		return m.adminForceCompleteFn(ctx, workflowID, generation, result, operator)
+	}
+	return nil
+}
+func (m *mockStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	if m.adminForceFailFn != nil {
+		return m.adminForceFailFn(ctx, workflowID, generation, errorMsg, errorCode, operator)
+	}
+	return nil
+}
+func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	if m.adminReReplayFn != nil {
+		return m.adminReReplayFn(ctx, workflowID, generation, operator)
 	}
 	return nil
 }

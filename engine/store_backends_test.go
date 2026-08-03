@@ -49,6 +49,7 @@ func (b *PostgresBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	t.Helper()
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	applyPostgresProcedures(t, db)
 	testutil.CleanupPostgresTestData(t, db)
 	store := NewPostgresStore(db)
 	teardown := func() {
@@ -58,16 +59,31 @@ func (b *PostgresBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	return store, teardown
 }
 
+// SetupForTenant returns a store that genuinely enforces Row-Level Security.
+//
+// The superuser/owner connection that adminDB (and Setup, above) uses
+// bypasses RLS entirely -- that's a hard PostgreSQL rule for superusers, and
+// applies to the table-owning role too unless FORCE ROW LEVEL SECURITY is
+// set. So the WorkflowStore returned here is built on a *second* connection,
+// authenticated as testutil.PostgresRLSTestRole: an ordinary, non-owning
+// role for which Postgres always evaluates RLS policies. Without this,
+// every cross-tenant isolation assertion in tenant_isolation_test.go would
+// trivially "pass" by seeing every row and simply not asserting on the ones
+// it shouldn't -- or, worse, silently prove nothing about whether RLS
+// actually blocks cross-tenant access. See testutil.OpenPostgresRLSTestDB.
 func (b *PostgresBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowStore, func()) {
 	t.Helper()
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
-	testutil.CleanupPostgresTestData(t, db)
-	store := NewPostgresStore(db)
+	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
+	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
+	testutil.CleanupPostgresTestData(t, adminDB)
+
+	appDB := testutil.OpenPostgresRLSTestDB(t, adminDB)
+	store := NewPostgresStore(appDB)
 	store.tenantID = tenantID
 	teardown := func() {
-		testutil.CleanupPostgresTestData(t, db)
-		db.Close()
+		testutil.CleanupPostgresTestData(t, adminDB)
+		appDB.Close()
+		adminDB.Close()
 	}
 	return store, teardown
 }
@@ -90,6 +106,7 @@ func (b *MySQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	}
 	db := testutil.MySQLTestDB(t)
 	testutil.SetupMySQLFullSchema(t, db)
+	applyMySQLProcedures(t, db)
 	testutil.CleanupMySQLTestData(t, db)
 	store := NewMySQLStore(db)
 	teardown := func() {
@@ -134,6 +151,7 @@ func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	}
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
+	applyMSSQLProcedures(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 	store := NewMSSQLStore(db)
 	teardown := func() {
@@ -223,6 +241,63 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 	err = store.CreatePromise(context.Background(), readyWfID, "test-promise", "promise-1")
 	if err != nil {
 		t.Fatalf("setupTestData: CreatePromise: %v", err)
+	}
+}
+
+// describeClaimState reports what the claim predicate would see right now.
+//
+// TestClaimWorkflow, TestClaimSkipLocked and TestListWorkflows_ByStatus fail
+// intermittently on some machines and in the cluster CI job -- with
+// "ClaimWorkflow returned nil", "first claim returned 10, want 3" and
+// "expected at least 1 result" respectively. Those messages say a claim did
+// not behave, and nothing about why: not how many rows existed, what status or
+// task_queue they carried, or whether they were due. Reproducing has so far
+// needed the exact machine state that produced it.
+//
+// Rather than guess, the assertions call this so the next failure arrives with
+// the evidence attached. It is deliberately read-only and best-effort: a
+// diagnostic that can itself fail the test would be worse than none.
+func describeClaimState(t *testing.T, store WorkflowStore) {
+	t.Helper()
+
+	var db *sql.DB
+	switch s := store.(type) {
+	case *PostgresStore:
+		db = s.db
+		t.Logf("claim state: store.taskQueues=%v store.tenantID=%q", s.taskQueues, s.tenantID)
+	default:
+		t.Logf("claim state: no diagnostic for %T", store)
+		return
+	}
+
+	var total, ready, due, running int
+	err := db.QueryRow(`
+		SELECT count(*),
+		       count(*) FILTER (WHERE status = 'ready'),
+		       count(*) FILTER (WHERE status = 'ready' AND next_wake_at <= now()),
+		       count(*) FILTER (WHERE status = 'running')
+		FROM workflow_instances`).Scan(&total, &ready, &due, &running)
+	if err != nil {
+		t.Logf("claim state: query failed: %v", err)
+		return
+	}
+	t.Logf("claim state: workflow_instances total=%d ready=%d ready+due=%d running=%d",
+		total, ready, due, running)
+
+	rows, err := db.Query(`
+		SELECT coalesce(task_queue, '<null>'), status, count(*)
+		FROM workflow_instances GROUP BY 1, 2 ORDER BY 1, 2`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tq, status string
+		var n int
+		if err := rows.Scan(&tq, &status, &n); err != nil {
+			return
+		}
+		t.Logf("claim state:   task_queue=%q status=%q count=%d", tq, status, n)
 	}
 }
 

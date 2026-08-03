@@ -16,26 +16,48 @@ import (
 // wired in (the --require-auth=true default), requests with an invalid API key
 // are rejected with 401 Unauthorized.
 //
-// This is an integration test requiring a running PostgreSQL. Set DURABLE_TEST_DB
+// This is an integration test requiring a running PostgreSQL. Set CLEAT_TEST_DB
 // to the connection URL (e.g. "postgres://localhost:5432/cleat?sslmode=disable").
+//
+// It read DURABLE_TEST_DB until now -- a name left behind by the incomplete
+// rename recorded in plans/durable-to-cleat-rename.md, which lists
+// DURABLE_TEST_DB -> CLEAT_TEST_DB. Nothing sets the old name any more, so this
+// test fell through to a localhost DSN with no credentials, failed to
+// authenticate as the CI runner's OS user, and skipped. It had not actually
+// exercised the auth middleware in CI for as long as that rename has been
+// pending.
 func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping auth integration test in short mode")
 	}
 
-	dsn := os.Getenv("DURABLE_TEST_DB")
+	dsn := os.Getenv("CLEAT_TEST_DB")
 	if dsn == "" {
+		dsn = os.Getenv("DURABLE_TEST_DB") // deprecated spelling
+	}
+	// Distinguish "no database configured" from "the configured database is
+	// broken". Only the former is a legitimate skip; treating the latter as one
+	// is how a test reports success while testing nothing.
+	configured := dsn != ""
+	if !configured {
 		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
+	}
+
+	fatalf := t.Skipf
+	if configured {
+		fatalf = t.Fatalf
 	}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		t.Skipf("cannot connect to database: %v", err)
+		fatalf("cannot connect to database: %v", err)
+		return
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		t.Skipf("cannot ping database: %v", err)
+		fatalf("cannot ping database: %v", err)
+		return
 	}
 
 	// Ensure the tenant_api_keys table exists so that the query does not fail

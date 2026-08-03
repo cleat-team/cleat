@@ -22,6 +22,34 @@ func testDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// deployFaultTestDef deploys the ("test", 1) workflow_defs row that every
+// raw `INSERT INTO workflow_instances (..., def_name, def_version, ...)
+// VALUES (..., 'test', 1, ...)` below depends on.
+//
+// migrations/postgres/001_schema.sql has
+// `FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)`
+// on workflow_instances; the hand-maintained test schema this package used
+// to build (engine/testutil/schema.go, before it started applying the real
+// migration file) had no such FK, so these raw inserts silently worked
+// without a matching def. Every one of them used to ignore db.Exec's error
+// return too, so the FK violation this constraint now produces was swallowed
+// outright: the INSERT was a no-op, and every assertion below failed for a
+// completely unrelated-looking reason (e.g. "Expected exactly 1 claim, got 0"
+// instead of a foreign key error).
+func deployFaultTestDef(t *testing.T, store *PostgresStore) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
+		Name:       "test",
+		Version:    1,
+		WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1,
+		MinVersion: 1,
+	}); err != nil {
+		t.Fatalf("deployFaultTestDef: %v", err)
+	}
+}
+
 // TestFaultConcurrentClaim verifies that SKIP LOCKED prevents duplicate claims
 // when multiple workers compete for the same workflow.
 func TestFaultConcurrentClaim(t *testing.T) {
@@ -30,11 +58,14 @@ func TestFaultConcurrentClaim(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
+	deployFaultTestDef(t, store)
 
 	// Create a test instance.
 	runID := fmt.Sprintf("test-concurrent-%d", time.Now().UnixNano())
-	db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID)
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
+		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
+		t.Fatalf("insert test instance: %v", err)
+	}
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	var wg sync.WaitGroup
@@ -69,10 +100,13 @@ func TestFaultEventHistoryIdempotency(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
+	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-idempotent-%d", time.Now().UnixNano())
-	db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID)
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
+		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
+		t.Fatalf("insert test instance: %v", err)
+	}
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -109,12 +143,15 @@ func TestFaultReapStaleInstances(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
+	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-reap-%d", time.Now().UnixNano())
 	// Insert directly with an old heartbeat.
-	db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, assigned_to, heartbeat_at)
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, assigned_to, heartbeat_at)
 		VALUES ($1, 'test', 1, 'running', '{}', 'dead-worker', now() - interval '2 minutes')
-		ON CONFLICT DO NOTHING`, runID)
+		ON CONFLICT DO NOTHING`, runID); err != nil {
+		t.Fatalf("insert test instance: %v", err)
+	}
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Reap with a short timeout.
@@ -142,10 +179,13 @@ func TestFaultHeartbeatOwnership(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
+	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-heartbeat-%d", time.Now().UnixNano())
-	db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID)
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
+		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
+		t.Fatalf("insert test instance: %v", err)
+	}
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Worker A claims the instance.

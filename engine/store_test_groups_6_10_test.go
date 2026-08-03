@@ -463,6 +463,7 @@ func TestListWorkflows_ByStatus(t *testing.T) {
 				t.Fatalf("ListWorkflows(status=ready): %v", err)
 			}
 			if len(readyResults) < 1 {
+				describeClaimState(t, store)
 				t.Fatal("ListWorkflows(status=ready): expected at least 1 result")
 			}
 

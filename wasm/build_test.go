@@ -291,92 +291,6 @@ func TestPrepareBuildDirEmptyOutputs(t *testing.T) {
 	}
 }
 
-func TestPrepareBuildDirTinygoTarget(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	projRoot := filepath.Join(tmpDir, "project")
-	if err := os.MkdirAll(projRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projRoot, "go.mod"), []byte("module test\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// The tinygo path copies the cleat SDK source from projectRoot/cleat/
-	// into .deps/cleat/.  Create a minimal cleat SDK stub.
-	cleatDir := filepath.Join(projRoot, "cleat")
-	if err := os.MkdirAll(cleatDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cleatDir, "hostcalls.go"),
-		[]byte("package cleat\n\n// stub\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	srcDir := filepath.Join(tmpDir, "src")
-	if err := os.MkdirAll(srcDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(srcDir, "wf.go"),
-		[]byte("package mypkg\n\nfunc Run() {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	outDir := filepath.Join(tmpDir, "out")
-
-	cfg := &BuildConfig{
-		SrcDir:      srcDir,
-		OutDir:      outDir,
-		PkgName:     "main",
-		ModulePath:  "github.com/test/module",
-		ProjectRoot: projRoot,
-		GoVersion:   "1.26",
-		Target:      "tinygo",
-		Outputs: &OutputFiles{
-			Imports: "// imports\n",
-			Memory:  "// memory\n",
-			Adapter: "// adapter\n",
-			Exports: "// exports\n",
-		},
-	}
-
-	if err := PrepareBuildDir(cfg); err != nil {
-		t.Fatalf("PrepareBuildDir: %v", err)
-	}
-
-	// Main stub should use channel block for tinygo.
-	stub, err := os.ReadFile(filepath.Join(outDir, "gen_main_stub.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(stub), "<-make(chan struct{})") {
-		t.Errorf("expected channel block in tinygo stub, got: %s", string(stub))
-	}
-
-	// .deps/go.mod should have go 1.23 (capped).
-	depsMod, err := os.ReadFile(filepath.Join(outDir, ".deps", "go.mod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(depsMod), "go 1.23") {
-		t.Errorf("expected go 1.23 in .deps/go.mod, got: %s", string(depsMod))
-	}
-
-	// Cleat SDK should be copied into .deps/cleat/.
-	if _, err := os.Stat(filepath.Join(outDir, ".deps", "cleat", "hostcalls.go")); os.IsNotExist(err) {
-		t.Error("cleat SDK stub not copied to .deps/cleat/")
-	}
-
-	// The main go.mod should reference .deps as the replace root (not projRoot).
-	mod, err := os.ReadFile(filepath.Join(outDir, "go.mod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(mod), filepath.Join(outDir, ".deps")) {
-		t.Errorf("expected .deps replace target in go.mod, got: %s", string(mod))
-	}
-}
-
 func TestPrepareBuildDirSkipsGenFilesInSrc(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -613,9 +527,9 @@ func TestPrepareBuildDirGoTargetWithCleattest(t *testing.T) {
 		t.Fatalf("PrepareBuildDir: %v", err)
 	}
 
-	// The "go" target should NOT create .deps/cleattest/ (no TinyGo workaround).
+	// The "go" target should NOT create a .deps/ vendor directory.
 	if _, err := os.Stat(filepath.Join(outDir, ".deps")); !os.IsNotExist(err) {
-		t.Error(".deps directory should not exist for go target (no TinyGo workaround needed)")
+		t.Error(".deps directory should not exist for go target")
 	}
 
 	// Generated files should be present.
@@ -623,72 +537,5 @@ func TestPrepareBuildDirGoTargetWithCleattest(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(outDir, name)); os.IsNotExist(err) {
 			t.Errorf("expected generated file %s was not created", name)
 		}
-	}
-}
-
-func TestPrepareBuildDirTinygoWithCleattest(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	projRoot := filepath.Join(tmpDir, "project")
-	if err := os.MkdirAll(projRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projRoot, "go.mod"), []byte("module test\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create cleat SDK with a cleattest subdirectory.
-	cleatDir := filepath.Join(projRoot, "cleat")
-	if err := os.MkdirAll(cleatDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cleatDir, "hostcalls.go"),
-		[]byte("package cleat\n\n// stub\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cleattestDir := filepath.Join(cleatDir, "cleattest")
-	if err := os.MkdirAll(cleattestDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cleattestDir, "testutil.go"),
-		[]byte("package cleattest\n\n// stub\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	srcDir := filepath.Join(tmpDir, "src")
-	if err := os.MkdirAll(srcDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(srcDir, "wf.go"),
-		[]byte("package mypkg\n\nfunc Run() {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	outDir := filepath.Join(tmpDir, "out")
-
-	cfg := &BuildConfig{
-		SrcDir:      srcDir,
-		OutDir:      outDir,
-		PkgName:     "main",
-		ModulePath:  "github.com/test/module",
-		ProjectRoot: projRoot,
-		GoVersion:   "1.26",
-		Target:      "tinygo",
-		Outputs: &OutputFiles{
-			Imports: "// imports\n",
-			Memory:  "// memory\n",
-			Adapter: "// adapter\n",
-			Exports: "// exports\n",
-		},
-	}
-
-	if err := PrepareBuildDir(cfg); err != nil {
-		t.Fatalf("PrepareBuildDir: %v", err)
-	}
-
-	// Cleattest SDK should be copied into .deps/cleattest/.
-	if _, err := os.Stat(filepath.Join(outDir, ".deps", "cleattest", "testutil.go")); os.IsNotExist(err) {
-		t.Error("cleattest stub not copied to .deps/cleattest/")
 	}
 }

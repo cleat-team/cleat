@@ -93,8 +93,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/google/uuid"
 )
 
 // WorkflowFunc is a workflow entry point. The context provides HostCalls
@@ -104,10 +104,10 @@ type WorkflowFunc func(ctx *Context) error
 // Context provides HostCalls and manages input/output for a single
 // workflow execution.
 type Context struct {
-	h               cleat.HostCalls
-	Input           string
-	Output          string
-	childWorkflows  map[string]WorkflowFunc
+	h              cleat.HostCalls
+	Input          string
+	Output         string
+	childWorkflows map[string]WorkflowFunc
 }
 
 // H returns the HostCalls interface for the current execution.
@@ -120,9 +120,9 @@ type Option func(*Runner)
 
 // Runner is an in-process workflow runner.
 type Runner struct {
-	mu         sync.RWMutex
-	workflows  map[string]WorkflowFunc
-	now        time.Time
+	mu        sync.RWMutex
+	workflows map[string]WorkflowFunc
+	now       time.Time
 }
 
 // New creates a new embedded Runner. The simulated clock starts at
@@ -190,11 +190,11 @@ func (r *Runner) ExecuteWorkflowTyped(ctx context.Context, name string, input, o
 
 // execution holds the per-run state.
 type execution struct {
-	runner      *Runner
-	wfID        string
-	wfRunID     string
-	startTime   time.Time
-	mu          sync.Mutex
+	runner    *Runner
+	wfID      string
+	wfRunID   string
+	startTime time.Time
+	mu        sync.Mutex
 
 	// call history
 	calls []cleat.CallResult
@@ -215,8 +215,8 @@ type execution struct {
 	// child workflow results
 	childResults map[string]*childResult
 
-		// lock state (in-memory concurrency keys)
-		locks map[string]string
+	// lock state (in-memory concurrency keys)
+	locks map[string]string
 
 	// cleanup functions (LIFO)
 	deferFuncs []func()
@@ -240,10 +240,10 @@ type signalWaiter struct {
 }
 
 type promiseState struct {
-	name    string
-	status  string // "pending", "resolved", "rejected"
-	result  string
-	errMsg  string
+	name   string
+	status string // "pending", "resolved", "rejected"
+	result string
+	errMsg string
 }
 
 type childResult struct {
@@ -254,8 +254,8 @@ type childResult struct {
 func newExecution(r *Runner, workflowID, inputJSON string) *execution {
 	return &execution{
 		runner:       r,
-		wfID:        workflowID,
-		wfRunID:     uuid.New().String(),
+		wfID:         workflowID,
+		wfRunID:      uuid.New().String(),
 		startTime:    r.now,
 		promises:     make(map[string]*promiseState),
 		childResults: make(map[string]*childResult),
@@ -265,30 +265,30 @@ func newExecution(r *Runner, workflowID, inputJSON string) *execution {
 
 func (e *execution) hostCalls() cleat.HostCalls {
 	return cleat.NewHostCalls(cleat.HostCallsOptions{
-		DurableCall:            e.durableCall,
-		DurableSleep:           e.durableSleep,
-		DurableAwaitSignals:    e.durableAwaitSignals,
-		DurableDefer:           e.durableDefer,
-		DurableDeferFunc:       e.durableDeferFunc,
-		DurableLog:             e.durableLog,
-		PollCancellation:       e.pollCancellation,
-		PollSignal:             e.pollSignal,
-		Now:                    e.now,
-		Random:                 e.random,
-		CreatePromise:          e.createPromise,
-		AwaitPromise:           e.awaitPromise,
-		ChildWorkflow:          e.childWorkflow,
-		AwaitChild:             e.awaitChild,
-		WorkflowID:             e.workflowID,
-		RunID:                  e.runID,
-		SendSignalAndWait:      e.sendSignalAndWait,
-		ReplyToSignal:          e.replyToSignal,
-		SignalWorkflow:         e.signalWorkflow,
-		AcquireLock:             e.acquireLock,
-		ReleaseLock:            e.releaseLock,
-		AwaitCondition:         e.awaitCondition,
-		SideEffect:              e.sideEffect,
-		})
+		DurableCall:         e.durableCall,
+		DurableSleep:        e.durableSleep,
+		DurableAwaitSignals: e.durableAwaitSignals,
+		DurableDefer:        e.durableDefer,
+		DurableDeferFunc:    e.durableDeferFunc,
+		DurableLog:          e.durableLog,
+		PollCancellation:    e.pollCancellation,
+		PollSignal:          e.pollSignal,
+		Now:                 e.now,
+		Random:              e.random,
+		CreatePromise:       e.createPromise,
+		AwaitPromise:        e.awaitPromise,
+		ChildWorkflow:       e.childWorkflow,
+		AwaitChild:          e.awaitChild,
+		WorkflowID:          e.workflowID,
+		RunID:               e.runID,
+		SendSignalAndWait:   e.sendSignalAndWait,
+		ReplyToSignal:       e.replyToSignal,
+		SignalWorkflow:      e.signalWorkflow,
+		AcquireLock:         e.acquireLock,
+		ReleaseLock:         e.releaseLock,
+		AwaitCondition:      e.awaitCondition,
+		SideEffect:          e.sideEffect,
+	})
 }
 
 func (e *execution) acquireLock(key string, ttlMs int64) (bool, error) {
@@ -327,20 +327,20 @@ func (e *execution) awaitCondition(predicate func() bool, pollInterval, timeout 
 		time.Sleep(pollInterval)
 	}
 }
-	func (e *execution) sideEffect(computedResult string) (string, error) {
-		// In embedded mode, there's no replay, so computedResult IS authoritative.
-		return computedResult, nil
-	}
+func (e *execution) sideEffect(computedResult string) (string, error) {
+	// In embedded mode, there's no replay, so computedResult IS authoritative.
+	return computedResult, nil
+}
 
-	func (e *execution) workflowID() string {
-		return e.wfID
-	}
+func (e *execution) workflowID() string {
+	return e.wfID
+}
 
-	func (e *execution) runID() string {
-		return e.wfRunID
-	}
+func (e *execution) runID() string {
+	return e.wfRunID
+}
 
-	func (e *execution) now() int64 {
+func (e *execution) now() int64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.runner.now.UnixMilli()

@@ -55,7 +55,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 
 			// Check for cancellation on each heartbeat tick.
 			if s.engine.signalStore != nil {
-				cancelled, _, pollErr := s.engine.signalStore.PollCancellation(ctx, "")
+				cancelled, _, pollErr := s.engine.signalStore.PollCancellation(ctx, s.engine.workflowID)
 				if pollErr == nil && cancelled {
 					cancelCall() // Cancel the in-flight call.
 				}

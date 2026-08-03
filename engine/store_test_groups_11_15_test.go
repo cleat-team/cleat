@@ -355,6 +355,36 @@ func TestCompleteUpdateRequest(t *testing.T) {
 // Group 13 — Concurrency Keys
 // =============================================================================
 
+// deployConcurrencyTestWorkflows deploys a shared workflow def and creates a
+// real workflow_instances row for each given ID.
+// migrations/postgres/001_schema.sql has
+// `workflow_id TEXT NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE`
+// on concurrency_keys; the Group 13 tests below predate that FK (the
+// hand-maintained test schema this package used to build had no such
+// constraint) and use bare strings like "wf-1" as opaque AcquireConcurrencyKey
+// arguments. AcquireConcurrencyKey itself doesn't care what the workflow_id
+// refers to, so the fix is simply to make sure a row exists, not to change
+// what's being tested.
+func deployConcurrencyTestWorkflows(t *testing.T, store WorkflowStore, ids ...string) {
+	t.Helper()
+	ctx := context.Background()
+	def := &WorkflowDef{
+		Name:       "concurrency-test-workflow",
+		Version:    1,
+		WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1,
+		MinVersion: 1,
+	}
+	if err := store.DeployWorkflowDef(ctx, def); err != nil {
+		t.Fatalf("deployConcurrencyTestWorkflows: DeployWorkflowDef: %v", err)
+	}
+	for _, id := range ids {
+		if _, _, err := store.StartNewRun(ctx, id, "concurrency-test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0); err != nil {
+			t.Fatalf("deployConcurrencyTestWorkflows: StartNewRun(%s): %v", id, err)
+		}
+	}
+}
+
 func TestAcquireConcurrencyKey(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
@@ -362,6 +392,7 @@ func TestAcquireConcurrencyKey(t *testing.T) {
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
+			deployConcurrencyTestWorkflows(t, store, "wf-1", "wf-2")
 
 			// First acquire should succeed.
 			acquired, err := store.AcquireConcurrencyKey(ctx, "key-1", "wf-1", 60*time.Second)
@@ -392,6 +423,7 @@ func TestAcquireConcurrencyKey_Expired(t *testing.T) {
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
+			deployConcurrencyTestWorkflows(t, store, "wf-1", "wf-2")
 
 			// Acquire with a TTL of 1 nanosecond — will expire effectively
 			// immediately.
@@ -425,6 +457,7 @@ func TestReleaseConcurrencyKey(t *testing.T) {
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
+			deployConcurrencyTestWorkflows(t, store, "wf-1", "wf-2")
 
 			// Acquire for wf-1.
 			acquired, err := store.AcquireConcurrencyKey(ctx, "key-rel", "wf-1", 60*time.Second)
@@ -459,6 +492,7 @@ func TestStoreReleaseWorkflowConcurrencyKeys(t *testing.T) {
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
+			deployConcurrencyTestWorkflows(t, store, "wf-multi", "wf-other")
 
 			// Acquire multiple keys for workflow "wf-multi".
 			for _, key := range []string{"mk-1", "mk-2", "mk-3"} {
@@ -495,6 +529,7 @@ func TestStoreReapExpiredConcurrencyKeys(t *testing.T) {
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
+			deployConcurrencyTestWorkflows(t, store, "wf-1")
 
 			// Acquire a key with a very short TTL (1 nanosecond) so it expires
 			// before we call ReapExpiredConcurrencyKeys.
@@ -527,6 +562,7 @@ func TestGetConcurrencyKeyCount(t *testing.T) {
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
+			deployConcurrencyTestWorkflows(t, store, "wf-count")
 
 			// Acquire multiple keys for workflow "wf-count".
 			for _, key := range []string{"ck-1", "ck-2"} {

@@ -345,7 +345,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		var originalInput map[string]any
 		json.Unmarshal(input.Input, &originalInput)
 		in, _ = json.Marshal(map[string]any{
-			"input":        originalInput,
+			"input":         originalInput,
 			"__entry_point": input.EntryPoint,
 		})
 	}
@@ -670,7 +670,6 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 
 	s.writeJSON(w, 202, map[string]string{"promise_id": promiseID})
 }
-
 
 // ---- Schedule API handlers ----
 

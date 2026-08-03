@@ -6,6 +6,12 @@
 -- pg_roles to handle database drop/recreate scenarios.
 
 -- ── Default tenant ───────────────────────────────────────────────────────────
+-- Pin the creation target; see the note in 001_schema.sql. The default
+-- search_path is "$user", public, so unqualified names below would resolve
+-- against a schema named after the connecting role -- and 001 creates a schema
+-- called "cleat" while the shipped compose connects as POSTGRES_USER=cleat.
+SET search_path = public;
+
 INSERT INTO admin.tenants (tenant_id, name, display_name)
     VALUES ('00000000-0000-0000-0000-000000000000', 'default', 'Default Tenant')
     ON CONFLICT (tenant_id) DO NOTHING;

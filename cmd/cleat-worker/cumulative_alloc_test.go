@@ -78,7 +78,7 @@ func TestTryClaimCumulativeAllocation_ExceedsLimit(t *testing.T) {
 
 func TestTryClaimCumulativeAllocation_ExceedsLimit_FromZero(t *testing.T) {
 	var counter atomic.Int64
-	maxBytes := int64(65536)      // 1 page max
+	maxBytes := int64(65536)         // 1 page max
 	byteEstimate := int64(65536 * 2) // request 2 pages
 
 	ok := tryClaimCumulativeAllocation(&counter, byteEstimate, maxBytes)
@@ -200,9 +200,9 @@ func TestCumulativeAllocationErrorFormat(t *testing.T) {
 
 	checks := []string{
 		"cumulative WASM allocation limit reached",
-		"100 MB",    // current in MB
-		"32 MB",     // required in MB
-		"128 MB",    // max in MB
+		"100 MB", // current in MB
+		"32 MB",  // required in MB
+		"128 MB", // max in MB
 		fmt.Sprintf("%d", curBytes),
 		fmt.Sprintf("%d", requiredBytes),
 		fmt.Sprintf("%d", maxBytes),

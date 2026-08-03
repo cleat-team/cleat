@@ -39,16 +39,16 @@ func TestRegisterVirtualObject_DuplicateNameError(t *testing.T) {
 	name := "test-vo-duplicate"
 
 	err := RegisterVirtualObject(VirtualObjectDef{
-		Name:        name,
-		EntryPoint:  func(h HostCalls, input string) (string, error) { return "{}", nil },
+		Name:       name,
+		EntryPoint: func(h HostCalls, input string) (string, error) { return "{}", nil },
 	})
 	if err != nil {
 		t.Fatalf("unexpected error on first register: %v", err)
 	}
 
 	err = RegisterVirtualObject(VirtualObjectDef{
-		Name:        name,
-		EntryPoint:  func(h HostCalls, input string) (string, error) { return "{}", nil },
+		Name:       name,
+		EntryPoint: func(h HostCalls, input string) (string, error) { return "{}", nil },
 	})
 	if err == nil {
 		t.Fatal("expected error for duplicate name, got nil")
@@ -69,8 +69,8 @@ func TestGetVirtualObject_RegisteredReturnsDef(t *testing.T) {
 		return `{"result":"ok"}`, nil
 	}
 	RegisterVirtualObject(VirtualObjectDef{
-		Name:        name,
-		EntryPoint:  entryPoint,
+		Name:       name,
+		EntryPoint: entryPoint,
 	})
 
 	got, ok := GetVirtualObject(name)

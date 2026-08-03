@@ -240,13 +240,23 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
 	`, result, qsJSON, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency result within the transaction (best-effort).
@@ -282,7 +292,7 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
 		    error_msg = ?,
@@ -295,6 +305,16 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 	`, errorMsg, errorCode, errorOp, qsJSON, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("fail workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency error within the transaction (best-effort).
@@ -469,13 +489,24 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
 	`, result, qsJSON, currentRunID, workerID, s.tenantID, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("continue as new: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: this also discards the new run row we just inserted, so
+		// a lost fence leaves no orphaned, unreachable continuation run
+		// behind.
+		return "", ErrFenceLost
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -533,10 +564,33 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 		resultJSON = "{}"
 	}
 
-	if _, err := tx.ExecContext(ctx, `
+	// p_next_wake_at is only meaningful for the "ready" status; callers
+	// finalizing as "done"/"failed" routinely pass the zero time.Time{}.
+	// The go-sql-driver/mysql driver encodes a Go zero time as MySQL's
+	// legacy zero-date sentinel "0000-00-00 00:00:00", which MySQL's
+	// default strict sql_mode (NO_ZERO_DATE, on by default since 5.7)
+	// rejects with Error 1292 "Incorrect datetime value". Postgres and
+	// MSSQL both accept a year-1 timestamp fine, so this is MySQL-only.
+	// Pass NULL instead when the caller didn't supply a real time.
+	var nextWakeParam interface{}
+	if !nextWakeAt.IsZero() {
+		nextWakeParam = nextWakeAt
+	}
+
+	var fenceHeld bool
+	if err := tx.QueryRowContext(ctx, `
 		CALL finalize_workflow_status(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel); err != nil {
+	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeParam, s.notifyChannel).Scan(&fenceHeld); err != nil {
 		return fmt.Errorf("finalize workflow: %w", err)
+	}
+
+	if !fenceHeld {
+		// Another worker now owns this workflow (e.g. this worker stalled,
+		// was reaped, and the workflow was reclaimed). Roll back rather
+		// than commit: the events we just appended belong to a segment
+		// that is no longer valid, and none of the post-commit cleanup
+		// below is safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -606,7 +660,7 @@ func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = ?, error_code = ?, error_op = ?,
 		    completed_at = NOW(6), assigned_to = NULL
@@ -614,6 +668,16 @@ func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 	`, errMsg, errorCode, errorOp, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency error within the transaction (best-effort).
@@ -659,7 +723,7 @@ func (s *MySQLStore) RetryWorkflow(ctx context.Context, workflowID string) error
 func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < NOW(6) - INTERVAL ? SECOND
 		  AND tenant_id = ?

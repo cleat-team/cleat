@@ -520,29 +520,29 @@ func TestDBEventStream_EnsureLoaded_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM event_history", data: [][]driver.Value{
 			{
-				int64(0),               // Step
-				string(EventTypeCall),  // EventType
-				string("svc1"),         // service
-				nil,                    // op
-				nil,                    // request
-				nil,                    // response
-				nil,                    // error
-				nil,                    // duration_ms
-				nil,                    // signal_names
-				nil,                    // timeout_ms
-				nil,                    // signal_name
-				nil,                    // signal_payload
-				nil,                    // defer_description
-				nil,                    // defer_id
-				nil,                    // child_name
-				nil,                    // child_input
-				nil,                    // run_id
-				nil,                    // new_input
-				nil,                    // plugin_name
-				nil,                    // plugin_func
-				nil,                    // plugin_input
-				nil,                    // plugin_output
-				nil,                    // plugin_error
+				int64(0),              // Step
+				string(EventTypeCall), // EventType
+				string("svc1"),        // service
+				nil,                   // op
+				nil,                   // request
+				nil,                   // response
+				nil,                   // error
+				nil,                   // duration_ms
+				nil,                   // signal_names
+				nil,                   // timeout_ms
+				nil,                   // signal_name
+				nil,                   // signal_payload
+				nil,                   // defer_description
+				nil,                   // defer_id
+				nil,                   // child_name
+				nil,                   // child_input
+				nil,                   // run_id
+				nil,                   // new_input
+				nil,                   // plugin_name
+				nil,                   // plugin_func
+				nil,                   // plugin_input
+				nil,                   // plugin_output
+				nil,                   // plugin_error
 			},
 			{
 				int64(1),

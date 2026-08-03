@@ -58,29 +58,29 @@ jobs:
 
             const prompt = `You are reviewing a pull request for the cleat project (Go workflow engine with WASM runtime and PostgreSQL storage).
 
-          Review the following git diff. Focus on:
-          1. Correctness bugs — logic errors, missing error handling, nil dereferences, race conditions
-          2. Security issues — SQL injection, unsafe WASM operations, missing input validation
-          3. Breaking changes — API surface changes, schema changes, wire format changes
-          4. Missing tests — new behavior without corresponding tests
-          5. Project conventions — style violations, missed interface implementations, import issues
+            Review the following git diff. Focus on:
+            1. Correctness bugs — logic errors, missing error handling, nil dereferences, race conditions
+            2. Security issues — SQL injection, unsafe WASM operations, missing input validation
+            3. Breaking changes — API surface changes, schema changes, wire format changes
+            4. Missing tests — new behavior without corresponding tests
+            5. Project conventions — style violations, missed interface implementations, import issues
 
-          Respond with a concise review in this format:
+            Respond with a concise review in this format:
 
-          ## AI Review
+            ## AI Review
 
-          ### Summary
-          [One paragraph summarizing the change and overall assessment]
+            ### Summary
+            [One paragraph summarizing the change and overall assessment]
 
-          ### Issues found
-          [List each issue as a bullet with severity: 🔴 Critical / 🟡 Warning / 🔵 Note]
-          - **
-          [file:line] **Severity** — Description. Suggestion if applicable.
+            ### Issues found
+            [List each issue as a bullet with severity: 🔴 Critical / 🟡 Warning / 🔵 Note]
+            - **
+            [file:line] **Severity** — Description. Suggestion if applicable.
 
-          ### Unchecked
-          [List anything the diff doesn't show that a human reviewer should verify]
+            ### Unchecked
+            [List anything the diff doesn't show that a human reviewer should verify]
 
-          Keep it concise. No praise, no greeting, no closing — just findings. Skip if the diff is empty or contains only docs.`;
+            Keep it concise. No praise, no greeting, no closing — just findings. Skip if the diff is empty or contains only docs.`;
 
             // Call Anthropic API
             const response = await fetch('https://api.anthropic.com/v1/messages', {

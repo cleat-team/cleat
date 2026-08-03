@@ -52,18 +52,18 @@ type AdaptiveFlusher struct {
 	encryption               *PayloadEncryption
 
 	// Stats
-	directFlushes   atomic.Int64
-	batchFlushes    atomic.Int64
-	batchedEvents   atomic.Int64
-	totalPrepareUs  atomic.Int64
-	totalFlushUs    atomic.Int64
-	totalMarshalUs  atomic.Int64
-	totalDBUs       atomic.Int64
-	batchSizeTotal  atomic.Int64
-	batchCount      atomic.Int64
-	timerFlushes    atomic.Int64
-	fullFlushes     atomic.Int64
-	lastReportTime  time.Time
+	directFlushes  atomic.Int64
+	batchFlushes   atomic.Int64
+	batchedEvents  atomic.Int64
+	totalPrepareUs atomic.Int64
+	totalFlushUs   atomic.Int64
+	totalMarshalUs atomic.Int64
+	totalDBUs      atomic.Int64
+	batchSizeTotal atomic.Int64
+	batchCount     atomic.Int64
+	timerFlushes   atomic.Int64
+	fullFlushes    atomic.Int64
+	lastReportTime time.Time
 }
 
 func NewAdaptiveFlusher(db *sql.DB, tenantID string, maxWait time.Duration, maxBatch int, enterThreshold, exitThreshold float64, _ int) *AdaptiveFlusher {
@@ -419,9 +419,9 @@ func errIsRetryable(err error) bool {
 // exhausting retries.
 func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte, batchSize int) error {
 	const (
-		maxRetries   = 5
-		baseBackoff  = 50 * time.Millisecond
-		maxBackoff   = 2 * time.Second
+		maxRetries  = 5
+		baseBackoff = 50 * time.Millisecond
+		maxBackoff  = 2 * time.Second
 	)
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {

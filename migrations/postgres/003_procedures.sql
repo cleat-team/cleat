@@ -7,7 +7,14 @@
 -- flush_event_step() is a per-step event INSERT (from 013).
 -- batch_flush_events() is the bulk variant using jsonb_populate_recordset (016).
 
+-- Pin the creation target; see the note in 001_schema.sql. The default
+-- search_path is "$user", public, so unqualified names below would resolve
+-- against a schema named after the connecting role -- and 001 creates a schema
+-- called "cleat" while the shipped compose connects as POSTGRES_USER=cleat.
+SET search_path = public;
+
 -- ── Drop FK on event_history (no longer needed; events are deleted on terminal) ─
+
 ALTER TABLE event_history DROP CONSTRAINT IF EXISTS fk_event_history_workflow;
 
 -- ── Finalize workflow status ─────────────────────────────────────────────────
@@ -16,6 +23,23 @@ ALTER TABLE event_history DROP CONSTRAINT IF EXISTS fk_event_history_workflow;
 -- events for terminal workflows, and dispatches a pg_notify hint.
 -- Called within an existing transaction after events have been appended and
 -- event_count has been incremented.
+
+-- Drop before creating, for the same reason 004 does: this file declares
+-- RETURNS VOID and 004 replaces it with RETURNS BOOLEAN, and PostgreSQL
+-- rejects a return-type change through CREATE OR REPLACE with
+--   ERROR: cannot change return type of existing function (42P13)
+-- Re-applying the migration set to a database that already has 004's version
+-- would otherwise fail here -- and re-applying is exactly what an operator
+-- upgrading an existing deployment does. The files are advertised as
+-- idempotent (docs/explanation/postgresql-schema.md) and
+-- TestShippedSchema_IsIdempotent enforces it.
+--
+-- Dropping 004's version here is safe: 004 sorts after 003, so any run that
+-- applies this file also re-applies 004 afterwards and the BOOLEAN version
+-- with the fence guard is always the end state.
+DROP FUNCTION IF EXISTS finalize_workflow_status(
+    TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, JSONB, TIMESTAMPTZ, TEXT
+);
 
 CREATE OR REPLACE FUNCTION finalize_workflow_status(
     p_workflow_id      TEXT,

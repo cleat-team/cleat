@@ -247,13 +247,23 @@ func (s *MSSQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p5
 	`, workflowID, workerID, result, string(qsJSON), generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency result within the transaction (best-effort).
@@ -287,7 +297,7 @@ func (s *MSSQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
 		    error_msg = @p3,
@@ -300,6 +310,16 @@ func (s *MSSQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("fail workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency error within the transaction (best-effort).
@@ -330,7 +350,7 @@ func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = @p3, error_code = @p4, error_op = @p5,
 		    completed_at = SYSUTCDATETIME(), assigned_to = NULL
@@ -338,6 +358,16 @@ func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency error within the transaction (best-effort).
@@ -434,13 +464,24 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p5
 	`, currentRunID, workerID, result, string(qsJSON), generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("continue as new: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: this also discards the new run row we just inserted, so
+		// a lost fence leaves no orphaned, unreachable continuation run
+		// behind.
+		return "", ErrFenceLost
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -498,10 +539,20 @@ func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 		resultJSON = "{}"
 	}
 
-	if _, err := tx.ExecContext(ctx, `
+	var fenceHeld bool
+	if err := tx.QueryRowContext(ctx, `
 		EXEC finalize_workflow_status @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10
-	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel); err != nil {
+	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel).Scan(&fenceHeld); err != nil {
 		return fmt.Errorf("finalize workflow: %w", err)
+	}
+
+	if !fenceHeld {
+		// Another worker now owns this workflow (e.g. this worker stalled,
+		// was reaped, and the workflow was reclaimed). Roll back rather
+		// than commit: the events we just appended belong to a segment
+		// that is no longer valid, and none of the post-commit cleanup
+		// below is safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	if err := tx.Commit(); err != nil {

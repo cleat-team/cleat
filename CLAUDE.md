@@ -4,32 +4,77 @@ The core cleat engine: workflow execution, WASM runtime, plugin system, worker d
 
 ## Repo structure
 
-- `cmd/` — CLI entrypoints (cleat, cleatctl, cleat-worker, cleat-bench, cleat-gen)
-- `internal/` — Core engine (host, wasm, plugin, analyzer, transform)
-- `cleat/` — Public Go API (cleattest, embedded, localdev, wasmtest, ai)
-- `plugins/` — 20 built-in plugins (llm, slacknotify, pagerdutyalert, scheduler, etc.)
+- `cmd/` — CLI entrypoints (cleat, cleatctl, cleat-worker, cleat-bench, cleat-gen,
+  cleat-gen-plugin, cleat-plugin-verify, deploy-workflow, wit-rewrite)
+- `engine/` — Core engine: workflow execution, host functions, DB backends (~174 files)
+- `wasm/` — WASM build, module loading, and codegen
+- `wasmrw/` — WASM read/write helpers (small; production code duplicates this inline)
+- `plugin/` — Plugin runtime and interface
+- `auth/` — Tenant and auth stores
+- `pluginapi/` — Public re-exports for external plugin authors
+- `internal/` — Non-public support packages (analyzer, callgraph, closure, plugingen,
+  telemetry, transform)
+- `cleat/` — Public Go API (cleattest, embedded, localdev, wasmtest, ai, backendkit)
+- `plugins/` — 21 built-in plugins (llm, slacknotify, pagerdutyalert, scheduler, etc.)
 - `web/` — Svelte 5 admin dashboard
 - `crates/` — Rust SDK + Java SDK
 - `python-sdk/` — Python SDK
 - `packages/` — AssemblyScript SDK
 - `examples/` — Example workflows
-- `tests/` — Integration test suites (cluster, cross-language, integrity, scale, soak, upgrade)
+- `tests/` — Integration test suites (cluster, cross-language, integrity, plugin-harness,
+  scale, soak, upgrade)
 - `benchmarks/` — Go benchmarks + comparative Temporal/DBOS benchmarks
+
+> **Note on paths in older commits and branches.** Commit `3eeb74e` (2026-06-01),
+> "promote internal packages to public — engine as a library", moved `internal/host/` →
+> `engine/`, `internal/wasm/` → `wasm/`, `internal/plugin/` → `plugin/`, and
+> `internal/wasmrw/` → `wasmrw/`. Anything referring to those `internal/` paths predates
+> that commit. Branches based before it will not merge cleanly.
 
 ## Plugin development
 
-When building new plugins, read the full guidance at:
-/localssd/rcownie/cleat-internal/prompts/plugins-and-apps-guidance.md
+Fuller guidance lives outside this repo at
+`cleat-internal/prompts/plugins-and-apps-guidance.md`. That checkout is not present on
+every machine — if it is missing, the conventions below are sufficient to start; do not
+spend turns hunting for it.
 
 Key conventions:
 - Plugin names are hyphenated: `"slack-notify"`, `"email-notify"`, `"pagerduty-alert"`
 - HostCall operations are snake_case: `"send_message"`, `"trigger_incident"`
 - Plugins share the main go.mod (no separate go.mod per plugin)
 - Study `plugins/slacknotify/` and `plugins/scheduler/` as reference implementations
-- The Plugin interface is in `internal/plugin/plugin.go`
+- The Plugin interface is in `plugin/plugin.go`
 
 ## Build
 
 - Go 1.25+, module `github.com/cleat-team/cleat`
-- WASM workflows are compiled with the standard Go toolchain (`--target go`, default) or TinyGo (`--target tinygo`)
+- WASM workflows are compiled with the standard Go toolchain (`--target go`, default)
 - Tests use `go test`, fuzz tests, and behavioral test suites
+
+### Two WASM backends
+
+- **wasmtime** (`engine/backend_wasmtime.go`) — via CGo. **The primary backend.** It is the
+  standard engine, and in practice substantially more reliable. Preferred automatically
+  whenever CGO is available (`cmd/cleat-worker/main.go`).
+- **wazero** (`engine/backend_wazero.go`) — pure Go. Retained as a fallback for the
+  languages that do not work under wasmtime, and used when CGO is unavailable. The worker
+  logs this as "legacy wazero". It has a real bug tail — do not treat a wazero-only failure
+  as evidence about the engine as a whole.
+
+Prefer wasmtime when reproducing or debugging anything execution-related. If you find
+yourself on wazero unexpectedly, check whether CGO got disabled.
+
+They are not equivalent: resource limits and determinism enforcement differ. When changing
+execution paths, check both, but treat wasmtime as the behaviour of record.
+
+> **Currently:** `go build ./...` fails with `'wasmtime.h' file not found` because
+> `engine/cgo_test_helpers.go` hardcodes machine-specific paths. Use `CGO_ENABLED=0` until
+> that is fixed. See `IMPROVEMENT-PLAN.md` Phase 0.
+
+## Project state
+
+Two working documents at the repo root, both current as of 2026-08-02:
+
+- `IMPROVEMENT-PLAN.md` — prioritised remediation plan. Start at Phase 0; CI is currently
+  reporting green while the `engine` test package does not compile.
+- `BRANCH-TRIAGE.md` — state and risk assessment of the 47 unmerged remote branches.

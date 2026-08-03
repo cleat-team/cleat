@@ -37,11 +37,6 @@ type Config struct {
 	Result    *analyzer.AnalysisResult
 	CallGraph *callgraph.Graph
 	Closure   *closure.Result
-
-	// Target is the compilation target ("tinygo" for Go code).
-	// The direct-call transform is skipped because TinyGo's asyncify
-	// scheduler needs function pointer indirection for goroutine switching.
-	Target string
 }
 
 // Transform modifies ASTs to automatically thread cleat.HostCalls.

@@ -108,10 +108,10 @@ func defaultSoakConfig() soakConfig {
 // leakDetector tracks memory and goroutine metrics over time and detects
 // monotonic growth patterns that indicate leaks.
 type leakDetector struct {
-	mu              sync.Mutex
-	memSamples      []uint64 // RSS in bytes
+	mu               sync.Mutex
+	memSamples       []uint64 // RSS in bytes
 	goroutineSamples []int
-	threshold       int // number of consecutive monotonic increases before failure
+	threshold        int // number of consecutive monotonic increases before failure
 }
 
 func newLeakDetector(threshold int) *leakDetector {
@@ -267,12 +267,12 @@ func runWorkloadLoop(ctx context.Context, cfg soakConfig, wfTypes []workflowType
 
 // workloadMetrics tracks aggregate metrics across the soak test run.
 type workloadMetrics struct {
-	mu            sync.Mutex
-	total         int
-	successes     int
-	failures      int
-	startTime     time.Time
-	durations     []time.Duration
+	mu        sync.Mutex
+	total     int
+	successes int
+	failures  int
+	startTime time.Time
+	durations []time.Duration
 }
 
 func newWorkloadMetrics() *workloadMetrics {

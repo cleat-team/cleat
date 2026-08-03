@@ -59,8 +59,10 @@ walkthrough with a real-world example.
 
 - **Durable execution** -- deterministic replay via event history; workflows survive
   worker crashes, restarts, and network partitions.
-- **Multi-DB backends** -- PostgreSQL 14+, MySQL 8.0+, SQL Server 2017+ with full
-  feature parity across all three.
+- **Multi-DB backends** -- PostgreSQL 14+, MySQL 8.0+, SQL Server 2017+, each with an
+  independent implementation of the full workflow store. One exception: database-enforced
+  tenant isolation (row-level security) exists on PostgreSQL only. On MySQL and SQL Server,
+  tenant scoping is applied in application queries with no database-level backstop.
 - **Plugin system** -- extensible via LLM, Slack, webhooks, and custom plugins;
   plugins run in-process with lifecycle hooks.
 - **WASM workflows** -- write in Go or Rust, compile to WebAssembly, zero sandbox

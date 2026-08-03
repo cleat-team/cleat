@@ -479,34 +479,15 @@ func testASCompilesToWasm(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// This fixture imports the real @cleat/sdk, exactly as a user's workflow
+	// does. It previously declared stand-in HostCalls/Memory/cleatEntry
+	// definitions inline because the SDK was not installed; those now collide
+	// with the real ones (TS2300 duplicate identifier), and more importantly
+	// they meant this test could never have caught a mismatch between the
+	// transform's generated wrapper and the SDK it generates against — which
+	// is most of what there is to catch here.
 	indexTS := `
-class CleatCallOutcome {
-  response: string = "";
-  isError: bool = false;
-  error: string = "";
-}
-
-class HostCalls {
-  cleatCall(service: string, action: string, input: string): CleatCallOutcome {
-    return new CleatCallOutcome();
-  }
-}
-
-class Memory {
-  static readString(ptr: usize, len: i32): string { return ""; }
-  static writeString(ptr: usize, maxLen: i32, s: string): i32 { return 0; }
-  static encodeExportResult(errCode: u32, actualLen: u32): i64 { return 0; }
-}
-
-const SUSPEND_SENTINEL: i64 = 0;
-
-function isWorkflowSuspended(): bool { return false; }
-
-function resetWorkflowSuspended(): void {}
-
-function cleatEntry(name: string = ""): (target: usize, propertyKey: string, descriptor: usize) => void {
-  return function(target: usize, propertyKey: string, descriptor: usize): void {};
-}
+import { HostCalls, cleatEntry } from "@cleat/sdk";
 
 @cleatEntry()
 function myWorkflow(h: HostCalls, input: string): string {
@@ -517,15 +498,24 @@ function myWorkflow(h: HostCalls, input: string): string {
 		t.Fatal(err)
 	}
 
-	// package.json — only assemblyscript is needed; @cleat dep is resolved
-	// via the --transform flag pointing directly at the JS file.
-	pkgJSON := `{
+	// package.json. The --transform flag points at the transform's JS file
+	// directly, but that is not sufficient on its own: the transform injects
+	// an `import { HostCalls, Memory, ... } from "@cleat/sdk"` into the
+	// wrapper it generates, and asc must resolve that import at parse time.
+	// Installing @cleat/sdk from the repo checkout is what lets this subtest
+	// actually compile. Without it asc fails with a parse error, no .wasm is
+	// produced, and the subtest skips — which is what it did from the day it
+	// was written until this was fixed, despite being named "compiles to wasm".
+	pkgJSON := fmt.Sprintf(`{
   "name": "test-as-workflow",
   "private": true,
   "devDependencies": {
     "assemblyscript": "^0.27.0"
+  },
+  "dependencies": {
+    "@cleat/sdk": "file:%s"
   }
-}`
+}`, filepath.Join(asRepoRoot(t), "packages", "cleat-as"))
 	if err := os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(pkgJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -572,11 +562,24 @@ function myWorkflow(h: HostCalls, input: string): string {
 	ascOut, ascErr := ascCmd.CombinedOutput()
 	t.Logf("asc output:\n%s", string(ascOut))
 
+	// A compilation failure is a FAILURE, not a skip.
+	//
+	// This block used to t.Skipf here, which made the subtest unfalsifiable:
+	// any asc error at all — including a real regression in the transform —
+	// produced no .wasm and was reported as a skip, and skips are green. The
+	// stated justification was that @cleat/sdk could not be installed in the
+	// fixture, so the transform's generated import never resolved. That is now
+	// fixed (see the package.json above), so there is no longer any expected
+	// reason for asc to fail, and any failure is a defect worth failing on.
+	//
+	// The only legitimate skips in this test are environmental and are handled
+	// earlier: a missing `npm`/`node`, or an `npm install` that cannot reach
+	// the network.
 	if ascErr != nil {
-		// Check if .wasm was produced despite errors
 		if _, err := os.Stat(wasmPath); os.IsNotExist(err) {
-			t.Skipf("asc compilation failed and no .wasm produced: %v\n%s", ascErr, ascOut)
+			t.Fatalf("asc compilation failed and produced no .wasm: %v\n%s", ascErr, ascOut)
 		}
+		t.Errorf("asc reported an error even though a .wasm was produced: %v\n%s", ascErr, ascOut)
 	}
 
 	// ---- Verify .wasm output ----

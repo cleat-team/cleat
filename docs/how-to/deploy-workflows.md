@@ -12,9 +12,6 @@ Use the `cleat build` command to analyze, transform, and compile your workflow p
 # Build with the default Go compiler.
 cleat build -o ./out ./path/to/workflow/
 
-# Build with TinyGo (produces smaller binaries).
-cleat build -o ./out --target tinygo ./path/to/workflow/
-
 # Build for other language targets.
 cleat build -o ./out --target rust ./path/to/rust-workflow/
 cleat build -o ./out --target python ./path/to/python-workflow/

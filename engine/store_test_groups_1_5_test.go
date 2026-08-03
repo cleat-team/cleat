@@ -26,6 +26,7 @@ func TestClaimWorkflow(t *testing.T) {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
 			if wf == nil {
+				describeClaimState(t, store)
 				t.Fatal("ClaimWorkflow returned nil, expected a ready workflow")
 			}
 			if wf.Status != "running" {
@@ -178,6 +179,7 @@ func TestClaimSkipLocked(t *testing.T) {
 				t.Fatalf("ClaimWorkflows (first, limit=3): %v", err)
 			}
 			if len(first) != 3 {
+				describeClaimState(t, store)
 				t.Fatalf("first claim returned %d, want 3", len(first))
 			}
 

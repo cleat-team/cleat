@@ -578,19 +578,19 @@ func TestFlushEvent_EncryptSensitivePayloads(t *testing.T) {
 	)
 
 	rec := EventRecord{
-		Step:           1,
-		EventType:      EventTypeCall,
-		Service:        "my-svc",
-		Op:             "my-op",
-		Request:        "sensitive-request",
-		Response:       "sensitive-response",
-		SignalPayload:  "sig-payload",
-		ChildInput:     "child-input",
-		NewInput:       "new-input",
-		PluginInput:    "plugin-input",
-		PluginOutput:   "plugin-output",
-		PromiseResult:  "promise-result",
-		PromiseError:   "promise-error",
+		Step:          1,
+		EventType:     EventTypeCall,
+		Service:       "my-svc",
+		Op:            "my-op",
+		Request:       "sensitive-request",
+		Response:      "sensitive-response",
+		SignalPayload: "sig-payload",
+		ChildInput:    "child-input",
+		NewInput:      "new-input",
+		PluginInput:   "plugin-input",
+		PluginOutput:  "plugin-output",
+		PromiseResult: "promise-result",
+		PromiseError:  "promise-error",
 	}
 
 	err = engine.flushEvent(context.Background(), "wf-123", rec, "")

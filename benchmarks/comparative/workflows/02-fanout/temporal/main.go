@@ -149,8 +149,8 @@ func runBenchmark(
 		id := atomic.AddInt64(&idSeq, 1)
 		wfID := fmt.Sprintf("bench-%s-%d", workflowName, id)
 		opts := client.StartWorkflowOptions{
-			ID:                 wfID,
-			TaskQueue:          cfg.TaskQueue,
+			ID:                  wfID,
+			TaskQueue:           cfg.TaskQueue,
 			WorkflowTaskTimeout: 30 * time.Second,
 		}
 		run, err := c.ExecuteWorkflow(context.Background(), opts, wfFn, input)

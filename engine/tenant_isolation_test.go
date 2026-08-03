@@ -735,12 +735,44 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
 			}
 
-			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+			storeA, teardownA := mtBackend.SetupForTenant(t, tenantA)
 			defer teardownA()
-			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			storeB, teardownB := mtBackend.SetupForTenant(t, tenantB)
 			defer teardownB()
 
 			ctx := context.Background()
+
+			// concurrency_keys.workflow_id is a real foreign key into
+			// workflow_instances(id) (migrations/postgres/001_schema.sql), so
+			// every workflow_id used below must be a real, already-created
+			// instance -- not just an opaque string, as this test used to
+			// assume back when the hand-maintained test schema in
+			// engine/testutil/schema.go had no such constraint.
+			def := &WorkflowDef{
+				Name:       "test-concurrency-keys",
+				Version:    1,
+				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				ABIVersion: 1,
+				MinVersion: 1,
+			}
+			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store A: %v", err)
+			}
+			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store B: %v", err)
+			}
+			for _, wfID := range []string{"wf-a", "wf-a-2", "wf-a-3"} {
+				if _, _, err := storeA.StartNewRun(ctx, wfID, "test-concurrency-keys", 1, json.RawMessage(`{}`), "", tenantA, 0); err != nil {
+					t.Fatalf("StartNewRun(%s) on store A: %v", wfID, err)
+				}
+			}
+			for _, wfID := range []string{"wf-b"} {
+				if _, _, err := storeB.StartNewRun(ctx, wfID, "test-concurrency-keys", 1, json.RawMessage(`{}`), "", tenantB, 0); err != nil {
+					t.Fatalf("StartNewRun(%s) on store B: %v", wfID, err)
+				}
+			}
 
 			// --- Part 1: Acquire/release cross-tenant isolation ---
 			// concurrency_keys has PRIMARY KEY (key_hash) alone, so two tenants

@@ -233,6 +233,19 @@ type RunDetachedEvent struct {
 func (e RunDetachedEvent) Step() int       { return e.step }
 func (e RunDetachedEvent) Type() EventType { return EventTypeRunDetached }
 
+// ---- AdminAction event ----
+
+// AdminActionEvent records an administrative action performed on a workflow.
+type AdminActionEvent struct {
+	step     int
+	Action   string // "force_complete", "force_fail", "re_replay"
+	Operator string // identity from auth context
+	Reason   string // optional detail
+}
+
+func (e AdminActionEvent) Step() int       { return e.step }
+func (e AdminActionEvent) Type() EventType { return EventTypeAdminAction }
+
 // ---------------------------------------------------------------------------
 // Conversion functions between the typed Event hierarchy and the flat
 // EventRecord struct used at the database boundary.
@@ -337,6 +350,11 @@ func EventRecordFromEvent(e Event) EventRecord {
 		return EventRecord{
 			Step: e.Step(), EventType: EventTypeRunDetached,
 		}
+	case AdminActionEvent:
+		return EventRecord{
+			Step: e.Step(), EventType: EventTypeAdminAction,
+			Service: ev.Operator, Op: ev.Action, Err: ev.Reason,
+		}
 	default:
 		return EventRecord{Step: e.Step(), EventType: e.Type()}
 	}
@@ -424,6 +442,10 @@ func EventFromRecord(r EventRecord) Event {
 	case EventTypeRunDetached:
 		return RunDetachedEvent{
 			step: r.Step,
+		}
+	case EventTypeAdminAction:
+		return AdminActionEvent{
+			step: r.Step, Action: r.Op, Operator: r.Service, Reason: r.Err,
 		}
 	default:
 		return nil

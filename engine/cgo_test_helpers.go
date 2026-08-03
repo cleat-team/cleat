@@ -1,9 +1,18 @@
-//go:build cgo
+//go:build cgo && wasmtime_component_cgo
+
+// Every symbol this file defines is only ever called from other _test.go
+// files (component_cgo_test.go), so in spirit this is test-only code. It is
+// deliberately NOT named *_test.go, though: Go (as of at least 1.26) rejects
+// `import "C"` in any _test.go file outright ("use of cgo in test ... not
+// supported"), for both `go build` and `go test`. So this file has to be an
+// ordinary .go file to be usable at all, and instead relies on the
+// wasmtime_component_cgo build tag -- the same opt-in tag used by
+// component_cgo.go and component_callbacks.go -- to stay out of default
+// builds. See the comment at the top of component_cgo.go for why that tag
+// exists and how to build with it enabled.
 
 package engine
 
-// #cgo CFLAGS:-I/tmp/wasmtime-v45/wasmtime-v45.0.0-x86_64-linux-c-api/include -I/home/rcownie/go/pkg/mod/github.com/bytecodealliance/wasmtime-go/v44@v44.0.0/build/include
-// #cgo linux,amd64 LDFLAGS:-L/tmp/wasmtime-v45/wasmtime-v45.0.0-x86_64-linux-c-api/lib -lwasmtime -lm -ldl -pthread
 // #include <wasmtime.h>
 // #include <wasmtime/component/component.h>
 // #include <wasmtime/component/linker.h>

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -73,7 +74,29 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 	if err != nil {
 		return "", false, fmt.Errorf("poll signal: %w", err)
 	}
-	return payload, true, tx.Commit()
+	return decodeSignalPayload(payload), true, tx.Commit()
+}
+
+// decodeSignalPayload reverses what DeliverSignal does to a payload before
+// writing it to the JSONB `payload` column (wrapping it in quotes if it
+// isn't already valid JSON, so the column accepts it) and normalizes
+// whitespace for payloads that were already JSON. Without this, callers get
+// back the JSONB column's on-disk text representation verbatim, which
+// differs from what was originally passed to DeliverSignal in two ways:
+// PostgreSQL's jsonb text output always inserts a space after every ':' and
+// ',' (so `{"data":"hello"}` round-trips as `{"data": "hello"}`), and a
+// plain, non-JSON string like "payload-1" comes back as the JSON string
+// literal `"payload-1"`, quotes included, rather than the original bytes.
+func decodeSignalPayload(raw string) string {
+	var s string
+	if err := json.Unmarshal([]byte(raw), &s); err == nil {
+		return s
+	}
+	compacted := bytes.NewBuffer(nil)
+	if err := json.Compact(compacted, []byte(raw)); err == nil {
+		return compacted.String()
+	}
+	return raw
 }
 
 // StartNewRun creates a new workflow instance.
@@ -93,10 +116,10 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 		payload = `"` + payload + `"`
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_signals (workflow_id, signal_name, payload)
-		VALUES ($1, $2, $3)
+		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
+		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (workflow_id, signal_name) DO UPDATE SET payload = $3, delivered_at = now()
-	`, workflowID, signalName, payload)
+	`, workflowID, signalName, payload, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -113,10 +136,37 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 	return tx.Commit()
 }
 
-// PollSignal satisfies the SignalStore interface by checking for a delivered signal.
-
+// PollSignal satisfies the SignalStore interface by checking for a delivered
+// signal, without consuming it. This must be a plain read: it used to
+// delegate straight to PollAndClaimSignal, whose name and doc comment both
+// say it "atomically checks for AND CLAIMS" a signal (i.e. DELETEs the row)
+// -- the opposite of what SignalStore's own doc comment promises for
+// PollSignal ("checks for a delivered signal", no mention of consuming it).
+// A second PollSignal call for the same signal would find nothing, having
+// silently deleted it on the first call.
 func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return s.PollAndClaimSignal(ctx, workflowID, signalName)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback()
+
+	if err := s.setRLSOnTx(tx); err != nil {
+		return "", false, err
+	}
+
+	var payload string
+	err = tx.QueryRowContext(ctx, `
+		SELECT payload FROM workflow_signals
+		WHERE workflow_id = $1 AND signal_name = $2
+	`, workflowID, signalName).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, tx.Rollback()
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("poll signal: %w", err)
+	}
+	return decodeSignalPayload(payload), true, tx.Commit()
 }
 
 // PollCancellation satisfies the SignalStore interface.

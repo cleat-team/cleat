@@ -12,7 +12,6 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-
 // pluginFuncEntry stores a registered plugin function along with its
 // idempotent flag. Idempotent functions are safe to re-invoke during replay.
 type pluginFuncEntry struct {
@@ -171,7 +170,6 @@ func (psr *PluginStreamRegistry) PluginHealthStatus() []plugin.HealthStatus {
 func (psr *PluginStreamRegistry) UnhealthyError(pluginName string) error {
 	return psr.healthTracker.UnhealthyError(pluginName)
 }
-
 
 func (s *execSession) PluginCall(ctx context.Context, m api.Module,
 	pluginName, functionName, inputJSON string,

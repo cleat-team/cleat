@@ -186,18 +186,18 @@ go test -count=1 -v ./internal/transform/...
 
 # Cluster integration tests (requires Docker)
 # Starts a PostgreSQL cluster via docker-compose, then runs tests
-DURABLE_TEST_DB=postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable \
-  go test -count=1 -timeout=120s ./internal/host/...
+CLEAT_TEST_DB=postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable \
+  go test -count=1 -timeout=120s ./engine/...
 
 # MySQL backend tests (requires MySQL 8.0+ at localhost:3306)
 # Skipped if CLEAT_TEST_MYSQL is not set
 CLEAT_TEST_MYSQL=root:cleat@tcp(localhost:3306)/cleat \
-  go test -count=1 -timeout=120s ./internal/host/...
+  go test -count=1 -timeout=120s ./engine/...
 
 # SQL Server backend tests (requires SQL Server 2017+ at localhost:1433)
 # Skipped if CLEAT_TEST_MSSQL is not set
 CLEAT_TEST_MSSQL=sqlserver://sa:CleatTest123!@localhost:1433?database=master \
-  go test -count=1 -timeout=120s ./internal/host/...
+  go test -count=1 -timeout=120s ./engine/...
 
 # Rust crates
 cd crates/cleat-macro && cargo test
@@ -207,7 +207,7 @@ cd crates/cleat-sdk && cargo test
 cd packages/cleat-as && npm test
 ```
 
-> **Note:** The `DURABLE_TEST_DB` environment variable is used by cluster
+> **Note:** The `CLEAT_TEST_DB` environment variable is used by cluster
 > integration tests. See `docker-compose.cluster.yml` for the default Postgres,
 > MySQL, and SQL Server configurations. The compose file defines all three
 > database services for local multi-backend development.
@@ -246,7 +246,7 @@ Workflows are compiled to WebAssembly using the `cleat build` command.
 ### Go WASM
 
 ```bash
-# Compile with TinyGo (the default and only Go WASM target)
+# Compile with the standard Go toolchain (the only Go WASM target)
 cleat build -o ./out ./path/to/workflow/package
 ```
 

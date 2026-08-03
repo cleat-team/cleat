@@ -4,7 +4,13 @@ This document defines the exact WebAssembly contract between workflow modules an
 
 ## Version
 
-ABI version: 4. The ABI is versioned separately from the workflow definition version. The host runtime supports all ABI versions it was compiled for.
+ABI version: 1 — the value of `CurrentABIVersion` in `wasm/metadata.go`, stamped into every
+compiled workflow and used to gate redeploy compatibility in `engine/version_compat.go`.
+The ABI is versioned separately from the workflow definition version. The host runtime
+supports all ABI versions it was compiled for.
+
+> This document previously claimed version 4, and its changelog below claimed 5. Neither
+> was ever the shipped value. If you change `CurrentABIVersion`, change it here too.
 
 ---
 
@@ -29,7 +35,7 @@ int64_t entry_point_name(const uint8_t* args_ptr, uint32_t args_len,
 | `args_ptr` | `i32` | Pointer to input JSON in linear memory |
 | `args_len` | `i32` | Byte length of input JSON |
 | `out_ptr` | `i32` | Pointer to output buffer in linear memory |
-| `max_out_len` | `i32` | Capacity of output buffer (65536 bytes) |
+| `max_out_len` | `i32` | Capacity of output buffer (1048576 bytes) |
 
 ### Return value (i64 packed)
 
@@ -95,7 +101,7 @@ Make a recorded API call to an external service.
 | `request_ptr` | `i32` | Request JSON pointer |
 | `request_len` | `i32` | Request JSON length |
 | `response_ptr` | `i32` | Output buffer for response |
-| `response_max_len` | `i32` | Output buffer capacity (65536) |
+| `response_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -145,7 +151,7 @@ Server-side retry variant of `cleat_call`. Retries happen inside the host; one e
 | `non_retryable_errors_ptr` | `i32` | Pointer to JSON array of non-retryable error codes |
 | `non_retryable_errors_len` | `i32` | Length of non-retryable errors JSON |
 | `response_ptr` | `i32` | Output buffer for response |
-| `response_max_len` | `i32` | Output buffer capacity (65536) |
+| `response_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -175,7 +181,7 @@ Long-running call with progress updates. The host sends periodic progress update
 | `request_len` | `i32` | Request JSON length |
 | `heartbeat_interval_ms` | `i64` | Heartbeat interval in milliseconds |
 | `response_ptr` | `i32` | Output buffer for response |
-| `response_max_len` | `i32` | Output buffer capacity (65536) |
+| `response_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -280,7 +286,7 @@ Register a cleanup callback to run on workflow exit.
 | `description_ptr` | `i32` | Defer description pointer |
 | `description_len` | `i32` | Defer description length |
 | `defer_id_ptr` | `i32` | Output buffer for defer ID |
-| `defer_id_max_len` | `i32` | Output buffer capacity (65536) |
+| `defer_id_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -302,7 +308,7 @@ Check if workflow cancellation has been requested.
 | Param | Type | Description |
 |---|---|---|
 | `reason_ptr` | `i32` | Output buffer for cancellation reason |
-| `reason_max_len` | `i32` | Output buffer capacity (65536) |
+| `reason_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -328,7 +334,7 @@ Poll for a specific pending signal.
 | `name_ptr` | `i32` | Signal name pointer |
 | `name_len` | `i32` | Signal name length |
 | `payload_ptr` | `i32` | Output buffer for signal payload |
-| `payload_max_len` | `i32` | Output buffer capacity (65536) |
+| `payload_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -354,9 +360,9 @@ Wait for one or more external signals, with a timeout.
 | `names_len` | `i32` | JSON array length |
 | `timeout_ms` | `i64` | Timeout in milliseconds |
 | `sig_name_ptr` | `i32` | Output buffer for received signal name |
-| `sig_name_max_len` | `i32` | Output buffer capacity (65536) |
+| `sig_name_max_len` | `i32` | Output buffer capacity (1048576) |
 | `payload_ptr` | `i32` | Output buffer for signal payload |
-| `payload_max_len` | `i32` | Output buffer capacity (65536) |
+| `payload_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -387,7 +393,7 @@ Send a signal to another workflow and wait for a correlated reply.
 | `payload_len` | `i32` | Signal payload length |
 | `timeout_ms` | `i64` | Timeout in milliseconds |
 | `resp_ptr` | `i32` | Output buffer for reply response |
-| `resp_max_len` | `i32` | Output buffer capacity (65536) |
+| `resp_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -510,7 +516,7 @@ Start a child workflow instance.
 | `input_ptr` | `i32` | Input JSON pointer |
 | `input_len` | `i32` | Input JSON length |
 | `run_id_ptr` | `i32` | Output buffer for run ID |
-| `run_id_max_len` | `i32` | Output buffer capacity (65536) |
+| `run_id_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -539,7 +545,7 @@ Start a child workflow instance with configurable version and parent close polic
 | `policy_ptr` | `i32` | Parent close policy pointer |
 | `policy_len` | `i32` | Parent close policy length |
 | `run_id_ptr` | `i32` | Output buffer for run ID |
-| `run_id_max_len` | `i32` | Output buffer capacity (65536) |
+| `run_id_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -570,7 +576,7 @@ Start a child workflow instance in a different PostgreSQL schema for cross-insta
 | `policy_ptr` | `i32` | Parent close policy pointer |
 | `policy_len` | `i32` | Parent close policy length |
 | `run_id_ptr` | `i32` | Output buffer for run ID |
-| `run_id_max_len` | `i32` | Output buffer capacity (65536) |
+| `run_id_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -594,7 +600,7 @@ Wait for a child workflow to complete.
 | `run_id_ptr` | `i32` | Child run ID pointer |
 | `run_id_len` | `i32` | Child run ID length |
 | `result_ptr` | `i32` | Output buffer for child result |
-| `result_max_len` | `i32` | Output buffer capacity (65536) |
+| `result_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -620,7 +626,7 @@ Batch await for multiple child workflows. Returns a JSON array of child results.
 | `run_ids_json_ptr` | `i32` | Pointer to JSON array of run IDs |
 | `run_ids_json_len` | `i32` | Length of run IDs JSON |
 | `results_ptr` | `i32` | Output buffer for results |
-| `results_max_len` | `i32` | Output buffer capacity (65536) |
+| `results_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -755,7 +761,7 @@ Get the value for a key in the workflow's durable state.
 | `key_ptr` | `i32` | Key pointer |
 | `key_len` | `i32` | Key length |
 | `value_ptr` | `i32` | Output buffer for value |
-| `value_max_len` | `i32` | Output buffer capacity (65536) |
+| `value_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -845,7 +851,7 @@ List state keys matching a given prefix.
 | `prefix_ptr` | `i32` | Key prefix pointer |
 | `prefix_len` | `i32` | Key prefix length |
 | `keys_ptr` | `i32` | Output buffer for JSON array of keys |
-| `keys_max_len` | `i32` | Output buffer capacity (65536) |
+| `keys_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -871,7 +877,7 @@ Create a named durable promise. Returns a promise ID that external callers use t
 | `name_ptr` | `i32` | Promise name pointer |
 | `name_len` | `i32` | Promise name length |
 | `promise_id_out_ptr` | `i32` | Output buffer for promise ID |
-| `promise_id_out_max` | `i32` | Output buffer capacity (65536) |
+| `promise_id_out_max` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -896,7 +902,7 @@ Wait for a promise to be resolved by an external caller. Blocks until resolved o
 | `promise_id_len` | `i32` | Promise ID length |
 | `timeout_ms` | `i64` | Timeout in milliseconds |
 | `result_out_ptr` | `i32` | Output buffer for result |
-| `result_out_max` | `i32` | Output buffer capacity (65536) |
+| `result_out_max` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -971,7 +977,7 @@ Set the virtual object scope for the current workflow execution.
 | `inst_key_ptr` | `i32` | Instance key pointer |
 | `inst_key_len` | `i32` | Instance key length |
 | `prev_scope_ptr` | `i32` | Output buffer for previous scope |
-| `prev_scope_max_len` | `i32` | Output buffer capacity (65536) |
+| `prev_scope_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -993,9 +999,9 @@ Get the current virtual object scope.
 | Param | Type | Description |
 |---|---|---|
 | `obj_type_ptr` | `i32` | Output buffer for object type |
-| `obj_type_max_len` | `i32` | Output buffer capacity (65536) |
+| `obj_type_max_len` | `i32` | Output buffer capacity (1048576) |
 | `inst_key_ptr` | `i32` | Output buffer for instance key |
-| `inst_key_max_len` | `i32` | Output buffer capacity (65536) |
+| `inst_key_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1020,7 +1026,7 @@ Generate a deterministic UUID from a seed value.
 | `seed_ptr` | `i32` | Seed string pointer |
 | `seed_len` | `i32` | Seed string length |
 | `uuid_ptr` | `i32` | Output buffer for UUID |
-| `uuid_max_len` | `i32` | Output buffer capacity (65536) |
+| `uuid_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1091,7 +1097,7 @@ Record a non-deterministic computation result. On first execution, the result is
 | `result_ptr` | `i32` | Computed result pointer |
 | `result_len` | `i32` | Computed result length |
 | `out_ptr` | `i32` | Output buffer for cached result |
-| `out_max_len` | `i32` | Output buffer capacity (65536) |
+| `out_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1115,7 +1121,7 @@ Get the current workflow's unique identifier.
 | Param | Type | Description |
 |---|---|---|
 | `id_ptr` | `i32` | Output buffer for workflow ID |
-| `id_max_len` | `i32` | Output buffer capacity (65536) |
+| `id_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1137,7 +1143,7 @@ Get the current workflow run's unique identifier.
 | Param | Type | Description |
 |---|---|---|
 | `id_ptr` | `i32` | Output buffer for run ID |
-| `id_max_len` | `i32` | Output buffer capacity (65536) |
+| `id_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1222,7 +1228,7 @@ Perform an HTTP fetch request. The method, URL, headers (JSON), and body are all
 | `body_ptr` | `i32` | Request body pointer |
 | `body_len` | `i32` | Request body length |
 | `response_ptr` | `i32` | Output buffer for response |
-| `response_max_len` | `i32` | Output buffer capacity (65536) |
+| `response_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1248,7 +1254,7 @@ Parse and validate a JSON string. Returns the canonical (re-serialized) form of 
 | `json_ptr` | `i32` | JSON string pointer |
 | `json_len` | `i32` | JSON string length |
 | `out_ptr` | `i32` | Output buffer for normalized JSON |
-| `out_max_len` | `i32` | Output buffer capacity (65536) |
+| `out_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1274,7 +1280,7 @@ Validate and re-serialize a JSON value. Identical behavior to `cleat_json_parse`
 | `value_ptr` | `i32` | JSON value pointer |
 | `value_len` | `i32` | JSON value length |
 | `out_ptr` | `i32` | Output buffer for serialized JSON |
-| `out_max_len` | `i32` | Output buffer capacity (65536) |
+| `out_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1304,7 +1310,7 @@ Host-only extension for plugin function calls. Not included in the Go SDK genera
 | `input_ptr` | `i32` | Input JSON pointer |
 | `input_len` | `i32` | Input JSON length |
 | `response_ptr` | `i32` | Output buffer for response |
-| `response_max_len` | `i32` | Output buffer capacity (65536) |
+| `response_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1333,7 +1339,7 @@ Host-only extension for streaming plugin function calls. Same signature as `plug
 | `input_ptr` | `i32` | Input JSON pointer |
 | `input_len` | `i32` | Input JSON length |
 | `response_ptr` | `i32` | Output buffer for response |
-| `response_max_len` | `i32` | Output buffer capacity (65536) |
+| `response_max_len` | `i32` | Output buffer capacity (1048576) |
 
 **Return packing:**
 
@@ -1349,14 +1355,36 @@ Host-only extension for streaming plugin function calls. Same signature as `plug
 
 ### Scratch Region
 
-The host writes input JSON and reads output at fixed offsets in the WASM module's linear memory:
+The host writes input JSON and reads output from a scratch region in the WASM module's
+linear memory. The region's base is **not a fixed address**: the host places it one guard
+page past the end of the module's current memory, with a floor of 10 MiB
+(`engine/runtime.go`):
+
+```
+scratchBase  = max(currentMemorySize + 65536, 0xA00000)
+inputOffset  = scratchBase
+outputOffset = scratchBase + OutBufSize
+```
+
+The 10 MiB floor exists because some SDKs (Java/TeaVM, AssemblyScript) hardcode that
+convention and break if the region moves below it. A module whose heap already exceeds
+10 MiB gets a correspondingly higher base.
 
 | Offset | Size | Use |
 |---|---|---|
-| `0xA00000` (10 MiB) | Variable | Input JSON written by host |
-| `0xA10000` (10 MiB + 64 KiB) | 65536 bytes | Output buffer read by host |
+| `scratchBase` (≥ `0xA00000`, 10 MiB) | Variable, up to `OutBufSize` | Input JSON written by host |
+| `scratchBase + OutBufSize` | `OutBufSize` bytes (1048576) | Output buffer read by host |
 
-The host ensures linear memory is at least `0xA20000` bytes (10 MiB + 128 KiB) before calling an export. If the module's memory is smaller, the host grows it (`memory.grow`).
+The host grows linear memory to at least `scratchBase + 2 × OutBufSize` before calling an
+export. With the region at its 10 MiB floor that is `0xC00000` (12 MiB).
+
+`OutBufSize` is `engine/memory.go`'s `DefaultOutBufSize` (1 MiB) and is the value passed as
+every `*_max_len` parameter in this document.
+
+> This section previously described a fixed `0xA00000`/`0xA10000` layout with a 65536-byte
+> output buffer and a 10 MiB + 128 KiB growth target. All three were wrong: the buffer is
+> 16× larger than stated, the output offset is 1 MiB past the base rather than 64 KiB, and
+> the base is dynamic. An SDK sized from the old text would under-allocate.
 
 ### WASM Page Size
 

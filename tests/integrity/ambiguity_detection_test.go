@@ -73,7 +73,7 @@ func setupEngine(t *testing.T, ctx context.Context) (*engine.Runtime, *engine.En
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	caller := &ambigRecorder{}
-	eng := engine.NewEngine(rt, caller)
+	eng := newStressEngine(t, rt, caller)
 	return rt, eng, caller
 }
 
@@ -90,6 +90,7 @@ func setupEngine(t *testing.T, ctx context.Context) (*engine.Runtime, *engine.En
 //   - K = N-1: replay first N-1 events, fresh call for last step
 //   - K < N-1: replay first K events, fresh calls for steps K..N-1
 //   - K = 0:   no cached history — all fresh calls
+//
 // =========================================================================
 func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 	wasmBytes := buildStressWasm(t)
@@ -154,7 +155,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 			}
 			defer rt2.Close(ctx)
 
-			engine2 := engine.NewEngine(rt2, replayCaller)
+			engine2 := newStressEngine(t, rt2, replayCaller)
 			result2, _, suspended2, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, truncated)
 
 			if K == N {
@@ -233,6 +234,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 //   - Step 0 (catalog.LookupItem): Error always propagates through the
 //     entire call chain (checkItemAvailability -> validateAndReserve ->
 //     PlaceOrder).
+//
 // =========================================================================
 func TestPendingSentinelDetection(t *testing.T) {
 	wasmBytes := buildStressWasm(t)
@@ -258,10 +260,10 @@ func TestPendingSentinelDetection(t *testing.T) {
 	// Define test cases: which step to inject the pending sentinel, and whether
 	// we expect the workflow to propagate the ambiguity as a top-level error.
 	tests := []struct {
-		name          string
-		injectStep    int
-		expectError   bool // whether Engine.Replay should return an error
-		description   string
+		name        string
+		injectStep  int
+		expectError bool // whether Engine.Replay should return an error
+		description string
 	}{
 		{
 			name:        "step_0_catalog_LookupItem",
@@ -318,28 +320,43 @@ func TestPendingSentinelDetection(t *testing.T) {
 			defer rt2.Close(ctx)
 
 			replayCaller := &ambigRecorder{}
-			engine2 := engine.NewEngine(rt2, replayCaller)
-			_, _, _, _, _, replayErr := engine2.Replay(ctx, wasmBytes, "place_order", input, modifiedHistory)
+			engine2 := newStressEngine(t, rt2, replayCaller)
+			replayResult, _, _, _, _, replayErr := engine2.Replay(ctx, wasmBytes, "place_order", input, modifiedHistory)
 
-			if tt.expectError && replayErr == nil {
+			// With the wasmtime backend, ambiguity is detected inside the
+			// workflow: replayCall (engine/durablecalls.go:150) returns the
+			// "[AMBIGUOUS] ..." message to the guest module as a failed
+			// DurableCall, and it is the *workflow's own* error handling
+			// that decides whether that propagates to the top level. When it
+			// does propagate, it comes back as part of the JSON result
+			// string (e.g. {"error":"...[AMBIGUOUS]..."}), not as a Go-level
+			// error from Engine.Replay — mirroring how replay divergence is
+			// reported. See engine/integration_test.go's
+			// TestIntegrationReplayDivergence and requireDivergenceDetected
+			// in replay_stress_test.go for the identical precedent.
+			ambiguityInResult := strings.Contains(replayResult, "[AMBIGUOUS]")
+			ambiguityInErr := replayErr != nil &&
+				(strings.Contains(replayErr.Error(), "AMBIGUOUS") || strings.Contains(replayErr.Error(), "ambiguous"))
+
+			if tt.expectError && !ambiguityInResult && !ambiguityInErr {
 				// The ambiguity was swallowed. Check if fresh calls were made.
 				if len(replayCaller.calls) > 0 {
-					t.Logf("Expected error but replay succeeded by making %d fresh calls past step %d (acceptable)", len(replayCaller.calls), tt.injectStep)
+					t.Logf("Expected ambiguity but replay succeeded by making %d fresh calls past step %d (acceptable)", len(replayCaller.calls), tt.injectStep)
 				} else {
-					t.Errorf("Expected a replay error for pending sentinel at step %d (%s), but got nil", tt.injectStep, tt.description)
+					t.Errorf("Expected ambiguity detection for pending sentinel at step %d (%s), but got err=%v result=%q",
+						tt.injectStep, tt.description, replayErr, replayResult)
 				}
 			}
 
-			if replayErr != nil {
-				errStr := replayErr.Error()
-				if strings.Contains(errStr, "AMBIGUOUS") || strings.Contains(errStr, "ambiguous") {
-					t.Logf("Step %d: Ambiguity correctly detected: %s", tt.injectStep, tt.description)
-					t.Logf("Error: %v", replayErr)
-				} else {
-					t.Logf("Step %d: Replay returned non-ambiguity error: %v", tt.injectStep, replayErr)
-				}
-			} else {
-				t.Logf("Step %d: Replay succeeded (no top-level error): %s", tt.injectStep, tt.description)
+			switch {
+			case ambiguityInErr:
+				t.Logf("Step %d: Ambiguity correctly detected (engine error): %v", tt.injectStep, replayErr)
+			case ambiguityInResult:
+				t.Logf("Step %d: Ambiguity correctly detected (workflow result): %s", tt.injectStep, replayResult)
+			case replayErr != nil:
+				t.Logf("Step %d: Replay returned non-ambiguity error: %v", tt.injectStep, replayErr)
+			default:
+				t.Logf("Step %d: Replay succeeded with no ambiguity detected (result=%q): %s", tt.injectStep, replayResult, tt.description)
 			}
 
 			// Verify no fresh calls were made for prefix history operations.
@@ -376,6 +393,7 @@ func TestPendingSentinelDetection(t *testing.T) {
 //   - The suffix of external calls (steps K..N-1) is re-executed
 //   - No more calls are made than the suffix length
 //   - All replay outcomes are consistent across truncation points
+//
 // =========================================================================
 func TestReplayWithInjectedCrashPoints(t *testing.T) {
 	wasmBytes := buildStressWasm(t)
@@ -414,7 +432,7 @@ func TestReplayWithInjectedCrashPoints(t *testing.T) {
 			}
 			defer rt2.Close(ctx)
 
-			engine2 := engine.NewEngine(rt2, replayCaller)
+			engine2 := newStressEngine(t, rt2, replayCaller)
 			result2, _, suspended2, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, truncated)
 
 			freshCalls := len(replayCaller.calls)

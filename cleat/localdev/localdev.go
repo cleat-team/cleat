@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/google/uuid"
 )
 
 // ConcurrencyKeyTTL is the default TTL for concurrency key acquisitions in localdev.
@@ -188,8 +188,8 @@ type LocalRunner struct {
 	caller       ServiceCaller
 	pluginCaller PluginCaller
 	logWriter    io.Writer
-	signalCh  chan Signal
-	events    []Event
+	signalCh     chan Signal
+	events       []Event
 
 	childRunner  ChildWorkflowRunner
 	childResults map[string]childResult
@@ -205,7 +205,7 @@ type LocalRunner struct {
 	cancelReason  string
 
 	startTime   time.Time
-	pendingSigs []Signal // signals buffered while no one is listening
+	pendingSigs []Signal                 // signals buffered while no one is listening
 	promises    map[string]*localPromise // durable promises keyed by promiseID
 
 	concurrencyKey  string
@@ -215,14 +215,14 @@ type LocalRunner struct {
 // NewLocalRunner creates a new LocalRunner with the given options.
 func NewLocalRunner(opts ...Option) *LocalRunner {
 	r := &LocalRunner{
-		logWriter:     os.Stderr,
-		signalCh:      make(chan Signal, 100),
-		startTime:     time.Now(),
-		versionVal:    1,
-		minVersionVal: 1,
-		queryState:    make(map[string]string),
-		childResults:  make(map[string]childResult),
-		promises:      make(map[string]*localPromise),
+		logWriter:       os.Stderr,
+		signalCh:        make(chan Signal, 100),
+		startTime:       time.Now(),
+		versionVal:      1,
+		minVersionVal:   1,
+		queryState:      make(map[string]string),
+		childResults:    make(map[string]childResult),
+		promises:        make(map[string]*localPromise),
 		concurrencyKeys: make(map[string]string),
 	}
 	for _, o := range opts {
@@ -255,10 +255,10 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		AwaitPromise:                  r.awaitPromiseImpl,
 		RegisterUpdateHandler:         r.registerUpdateHandler,
 		RunDetached:                   r.runDetached,
-		PluginCall:                   r.pluginCallImpl,
+		PluginCall:                    r.pluginCallImpl,
 		AcquireLock:                   r.acquireLockImpl,
 		ReleaseLock:                   r.releaseLockImpl,
-		AwaitCondition:               r.awaitConditionImpl,
+		AwaitCondition:                r.awaitConditionImpl,
 		SideEffect:                    r.sideEffect,
 	})
 	return r
@@ -625,7 +625,6 @@ func (r *LocalRunner) durableCallTypedWithHeartbeat(service, operation string, r
 	return json.Unmarshal([]byte(resp), result)
 }
 
-
 func (r *LocalRunner) version() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -840,7 +839,7 @@ func (r *LocalRunner) sideEffect(computedResult string) (string, error) {
 	return computedResult, nil
 }
 
-	func (r *LocalRunner) ReleaseConcurrencyKeys(workflowID string) {
+func (r *LocalRunner) ReleaseConcurrencyKeys(workflowID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for k, v := range r.concurrencyKeys {

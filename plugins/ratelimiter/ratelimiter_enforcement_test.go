@@ -102,8 +102,8 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	case strings.Contains(query, "SELECT tenant_id, limit_key, max_requests, window_seconds"):
 		// background.go reload() — no WHERE clause, returns all rows.
 		return c.queryAllRateLimits(corrupt)
-		case strings.Contains(query, "FROM rate_counter"):
-			return c.queryRateCounter(args)
+	case strings.Contains(query, "FROM rate_counter"):
+		return c.queryRateCounter(args)
 	case strings.Contains(query, "SELECT limit_key, max_requests, window_seconds, created_at, updated_at"):
 		// routes.go handleList — filtered by tenant.
 		return c.queryRateLimits(args)
@@ -123,12 +123,12 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	switch {
 	case strings.Contains(query, "INSERT INTO rate_limits"):
 		return c.execInsertRateLimit(args)
-		case strings.Contains(query, "INSERT INTO rate_counter"):
-			return c.execInsertRateCounter(args)
-		case strings.Contains(query, "DELETE FROM rate_counter"):
-			return driver.RowsAffected(0), nil
-		case strings.Contains(query, "UPDATE rate_counter"):
-			return c.execUpdateRateCounter(args)
+	case strings.Contains(query, "INSERT INTO rate_counter"):
+		return c.execInsertRateCounter(args)
+	case strings.Contains(query, "DELETE FROM rate_counter"):
+		return driver.RowsAffected(0), nil
+	case strings.Contains(query, "UPDATE rate_counter"):
+		return c.execUpdateRateCounter(args)
 	case strings.Contains(query, "DELETE FROM rate_limits"):
 		return c.execDeleteRateLimit(args)
 	default:
@@ -385,9 +385,9 @@ func newTestPlugin(t *testing.T) *Plugin {
 func newPluginWithDB(t *testing.T) (*Plugin, *fakeDBStore) {
 	t.Helper()
 	store := &fakeDBStore{
-		apiKeys:    make(map[string]string),
+		apiKeys:      make(map[string]string),
 		rateCounters: make(map[string]int),
-		rateLimits: make(map[string]fakeRateLimitRow),
+		rateLimits:   make(map[string]fakeRateLimitRow),
 	}
 	keyHash := sha256.Sum256([]byte(testAPIKey))
 	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantA.String()
@@ -1476,9 +1476,9 @@ func (c *rowsErrConn) QueryContext(_ context.Context, query string, args []drive
 
 func TestReload_RowsErr(t *testing.T) {
 	store := &fakeDBStore{
-		apiKeys:    make(map[string]string),
+		apiKeys:      make(map[string]string),
 		rateCounters: make(map[string]int),
-		rateLimits: make(map[string]fakeRateLimitRow),
+		rateLimits:   make(map[string]fakeRateLimitRow),
 	}
 	keyHash := sha256.Sum256([]byte(testAPIKey))
 	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantA.String()

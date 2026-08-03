@@ -717,6 +717,21 @@ func (m *mockShardStore) TerminateWorkflow(ctx context.Context, workflowID, reas
 	return m.err
 }
 
+func (m *mockShardStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	m.recordCall("AdminForceComplete")
+	return m.err
+}
+
+func (m *mockShardStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	m.recordCall("AdminForceFail")
+	return m.err
+}
+
+func (m *mockShardStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	m.recordCall("AdminReReplay")
+	return m.err
+}
+
 func (m *mockShardStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
 	m.recordCall("StreamEventHistory")
 	if m.streamEventHistoryFn != nil {

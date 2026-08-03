@@ -18,7 +18,11 @@ func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 			match: "INSERT INTO workflow_instances (id, def_name",
 			data:  [][]driver.Value{{"new-run-uuid"}},
 		},
-	}, nil)
+	}, []mockExecResult{
+		// "Complete old run" UPDATE must report the fence as held for
+		// ContinueAsNew to commit and return the new run ID.
+		{match: "SET status = 'done'", affected: 1},
+	})
 	defer db.Close()
 
 	store := NewPostgresStore(db)
@@ -41,7 +45,11 @@ func TestPostgresStore_ContinueAsNew_NoEvents(t *testing.T) {
 			match: "INSERT INTO workflow_instances (id, def_name",
 			data:  [][]driver.Value{{"new-run-uuid"}},
 		},
-	}, nil)
+	}, []mockExecResult{
+		// "Complete old run" UPDATE must report the fence as held for
+		// ContinueAsNew to commit and return the new run ID.
+		{match: "SET status = 'done'", affected: 1},
+	})
 	defer db.Close()
 
 	store := NewPostgresStore(db)
@@ -60,7 +68,11 @@ func TestPostgresStore_ContinueAsNew_NoEvents(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_FinalizeWorkflowSegment_Done(t *testing.T) {
-	db := newNoopDB(t)
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		// finalize_workflow_status is called via QueryRow and returns
+		// whether the generation fence held.
+		{match: "SELECT finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
@@ -73,7 +85,9 @@ func TestPostgresStore_FinalizeWorkflowSegment_Done(t *testing.T) {
 }
 
 func TestPostgresStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
-	db := newNoopDB(t)
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
@@ -86,7 +100,9 @@ func TestPostgresStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
 }
 
 func TestPostgresStore_FinalizeWorkflowSegment_Ready(t *testing.T) {
-	db := newNoopDB(t)
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT finalize_workflow_status", data: [][]driver.Value{{true}}},
+	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)

@@ -239,10 +239,10 @@ func runWorkflowSDK(h cleat.HostCalls, userID string, cart []cartItem) (string, 
 			SKU string `json:"sku"`
 		}
 		var result struct {
-			SKU       string `json:"sku"`
-			Name      string `json:"name"`
-			PriceCents int   `json:"price_cents"`
-			Found     bool   `json:"found"`
+			SKU        string `json:"sku"`
+			Name       string `json:"name"`
+			PriceCents int    `json:"price_cents"`
+			Found      bool   `json:"found"`
 		}
 		if err := h.DurableCallTyped("catalog", "LookupItem", lookupReq{SKU: item.SKU}, &result); err != nil {
 			return "", fmt.Errorf("item %s unavailable: %w", item.SKU, err)
@@ -251,8 +251,8 @@ func runWorkflowSDK(h cleat.HostCalls, userID string, cart []cartItem) (string, 
 
 	// Reserve inventory.
 	type reserveReq struct {
-		UserID string       `json:"user_id"`
-		Items  []cartItem   `json:"items"`
+		UserID string     `json:"user_id"`
+		Items  []cartItem `json:"items"`
 	}
 	_, err := h.DurableCall("inventory", "Reserve",
 		mustMarshal(reserveReq{UserID: userID, Items: cart}))

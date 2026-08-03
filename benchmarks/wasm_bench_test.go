@@ -4,7 +4,8 @@
 // engine.Runtime and engine.Engine, capturing realistic end-to-end overhead.
 //
 // Tier 1 benchmarks are always runnable with no external tooling.
-// Tier 2 benchmarks require tinygo and will skip gracefully if unavailable.
+// Tier 2 benchmarks compile a workflow to WASM via the standard Go/wasip1
+// build pipeline.
 //
 // Usage:
 //
@@ -127,8 +128,29 @@ func BenchmarkPayloadRoundTrip(b *testing.B) {
 }
 
 // ---------------------------------------------------------------------------
-// Tier 2 — require tinygo (skip gracefully if unavailable)
+// Tier 2 — compile via the standard Go/wasip1 build pipeline
 // ---------------------------------------------------------------------------
+
+// newBenchEngine builds an Engine wired with the wasmtime backend for the
+// "go" language. `cleat build`'s default Go/wasip1 target generates a main()
+// that uses the cleat_poll_work dispatch protocol; the default wazero
+// Runtime only stubs cleat_poll_work (it always reports "no work"), which
+// races the module's background _start goroutine into calling proc_exit
+// before an exported entry point can be invoked directly, surfacing as
+// "wasm trap: exit(code=0)". The wasmtime backend implements the real
+// dispatch protocol and does not have this problem. This mirrors
+// engine/host_test.go's withWasmtimeBackend helper, which documents the
+// same constraint for engine-package tests.
+func newBenchEngine(b *testing.B, rt *engine.Runtime, caller engine.ServiceCaller) *engine.Engine {
+	b.Helper()
+	ctx := context.Background()
+	wt, err := engine.NewWasmtimeBackend(ctx)
+	if err != nil {
+		b.Skipf("wasmtime backend not available: %v", err)
+	}
+	b.Cleanup(func() { wt.Close(ctx) })
+	return engine.NewEngine(rt, caller, engine.WithBackend("go", wt))
+}
 
 // BenchmarkEndToEndLatency measures the complete end-to-end latency of the
 // durable workflow pipeline: compiling a testdata workflow to WASM (via
@@ -146,9 +168,9 @@ func BenchmarkEndToEndLatency(b *testing.B) {
 	defer rt.Close(ctx)
 
 	caller := &benchCaller{}
-	eng := engine.NewEngine(rt, caller)
+	eng := newBenchEngine(b, rt, caller)
 
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"test-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 
 	b.ResetTimer()
 
@@ -175,9 +197,9 @@ func BenchmarkFreshThroughput(b *testing.B) {
 	defer rt.Close(ctx)
 
 	caller := &benchCaller{}
-	eng := engine.NewEngine(rt, caller)
+	eng := newBenchEngine(b, rt, caller)
 
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"test-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 
 	b.ResetTimer()
 	start := time.Now()
@@ -213,9 +235,9 @@ func BenchmarkReplayThroughput(b *testing.B) {
 	defer rtExecute.Close(ctx)
 
 	caller := &benchCaller{}
-	engineExecute := engine.NewEngine(rtExecute, caller)
+	engineExecute := newBenchEngine(b, rtExecute, caller)
 
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"test-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 
 	result, history, _, _, _, err := engineExecute.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
@@ -233,7 +255,7 @@ func BenchmarkReplayThroughput(b *testing.B) {
 	}
 	defer rtReplay.Close(ctx)
 
-	engineReplay := engine.NewEngine(rtReplay, caller)
+	engineReplay := newBenchEngine(b, rtReplay, caller)
 
 	b.ResetTimer()
 	start := time.Now()
@@ -294,102 +316,85 @@ func minimalWasmWithMemory() []byte {
 		// --- Type section (id=1) ---------------------------------------------
 		// 1 functype: (i32, i32, i32, i32) -> i64
 		// Content: count(1) + functype(60 04 params 01 result 7e) = 9 bytes
-		0x01,                         // section id: Type
-		0x09,                         // section size: 9 bytes
-		0x01,                         // count: 1 type
-		0x60,                         // functype
-		0x04,                         // 4 parameter types
-		0x7f, 0x7f, 0x7f, 0x7f,      // i32, i32, i32, i32
-		0x01,                         // 1 result type
-		0x7e,                         // i64
+		0x01,                   // section id: Type
+		0x09,                   // section size: 9 bytes
+		0x01,                   // count: 1 type
+		0x60,                   // functype
+		0x04,                   // 4 parameter types
+		0x7f, 0x7f, 0x7f, 0x7f, // i32, i32, i32, i32
+		0x01, // 1 result type
+		0x7e, // i64
 
 		// --- Function section (id=3) -----------------------------------------
 		// 1 function, type index 0
-		0x03,                         // section id: Function
-		0x02,                         // section size: 2 bytes
-		0x01,                         // count: 1 function
-		0x00,                         // type index: 0
+		0x03, // section id: Function
+		0x02, // section size: 2 bytes
+		0x01, // count: 1 function
+		0x00, // type index: 0
 
 		// --- Memory section (id=5) -------------------------------------------
 		// 1 memory, initial 1 page (64 KB), no maximum
-		0x05,                         // section id: Memory
-		0x03,                         // section size: 3 bytes
-		0x01,                         // count: 1 memory
-		0x00,                         // limits flag: no max
-		0x01,                         // initial pages: 1
+		0x05, // section id: Memory
+		0x03, // section size: 3 bytes
+		0x01, // count: 1 memory
+		0x00, // limits flag: no max
+		0x01, // initial pages: 1
 
 		// --- Export section (id=7) -------------------------------------------
 		// 2 exports: "memory" -> mem 0, "noop" -> func 0
-		0x07,                         // section id: Export
-		0x11,                         // section size: 17 bytes
-		0x02,                         // count: 2 exports
+		0x07, // section id: Export
+		0x11, // section size: 17 bytes
+		0x02, // count: 2 exports
 		// Export 1: "memory" (6 chars, kind=Memory(2), index=0)
 		0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, // name "memory"
-		0x02,                         // kind: Memory
-		0x00,                         // index: 0
+		0x02, // kind: Memory
+		0x00, // index: 0
 		// Export 2: "noop" (4 chars, kind=Function(0), index=0)
 		0x04, 0x6e, 0x6f, 0x6f, 0x70, // name "noop"
-		0x00,                         // kind: Function
-		0x00,                         // index: 0
+		0x00, // kind: Function
+		0x00, // index: 0
 
 		// --- Code section (id=10) --------------------------------------------
 		// 1 function body: i64.const 0, end
-		0x0a,                         // section id: Code
-		0x06,                         // section size: 6 bytes
-		0x01,                         // count: 1 code entry
-		0x04,                         // body size: 4 bytes (locals + expr)
-		0x00,                         // 0 local groups
-		0x42, 0x00,                   // i64.const 0
-		0x0b,                         // end
+		0x0a,       // section id: Code
+		0x06,       // section size: 6 bytes
+		0x01,       // count: 1 code entry
+		0x04,       // body size: 4 bytes (locals + expr)
+		0x00,       // 0 local groups
+		0x42, 0x00, // i64.const 0
+		0x0b, // end
 	}
 }
 
 // buildBenchWasm compiles the testdata/basic workflow to WASM via the
-// `durable build` pipeline with the tinygo target. It skips the benchmark
-// if tinygo or the project root cannot be found.
+// `cleat build` pipeline using the default Go/wasip1 target. It skips the
+// benchmark if the project root cannot be found.
 func buildBenchWasm(b *testing.B) []byte {
 	b.Helper()
 
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		b.Skip("tinygo not installed — skipping WASM benchmark")
-	}
-
-	// Locate the project root by looking for cmd/durable/main.go.
+	// Locate the project root by looking for cmd/cleat/main.go.
 	cwd, err := os.Getwd()
 	if err != nil {
 		b.Skip("cannot determine working directory")
 	}
 	projectRoot := cwd
-	if _, err := os.Stat(filepath.Join(projectRoot, "cmd", "durable", "main.go")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(projectRoot, "cmd", "cleat", "main.go")); os.IsNotExist(err) {
 		projectRoot = filepath.Dir(cwd)
-		if _, err := os.Stat(filepath.Join(projectRoot, "cmd", "durable", "main.go")); os.IsNotExist(err) {
-			b.Skip("cannot find project root (cmd/durable/main.go)")
+		if _, err := os.Stat(filepath.Join(projectRoot, "cmd", "cleat", "main.go")); os.IsNotExist(err) {
+			b.Skip("cannot find project root (cmd/cleat/main.go)")
 		}
 	}
 
 	tmpDir := b.TempDir()
-	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "durable"),
-		"build", "--target", "tinygo", "-o", tmpDir,
+	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "cleat"),
+		"build", "-o", tmpDir,
 		filepath.Join(projectRoot, "testdata", "basic"),
 	)
 	cmd.Dir = projectRoot
 
-	// tinygo needs GOROOT and TINYGOROOT in its environment.
-	cmd.Env = os.Environ()
-	if goroot := os.Getenv("GOROOT"); goroot != "" {
-		cmd.Env = append(cmd.Env, "GOROOT="+goroot)
-	}
-	if tinygoGoroot := os.Getenv("DURABLE_TINYGO_GOROOT"); tinygoGoroot != "" {
-		cmd.Env = append(cmd.Env, "GOROOT="+tinygoGoroot)
-		cmd.Env = append(cmd.Env, "PATH="+tinygoGoroot+"/bin:"+os.Getenv("PATH"))
-	}
-	if tinygoroot := os.Getenv("TINYGOROOT"); tinygoroot != "" {
-		cmd.Env = append(cmd.Env, "TINYGOROOT="+tinygoroot)
-	}
-
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		b.Fatalf("durable build failed:\n%s\n%v", string(out), err)
+		b.Fatalf("cleat build failed:\n%s\n%v", string(out), err)
 	}
 
 	entries, err := os.ReadDir(tmpDir)

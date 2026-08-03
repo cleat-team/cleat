@@ -106,52 +106,6 @@ for details on how the transformer propagates `HostCalls`.
 
 ---
 
-### Symptom: TinyGo build produces a broken WASM module
-
-The workflow works when compiled with the standard Go target (`--target go`) but
-fails at runtime when compiled with TinyGo (`--target tinygo`). Common symptoms:
-JSON parsing produces zero values, `time.Time` serialisation is wrong, or the
-module panics on startup.
-
-**Diagnosis: How to confirm**
-
-Check which target was used by looking at the WASM binary size:
-
-```bash
-ls -lh output.wasm
-# TinyGo:  50-200 KB
-# Standard Go: 4-10 MB
-```
-
-Check the `go.mod` in the build output directory for the TinyGo dependency shim
-at `.deps/`.
-
-**Fix: How to resolve**
-
-TinyGo does not fully implement the Go standard library. The following packages
-are known to cause problems:
-
-- `encoding/json` -- limited reflection support; use `cleat-gen` code generation
-  for custom `MarshalJSON`/`UnmarshalJSON` methods
-- `net` / `net/http` -- use `h.DurableCall()` instead
-- `regexp` -- limited; use string operations
-- `time` timezone loading -- use UTC only
-
-Switch to the standard Go target if your workflow needs these packages:
-
-```bash
-cleat build --target go ./workflows/my-workflow/
-```
-
-The standard Go target produces larger binaries but has full standard library
-support, no dependency shim requirement, and no JSON bugs.
-
-See [TinyGo Limitations](workflow-go-constraints.md#5-tinygo-limitations) and
-[WASM Compilation Targets](explanation/wasm-compilation.md#compilation-targets)
-for the full compatibility matrix.
-
----
-
 ### Symptom: Python WASM build fails
 
 Building a Python workflow fails at the `cleat build` step with an error from the
@@ -767,16 +721,12 @@ Monitor cache metrics:
 
 **Fix: How to resolve**
 
-1. **Reduce WASM binary size**: Use `--target tinygo` for workflows that do not
-   need the full Go standard library. TinyGo binaries are ~98% smaller.
-   See [Binary Size Comparison](workflow-go-constraints.md#binary-size-comparison).
-
-2. **Adjust cache limits**: Configure the maximum entries and total bytes:
+1. **Adjust cache limits**: Configure the maximum entries and total bytes:
    ```bash
    cleat-worker --wasm-cache-size 500 --wasm-cache-bytes 2GB
    ```
 
-3. **GC old versions**: Remove deprecated workflow versions that are no longer
+2. **GC old versions**: Remove deprecated workflow versions that are no longer
    needed:
    ```bash
    cleatctl versions gc --dry-run
@@ -784,7 +734,7 @@ Monitor cache metrics:
    ```
    See [version_gc.go](engine/version_gc.go) for configuration.
 
-4. **Tune the LRU eviction policy**: The cache evicts the least recently used
+3. **Tune the LRU eviction policy**: The cache evicts the least recently used
    entry when the max entries or max bytes limit is hit. High eviction rates
    indicate the cache is too small for your deployment.
 
@@ -801,8 +751,8 @@ A workflow that should complete in seconds is taking minutes.
    Check the tracing dashboard for slow steps.
 
 2. **Check WASM cold start time**: Loading a WASM module from the database
-   takes 50-100 ms for standard Go modules, 0.5-2 ms for TinyGo. If you see
-   long load times, check the `wasm_bytes` column size in `workflow_defs`.
+   takes 50-100 ms for standard Go modules. If you see long load times, check
+   the `wasm_bytes` column size in `workflow_defs`.
 
 3. **Profile with `cleat build --bench`**:
    ```bash
@@ -811,23 +761,18 @@ A workflow that should complete in seconds is taking minutes.
 
 **Fix: How to resolve**
 
-1. **Use TinyGo for smaller binaries** and faster cold starts:
-   ```bash
-   cleat build --target tinygo ./workflows/my-workflow/
-   ```
-
-2. **Reduce WASM module size**: Avoid importing large packages like
+1. **Reduce WASM module size**: Avoid importing large packages like
    `encoding/json` (adds 1-2 MB) in workflow code. Use `cleat-gen` code
    generation for JSON serialisation.
 
-3. **Check the event count**: If the workflow has many events, compaction
+2. **Check the event count**: If the workflow has many events, compaction
    may help (see [Event history replay is slow](#symptom-event-history-is-too-large-replay-is-slow)).
 
-4. **Check database query performance**: Slow `SELECT ... FOR UPDATE SKIP LOCKED`
+3. **Check database query performance**: Slow `SELECT ... FOR UPDATE SKIP LOCKED`
    queries can delay the claim loop. Check for missing indexes on
    `workflow_instances(tenant_id, status, next_wake_at)`.
 
-5. **Check the circuit breaker**: If the worker encountered consecutive database
+4. **Check the circuit breaker**: If the worker encountered consecutive database
    errors, it backs off with exponential backoff (up to 30s). Check for
    `circuit breaker open` or `backoff` in the worker logs.
 

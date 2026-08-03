@@ -118,7 +118,7 @@ func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reason
 	}
 
 	if s.engine.signalStore != nil {
-		cancelled, reason, err := s.engine.signalStore.PollCancellation(ctx, "")
+		cancelled, reason, err := s.engine.signalStore.PollCancellation(ctx, s.engine.workflowID)
 		if err == nil && cancelled {
 
 			_, _ = s.writeResult(ctx, m, reasonPtr, reason, reasonMaxLen)

@@ -56,8 +56,7 @@ Cleat's architecture imposes four non-negotiable constraints on the VM:
   AS SDK doesn't compile on current AS 0.27.32, TeaVM has 6 blockers, Python
   WASM binaries are ~20MB.
 - **Go version lock-in.** Requires Go 1.26+ for `//go:wasmimport` and
-  `//go:wasmexport`. This is bleeding-edge (May 2026). TinyGo fallback exists
-  but uses a language subset.
+  `//go:wasmexport`. This is bleeding-edge (May 2026).
 - **Debugging is primitive.** No step-through debugger for WASM workflows.
   Debugging is via event history inspection.
 - **GC within WASM is per-module and not shared with the host.**

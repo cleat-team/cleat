@@ -728,6 +728,14 @@ func TestWriteWorkToFixedMemory(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	inst, err := linker.Instantiate(store, mod)
@@ -859,6 +867,14 @@ func TestClosure_CleatNow(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatNow(linker); err != nil {
@@ -905,6 +921,14 @@ func TestClosure_CleatRandom(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatRandom(linker); err != nil {
@@ -951,6 +975,14 @@ func TestClosure_CleatVersion(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatVersion(linker); err != nil {
@@ -997,6 +1029,14 @@ func TestClosure_CleatMinVersion(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatMinVersion(linker); err != nil {
@@ -1043,6 +1083,14 @@ func TestClosure_CleatSleep(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatSleep(linker); err != nil {
@@ -1089,6 +1137,14 @@ func TestClosure_CleatLog(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatLog(linker); err != nil {
@@ -1165,6 +1221,14 @@ func TestClosure_CleatComplete(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatComplete(linker, &cr, &ce); err != nil {
@@ -1216,6 +1280,14 @@ func TestClosure_CleatComplete_WithResult(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatComplete(linker, &cr, &ce); err != nil {
@@ -1268,6 +1340,14 @@ func TestClosure_CleatComplete_ErrorStatus(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatComplete(linker, &cr, &ce); err != nil {
@@ -1319,6 +1399,14 @@ func TestClosure_CleatPollWork(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatPollWork(linker); err != nil {
@@ -1387,6 +1475,14 @@ func TestClosure_CleatPollWork_Truncation(t *testing.T) {
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
+	// b.engine now always has epoch interruption enabled (see
+	// NewWasmtimeBackend / IMPROVEMENT-PLAN.md 1.5); a store with no
+	// explicit deadline defaults to deadline 0, which traps on the very
+	// first exported-function call. These tests exercise individual host
+	// function registrations directly (bypassing wasmtimeBackend.Execute,
+	// which calls configureStore for real executions), so give the store
+	// a deadline generous enough to never fire for a fast unit test.
+	store.SetEpochDeadline(1 << 32)
 
 	linker := wasmtime.NewLinker(b.engine)
 	if err := b.registerCleatPollWork(linker); err != nil {
@@ -1700,9 +1796,9 @@ func TestClosure_TwoStringIn(t *testing.T) {
 	})
 
 	for _, tc := range []struct {
-		export  string
-		name    string
-		second  string
+		export string
+		name   string
+		second string
 	}{
 		{"test_cleat_set_state", "mykey", "myval"},
 		{"test_cleat_resolve_promise", "promise-1", "resolved"},
@@ -2172,9 +2268,9 @@ func TestClosure_CallRetry(t *testing.T) {
 	s.writeString(90, `{"k":"v"}`)
 	s.writeString(140, `["E1","E2"]`)
 	got := s.call(t, "test_cleat_call_retry",
-		i32(30), i32(6),  // svc
-		i32(60), i32(5),   // op
-		i32(90), i32(9),   // req
+		i32(30), i32(6), // svc
+		i32(60), i32(5), // op
+		i32(90), i32(9), // req
 		int64(3), int64(100), int64(200), int64(5000), // retry config
 		i32(140), i32(12), // nonRetryable
 		i32(200), i32(512), // resp
@@ -2202,10 +2298,10 @@ func TestClosure_CallHeartbeat(t *testing.T) {
 	s.writeString(60, "my-op")
 	s.writeString(90, `{"k":"v"}`)
 	got := s.call(t, "test_cleat_call_heartbeat",
-		i32(30), i32(6),  // svc
-		i32(60), i32(5),  // op
-		i32(90), i32(9),  // req
-		int64(5000),      // heartbeat interval
+		i32(30), i32(6), // svc
+		i32(60), i32(5), // op
+		i32(90), i32(9), // req
+		int64(5000),        // heartbeat interval
 		i32(200), i32(512), // resp
 	)
 	if got != 0 {
@@ -2230,8 +2326,8 @@ func TestClosure_PluginCall(t *testing.T) {
 	s.writeString(60, "my-func")
 	s.writeString(90, `{"in":"put"}`)
 	got := s.call(t, "test_plugin_call",
-		i32(30), i32(9),  // plugin name
-		i32(60), i32(7),  // func name
+		i32(30), i32(9), // plugin name
+		i32(60), i32(7), // func name
 		i32(90), i32(12), // input
 		i32(200), i32(512), // resp
 	)
@@ -2286,10 +2382,10 @@ func TestClosure_ChildWorkflowWithOptions(t *testing.T) {
 	s.writeString(70, `{"in":"put"}`)
 	s.writeString(120, "ABANDON")
 	got := s.call(t, "test_cleat_child_workflow_with_options",
-		i32(30), i32(8),   // name
-		i32(70), i32(14),  // input
+		i32(30), i32(8), // name
+		i32(70), i32(14), // input
 		int64(2), int64(5), // version, priority
-		i32(120), i32(7),  // parentClosePolicy
+		i32(120), i32(7), // parentClosePolicy
 		i32(200), i32(64), // runID
 	)
 	if got != 0 {
@@ -2317,11 +2413,11 @@ func TestClosure_ChildWorkflowInSchema(t *testing.T) {
 	s.writeString(70, `{"in":"put"}`)
 	s.writeString(120, "TERMINATE")
 	got := s.call(t, "test_cleat_child_workflow_in_schema",
-		i32(10), i32(12),  // targetSchema
-		i32(40), i32(8),   // name
-		i32(70), i32(14),  // input
+		i32(10), i32(12), // targetSchema
+		i32(40), i32(8), // name
+		i32(70), i32(14), // input
 		int64(1), int64(3), // version, priority
-		i32(120), i32(9),  // parentClosePolicy
+		i32(120), i32(9), // parentClosePolicy
 		i32(200), i32(64), // runID
 	)
 	if got != 0 {
@@ -2346,7 +2442,7 @@ func TestClosure_AwaitSignals(t *testing.T) {
 
 	s.writeString(30, "sig1,sig2")
 	got := s.call(t, "test_cleat_await_signals",
-		i32(30), i32(9),   // signalNames
+		i32(30), i32(9), // signalNames
 		int64(30000),      // timeout
 		i32(200), i32(64), // sigName
 		i32(300), i32(512), // payload
@@ -2372,8 +2468,8 @@ func TestClosure_AwaitPromise(t *testing.T) {
 
 	s.writeString(30, "promise-uuid-123")
 	got := s.call(t, "test_cleat_await_promise",
-		i32(30), i32(16),  // promiseID
-		int64(5000),       // timeout
+		i32(30), i32(16), // promiseID
+		int64(5000),        // timeout
 		i32(200), i32(512), // result
 	)
 	if got != 0 {
@@ -2399,10 +2495,10 @@ func TestClosure_SendSignalAndWait(t *testing.T) {
 	s.writeString(70, "my-signal")
 	s.writeString(110, `{"p":"load"}`)
 	got := s.call(t, "test_cleat_send_signal_and_wait",
-		i32(30), i32(12),  // targetRunID
-		i32(70), i32(9),   // signalName
+		i32(30), i32(12), // targetRunID
+		i32(70), i32(9), // signalName
 		i32(110), i32(11), // payload
-		int64(10000),      // timeout
+		int64(10000),       // timeout
 		i32(200), i32(512), // resp
 	)
 	if got != 0 {
@@ -2442,7 +2538,6 @@ func TestClosure_CleatPollCancellation(t *testing.T) {
 		t.Errorf("got %v, want 0", got)
 	}
 }
-
 
 // TestClosure_ErrorPaths tests error-handling paths by passing zero-length strings.
 func TestClosure_ErrorPaths(t *testing.T) {
@@ -2575,13 +2670,6 @@ func TestClosure_MoreErrorPaths(t *testing.T) {
 				t.Errorf("got %v, want %v (errBadParamInt64)", got, errBadParamInt64)
 			}
 		})
-	}
-}
-
-func TestCgotestMakeU32Arg(t *testing.T) {
-	p := cgotestMakeU32Arg(42)
-	if p == nil {
-		t.Fatal("expected non-nil pointer")
 	}
 }
 

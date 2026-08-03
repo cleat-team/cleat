@@ -11,6 +11,19 @@ import (
 // against a MySQL 8.0+ or MariaDB 10.5+ backend. Uses CREATE TABLE IF NOT EXISTS
 // for idempotency. The final column set includes all migration additions so no
 // ALTER TABLE is needed for test setup.
+//
+// Deliberately does NOT pin an explicit CHARSET/COLLATE on these tables (unlike
+// an earlier version of this file, which hardcoded utf8mb4_unicode_ci). The
+// production migrations (migrations/mysql/*.sql) specify no charset/collation
+// either, so both production tables and the stored procedures in
+// 003_procedures.sql / 004_*.sql inherit whatever collation the target
+// database was created with. Pinning a different, hardcoded collation here
+// made this test schema disagree with the procedures applied on top of it by
+// applyMySQLProcedures (store_backends_test.go), producing spurious "Illegal
+// mix of collations" errors (1267) on MySQL 8.4+, whose server default
+// (utf8mb4_0900_ai_ci) differs from the old hardcoded utf8mb4_unicode_ci.
+// Letting these tables inherit the database default instead keeps this test
+// schema's collation behavior identical to production's.
 func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
 
@@ -32,7 +45,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			tenant_id          VARCHAR(255),
 			created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			PRIMARY KEY (name, version)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// workflow_instances
 		`CREATE TABLE IF NOT EXISTS workflow_instances (
@@ -68,7 +81,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			generation             BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY (id),
 			FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// event_history
 		`CREATE TABLE IF NOT EXISTS event_history (
@@ -106,7 +119,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			tenant_id          VARCHAR(255),
 			PRIMARY KEY (workflow_id, step),
 			FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// workflow_signals
 		`CREATE TABLE IF NOT EXISTS workflow_signals (
@@ -117,7 +130,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			tenant_id      VARCHAR(255),
 			PRIMARY KEY (workflow_id, signal_name),
 			FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// workflow_schedules
 		`CREATE TABLE IF NOT EXISTS workflow_schedules (
@@ -132,7 +145,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			tenant_id          VARCHAR(255),
 			PRIMARY KEY (name)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// concurrency_keys
 		// Note: no FOREIGN KEY on workflow_id in test schema (intentionally omitted
@@ -145,7 +158,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			tenant_id    VARCHAR(255) NOT NULL DEFAULT '',
 			acquired_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			expires_at   TIMESTAMP(6) NOT NULL
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// workflow_promises
 		`CREATE TABLE IF NOT EXISTS workflow_promises (
@@ -161,7 +174,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			resolved_at   TIMESTAMP(6),
 			PRIMARY KEY (workflow_id, promise_id),
 			FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// workflow_update_requests
 		`CREATE TABLE IF NOT EXISTS workflow_update_requests (
@@ -177,7 +190,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			completed_at  TIMESTAMP(6),
 			PRIMARY KEY (workflow_id, update_name),
 			FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// idempotency_keys
 		`CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -187,7 +200,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			error_msg    TEXT,
 			created_at   TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			expires_at   TIMESTAMP(6) NOT NULL DEFAULT (NOW(6) + INTERVAL 7 DAY)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// workflow_memory_samples
 		`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
@@ -195,7 +208,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			def_name      VARCHAR(255) NOT NULL,
 			sample_bytes  BIGINT NOT NULL,
 			recorded_at   TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// workflow_memory_stats
 		`CREATE TABLE IF NOT EXISTS workflow_memory_stats (
@@ -204,7 +217,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			sample_count  INTEGER NOT NULL DEFAULT 0,
 			alpha         DOUBLE NOT NULL DEFAULT 0.3,
 			updated_at    TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
 
 		// plugin_defs
 		`CREATE TABLE IF NOT EXISTS plugin_defs (
@@ -215,7 +228,22 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			created_at    TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			deprecated    TINYINT(1) NOT NULL DEFAULT 0,
 			PRIMARY KEY (name, version)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		) ENGINE=InnoDB`,
+
+		// tenant_api_keys
+		// Note: no FOREIGN KEY on tenant_id in test schema (intentionally
+		// omitted for test isolation, same as concurrency_keys above) --
+		// this test schema has no tenants table. The MSSQL test schema
+		// (mssql_schema.go) omits the same FK for the same reason.
+		`CREATE TABLE IF NOT EXISTS tenant_api_keys (
+			key_id       VARCHAR(36) NOT NULL,
+			tenant_id    VARCHAR(36) NOT NULL,
+			key_hash     VARBINARY(32) NOT NULL,
+			description  VARCHAR(1024) NOT NULL DEFAULT '',
+			created_at   TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+			revoked_at   TIMESTAMP(6),
+			PRIMARY KEY (key_id)
+		) ENGINE=InnoDB`,
 	}
 
 	for i, stmt := range statements {

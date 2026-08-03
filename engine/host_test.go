@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2009,10 +2010,27 @@ type mockCancellationStore struct {
 	cancelled bool
 	reason    string
 	err       error
+
+	mu                sync.Mutex
+	polledWorkflowIDs []string // captures every workflowID PollCancellation was called with
 }
 
-func (m *mockCancellationStore) PollCancellation(_ context.Context, _ string) (bool, string, error) {
+func (m *mockCancellationStore) PollCancellation(_ context.Context, workflowID string) (bool, string, error) {
+	m.mu.Lock()
+	m.polledWorkflowIDs = append(m.polledWorkflowIDs, workflowID)
+	m.mu.Unlock()
 	return m.cancelled, m.reason, m.err
+}
+
+// lastPolledWorkflowID returns the workflowID passed on the most recent
+// PollCancellation call, or "" if it was never called.
+func (m *mockCancellationStore) lastPolledWorkflowID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.polledWorkflowIDs) == 0 {
+		return ""
+	}
+	return m.polledWorkflowIDs[len(m.polledWorkflowIDs)-1]
 }
 
 func (m *mockCancellationStore) DeliverSignal(_ context.Context, _, _, _ string) error {
@@ -2044,20 +2062,27 @@ func TestPollCancellationNoStore(t *testing.T) {
 
 func TestPollCancellationNotCancelled(t *testing.T) {
 	s := newTestExecSession()
-	s.engine.signalStore = &mockCancellationStore{cancelled: false}
+	s.engine.workflowID = "wf-not-cancelled"
+	store := &mockCancellationStore{cancelled: false}
+	s.engine.signalStore = store
 
 	result := s.PollCancellation(context.Background(), nil, 0, 0)
 	if result != 0 {
 		t.Errorf("expected 0 when not cancelled, got %d", result)
 	}
+	if got := store.lastPolledWorkflowID(); got != "wf-not-cancelled" {
+		t.Errorf("expected PollCancellation to be called with workflowID %q, got %q", "wf-not-cancelled", got)
+	}
 }
 
 func TestPollCancellationWithReason(t *testing.T) {
 	s := newTestExecSession()
-	s.engine.signalStore = &mockCancellationStore{
+	s.engine.workflowID = "wf-with-reason"
+	store := &mockCancellationStore{
 		cancelled: true,
 		reason:    "testing",
 	}
+	s.engine.signalStore = store
 
 	buf := make([]byte, 256)
 	ctx := contextWithRawMemBuf(context.Background(), buf)
@@ -2073,14 +2098,19 @@ func TestPollCancellationWithReason(t *testing.T) {
 	if written != "testing" {
 		t.Errorf("expected 'testing' in buffer, got %q", written)
 	}
+	if got := store.lastPolledWorkflowID(); got != "wf-with-reason" {
+		t.Errorf("expected PollCancellation to be called with workflowID %q, got %q", "wf-with-reason", got)
+	}
 }
 
 func TestPollCancellationEmptyReason(t *testing.T) {
 	s := newTestExecSession()
-	s.engine.signalStore = &mockCancellationStore{
+	s.engine.workflowID = "wf-empty-reason"
+	store := &mockCancellationStore{
 		cancelled: true,
 		reason:    "",
 	}
+	s.engine.signalStore = store
 
 	result := s.PollCancellation(context.Background(), nil, 0, 0)
 
@@ -2088,17 +2118,25 @@ func TestPollCancellationEmptyReason(t *testing.T) {
 	if result != expected {
 		t.Errorf("expected %d, got %d", expected, result)
 	}
+	if got := store.lastPolledWorkflowID(); got != "wf-empty-reason" {
+		t.Errorf("expected PollCancellation to be called with workflowID %q, got %q", "wf-empty-reason", got)
+	}
 }
 
 func TestPollCancellationStoreError(t *testing.T) {
 	s := newTestExecSession()
-	s.engine.signalStore = &mockCancellationStore{
+	s.engine.workflowID = "wf-store-error"
+	store := &mockCancellationStore{
 		err: fmt.Errorf("db down"),
 	}
+	s.engine.signalStore = store
 
 	result := s.PollCancellation(context.Background(), nil, 0, 0)
 	if result != 0 {
 		t.Errorf("expected 0 on store error, got %d", result)
+	}
+	if got := store.lastPolledWorkflowID(); got != "wf-store-error" {
+		t.Errorf("expected PollCancellation to be called with workflowID %q, got %q", "wf-store-error", got)
 	}
 }
 

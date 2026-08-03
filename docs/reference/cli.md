@@ -25,7 +25,7 @@ and compilation.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o <dir>` | temp dir | Output directory for generated WASM and auxiliary files |
-| `--target <name>` | `go` | Compilation target: `go` (standard Go toolchain, fully implemented), `tinygo` (smaller binaries), `rust`, `java`, `assemblyscript`, or `python` |
+| `--target <name>` | `go` | Compilation target: `go` (standard Go toolchain, fully implemented), `rust`, `java`, `assemblyscript`, or `python` |
 | `--entry <file:func>` | `""` | Entry point in `file.py:func_name` format (Python target only) |
 | `--json` | `false` | Output diagnostics as JSON to stdout (progress goes to stderr) |
 
@@ -112,7 +112,7 @@ Build (if needed) and execute a workflow in-process.
 | `--entry-point <name>` | `place_order` | Entry point function name |
 | `--input <json>` | `{}` | Workflow input as JSON |
 | `--api-addr <addr>` | `:8080` | HTTP API + web UI listen address (empty to disable) |
-| `--target <name>` | `go` | Build target when WASM is not pre-built: `go` (standard Go, fully implemented), `tinygo` (smaller binaries), or `rust` |
+| `--target <name>` | `go` | Build target when WASM is not pre-built: `go` (standard Go, fully implemented), or `rust` |
 
 Example:
 

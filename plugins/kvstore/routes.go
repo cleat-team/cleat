@@ -60,14 +60,17 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var value json.RawMessage
+	// plugin.JSONColumn rather than json.RawMessage: SQL Server returns the
+	// column as a string and database/sql will not scan that into a named
+	// []byte type. See plugin.JSONColumn.
+	var value plugin.JSONColumn
 	var version int
 	var createdAt, updatedAt time.Time
 
 	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT value, version, created_at, updated_at
 		FROM kv_store
-		WHERE tenant_id = $1 AND key = $2
+		WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
 	`, p.dialect), tid, key).Scan(&value, &version, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "key not found")
@@ -82,7 +85,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", strconv.Itoa(version))
 	p.writeJSON(w, 200, map[string]any{
 		"key":        key,
-		"value":      value,
+		"value":      value.Raw,
 		"version":    version,
 		"created_at": createdAt,
 		"updated_at": updatedAt,
@@ -142,7 +145,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		if p.dialect == plugin.DialectMySQL {
 			// MySQL: UPDATE without RETURNING
 			rows, execErr := p.db.Exec(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
-				value, tid, key, expectedVersion)
+				plugin.JSONColumn{Raw: value}, tid, key, expectedVersion)
 			if execErr != nil {
 				p.logger.Error("kvstore: put (update)", "key", key, "error", execErr)
 				p.writeError(w, 500, "failed to update value")
@@ -152,10 +155,10 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 				p.writeError(w, 409, "conflict: version mismatch")
 				return
 			}
-			err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND key = $2`, p.dialect), tid, key).Scan(&newVersion)
+			err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, p.dialect), tid, key).Scan(&newVersion)
 		} else {
 			err = p.db.QueryRow(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
-				value, tid, key, expectedVersion).Scan(&newVersion)
+				plugin.JSONColumn{Raw: value}, tid, key, expectedVersion).Scan(&newVersion)
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			p.writeError(w, 409, "conflict: version mismatch")
@@ -180,16 +183,16 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	if p.dialect == plugin.DialectMySQL {
 		// MySQL: upsert without RETURNING, then select version
 		_, execErr := p.db.Exec(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
-			tid, key, value)
+			tid, key, plugin.JSONColumn{Raw: value})
 		if execErr != nil {
 			p.logger.Error("kvstore: put (upsert)", "key", key, "error", execErr)
 			p.writeError(w, 500, "failed to store value")
 			return
 		}
-		err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND key = $2`, p.dialect), tid, key).Scan(&newVersion)
+		err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, p.dialect), tid, key).Scan(&newVersion)
 	} else {
 		err = p.db.QueryRow(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
-			tid, key, value).Scan(&newVersion)
+			tid, key, plugin.JSONColumn{Raw: value}).Scan(&newVersion)
 	}
 	if err != nil {
 		p.logger.Error("kvstore: put (upsert)", "key", key, "error", err)
@@ -228,7 +231,7 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
 		DELETE FROM kv_store
-		WHERE tenant_id = $1 AND key = $2
+		WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
 	`, p.dialect), tid, key)
 	if err != nil {
 		p.logger.Error("kvstore: delete", "key", key, "error", err)
@@ -263,7 +266,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := `
-		SELECT key, value, version, created_at, updated_at
+		SELECT ` + plugin.QuoteIdent("key", p.dialect) + `, value, version, created_at, updated_at
 		FROM kv_store
 		WHERE tenant_id = $1
 		`
@@ -271,13 +274,13 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	argIdx := 2
 
 	if prefix != "" {
-		query += " AND key LIKE " + fmt.Sprintf("$%d", argIdx)
+		query += " AND " + plugin.QuoteIdent("key", p.dialect) + " LIKE " + fmt.Sprintf("$%d", argIdx)
 		args = append(args, prefix+"%")
 		argIdx++
 	}
 
-	query += " ORDER BY key ASC"
-	query += " LIMIT " + fmt.Sprintf("$%d", argIdx)
+	query += " ORDER BY " + plugin.QuoteIdent("key", p.dialect) + " ASC"
+	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
@@ -299,13 +302,20 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	var entries []kvEntry
 	for rows.Next() {
 		var entry kvEntry
+		// See plugin.JSONColumn: SQL Server hands JSON back as a string.
+		var value plugin.JSONColumn
 		if err := rows.Scan(
-			&entry.Key, &entry.Value, &entry.Version,
+			&entry.Key, &value, &entry.Version,
 			&entry.CreatedAt, &entry.UpdatedAt,
 		); err != nil {
+			// Not a continue: skipping the row turned a driver-level type
+			// mismatch into a silently short list, which is how this went
+			// unnoticed on SQL Server.
 			p.logger.Error("kvstore: scan row", "error", err)
-			continue
+			p.writeError(w, 500, "failed to list keys")
+			return
 		}
+		entry.Value = value.Raw
 		entries = append(entries, entry)
 	}
 

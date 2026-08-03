@@ -82,15 +82,15 @@ type Engine struct {
 
 	noPerStepFlush bool // skip per-step flushEvent; rely on FinalizeWorkflowSegment for persistence
 
-	batchFlusher     *BatchFlusher           // batch flusher for higher throughput event persistence
-	flusherRegistry  *TenantFlusherRegistry   // per-tenant adaptive batch flushers based on step rate
+	batchFlusher    *BatchFlusher          // batch flusher for higher throughput event persistence
+	flusherRegistry *TenantFlusherRegistry // per-tenant adaptive batch flushers based on step rate
 
 	cancellationCheckInterval time.Duration // throttle PollCancellation; 0 = every step
 
 	Metrics *prometheus.Metrics
 
-	wasmCumulativeAllocMax int64          // max cumulative WASM allocation in bytes (0 = unlimited)
-	wasmCumulativeAlloc    *atomic.Int64  // shared cumulative allocation counter in bytes
+	wasmCumulativeAllocMax int64         // max cumulative WASM allocation in bytes (0 = unlimited)
+	wasmCumulativeAlloc    *atomic.Int64 // shared cumulative allocation counter in bytes
 }
 
 // WithSignalStore sets the signal store.

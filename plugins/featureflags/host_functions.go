@@ -64,14 +64,14 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		name              sql.NullString
 		description       sql.NullString
 		enabled           bool
-		rulesJSON         []byte
+		rulesJSON         plugin.JSONColumn
 		rolloutPercentage int
 	)
 
 	err := p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT id, tenant_id, key, name, description, enabled, rules, rollout_percentage
+			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage
 			FROM feature_flags
-			WHERE tenant_id = $1 AND key = $2
+			WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
 		`, p.dialect), cc.TenantID, input.Key).Scan(
 		&id, &tenantID, &key, &name, &description,
 		&enabled, &rulesJSON, &rolloutPercentage,
@@ -90,7 +90,7 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		Name:              name.String,
 		Description:       description.String,
 		Enabled:           enabled,
-		Rules:             rulesJSON,
+		Rules:             rulesJSON.Raw,
 		RolloutPercentage: rolloutPercentage,
 	}
 

@@ -38,7 +38,7 @@ func concurrencyModel() {
 
 	// Memory model for a typical workflow.
 	const (
-		goroutineStack = 4 * 1024       // 4 KB (Go runtime, grows as needed)
+		goroutineStack = 4 * 1024        // 4 KB (Go runtime, grows as needed)
 		wasmMemory     = 2 * 1024 * 1024 // 2 MB (typical tinygo WASM module heap)
 		hostOverhead   = 1 * 1024 * 1024 // 1 MB (host structs, event history buffers)
 		totalPerWF     = goroutineStack + wasmMemory + hostOverhead
@@ -91,9 +91,9 @@ func costAnalysis() {
 
 	// Pricing data.
 	const (
-		pgSmallHr = 0.25  // RDS db.r6g.large, 2 vCPU, 16 GB, $0.25/hr
-		pgMedHr   = 0.50  // RDS db.r6g.xlarge, 4 vCPU, 32 GB
-		pgLargeHr = 1.00  // RDS db.r6g.2xlarge, 8 vCPU, 64 GB
+		pgSmallHr  = 0.25 // RDS db.r6g.large, 2 vCPU, 16 GB, $0.25/hr
+		pgMedHr    = 0.50 // RDS db.r6g.xlarge, 4 vCPU, 32 GB
+		pgLargeHr  = 1.00 // RDS db.r6g.2xlarge, 8 vCPU, 64 GB
 		pgXLargeHr = 2.00 // RDS db.r6g.4xlarge, 16 vCPU, 128 GB
 
 		workerSmallHr = 0.042 // t3.medium, 2 vCPU, 4 GB
@@ -105,15 +105,15 @@ func costAnalysis() {
 	)
 
 	scenarios := []struct {
-		name        string
-		description string
-		pgCostHr    float64
-		workerCount int
-		workerCostHr float64
-		workersRAM  int
+		name          string
+		description   string
+		pgCostHr      float64
+		workerCount   int
+		workerCostHr  float64
+		workersRAM    int
 		maxConcurrent int
-		storageGB   int
-		stepsPerSec int
+		storageGB     int
+		stepsPerSec   int
 	}{
 		{
 			name: "Development", description: "Single worker, small PG, 10 GB storage",
@@ -204,11 +204,11 @@ func scalingLimits() {
 	fmt.Println()
 
 	const (
-		pgInsertsPerSec    = 20000 // Single PG instance, modest hardware
+		pgInsertsPerSec    = 20000  // Single PG instance, modest hardware
 		pgInsertsPerSecBig = 100000 // High-end PG with tuned config
-		pgClaimsPerSec     = 1000  // SKIP LOCKED dequeue
-		pgClaimsPerSecBig  = 5000 // With connection pooling + tuning
-		stepsPerWorkflow   = 8     // Average (catalog + inventory + payment + shipping + notification + error handling)
+		pgClaimsPerSec     = 1000   // SKIP LOCKED dequeue
+		pgClaimsPerSecBig  = 5000   // With connection pooling + tuning
+		stepsPerWorkflow   = 8      // Average (catalog + inventory + payment + shipping + notification + error handling)
 	)
 
 	fmt.Println("  Bottleneck 1: Event history INSERT throughput")
@@ -262,9 +262,9 @@ func hardLimits() {
 	fmt.Println()
 
 	limits := []struct {
-		component string
-		limit     string
-		atScale   string
+		component  string
+		limit      string
+		atScale    string
 		mitigation string
 	}{
 		{
@@ -330,11 +330,11 @@ func stagedScaling() {
 	fmt.Println()
 
 	stages := []struct {
-		name        string
-		trigger     string
-		changes     []string
-		newCap      string
-		costDelta   string
+		name      string
+		trigger   string
+		changes   []string
+		newCap    string
+		costDelta string
 	}{
 		{
 			"Stage 1: Single PG",

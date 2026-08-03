@@ -53,62 +53,62 @@ type Metrics struct {
 	mp     *sdkmetric.MeterProvider
 
 	// --- Counters (Int64Counter) ---
-	workflowsStarted         metric.Int64Counter
-	workflowsCompleted       metric.Int64Counter
-	workflowsFailed          metric.Int64Counter
-	freshSteps               metric.Int64Counter
-	replaySteps              metric.Int64Counter
-	calls                    metric.Int64Counter
-	replayFailures           metric.Int64Counter
-	replayChecksumFailures   metric.Int64Counter
-	ambiguousCalls           metric.Int64Counter
-	compactionEventsDeleted  metric.Int64Counter
-	encryptionErrors         metric.Int64Counter
-	decryptionErrors         metric.Int64Counter
-	continueAsNew            metric.Int64Counter
-	wasmFuelExhausted        metric.Int64Counter
-	workflowsDeadLettered    metric.Int64Counter
-	workflowsClaimed         metric.Int64Counter
-	wasmCacheHits            metric.Int64Counter
-	wasmCacheMisses          metric.Int64Counter
-	eventsDeleted            metric.Int64Counter
-	backgroundLoops          metric.Int64Counter
-	backgroundLoopRestarts   metric.Int64Counter
-	reaperInstancesClaimed   metric.Int64Counter
-	httpRequests             metric.Int64Counter
+	workflowsStarted        metric.Int64Counter
+	workflowsCompleted      metric.Int64Counter
+	workflowsFailed         metric.Int64Counter
+	freshSteps              metric.Int64Counter
+	replaySteps             metric.Int64Counter
+	calls                   metric.Int64Counter
+	replayFailures          metric.Int64Counter
+	replayChecksumFailures  metric.Int64Counter
+	ambiguousCalls          metric.Int64Counter
+	compactionEventsDeleted metric.Int64Counter
+	encryptionErrors        metric.Int64Counter
+	decryptionErrors        metric.Int64Counter
+	continueAsNew           metric.Int64Counter
+	wasmFuelExhausted       metric.Int64Counter
+	workflowsDeadLettered   metric.Int64Counter
+	workflowsClaimed        metric.Int64Counter
+	wasmCacheHits           metric.Int64Counter
+	wasmCacheMisses         metric.Int64Counter
+	eventsDeleted           metric.Int64Counter
+	backgroundLoops         metric.Int64Counter
+	backgroundLoopRestarts  metric.Int64Counter
+	reaperInstancesClaimed  metric.Int64Counter
+	httpRequests            metric.Int64Counter
 
 	// --- UpDownCounters (Int64UpDownCounter) ---
-	workflowsActive              metric.Int64UpDownCounter
-	workerCount                  metric.Int64UpDownCounter
-	eventHistorySize             metric.Int64UpDownCounter
-	wasmCacheEntries             metric.Int64UpDownCounter
-	wasmCacheBytes               metric.Int64UpDownCounter
-	workflowsStuck               metric.Int64UpDownCounter
-	eventHistoryRowCount         metric.Int64UpDownCounter
-	concurrencyKeysTotal         metric.Int64UpDownCounter
-	concurrencyKeysExpiringSoon  metric.Int64UpDownCounter
-	pluginConnectionsInUse       metric.Int64UpDownCounter
-	pluginConnectionsMax         metric.Int64UpDownCounter
-	memoryRSS                    metric.Int64UpDownCounter
-	memoryAvailable              metric.Int64UpDownCounter
-	memoryTotal                  metric.Int64UpDownCounter
-	concurrencyLimit             metric.Int64UpDownCounter
-	desiredConcurrency           metric.Int64UpDownCounter
-	workflowMemoryEstimate       metric.Int64UpDownCounter
+	workflowsActive             metric.Int64UpDownCounter
+	workerCount                 metric.Int64UpDownCounter
+	eventHistorySize            metric.Int64UpDownCounter
+	wasmCacheEntries            metric.Int64UpDownCounter
+	wasmCacheBytes              metric.Int64UpDownCounter
+	workflowsStuck              metric.Int64UpDownCounter
+	eventHistoryRowCount        metric.Int64UpDownCounter
+	concurrencyKeysTotal        metric.Int64UpDownCounter
+	concurrencyKeysExpiringSoon metric.Int64UpDownCounter
+	pluginConnectionsInUse      metric.Int64UpDownCounter
+	pluginConnectionsMax        metric.Int64UpDownCounter
+	memoryRSS                   metric.Int64UpDownCounter
+	memoryAvailable             metric.Int64UpDownCounter
+	memoryTotal                 metric.Int64UpDownCounter
+	concurrencyLimit            metric.Int64UpDownCounter
+	desiredConcurrency          metric.Int64UpDownCounter
+	workflowMemoryEstimate      metric.Int64UpDownCounter
 
 	// --- Int64Gauges ---
-	queueDepth                     metric.Int64Gauge
-	retentionLastRunTimestamp      metric.Int64Gauge
-	backgroundLoopItemsProcessed   metric.Int64Gauge
-	freshStepCountGauge            metric.Int64Gauge
-	replayStepCountGauge           metric.Int64Gauge
+	queueDepth                   metric.Int64Gauge
+	retentionLastRunTimestamp    metric.Int64Gauge
+	backgroundLoopItemsProcessed metric.Int64Gauge
+	freshStepCountGauge          metric.Int64Gauge
+	replayStepCountGauge         metric.Int64Gauge
 
 	// --- Float64Gauges ---
-	replayThroughput    metric.Float64Gauge
-	freshThroughput     metric.Float64Gauge
-	memoryPressureRatio metric.Float64Gauge
-	memoryPressure      metric.Float64Gauge
-	scalingPressure     metric.Float64Gauge
+	replayThroughput       metric.Float64Gauge
+	freshThroughput        metric.Float64Gauge
+	memoryPressureRatio    metric.Float64Gauge
+	memoryPressure         metric.Float64Gauge
+	scalingPressure        metric.Float64Gauge
 	backgroundLoopDuration metric.Float64Gauge
 	backgroundLoopLastRun  metric.Float64Gauge
 
@@ -129,23 +129,23 @@ type Metrics struct {
 	defaultAttrs []attribute.KeyValue
 
 	// Delta tracking for UpDownCounters used as absolute-value gauges.
-	mu                        sync.Mutex
-	lastWorkerCount           int64
-	lastEventHistorySize      map[string]int64 // keyed by workflowName
-	lastRSS                   int64
-	lastAvailable             int64
-	lastTotal                 int64
-	lastConcurrencyLimit      int64
-	lastDesiredConcurrency    int64
-	lastWorkflowMemoryEstimate map[string]float64 // keyed by defName
-	lastWasmCacheEntries      int64
-	lastWasmCacheBytes        int64
-	lastWorkflowsStuck        int64
-	lastEventHistoryRowCount  int64
-	lastConcurrencyKeysTotal           int64
-	lastConcurrencyKeysExpiringSoon    int64
-	lastPluginConnectionsInUse         int64
-	lastPluginConnectionsMax           int64
+	mu                              sync.Mutex
+	lastWorkerCount                 int64
+	lastEventHistorySize            map[string]int64 // keyed by workflowName
+	lastRSS                         int64
+	lastAvailable                   int64
+	lastTotal                       int64
+	lastConcurrencyLimit            int64
+	lastDesiredConcurrency          int64
+	lastWorkflowMemoryEstimate      map[string]float64 // keyed by defName
+	lastWasmCacheEntries            int64
+	lastWasmCacheBytes              int64
+	lastWorkflowsStuck              int64
+	lastEventHistoryRowCount        int64
+	lastConcurrencyKeysTotal        int64
+	lastConcurrencyKeysExpiringSoon int64
+	lastPluginConnectionsInUse      int64
+	lastPluginConnectionsMax        int64
 
 	once sync.Once
 }

@@ -119,8 +119,21 @@ func (e *Engine) executeWithBackend(
 	// the handler/work-data fields when Execute is called concurrently.
 	execBackend := backend.PerExecution()
 	res, callErr := execBackend.Execute(execCtx, wasmBytes, entryPoint, input, session)
-	// wasmtime does not propagate Go context cancellation during
-	// fn.Call, so check for deadline exceeded post-execution.
+	// Defensive fallback, not the primary timeout mechanism. The wasmtime
+	// backend bounds its own execution via epoch interruption tied to this
+	// same execCtx deadline (see wasmtimeBackend.configureStore and
+	// NewWasmtimeBackend in backend_wasmtime.go) and returns a non-nil
+	// callErr when that bound is hit, so the timeout case is normally
+	// already handled by the callErr != nil branch below. This check only
+	// catches the residual case of a backend returning callErr == nil
+	// after execCtx's deadline has already passed without detecting it
+	// itself (wazero, for example, honors ctx cancellation directly and
+	// should not need this either, but the fallback is cheap insurance).
+	//
+	// This used to be the *only* timeout enforcement wasmtime had, and it
+	// did not work: wasmtime-go does not observe ctx.Done() while fn.Call
+	// is in progress, so for an infinite loop fn.Call never returns and
+	// this line was never reached. See IMPROVEMENT-PLAN.md 1.5.
 	if callErr == nil && execCtx.Err() == context.DeadlineExceeded {
 		if len(session.deferrals) > 0 {
 			e.runDefers(context.Background(), wasmBytes, session.deferrals)

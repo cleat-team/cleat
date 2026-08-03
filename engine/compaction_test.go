@@ -1678,6 +1678,15 @@ func (m *mockCompactStore) PickVersionByRouting(ctx context.Context, workflowNam
 func (m *mockCompactStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	return 0, nil
 }
+func (m *mockCompactStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	return nil
+}
+func (m *mockCompactStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	return nil
+}
+func (m *mockCompactStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	return nil
+}
 
 // retryMockStore wraps mockCompactStore and fails CompactHistory a specified
 // number of times before succeeding. The error returned is a deadlock error

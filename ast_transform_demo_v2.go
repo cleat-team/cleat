@@ -200,11 +200,11 @@ type DurableLeaf map[string]bool
 
 // AnalyzerV2 does multi-function, call-graph-aware analysis.
 type AnalyzerV2 struct {
-	Fset     *token.FileSet
-	File     *ast.File
-	Funcs    map[string]*ast.FuncDecl // name → decl
-	CG       CallGraph
-	Leaves   DurableLeaf
+	Fset   *token.FileSet
+	File   *ast.File
+	Funcs  map[string]*ast.FuncDecl // name → decl
+	CG     CallGraph
+	Leaves DurableLeaf
 
 	// Transitive closure: all functions that are "in the durable context"
 	// because they directly or transitively call a durable leaf.
@@ -721,18 +721,18 @@ func argsStr(args []ast.Expr) string {
 
 func inferReturnType(funcName string, index int) string {
 	types := map[string]string{
-		"catalogLookup":            "CatalogItem",
-		"reserveInventory":         "Reservation",
-		"getDefaultPaymentMethod":  "PaymentMethod",
-		"chargeCustomer":           "Charge",
-		"createShipment":           "string",
-		"releaseReservation":       "error",
-		"refundPayment":            "error",
-		"notifyCustomer":           "error",
-		"checkItemAvailability":    "error",
-		"validateAndReserve":       "Reservation",
-		"processPayment":           "Charge",
-		"fulfillOrder":             "string",
+		"catalogLookup":           "CatalogItem",
+		"reserveInventory":        "Reservation",
+		"getDefaultPaymentMethod": "PaymentMethod",
+		"chargeCustomer":          "Charge",
+		"createShipment":          "string",
+		"releaseReservation":      "error",
+		"refundPayment":           "error",
+		"notifyCustomer":          "error",
+		"checkItemAvailability":   "error",
+		"validateAndReserve":      "Reservation",
+		"processPayment":          "Charge",
+		"fulfillOrder":            "string",
 	}
 	if t, ok := types[funcName]; ok {
 		return t

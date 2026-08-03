@@ -1,9 +1,12 @@
-//go:build cgo
+//go:build cgo && wasmtime_component_cgo
+
+// See the comment at the top of component_cgo.go: this file is part of the
+// opt-in native wasmtime Component Model C API fast path, gated behind the
+// wasmtime_component_cgo build tag because the required `-I` to wasmtime's
+// C headers cannot be derived portably in a #cgo directive.
 
 package engine
 
-// #cgo CFLAGS:-I/tmp/wasmtime-v45/wasmtime-v45.0.0-x86_64-linux-c-api/include -I/home/rcownie/go/pkg/mod/github.com/bytecodealliance/wasmtime-go/v44@v44.0.0/build/include
-// #cgo linux,amd64 LDFLAGS:-L/tmp/wasmtime-v45/wasmtime-v45.0.0-x86_64-linux-c-api/lib -lwasmtime -lm -ldl -pthread
 // #include <wasmtime.h>
 // #include <wasmtime/component/component.h>
 // #include <wasmtime/component/linker.h>

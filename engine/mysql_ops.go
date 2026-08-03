@@ -1111,7 +1111,8 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 		SET status = 'terminated',
 		    error_msg = ?,
 		    completed_at = NOW(),
-		    assigned_to = NULL
+		    assigned_to = NULL,
+		    generation = generation + 1
 		WHERE id = ? AND tenant_id = ?
 	`, reason, workflowID, s.tenantID)
 	if err != nil {

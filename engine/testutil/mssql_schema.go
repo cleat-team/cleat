@@ -272,7 +272,7 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 
 	// Order matters due to FK constraints — delete child tables first.
 	tables := []string{
-			"tenant_api_keys",
+		"tenant_api_keys",
 		"workflow_update_requests",
 		"workflow_promises",
 		"workflow_signals",

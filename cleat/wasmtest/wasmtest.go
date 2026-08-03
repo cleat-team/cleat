@@ -42,8 +42,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -52,9 +52,9 @@ import (
 
 // InMemorySignalStore implements engine.SignalStore with in-memory maps.
 type InMemorySignalStore struct {
-	mu            sync.Mutex
-	signals       map[string][]pendingSignal   // workflowID -> pending signals
-	cancelled     map[string]cancellationState // workflowID -> cancellation state
+	mu        sync.Mutex
+	signals   map[string][]pendingSignal   // workflowID -> pending signals
+	cancelled map[string]cancellationState // workflowID -> cancellation state
 }
 
 type pendingSignal struct {
@@ -129,9 +129,9 @@ type InMemoryPromiseStore struct {
 }
 
 type promiseState struct {
-	status   string // "pending", "resolved", "rejected"
-	result   string
-	errMsg   string
+	status string // "pending", "resolved", "rejected"
+	result string
+	errMsg string
 }
 
 func NewInMemoryPromiseStore() *InMemoryPromiseStore {
@@ -184,18 +184,18 @@ func (s *InMemoryPromiseStore) GetPromise(_ context.Context, _, promiseID string
 // the invocation with a generated run ID and stores the input; GetChildResult
 // returns the pre-configured result immediately (simulating instant completion).
 type InMemoryChildWorkflowStore struct {
-	mu      sync.Mutex
+	mu sync.Mutex
 	// childResults maps runID -> JSON result
 	childResults map[string]string
 	// childErrors maps runID -> error string (empty means success)
-	childErrors  map[string]string
+	childErrors map[string]string
 	// invocations records all child workflow invocations
-	invocations  []ChildWorkflowInvocation
+	invocations []ChildWorkflowInvocation
 	// handlers maps name -> handler function (if set, takes priority)
-	handlers     map[string]func(inputJSON string) (string, error)
+	handlers map[string]func(inputJSON string) (string, error)
 	// autoResult is the default result returned when no handler or explicit
 	// result is set for a child workflow
-	autoResult   string
+	autoResult string
 }
 
 // ChildWorkflowInvocation records a single child workflow start.
@@ -380,9 +380,9 @@ func NewTestWorkflowState() *TestWorkflowState {
 	}
 }
 
-func (s *TestWorkflowState) Version() int { return s.VersionVal }
+func (s *TestWorkflowState) Version() int    { return s.VersionVal }
 func (s *TestWorkflowState) MinVersion() int { return s.MinVersionVal }
-func (s *TestWorkflowState) Priority() int { return s.PriorityVal }
+func (s *TestWorkflowState) Priority() int   { return s.PriorityVal }
 func (s *TestWorkflowState) ChildVersion(name string) (int, bool) {
 	v, ok := s.ChildVersions[name]
 	return v, ok
@@ -448,14 +448,14 @@ func defaultResponse(service, operation string) string {
 //   - WASM compilation via `go build`
 //   - Convenience Execute/Replay methods
 type WasmTestEnv struct {
-	t       *testing.T
-	ctx     context.Context
-	cancel  context.CancelFunc
-	rt      *engine.Runtime
-	caller  *mockCaller
-	engine  *engine.Engine
+	t      *testing.T
+	ctx    context.Context
+	cancel context.CancelFunc
+	rt     *engine.Runtime
+	caller *mockCaller
+	engine *engine.Engine
 
-	pluginRegistry    *engine.PluginRegistry
+	pluginRegistry *engine.PluginRegistry
 
 	SignalStore        *InMemorySignalStore
 	PromiseStore       *InMemoryPromiseStore
@@ -508,19 +508,19 @@ func NewWasmTestEnv(t *testing.T, opts ...WasmTestEnvOption) *WasmTestEnv {
 	}
 
 	env := &WasmTestEnv{
-		t:                 t,
-		ctx:               ctx,
-		cancel:            cancel,
-		rt:                rt,
-		caller:            &mockCaller{},
-		SignalStore:       NewInMemorySignalStore(),
-		PromiseStore:      NewInMemoryPromiseStore(),
+		t:                  t,
+		ctx:                ctx,
+		cancel:             cancel,
+		rt:                 rt,
+		caller:             &mockCaller{},
+		SignalStore:        NewInMemorySignalStore(),
+		PromiseStore:       NewInMemoryPromiseStore(),
 		ChildWorkflowStore: NewInMemoryChildWorkflowStore(),
-		ConcurrencyStore:  NewInMemoryConcurrencyKeyStore(),
-		WorkflowState:     NewTestWorkflowState(),
-		WorkflowID:        uuid.New().String(),
-		DefName:           "test-workflow",
-		DefVersion:        1,
+		ConcurrencyStore:   NewInMemoryConcurrencyKeyStore(),
+		WorkflowState:      NewTestWorkflowState(),
+		WorkflowID:         uuid.New().String(),
+		DefName:            "test-workflow",
+		DefVersion:         1,
 	}
 
 	for _, o := range opts {
@@ -682,4 +682,3 @@ func (e *WasmTestEnv) ExecuteAndReplay(t *testing.T, wasmBytes []byte, entryPoin
 
 	return result, nil
 }
-

@@ -38,13 +38,23 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// The candidate set is selected in a CTE, not an IN (SELECT ... LIMIT n)
+	// sublink, and that is load-bearing rather than stylistic.
+	//
+	// When an UPDATE meets a row another transaction has concurrently
+	// modified, PostgreSQL re-reads that row and re-evaluates the WHERE
+	// clause against the new version (EvalPlanQual). Re-evaluating a WHERE
+	// clause that contains `id IN (SELECT ... ORDER BY ... LIMIT n FOR UPDATE
+	// SKIP LOCKED)` re-executes the sublink, which returns a *different* n
+	// rows each time -- so a claim for n could update far more than n. It was
+	// observed asking for 3 and returning 10 (every eligible row) whenever
+	// other workers were claiming from the same table, which is precisely
+	// when a worker must not exceed its concurrency budget.
+	//
+	// A CTE is evaluated once, so the limit holds however much concurrency
+	// there is.
 	rows, err := tx.QueryContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'running',
-		    assigned_to = $1,
-		    heartbeat_at = now(),
-		    generation = generation + 1
-		WHERE id IN (
+		WITH candidates AS (
 			SELECT id FROM workflow_instances
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
@@ -53,7 +63,14 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
+		UPDATE workflow_instances w
+		SET status = 'running',
+		    assigned_to = $1,
+		    heartbeat_at = now(),
+		    generation = generation + 1
+		FROM candidates c
+		WHERE w.id = c.id
+		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
@@ -66,7 +83,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
-		var assignedTo, errorCode, errorOp sql.NullString
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
@@ -82,7 +99,6 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
-		wf.AssignedTo = assignedTo.String
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
@@ -109,13 +125,11 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// CTE rather than an IN (SELECT ... LIMIT n) sublink, for the reason
+	// documented in ClaimWorkflows above: the sublink is re-executed on an
+	// EvalPlanQual recheck and the limit stops holding under concurrency.
 	rows, err := tx.QueryContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'running',
-		    assigned_to = $1,
-		    heartbeat_at = now(),
-		    generation = generation + 1
-		WHERE id IN (
+		WITH candidates AS (
 			SELECT id FROM workflow_instances
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
@@ -125,7 +139,14 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
+		UPDATE workflow_instances w
+		SET status = 'running',
+		    assigned_to = $1,
+		    heartbeat_at = now(),
+		    generation = generation + 1
+		FROM candidates c
+		WHERE w.id = c.id
+		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
@@ -138,7 +159,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
-		var assignedTo, errorCode, errorOp sql.NullString
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
@@ -154,7 +175,6 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
-		wf.AssignedTo = assignedTo.String
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
@@ -191,7 +211,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
-			$4, $5)
+			$4, $5, now() - INTERVAL '1 millisecond')
 		RETURNING id
 		`, defName, defVersion, newInput, s.tenantID, priority).Scan(&newRunID)
 	if err != nil {
@@ -203,13 +223,24 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
 	`, currentRunID, workerID, result, qsJSON, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("continue as new: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: this also discards the new run row we just inserted, so
+		// a lost fence leaves no orphaned, unreachable continuation run
+		// behind.
+		return "", ErrFenceLost
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -268,10 +299,20 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		resultJSON = "{}"
 	}
 
-	if _, err := tx.ExecContext(ctx, `
+	var fenceHeld bool
+	if err := tx.QueryRowContext(ctx, `
 		SELECT finalize_workflow_status($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel); err != nil {
+	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel).Scan(&fenceHeld); err != nil {
 		return fmt.Errorf("finalize workflow: %w", err)
+	}
+
+	if !fenceHeld {
+		// Another worker now owns this workflow (e.g. this worker stalled,
+		// was reaped, and the workflow was reclaimed). Roll back rather
+		// than commit: the events we just appended belong to a segment
+		// that is no longer valid, and none of the post-commit cleanup
+		// below is safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -310,13 +351,23 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
 	`, workflowID, workerID, result, qsJSON, generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency result within the transaction (best-effort).
@@ -354,7 +405,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
 		    error_msg = $3,
@@ -367,6 +418,16 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("fail workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 
 	// Record idempotency error within the transaction (best-effort).
@@ -436,7 +497,7 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
 		    completed_at = now(), assigned_to = NULL
@@ -444,6 +505,16 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
 	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Another worker now owns this workflow. Roll back rather than
+		// commit: the idempotency-key write and post-commit cleanup below
+		// are not safe to run on the new owner's behalf.
+		return ErrFenceLost
 	}
 	// Record idempotency error within the transaction (best-effort).
 	if _, err := tx.ExecContext(ctx,
@@ -621,7 +692,7 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < now() - $1::interval
 	`, fmt.Sprintf("%d seconds", int(timeout.Seconds())))

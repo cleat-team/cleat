@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"database/sql"
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -113,6 +114,20 @@ func TestSetupFullSchema(t *testing.T) {
 	SetupFullSchema(t, db, DialectPostgres)
 }
 
+// insertTestDef creates the workflow_defs row that workflow_instances rows
+// reference. The real schema (migrations/postgres/001_schema.sql, which
+// SetupFullSchema now applies directly) has a
+// workflow_instances_def_name_def_version_fkey foreign key; the hand-rolled
+// test schema this package used to carry did not, so these tests could insert
+// an instance for a definition that never existed.
+func insertTestDef(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes)
+		VALUES ('test-def', 1, '\\x00'::bytea) ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatalf("insert test def: %v", err)
+	}
+}
+
 func TestCleanupPostgresTestData(t *testing.T) {
 	db := TestDB(t, DialectPostgres)
 	defer db.Close()
@@ -121,6 +136,7 @@ func TestCleanupPostgresTestData(t *testing.T) {
 	CleanupPostgresTestData(t, db)
 
 	// Insert test data.
+	insertTestDef(t, db)
 	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version)
 		VALUES ('test-cleanup-id', 'test-def', 1)`); err != nil {
 		t.Fatalf("insert test instance: %v", err)
@@ -198,6 +214,7 @@ func TestCleanupTestData(t *testing.T) {
 
 	runID := "test-cleanup-pattern-%"
 
+	insertTestDef(t, db)
 	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version)
 		VALUES ('test-cleanup-pattern-1', 'test-def', 1)`); err != nil {
 		t.Fatalf("insert instance: %v", err)

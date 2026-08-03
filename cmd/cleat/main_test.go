@@ -53,13 +53,13 @@ func TestIsErrorType(t *testing.T) {
 }
 
 func TestIsValidTarget(t *testing.T) {
-	valid := []string{"tinygo", "rust", "java", "assemblyscript", "python"}
+	valid := []string{"go", "rust", "java", "assemblyscript", "python"}
 	for _, v := range valid {
 		if !isValidTarget(v) {
 			t.Errorf("isValidTarget(%q) = false, want true", v)
 		}
 	}
-	invalid := []string{"", "gogo", "csharp", "swift", "kotlin", "javascript", "wasm"}
+	invalid := []string{"", "gogo", "csharp", "swift", "kotlin", "javascript", "wasm", "tinygo"}
 	for _, v := range invalid {
 		if isValidTarget(v) {
 			t.Errorf("isValidTarget(%q) = true, want false", v)
@@ -141,14 +141,14 @@ func TestCommandFlags(t *testing.T) {
 		o := fs.String("o", "", "")
 		target := fs.String("target", "go", "")
 		entry := fs.String("entry", "", "")
-		if err := fs.Parse([]string{"-o", "./out", "--target", "tinygo", "--entry", "file.py:func", "."}); err != nil {
+		if err := fs.Parse([]string{"-o", "./out", "--target", "go", "--entry", "file.py:func", "."}); err != nil {
 			t.Fatal(err)
 		}
 		if *o != "./out" {
 			t.Errorf("build -o = %q, want %q", *o, "./out")
 		}
-		if *target != "tinygo" {
-			t.Errorf("build --target = %q, want %q", *target, "tinygo")
+		if *target != "go" {
+			t.Errorf("build --target = %q, want %q", *target, "go")
 		}
 		if *entry != "file.py:func" {
 			t.Errorf("build --entry = %q, want %q", *entry, "file.py:func")
@@ -228,7 +228,7 @@ func TestCommandFlags(t *testing.T) {
 		inp := fs.String("input", "{}", "")
 		addr := fs.String("api-addr", ":8080", "")
 		target := fs.String("target", "go", "")
-		if err := fs.Parse([]string{"--wasm", "test.wasm", "--entry-point", "myfunc", "--input", `{"x":1}`, "--api-addr", ":9090", "--target", "tinygo"}); err != nil {
+		if err := fs.Parse([]string{"--wasm", "test.wasm", "--entry-point", "myfunc", "--input", `{"x":1}`, "--api-addr", ":9090", "--target", "go"}); err != nil {
 			t.Fatal(err)
 		}
 		if *wasm != "test.wasm" {
@@ -243,8 +243,8 @@ func TestCommandFlags(t *testing.T) {
 		if *addr != ":9090" {
 			t.Errorf("api-addr = %q, want %q", *addr, ":9090")
 		}
-		if *target != "tinygo" {
-			t.Errorf("target = %q, want %q", *target, "tinygo")
+		if *target != "go" {
+			t.Errorf("target = %q, want %q", *target, "go")
 		}
 	})
 

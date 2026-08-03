@@ -143,8 +143,8 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 
 	// Create workflow instances.
 	type wfState struct {
-		id            string
-		executeCount  int32
+		id           string
+		executeCount int32
 	}
 	var workflows []wfState
 	for i := 0; i < numWorkflows; i++ {
