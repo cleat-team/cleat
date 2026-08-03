@@ -121,7 +121,12 @@ func TestJSONColumn_Value(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Value: %v", err)
 	}
-	if string(v.([]byte)) != `{"a":1}` {
+	// A string, not []byte: see the comment on Value.
+	str, ok := v.(string)
+	if !ok {
+		t.Fatalf("Value returned %T, want string -- []byte becomes VARBINARY on SQL Server", v)
+	}
+	if str != `{"a":1}` {
 		t.Errorf("Value = %v", v)
 	}
 	if v, err := (JSONColumn{}).Value(); err != nil || v != nil {

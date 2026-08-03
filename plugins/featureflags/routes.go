@@ -129,7 +129,8 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO feature_flags (tenant_id, id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		`, p.dialect), tid, id, req.Key, req.Name, req.Description, req.Enabled, rulesJSON, rollout, now, now)
+		`, p.dialect), tid, id, req.Key, req.Name, req.Description, req.Enabled,
+		plugin.JSONColumn{Raw: rulesJSON}, rollout, now, now)
 	if err != nil {
 		p.logger.Error("feature-flags: create", "key", req.Key, "error", err)
 		p.writeError(w, 500, "failed to create feature flag")
@@ -302,7 +303,9 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Rules != nil {
 		query += fmt.Sprintf(", rules = $%d", argIdx)
-		args = append(args, *req.Rules)
+		// plugin.JSONColumn, not the raw []byte: see its Value method --
+		// go-mssqldb sends []byte as VARBINARY.
+		args = append(args, plugin.JSONColumn{Raw: *req.Rules})
 		argIdx++
 	}
 	if req.RolloutPercentage != nil {

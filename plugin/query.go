@@ -127,9 +127,18 @@ func (j *JSONColumn) Scan(src any) error {
 }
 
 // Value implements driver.Valuer so the same type can be used for writes.
+//
+// It yields a string, not []byte, and that is deliberate. go-mssqldb maps a
+// []byte argument to VARBINARY; inserting that into the NVARCHAR column that
+// backs a JSON value stores the binary representation, which reads back as
+// text that is not valid JSON. The symptom is a 200 with an empty body,
+// because encoding/json fails part-way through writing the response. A string
+// argument is sent as NVARCHAR by go-mssqldb, and lib/pq and go-sql-driver
+// both accept a string for jsonb/JSON columns, so one form is correct
+// everywhere.
 func (j JSONColumn) Value() (driver.Value, error) {
 	if len(j.Raw) == 0 {
 		return nil, nil
 	}
-	return []byte(j.Raw), nil
+	return string(j.Raw), nil
 }

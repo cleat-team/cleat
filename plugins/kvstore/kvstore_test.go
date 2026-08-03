@@ -541,14 +541,21 @@ func argString(args []driver.NamedValue, ordinal int) (string, error) {
 	return "", fmt.Errorf("arg %d not found", ordinal)
 }
 
+// argBytes accepts either representation a JSON argument may arrive as.
+// plugin.JSONColumn deliberately yields a string rather than []byte (a []byte
+// becomes VARBINARY on SQL Server), and a fake that insists on one form tests
+// the plumbing rather than the plugin.
 func argBytes(args []driver.NamedValue, ordinal int) ([]byte, error) {
 	for _, a := range args {
 		if a.Ordinal == ordinal {
-			b, ok := a.Value.([]byte)
-			if !ok {
-				return nil, fmt.Errorf("arg %d: want []byte, got %T", ordinal, a.Value)
+			switch v := a.Value.(type) {
+			case []byte:
+				return v, nil
+			case string:
+				return []byte(v), nil
+			default:
+				return nil, fmt.Errorf("arg %d: want []byte or string, got %T", ordinal, a.Value)
 			}
-			return b, nil
 		}
 	}
 	return nil, fmt.Errorf("arg %d not found", ordinal)

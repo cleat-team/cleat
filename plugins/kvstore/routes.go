@@ -145,7 +145,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		if p.dialect == plugin.DialectMySQL {
 			// MySQL: UPDATE without RETURNING
 			rows, execErr := p.db.Exec(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
-				value, tid, key, expectedVersion)
+				plugin.JSONColumn{Raw: value}, tid, key, expectedVersion)
 			if execErr != nil {
 				p.logger.Error("kvstore: put (update)", "key", key, "error", execErr)
 				p.writeError(w, 500, "failed to update value")
@@ -158,7 +158,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 			err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, p.dialect), tid, key).Scan(&newVersion)
 		} else {
 			err = p.db.QueryRow(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
-				value, tid, key, expectedVersion).Scan(&newVersion)
+				plugin.JSONColumn{Raw: value}, tid, key, expectedVersion).Scan(&newVersion)
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			p.writeError(w, 409, "conflict: version mismatch")
@@ -183,7 +183,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	if p.dialect == plugin.DialectMySQL {
 		// MySQL: upsert without RETURNING, then select version
 		_, execErr := p.db.Exec(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
-			tid, key, value)
+			tid, key, plugin.JSONColumn{Raw: value})
 		if execErr != nil {
 			p.logger.Error("kvstore: put (upsert)", "key", key, "error", execErr)
 			p.writeError(w, 500, "failed to store value")
@@ -192,7 +192,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, p.dialect), tid, key).Scan(&newVersion)
 	} else {
 		err = p.db.QueryRow(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
-			tid, key, value).Scan(&newVersion)
+			tid, key, plugin.JSONColumn{Raw: value}).Scan(&newVersion)
 	}
 	if err != nil {
 		p.logger.Error("kvstore: put (upsert)", "key", key, "error", err)
