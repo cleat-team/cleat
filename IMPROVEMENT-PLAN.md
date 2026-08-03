@@ -397,6 +397,32 @@ now waits for each service's healthcheck and fails on any restart count above ze
 
 ---
 
+### 1.12 Two CI workflows had never run — fixed in `HEAD`
+
+`ai-pr-review.yml` and `release-notes-check.yml` failed on every push, on every branch, for
+as long as the branch history shows. Not a flaky job: a **startup failure**, which produces
+a run with no jobs at all.
+
+Both files were unparseable YAML. In each, a block indented *less* than its enclosing
+block scalar ended that scalar early, and the following text was then read as YAML:
+
+- `ai-pr-review.yml` — a JS template literal inside `script: |` continued at 10 spaces
+  where the scalar was at 12.
+- `release-notes-check.yml` — a here-document body written at column 0 inside `run: |`.
+  `<<-` is not a fix, since it strips tabs only; the step now builds the comment with
+  `printf` and posts it with `--body-file`.
+
+So the repository advertised an automated first-pass code review and a release-notes gate,
+and had neither. This is the sharpest instance of the pattern this document keeps
+recording: not a check that was wrong, a check that never executed.
+
+Nothing inside a workflow can catch this — there are no jobs to run the check in. The lint
+job now parses every file under `.github/workflows/` and fails on any that does not load or
+has no `jobs:` key. Falsified against the two files as they stood at `4de8f69`: the guard
+reports both.
+
+---
+
 ### 1.10 RLS is bypassed in every shipped configuration — OPEN, needs a decision
 
 Not fixed. It cannot be fixed without a product decision.

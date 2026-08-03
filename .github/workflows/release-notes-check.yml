@@ -82,28 +82,31 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           MISSING="${{ steps.check.outputs.missing_sections }}"
-          BODY=$(cat <<'BODYEOF'
-## Release Notes Missing
-
-This PR has a **FEATURE** or **BUGFIX** label but one or more required release
-notes sections are empty or missing.
-
-**Missing sections:**{{ MISSING }}
-
-Please add a brief description of the changes under each section header in the
-PR description. For example:
-
-```markdown
-### Added
-- New workflow poller for async task completion.
-```
-
-See the project changelog for examples of accepted release note entries.
-BODYEOF
-          )
-          # Replace placeholder
-          BODY="${BODY//\{\{ MISSING \}\}/$MISSING}"
-          gh pr comment "${{ github.event.number }}" --body "$BODY"
+          # Built with printf rather than a here-document. An unindented
+          # heredoc body terminates the YAML block scalar this step is written
+          # in, which made the whole file unparseable -- every run on this
+          # workflow was a startup failure with no jobs, so the check had never
+          # actually run. `<<-` is not an alternative: it strips tabs only, and
+          # this file is space-indented.
+          printf '%s\n' \
+            '## Release Notes Missing' \
+            '' \
+            'This PR has a **FEATURE** or **BUGFIX** label but one or more required release' \
+            'notes sections are empty or missing.' \
+            '' \
+            "**Missing sections:**${MISSING}" \
+            '' \
+            'Please add a brief description of the changes under each section header in the' \
+            'PR description. For example:' \
+            '' \
+            '```markdown' \
+            '### Added' \
+            '- New workflow poller for async task completion.' \
+            '```' \
+            '' \
+            'See the project changelog for examples of accepted release note entries.' \
+            > "$RUNNER_TEMP/release-notes-comment.md"
+          gh pr comment "${{ github.event.number }}" --body-file "$RUNNER_TEMP/release-notes-comment.md"
 
       - name: Fail if release notes missing
         if: steps.check.outputs.skip == 'false' && steps.check.outputs.pass == 'false'

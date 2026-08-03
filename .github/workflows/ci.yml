@@ -80,6 +80,39 @@ jobs:
         with:
           python-version: "3.12"
 
+      # A workflow file that does not parse produces a run with *no jobs* --
+      # a "startup failure" that reports red but cannot report why, and that
+      # no step inside that workflow can ever catch. ai-pr-review.yml and
+      # release-notes-check.yml were both in that state: an unindented block
+      # inside a `script:`/`run:` scalar ended it early, so neither check had
+      # ever actually run on any PR. This step catches the next one, from a
+      # workflow that does parse.
+      - name: Workflow files parse
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          python3 - <<'PY'
+          import glob, sys, yaml
+          bad = []
+          files = sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
+          if not files:
+              sys.exit("no workflow files found -- this check would pass vacuously")
+          for path in files:
+              try:
+                  doc = yaml.safe_load(open(path))
+              except yaml.YAMLError as e:
+                  bad.append(f"{path}: {e}")
+                  continue
+              # `on:` parses as the boolean True in YAML 1.1, which is why it
+              # is checked by identity rather than by name.
+              if not isinstance(doc, dict) or "jobs" not in doc:
+                  bad.append(f"{path}: parsed but has no top-level 'jobs:' key")
+          for b in bad:
+              print(f"::error title=Unparseable workflow::{b}")
+          print(f"checked {len(files)} workflow files, {len(bad)} broken")
+          sys.exit(1 if bad else 0)
+          PY
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
