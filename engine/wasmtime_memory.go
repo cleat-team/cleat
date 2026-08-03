@@ -56,6 +56,16 @@ func wasmtimeReadPayload(buf []byte, ptr, length, maxLen int32) (string, bool) {
 	return wasmtimeReadStringValidated(buf, ptr, length, maxLen)
 }
 
+// wasmtimeReadOptionalServiceName is the wasmtime twin of
+// readOptionalServiceName: a zero length yields ("", true), anything else must
+// still be a valid service name. A negative length remains invalid.
+func wasmtimeReadOptionalServiceName(buf []byte, ptr, length int32) (string, bool) {
+	if length == 0 {
+		return "", true
+	}
+	return wasmtimeReadServiceName(buf, ptr, length)
+}
+
 func wasmtimeReadServiceName(buf []byte, ptr, length int32) (string, bool) {
 	s, ok := wasmtimeReadStringValidated(buf, ptr, length, int32(MaxWasmStringLen))
 	if !ok {

@@ -1204,14 +1204,16 @@ func TestClosure_CleatLog(t *testing.T) {
 		t.Errorf("success path: got %v, want 0", result)
 	}
 
-	// Zero-length read is rejected by wasmtimeReadStringValidated.
-	t.Run("error_path_zero_length", func(t *testing.T) {
+	// An empty message is accepted: emptiness is a property of the payload,
+	// not a fault, and DurableLog never inspects it. This asserted
+	// errBadParamInt64 until IMPROVEMENT-PLAN.md 2.13.
+	t.Run("empty_message_accepted", func(t *testing.T) {
 		result, err := testFn.Call(store, int32(0), int32(0))
 		if err != nil {
 			t.Fatalf("call test_cleat_log: %v", err)
 		}
-		if result != errBadParamInt64 {
-			t.Errorf("got %v, want %v (errBadParamInt64)", result, errBadParamInt64)
+		if result == errBadParamInt64 {
+			t.Error("cleat_log refused an empty message")
 		}
 	})
 }
@@ -2636,12 +2638,13 @@ func TestClosure_MoreErrorPaths(t *testing.T) {
 		{"cleat_get_state", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
 			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatGetState(l) },
 			[]any{i32(0), i32(0), i32(0), i32(0)}},
-		{"cleat_list_state", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
-			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatListState(l) },
-			[]any{i32(0), i32(0), i32(0), i32(0)}},
-		{"cleat_side_effect", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
-			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatSideEffect(l) },
-			[]any{i32(0), i32(0), i32(0), i32(0)}},
+		// cleat_list_state is deliberately absent: a zero-length prefix is a
+		// legitimate call meaning "every key", not a bad parameter. This entry
+		// asserted the opposite and so encoded the bug as the contract. See
+		// TestListStateEmptyPrefixListsEverything and IMPROVEMENT-PLAN.md 2.13.
+		// cleat_side_effect is deliberately absent from this table: a side effect that legitimately computed the empty string must be
+		// representable, or replay determinism cannot round-trip that value.
+		// See IMPROVEMENT-PLAN.md 2.13.
 		{"cleat_continue_as_new", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64}),
 			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatContinueAsNew(l) },
 			[]any{i32(0), i32(0)}},
@@ -2679,9 +2682,9 @@ func TestClosure_FinalErrorPaths(t *testing.T) {
 		args       []any
 	}
 	tests := []testCase{
-		{"cleat_defer", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
-			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatDefer(l) },
-			[]any{i32(0), i32(0), i32(0), i32(0)}},
+		// cleat_defer is deliberately absent from this table: an empty description is still a description, and DurableDefer keys its
+		// deferrals by a host-generated deferID rather than by the text.
+		// See IMPROVEMENT-PLAN.md 2.13.
 		{"cleat_child_workflow", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
 			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatChildWorkflow(l) },
 			[]any{i32(0), i32(0), i32(0), i32(0), i32(0), i32(0)}},

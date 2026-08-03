@@ -170,7 +170,7 @@ func (b *wasmtimeBackend) registerCleatResolvePromise(linker *wasmtime.Linker) e
 		if !ok {
 			return errBadParamInt64
 		}
-		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, int32(MaxWasmStringLen))
+		value, ok := wasmtimeReadPayload(buf, valPtr, valLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
@@ -194,7 +194,7 @@ func (b *wasmtimeBackend) registerCleatRejectPromise(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParamInt64
 		}
-		errMsg, ok := wasmtimeReadStringValidated(buf, errPtr, errLen, int32(MaxWasmStringLen))
+		errMsg, ok := wasmtimeReadPayload(buf, errPtr, errLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}

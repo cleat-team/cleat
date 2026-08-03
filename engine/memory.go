@@ -137,6 +137,31 @@ func readWasmPayload(mem api.Memory, ptr, length, maxLen uint32) (string, bool) 
 	return readWasmStringValidated(mem, ptr, length, maxLen)
 }
 
+// readOptionalServiceName reads a name that the ABI allows to be absent, where
+// absence is expressed as a zero length and carries its own meaning.
+//
+// A zero length yields ("", true). Anything else must still be a valid service
+// name, so this relaxes only the emptiness rule and not the character set.
+//
+// Three host functions document behaviour that is selected by passing an empty
+// name, and all three were unreachable from a guest because readServiceName
+// refuses one:
+//
+//   - cleat_set_scope with both objectType and instanceKey empty clears the
+//     scope (engine/scope.go, freshSetScope).
+//   - cleat_child_workflow_in_schema with an empty targetSchema falls back to
+//     the local schema (engine/children.go, ChildWorkflowInSchema).
+//   - cleat_child_workflow_in_schema with an empty parentClosePolicy takes the
+//     default, which wazero already allowed and wasmtime did not.
+//
+// See IMPROVEMENT-PLAN.md 2.13.
+func readOptionalServiceName(mem api.Memory, ptr, length uint32) (string, bool) {
+	if length == 0 {
+		return "", true
+	}
+	return readServiceName(mem, ptr, length)
+}
+
 // readServiceName reads a service or operation name from WASM linear memory
 // and validates both its length (must not exceed MaxWasmStringLen) and
 // character set (must match [a-zA-Z0-9._-]+).

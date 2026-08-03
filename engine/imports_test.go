@@ -1413,13 +1413,17 @@ func TestHostFunc_CleatFetch(t *testing.T) {
 func TestHostFunc_CleatLog_EmptyMsg(t *testing.T) {
 	h := newTestHostFuncHarness(t, "cleat_log", []byte{wasmI32, wasmI32}, []byte{wasmI64}, true, &stubHostHandler{})
 
-	// Empty message (length 0) should trigger errBadParam
+	// An empty log line is a legitimate thing for a guest to write. This used
+	// to assert errBadParam, which was readWasmStringValidated's emptiness
+	// rule showing through rather than anything cleat_log required --
+	// DurableLog does not inspect the message at all.
+	// See IMPROVEMENT-PLAN.md 2.13.
 	result, err := h.call(0, 0)
 	if err != nil {
 		t.Fatalf("call cleat_log empty: %v", err)
 	}
-	if result != errBadParam {
-		t.Errorf("expected errBadParam, got %x", result)
+	if result == errBadParam {
+		t.Error("cleat_log refused an empty message")
 	}
 }
 
