@@ -530,22 +530,32 @@ func TestDB(t *testing.T, dialect Dialect) *sql.DB {
 
 	var dsn string
 	var driverName string
+	// configured records whether a DSN for *this* dialect was supplied, as
+	// opposed to falling back to a built-in default. It must be per-dialect:
+	// the Multi-DB CI MySQL job sets CLEAT_TEST_MYSQL and has no PostgreSQL at
+	// all, so treating any DSN variable as "a database was requested" would
+	// fail every PostgreSQL subtest there for the right reason in the wrong
+	// job.
+	var configured bool
 	switch dialect {
 	case DialectPostgres:
 		dsn = PostgresTestDSN()
 		driverName = "postgres"
+		configured = os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
 	case DialectMySQL:
 		dsn = os.Getenv("CLEAT_TEST_MYSQL")
 		if dsn == "" {
 			t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
 		}
 		driverName = "mysql"
+		configured = true
 	case DialectMSSQL:
 		dsn = os.Getenv("CLEAT_TEST_MSSQL")
 		if dsn == "" {
 			t.Skip("CLEAT_TEST_MSSQL not set, skipping MSSQL tests")
 		}
 		driverName = "sqlserver"
+		configured = true
 	default:
 		t.Fatalf("TestDB: unknown dialect: %s", dialect)
 	}
@@ -557,22 +567,20 @@ func TestDB(t *testing.T, dialect Dialect) *sql.DB {
 	// published a port for, so every PostgreSQL subtest skipped itself and the
 	// job reported green for its whole existence without connecting once. The
 	// same treatment is applied in cmd/cleat-worker/auth_test.go.
-	configured := os.Getenv("CLEAT_TEST_POSTGRES") != "" ||
-		os.Getenv("CLEAT_TEST_DB") != "" ||
-		os.Getenv("CLEAT_TEST_MYSQL") != "" ||
-		os.Getenv("CLEAT_TEST_MSSQL") != ""
 	unavailable := t.Skipf
+	reason := "no %s database at %s (default DSN, none configured): %v"
 	if configured {
 		unavailable = t.Fatalf
+		reason = "configured %s database at %s is unreachable: %v"
 	}
 
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
-		unavailable("no database available at %s: %v", redactDSN(dsn), err)
+		unavailable(reason, dialect, redactDSN(dsn), err)
 		return nil
 	}
 	if err := db.Ping(); err != nil {
-		unavailable("configured database at %s is unreachable: %v", redactDSN(dsn), err)
+		unavailable(reason, dialect, redactDSN(dsn), err)
 		return nil
 	}
 	SetupMinimalSchema(t, db, dialect)
