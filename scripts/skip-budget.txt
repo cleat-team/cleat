@@ -17,23 +17,34 @@
 # a mismatch is a one-line fix and not a mystery.
 
 test-go/core	0	# measured: 693 pass, 0 skip
-# 343 = 112 mysql + 112 mssql dialect subtests, plus ~118 MySQL/MSSQL-specific
-# top-level tests and one Python toolchain test. This job configures PostgreSQL
-# only (CLEAT_TEST_DB); the other dialects are multi-db-ci.yml's job. The number
-# is large but every one is "nobody asked". A PostgreSQL problem cannot hide
-# under it: testutil.TestDB now fails rather than skips when a configured DSN is
-# unreachable, so that shows up as a failure, not as a bigger skip count.
-test-go/engine	343	# measured: 2988 pass, 343 skip
+# 347 = 112 mysql + 112 mssql dialect subtests, 119 MySQL/MSSQL-specific
+# top-level tests, and 4 Rust toolchain tests. This job configures PostgreSQL
+# only (CLEAT_TEST_DB) and installs no Rust -- its Setup Rust step is gated to
+# matrix.package.name == 'internal' -- so every one of these is "nobody asked".
+#
+# Observed on the runner, at 343, after a first attempt seeded from a darwin
+# machine that had cargo installed: the four TestRustWorkflow* tests passed
+# locally and skip here. The measurement environment was richer than CI, which
+# is the failure mode to expect from any locally-seeded budget.
+#
+# A PostgreSQL problem cannot hide under this ceiling: testutil.TestDB now
+# fails rather than skips when a configured DSN is unreachable, so that shows
+# up as a failure, not as a larger skip count.
+test-go/engine	347	# observed on the runner: 2984 pass, 347 skip
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
 test-go/support	2	# measured: TestRunMigrations_{ExecInTxError,InsertRecordError}
 test-go/commands	4	# measured: TestAPIMetrics, TestHelperProcess, TestRunBuild_PythonTarget_WasmRoundtrip
 fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
-cluster	0	# seeded, NOT measured: colima cannot mount this repo's path, so
-	# docker-compose.cluster.yml is only ever exercised in CI. 0 is the correct
-	# intent -- the job brings up four workers and a database, so nothing it
-	# needs is absent -- but the first run may need reconciling.
+# Same number as test-go/engine, and for the same reason: this job also runs
+# `go test ./engine/...`, against the cluster's own database. It was seeded at 0
+# on the assumption that a job which brings up four workers and a database has
+# provisioned everything its tests need. That was wrong about *which* tests it
+# runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
+# job configures neither. The cluster being healthy is asserted by the
+# healthcheck and restart-count steps above this one, not by the skip count.
+cluster	347	# observed on the runner: 2984 pass, 347 skip
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is

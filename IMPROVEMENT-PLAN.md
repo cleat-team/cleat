@@ -805,15 +805,31 @@ three forms.
   at all: `nextRun`'s one-year search window cannot find a Feb 29 more than a year out.
   A real scheduler gap wearing a skip's clothing.
 
-**What did not change, deliberately.** The ~112 `mysql` and 112 `mssql` dialect subtests
+**What did not change, deliberately.** The 112 `mysql` and 112 `mssql` dialect subtests
 that skip in the `engine` job are correct: that job configures PostgreSQL only. A skip is
 allowed to mean "nobody asked for this" and nothing else — that is the whole rule, and
-the budget of 343 records it rather than hiding it.
+the budget of 347 records those rather than hiding them.
 
-Budgets were measured, not estimated, against a live PostgreSQL 16 and MySQL 8.4:
-core 0, engine 343, wasm 1, internal 0, plugins 1, support 2, commands 4. The `cluster`
-budget is seeded at 0 and unverified — colima cannot mount this repo's path, so
-`docker-compose.cluster.yml` remains CI-only.
+Budgets: core 0, engine 347, cluster 347, wasm 1, internal 0, plugins 1, support 2,
+commands 4, fuzz 1, plugin-harness/multi-db 1.
+
+**Two were wrong on the first CI run, in a way worth recording.** Both were seeded from a
+local machine and both failed for the same underlying reason — a budget is a claim about
+an environment, and the environment used to measure it was not the one it describes.
+
+- `engine` was seeded at 343 from a darwin machine that had **cargo installed**. The four
+  `TestRustWorkflow*` tests passed there and skip on the runner, which installs Rust only
+  for the `internal` matrix entry. The measuring environment was *richer* than CI, so the
+  budget was too tight. Corrected to 347.
+- `cluster` was seeded at 0 on the reasoning that a job bringing up four workers and a
+  database has provisioned everything its tests need. That was wrong about *which* tests
+  it runs: it executes `go test ./engine/...`, which carries the entire MySQL and SQL
+  Server suite, and the job configures neither. Corrected to 347. Cluster health is
+  asserted by the healthcheck and restart-count steps, not by the skip count.
+
+Neither run had a single test *failure* — `passed=2984 failed=0` in both. The guard did
+exactly what it was built to do on its first outing, which was to disagree with a number
+somebody had asserted without observing.
 
 ---
 
