@@ -1441,6 +1441,58 @@ Whatever the fix, **correct the doc comment**. A comment asserting a safety prop
 code does not have is worse than no comment, and it is why the failure reads as mysterious
 rather than obvious.
 
+### 2.22 `flushCallIntent` omits `tenant_id` too — ✅ **FIXED** (latent, no production caller)
+
+Found by auditing every PostgreSQL insert into an RLS-protected table after §2.20, on the
+theory that a defect shape appearing twice is worth grepping for rather than waiting for.
+`engine/flush.go:202` had the identical omission — `event_history` insert, no `tenant_id`,
+with `e.tenantID` available and used twice elsewhere in the same file.
+
+It is **latent, not live**: `flushCallIntent` has no production caller. Every reference is
+either its own definition or `flush_test.go`. Wired up as-is it would have reproduced
+§2.20's failure exactly.
+
+Worth noting how it would have been caught, which is to say not at all: the five
+`TestFlushCallIntent_*` tests **pass identically before and after** adding the column. They
+assert the call returns `nil` against a mock, never the SQL. That is §2.16's pattern for the
+third time — a test suite that cannot distinguish the fix from the defect.
+
+The rest of the audit came back clean. All other inserts into the eight RLS-protected tables
+(`store_lifecycle.go`, `store_signals.go`, `store_promises.go`, `store_versioning.go`,
+`adaptive_flush.go`, `db.go`, and the remaining `store_event_write.go` sites) pass
+`tenant_id` correctly. `workflow_defs` is the deliberate exception — its policy also admits
+the zero-UUID default tenant, so the omissions in `store_deployment.go:161` and
+`versioned_loader.go:176` are by design, not defects.
+
+### 2.23 `StartChildWorkflowInSchema` — same omission, but a one-line fix would be a false fix — OPEN
+
+`engine/store_children.go:169` omits `tenant_id` from its `<targetSchema>.workflow_instances`
+insert, with `s.tenantID` available and unused — superficially §2.20 again. **It is not, and
+patching the column alone would be worse than leaving it.**
+
+The function calls `s.db.QueryRowContext` directly: no transaction, no `setRLSOnTx`, so
+`cleat.tenant_id` is never set on the session. If the target schema's table carries the same
+policy, `cleat.assert_tenant_set()` raises *"cleat.tenant_id is not set"* **regardless of
+whether the column is supplied**. Adding `tenant_id` would look like a fix, change nothing,
+and retire the entry.
+
+Severity is genuinely unknown and should not be guessed at. Nothing in this repository
+creates `workflow_instances` outside `public` — all five migrations open with
+`SET search_path = public`, and the RLS policies are attached to the public tables only. So
+whether the target schema's table even has a `tenant_id` column or a policy depends on
+provisioning that lives outside this repo. Either it has both (the insert fails), or it has
+neither (the insert succeeds and cross-schema children are simply unattributed). Establish
+which before ranking.
+
+One thing that is settled: there is no session-variable leak. `setRLSOnTx` uses
+`set_config(..., true)`, which is transaction-local, and this function opens no transaction —
+so a pooled connection cannot carry a previous tenant's value into it.
+
+The real question underneath is a design decision, not a mechanical one: **which tenant owns
+a cross-schema child** — the parent's, or the target schema's? Until that is answered there
+is no correct value to pass. Reachable from `engine/children.go:230` whenever a workflow
+requests a target schema.
+
 ### 2.24 The wasmtime epoch ticker races `Close` — ✅ **FIXED**
 
 Found the honest way: it failed CI on PR #227, on a change that has nothing to do with
