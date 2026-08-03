@@ -446,52 +446,66 @@ environment unset it still skips.
 
 ---
 
-### 1.10 RLS is bypassed in every shipped configuration — OPEN, needs a decision
+### 1.10 RLS was bypassed in every shipped configuration — fixed in `HEAD`
 
-Not fixed. It cannot be fixed without a product decision.
+Every tenant-scoped table has row-level security enabled and `FORCE`d, and for
+`GetWorkflowByID` and `ListWorkflows` those policies are the **only** tenant isolation
+there is: neither carries an application-level `tenant_id` filter. PostgreSQL never applies
+RLS to a superuser, and every configuration cleat shipped connected as one —
+`docker-compose.cluster.yml` as `POSTGRES_USER=cleat`, CI and local development as
+`postgres`. The policies were present, correct, tested, and bypassed in practice by every
+connection that had ever run against them.
 
-PostgreSQL **never** applies row-level security to a superuser, and applies it to the
-table owner only when `FORCE ROW LEVEL SECURITY` is set. `e13c2c8`/`a47eabb` add `FORCE`,
-which closes the owner case. The superuser case cannot be closed from inside the schema:
+Demonstrated on one database, two roles, same query:
 
-- `docker-compose.cluster.yml` connects as `cleat`, which is its `POSTGRES_USER` — a
-  superuser in the official image.
-- CI and local development connect as `postgres`. Confirmed `rolsuper = t`.
-- `cmd/cleat-worker/main.go` documents connecting through "the owner pool" for all tenants.
+```
+owner (superuser) sees: 2          -- both tenants' rows
+as cleat_app, tenant a: 1 rows: a
+as cleat_app, tenant b: 1 rows: b
+```
 
-So every configuration this repo ships bypasses every policy. That is worse than it
-sounds, because RLS is not defence-in-depth here: `GetWorkflowByID` and `ListWorkflows`
-have **no application-level `tenant_id` filter at all**. RLS is their only isolation.
+Four parts:
 
-The fix is a deployment change, not a code change — the worker must connect as a role that
-is neither superuser nor table owner — plus a startup assertion that refuses to serve
-multi-tenant traffic on a connection that bypasses RLS. Both are user-facing decisions.
+1. **`005_app_role.sql`** creates `cleat_app`: owns nothing, no DDL rights,
+   `NOSUPERUSER NOBYPASSRLS`, granted only DML plus `EXECUTE`. Ownership matters as much
+   as superuser — an owner is exempt from its own policies unless `FORCE` is set, so a role
+   that owns nothing is subject to them unconditionally rather than depending on a flag a
+   later change could clear. The attributes are re-asserted on every run, so a role someone
+   granted `SUPERUSER` to while debugging is corrected rather than preserved.
 
-Note that this is *why* the tenant-isolation tests are meaningful: they connect through
-`testutil.OpenPostgresRLSTestDB`, a genuinely unprivileged role. Removing `FORCE` does not
-fail them (their role is subject to RLS either way) while it does fail
-`TestShippedSchema_HasTenantIsolation`. The two tests cover different failure modes and
-both were proven to bite.
+2. **No credential in the repository.** The role is created `NOLOGIN` and without a
+   password; the deployment supplies one.
+   `deploy/postgres/900-app-role.sh` does that for the compose file from
+   `CLEAT_APP_PASSWORD` and *fails* when it is unset, so a missing password stops the
+   deployment instead of quietly leaving it on a superuser connection. It then re-reads
+   `pg_roles` and refuses if the role came out with `rolsuper` or `rolbypassrls`.
 
-Why it survived: the MySQL CI lane failed *earlier*, on a collation error, so execution never
-reached this call. That collation error was itself harness-only — `engine/testutil/mysql_schema.go`
-pinned `utf8mb4_unicode_ci` while the migrations inherit the server default. So a
-**test-harness defect masked a total product failure**, and the harness defect was the third
-`engine/testutil/` ↔ `migrations/` drift found this session, after nullable `generation` and
-the stale root `schema.sql`.
+3. **`--migrate-db`.** `cleat_app` cannot run migrations, by design, and workers migrate at
+   boot. The runtime and schema DSNs are now separate; `--migrate-db` defaults to `--db`,
+   so an unsplit deployment is unaffected.
 
-Three consequences worth carrying forward:
+4. **A startup check.** `engine.CheckRLSEnforced` reports every way the runtime connection
+   escapes RLS: superuser, `BYPASSRLS`, RLS switched off on a table that has policies, or
+   ownership without `FORCE` — plus a database with *no* policies, which would otherwise
+   pass every other check while isolating nothing. `--rls-check=auto` (default) refuses to
+   start when `--require-auth` is set and warns otherwise; `require` always refuses; `off`
+   skips.
 
-1. **A green lane can hide an ungreen product.** The MySQL job was red for a harness reason.
-   Red for the wrong reason is nearly as bad as green for the wrong reason: both stop you
-   looking.
-2. **`engine/testutil/` must stop being a hand-maintained copy of the schema.** Three drifts,
-   three separate failures, one of them concealing a total outage. Deriving the test schema
-   from `migrations/` is the structural fix (in progress).
-3. **The MySQL/SQL Server differentiator is not yet real.** Phase 4 proposes leading on the
-   two backends no competitor supports. As of today MySQL could not complete a workflow, and
-   SQL Server's entire retry path is unwired (see 2.8 results). Both need to work before that
-   claim is made in public.
+Falsified from both sides, against the same database: the check reports the bypass on the
+superuser connection every configuration used, and reports nothing on an unprivileged one.
+A test that could only ever return one answer would fail one of the two. End to end, a real
+worker refuses to start on the superuser DSN with the reason and the remedy, and starts
+healthy on `cleat_app` logging `row-level security is enforced on this connection`.
+
+**Found on the way:** `cmd/cleat-worker/main.go` counted API keys with
+`SELECT COUNT(*) FROM tenant_api_keys`, unqualified. The table is `admin.tenant_api_keys`
+and every other PostgreSQL caller says so; the default `search_path` does not include
+`admin`, so this always failed with 42P01 and the only trace was a warning. The
+auto-generated startup key was therefore **never created on any PostgreSQL deployment**,
+while `--require-auth` defaults to true — a fresh cluster had no key and no way in. Now
+qualified per-dialect, and logged at ERROR: if that read fails, the auth middleware reads
+the same table on every request, so the API is unusable rather than merely missing a
+convenience.
 
 ---
 

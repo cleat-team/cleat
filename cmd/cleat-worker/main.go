@@ -527,15 +527,58 @@ func main() {
 	}
 
 	// Run core schema migrations before plugin migrations.
-	migrator := migration.NewRunner(db, factory.Dialect(), "migrations")
+	//
+	// On a separate connection when --migrate-db is set: --db may be an
+	// unprivileged role (see migrations/postgres/005_app_role.sql), which is
+	// what makes it subject to row-level security, and such a role cannot
+	// run DDL. Falls back to db so an unsplit deployment behaves as before.
+	migrateDB := db
+	if *migrateDBURL != "" {
+		mdb, mErr := sql.Open(sqlDriverName(*driver), dsnWithSchema(*migrateDBURL, *schemaName))
+		if mErr != nil {
+			logger.ErrorContext(context.Background(), "failed to connect to the migration database (--migrate-db)", "worker_id", workerID, "error", mErr)
+			os.Exit(1)
+		}
+		// Migrations are serialised by an advisory lock and run once at boot;
+		// a couple of connections is plenty, and this pool must not compete
+		// with the runtime one.
+		mdb.SetMaxOpenConns(2)
+		defer mdb.Close()
+		migrateDB = mdb
+	}
+
+	migrator := migration.NewRunner(migrateDB, factory.Dialect(), "migrations")
 	if err := migrator.Run(ctx); err != nil {
-		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges", "worker_id", workerID, "error", err)
+		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
 		os.Exit(1)
 	}
 
-	if err := plugin.RunMigrations(ctx, db, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
+	if err := plugin.RunMigrations(ctx, migrateDB, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
 		logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
 		os.Exit(1)
+	}
+
+	// Now that the schema (and its policies) exist, check that the *runtime*
+	// connection is actually subject to them. See engine.CheckRLSEnforced:
+	// GetWorkflowByID and ListWorkflows have no application-level tenant
+	// filter, so on a connection that bypasses RLS they return every tenant's
+	// data. Every configuration cleat shipped connected as a superuser.
+	if *driver == "postgres" && *rlsCheck != "off" {
+		reasons, rErr := engine.CheckRLSEnforced(ctx, db)
+		switch {
+		case rErr != nil:
+			// Could not tell. Refusing on an inconclusive check would make an
+			// unrelated database hiccup fatal, so this is reported and the
+			// worker continues.
+			logger.WarnContext(context.Background(), "could not verify row-level security enforcement", "worker_id", workerID, "error", rErr)
+		case len(reasons) == 0:
+			logger.InfoContext(context.Background(), "row-level security is enforced on this connection", "worker_id", workerID)
+		case *rlsCheck == "require" || (*rlsCheck == "auto" && *requireAuth):
+			logger.ErrorContext(context.Background(), "refusing to start: "+engine.FormatRLSBypass(reasons), "worker_id", workerID)
+			os.Exit(1)
+		default:
+			logger.WarnContext(context.Background(), engine.FormatRLSBypass(reasons), "worker_id", workerID)
+		}
 	}
 
 	// For MySQL, the factory creates a per-tenant database that needs its
@@ -901,9 +944,28 @@ func main() {
 			handler = auth.Middleware(store, true)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
+			//
+			// The table is admin.tenant_api_keys on PostgreSQL, and this was
+			// the one site that named it unqualified -- every other Postgres
+			// caller (engine/store_deployment.go, auth/tenant_store.go) gets
+			// it right. The default search_path does not include admin, so
+			// this always failed with 42P01 and the only trace was a warning:
+			// no startup key was ever generated on a fresh PostgreSQL
+			// deployment, while --require-auth defaults to true. MySQL and
+			// SQL Server keep the unqualified name; there the table is not in
+			// a separate schema.
+			keyCountQuery := `SELECT COUNT(*) FROM tenant_api_keys`
+			if *driver == "postgres" {
+				keyCountQuery = `SELECT COUNT(*) FROM admin.tenant_api_keys`
+			}
 			var keyCount int
-			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenant_api_keys`).Scan(&keyCount); err != nil {
-				logger.WarnContext(context.Background(), "cannot check API key count", "worker_id", workerID, "error", err)
+			if err := db.QueryRowContext(ctx, keyCountQuery).Scan(&keyCount); err != nil {
+				// ERROR, not WARN: if this query fails the auth middleware
+				// reads the same table on every request, so the API is
+				// unusable rather than merely missing a convenience.
+				logger.ErrorContext(context.Background(),
+					"cannot read the API key table; authentication will not work and no startup key will be generated",
+					"worker_id", workerID, "query", keyCountQuery, "error", err)
 			} else if keyCount == 0 {
 				key := auth.GenerateAPIKey()
 				defaultTenantID := uuid.MustParse("00000000-0000-0000-0000-000000000000")

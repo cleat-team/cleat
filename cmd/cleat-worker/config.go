@@ -37,6 +37,28 @@ type Config struct {
 // Package-level flag variables used across the worker.
 var (
 	dbURL                         = flag.String("db", "", "Database connection URL (required). For Postgres: postgres://... For MySQL: user:pass@tcp(host:port)/dbname?parseTime=true For MSSQL: sqlserver://user:pass@host:port?database=dbname")
+
+	// migrateDBURL exists so that --db can be an unprivileged role.
+	//
+	// The role cleat should run as (migrations/postgres/005_app_role.sql) owns
+	// nothing and has no DDL rights -- that is what makes it subject to
+	// row-level security, and RLS is the only tenant isolation
+	// GetWorkflowByID and ListWorkflows have. But migrations obviously do need
+	// DDL rights, and workers run them at boot. Two DSNs is the way out:
+	// privileged for the schema, unprivileged for everything after.
+	//
+	// Defaults to --db, so a deployment that has not been split keeps working
+	// exactly as before.
+	migrateDBURL = flag.String("migrate-db", "",
+		"Database URL used only for schema migrations, which need DDL rights (default: --db). "+
+			"Set this when --db is an unprivileged role such as cleat_app.")
+
+	// rlsCheck decides what happens when the runtime connection turns out not
+	// to be subject to row-level security.
+	rlsCheck = flag.String("rls-check", "auto",
+		"Row-level security enforcement check on startup: \"auto\" refuses to start when "+
+			"--require-auth is set (multi-tenant) and warns otherwise, \"require\" always "+
+			"refuses, \"off\" skips the check. PostgreSQL only.")
 	driver                        = flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
 	concurrency                   = flag.Int("concurrency", 10, "Max concurrent workflow executions")
 	maxQueued                     = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")

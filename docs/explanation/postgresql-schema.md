@@ -318,7 +318,7 @@ db.SetConnMaxLifetime(5 * time.Minute)
 For multi-tenant deployments, the worker supports sharded databases. Each
 shard has its own connection string and tenant assignment. The sharded store
 dispatches workflow operations to the correct shard by tenant ID. See
-`internal/host/sharded_store.go` and `cmd/cleat-worker/main.go` for
+`engine/sharded_store.go` and `cmd/cleat-worker/main.go` for
 implementation details.
 
 ---
@@ -382,7 +382,7 @@ them.
 
 1. MySQL does not support `UPDATE ... RETURNING`. The claim pattern uses a two-step
    approach: (a) `SELECT id ... FOR UPDATE SKIP LOCKED`, then (b) `UPDATE ... WHERE id IN (...)`.
-   See `internal/host/mysql_store.go`.
+   See `engine/mysql_store.go`.
 
 ### Index Differences
 
@@ -443,6 +443,63 @@ MySQL-specific deviations from the PostgreSQL original. For example, from
 
 The Go store implementations that translate queries for each backend are at:
 
-- `internal/host/store.go` — common interface and shared logic
-- `internal/host/mysql_store.go` — MySQL query translations
-- `internal/host/mssql_store.go` — MSSQL query translations
+- `engine/store.go` — common interface and shared logic
+- `engine/mysql_store.go` — MySQL query translations
+- `engine/mssql_store.go` — MSSQL query translations
+
+
+## Which role to connect as
+
+**Do not point `--db` at a superuser.** Tenant isolation depends on it.
+
+Every tenant-scoped table has row-level security enabled and `FORCE`d
+(`001_schema.sql`), and for `GetWorkflowByID` and `ListWorkflows` those policies
+are the *only* isolation there is — neither carries an application-level
+`tenant_id` filter. PostgreSQL never applies row-level security to a superuser,
+and there is no setting that changes that. A superuser connection therefore
+returns every tenant's data from those calls, however the policies are written.
+
+`005_app_role.sql` creates the role to use instead: `cleat_app`, which owns
+nothing, has no DDL rights, and is `NOSUPERUSER NOBYPASSRLS`. Ownership matters
+as much as superuser here — an owner is exempt from its own policies unless
+`FORCE` is set, so a role that owns nothing is subject to them unconditionally,
+rather than depending on a flag a later change could clear.
+
+The role is created `NOLOGIN` and without a password: a credential does not
+belong in a file that is committed, mounted into containers, and re-applied by
+every worker at boot. Give it one at deploy time:
+
+```sql
+ALTER ROLE cleat_app LOGIN PASSWORD '...';
+```
+
+`deploy/postgres/900-app-role.sh` does this for `docker-compose.cluster.yml`
+from `CLEAT_APP_PASSWORD`, and refuses to proceed if that variable is unset —
+so a missing password fails the deployment rather than quietly leaving the
+cluster on a superuser connection.
+
+Migrations still need DDL rights, so workers take two DSNs:
+
+```
+--db=postgres://cleat_app:...@host:5432/cleat        # runtime, unprivileged
+--migrate-db=postgres://owner:...@host:5432/cleat    # schema only
+```
+
+`--migrate-db` defaults to `--db`, so a deployment that has not been split
+keeps working as before.
+
+### The startup check
+
+On PostgreSQL the worker verifies at boot that its runtime connection really is
+subject to the policies, and reports every reason it is not — superuser,
+`BYPASSRLS`, row-level security switched off on a table that has policies, or
+ownership without `FORCE`. It also reports a database with no policies at all,
+which would otherwise pass every other check while isolating nothing.
+
+`--rls-check` controls what happens next:
+
+| Value | Behaviour |
+|---|---|
+| `auto` (default) | Refuse to start when `--require-auth` is set; warn otherwise |
+| `require` | Always refuse to start |
+| `off` | Skip the check |
