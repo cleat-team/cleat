@@ -106,10 +106,10 @@ type HostHandler interface {
 	Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64
 
 	// JsonParse validates and normalizes a JSON string via the host's encoding/json.
-	JsonParse(ctx context.Context, m api.Module, jsonPtr, jsonLen, outPtr, outMaxLen uint32) int64
+	JsonParse(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64
 
 	// JsonStringify validates and re-serializes a JSON string via the host's encoding/json.
-	JsonStringify(ctx context.Context, m api.Module, ptr, len, outPtr, outMaxLen uint32) int64
+	JsonStringify(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64
 }
 
 // registerHostFunctions registers all cleat_* imports on the "env" host module.
@@ -844,13 +844,25 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 	// cleat_json_parse: (ptr,len, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		jsonPtr, jsonLen, outPtr, outMaxLen uint32) uint64 {
-		return uint64(handlerFromContext(ctx).JsonParse(ctx, m, jsonPtr, jsonLen, outPtr, outMaxLen))
+		// The wrapper reads the input, as every other host function's does.
+		// packSimpleResult(1) rather than errBadParam: these two report
+		// failure as "not valid JSON", which is what an unreadable argument
+		// amounts to here, and it is what the guest decodes.
+		input, ok := readWasmStringValidated(m.Memory(), jsonPtr, jsonLen, MaxWasmStringLen)
+		if !ok {
+			return uint64(packSimpleResult(1))
+		}
+		return uint64(handlerFromContext(ctx).JsonParse(ctx, m, input, outPtr, outMaxLen))
 	}).Export("cleat_json_parse")
 
 	// cleat_json_stringify: (ptr,len, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		ptr, len, outPtr, outMaxLen uint32) uint64 {
-		return uint64(handlerFromContext(ctx).JsonStringify(ctx, m, ptr, len, outPtr, outMaxLen))
+		input, ok := readWasmStringValidated(m.Memory(), ptr, len, MaxWasmStringLen)
+		if !ok {
+			return uint64(packSimpleResult(1))
+		}
+		return uint64(handlerFromContext(ctx).JsonStringify(ctx, m, input, outPtr, outMaxLen))
 	}).Export("cleat_json_stringify")
 
 	// cleat_poll_work supplies entry point + input to Go wasip1

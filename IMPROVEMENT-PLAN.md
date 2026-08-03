@@ -948,21 +948,52 @@ unconditionally required on wasmtime (`engine/wasmtime_hostfuncs_workflow.go`). 
 
 ---
 
-### 2.14 `cleat_json_parse` / `cleat_json_stringify` panic on the primary backend — OPEN
+### 2.14 `cleat_json_parse` / `cleat_json_stringify` panicked on the primary backend — FIXED
 
-**Confirmed by running it**, not by inspection alone: a nil-pointer dereference.
+A nil-pointer dereference, reachable from real guest code: the Rust SDK calls
+`cleat_json_parse` (`crates/cleat-sdk/src/host_calls.rs`).
 
-`engine/wasmtime_hostfuncs_core.go` passes a literal `nil` for the `api.Module` argument
-(`h.JsonParse(callCtx, nil, ...)`), and `engine/lifecycle.go:629` immediately calls
-`m.Memory()` on it. Any guest calling these two host functions under wasmtime — the
-backend of record — crashes the execution. wazero passes a real module and is unaffected.
+`engine/wasmtime_hostfuncs_core.go` passed a literal `nil` for the `api.Module` argument
+and `engine/lifecycle.go` immediately called `m.Memory()` on it. The `nil` was not the bug —
+it is the wasmtime convention, documented on `writeResult` in `engine/flush.go`: the memory
+travels in the context instead. The bug is that these two handlers were the **only** ones
+that read their own input out of guest memory rather than being handed a decoded string,
+so they were the only ones that reached for `m` on a path where it is deliberately nil.
 
-The fix is presumably the `ctx.Value(wasmMemBufKey{})` fallback `engine/flush.go`'s
-`writeResult` already uses for exactly this reason. Unrelated to 2.10 beyond having been
-found in the same sweep; recorded here rather than fixed so it gets its own change and its
-own regression test.
+Fixed by removing the anomaly rather than patching around it. `JsonParse` and
+`JsonStringify` now take `input string`, each backend's wrapper reads it the way every
+other wrapper already does, and output goes through the context-aware `writeResult`. wazero
+was unaffected throughout (it passes a real module) and stays that way.
+
+**Why nothing caught it.** `TestClosure_JsonParse` and `TestClosure_JsonStringify` existed
+and passed. They installed `mockHostHandler`, whose `JsonParse` returns a canned `0` without
+touching memory, wrote an input into guest memory, and then asserted only that the result
+was `0` — which is what the mock returns unconditionally. They would have passed if the
+function did nothing at all, and they did pass while every real call crashed. Both are
+deleted and replaced by tests that drive the real `execSession` through the same
+registration path and assert on the bytes written back, on **both** backends. Verified by
+falsification in the honest direction: the new wasmtime test panics against the unfixed
+handler.
 
 ---
+
+### 2.16 Most wasmtime closure tests cannot see a handler defect — OPEN
+
+Generalising the previous item. 34 of the 48 `TestClosure_*` tests in
+`engine/backend_wasmtime_test.go` follow the shape that hid 2.14: call the host function
+with valid arguments and assert the result is `0`, against `newClosureSetup`'s
+`mockHostHandler{ret: 0}`.
+
+They are not worthless — a wrapper that wrongly rejected its arguments would return
+`errBadParamInt64` and trip the assertion, so they do cover registration, the import
+signature, and the wrapper's validation on the happy path. What they cannot cover is the
+**handler**, because the mock replaces it. Any defect on the far side of that boundary —
+2.14's nil dereference being the extreme case — is invisible to them.
+
+The fix is not to rewrite all 34. It is to decide, per host function, whether its handler
+behaviour is worth a test that drives the real `execSession`, as
+`json_hostfuncs_cgo_test.go` now does, and to stop treating the `TestClosure_*` family as
+evidence that a host function *works*. It is evidence that it is *wired up*.
 
 ### 2.15 Durable call failures are all classified as retryable timeouts — OPEN
 

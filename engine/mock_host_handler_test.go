@@ -168,9 +168,9 @@ func (h *mockHostHandler) RunDetached(ctx context.Context, m api.Module, name, i
 func (h *mockHostHandler) Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64 {
 	return h.ret
 }
-func (h *mockHostHandler) JsonParse(ctx context.Context, m api.Module, jsonPtr, jsonLen, outPtr, outMaxLen uint32) int64 {
+func (h *mockHostHandler) JsonParse(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
 	return h.ret
 }
-func (h *mockHostHandler) JsonStringify(ctx context.Context, m api.Module, ptr, len, outPtr, outMaxLen uint32) int64 {
+func (h *mockHostHandler) JsonStringify(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
 	return h.ret
 }

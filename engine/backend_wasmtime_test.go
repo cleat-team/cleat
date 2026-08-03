@@ -2236,39 +2236,16 @@ func TestClosure_AwaitAnyChild(t *testing.T) {
 	}
 }
 
-func TestClosure_JsonParse(t *testing.T) {
-	// cleat_json_parse: (jsonPtr,jsonLen, outPtr,outMaxLen) -> i64
-	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
-	s := newClosureSetup(t, []struct {
-		name string
-		ft   []byte
-	}{{"cleat_json_parse", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
-		return b.registerCleatJsonParse(l)
-	})
-
-	s.writeString(50, `{"a":1}`)
-	got := s.call(t, "test_cleat_json_parse", i32(50), i32(7), i32(200), i32(512))
-	if got != 0 {
-		t.Errorf("got %v, want 0", got)
-	}
-}
-
-func TestClosure_JsonStringify(t *testing.T) {
-	// cleat_json_stringify: (ptr,len, outPtr,outMaxLen) -> i64
-	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
-	s := newClosureSetup(t, []struct {
-		name string
-		ft   []byte
-	}{{"cleat_json_stringify", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
-		return b.registerCleatJsonStringify(l)
-	})
-
-	s.writeString(50, `[1,2,3]`)
-	got := s.call(t, "test_cleat_json_stringify", i32(50), i32(7), i32(200), i32(512))
-	if got != 0 {
-		t.Errorf("got %v, want 0", got)
-	}
-}
+// TestClosure_JsonParse and TestClosure_JsonStringify used to live here. They
+// installed mockHostHandler -- whose JsonParse returns a canned 0 without
+// touching memory -- wrote an input into guest memory, and then asserted only
+// that the result was 0. That is what the mock returns unconditionally, so the
+// assertion could not fail; both passed for years while the real handler
+// nil-dereferenced on every call (IMPROVEMENT-PLAN.md 2.14).
+//
+// They are replaced by TestWasmtimeJson{Parse,Stringify}Normalises in
+// json_hostfuncs_cgo_test.go, which drive the real execSession through the
+// same registration path and assert on the bytes written back.
 
 func TestClosure_CallRetry(t *testing.T) {
 	// cleat_call_retry: (svc,op,req ptr,len × 3, maxAttempts,initialInterval,backoff,maxInterval i64 × 4, nonRetryableJSON ptr,len, respPtr,respMaxLen) -> i64

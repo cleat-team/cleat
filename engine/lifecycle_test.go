@@ -1479,15 +1479,15 @@ func TestJsonParse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := []byte(tt.input)
 			mem := mod.Memory()
-			if !mem.Write(0, data) {
-				t.Fatal("write to memory failed")
-			}
 
+			// The input is passed as a decoded string now; the wrapper reads
+			// it out of guest memory (see engine/imports.go). The "invalid
+			// json" and "empty string" cases still fail here, just at
+			// json.Unmarshal rather than at the read.
 			outPtr := uint32(4096) // offset in memory for output
 			outMaxLen := uint32(4096)
-			result := s.JsonParse(ctx, mod, 0, uint32(len(data)), outPtr, outMaxLen)
+			result := s.JsonParse(ctx, mod, tt.input, outPtr, outMaxLen)
 
 			errCode := byte(result & 0xFF)
 			if tt.wantOK && errCode != 0 {
