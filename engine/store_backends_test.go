@@ -244,6 +244,63 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 	}
 }
 
+// describeClaimState reports what the claim predicate would see right now.
+//
+// TestClaimWorkflow, TestClaimSkipLocked and TestListWorkflows_ByStatus fail
+// intermittently on some machines and in the cluster CI job -- with
+// "ClaimWorkflow returned nil", "first claim returned 10, want 3" and
+// "expected at least 1 result" respectively. Those messages say a claim did
+// not behave, and nothing about why: not how many rows existed, what status or
+// task_queue they carried, or whether they were due. Reproducing has so far
+// needed the exact machine state that produced it.
+//
+// Rather than guess, the assertions call this so the next failure arrives with
+// the evidence attached. It is deliberately read-only and best-effort: a
+// diagnostic that can itself fail the test would be worse than none.
+func describeClaimState(t *testing.T, store WorkflowStore) {
+	t.Helper()
+
+	var db *sql.DB
+	switch s := store.(type) {
+	case *PostgresStore:
+		db = s.db
+		t.Logf("claim state: store.taskQueues=%v store.tenantID=%q", s.taskQueues, s.tenantID)
+	default:
+		t.Logf("claim state: no diagnostic for %T", store)
+		return
+	}
+
+	var total, ready, due, running int
+	err := db.QueryRow(`
+		SELECT count(*),
+		       count(*) FILTER (WHERE status = 'ready'),
+		       count(*) FILTER (WHERE status = 'ready' AND next_wake_at <= now()),
+		       count(*) FILTER (WHERE status = 'running')
+		FROM workflow_instances`).Scan(&total, &ready, &due, &running)
+	if err != nil {
+		t.Logf("claim state: query failed: %v", err)
+		return
+	}
+	t.Logf("claim state: workflow_instances total=%d ready=%d ready+due=%d running=%d",
+		total, ready, due, running)
+
+	rows, err := db.Query(`
+		SELECT coalesce(task_queue, '<null>'), status, count(*)
+		FROM workflow_instances GROUP BY 1, 2 ORDER BY 1, 2`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tq, status string
+		var n int
+		if err := rows.Scan(&tq, &status, &n); err != nil {
+			return
+		}
+		t.Logf("claim state:   task_queue=%q status=%q count=%d", tq, status, n)
+	}
+}
+
 // truncateAll cleans up ALL test data between test cases.
 // setupTestData leaves behind a "ready" workflow and a "running" workflow
 // that DeleteExpiredEvents does not touch (it only cleans events for

@@ -328,6 +328,61 @@ alone and asserts the engine's requirements. It found a second defect on its fir
 `003_procedures.sql` had the same 42P13 return-type bug as 004, so re-applying the set —
 what an operator upgrading a deployment does, and what the docs promise is safe — failed.
 
+### 1.11 No worker could start against PostgreSQL — fixed in `HEAD`
+
+`cleat-worker` runs `migration.Runner` and `plugin.RunMigrations` at boot and exits if
+either fails. Both failed, for two independent reasons, and neither had a single test.
+
+**`SET search_path` leaked out of the migration file and broke the runner's own
+bookkeeping.** `2a70373` added `SET search_path = public;` to the four
+`migrations/postgres/*.sql` files, to stop the objects landing in a schema named after the
+connecting role (1.9). A bare `SET` is *session*-scoped, so it outlived the transaction the
+file ran in and changed name resolution for the runner's next statement — an unqualified
+`INSERT INTO schema_migrations` on the connection that had just created that table under
+the previous `search_path`:
+
+```
+[migration] applying 001_schema.sql
+ERROR: relation "schema_migrations" does not exist (42P01)
+```
+
+That aborted the transaction, rolled `001` back and failed the boot. Every worker in
+`docker-compose.cluster.yml` crash-looped. `SET LOCAL` is not available as a fix: the same
+files are applied by `docker-entrypoint-initdb.d` through psql, where each statement is its
+own implicit transaction and a `LOCAL` setting would be discarded immediately. The runner
+now schema-qualifies its tracking table, which makes it independent of anything the
+migration files do to `search_path`, and resets `search_path` before returning the
+connection to the pool.
+
+**Four workers applied migrations simultaneously.** `CREATE TABLE IF NOT EXISTS` is not
+atomic against another session creating the same table, so the compose cluster produced
+`duplicate key value violates unique constraint "pg_type_typname_nsp_index"`,
+`relation "tenant_api_keys" does not exist`, and
+`type "plugin_migrations" already exists`. Both runners now take a `pg_advisory_lock` for
+the duration of a run. PostgreSQL only, deliberately: MySQL and SQL Server have
+equivalents but no multi-worker topology is shipped for them, and untested locking would
+be worse than none.
+
+Why it survived: `migration/` had **no test file at all**, and nothing anywhere ran the
+runner against `migrations/postgres/`. The two halves of the bootstrap were each covered
+alone — `engine/schema_bootstrap_test.go` applies the files with psql semantics, and the
+runner's logic was exercised by nothing — so the seam between them was unobserved. This is
+the same shape as 1.9: an artifact that ships is verified by a path that does not.
+
+Both fixes were falsified before being kept. Reverting the qualification reproduces the
+verbatim boot failure in all four new tests; removing the lock makes three of four
+concurrent runners fail with the exact constraint names seen in CI. New coverage:
+`migration/runner_test.go` (5 tests, from nothing) and
+`plugin/migration_concurrency_test.go`. End-to-end, four workers now boot against one
+database, exactly one applies the migrations, and all four report healthy.
+
+**The cluster CI job could not tell a running cluster from no cluster.** It started the
+compose file, slept 10 seconds and ran the tests. Every worker was crash-looping and the
+only symptom was three unrelated-looking store tests failing. `.github/workflows/ci.yml`
+now waits for each service's healthcheck and fails on any restart count above zero.
+
+---
+
 ### 1.10 RLS is bypassed in every shipped configuration — OPEN, needs a decision
 
 Not fixed. It cannot be fixed without a product decision.
@@ -467,6 +522,33 @@ a fast machine without `-race`. Retuning the iteration count cannot fix it.
 
 The test is skipped with this reasoning inline rather than left green. A skip is visible —
 the CI job has a "Warn on skipped tests" step — whereas a pass for the wrong reason is not.
+
+---
+
+### 2.11 Three store tests fail intermittently, cause unknown — OPEN, instrumented
+
+`TestClaimWorkflow`, `TestClaimSkipLocked` and `TestListWorkflows_ByStatus` fail on some
+machines and in the cluster CI job, with `ClaimWorkflow returned nil`,
+`first claim returned 10, want 3` and `expected at least 1 result`.
+
+They were expected to be collateral from 1.11 — the cluster job ran them against a database
+four crash-looping workers were hammering with DDL. They are not, or not only: the same
+three fail locally with no worker running, in bursts, and then stop. Repeated runs of the
+same command give FAIL FAIL FAIL ok, then ok ok ok ok. An extracted probe that performs the
+identical sequence through the same API has not reproduced it in 20 attempts.
+
+The `want 3, got 10` case in particular has no explanation yet. `ClaimWorkflows` issues one
+`UPDATE ... WHERE id IN (SELECT ... LIMIT $3 FOR UPDATE SKIP LOCKED) RETURNING`, and running
+that statement by hand against the same database, with the same ten rows and `LIMIT 3`,
+returns exactly three. The Go path returns three as well when called from a probe. **No
+cause has been established, and none should be asserted until one is.**
+
+What has been done instead of guessing: the three assertions now call `describeClaimState`,
+which logs the row counts by status, whether they are due, their `task_queue` values, and
+the store's own `taskQueues`/`tenantID`, so the next failure carries the evidence rather
+than a bare count. The next occurrence should be diagnosed from that output.
+
+---
 
 ## Phase 3 — Put falsification in the loop
 

@@ -672,8 +672,56 @@ jobs:
           # migrations further.
           docker compose -f docker-compose.cluster.yml up -d
 
-          echo "Waiting for workers to register..."
-          sleep 10
+          # Assert the cluster actually came up.
+          #
+          # This step used to be `sleep 10` and nothing else, so the job called
+          # itself "Cluster Integration Tests" while every worker was in a
+          # crash-restart loop, and the only symptom was three unrelated-looking
+          # store tests failing. A job that cannot tell the difference between a
+          # running cluster and no cluster at all is not testing a cluster.
+          #
+          # Each service has a healthcheck in docker-compose.cluster.yml; wait
+          # for every one of them to reach "healthy" rather than assuming a
+          # fixed delay is enough.
+          echo "Waiting for workers to become healthy..."
+          SERVICES="cleat-worker-1 cleat-worker-2 cleat-worker-3 cleat-dashboard"
+          DEADLINE=$(( SECONDS + 120 ))
+          while :; do
+            UNHEALTHY=""
+            for svc in $SERVICES; do
+              STATE="$(docker inspect -f '{{.State.Status}}:{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$svc" 2>/dev/null || echo "missing:missing")"
+              case "$STATE" in
+                running:healthy) ;;
+                *) UNHEALTHY="$UNHEALTHY $svc($STATE)" ;;
+              esac
+            done
+            [ -z "$UNHEALTHY" ] && break
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error title=Cluster workers unhealthy::Not healthy after 120s:$UNHEALTHY"
+              echo
+              echo "Worker logs follow. A worker that exits at boot is usually a"
+              echo "schema or migration problem, not a test problem."
+              for svc in $SERVICES; do
+                echo "--- $svc ---"
+                docker logs --tail=60 "$svc" 2>&1 || true
+              done
+              exit 1
+            fi
+            sleep 3
+          done
+          echo "All workers healthy."
+
+          # A worker that boots, dies and is restarted by `restart:
+          # unless-stopped` can be momentarily healthy. Restarts mean the
+          # cluster is not stable, so fail on any.
+          for svc in $SERVICES; do
+            RESTARTS="$(docker inspect -f '{{.RestartCount}}' "$svc")"
+            if [ "$RESTARTS" -ne 0 ]; then
+              echo "::error title=Worker restarting::$svc has restarted $RESTARTS time(s); it is crash-looping."
+              docker logs --tail=60 "$svc" 2>&1 || true
+              exit 1
+            fi
+          done
 
       - name: Run integration tests
         shell: bash

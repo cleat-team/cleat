@@ -45,6 +45,7 @@ type execCall struct {
 
 type migrationTestConn struct {
 	execCalls  []execCall
+	lockCalls  []string // pg_advisory_lock / pg_advisory_unlock statements
 	queryCalls []string
 	execErr    error
 	queryErr   error
@@ -87,6 +88,15 @@ func (c *migrationTestConn) BeginTx(ctx context.Context, opts driver.TxOptions) 
 
 // ExecContext implements driver.ExecerContext.
 func (c *migrationTestConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	// Advisory lock/unlock is transport for RunMigrations, not one of the
+	// migration statements the assertions below are about. Recording it in
+	// execCalls would shift every index and count in this file by one and say
+	// nothing extra; it is tracked separately instead, and
+	// TestRunMigrations_TakesAdvisoryLockOnPostgresOnly asserts on it.
+	if strings.Contains(query, "pg_advisory_") {
+		c.lockCalls = append(c.lockCalls, query)
+		return &migrationTestResult{rowsAffected: 1}, nil
+	}
 	if c.execFailAfter > 0 {
 		if c.execCallCount >= c.execFailAfter && c.execErr != nil {
 			return nil, c.execErr
@@ -532,6 +542,42 @@ func TestRunMigrations_CreatesMigrationTable(t *testing.T) {
 	}
 	if !strings.Contains(conn.execCalls[0].query, "CREATE TABLE IF NOT EXISTS plugin_migrations") {
 		t.Errorf("first exec should be CREATE TABLE, got: %s", conn.execCalls[0].query)
+	}
+}
+
+// TestRunMigrations_TakesAdvisoryLockOnPostgresOnly pins the serialisation
+// added after four concurrently-starting workers killed each other's
+// migrations (see lockPluginMigrations). MySQL and SQL Server have no
+// pg_advisory_lock, so sending it there would break them outright.
+func TestRunMigrations_TakesAdvisoryLockOnPostgresOnly(t *testing.T) {
+	for _, tc := range []struct {
+		dialect  Dialect
+		wantLock bool
+	}{
+		{DialectPostgres, true},
+		{DialectMySQL, false},
+		{DialectMSSQL, false},
+	} {
+		t.Run(string(tc.dialect), func(t *testing.T) {
+			db, conn := newTestMigrationDB(t)
+			if err := RunMigrations(context.Background(), db, tc.dialect, nil, nil); err != nil {
+				t.Fatalf("RunMigrations: %v", err)
+			}
+			if got := len(conn.lockCalls) > 0; got != tc.wantLock {
+				t.Errorf("advisory lock taken = %v, want %v (calls: %v)",
+					got, tc.wantLock, conn.lockCalls)
+			}
+			if !tc.wantLock {
+				return
+			}
+			// Taken and released: a lock held past the run would block every
+			// later migration attempt against that database.
+			if len(conn.lockCalls) != 2 ||
+				!strings.Contains(conn.lockCalls[0], "pg_advisory_lock") ||
+				!strings.Contains(conn.lockCalls[1], "pg_advisory_unlock") {
+				t.Errorf("want lock then unlock, got %v", conn.lockCalls)
+			}
+		})
 	}
 }
 

@@ -127,6 +127,42 @@ func execSQLStatements(ctx context.Context, execFn func(ctx context.Context, que
 	return nil
 }
 
+// pluginMigrationsLockKey is the pg_advisory_lock key that serialises plugin
+// migration runs across processes. Arbitrary, but must never change: it is the
+// identity of the lock.
+const pluginMigrationsLockKey int64 = 7215842093104562
+
+// lockPluginMigrations takes a database-wide advisory lock for the duration of
+// a plugin migration run and returns its release function.
+//
+// The lock lives on a connection of its own, because a session-level advisory
+// lock belongs to the connection that took it and RunMigrations uses the pool
+// throughout. That means the pool must allow at least two connections; the
+// worker's plugin pool is configured well above that.
+//
+// PostgreSQL only, deliberately: MySQL and SQL Server have equivalents
+// (GET_LOCK, sp_getapplock) but cleat ships no multi-worker topology for them,
+// and untested locking would be worse than none. There this is a no-op and
+// behaviour is unchanged.
+func lockPluginMigrations(ctx context.Context, db *sql.DB, dialect Dialect) (func(), error) {
+	if dialect != DialectPostgres {
+		return func() {}, nil
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("plugin: acquire migration lock: connection: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", pluginMigrationsLockKey); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("plugin: acquire migration lock: %w", err)
+	}
+	return func() {
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx),
+			"SELECT pg_advisory_unlock($1)", pluginMigrationsLockKey)
+		conn.Close()
+	}, nil
+}
+
 // RunMigrations runs core migrations and plugin migrations in order.
 // Core migrations are run first, then plugins in dependency order.
 // Each plugin's migrations are tracked in a plugin_migrations table
@@ -135,6 +171,23 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 	if db == nil {
 		return nil
 	}
+
+	// Serialise against other processes doing the same thing. Every worker
+	// runs plugin migrations at boot, and docker-compose.cluster.yml starts
+	// four workers at once, so without this they race on the CREATE TABLE IF
+	// NOT EXISTS below and on each plugin's own DDL:
+	//
+	//	plugin: create migrations table: pq: type "plugin_migrations"
+	//	already exists (42710)
+	//
+	// which is fatal to worker startup. Same defect, same shape, and the same
+	// fix as migration.Runner -- see migrationsLockKey there. The key differs
+	// so that core and plugin migrations do not block each other needlessly.
+	unlock, err := lockPluginMigrations(ctx, db, dialect)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	// Ensure the plugin_migrations tracking table exists.
 	ddl := createPluginMigrationsTableSQL(dialect)
