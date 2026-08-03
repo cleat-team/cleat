@@ -1277,6 +1277,43 @@ would explain how this survived: the enforcement that exposes it is new.
 The fix is one column and one parameter. The test is the valuable part, and there is
 currently no test that spawns a child workflow under an RLS-enforcing connection.
 
+### 2.21 `applyPostgresSchemaFile` races itself, and its doc comment says it cannot — OPEN
+
+Caught flaking CI on the docs PR that recorded §2.18–§2.20. Same commit, three Multi-DB CI
+runs, **success / failure / success** — so it is a flake, and the kind that erodes exactly
+the signal Phase 0 spent effort restoring.
+
+```
+kvstore_multidb_test.go:36: apply migrations/postgres/001_schema.sql:
+  pq: duplicate key value violates unique constraint "pg_extension_name_index" (23505)
+```
+
+`engine/testutil/schema.go:73-79` claims the file is safe to reapply:
+
+> All statements in it are idempotent (CREATE ... IF NOT EXISTS, CREATE OR REPLACE,
+> DROP POLICY IF EXISTS ... CREATE POLICY), so it is safe to call more than once against
+> the same database
+
+That is true **sequentially and false concurrently**, which is the only way CI runs it.
+PostgreSQL's `IF NOT EXISTS` forms are not atomic: two sessions both observe the object
+missing, both insert the catalog row, and one loses on the unique index.
+`CREATE EXTENSION IF NOT EXISTS pgcrypto` (`migrations/postgres/001_schema.sql:24`) is the
+one that lost here, but `CREATE TABLE IF NOT EXISTS` has the same hazard.
+
+`go test ./plugins/...` compiles and runs distinct packages in parallel (`-p` defaults to
+NumCPU), and every one of them points at the same `CLEAT_TEST_POSTGRES` database, so several
+call `applyPostgresSchemaFile` at once against one server. Nothing serialises them.
+
+Options: take a Postgres advisory lock around the apply (`pg_advisory_lock` on a fixed key,
+released on close) — smallest change, keeps one shared database; or give each package its
+own database; or apply the schema once in the workflow before the test step and stop
+applying it per-package. The advisory lock is probably right: it is three lines, needs no CI
+change, and matches the existing "one shared DB" assumption.
+
+Whatever the fix, **correct the doc comment**. A comment asserting a safety property the
+code does not have is worse than no comment, and it is why the failure reads as mysterious
+rather than obvious.
+
 ---
 
 ## Salvage register — PR #208, closed unmerged
