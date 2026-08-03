@@ -8,6 +8,12 @@
 // and TestWasmtimeBackend_InfiniteLoop_DirectExportPath below would hang
 // forever; they now assert the worker regains control within a bounded
 // time and gets a clear, actionable error.
+//
+// A failure of NewWasmtimeBackend here is fatal, never a skip -- see the header
+// of backend_wasmtime_test.go for why the //go:build cgo tag makes "backend not
+// available" an impossible diagnosis in this file. It matters most here: these
+// four tests are the only thing standing between a runaway workflow and a hung
+// worker, and a skip would have retired that guarantee without saying so.
 package engine
 
 import (
@@ -106,7 +112,7 @@ func TestWasmtimeBackend_InfiniteLoop_GoStartPath(t *testing.T) {
 
 	b, err := NewWasmtimeBackend(ctx, WithWasmtimeExecutionTimeout(boundedTimeout))
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -165,7 +171,7 @@ func TestWasmtimeBackend_InfiniteLoop_DirectExportPath(t *testing.T) {
 
 	b, err := NewWasmtimeBackend(ctx, WithWasmtimeExecutionTimeout(boundedTimeout))
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -212,7 +218,7 @@ func TestWasmtimeBackend_InstructionLimit_FuelExhaustion(t *testing.T) {
 		WithWasmtimeInstructionLimit(10_000),
 	)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 
@@ -257,7 +263,7 @@ func TestWasmtimeBackend_NormalExecution_StillCompletes(t *testing.T) {
 
 	b, err := NewWasmtimeBackend(ctx) // built-in defaults, same as an unconfigured worker
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	defer b.Close(ctx)
 

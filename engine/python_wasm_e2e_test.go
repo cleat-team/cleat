@@ -34,8 +34,19 @@ func TestPythonWasmEndToEnd(t *testing.T) {
 	ctx := context.Background()
 
 	// ---- Check prerequisites ----
+	//
+	// toolchainRequired (defined in rust_workflow_test.go, which documents the
+	// reasoning) applies here too: e2e-cross-language.yml installs
+	// componentize-py and wasm-tools via pip/cargo, declares "python" in
+	// CLEAT_REQUIRE_TOOLCHAINS, and states in its own header that Python is
+	// first-class ("build/execute failures block CI"), while ci.yml's engine
+	// matrix entry runs this package with none of that installed. A skip here
+	// is only legitimate when nobody asked for these tools.
 	pythonWasm := newPythonWasmTestHelper(t)
 	if !pythonWasm.toolsAvailable() {
+		if toolchainRequired("python") {
+			t.Fatalf("Python WASM prerequisites not met, but %s declares python, so this job installs componentize-py/wasm-tools and treats Python as first-class: %s", requireToolchainEnv, pythonWasm.missingTools())
+		}
 		t.Skip("Python WASM prerequisites not met: " + pythonWasm.missingTools())
 	}
 
@@ -479,15 +490,6 @@ func (h *pythonWasmTestHelper) decomposeComponent(t *testing.T, wasmPath string)
 	}
 
 	return outputPath
-}
-
-// skipIfNoDecompose skips the test when wasm-tools component decompose is
-// not available (removed in wasm-tools >= ~1.230).
-func (h *pythonWasmTestHelper) skipIfNoDecompose(t *testing.T) {
-	t.Helper()
-	t.Skip("wasm-tools component decompose not available — removed in wasm-tools >= 1.230. " +
-		"The engine requires decomposed core WASM. Install older wasm-tools or implement " +
-		"native Component Model support in the wasmtime backend.")
 }
 
 // findRepoRoot locates the repository root by finding go.mod.

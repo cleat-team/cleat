@@ -8,6 +8,56 @@ import (
 	"time"
 )
 
+// Skip-guard audit (fix/audit-conditional-skips, IMPROVEMENT-PLAN.md 1.10):
+//
+// This file holds the tenant-isolation tests that are the *only* proof
+// row-level security actually works for GetWorkflowByID/ListWorkflows --
+// neither carries an application-level tenant_id filter, and cleat
+// historically connected as a superuser, which PostgreSQL exempts from RLS
+// entirely (IMPROVEMENT-PLAN.md 1.10). A skip that fires here when it
+// shouldn't means isolation goes unverified while CI stays green, so every
+// guard in this file was re-derived from scratch rather than trusted:
+//
+//   - `if !backend.Enabled() { t.Skip(...) }` (forEachBackend and the
+//     per-test loops below) is genuinely live for MySQL/MSSQL: their
+//     Enabled() reads CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL, and the loop must
+//     skip when nobody asked for that backend (e.g. ci.yml's test-go job,
+//     which sets neither var). It is provably dead for Postgres:
+//     PostgresBackend.Enabled() (store_backends_test.go) hardcodes
+//     `return true`, mirroring testutil.TestDB's own unconditional
+//     default-DSN fallback, so this branch can never fire on that leg --
+//     Postgres has no "unconfigured" state in this suite. That is
+//     intentional, not a bug: a genuinely unreachable Postgres already
+//     surfaces as a t.Fatalf inside backend.Setup() -> testutil.TestDB,
+//     which already applies the "configured but broken is Fatal, not Skip"
+//     rule this whole file is held to. The guard is left unchanged below so
+//     it stays correct for the two dialects where it does something.
+//
+//   - `backend.(MultiTenantStoreBackend)` type assertions, below, are
+//     t.Fatalf, not t.Skipf: store_backends_test.go's init() registers
+//     exactly three backends (Postgres, MySQL, MSSQL) and all three
+//     implement SetupForTenant, so this assertion cannot fail today. A
+//     failure would mean a backend was registered without tenant-isolation
+//     support -- i.e. isolation silently went untested for it -- which must
+//     stop the build, not quietly skip a subtest.
+//
+//   - TestUnauthenticatedQueryRejection's closing type switch: no
+//     registered backend ever constructs a *ShardedStore (grepped
+//     `ShardedStore{` across the repo; only sharded_store.go's own
+//     NewShardedStore and sharded_store_test.go's unit tests construct one),
+//     so that case is unreachable today -- left in place as the shape to
+//     fill in if ShardedStore is ever registered as a backend, which would
+//     also give it tenant-isolation coverage it has nowhere else in this
+//     file. Its `default:` branch is t.Fatalf, not t.Skipf: the switch has
+//     no `case *MySQLStore`, so whenever multi-db-ci.yml's test-mysql job
+//     runs this test -- the job that exists specifically to exercise MySQL
+//     -- the MySQL subtest fell into `default` and skipped itself
+//     unconditionally, every time, regardless of environment. That is a
+//     structural coverage hole (MySQL is never checked for
+//     unauthenticated-query rejection at all), not an environment-
+//     conditional skip, and this change does not fill it -- it only stops
+//     the hole from being invisible.
+
 // MultiTenantStoreBackend extends StoreBackend for backends that support
 // creating stores scoped to specific tenants (used by tenant isolation tests).
 type MultiTenantStoreBackend interface {
@@ -109,7 +159,10 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -222,7 +275,10 @@ func TestTenantIsolation_Signals(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -313,7 +369,10 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -407,7 +466,10 @@ func TestTenantIsolation_EventHistory(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -492,7 +554,10 @@ func TestTenantIsolation_Promises(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -592,7 +657,10 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -732,7 +800,10 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -914,7 +985,10 @@ func TestTenantIsolation_ActiveInstanceCounts(t *testing.T) {
 			}
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -1005,10 +1079,38 @@ func TestUnauthenticatedQueryRejection(t *testing.T) {
 				if err == nil {
 					t.Error("expected error for unauthenticated query, got nil")
 				}
+			case *MySQLStore:
+				// This case did not exist until the conditional-skip audit.
+				// MySQL fell through to `default:` and skipped, so the dialect
+				// was never once checked here -- including in multi-db-ci.yml's
+				// test-mysql job, which exists to test it.
+				//
+				// It matters more on MySQL than on PostgreSQL. Postgres has
+				// seven RLS policies as a database-level backstop; MySQL has
+				// none (IMPROVEMENT-PLAN.md 1.7), so a query that runs with no
+				// tenant is bounded by nothing but the Go code that built it.
+				zeroStore := *s
+				zeroStore.tenantID = ""
+				_, err := zeroStore.GetActiveInstanceCountsByVersion(context.Background())
+				if err == nil {
+					t.Error("expected error for unauthenticated query, got nil")
+				}
 			case *ShardedStore:
+				// No registered StoreBackend ever constructs a *ShardedStore
+				// (see file-level comment above), so this case is
+				// unreachable today. Left in place as the shape to fill in
+				// if ShardedStore is ever registered as a backend.
 				t.Skip("ShardedStore unauthenticated test requires base store access")
 			default:
-				t.Skipf("unauthenticated rejection test not implemented for %T", store)
+				// Was t.Skipf. This switch has no `case *MySQLStore`, so the
+				// MySQL subtest -- run for real by multi-db-ci.yml's
+				// test-mysql job -- fell in here and skipped itself every
+				// time, unconditionally, never once verifying
+				// unauthenticated-query rejection for MySQL (see file-level
+				// comment above). Fatal turns any unhandled store type,
+				// including that one, into a build failure instead of an
+				// invisible pass.
+				t.Fatalf("unauthenticated rejection test not implemented for %T", store)
 			}
 		})
 	}

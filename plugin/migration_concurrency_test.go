@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	_ "github.com/lib/pq"
+
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // Every cleat-worker calls RunMigrations at boot, and
@@ -26,29 +28,64 @@ import (
 // Both were invisible because neither migration path had any test that ran it
 // more than once at a time.
 
-func pluginTestPostgresDSN(t *testing.T) string {
+// pluginTestPostgresDSN resolves the admin connection string via
+// testutil.PostgresTestDSN (CLEAT_TEST_POSTGRES, then CLEAT_TEST_DB, then a
+// localhost fallback), rather than hand-duplicating that precedence.
+//
+// configured reports whether a DSN was explicitly supplied, as opposed to
+// the hardcoded fallback. This is the same "configured but unreachable ->
+// skip, not fail" bug engine/testutil.TestDB had before f9bce35 -- a service
+// container with no published port made every subtest skip silently instead
+// of failing, and the CI job reported green having never connected once.
+// This file is the regression test for the duplicate-key migration race that
+// killed 3 of 4 cleat-workers (see the file header): ci.yml's test-go job,
+// matrix entry "support" (which covers ./plugin/...), always sets
+// CLEAT_TEST_DB against a Postgres service with a published port, so an
+// unreachable Ping there is a broken environment, not an absent one, and
+// silently skipping it retires coverage for exactly the defect this file
+// exists to catch.
+//
+// testutil has no exported helper for the "configured" bit itself, so that
+// two-line env check is replicated here rather than shared.
+func pluginTestPostgresDSN(t *testing.T) (dsn string, configured bool) {
 	t.Helper()
-	if v := os.Getenv("CLEAT_TEST_POSTGRES"); v != "" {
-		return v
+	dsn = testutil.PostgresTestDSN()
+	configured = os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
+	return dsn, configured
+}
+
+// redactDSN strips the password from a DSN before it can appear in test
+// output. testutil's equivalent is unexported, so this is replicated rather
+// than shared -- the same duplication already exists in
+// migration/runner_test.go.
+func redactDSN(dsn string) string {
+	if u, err := url.Parse(dsn); err == nil && u.User != nil {
+		u.User = url.User(u.User.Username())
+		return u.String()
 	}
-	if v := os.Getenv("CLEAT_TEST_DB"); v != "" {
-		return v
-	}
-	return "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+	return dsn
 }
 
 // newPluginScratchDB creates an empty database for one test.
 func newPluginScratchDB(t *testing.T, name string) *sql.DB {
 	t.Helper()
 
-	adminDSN := pluginTestPostgresDSN(t)
+	adminDSN, configured := pluginTestPostgresDSN(t)
 	admin, err := sql.Open("postgres", adminDSN)
 	if err != nil {
 		t.Fatalf("open admin connection: %v", err)
 	}
 	defer admin.Close()
 	if err := admin.Ping(); err != nil {
-		t.Skipf("no postgres available: %v", err)
+		// See pluginTestPostgresDSN: only skip when nobody asked for a
+		// database at all. A configured-but-unreachable Postgres must fail
+		// loud here -- this is the regression test for the duplicate-key
+		// migration race described in the file header, and ci.yml always
+		// configures CLEAT_TEST_DB for the job that runs this package.
+		if configured {
+			t.Fatalf("configured postgres database at %s is unreachable: %v", redactDSN(adminDSN), err)
+		}
+		t.Skipf("no postgres database at %s (default DSN, none configured): %v", redactDSN(adminDSN), err)
 	}
 
 	drop := func(db *sql.DB) {

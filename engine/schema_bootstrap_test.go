@@ -56,7 +56,6 @@ func migrationsDir(t *testing.T) string {
 // test entirely.
 func bootstrapScratchDB(t *testing.T, dbName ...string) *sql.DB {
 	t.Helper()
-	requireBackendReachable(t, "postgres")
 
 	adminDSN := testutilPostgresDSN(t)
 	admin, err := sql.Open("postgres", adminDSN)
@@ -64,8 +63,24 @@ func bootstrapScratchDB(t *testing.T, dbName ...string) *sql.DB {
 		t.Fatalf("open admin connection: %v", err)
 	}
 	defer admin.Close()
+	// This file deliberately does not call testutil.TestDB (see the package
+	// doc comment above) so it has to reproduce, not inherit, the
+	// configured-vs-default distinction TestDB makes centrally
+	// (engine/testutil/schema.go). Before this fix, this Ping used a bare
+	// t.Skipf regardless of why the connection failed -- the exact bug
+	// TestDB was fixed for in c26c332, reintroduced locally. It was inert
+	// only because this function used to call the since-deleted
+	// requireBackendReachable first, which Fatal'd on a configured-but-
+	// unreachable database one step earlier; deleting that helper without
+	// this fix would have silently regressed every test in this file, plus
+	// the postgres leg of TestPluginMigrations_AllDialects (which calls
+	// bootstrapScratchDB via the exported BootstrapScratchDB wrapper), back
+	// to "Multi-DB CI never reached PostgreSQL, green for months."
 	if err := admin.Ping(); err != nil {
-		t.Skipf("no postgres available: %v", err)
+		if postgresConfiguredForTest() {
+			t.Fatalf("configured postgres database at %s is unreachable: %v", redactPostgresDSN(adminDSN), err)
+		}
+		t.Skipf("no postgres available (default DSN, none configured): %v", err)
 	}
 
 	// Callers that need their own database (so that what they assert about a
@@ -155,6 +170,31 @@ func testutilPostgresDSN(t *testing.T) string {
 		return v
 	}
 	return "postgres://localhost:5432/cleat?sslmode=disable"
+}
+
+// postgresConfiguredForTest reports whether a Postgres DSN was explicitly
+// supplied for tests, as opposed to bootstrapScratchDB falling back to
+// testutilPostgresDSN's hardcoded localhost default. Mirrors the
+// `configured` check in testutil.TestDB (engine/testutil/schema.go) --
+// duplicated rather than imported for the same reason testutilPostgresDSN
+// is: this file exercises the shipped migrations independent of the test
+// harness it is auditing.
+func postgresConfiguredForTest() bool {
+	return os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
+}
+
+// redactPostgresDSN strips the password from a DSN so it can appear in test
+// failure output. Duplicated from testutil's unexported redactDSN
+// (engine/testutil/schema.go) for the same reason as testutilPostgresDSN.
+func redactPostgresDSN(dsn string) string {
+	if u, err := url.Parse(dsn); err == nil && u.User != nil {
+		u.User = url.User(u.User.Username())
+		return u.String()
+	}
+	if i := strings.LastIndex(dsn, "@"); i >= 0 {
+		return "***@" + dsn[i+1:]
+	}
+	return dsn
 }
 
 // swapDatabase returns dsn with its database name replaced by name.

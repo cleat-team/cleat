@@ -9,18 +9,58 @@ import (
 	"testing"
 )
 
+// requireToolchainEnv is set by any CI job that installs a language toolchain
+// and therefore treats its absence as a failed setup step rather than an
+// absent optional dependency. Today only
+// .github/workflows/e2e-cross-language.yml sets it, to "rust,python", matching
+// the policy stated in that file's own header: "Rust and Python are
+// first-class: build/execute failures block the CI."
+//
+// The distinction this draws is the whole point of the conditional-skip audit.
+// ci.yml's engine matrix entry runs this same package without either toolchain
+// (its Setup Rust step is gated to matrix.package.name == 'internal'), and so
+// does every developer running `go test` locally. There, a missing cargo is
+// nobody asking for Rust, and skipping is correct. In the job that installs
+// Rust, a missing cargo means the install silently failed -- and skipping
+// there would retire the language's entire e2e coverage while the job stayed
+// green.
+//
+// Deliberately not a check on $GITHUB_WORKFLOW: that matches the workflow's
+// human-facing display name, so renaming a workflow -- a cosmetic edit nobody
+// would expect to change test behaviour -- would silently return every test
+// here to skipping. That is precisely how DURABLE_TEST_DB was renamed with
+// nothing noticing (IMPROVEMENT-PLAN.md 2.9).
+const requireToolchainEnv = "CLEAT_REQUIRE_TOOLCHAINS"
+
+// toolchainRequired reports whether the current job declared that it provides
+// the named toolchain, making its absence a failure rather than a skip.
+func toolchainRequired(name string) bool {
+	for _, want := range strings.Split(os.Getenv(requireToolchainEnv), ",") {
+		if strings.TrimSpace(want) == name {
+			return true
+		}
+	}
+	return false
+}
+
 // buildRustWasm compiles the Rust workflow crate to WASM and returns the path.
 func buildRustWasm(t *testing.T) string {
 	t.Helper()
 
 	cargo, err := exec.LookPath("cargo")
 	if err != nil {
-		t.Skip("cargo not installed — skipping Rust WASM integration test")
+		if toolchainRequired("rust") {
+			t.Fatalf("cargo not installed, but %s declares rust, so this job installs Rust + wasm32-wasip1 and treats it as first-class -- the toolchain setup step must have failed silently: %v", requireToolchainEnv, err)
+		}
+		t.Skip("cargo not installed — skipping Rust WASM integration test (only e2e-cross-language.yml provisions Rust for this test)")
 	}
 
 	// Check if wasm32-wasip1 target is available.
 	if out, err := exec.Command("rustup", "target", "list", "--installed").Output(); err != nil || !strings.Contains(string(out), "wasm32-wasip1") {
-		t.Skip("wasm32-wasip1 Rust target not installed — skipping Rust WASM integration test")
+		if toolchainRequired("rust") {
+			t.Fatalf("wasm32-wasip1 Rust target not installed, but %s declares rust and the job explicitly requests that target -- its setup step must have failed silently", requireToolchainEnv)
+		}
+		t.Skip("wasm32-wasip1 Rust target not installed — skipping Rust WASM integration test (only e2e-cross-language.yml provisions this target)")
 	}
 
 	projectRoot := findProjectRoot(t)

@@ -22,76 +22,28 @@ package engine
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-// requireBackendReachable turns "explicitly configured but unreachable" into
-// a hard test failure instead of the silent skip that testutil.TestDB's
-// Postgres path currently produces.
+// requireBackendReachable used to live here: a local "explicitly configured
+// but unreachable must Fatal, not skip" preflight for backend.Setup, added
+// in f9bce35 because testutil.TestDB's Postgres path unconditionally
+// t.Skipf'd on a ping failure even when CLEAT_TEST_POSTGRES/CLEAT_TEST_DB
+// was set. That gap was closed centrally in c26c332: TestDB (and
+// MySQLTestDB/MSSQLTestDB, which already did this) now Fatal on a
+// configured-but-unreachable database for every dialect. All three call
+// sites below (registeredBackends' Setup, PostgresBackend.Setup directly,
+// MySQLBackend.Setup directly) route through that shared path, so the local
+// copy was pure duplication and was removed. See
+// engine/testutil/schema.go's TestDB doc comment for the current behavior,
+// and schema_bootstrap_test.go's bootstrapScratchDB for the one caller in
+// this package that cannot use TestDB and needs the same discrimination
+// inlined instead.
 //
-// testutil.MySQLTestDB and testutil.MSSQLTestDB already t.Fatalf when their
-// respective env var (CLEAT_TEST_MYSQL / CLEAT_TEST_MSSQL) is set but the
-// database doesn't answer a ping -- see engine/testutil/mysql_schema.go and
-// mssql_schema.go. testutil.TestDB's Postgres path does not: it calls
-// t.Skipf on a ping failure unconditionally, regardless of whether the DSN
-// came from an explicit CLEAT_TEST_POSTGRES/CLEAT_TEST_DB or its hardcoded
-// localhost fallback (engine/testutil/schema.go). That means a Postgres
-// container that stops between runs -- exactly what happened during this
-// investigation -- produces a quiet "ok" instead of a failure, because every
-// subtest that depends on it just skips.
-//
-// This preflights the same env vars backend.Setup ultimately consults and
-// fails loudly, before backend.Setup gets a chance to swallow the same
-// problem as a skip. It is a no-op (defers entirely to backend.Setup's own
-// skip-if-unconfigured behavior) when the relevant env var isn't set at all.
-func requireBackendReachable(t *testing.T, backendName string) {
-	t.Helper()
-
-	var envVars []string
-	var driverName string
-	switch backendName {
-	case "postgres":
-		envVars = []string{"CLEAT_TEST_POSTGRES", "CLEAT_TEST_DB"}
-		driverName = "postgres"
-	case "mysql":
-		envVars = []string{"CLEAT_TEST_MYSQL"}
-		driverName = "mysql"
-	case "mssql":
-		envVars = []string{"CLEAT_TEST_MSSQL"}
-		driverName = "sqlserver"
-	default:
-		return
-	}
-
-	var envVar, dsn string
-	for _, e := range envVars {
-		if v := os.Getenv(e); v != "" {
-			envVar, dsn = e, v
-			break
-		}
-	}
-	if dsn == "" {
-		// Not explicitly configured -- an absent database is legitimately a
-		// skip, not a failure.
-		return
-	}
-
-	db, err := sql.Open(driverName, dsn)
-	if err != nil {
-		t.Fatalf("%s is set to %q but sql.Open failed: %v -- an explicitly configured but broken test database must FAIL, not skip", envVar, dsn, err)
-	}
-	defer db.Close()
-	if err := db.PingContext(context.Background()); err != nil {
-		t.Fatalf("%s is set to %q but the database is unreachable: %v -- an explicitly configured but unreachable test database must FAIL, not skip", envVar, dsn, err)
-	}
-}
-
 // zombieWriterScenario is the set of IDs and fence values produced by
 // buildZombieWriterScenario, shared by TestFinalizeWorkflowSegment_ZombieWriterFence
 // (which exercises the Go wrapper, store.FinalizeWorkflowSegment) and
@@ -202,7 +154,6 @@ func TestFinalizeWorkflowSegment_ZombieWriterFence(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			requireBackendReachable(t, backend.Name())
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -285,8 +236,6 @@ func TestFinalizeWorkflowSegment_ZombieWriterFence(t *testing.T) {
 // here can only be caught by the stored procedure's own IF, because there is
 // no Go-level safety net to fall back on.
 func TestFinalizeWorkflowStatus_SQLFenceGuard(t *testing.T) {
-	requireBackendReachable(t, "postgres")
-
 	backend := &PostgresBackend{}
 	store, teardown := backend.Setup(t)
 	defer teardown()
@@ -386,8 +335,6 @@ func TestFinalizeWorkflowStatus_SQLFenceGuard(t *testing.T) {
 // enclosing transaction, ordinary MySQL autocommit) so the SQL guard is what
 // is actually under test, with no Go-level rollback to fall back on.
 func TestFinalizeWorkflowStatus_SQLFenceGuard_MySQL(t *testing.T) {
-	requireBackendReachable(t, "mysql")
-
 	backend := &MySQLBackend{}
 	if !backend.Enabled() {
 		t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")

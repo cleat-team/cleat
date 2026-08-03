@@ -4,10 +4,10 @@
 // featureflags_behavioral_test.go and are kept in a separate file to keep
 // them distinct.
 //
-// When a backend lacks dialect-specific migration SQL (e.g. UpMySQL or
-// UpMSSQL is empty), the test skips with a descriptive message rather than
-// failing. Currently the featureflags plugin only has a PostgreSQL migration,
-// so only the postgres backend exercises real queries.
+// migrations.go provides full UpMySQL and UpMSSQL DDL alongside the
+// PostgreSQL Up field, so every backend testutil.NewPluginTestBackends
+// returns exercises real queries -- there is no dialect this suite still
+// needs to skip.
 package featureflags
 
 import (
@@ -46,16 +46,6 @@ func TestFFBehavioral_MultiBackend(t *testing.T) {
 
 			p := &Plugin{}
 			ctx := context.Background()
-
-			// Check whether this dialect has migration SQL. The featureflags
-			// plugin currently only provides a PostgreSQL migration (the Up
-			// field). For MySQL and MSSQL the plugin has no dialect-specific
-			// DDL, so RunMigrations skips it and the table is never created.
-			if be.Dialect == testutil.DialectMySQL || be.Dialect == testutil.DialectMSSQL {
-				if !ffHasDialectMigrations(p, be.Dialect) {
-					t.Skipf("featureflags plugin does not have %s migrations yet", be.Name)
-				}
-			}
 
 			// Run plugin migrations to create the feature_flags table.
 			pluginDialect := plugin.Dialect(string(be.Dialect))
@@ -137,28 +127,6 @@ func cleanupFeatureFlags(t *testing.T, p *Plugin) {
 		// cleanup that did not happen silently invalidates them.
 		t.Fatalf("cleanup: clearing feature_flags for tenant %s failed: %v", testBackendTenantID, err)
 	}
-}
-
-// ffHasDialectMigrations returns true if the plugin has at least one
-// migration with dialect-specific DDL (UpMySQL or UpMSSQL) for the given
-// dialect. For PostgreSQL we always return true since the Up field is the
-// default and is always populated.
-func ffHasDialectMigrations(p *Plugin, dialect testutil.Dialect) bool {
-	for _, m := range p.Migrations() {
-		var ddl string
-		switch dialect {
-		case testutil.DialectMySQL:
-			ddl = m.UpMySQL
-		case testutil.DialectMSSQL:
-			ddl = m.UpMSSQL
-		default:
-			return true // PostgreSQL always has the Up field
-		}
-		if ddl != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // beRequest creates an HTTP request with the test tenant ID injected directly
