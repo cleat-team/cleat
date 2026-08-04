@@ -170,10 +170,15 @@ than prove a policy exists — and §2.20 gives it a concrete first target.
 
 ### Standing constraints, carried forward
 
-- **`docker-compose.cluster.yml` is only ever exercised in CI.** colima cannot share this
-  repo's path (`/Users/Shared/localssd/...`), so compose changes cannot be tested locally.
-  Verify scripts inside a container, expect a CI round trip for mount wiring, and remember
-  it has already broken once that way.
+- **~~`docker-compose.cluster.yml` is only ever exercised in CI.~~ Lifted 2026-08-04.**
+  The constraint was real but its cause was colima, not the path: colima mounts only
+  `$HOME`, and `/Users/Shared/localssd` sits outside it. Docker Desktop shares all of
+  `/Users` and bind-mounts the repo fine (verified by reading `go.mod` and
+  `IMPROVEMENT-PLAN.md` from inside a container). Compose — and `kind`, and therefore the
+  2.2–2.7 boot tests — can now run locally.
+  Two things carried over from when it did hold: it has already broken once through mount
+  wiring, so verify scripts inside a container; and colima forwards host ports 5432–5434,
+  which collide with the cluster's PostgreSQL if both are up.
 - **Two DSNs now.** `--db` is the unprivileged `cleat_app`; `--migrate-db` is the owner.
   A worker that cannot run DDL is behaving correctly.
 - **PR #208 is closed, unmerged** (2026-08-03). Its headline fix was already on `develop`
