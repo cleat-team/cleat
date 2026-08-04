@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -10,6 +11,12 @@ import (
 	"strings"
 	"testing"
 )
+
+// schemaApplyLockKey is the advisory-lock key that serialises concurrent
+// applications of 001_schema.sql against one database. Any fixed int64 works
+// as long as every caller uses the same one; this is "cleatddl" in ASCII,
+// chosen to be recognisable in pg_locks when diagnosing a stuck test.
+const schemaApplyLockKey int64 = 0x636c65617464646c
 
 // execIgnoreDupKey executes a SQL statement, ignoring MySQL error 1061
 // (Duplicate key name) and 1060 (Duplicate column name). Other errors are
@@ -71,12 +78,35 @@ func postgresSchemaFile() string {
 }
 
 // applyPostgresSchemaFile reads and executes postgresSchemaFile() against db.
-// All statements in it are idempotent (CREATE ... IF NOT EXISTS, CREATE OR
-// REPLACE, DROP POLICY IF EXISTS ... CREATE POLICY), so it is safe to call
-// more than once against the same database, and lib/pq's simple query
-// protocol accepts the whole multi-statement file as a single db.Exec (as
-// applyPostgresProcedures in store_backends_procedures_test.go already
-// relies on for 003/004).
+// lib/pq's simple query protocol accepts the whole multi-statement file as a
+// single Exec (as applyPostgresProcedures in store_backends_procedures_test.go
+// already relies on for 003/004).
+//
+// The statements are idempotent (CREATE ... IF NOT EXISTS, CREATE OR REPLACE,
+// DROP POLICY IF EXISTS ... CREATE POLICY), so this is safe to call more than
+// once against the same database **sequentially**. It is NOT safe to call
+// concurrently, and an earlier version of this comment claimed otherwise --
+// which is why the resulting flake read as mysterious rather than obvious
+// (IMPROVEMENT-PLAN §2.21). PostgreSQL's IF NOT EXISTS forms are not atomic:
+// two sessions both observe the object missing, both insert the catalog row,
+// and one loses on a unique index. Observed as
+//
+//	pq: duplicate key value violates unique constraint
+//	"pg_extension_name_index" (23505)
+//
+// from CREATE EXTENSION IF NOT EXISTS pgcrypto, though CREATE TABLE IF NOT
+// EXISTS carries the same hazard.
+//
+// Concurrency here is the norm, not the exception: `go test ./plugins/...`
+// runs distinct packages in parallel (-p defaults to NumCPU) and they all
+// point at the same CLEAT_TEST_POSTGRES database. So the apply is serialised
+// with a session-level advisory lock.
+//
+// The lock is taken on a single pinned *sql.Conn rather than on db. Advisory
+// locks belong to a session, and database/sql hands out arbitrary pooled
+// connections per call -- so locking via db could take the lock on one
+// connection and try to release it on another, which silently fails to
+// unlock and leaks the lock for the life of that connection.
 //
 // Must be called with a connection that owns (or can create) the schema --
 // migrations/postgres/001_schema.sql creates the `admin` and `cleat`
@@ -93,7 +123,27 @@ func applyPostgresSchemaFile(t *testing.T, db *sql.DB) {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	if _, err := db.Exec(string(data)); err != nil {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("apply %s: acquire connection: %v", path, err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaApplyLockKey); err != nil {
+		t.Fatalf("apply %s: acquire advisory lock: %v", path, err)
+	}
+	defer func() {
+		// Release explicitly. conn.Close() only returns the connection to the
+		// pool; the session lives on and would keep holding the lock.
+		if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, schemaApplyLockKey); err != nil {
+			t.Errorf("apply %s: release advisory lock: %v", path, err)
+		}
+	}()
+
+	// No-args Exec keeps lib/pq on the simple query protocol, which is what
+	// allows the whole multi-statement file to go in one round trip.
+	if _, err := conn.ExecContext(ctx, string(data)); err != nil {
 		t.Fatalf("apply %s: %v", path, err)
 	}
 }
