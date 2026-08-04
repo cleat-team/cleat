@@ -3677,6 +3677,28 @@ test was failing because it forced a routing the product had already rejected; a
 had been rejected for a reason that was itself only half-diagnosed until the abort fix moved
 the error. Four layers, each concealing the next.
 
+#### Decision: Python stays on wazero — ✅ **SETTLED 2026-08-04**
+
+Not an open item. The point of the work above was to find out *why* Python was on the fallback
+runtime, and that is now known to the instance: it stops at `undefined element: out of bounds
+table access` instantiating an inner core module, eleven instances past where the `env::abort`
+defect used to mask it.
+
+**wazero runs Python correctly**, so there is no user-visible cost. Four of five languages run
+on wasmtime — `go`, `assemblyscript`, `java`, `rust` — and the fifth runs on a supported
+backend for a reason anyone can read, rather than because of a stale note nobody had rechecked.
+
+Two candidates remain for whoever wants to revisit, and neither is urgent:
+
+- The `undefined element` retry in `backend_wasmtime.go` ("adapter-provided tables conflicting
+  with our placeholders") is keyed on this exact error and does not rescue this case.
+- The native component path in `engine/component_cgo.go`, behind the `wasmtime_component_cgo`
+  build tag that no build sets, needs `CGO_CFLAGS` pointing at wasmtime-go's vendored headers
+  and a `componentGetFunc` that can resolve exports nested inside an interface instance.
+
+Adding `"python"` to `engine.WasmtimeLanguages` is the whole of the switch when one of those
+lands; `engine/python_wasm_e2e_test.go` reads that list, so it moves over with no edit.
+
 ---
 
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by
