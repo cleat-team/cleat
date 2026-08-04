@@ -868,6 +868,15 @@ jobs:
             fi
           done
 
+      # IMPROVEMENT-PLAN 2.5, and the end-to-end regression test for 2.28.
+      # Runs before the integration tests because it is the only step in this
+      # job that puts real work through the running containers -- everything
+      # else proves the cluster comes up, not that it executes anything. It
+      # talks to the cluster's own database (the default in the test), not the
+      # cleat_tests database the step below uses.
+      - name: Resource exhaustion — runaway workflow is terminated
+        run: go test -count=1 -timeout=300s ./tests/exhaustion/...
+
       - name: Run integration tests
         shell: bash
         run: |

@@ -701,7 +701,7 @@ This is the part that prevents recurrence, and the highest-value work in the pla
 | 2.2 | **Two-worker race.** Real Postgres. Claim, stall worker A (SIGSTOP), let the reaper fire, let B claim, resume A. Assert event history intact, no duplicate side effects, no stale parent result. | 1.1, 1.2, 1.6 |
 | 2.3 | **Cancellation e2e.** Start a long workflow, `RequestCancellation`, assert it actually stops within N seconds. | 1.3 |
 | 2.4 | **Crash recovery.** SIGKILL the worker mid-`DurableCall`, restart, assert the documented semantics (exactly-once vs at-least-once — pick one and assert *that*). | 1.4 |
-| 2.5 | **Resource exhaustion.** Deploy an infinite-loop workflow. Assert the worker survives and the workflow is terminated. Run per backend. | 1.5 |
+| 2.5 | **Resource exhaustion.** ✅ **Done** — `tests/exhaustion`, wired into the cluster job. See §2.29. Per-backend coverage is still wasmtime-only, matching what deployments run. | 1.5 |
 | 2.6 | **Tenant isolation.** Two tenants; assert A cannot read, list, cancel, or admin-act on B's workflows through the HTTP API. Run against all three backends. | 1.7 |
 | 2.7 | **Deploy manifests.** Flag contract ✅ **done**, see §2.27. Actually *starting* them and asserting the worker reaches ready still needs a cluster — open. | `--namespace`/`--tenant-id` crash-loop — confirmed in `k8s/` and `charts/cleat/`, **not** in `docker-compose.cluster.yml` |
 | 2.8 | **Dead-code detector.** ✅ **Done** — `scripts/check-test-only-code.sh`. See below; it was indeed the highest-signal cheap check. | 1.4 class — the single highest-signal cheap check |
@@ -1904,6 +1904,53 @@ wazero is retained for still execute on wazero, where the fence still does not f
 narrower than before — Go is the common case and is now bounded — but it is not zero, and the
 parked test above stays parked for exactly this reason. Closing it needs route 1 after all,
 for those guests only.
+
+---
+
+### 2.29 Resource exhaustion, end to end against the shipped image — ✅ **DONE**
+
+Phase 2 row 2.5, and the test that closes the loop on §2.28. #237 was merged on the strength
+of a log line and a `--verify-backend` exit code; neither shows that a runaway workflow is
+actually *killed* in a container.
+
+**Observed against the running cluster:**
+
+```
+execution time limit exceeded (29.999847291s wall-clock budget; configure with --wasm-instance-timeout)
+    0: 0x1b7d4f - <unknown>!main.Spin
+Caused by:
+    wasm trap: interrupt          <- epoch interruption
+```
+
+The worker held `restarts=0` and `/healthz 200` throughout, and completed an ordinary
+workflow immediately afterwards. That second part is the half a fence test usually forgets:
+terminating a runaway workflow by wedging or crashing the worker would satisfy every other
+assertion.
+
+**Verified non-vacuous against the real defect,** by rebuilding the pre-#237 image
+(`git show ff7e759^:Dockerfile`), pointing worker-1 at it, and re-running. The worker logged
+`wasmtime backend unavailable, using legacy wazero` and the test failed with:
+
+> workflow spin-runaway-… was still "running" after 1m30s — a runaway workflow was not
+> terminated, so it is holding a worker's concurrency slot indefinitely
+
+Not a stubbed backend or a deleted line: the actual image that shipped until today.
+
+**Where it lives, and why not `tests/cluster`.** That suite is run by *nothing at all*
+(`UNWIRED_SUITES` in `scripts/check-ci-package-coverage.sh`), so a test added there would
+never execute. `tests/exhaustion` is its own package, wired into ci.yml's cluster job — which
+already builds the image and brings the cluster up, and until now put no work through it. Its
+existing steps prove the cluster *comes up*; this is the first that proves it *runs
+anything*.
+
+Two things this cost, worth knowing before extending it:
+
+- It needs `__entry_point` in the instance input. The definition's `entry_points` array does
+  not resolve it, and without it the workflow fails instantly with "cannot determine entry
+  point" — which resembles a fence firing closely enough to fool a looser assertion. The test
+  asserts on the limit message and on elapsed time for that reason.
+- The existing `tests/cluster` fixtures insert mock WASM (`"mock-wasm-v1"`), so nothing in the
+  repo had run real WASM through a worker container before this.
 
 ---
 
