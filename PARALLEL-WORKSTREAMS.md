@@ -158,11 +158,17 @@ Two known potholes, neither introduced by this setup:
 **Sandbox:** `/localssd/rcownie/cleat`   **Migrations:** `006–009`   **Postgres:** `5432`
 **MySQL:** `3306` (`cleat-ws1-mysql`)   **SQL Server:** `1433` (`cleat-ws1-mssql`)
 
-SQL Server needs a Rosetta colima profile — the default profile has `rosetta: false` and
-`sqlservr` aborts under QEMU on arm64. Create a separate profile rather than restarting
-`default`, which would stop every other stream's database:
-`colima start --profile cleat-ws1 --vm-type vz --vz-rosetta --cpu 2 --memory 4 --disk 20`.
-Run `docker context use colima` afterwards; `colima start --profile` switches it globally.
+All three databases run locally — this is not a constraint on any item. `go test ./engine/`
+is green against all three (~43s with all three DSNs set, ~21s with Postgres alone; check
+that delta, because an unset DSN skips its dialect silently).
+
+One gotcha, and it is about `docker context`, not about SQL Server: bare `docker` resolves to
+the **default colima profile**, which has `rosetta: false`, and amd64 images such as
+`mcr.microsoft.com/mssql/server` abort there under QEMU. Rosetta is available — the
+`cleat-ws1` and `cleat-ws3` colima profiles both have it, and Docker Desktop is running. Run
+amd64 images on one of those contexts. Containers on a non-active profile do not show up in
+`docker ps`, but their ports still forward to the host, so the DSNs work either way; reach
+the container itself with `docker --context colima-cleat-ws1 exec …`.
 
 One theme: the engine fences a write, ignores whether the fence held, and then performs the
 side effect anyway. Every item is a variation on an unchecked `RowsAffected`.
