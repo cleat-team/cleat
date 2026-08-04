@@ -260,6 +260,14 @@ jobs:
           # binary they start.
           - name: manifests
             path: ./tests/manifests/...
+          # integrity needs exactly what this job already provides: a
+          # PostgreSQL service (CLEAT_TEST_DB, above) and CGO for the wasmtime
+          # backend, which -race turns on anyway. It is where replay
+          # determinism, checksum-chain verification, WAL corruption detection
+          # and the durable-call ambiguity detector are tested -- 68 tests that
+          # no job had ever run. Its budget is 0: everything in it runs here.
+          - name: integrity
+            path: ./tests/integrity/...
     steps:
       - uses: actions/checkout@v4
 

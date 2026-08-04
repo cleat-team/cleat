@@ -64,9 +64,18 @@ func TestWalCorruption_ChecksumTampering(t *testing.T) {
 	}
 }
 
-// TestWalCorruption_PayloadTampering inserts events, tampers with the operation
-// column, then verifies that VerifyWorkflowEvents detects the mismatch
-// (since the stored checksum no longer matches the recomputed checksum).
+// TestWalCorruption_PayloadTampering inserts an event, rewrites its persisted
+// payload, and verifies that VerifyWorkflowEvents detects the mismatch.
+//
+// It tampers with the `payload` column, not the `operation` column it used to
+// use. LoadEventHistory scans the individual columns first and then, if
+// `payload` is non-NULL, overwrites them from it (engine/store_events.go) -- so
+// `payload` is the authoritative copy, it is what the checksum is computed
+// over, and it is what replay reads. Rewriting `operation` alone changes
+// nothing the checksum covers, so the original assertion could never have
+// passed. See IMPROVEMENT-PLAN 2.31 for the gap that leaves behind: the
+// duplicated columns are what every SQL consumer reads, and nothing detects a
+// change to them.
 func TestWalCorruption_PayloadTampering(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
@@ -90,10 +99,12 @@ func TestWalCorruption_PayloadTampering(t *testing.T) {
 		t.Fatalf("expected no error before tampering, got: %v", err)
 	}
 
-	// Tamper with the operation column (used in checksum computation).
-	_, err := db.Exec(`UPDATE event_history SET operation = 'tampered-op' WHERE workflow_id = $1 AND step = 0`, runID)
+	// Tamper with the payload, which is what the checksum covers.
+	_, err := db.Exec(`UPDATE event_history
+		SET payload = jsonb_set(payload::jsonb, '{operation}', '"tampered-op"')
+		WHERE workflow_id = $1 AND step = 0`, runID)
 	if err != nil {
-		t.Fatalf("tamper operation: %v", err)
+		t.Fatalf("tamper payload: %v", err)
 	}
 
 	// Verify that VerifyWorkflowEvents detects the mismatch.
@@ -104,6 +115,24 @@ func TestWalCorruption_PayloadTampering(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Errorf("expected error message to contain 'checksum mismatch', got: %v", err)
+	}
+
+	// The shadow columns are NOT covered. Recorded as an assertion rather than
+	// a comment so that closing IMPROVEMENT-PLAN 2.31 fails here and forces
+	// this test to be updated, instead of leaving a stale claim behind.
+	runID2 := createTestWorkflow(t, db, store, ctx)
+	if err := store.AppendEventHistoryBatch(ctx, runID2, []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "original", Request: `{"data":"original"}`, Response: `{}`},
+	}); err != nil {
+		t.Fatalf("append events: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE event_history SET operation = 'tampered-op' WHERE workflow_id = $1 AND step = 0`, runID2); err != nil {
+		t.Fatalf("tamper operation column: %v", err)
+	}
+	if err := store.VerifyWorkflowEvents(ctx, runID2); err != nil {
+		t.Errorf("the operation column is not part of the checksum, so tampering "+
+			"with it should still verify clean -- if this now fails, 2.31 has been "+
+			"closed and this assertion should be inverted: %v", err)
 	}
 }
 

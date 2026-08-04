@@ -45,6 +45,13 @@ test-go/commands	4	# measured: TestAPIMetrics, TestHelperProcess, TestRunBuild_P
 # 0 and it should stay 0: this job needs nothing but a Go toolchain, so a skip
 # here can only mean the test stopped running.
 test-go/manifests	0	# measured: 3 subtests pass, 0 skip
+# 0, and it is the whole point of wiring this suite up. Every one of its 68
+# tests needs either PostgreSQL or the wasmtime backend, and this job has both
+# (CLEAT_TEST_DB, and CGO via -race). Measured on darwin against a live
+# PostgreSQL 16 with CGO_ENABLED=1: 68 pass, 0 skip. With CGO off, 7 skip on
+# "wasmtime backend requires CGO" -- so a nonzero count here means CGO got
+# turned off and the suite quietly stopped testing the primary backend.
+test-go/integrity	0	# measured: 68 pass, 0 skip
 fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # Same number as test-go/engine, and for the same reason: this job also runs
 # `go test ./engine/...`, against the cluster's own database. It was seeded at 0
