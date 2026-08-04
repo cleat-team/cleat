@@ -168,11 +168,12 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 		}
 
 		if rec.Err != "" {
-			// callFailureCode, the same constant the fresh path uses, because
-			// the class was never persisted -- see the note on it. These two
-			// must agree or the same step changes retryability on replay.
+			// The classification comes off the event now rather than being
+			// assumed, so a call the caller marked non-retryable replays as
+			// non-retryable. Events written before 2.35 carry no such key and
+			// read back false, which is the constant this used to hardcode.
 			written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
-			return packDurableCallResult(int(written), callFailureCode, 1)
+			return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
 		}
 
 		written, _ := s.writeResult(ctx, m, responsePtr, rec.Response, responseMaxLen)
@@ -278,22 +279,30 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	if exhausted {
 		errMsg = "retries exhausted: " + errMsg
 	}
+	// The loop broke early precisely because this error is not worth retrying.
+	// Reporting it as retryable told the workflow to do the one thing the
+	// engine had just decided against -- and for a non-idempotent operation a
+	// caller marks non-retryable, that is a duplicate side effect.
+	//
+	// Recording the bit is what makes fixing it legal: replay reads this event
+	// back, and if it could not recover the classification the same step would
+	// be non-retryable on the first run and retryable on the replay of it.
+	nonRetryable := !exhausted
 	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeCall,
-		Service:   service,
-		Op:        operation,
-		Request:   requestJSON,
-		Err:       errMsg,
+		Step:            s.stepCount,
+		EventType:       EventTypeCall,
+		Service:         service,
+		Op:              operation,
+		Request:         requestJSON,
+		Err:             errMsg,
+		ErrNonRetryable: nonRetryable,
 	}
 	s.recordEvent(rec)
 
-	// callFailureCode, not a distinct "retries exhausted" code, for the same
-	// reason as the plain call failure: this event is recorded, and replay
-	// re-reads it as a bare string. Fresh and replay must classify it the same
-	// way. IMPROVEMENT-PLAN 2.35.
+	// Retries exhausted stays callFailureCode: the error was retryable, the
+	// attempts simply ran out, and calling again later may well work.
 	written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-	return packDurableCallResult(int(written), callFailureCode, 1)
+	return packDurableCallResult(int(written), recordedFailureCode(nonRetryable), 1)
 }
 
 func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs int64) int64 {

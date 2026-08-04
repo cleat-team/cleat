@@ -1196,7 +1196,7 @@ guest adapter branches on `errCode != 0`, so an abandoned retry loop reached the
 **successful call with an empty response**. It now returns the context error with a nonzero
 `errCode`.
 
-### 2.35 The call error class is not persisted, so replay cannot recover it — 🔶 **OPEN**
+### 2.35 The call error class is not persisted, so replay cannot recover it — 🔶 **PARTLY FIXED**
 
 The constraint that bounds §2.15, and it is a real one rather than an excuse.
 
@@ -1218,6 +1218,63 @@ a caller that knows a 404 from a connection reset can say so, and replay will ag
 Deliberately **no mechanism was added ahead of that**. An interface nothing can call yet is
 how `engine/flush.go` accumulated 350 lines of durability code that had never run (§1.4,
 `docs/durable-call-intent-design.md`).
+
+**Update (2026-08-04): the constraint was hiding a live contradiction, and that half is
+fixed.**
+
+Re-reading the call path to scope this turned up something the section had missed. There *is*
+already a machine-readable signal a `ServiceCaller` can send — `RetryableError`
+(`engine/types.go:301`), a duck-typed `Retryable() bool` that any error may implement — and
+`isDefinitelyNonRetryable` (`engine/helpers.go:89`) already honours it. `DurableCallWithRetry`
+calls it at `durablecalls.go:249` and **breaks out of the retry loop** when it says the error
+is not worth retrying.
+
+And then reported `callFailureCode` — `callErrorUnavailable`, which `cleat.CallError.Retryable()`
+says **is** retryable.
+
+So the engine stopped retrying *because the error was non-retryable*, and then told the
+workflow the call was retryable. A workflow branching on `err.Retryable()`, which is precisely
+what the guest SDK offers, goes on to retry a call the engine has already decided against. For
+a non-idempotent operation a caller marks non-retryable, that is a duplicate side effect.
+Demonstrated before fixing:
+
+```
+engine stopped retrying because the error is non-retryable; it reported code 2, Retryable()=true
+```
+
+This could not be fixed without the persistence this section is about — that part of the
+original diagnosis was exactly right. Classifying on the fresh path alone would make the same
+step non-retryable on the first run and retryable on the replay of it.
+
+**What landed.** `EventRecord.ErrNonRetryable`, round-tripped through the `payload` JSONB
+(`error_non_retryable`, written only when true). Both paths now go through one function,
+`recordedFailureCode`, so they cannot drift.
+
+Three deliberate choices:
+
+- **A bool, not a code.** It is the only part of a classification the engine can populate
+  today, and a code field's zero value would collide with `callErrorUnknown`, which is a real
+  class. The bool's zero value is instead exactly the pre-2.35 behaviour.
+- **No migration.** `payload` is JSONB. Adding a key changes checksums only for newly written
+  events; existing rows keep their stored payload and still verify.
+- **`callErrorUnknown`, not `callErrorInvalidRequest`.** Both are non-retryable, which is the
+  bit that matters — but the engine does not know *why* the caller declined the retry, and
+  `InvalidRequest` would tell the author their request was malformed, a claim nothing supports.
+
+Backward compatibility is asserted, not assumed: `TestLegacyFailureReplaysAsRetryable` drives a
+payload with no such key and requires `callFailureCode`, because every call failure in every
+existing `event_history` was written that way and upgrading must not change the retry behaviour
+of workflows already in flight. `TestFreshAndReplayAgreeOnNonRetryableFailure` replays *the
+event the fresh run actually recorded* rather than a hand-written literal — a literal would let
+the test agree with itself while the writer and reader disagreed. Each of the three arms was
+verified by breaking it.
+
+**Still open: the full class.** No `ServiceCaller` in the repo returns anything but a bare
+`fmt.Errorf` — not the worker's `dbServiceCaller` (`cmd/cleat-worker/setup.go:134`), not any
+other. A richer taxonomy would be values nothing populates. The remaining work is at the
+`ServiceCaller` boundary, and it is now unblocked: the persistence exists, so a caller that
+knows a 404 from a connection reset can say so and replay will agree. The streaming plugin
+family (`recordStreamError`) is likewise still single-coded.
 
 ---
 

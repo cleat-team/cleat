@@ -32,20 +32,37 @@ const (
 	callErrorInvalidRequest byte = 4
 )
 
-// callFailureCode is the code reported for a call that the *service* failed,
-// as opposed to a failure the engine itself produced.
-//
-// It is a constant rather than a classification of the error, and that is a
-// deliberate constraint rather than laziness. A recorded call failure comes
-// back from the event history as a bare string (EventRecord.Err), so replay
-// cannot recover any class the fresh path might have derived. Deriving one on
-// the fresh path and not on replay would make the same step retryable on the
-// first run and non-retryable on the replay of it -- a determinism bug in the
-// engine, introduced in the name of better error reporting.
-//
-// Classifying at the ServiceCaller boundary therefore requires persisting the
-// code alongside the event first. That is IMPROVEMENT-PLAN 2.35, and no
-// mechanism for it is added here: an interface nothing can call yet is how
-// engine/flush.go accumulated 350 lines of durability code that had never run
-// (see docs/durable-call-intent-design.md).
+// callFailureCode is the code reported for a call that the *service* failed
+// and that is worth trying again, as opposed to a failure the engine itself
+// produced.
 const callFailureCode = callErrorUnavailable
+
+// recordedFailureCode maps a recorded call failure to the code the guest sees.
+//
+// Both the fresh path and the replay path must go through this function. A
+// recorded failure is replayed from the event history, so if the two derived
+// the classification differently the same step would be retryable on the first
+// run and non-retryable on the replay of it -- a determinism bug in the engine,
+// introduced in the name of better error reporting. Routing both through one
+// function is what keeps that from being a convention two call sites have to
+// remember; TestFreshAndReplayAgreeOnNonRetryableFailure asserts it end to end,
+// replaying the event the fresh run actually recorded.
+//
+// callErrorUnknown, not callErrorInvalidRequest, for the non-retryable case.
+// Both are non-retryable, which is the bit that matters, but the engine does
+// not know *why* the caller declined the retry -- ServiceCaller returns a bare
+// error and the only machine-readable signal is RetryableError's single bool.
+// Reporting InvalidRequest would tell the workflow author their request was
+// malformed, which is a claim nothing here supports.
+//
+// This is the narrow half of IMPROVEMENT-PLAN 2.35. The full error class still
+// has nowhere to come from: no ServiceCaller in the repo returns anything but a
+// bare fmt.Errorf, so a richer taxonomy would be values nothing populates --
+// which is how engine/flush.go accumulated 350 lines of durability code that
+// had never run (docs/durable-call-intent-design.md).
+func recordedFailureCode(nonRetryable bool) byte {
+	if nonRetryable {
+		return callErrorUnknown
+	}
+	return callFailureCode
+}

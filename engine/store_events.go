@@ -158,6 +158,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.Err != "" {
 			payload["error"] = rec.Err
 		}
+		// Only when true, so an ordinary retryable failure produces byte-identical
+		// payload to what it always did. See EventRecord.ErrNonRetryable.
+		if rec.ErrNonRetryable {
+			payload["error_non_retryable"] = true
+		}
 		if rec.DurationMs > 0 {
 			payload["duration_ms"] = rec.DurationMs
 		}
@@ -439,6 +444,11 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["error"].(string); ok {
 			rec.Err = v
+		}
+		// Absent on every event written before 2.35, which is exactly right:
+		// those replay as retryable, the behaviour they were recorded under.
+		if v, ok := m["error_non_retryable"].(bool); ok {
+			rec.ErrNonRetryable = v
 		}
 		if v, ok := m["duration_ms"].(float64); ok {
 			rec.DurationMs = int64(v)
