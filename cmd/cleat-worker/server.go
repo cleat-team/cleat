@@ -386,8 +386,35 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		if !acquired {
-			// Key already held by another workflow — fail the new run and return conflict.
-			s.store.FailWorkflow(context.Background(), runID, "", 0, "concurrency key conflict: "+concurrencyKey, "", "", nil)
+			// Key already held by another workflow — reject the new run and
+			// return conflict.
+			//
+			// This must not use FailWorkflow. That is the owning worker's
+			// terminal write, fenced on `assigned_to = $2 AND generation = $7`,
+			// and the run StartNewRun just inserted is 'ready' with
+			// assigned_to NULL — so the UPDATE matched zero rows for any
+			// arguments this caller could pass, returned ErrFenceLost, and
+			// the error was discarded. The client got a 409 saying the run
+			// was rejected while the run stayed claimable, and the next
+			// worker to poll executed it. The HTTP layer is the only
+			// enforcement point for Cleat-Concurrency-Key; ClaimWorkflows
+			// does not consult concurrency_keys. See
+			// engine/fence_lost_callers_test.go.
+			//
+			// TerminateWorkflow is the unowned-writer primitive: it matches
+			// on id alone and bumps generation, so it also wins the race
+			// against a worker that claimed the run in the window since
+			// StartNewRun — that worker's own fenced write then returns
+			// ErrFenceLost and it stops.
+			if err := s.store.TerminateWorkflow(context.Background(), runID, "concurrency key conflict: "+concurrencyKey); err != nil {
+				// The run is live and will execute despite the 409 below.
+				// Report it rather than letting the client believe the key
+				// was enforced.
+				slog.ErrorContext(r.Context(), "concurrency key conflict: could not reject the losing run, it remains runnable",
+					"run_id", runID, "concurrency_key", concurrencyKey, "error", err)
+				s.writeError(w, 500, "workflow already running with key "+concurrencyKey+", and the losing run could not be rejected: "+err.Error())
+				return
+			}
 			s.writeError(w, 409, "workflow already running with key "+concurrencyKey)
 			return
 		}
