@@ -47,6 +47,7 @@ type mockStore struct {
 	completeWorkflowFn                 func(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
 	failWorkflowFn                     func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 	releaseWorkflowFn                  func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
+	moveToDeadLetterQueueFn            func(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error
 	requestCancellationFn              func(ctx context.Context, workflowID, reason string) error
 	checkCancellationFn                func(ctx context.Context, workflowID string) (bool, string, error)
 	deliverSignalFn                    func(ctx context.Context, workflowID, signalName, payload string) error
@@ -3102,6 +3103,9 @@ func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID st
 }
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+	if m.moveToDeadLetterQueueFn != nil {
+		return m.moveToDeadLetterQueueFn(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp)
+	}
 	return nil
 }
 func (m *mockStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }

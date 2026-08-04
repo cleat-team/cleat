@@ -456,13 +456,33 @@ completion write that was previously skipped. **Numbers from before this fix are
 comparable to numbers after it**, and any published figure taken from this tool before
 2026-08-04 was measuring an incomplete path.
 
-**Also open — ~15 fire-and-forget sites in `cmd/cleat-worker/setup.go`** (`FailWorkflow`,
-`MoveToDeadLetterQueue`) that pass correct fence arguments and discard the return. These are
-not data-loss: the store skips the write correctly. The cost is observability — a lost fence
-is invisible, and `RecordWorkflowFailed` is emitted at `setup.go:1657` *before* the store
-call, so a workflow another worker goes on to complete is still counted as failed. The two
-sites that do handle `ErrFenceLost` (`setup.go:1696`, `1729`) set the precedent: debug-log
-and return.
+**The 16 fire-and-forget sites in `cmd/cleat-worker/setup.go` — fixed.** `FailWorkflow`,
+`MoveToDeadLetterQueue` and `ReleaseWorkflow` passed correct fence arguments and discarded
+the return. Not data loss: the store skips the write correctly. Two things were wrong anyway.
+
+A lost fence was **invisible** — nothing logged it, so a worker losing every race looked
+identical to one doing its job. And `RecordWorkflowFailed` was emitted *before* the store
+call, so a workflow another worker went on to complete successfully was still counted as
+failed: **the failure counter disagreed with the database, and the disagreement grew with
+exactly the thing that causes lost fences** — workers stalling and being reaped.
+
+Folded into `recordTerminalFailure` / `writeTerminalFailure` / `releaseWorkflow`, which log
+the lost fence at debug and record the metrics only when the write applied. The precedent is
+the two sites that already handled `ErrFenceLost` (the `ContinueAsNew` and
+`FinalizeWorkflowSegment` paths): debug-log and return, having done nothing.
+
+`releaseOrFail` deliberately does *not* route through `recordTerminalFailure`: it never
+recorded the failed/duration pair and has no start time to report a duration from. It keeps
+its dead-letter counter, now conditional on the write applying.
+
+- Tests: `cmd/cleat-worker/terminal_failure_test.go`, asserting on the published
+  `cleat_workflows_failed_total` rather than an internal counter — what an operator sees. It
+  fails against the old ordering with
+  `cleat_workflows_failed_total{…,workflow_name="fence-lost-wf"} 2`. Includes a positive
+  control (a write that applied *is* counted, so the first test cannot pass by recording
+  nothing at all), an assertion that the write receives `(w.id, wf.Generation)` rather than
+  `("", 0)` — the §263 defect, which nothing else would catch — and the dead-letter routing
+  that used to live inline at each site.
 
 ### 1.3 Cancellation is dead end-to-end (~1 session)
 
