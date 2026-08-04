@@ -388,6 +388,65 @@ completion.
 - Fix: check `RowsAffected()`, return a typed `ErrFenceLost`, and make callers in
   `cmd/cleat-worker/setup.go` handle it rather than fire-and-forget.
 
+**Store half done. Caller half: one live bug found and fixed, one still open.**
+
+All twelve store sites (the four methods above × three dialects) now inspect `RowsAffected`
+and return `ErrFenceLost` before any post-commit cleanup. That much was already true when
+this section was written.
+
+The caller half turned out to contain a defect of a different shape than the one described
+above, and a worse one. The concern here was a caller that *ignores a fence it genuinely
+lost*. What was actually in the tree was a caller passing fence arguments that **cannot match
+any row**, so its write was always skipped — with the error discarded, that is a write that
+never happens and never reports:
+
+```go
+// cmd/cleat-worker/server.go, concurrency-key conflict path
+s.store.FailWorkflow(context.Background(), runID, "", 0, "concurrency key conflict: "+key, "", "", nil)
+s.writeError(w, 409, "workflow already running with key "+concurrencyKey)
+```
+
+`FailWorkflow` is the *owning worker's* terminal write, fenced on
+`assigned_to = $2 AND generation = $7`. The run was inserted by `StartNewRun` moments earlier
+as `'ready'` with `assigned_to` NULL, and `NULL = ''` is NULL rather than true — so no
+`(workerID, generation)` this caller could pass will ever match. **The client is told 409
+"workflow already running with key X" and the run executes anyway.** The HTTP layer is the
+only enforcement point for `Cleat-Concurrency-Key`; `ClaimWorkflows` does not consult
+`concurrency_keys`. Against a real PostgreSQL:
+
+```
+run conflict-rejected-… was rejected with 409 but a worker claimed and will execute it
+(status="running" assigned_to="worker-after-conflict"); the concurrency key is not enforced
+```
+
+Fixed by rejecting with `TerminateWorkflow`, which matches on `id` alone — the existing
+unowned-writer primitive, already present in all three dialects and on `ShardedStore` — and
+by answering 5xx rather than 409 when that write fails, since a 409 whose rejection did not
+apply is the same lie the fenced no-op told.
+
+- Tests: `engine/fence_lost_callers_test.go` (real PostgreSQL: the run is claimed and
+  executed after the 409; and `FailWorkflow` on an unclaimed run returns `ErrFenceLost` and
+  leaves the row `'ready'`), `cmd/cleat-worker/concurrency_conflict_test.go` (which store
+  call the handler chooses — the half the DB tests cannot see). All four were confirmed to
+  fail with the fix removed; the store-behaviour one was confirmed against a deliberately
+  permissive fence, since it passes both before and after and would otherwise be decoration.
+
+**Still open — the same shape in `cmd/cleat-bench`:**
+`main.go:161,168,228,247,251` call `CompleteWorkflow`/`FailWorkflow` with `("", 0)` and
+discard the result with an explicit `_ =`. The benchmark never claims the runs it starts, so
+every terminal write matches zero rows: runs are left `'ready'` in the database, and the
+reported latency excludes the completion round-trip it is supposed to be measuring — a no-op
+`UPDATE` is cheaper than a real one. Not fixed here because the honest fix changes what the
+benchmark measures, and the numbers in `benchmarks/` depend on that choice.
+
+**Also open — ~15 fire-and-forget sites in `cmd/cleat-worker/setup.go`** (`FailWorkflow`,
+`MoveToDeadLetterQueue`) that pass correct fence arguments and discard the return. These are
+not data-loss: the store skips the write correctly. The cost is observability — a lost fence
+is invisible, and `RecordWorkflowFailed` is emitted at `setup.go:1657` *before* the store
+call, so a workflow another worker goes on to complete is still counted as failed. The two
+sites that do handle `ErrFenceLost` (`setup.go:1696`, `1729`) set the precedent: debug-log
+and return.
+
 ### 1.3 Cancellation is dead end-to-end (~1 session)
 
 `PollCancellation(ctx, "")` — hardcoded empty string at all three call sites. The store does
