@@ -2274,12 +2274,12 @@ runner; what it asserts is correctness under concurrency.
 | `upgrade` | ✅ wired — §2.33 |
 | `scale` | ✅ wired — §2.34 |
 | `cluster` | ✅ wired — §2.36 |
-| `cross-language` | 🔶 open — needs the Rust/Python/AssemblyScript toolchains |
+| `cross-language` | ✅ wired — §2.37 |
 | `soak` | 🔶 open, and unwired twice over: gated behind the `soak_test` build tag, so `go vet ./tests/soak/...` reports no packages at all |
 
-Across the four suites wired so far: **103 tests that no job had ever run**, of which **42
-failed** the first time a database appeared, and two of those were live defects in production
-code (§2.30, and the `docker compose` call in §2.36). None of it was visible from a green CI.
+Across all five suites: **110 tests that no job had ever run**, of which **42 failed** the
+first time real infrastructure appeared, and two of those were live defects in production code
+(§2.30, and the `docker compose` call in §2.36). None of it was visible from a green CI.
 
 **Follow-up, and it matters:** the new matrix entries create new check-run contexts
 (`Test Go (integrity) on 1.26`, `… (upgrade) …`, `… (scale) …`) that are **not** in the
@@ -2340,6 +2340,44 @@ failover, so it has to be looking at the database the cluster actually runs on. 
 `cleat_tests` every test failed with `relation "workflow_defs" does not exist`: nothing builds a
 schema there until `engine/testutil` does, and this package does not use it. The step overrides
 the variable, with the reason recorded next to it.
+
+### 2.37 `tests/cross-language` — ✅ **DONE**, and it passed as written
+
+Seven tests, and the only one of the five suites with **nothing wrong with it**. It covers the
+thing that is hardest to get right and easiest to break silently: a workflow executed under one
+language runtime and then *replayed* under another from the recorded history, in both
+directions, plus divergence detection across the boundary.
+
+`7 pass, 0 skip, 0 fail` on the first run. It had simply never been run — no workflow file
+named it.
+
+The `Cross-Language E2E` workflow already installs Rust, Python, AssemblyScript and Java, then
+runs `-run "TestRust|TestPython|TestAssemblyScript|TestJava" ./engine/...`, which never touches
+`tests/cross-language/`. Wiring it there is one step, because that job is the only one with the
+toolchain the suite needs.
+
+Skip budget `e2e-cross-language 0`, and the number is the point: without cargo all seven skip,
+so a nonzero count means the toolchain setup stopped working and the suite quietly went back to
+testing nothing — the state it was already in.
+
+**It runs but does not gate.** `Cross-Language E2E` is deliberately outside the required-check
+list (§2.25) because it pulls from external registries — the same reasoning as the Maven
+exclusion. Recorded rather than quietly accepted: a crates.io outage should not block every
+merge, and the cost is that a regression here surfaces on `develop` rather than on the PR.
+
+### What the five suites cost, and what they were worth
+
+**110 tests that no job had ever run.** 42 failed the first time real infrastructure appeared.
+Two were live defects in production code — the event checksum chain (§2.30) and the
+`docker-compose` v1 call (§2.36). The rest were fixtures that had drifted from the schema,
+`generation = 0` in five separate suites, four SQL statements that had never been executed, and
+five assertions that were `t.Log` calls printing the exact output a total failure produces.
+
+`soak` remains, and is unwired twice over: gated behind the `soak_test` build tag, so
+`go vet ./tests/soak/...` reports no packages at all. It is designed to run for hours — a
+scheduled workflow, not a PR gate.
+
+The one suite with nothing wrong with it is the one testing the hardest thing.
 
 ---
 

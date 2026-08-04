@@ -72,3 +72,8 @@ cluster	346	# same as test-go/engine, and for the same reason; see the note ther
 # the same treatment as the deadcode and test-only-code baselines. Drop it to 0
 # when the skip is removed.
 plugin-harness/multi-db	1
+# 0: the Cross-Language E2E workflow installs Rust and the wasm32-wasip1 target,
+# so every test in tests/cross-language has what it needs. Measured on darwin
+# with cargo present: 7 pass, 0 skip. Without cargo all seven skip, which is
+# what this catches.
+e2e-cross-language	0

@@ -105,7 +105,7 @@ echo "OK: all $count top-level Go package dirs are covered or exempt."
 # tracked in IMPROVEMENT-PLAN.md Phase 2. Removing a name from this list when
 # you wire its suite up must never fail the build; adding one requires saying
 # why here.
-UNWIRED_SUITES="cross-language soak"
+UNWIRED_SUITES="soak"
 
 unreferenced=""
 regressed=""
