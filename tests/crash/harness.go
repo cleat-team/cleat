@@ -40,7 +40,13 @@ const (
 	// the role NOLOGIN with no password on purpose -- a committed credential
 	// would be a defect -- so the deployment supplies one. Here, the harness is
 	// the deployment.
-	appPassword = "crash-suite-app-pw"
+	//
+	// Must match engine/flush_rls_test.go's appRolePassword exactly. Both suites
+	// connect as cleat_app, and it is one role in one database: different values
+	// mean whichever package runs second re-ALTERs the role and breaks the
+	// other's live connections. `go test ./...` runs packages in parallel, so
+	// this is the ordinary local command.
+	appPassword = "cleat-app-test-pw"
 
 	// defaultTenant is engine.DefaultTenantUUID, spelled out rather than
 	// imported so this suite does not depend on the engine package. Getting it
@@ -80,7 +86,7 @@ func appDSN(t *testing.T) string {
 	if at < 0 || scheme < 0 {
 		t.Fatalf("cannot derive the cleat_app DSN from %s: expected scheme://user:pass@host/db", redact(owner))
 	}
-	return owner[:scheme+3] + "cleat_app:" + appPassword + owner[at:]
+	return swapDatabase(owner[:scheme+3]+"cleat_app:"+appPassword+owner[at:], crashDatabase)
 }
 
 func redact(dsn string) string {
@@ -109,7 +115,7 @@ func repoRoot(t *testing.T) string {
 // pass.
 func ownerDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := ownerDSN()
+	dsn := ensureCrashDatabase(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("opening %s: %v", redact(dsn), err)
@@ -149,6 +155,73 @@ func ownerDB(t *testing.T) *sql.DB {
 		t.Fatalf("granting cleat_app a login: %v", err)
 	}
 	return db
+}
+
+// crashDatabase is the database this suite runs in, created on demand.
+const crashDatabase = "cleat_crash"
+
+// ensureCrashDatabase creates and returns a DSN for a database used only by
+// this suite.
+//
+// It cannot share one with the engine package. engine/testutil's
+// CleanupPostgresTestData issues an unqualified `DELETE FROM workflow_defs`
+// (and workflow_instances, and event_history), so an engine test running
+// concurrently deletes this suite's definition and queued workflow out from
+// under a live worker. `go test ./...` runs packages in parallel, so that is
+// the ordinary case, and the symptom is this suite timing out with "the
+// external service was never called" -- which reads like a harness bug rather
+// than a collision.
+//
+// §2.39 made the DB-backed suites concurrency-safe against each other with
+// per-suite task queues and a schema fingerprint. Neither helps here: the
+// deletes are not scoped to a task queue at all. A separate database is the
+// smallest fix that does not change a helper every other suite depends on.
+func ensureCrashDatabase(t *testing.T) string {
+	t.Helper()
+	base := ownerDSN()
+
+	admin, err := sql.Open("postgres", base)
+	if err != nil {
+		t.Fatalf("opening %s: %v", redact(base), err)
+	}
+	defer admin.Close()
+	if err := admin.Ping(); err != nil {
+		t.Fatalf("database unreachable at %s: %v -- this suite needs a PostgreSQL "+
+			"instance (WS-2's is port 5433; override with CLEAT_CRASH_DB)", redact(base), err)
+	}
+
+	var exists bool
+	if err := admin.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, crashDatabase).Scan(&exists); err != nil {
+		t.Fatalf("checking for the %s database: %v", crashDatabase, err)
+	}
+	if !exists {
+		// CREATE DATABASE cannot be parameterised. crashDatabase is a compile-time
+		// constant, so there is nothing here to inject.
+		if _, err := admin.Exec(`CREATE DATABASE ` + crashDatabase); err != nil {
+			// A concurrent run may have won the race; re-check rather than fail.
+			if err2 := admin.QueryRow(
+				`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`,
+				crashDatabase).Scan(&exists); err2 != nil || !exists {
+				t.Fatalf("creating the %s database: %v", crashDatabase, err)
+			}
+		}
+	}
+
+	return swapDatabase(base, crashDatabase)
+}
+
+// swapDatabase replaces the database component of a postgres URL.
+func swapDatabase(dsn, name string) string {
+	q := ""
+	if i := strings.Index(dsn, "?"); i >= 0 {
+		q = dsn[i:]
+		dsn = dsn[:i]
+	}
+	if i := strings.LastIndex(dsn, "/"); i >= 0 {
+		dsn = dsn[:i]
+	}
+	return dsn + "/" + name + q
 }
 
 // chargeService is the external service the fixture calls. It counts every

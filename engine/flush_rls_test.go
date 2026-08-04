@@ -16,7 +16,15 @@ import (
 // the role NOLOGIN with no password deliberately -- a committed credential would
 // be the defect that migration exists to prevent -- so the deployment supplies
 // one. Here the test is the deployment.
-const appRolePassword = "flush-rls-test-pw"
+//
+// The value is shared verbatim with tests/crash (see its appPassword). Both
+// suites need to connect as cleat_app, and cleat_app is one role in one
+// database: if they chose different passwords, whichever ran second would
+// re-ALTER the role and the other's connections would start failing
+// authentication mid-run. `go test ./...` runs packages in parallel, so that is
+// the ordinary local command, not an exotic case. Concurrent ALTERs to the same
+// value are harmless.
+const appRolePassword = "cleat-app-test-pw"
 
 // appRoleDB returns a connection as cleat_app: unprivileged, NOBYPASSRLS, and
 // therefore subject to every row-level security policy.
