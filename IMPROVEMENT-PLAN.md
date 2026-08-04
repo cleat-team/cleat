@@ -1700,16 +1700,30 @@ guest adapter branches on `errCode != 0`, so an abandoned retry loop reached the
 > including `ErrUnknown`, which is the zero value, so a `CleatError` built without a `Code` is
 > silently non-retryable.
 >
-> **The trap is `ErrTimeout`.** It reads non-retryable, while the doc comment on the constructor
-> immediately above it says:
+> ~~**The trap is `ErrTimeout`.** It reads non-retryable, while the doc comment on the
+> constructor immediately above it says `NewTransientError` creates a retryable error "(DB
+> connection, **timeout**)". So the package documents timeouts as the canonical retryable case
+> and classifies `NewTimeoutError` as non-retryable. An external caller gets the opposite of
+> the documented behaviour, silently.~~
 >
-> > `NewTransientError` creates a retryable error (DB connection, **timeout**).
+> **Wrong — retracted the same day, and kept here because it went out in a commit message
+> before I checked.** The two are different concepts, not one concept classified two ways. The
+> const block says so directly:
 >
-> So the package documents timeouts as the canonical retryable case and classifies
-> `NewTimeoutError` as non-retryable. An external caller — `engine` is a public library since
-> `3eeb74e` — that reaches for the obviously-named constructor gets the opposite of the
-> documented behaviour, silently, on a path where the cost is a call that should have been
-> retried and was not.
+> ```go
+> ErrTransient  // retryable (DB connection, timeout)
+> ErrTimeout    // execution timeout
+> ```
+>
+> `ErrTransient` covers a *network or database* timeout, which is retryable. `ErrTimeout` is
+> the *workflow execution* timeout — the run exceeded its budget — and retrying that is exactly
+> wrong. `TestCleatError_Retryable` already asserts it, deliberately, in a subtest named
+> "timeout is not retryable". The classification is correct and there is nothing to fix.
+>
+> I reached the wrong conclusion by reading the two doc comments and not the word *execution*
+> in the second. The tell I ignored was the existing test: a behaviour with a subtest asserting
+> it is a decision, and the first question is what the decision was for, not whether it looks
+> odd next to its neighbour.
 >
 > **In-repo only three of the six constructors are ever produced:** `NewPermanentError` and
 > `NewTransientError` (`cmd/cleat-worker/setup.go`, the shipped `ServiceCaller`) and
@@ -1719,11 +1733,16 @@ guest adapter branches on `errCode != 0`, so an abandoned retry loop reached the
 > packages, and says so — but it does mean the effective in-repo taxonomy is three-valued, and
 > that the three unused codes have never been exercised against a real retry decision.
 >
-> **Smallest useful fix, and it is not the schema work:** make `Retryable()` enumerate rather
-> than compare, so each of the seven has a stated answer and `ErrTimeout` gets the one its
-> neighbour's documentation promises. That is a behaviour change for any external caller
-> currently relying on `NewTimeoutError` being non-retryable, so it wants a CHANGELOG note
-> rather than a quiet edit. Persisting the full code is the larger, separate half of this entry.
+> **What actually survives**, once the retraction above is taken out: the observations are
+> right and the conclusion drawn from them was not. `Retryable()` does collapse seven values to
+> one bit; `ErrUnknown`, the zero value, does read non-retryable — which is the conservative
+> choice for a durable engine and defensible rather than defective; and three of the six
+> constructors do have no in-repo producer, which is explicitly *not* a dead-code finding.
+>
+> None of that is a new defect. It is a more precise restatement of what this entry already
+> said: **the full code has no path into history.** That remains the real residual, and it is
+> schema work — persisting `error_code` per event so replay can recover the classification
+> rather than re-deriving one bit of it. There is no cheap version hiding underneath.
 
 
 The constraint that bounds §2.15, and it is a real one rather than an excuse.
