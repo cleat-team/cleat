@@ -3364,8 +3364,26 @@ artifact no user runs, and could not have tested the claim that kept Rust out:
 That claim was structurally uncheckable by the only suite that would have checked it, because
 the suite never built a cdylib. It does not reproduce. With the suite switched to the shipped
 target, all seven of its tests pass on wasmtime — including both cross-replay directions,
-executing under one runtime and replaying the recorded history under the other — as does
-`TestPluginCalls_Wasm_Rust`.
+executing under one runtime and replaying the recorded history under the other.
+
+**Correction to a first draft of this entry:** `TestPluginCalls_Wasm_Rust` was cited as
+additional coverage. It is not, in CI. `plugin-harness-ci.yml` installs no Rust toolchain at
+all, so that test skips there and only passes locally. `tests/cross-language` is the whole of
+the gate.
+
+**And the gate needed a toolchain fix nobody had needed before.** Every workflow installs
+`wasm32-wasip1` only — five of them — while `cleat build --target rust` has always required
+`wasm32-unknown-unknown` (`build_rust.go:34`). Pointing the suite at the shipped target made
+CI fail with `error[E0463]: can't find crate for 'std'`, after passing locally on a machine
+that happened to have both targets installed. A local pass on a richer toolchain than the
+runner's is not evidence the job works, which is the same lesson the `test-go/engine` skip
+budget records from the other direction.
+
+Worth someone's attention, not fixed here: **no CI job installs the target `cleat build
+--target rust` needs**, so that build path — the one users actually invoke — is exercised
+nowhere. And `tests/plugin-harness/wasm_plugin_test.go` skips on
+`"wasmtime-go compatibility issue with this WASM module"`, a skip that would swallow precisely
+the regression this section is about.
 
 Same shape as the stale `CGO_ENABLED=0` note in `CLAUDE.md`: a reason that was true when
 written, outlived its cause, and stayed because the thing that would have contradicted it was
