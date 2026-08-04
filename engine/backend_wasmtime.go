@@ -91,6 +91,14 @@ type wasmtimeBackend struct {
 	// ticker or race to close it.
 	epochStop chan struct{}
 	closeOnce sync.Once // guards closing epochStop so Close is idempotent
+
+	// epochDone is closed by the ticker goroutine as it returns. Close must
+	// wait on it before calling engine.Close(): signalling epochStop only
+	// asks the goroutine to stop, it does not mean it has. A goroutine
+	// already inside the ticker branch goes on to call IncrementEpoch on a
+	// freed engine, which panics with "object has been closed already".
+	// Observed in CI on 2026-08-03 during TestEngineExecute.
+	epochDone chan struct{}
 }
 
 // NewWasmtimeBackend creates a new wasmtimeBackend with a fresh engine
@@ -132,6 +140,7 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 		metaCache:    new(sync.Map),
 		limits:       lim,
 		epochStop:    make(chan struct{}),
+		epochDone:    make(chan struct{}),
 	}
 	b.startEpochTicker()
 	return b, nil
@@ -148,9 +157,11 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 func (b *wasmtimeBackend) startEpochTicker() {
 	ticker := time.NewTicker(epochTickInterval)
 	stop := b.epochStop
+	done := b.epochDone
 	eng := b.engine
 	go func() {
 		defer ticker.Stop()
+		defer close(done)
 		for {
 			select {
 			case <-stop:
@@ -173,6 +184,10 @@ func (b *wasmtimeBackend) Name() string { return "wasmtime" }
 func (b *wasmtimeBackend) Close(ctx context.Context) error {
 	if b.epochStop != nil {
 		b.closeOnce.Do(func() { close(b.epochStop) })
+		// Wait for the goroutine to actually be gone. Closing epochStop is a
+		// request, not an acknowledgement -- without this join, a ticker tick
+		// that has already been selected races engine.Close() and panics.
+		<-b.epochDone
 	}
 	b.engine.Close()
 	return nil

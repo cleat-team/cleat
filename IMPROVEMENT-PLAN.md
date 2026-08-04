@@ -1368,6 +1368,36 @@ Whatever the fix, **correct the doc comment**. A comment asserting a safety prop
 code does not have is worse than no comment, and it is why the failure reads as mysterious
 rather than obvious.
 
+### 2.24 The wasmtime epoch ticker races `Close` — ✅ **FIXED**
+
+Found the honest way: it failed CI on PR #227, on a change that has nothing to do with
+wasmtime.
+
+```
+panic: object has been closed already
+  wasmtime-go.(*Engine).IncrementEpoch
+  engine.(*wasmtimeBackend).startEpochTicker.func1
+```
+
+`Close` did `close(b.epochStop)` and then called `b.engine.Close()` immediately. Closing the
+channel is a *request* to stop, not an acknowledgement that the goroutine has stopped: one
+already committed to the `case <-ticker.C` branch goes on to call `IncrementEpoch` on a
+freed engine. The window is a single scheduling quantum once every `epochTickInterval`
+(50ms), which is why it reads as a rare flake rather than a bug.
+
+Fixed with an `epochDone` channel the goroutine closes as it returns, and a `<-b.epochDone`
+join in `Close` before `engine.Close()`.
+
+**Note on the test, because the first one was worthless.** It called `NewWasmtimeBackend`,
+`Close`, then checked whether `epochDone` was closed — and **passed with the join removed**.
+Once `epochStop` closes, the real goroutine almost always gets scheduled and exits before the
+check runs, so it measured scheduler luck, not ordering. The replacement stands a stub
+backend in for the ticker so the wait is directly observable: `Close` must block, then
+return once the test closes `epochDone`. Verified to fail without the join.
+
+That is the second vacuous assertion caught in this session by the same habit of removing
+the fix and re-running. Both would have passed review.
+
 ---
 
 ## Salvage register — PR #208, closed unmerged
