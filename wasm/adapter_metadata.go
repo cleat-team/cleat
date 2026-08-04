@@ -335,7 +335,11 @@ var adapterDefs = map[string]adapterDef{
 		FieldName:  "WorkflowID",
 		ReturnType: "string",
 		ResultStmts: []string{
-			"idLen := uint32(result)",
+			// High 32 bits, matching packSimpleResult and every other
+			// length-returning entry here. This read the low half until
+			// IMPROVEMENT-PLAN §2.19 -- i.e. the error code, always 0 on
+			// success, so WorkflowID() returned "".
+			"idLen := uint32(uint64(result) >> 32)",
 			"return unsafe.String(&idBuf[0], int(idLen))",
 		},
 	},
@@ -343,7 +347,8 @@ var adapterDefs = map[string]adapterDef{
 		FieldName:  "RunID",
 		ReturnType: "string",
 		ResultStmts: []string{
-			"idLen := uint32(result)",
+			// See WorkflowID above -- same defect, same fix (§2.19).
+			"idLen := uint32(uint64(result) >> 32)",
 			"return unsafe.String(&idBuf[0], int(idLen))",
 		},
 	},

@@ -115,7 +115,15 @@ commits mid-claim, a larger candidate set, and `EXPLAIN (ANALYZE, VERBOSE)` on t
 sublink form under contention. If it cannot be reproduced, say so in 2.11 and leave the
 CTE as documented defence — do not upgrade it to "fixed".
 
-### 4. Six wasmtime host functions return empty results  —  see §2.18, §2.19
+### 4. Six wasmtime host functions return empty results  —  ✅ **done**, see §2.18, §2.19
+
+> **Done, and the count was wrong: 18, not 6.** Only `_core.go` had been audited. A class
+> guard now covers all 31 out-parameter wrappers. §2.16 is partially addressed — the real
+> `execSession` pattern is applied to the ID functions, but 36 `mockHostHandler` assertions
+> elsewhere in `backend_wasmtime_test.go` remain untouched and still cannot fail.
+>
+> The original framing is kept below.
+
 
 The highest-yield open item, and the cheapest. On the primary backend `cleat_uuid`,
 `cleat_workflow_id`, `cleat_run_id`, `cleat_get_state`, `cleat_list_state` and `cleat_fetch`
@@ -1158,7 +1166,38 @@ of a documentation fix.
 
 ---
 
-### 2.18 Six wasmtime host functions fetch the guest memory and throw it away — OPEN
+### 2.18 Six wasmtime host functions fetch the guest memory and throw it away — ✅ **FIXED (and it was 18, not 6)**
+
+> **Confirmed empirically, then fixed across the whole class.** A closure test with the real
+> `execSession` installed shows `cleat_workflow_id` returning raw result
+> `0x0000000000000000` — errCode 0, zero bytes written. Success by every signal except the
+> one that matters.
+>
+> **The count in the heading was wrong.** Auditing all four `wasmtime_hostfuncs*.go` files
+> rather than just `_core.go` found **31 wrappers with an out-parameter, 19 of them missing
+> `ctxWithMem`**. Eighteen were fixed; the nineteenth, `cleat_poll_work`, is a true negative
+> — it copies into `buf` itself and never calls a handler.
+>
+> Fixing only the six named here would have repeated §2.14's mistake exactly: fix the known
+> instances, leave the siblings, wait for the next round to find them. That has now happened
+> twice (§2.14 → §2.18), so the fix is the class, not the list.
+>
+> **Guard added**, because runtime coverage cannot close this cheaply — most of these
+> handlers need a live engine, store and session to reach their write path, which is
+> precisely why the existing closure tests settle for `mockHostHandler` (§2.16).
+> `TestWasmtimeWrappersPassGuestMemory` is a source-level invariant instead: any wrapper with
+> an out-length parameter must either pass `ctxWithMem` or write into `buf` directly. It
+> covers all 31 today and every wrapper added later. Verified non-vacuous by reverting one
+> wrapper and watching it name the regression.
+>
+> Note on method: a first pass tried to decide which handlers write by transitively chasing
+> `writeResult` through the call graph. It returned "18 of 18 affected", which is not a
+> result — a depth-6 walk through shared helpers implicates nearly everything, including
+> error-only paths. That was discarded in favour of the empirical test plus a uniform rule.
+>
+> The original framing is kept below.
+
+#### Original framing
 
 Found while assessing PR #208 for salvage (see the salvage register below), and verified
 directly against `develop`. **This is the same defect as §2.14, in six more places.** §2.14
@@ -1215,7 +1254,22 @@ Fix: `callCtx := ctxWithMem(context.Background(), buf)` at all six sites, and po
 `json_hostfuncs_cgo_test.go` pattern — real `execSession`, assert on the bytes written — to
 cover them. The patch applies cleanly to `develop` today.
 
-### 2.19 `WorkflowID` / `RunID` decode the wrong half of the result word — OPEN
+### 2.19 `WorkflowID` / `RunID` decode the wrong half of the result word — ✅ **FIXED**
+
+> **Fixed.** `wasm/adapter_metadata.go` now generates `uint32(uint64(result) >> 32)` for both,
+> matching the thirteen sibling entries and `decodeExportResult` in `engine/memory.go:259`,
+> which is unambiguous: `errCode = low 32, actualLen = high 32`.
+>
+> `Version` and `MinVersion` keep `uint32(result)` and are **not** defects — those host
+> functions return a plain value, not a packed length/errCode word.
+>
+> `TestWasmtimeIDResultLayout` pins the ABI contract on the host side, so flipping the layout
+> fails a test rather than silently un-fixing the generated adapter. The masking noted below
+> is real and was the reason to do both halves in one change.
+>
+> The original framing is kept below.
+
+#### Original framing
 
 Independent of §2.18, same two functions, and it would still bite after §2.18 is fixed.
 
@@ -1313,6 +1367,36 @@ change, and matches the existing "one shared DB" assumption.
 Whatever the fix, **correct the doc comment**. A comment asserting a safety property the
 code does not have is worse than no comment, and it is why the failure reads as mysterious
 rather than obvious.
+
+### 2.24 The wasmtime epoch ticker races `Close` — ✅ **FIXED**
+
+Found the honest way: it failed CI on PR #227, on a change that has nothing to do with
+wasmtime.
+
+```
+panic: object has been closed already
+  wasmtime-go.(*Engine).IncrementEpoch
+  engine.(*wasmtimeBackend).startEpochTicker.func1
+```
+
+`Close` did `close(b.epochStop)` and then called `b.engine.Close()` immediately. Closing the
+channel is a *request* to stop, not an acknowledgement that the goroutine has stopped: one
+already committed to the `case <-ticker.C` branch goes on to call `IncrementEpoch` on a
+freed engine. The window is a single scheduling quantum once every `epochTickInterval`
+(50ms), which is why it reads as a rare flake rather than a bug.
+
+Fixed with an `epochDone` channel the goroutine closes as it returns, and a `<-b.epochDone`
+join in `Close` before `engine.Close()`.
+
+**Note on the test, because the first one was worthless.** It called `NewWasmtimeBackend`,
+`Close`, then checked whether `epochDone` was closed — and **passed with the join removed**.
+Once `epochStop` closes, the real goroutine almost always gets scheduled and exits before the
+check runs, so it measured scheduler luck, not ordering. The replacement stands a stub
+backend in for the ticker so the wait is directly observable: `Close` must block, then
+return once the test closes `epochDone`. Verified to fail without the join.
+
+That is the second vacuous assertion caught in this session by the same habit of removing
+the fix and re-running. Both would have passed review.
 
 ---
 
