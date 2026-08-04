@@ -3263,9 +3263,6 @@ re-apply it on `ResetSession`. Separately, the MSSQL test schema should apply th
 migration so the policies exist, or every future isolation test on that backend will pass
 without meaning anything.
 
-`cmd/cleat-worker/tenant_isolation_mssql_test.go` is written and skipped pointing at this
-item; unskipping it is the acceptance test.
-
 #### The connection half — fixed, and it was worse than described
 
 Measured against a real SQL Server 2022 rather than reasoned about, and the first
@@ -3314,6 +3311,20 @@ test-suite migration, not a one-liner, and `engine/testutil/` is WS-2's.
 Until it lands, no MSSQL test can observe tenant isolation working or failing, and the
 connection fix above is verified by reading `SESSION_CONTEXT` directly rather than by
 observing a policy enforce it.
+
+**One exception, as of 2026-08-04.** `cmd/cleat-worker/tenant_isolation_mssql_test.go` was
+written and shipped skipped against this item; unskipping it was the recorded acceptance
+test, and it now passes. It sidesteps the shared helper entirely — it applies
+`migrations/mssql/001_schema.sql` to a dedicated database of its own, and asserts the
+policies are enabled *before* asserting anything about tenants, so it cannot pass against a
+schema without RLS. So there is now exactly one MSSQL test that observes a security policy
+enforcing tenant isolation end-to-end, through the HTTP layer.
+
+That does not close the schema half. One test carrying its own migration is a workaround for
+a shared helper that lacks the policies, not a replacement for fixing it: every *other* MSSQL
+test in the repo still runs without a backstop. `scripts/skip-baseline.txt` drops this entry
+from 2 skip sites to 1, the remaining one being the ordinary "CLEAT_TEST_MSSQL not set"
+guard.
 
 ---
 
