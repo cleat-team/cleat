@@ -2333,6 +2333,14 @@ something to assert on a shared runner.
 Result: **11 pass, 0 skip, 0 fail**, 4.2s. Wired into ci.yml's cluster job, after the
 exhaustion step, since `TestKillPostgresAndRestart` restarts the database.
 
+**One more thing the first CI run caught.** The cluster job sets `CLEAT_TEST_DB` to a separate
+`cleat_tests` database, deliberately, so that `./engine/...` does not share a table with four
+live workers. This suite wants the opposite — it restarts the postgres container and asserts on
+failover, so it has to be looking at the database the cluster actually runs on. Against
+`cleat_tests` every test failed with `relation "workflow_defs" does not exist`: nothing builds a
+schema there until `engine/testutil` does, and this package does not use it. The step overrides
+the variable, with the reason recorded next to it.
+
 ---
 
 ## Salvage register — PR #208, closed unmerged
