@@ -1270,7 +1270,7 @@ than hiding bad code, and it is the more insidious direction — those tests wer
 coverage of argument decoding while feeding the decoder inputs nobody had checked.
 
 
-### 2.17 `ShardedStore` claims `limit` from *every* shard and strands the excess — OPEN
+### 2.17 `ShardedStore` claims `limit` from *every* shard and strands the excess — ✅ **FIXED**
 
 Found while investigating 2.11. This is a real over-claim, in production-wired code
 (`cmd/cleat-worker/main.go`), and it is not the one 2.11 was chasing.
@@ -1308,9 +1308,39 @@ Options, none of them free:
 3. **Release the excess** after truncation. Keeps both, but needs an unclaim path and is
    racy against the reaper.
 
-Left unfixed deliberately: choosing between these changes the latency characteristics of
-the claim path, and that is a decision worth making on purpose rather than as a side effect
-of a documentation fix.
+**Fixed 2026-08-04 with option 1**, plus a rotating start.
+
+The latency objection to sequential does not survive being looked at. Claims stop as soon as
+the budget is spent, so **when work is available the first shard usually fills it and the loop
+does one round-trip — fewer than the fan-out made**. The serial walk only happens when the
+shards are empty, which is exactly when claim latency does not matter. The parallel fan-out was
+optimising the case that matters least, and paying for it with stranded work in the case that
+matters most.
+
+Option 2 (apportion up front) under-claims under skew: a worker with capacity 10 across 5
+shards asks each for 2 and gets 2 when only one shard has work. Option 3 (release the excess)
+needs an unclaim path and races the reaper.
+
+The one thing sequential does introduce is unfairness — a fixed starting shard drains shard 0
+first and starves the tail under sustained load. `claimCursor` rotates the starting shard per
+call; `TestShardedClaimWorkflows_RotatesStartingShard` covers it.
+
+Both `ClaimWorkflows` and `ClaimStickyWorkflows` now go through one `claimAcrossShards` helper,
+which also **errors** if a shard returns more than its budget rather than truncating. Truncating
+is what hid this for its whole existence, and the excess is already committed in that shard.
+
+`TestShardedClaimWorkflows_DoesNotOverClaim` asserts on what reached the *stores*, not on what
+was returned — the returned slice was correct throughout, which is precisely why the defect was
+invisible. Restoring the fan-out:
+
+```
+--- FAIL: TestShardedClaimWorkflows_DoesNotOverClaim/ClaimWorkflows
+    6 rows were claimed in the shard databases but only 2 were returned:
+    4 workflows are 'running' with no executor until the reaper takes them back
+--- FAIL: TestShardedClaimWorkflows_DoesNotOverClaim/ClaimStickyWorkflows
+    (the same)
+--- FAIL: TestShardedClaimWorkflows_RotatesStartingShard
+```
 
 ---
 
