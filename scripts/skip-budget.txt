@@ -97,6 +97,12 @@ test-go/integrity	0	# measured: 68 pass, 0 skip
 test-go/upgrade	0	# measured: 8 pass, 0 skip
 # 0: same, PostgreSQL only. ~23s.
 test-go/scale	0	# measured: 16 pass, 0 skip
+# 0: the job provisions everything this suite needs -- the same PostgreSQL
+# service, and a Go toolchain to build cleat-worker and the fixture. It has no
+# conditional skips at all: an unreachable database is t.Fatalf, and the
+# wasmtime backend is not optional here either. A skip appearing under this
+# ceiling would mean the job stopped providing something.
+test-go/crash	0	# measured: 3 pass, 0 skip
 fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # Same number as test-go/engine, and for the same reason: this job also runs
 # `go test ./engine/...`, against the cluster's own database. It was seeded at 0
