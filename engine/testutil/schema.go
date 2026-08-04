@@ -233,7 +233,14 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				trace_id TEXT, query_state JSON DEFAULT ('{}'),
 				task_queue VARCHAR(255) NOT NULL DEFAULT 'default',
 				cancellation_requested TINYINT(1) NOT NULL DEFAULT 0,
-				cancellation_reason TEXT, sticky_worker_id TEXT,
+				-- sticky_worker_id is VARCHAR, not TEXT: this file creates
+				-- idx_instances_sticky over it below, and MySQL rejects an index
+				-- on a TEXT column without a key length ("Error 1170: BLOB/TEXT
+				-- column 'sticky_worker_id' used in key specification without a
+				-- key length"). migrations/mysql/001_schema.sql and
+				-- engine/testutil/mysql_schema.go both already say VARCHAR(255);
+				-- this was the only one of the three copies that disagreed.
+				cancellation_reason TEXT, sticky_worker_id VARCHAR(255),
 				tenant_id VARCHAR(36),
 				compaction_state JSON, compacted_at TIMESTAMP(6), compaction_step INTEGER,
 				plugin_vers JSON NOT NULL DEFAULT ('{}'),
@@ -388,7 +395,12 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				tenant_id VARCHAR(36))`,
 			`CREATE TABLE IF NOT EXISTS concurrency_keys (
 				key_hash VARBINARY(255) PRIMARY KEY, key_text TEXT NOT NULL,
-				workflow_id TEXT NOT NULL,
+				-- VARCHAR, not TEXT, for the same reason as
+				-- workflow_instances.sticky_worker_id above: this file creates
+				-- idx_concurrency_keys_workflow over it and MySQL will not index
+				-- a TEXT column without a key length.
+				-- migrations/mysql/001_schema.sql agrees.
+				workflow_id VARCHAR(255) NOT NULL,
 				acquired_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 				expires_at TIMESTAMP(6) NOT NULL,
 				tenant_id VARCHAR(255))`,
@@ -416,7 +428,15 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				status VARCHAR(255) NOT NULL DEFAULT 'pending',
 				result JSON,
 				error_msg TEXT,
-				tenant_id VARCHAR(255) NOT NULL,
+				-- The DEFAULT is not decoration. migrations/mysql/001_schema.sql
+				-- has one here and this copy did not, so an insert that omits
+				-- tenant_id succeeds against the shipped schema and fails here
+				-- with "Error 1364: Field 'tenant_id' doesn't have a default
+				-- value" -- a test failing on a schema the product never uses.
+				-- (workflow_promises above has no default in the migration
+				-- either, so it is left alone: the rule is match the migration,
+				-- not add defaults everywhere.)
+				tenant_id VARCHAR(255) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 				completed_at TIMESTAMP(6),
 				PRIMARY KEY (workflow_id, update_name))`,

@@ -3603,24 +3603,101 @@ opaque TLS handshake failure, not an auth error. And Edge is a **15.0/2019-era s
 SQL Server 2022; it is enough to run this repo's suite and to stop writing MSSQL migrations
 blind, but a green run on Edge is not a claim about 2022. CI still has the real thing.
 
-#### 2.60b Four MySQL engine tests fail on `develop` — 🔴 **OPEN**
+#### 2.60b The engine suite is not deterministic against MySQL or SQL Server — 🔴 **OPEN**
 
-Surfaced by running the engine suite against a live MySQL for the first time. Verified
-pre-existing: they fail identically on a stashed tree. Not fixed here — they are unrelated to
-the flush path and each wants its own diagnosis.
+> ~~**Four MySQL engine tests fail on `develop`.** Surfaced by running the engine suite
+> against a live MySQL for the first time. Verified pre-existing: they fail identically on a
+> stashed tree. Not fixed here — they are unrelated to the flush path and each wants its own
+> diagnosis.~~
+>
+> ~~`TestCascadeDelete/mysql` — `Error 1170: BLOB/TEXT column 'sticky_worker_id'…`, a
+> `engine/testutil` schema defect. `TestDeliverSignal/mysql` — MySQL's `JSON` column
+> normalises whitespace; the test compares bytes. `TestPollAndClaimSignal/mysql`,
+> `TestPollSignal_NonDestructive/mysql` — `Error 3140: Invalid JSON text`. The first is a
+> test-schema bug; the other three are the same question, whether a signal payload must be
+> JSON, which PostgreSQL's `TEXT` accepts and MySQL's `JSON` does not.~~
+>
+> **Wrong, and kept here on purpose.** Two errors. *(a)* PostgreSQL's column is `JSONB`, not
+> `TEXT` — all three dialects require JSON, so the dialects did not "disagree" about the
+> requirement at all; see §2.60c for what the difference actually was. *(b)* "Verified
+> pre-existing" was the worse mistake. The stashed-tree comparison was run against a database
+> those same tests had already populated, so it established only that both trees hit the same
+> accumulated state. On a **freshly created** MySQL database `develop`'s engine suite is
+> **green**. There were never four deterministic failures to fix.
 
-- `TestCascadeDelete/mysql` — `Error 1170: BLOB/TEXT column 'sticky_worker_id' used in key
-  specification without a key length`. A `engine/testutil` schema defect: the column is TEXT
-  where the real migration presumably has a bounded type, so the index cannot be created.
-- `TestDeliverSignal/mysql` — expects `{"data":"hello"}`, gets `{"data": "hello"}`. MySQL's
-  `JSON` column normalises whitespace on round-trip; the test compares bytes.
-- `TestPollAndClaimSignal/mysql`, `TestPollSignal_NonDestructive/mysql` — `Error 3140:
-  Invalid JSON text` inserting a non-JSON payload into a `JSON` column. The signal payload is
-  a bare string on these paths, which PostgreSQL's `TEXT` accepts and MySQL's `JSON` does not.
+What is actually there is worse than four broken tests, because it does not show up as a
+stable red. Four consecutive full runs against live MySQL and SQL Server produced four
+different failure sets:
 
-The first is a test-schema bug. The other three are the same question in two forms: whether a
-signal payload is required to be JSON. PostgreSQL and MySQL currently disagree, and the
-suites only ever ran on PostgreSQL.
+| run | failures |
+|---|---|
+| 1 | `TestCascadeDelete/mysql`, `TestDeliverSignal/mysql`, `TestPollAndClaimSignal/mysql`, `TestPollSignal_NonDestructive/mysql` |
+| 2 | `TestMySQLIntegration_LoadDAGSpec`, `TestGetPendingUpdateRequests/mysql`, `TestCompleteUpdateRequest/mysql` |
+| 3 | `TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` — repeated three times, identical each time, so the non-determinism is between runs that change the database, not run-to-run coin-flipping |
+| 4 (fresh DBs) | `TestTenantIsolation_ConcurrencyKeys/mysql` |
+
+Both of the last two **pass in isolation, on the same database, immediately before and after
+failing in the full suite** — and the fence test passed *with* a change applied and failed
+*without* it, which is the inverted result that rules out attributing any of this to the code
+under test.
+
+**The mechanism.** `engine/testutil` holds two independent hand-written MySQL schemas —
+`schema.go`'s `DialectMySQL` block and `mysql_schema.go` — plus a third definition in
+`migrations/mysql/001_schema.sql`. All use `CREATE TABLE IF NOT EXISTS` against one shared
+database, so **whichever test runs first defines the tables for the whole package**, and Go's
+ordering decides which. Rows also accumulate: `CleanupPostgresTestData` is PostgreSQL-only
+and `truncateAll` does not reach everything on SQL Server, so reaping and tenant-isolation
+tests see other suites' leftovers.
+
+This is §2.39's shape — schema DDL racing another package's DML against one shared database —
+on the two dialects that never got §2.39's fix. PostgreSQL has the advisory lock *and* the
+content fingerprint that makes the apply run once; MySQL and SQL Server have neither.
+
+**Three real divergences were found underneath it and are fixed** (`engine/testutil/schema.go`,
+each one this file's MySQL block disagreeing with the shipped migration):
+`workflow_instances.sticky_worker_id` and `concurrency_keys.workflow_id` declared `TEXT` where
+the migration says `VARCHAR(255)`, so the indexes this same file creates over them cannot be
+built; and `workflow_update_requests.tenant_id` missing the migration's `DEFAULT`, so an
+insert that omits it fails against a schema the product never ships.
+
+**What to do:** give MySQL and SQL Server the fingerprint treatment `applyPostgresSchemaFile`
+already has, and collapse the two testutil MySQL schemas into one. Until then **a single green
+run on these dialects is not evidence**, which is the part worth inheriting — it is why the
+paragraph above is struck through rather than deleted.
+
+#### 2.60c A non-JSON signal payload was accepted on PostgreSQL and rejected elsewhere — ✅ **FIXED** (WS-2, 2026-08-04)
+
+All three schemas require `workflow_signals.payload` to hold valid JSON, each saying so
+differently: PostgreSQL `JSONB`, MySQL `JSON`, SQL Server `NVARCHAR(MAX)` with
+`CHECK (ISJSON(payload) = 1)`. Only `PostgresStore.DeliverSignal` knew — it wrapped a non-JSON
+payload in quotes on the way in, and `decodeSignalPayload` unwrapped it on the way out.
+`MySQLStore` and `MSSQLStore` did neither, at six sites between them.
+
+So `DeliverSignal(ctx, wf, "sig", "payload-1")` — reachable from the worker's signal endpoint —
+succeeded on PostgreSQL and failed outright on the other two:
+
+```
+Error 3140 (22032): Invalid JSON text: "Invalid value." at position 0
+```
+
+Fixed by extracting `encodeSignalPayload` and applying it, with `decodeSignalPayload`, on all
+three stores.
+
+**A second defect fell out of it.** The PostgreSQL wrapping was `` `"` + payload + `"` ``,
+which produces invalid JSON the moment the payload contains a quote or a backslash — and is
+then rejected by the very column the wrapping exists to satisfy. `encodeSignalPayload` uses
+`json.Marshal`. Demonstrated by restoring the concatenation:
+
+```
+DeliverSignal("he\"llo") on postgres:   pq: invalid input syntax for type json (22P02)
+DeliverSignal("C:\\path\\to") on postgres: pq: invalid input syntax for type json (22P02)
+```
+
+So this was not only a cross-dialect inconsistency; PostgreSQL was rejecting ordinary payloads
+too. `TestSignalPayloadRoundTripsOnEveryDialect` covers six payload shapes across all three
+dialects and was watched failing on each half of the fix separately.
+
+### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
 
 ### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
 
