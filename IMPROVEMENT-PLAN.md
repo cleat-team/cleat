@@ -399,7 +399,14 @@ The live paths (`freshCall`, `freshCallWithHeartbeat`, `freshCallWithRetry`) cal
   code is worse than either, because it reads as finished.
 - Test: crash-recovery e2e (see 2.4).
 
-### 1.5 Primary WASM backend has no hang protection (~1–2 sessions)
+### 1.5 Primary WASM backend has no hang protection (~1–2 sessions) — fixed for wasmtime, **still open for every deployment**
+
+> **Re-opened 2026-08-04 by §2.28.** The epoch-interruption fix below is real and tested, but
+> it lives behind `//go:build cgo` and the shipped Dockerfile builds `CGO_ENABLED=0`, so no
+> container has it. Measured on the wazero backend the containers actually run: a workflow
+> with a 2-second budget ran for 2m35s and returned **success**. Read §2.28 before treating
+> this item as done.
+
 
 > **Raise this to the top of Phase 1.** wasmtime is the primary backend — it is the standard
 > engine and materially more reliable than wazero, which is retained only as a fallback for
@@ -1782,6 +1789,72 @@ matching turns it green. That is §2.16 in a different costume.
 reach ready. That still needs a cluster — `helm`, `kubectl` and `kind` are all absent
 locally, and per the standing constraints `docker-compose.cluster.yml` cannot be exercised
 here at all. This covers the failure that was shipped; the boot test remains open.
+
+---
+
+### 2.28 The execution-time fence does not exist in any deployment — OPEN, and this is a Phase 1 finding
+
+Found by doing what 2.7 asks and actually booting `docker-compose.cluster.yml` (all five
+containers healthy in under 20s, zero restarts — the compose file is fine). The finding was
+in the first worker's startup log:
+
+```
+"msg":"wasmtime backend unavailable, using legacy wazero for Go WASM",
+"error":"wasmtime backend requires CGO"
+```
+
+**The chain.** `engine/backend_wasmtime.go` is `//go:build cgo`. `Dockerfile:21` builds with
+`CGO_ENABLED=0`. All three manifests run `cleat-worker:latest` from that Dockerfile. So the
+backend CLAUDE.md calls *"the primary backend … the standard engine … the behaviour of
+record"* is compiled out of every container in every deployment path.
+
+**And CI tests the other one.** The `test-go` matrix does not set `CGO_ENABLED`, so CGO is on
+and `TestWasmtimeBackend_InfiniteLoop_GoStartPath`, `TestIntegrationWorkflowMaxDuration` and
+the rest of the wasmtime suite all run. This is §1.9's shape — *the shipped X was not the
+tested X* — moved from the schema to the execution engine. The protection is tested in the
+configuration nobody ships and absent from the one everybody ships.
+
+**Measured, not inferred.** `testdata/spin` (a pure arithmetic loop that never enters the
+host) under `WithDefaultWorkflowTimeout(2 * time.Second)`, wazero backend, `CGO_ENABLED=0`:
+
+| iterations | elapsed | error |
+|---|---|---|
+| 1,000 | 499ms | nil |
+| 100,000,000 | 628ms | nil |
+| 100,000,000,000 | **2m35s** | **nil** |
+
+A workflow with a two-second budget ran for **two and a half minutes** and was reported as a
+**success**. The fence did not fire late; it did not fire. `executor.go:271` puts the
+deadline on `execCtx` and passes it to `CallExport`, but wazero only observes context
+cancellation when the guest calls back into the host, and this guest never does. In a worker
+there is no `go test -timeout` to end it: the goroutine holds its concurrency slot until the
+process dies, so ten runaway workflows wedge a `--concurrency=10` worker completely.
+
+This is item **1.5**, which was raised to the top of Phase 1 and then fixed for wasmtime only.
+It should be read as still open for every deployed configuration.
+
+**The obvious fix does not work.** wazero has `WithCloseOnContextDone(true)`, absent at
+`engine/runtime.go:93`, which makes it interrupt guest code on cancellation. Setting it makes
+*every* execution fail — 1,000 iterations included — with `wasm trap: exit(code=0)` in ~500ms.
+It is not a fence firing; it breaks execution outright, presumably against the suspend/resume
+protocol in `Runtime.CallExportWithSuspend`. Tried, measured, reverted. **Not committed.**
+
+**So the fix is real design work, not a one-liner,** and there are two routes that should be
+costed against each other rather than picked by reflex:
+
+1. Make wazero interruptible — understand the `CloseOnContextDone` interaction with suspend,
+   or bound the guest some other way. Keeps the deployment story unchanged.
+2. Ship the backend that already works — build the image with CGO so containers get wasmtime
+   and the epoch fence that is already tested. Changes the base image and binary linkage.
+
+Either way the invariant worth adding afterwards is that **a backend without a working
+execution fence must not be selectable in production**, so this cannot recur silently.
+
+A regression test is written and parked at
+`scratchpad/backend_wazero_fence_test.go.pending` — the wazero half of
+`TestIntegrationWorkflowMaxDuration`, with a bounded wait so a regression names the defect
+instead of hanging the package. It is deliberately **not** committed: it fails today, and
+landing a known-red test would put CI back in the state Phase 0 just dug it out of.
 
 ---
 
