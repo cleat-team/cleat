@@ -541,6 +541,52 @@ its dead-letter counter, now conditional on the write applying.
   `("", 0)` — the §263 defect, which nothing else would catch — and the dead-letter routing
   that used to live inline at each site.
 
+### 1.3 residual — a cancelled heartbeat call was reported as retryable — ✅ **FIXED** (WS-2, 2026-08-04)
+
+The hardcoded `""` was fixed by `c26c332`; the missing end-to-end test landed in #264. This is
+what was left underneath, and it is a behaviour defect rather than a dead call site.
+
+Both call paths detect cancellation. `freshCall` reports it as `callErrorUnknown`, with a
+comment saying why: *"Not retryable: the workflow was cancelled, so repeating the call is the
+one thing the caller must not do."* `callerrors.go` agrees, naming a cancelled workflow as the
+first of the three canonical non-retryable cases.
+
+`freshCallWithHeartbeat` cancelled the in-flight call's context and then fell through to its
+**generic** error branch, which returns `callFailureCode` — `callErrorUnavailable`, documented
+as *"Retryable"*. So a workflow cancelled during a long call was told the call was worth trying
+again, and a guest branching on `Retryable()` would re-issue the call it had just been
+cancelled out of.
+
+The recorded event was the durable half of the same defect:
+
+```
+callErrorCode = 2, want 0 (callErrorUnknown, non-retryable)
+recorded Err  = "context canceled", want "workflow cancelled"
+recorded ErrNonRetryable = false
+```
+
+Replay reads retryability off the event via `recordedFailureCode`. An event carrying the raw
+context error with `ErrNonRetryable` unset replays as an ordinary retryable failure — so the
+same step was non-retryable on the first run and retryable on the replay of it. That is
+precisely the divergence `recordedFailureCode` was introduced to prevent (§2.35); this path
+routed around it by never recording the classification at all.
+
+Fixed by tracking why the call context was cancelled and reporting a cancellation on both the
+guest-visible code and the recorded event. `cancelledCallError` is now a shared constant, since
+two paths produce it and replay compares against what was written.
+
+**Also:** `PollCancellation` errors were discarded at both sites. Failing open is right — a
+database blip must not abort a workflow that has not been cancelled, and the poll repeats on
+the next tick — but it was *silent*, so a persistently failing poll made cancellation quietly
+stop working with nothing to see. Now logged at both sites, with
+`TestDurableCallWithHeartbeat_PollErrorDoesNotCancel` pinning the fail-open behaviour so the
+guard cannot be flipped by accident.
+
+Three tests, watched failing before the fix: the cancellation case, an uncancelled control (so
+the cancellation branch cannot be reached unconditionally and pass for the wrong reason), and
+the poll-error case.
+
+### 1.3 Cancellation is dead end-to-end (~1 session)
 
 ### 1.3 Cancellation is dead end-to-end — ✅ **FIXED**, and this section was stale
 
@@ -3702,6 +3748,13 @@ dialect-neutral, so `store_backends_test.go` calls it with the MySQL and SQL Ser
 and wipes those databases as thoroughly. And it is the most likely remaining source of the
 cross-suite state that §2.60b's schema collapse only half addressed — the collapse fixed *which
 schema* you get, not *whose rows* are in it.
+
+**Direct evidence, 2026-08-04.** After §2.60b landed, the engine suite is green on freshly
+created MySQL and SQL Server databases and still fails on a *reused* one —
+`TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` and
+`TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL`, both of which pass again the moment the
+database is dropped and recreated. §2.60b fixed *which schema* you get; this is *whose rows*
+are in it, and it is the whole of what remains.
 
 Fixing it properly means deciding what test isolation is: a database per package (what
 `tests/crash` does, and it works), a tenant per package with tenant-scoped deletes, or

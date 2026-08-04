@@ -37,6 +37,15 @@ const (
 // produced.
 const callFailureCode = callErrorUnavailable
 
+// cancelledCallError is the message a durable call reports when the workflow
+// was cancelled while the call was in flight.
+//
+// A constant rather than a literal because two paths produce it -- freshCall
+// checks before dispatch, freshCallWithHeartbeat checks on every heartbeat tick
+// -- and because replay compares against what was recorded. A cancelled call is
+// non-retryable: repeating it is the one thing a cancelled workflow must not do.
+const cancelledCallError = "workflow cancelled"
+
 // recordedFailureCode maps a recorded call failure to the code the guest sees.
 //
 // Both the fresh path and the replay path must go through this function. A
