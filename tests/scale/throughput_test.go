@@ -4,86 +4,43 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 
 	_ "github.com/lib/pq"
 )
 
 // testDB returns a database connection for scale tests.
+//
+// The schema comes from engine/testutil, which builds it from
+// migrations/postgres/. This helper used to create every table itself with
+// CREATE TABLE IF NOT EXISTS -- see the same note in tests/integrity and
+// tests/upgrade for what that costs.
+//
+// testutil.TestDB also fails, rather than skips, when CLEAT_TEST_DB is set but
+// unreachable, so a database that stops arriving empties this job loudly.
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("Skipping scale test in short mode")
+	db := testutil.TestDB(t, testutil.DialectPostgres)
+
+	// Every insert site in this package uses def_name='test', def_version=1,
+	// and workflow_instances_def_name_def_version_fkey requires the definition
+	// to exist. Nothing else here creates it, so a fresh database would fail
+	// every test in the package.
+	if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ('test', 1, '\x00', '{}') ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatalf("seed workflow_defs(test, 1): %v", err)
 	}
-	dsn := os.Getenv("CLEAT_TEST_DB")
-	if dsn == "" {
-		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
-	}
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Skipf("Skipping: no database available: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping: cannot ping database: %v", err)
-	}
-	// Clean up previous test data.
+
+	// Clean up previous test data. Children first: the foreign keys apply to
+	// deletes too.
 	db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE 'scale-%'`)
 	db.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'scale-%'`)
 
-	// Ensure full schema.
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_defs (
-		name TEXT NOT NULL, version INTEGER NOT NULL,
-		wasm_bytes BYTEA NOT NULL, entry_points TEXT[] NOT NULL DEFAULT '{}',
-		min_version INTEGER NOT NULL DEFAULT 0,
-		max_history_length INTEGER NOT NULL DEFAULT 0,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (name, version))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_instances (
-		id TEXT PRIMARY KEY, def_name TEXT NOT NULL, def_version INTEGER NOT NULL DEFAULT 1,
-		status TEXT NOT NULL DEFAULT 'ready', input JSONB NOT NULL DEFAULT '{}',
-		assigned_to TEXT, heartbeat_at TIMESTAMPTZ,
-		next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(), completed_at TIMESTAMPTZ,
-		result JSONB, error_msg TEXT, parent_workflow_id TEXT,
-		trace_id TEXT,
-		query_state JSONB DEFAULT '{}', task_queue TEXT NOT NULL DEFAULT 'default',
-		cancellation_requested BOOLEAN NOT NULL DEFAULT false,
-		cancellation_reason TEXT, sticky_worker_id TEXT)`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS event_history (
-		workflow_id TEXT NOT NULL, step INTEGER NOT NULL,
-		event_type TEXT NOT NULL DEFAULT 'call',
-		service TEXT, operation TEXT, request JSONB, response JSONB, error TEXT,
-		duration_ms BIGINT, signal_names TEXT, timeout_ms BIGINT,
-		signal_name TEXT, signal_payload JSONB, defer_description TEXT,
-		defer_id TEXT, child_name TEXT, child_input JSONB, run_id TEXT,
-		new_input JSONB, plugin_name TEXT, plugin_func TEXT,
-		plugin_input JSONB, plugin_output JSONB, plugin_error TEXT,
-		promise_name TEXT, promise_id TEXT, promise_result TEXT, promise_error TEXT,
-		payload JSONB,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (workflow_id, step))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_signals (
-		workflow_id TEXT NOT NULL, signal_name TEXT NOT NULL,
-		payload JSONB NOT NULL DEFAULT '{}',
-		delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (workflow_id, signal_name))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_promises (
-		workflow_id TEXT NOT NULL, promise_id TEXT NOT NULL,
-		promise_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-		result JSONB, error_msg TEXT,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(), resolved_at TIMESTAMPTZ,
-		PRIMARY KEY (workflow_id, promise_id))`)
-	db.Exec(`CREATE EXTENSION IF NOT EXISTS pgcrypto`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS compaction_state JSONB`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS compacted_at TIMESTAMPTZ`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS compaction_step INTEGER`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS tenant_id TEXT`)
-	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS payload JSONB`)
 	return db
 }
 

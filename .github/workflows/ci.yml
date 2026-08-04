@@ -275,6 +275,13 @@ jobs:
           # twice.
           - name: upgrade
             path: ./tests/upgrade/...
+          # scale needs the same PostgreSQL service. It is not a benchmark
+          # gate -- it asserts correctness under concurrency (every workflow
+          # reaches a terminal state, no workflow is claimed twice), and its
+          # throughput numbers are logged, not asserted, so it does not fail on
+          # a slow runner.
+          - name: scale
+            path: ./tests/scale/...
     steps:
       - uses: actions/checkout@v4
 

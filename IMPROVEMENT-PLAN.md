@@ -2167,9 +2167,51 @@ assertions, and the first drains any remaining work and requires every workflow 
 Result: **8 pass, 0 skip, 0 fail**, wired into the `test-go` matrix with budget
 `test-go/upgrade 0`. Before: `50/50` and `30 executions` where it had been `0/50` and `0`.
 
-Three suites remain in `UNWIRED_SUITES`: `cluster`, `cross-language`, `scale`. (`soak` is also
-listed but is gated behind the `soak_test` build tag, so `go vet ./tests/soak/...` reports no
-packages at all — it is unwired twice over.)
+### 2.34 `tests/scale` — ✅ **DONE**
+
+Cheapest of the three. 15 of 16 passed once the schema was real; the one failure was the same
+generation fence, with an extra defect underneath it:
+
+```go
+for wfID := range workCh {
+    wf, err := store.ClaimWorkflow(ctx, workerID)   // claims *some* workflow
+    ...
+    store.AppendEventHistoryBatch(ctx, wfID, events)          // writes to a different one
+    store.CompleteWorkflow(ctx, wfID, workerID, 0, ...)       // and completes it, ungenerationed
+}
+```
+
+The channel is a work counter, not an assignment — `ClaimWorkflow` decides what this worker
+gets. The loop wrote to `wfID` while holding `wf`, so every completion was against a workflow
+the worker did not own, and the hardcoded `0` lost the fence on top of that. It now uses
+`wf.ID` and `wf.Generation`.
+
+`testDB` moved to `engine/testutil` and seeds `('test', 1)`, as in §2.31 and §2.33.
+
+**16 pass, 0 skip, 0 fail**, ~23s. Budget `test-go/scale 0`. The throughput numbers stay
+logged rather than asserted, so it does not become a benchmark gate that fails on a slow
+runner; what it asserts is correctness under concurrency.
+
+### Where the unwired suites stand
+
+| Suite | State |
+|---|---|
+| `integrity` | ✅ wired — §2.31 |
+| `upgrade` | ✅ wired — §2.33 |
+| `scale` | ✅ wired — §2.34 |
+| `cluster` | 🔶 open — needs the compose cluster; ci.yml's cluster job already brings one up |
+| `cross-language` | 🔶 open — needs the Rust/Python/AssemblyScript toolchains |
+| `soak` | 🔶 open, and unwired twice over: gated behind the `soak_test` build tag, so `go vet ./tests/soak/...` reports no packages at all |
+
+Across the three suites wired so far: **92 tests that no job had ever run**, of which **31
+failed** the first time a database appeared, and one of those failures was a live engine
+defect (§2.30). None of it was visible from a green CI.
+
+**Follow-up, and it matters:** the new matrix entries create new check-run contexts
+(`Test Go (integrity) on 1.26`, `… (upgrade) …`, `… (scale) …`) that are **not** in the
+required-status-check list configured in §2.25. Until they are added, a failure in any of them
+does not block a merge — which is the same defect as everything above, one level up. Add them
+once each has produced a real check-run to name.
 
 ---
 

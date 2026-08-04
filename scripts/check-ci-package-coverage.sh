@@ -81,8 +81,8 @@ echo "OK: all $count top-level Go package dirs are covered or exempt."
 # tests/upgrade, tests/soak, tests/scale and tests/cross-language were named by
 # no workflow file at all. Only tests/plugin-harness was actually run.
 #
-# tests/integrity and tests/upgrade were wired into the test-go matrix on
-# 2026-08-04 and dropped from the list below. What it found on its first real run is the argument for
+# tests/integrity, tests/upgrade and tests/scale were wired into the test-go
+# matrix on 2026-08-04 and dropped from the list below. What it found on its first real run is the argument for
 # clearing the rest: 22 of its 30 tests failed immediately against a migrated
 # database (its fixture invented its own schema, without the foreign key
 # production has), and behind that sat a real engine defect -- the event
@@ -104,7 +104,7 @@ echo "OK: all $count top-level Go package dirs are covered or exempt."
 # tracked in IMPROVEMENT-PLAN.md Phase 2. Removing a name from this list when
 # you wire its suite up must never fail the build; adding one requires saying
 # why here.
-UNWIRED_SUITES="cluster cross-language scale soak"
+UNWIRED_SUITES="cluster cross-language soak"
 
 unreferenced=""
 regressed=""
