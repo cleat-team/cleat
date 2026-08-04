@@ -76,6 +76,34 @@ would collide with WS-1's live instance. Start containers individually with expl
 `docker compose down -v` destroys the user's database: the `cleat` project owns
 `cleat-postgres-1`. Remove containers **by name**.
 
+### A long-lived test database eventually fails tests that are not broken
+
+Observed by WS-3 on 2026-08-04, after a few hours of repeated `go test ./engine/...` against
+one instance. Two tests failed on the stream's own database and passed on a freshly created
+one at the same server, same commit:
+
+- `TestStartChildWorkflowAtomicUnderRLS` — `reading child workflow_instances row: sql: no
+  rows in result set`, deterministic.
+- `TestClaimWorkflows_RespectsLimitUnderConcurrency` — only under the full suite, never in
+  isolation.
+
+Neither is a defect. Both are accumulated row and role state in a database that has had
+hundreds of suite runs applied to it, and the RLS-sensitive tests are the ones that notice,
+because a stale row that the policies do or do not match changes the answer.
+
+**Before reporting an engine failure, re-run it against a fresh database.** It costs one
+command and it is the difference between a real find and an afternoon spent on your own
+sandbox:
+
+```
+docker exec <your-postgres> psql -U cleat -d postgres -c "CREATE DATABASE cleat_probe;"
+CLEAT_TEST_POSTGRES='postgres://cleat:cleat@127.0.0.1:<your-port>/cleat_probe?sslmode=disable' \
+  go test -count=1 ./engine/...
+```
+
+This is the same failure mode as everything else in this file, in a different costume: a
+signal attached to the wrong thing. The test was reporting on the database, not on the code.
+
 ### SQL Server needs its own colima VM on Apple Silicon
 
 The default colima profile is `vmType: vz` with `rosetta: false`, so amd64 images fall back
