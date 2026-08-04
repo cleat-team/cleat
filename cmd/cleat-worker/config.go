@@ -129,6 +129,7 @@ var (
 	tenantPoolMaxConns            = flag.Int("tenant-pool-max-conns", 25, "Max open connections per tenant pool (MySQL/MSSQL only)")
 	logLevel                      = flag.String("log-level", "info", "Log level: debug, info, warn, error")
 	enableAdminAPI                = flag.Bool("enable-admin-api", false, "Enable admin API endpoints (force-complete, force-fail, re-replay)")
+	verifyBackend                 = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
 )
 
 func applyChildBindingOverrideEnv() {

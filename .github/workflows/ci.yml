@@ -672,9 +672,11 @@ jobs:
         with:
           go-version: stable
 
-      - name: Build cleat-worker binary
-        run: CGO_ENABLED=0 go build -o cleat-worker ./cmd/cleat-worker
-
+      # No host-binary build step here. It produced ./cleat-worker with
+      # CGO_ENABLED=0 and nothing in this job ever ran it -- the cluster runs
+      # containers. Worse, sitting directly above the image build it read as
+      # though CGO_ENABLED=0 were the shipped configuration, which is the
+      # belief that let 2.28 survive. The image build below is the real one.
       - name: Build Docker image
         run: docker build -t cleat-worker:latest .
 
