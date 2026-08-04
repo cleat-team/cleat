@@ -222,6 +222,23 @@ write the migration blind.
    operations. Different files, same dialect — coordinate before either lands a schema change
    to the MSSQL path.
 
+   **Updated 2026-08-04.** §1.7 turned out not to need an MSSQL policy migration — the seven
+   policies already exist in `migrations/mssql/001_schema.sql` and were verified enforcing.
+   But WS-3 found **§2.71** while testing them, and it sits squarely in WS-1's half of this
+   coupling: `MSSQLStoreFactory`'s per-tenant `sp_set_session_context` is cleared when a
+   pooled connection is recycled, so with the real schema every tenant-scoped *read* on SQL
+   Server returns nothing. Writes are fine (they set the context inside their own
+   transaction). It fails closed, so it is correctness rather than a leak.
+
+   **WS-1: this is yours to fix** — `engine/mssql_store.go`, and it likely interacts with
+   §2.26's `BeginTx` boundaries, since the fix direction is to establish the session context
+   per transaction the way the write paths already do. `cmd/cleat-worker/tenant_isolation_mssql_test.go`
+   is written and skipped against it; unskipping it is the acceptance test.
+
+   Related, for whoever owns `engine/testutil/` (WS-2): `mssql_schema.go` hand-writes its
+   tables and defines none of the seven security policies, so **no MSSQL test in the repo has
+   a tenant backstop** and none could have caught §2.71.
+
 Nothing else in the three lists overlaps.
 
 ## Sequencing, if you want the highest yield first
