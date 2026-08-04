@@ -314,9 +314,12 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 //     component path in engine/component_cgo.go is the other candidate, behind
 //     a build tag no build sets.
 //
-//     wazero runs Python correctly today, so there is no user-visible cost to
-//     leaving it there. Revisit only if the component path is wanted for another
-//     reason. See IMPROVEMENT-PLAN.md 2.72.
+//     Do not read this as "wazero runs Python fine". An earlier draft of this
+//     comment said exactly that, and CI contradicted it: with the routing
+//     corrected so Python reaches wazero, TestPythonWasmEndToEnd fails there too,
+//     on `module[__main_module__] not instantiated`. Python is on wazero because
+//     that is where the product sends it, not because it is known to work there.
+//     See IMPROVEMENT-PLAN.md 2.72.
 //
 // See IMPROVEMENT-PLAN.md 2.72.
 var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust"}

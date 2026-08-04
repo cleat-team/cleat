@@ -3684,9 +3684,30 @@ runtime, and that is now known to the instance: it stops at `undefined element: 
 table access` instantiating an inner core module, eleven instances past where the `env::abort`
 defect used to mask it.
 
-**wazero runs Python correctly**, so there is no user-visible cost. Four of five languages run
-on wasmtime — `go`, `assemblyscript`, `java`, `rust` — and the fifth runs on a supported
-backend for a reason anyone can read, rather than because of a stale note nobody had rechecked.
+**Correction — "wazero runs Python correctly" was wrong, and CI said so within the hour.**
+That sentence stood here and in the comment on `engine.WasmtimeLanguages`. It was inferred
+from the product's routing, not from anything that ran. With the routing corrected so Python
+actually reaches wazero, `TestPythonWasmEndToEnd` fails there too:
+
+```
+wasmtime: instantiate instance 52 (module 8): undefined element: out of bounds table access
+wazero:   instantiate instance 8 (module 1): module[__main_module__] not instantiated
+```
+
+**Python is on wazero because that is where the product sends it, not because it is known to
+work there.** The honest statement of the outcome: four of five languages run on wasmtime, and
+the fifth runs on a backend where its one end-to-end test does not currently pass either.
+
+That test is now skipped and recorded — `skip-baseline` 1→2 sites, `e2e-cross-language` budget
+0→1 — rather than left failing or left hidden. Deleting it would lose the only thing in CI
+that builds a Python component at all. Unskipping it is the acceptance test for whichever
+instantiation path is fixed first.
+
+Note the sequencing, because it is the whole lesson of this entry: the claim was written, and
+the mechanism that would have contradicted it (`pipefail`) was fixed in the same change. The
+correction arrived one CI run later. Had the `pipefail` fix not been part of this work, the
+false claim would have sat in the source comment indefinitely, with a green workflow behind
+it.
 
 Two candidates remain for whoever wants to revisit, and neither is urgent:
 
