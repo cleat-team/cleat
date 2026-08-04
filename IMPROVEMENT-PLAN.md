@@ -3268,6 +3268,71 @@ item; unskipping it is the acceptance test.
 
 ---
 
+### 2.72 Two languages ran on wasmtime because a parser was broken — ✅ **FIXED** (WS-3, 2026-08-04)
+
+`readImportSection` (`wasm/metadata.go`) advanced past an import descriptor's **kind byte**
+and left its payload unread. For a function import the payload is a type index, so the next
+iteration read that index as the following import's module-name length. The parser
+desynchronised after the *first* import, and every module with two or more failed:
+
+```
+AssemblyScript   readImportSection err=corrupt WASM import 1: field name overflows section
+Java (TeaVM)     readImportSection err=corrupt WASM import 2: name overflows section
+```
+
+Both fixtures parse cleanly with an independent parser — 3 and 7 imports, `env.abort` present
+in the AssemblyScript one, `teavm.*` in the Java one, which are exactly the two patterns
+`detectLanguageFromImports` looks for. **Those branches had never once been reached.**
+
+Invisible because both callers read an error as "cannot tell": `NeededEnvImports` falls back
+to registering every host function (safe, but the optimisation never applied), and
+`detectLanguageFromImports` returns `""`, which `DetectLanguage` turns into its `"go"` default.
+
+**The trap, and why the fix is two changes in one commit.** AssemblyScript and TeaVM Java
+reached the wasmtime backend *because* of this bug — misidentified as `"go"`, they matched the
+only entry in the backend map. Fixing the parser alone would have identified them correctly,
+matched nothing, and silently dropped both onto wazero. A bug fix that downgrades two
+languages onto the fallback runtime is worse than the bug, and nothing in the suite would have
+said so. `cmd/cleat-worker/backend_routing.go` now states the routed set explicitly, and
+`TestRealFixturesRouteToWasmtime` asserts detection *and* destination together — verified to
+fail with the parser fixed and the list left at `{"go"}`.
+
+**Also fixed: the discarded component error.** `backend_wasmtime.go` had
+`if result, err := b.ExecuteComponentCGo(...); err == nil`, throwing the error away. Every
+native-component failure surfaced only as whatever the decomposition fallback happened to
+report — typically an unresolved-import error, which reads like "wasmtime cannot run this
+component" when the cause was something else entirely. It is now logged and attached to the
+fallback's error.
+
+**What that revealed, for whoever takes §2.28's residual further:**
+
+- **Rust loads and executes on wasmtime today.** `place_order` from `examples/rust-workflow`
+  ran and returned the guest's own `{"error": "EOF while parsing a value at line 1 column 0"}`
+  from a nil input. `wasm/metadata.go:353-355` routes it away deliberately — *"so Rust modules
+  fall through to the default runtime instead of crashing in wasmtime"* — which does not
+  reproduce now. Same shape as the stale `CGO_ENABLED=0` note in `CLAUDE.md`: a reason that
+  was true when written and outlived its cause. **Not moved**, because `tests/cross-language`
+  is one of the six suites this plan records as run by no CI job, so there is no signal to
+  regress against. Wire that up first; the routing change is then one line in
+  `wasmtimeLanguages`.
+- **Python is closer than it looks, and blocked by three separate things.** With the native
+  component path enabled, the component *compiles and links* on wasmtime. Its failures are
+  (1) `engine/component_cgo.go` sits behind the `wasmtime_component_cgo` build tag, which
+  **no build, CI job, Makefile or Dockerfile sets** — every build gets the stub; (2) it needs
+  `CGO_CFLAGS=-I<wasmtime-go>/build/include`, documented at `component_cgo.go:26` and
+  automated nowhere; (3) `componentGetFunc` passes `nil` as the parent export index, so it
+  resolves only flat top-level exports and cannot reach functions nested inside an exported
+  interface, which is how componentize-py emits them. Probing export names, `run` was found
+  and called — it trapped in execution rather than being missing. That trap is inconclusive:
+  the probe passed a nil `HostHandler`, so host calls could not work. What it does establish
+  is that the wall is not wasmtime's component support.
+
+**Method note.** None of this was visible by reading. The parser looked correct, the language
+branches looked correct, and the routing looked correct; the fixtures were the only thing that
+disagreed. Every claim above came from executing against checked-in toolchain output.
+
+---
+
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by
 diffing against `develop` and by `git apply --check`, not by reading commit messages — the
 mistake §0.2's correction calls out. Three of the four highest-value findings (§2.18, §2.19,

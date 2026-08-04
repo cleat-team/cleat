@@ -1419,7 +1419,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			memoryPages = 65536
 		}
 	}
-	needsWazeroRuntime := w.wasmtimeBackend == nil || wasm.DetectLanguage(wasmBytes) != "go"
+	needsWazeroRuntime := w.wasmtimeBackend == nil || !runsOnWasmtime(wasm.DetectLanguage(wasmBytes))
 	var rt *engine.Runtime
 	if needsWazeroRuntime {
 		var rtErr error
@@ -1501,7 +1501,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithWorkflowID(wf.ID),
 		engine.WithTraceID(traceID),
 		engine.WithTenantID(wf.TenantID),
-		engine.WithBackend("go", w.wasmtimeBackend),
+		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend),
 		engine.WithWorkflowStore(w.store),
 		engine.WithChildWorkflowStore(w.store),
 		engine.WithPluginRegistry(w.pluginRegistry),
