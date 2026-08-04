@@ -231,9 +231,15 @@ type chargeService struct {
 	srv *httptest.Server
 
 	mu     sync.Mutex
-	counts map[string]int // keyed by operation
+	counts map[string]int // keyed by operation: work actually performed
 	total  int            // every request that reached the handler, whatever its shape
 	bodies []string       // raw request bodies, for diagnosing a mismatch
+
+	// honourKeys makes the service deduplicate on Idempotency-Key, the way a
+	// payment processor does. Off by default, so the crash test measures the
+	// contract for services that cannot dedupe.
+	honourKeys bool
+	seenKeys   map[string]string // Idempotency-Key -> the response first returned
 
 	// holdOp names the operation whose first invocation blocks. The crash
 	// window is exactly that block: the service has processed the request and
@@ -251,8 +257,9 @@ type chargeService struct {
 func newChargeService(t *testing.T) *chargeService {
 	t.Helper()
 	c := &chargeService{
-		counts: make(map[string]int),
-		gate:   make(chan struct{}),
+		counts:   make(map[string]int),
+		seenKeys: make(map[string]string),
+		gate:     make(chan struct{}),
 	}
 	// The worker forwards unknown services to --bench-svc-url as
 	// POST /call/{service}/{operation}; see dbServiceCaller.forwardToBenchSvc.
@@ -271,12 +278,27 @@ func (c *chargeService) handle(w http.ResponseWriter, r *http.Request) {
 	// and a silently-failing Unmarshal here reads as "the call never happened".
 	op := path.Base(r.URL.Path)
 
+	key := r.Header.Get("Idempotency-Key")
+
 	// Record the side effect BEFORE blocking. This models a real service that
 	// has committed the operation and is about to reply -- the case a durable
 	// call cannot distinguish from one that never ran.
 	c.mu.Lock()
 	c.total++
 	c.bodies = append(c.bodies, r.URL.Path+" "+string(raw))
+
+	// A key-honouring service returns the original outcome rather than doing
+	// the work again. The counter tracks work performed, not requests received,
+	// which is the distinction the whole mechanism turns on.
+	if c.honourKeys && key != "" {
+		if prior, seen := c.seenKeys[key]; seen {
+			c.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(prior))
+			return
+		}
+	}
+
 	c.counts[op]++
 	n := c.counts[op]
 	shouldHold := c.holdOp != "" && op == c.holdOp && n == 1
@@ -288,8 +310,22 @@ func (c *chargeService) handle(w http.ResponseWriter, r *http.Request) {
 		<-hold
 	}
 
+	body := fmt.Sprintf(`{"charge_id":"chg-%s-%d","status":"ok"}`, op, n)
+	if c.honourKeys && key != "" {
+		c.mu.Lock()
+		c.seenKeys[key] = body
+		c.mu.Unlock()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"charge_id":"chg-%s-%d","status":"ok"}`, op, n)
+	_, _ = w.Write([]byte(body))
+}
+
+// keyCount reports how many distinct idempotency keys the service was sent.
+func (c *chargeService) keyCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.seenKeys)
 }
 
 // holdOperation makes the first invocation of op block until the returned

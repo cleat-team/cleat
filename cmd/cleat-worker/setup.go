@@ -132,11 +132,31 @@ type dbServiceCaller struct {
 }
 
 func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
+	return c.call(ctx, service, operation, requestJSON, "")
+}
+
+// CallWithIdempotencyKey implements engine.IdempotentCaller.
+//
+// The key is stable across every replay of the same logical step, so a service
+// that honours it returns the original outcome instead of performing the work
+// again after a crash. See engine/idempotency.go and IMPROVEMENT-PLAN §1.4
+// phase B.
+//
+// NOTE (WS-2 -> WS-3): cmd/cleat-worker/ is WS-3's under
+// PARALLEL-WORKSTREAMS.md. Added here because the engine-side mechanism is inert
+// without a caller that implements it, and shipping a mechanism nothing calls is
+// the exact shape of the §1.4 defect this phase exists to avoid. Additive: the
+// existing Call is unchanged in behaviour and delegates to the same helper.
+func (c *dbServiceCaller) CallWithIdempotencyKey(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, error) {
+	return c.call(ctx, service, operation, requestJSON, idempotencyKey)
+}
+
+func (c *dbServiceCaller) call(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, error) {
 	if service == "http" && operation == "fetch" {
 		return c.handleHTTPFetch(ctx, requestJSON)
 	}
 	if c.benchSvcURL != "" {
-		return c.forwardToBenchSvc(ctx, service, operation, requestJSON)
+		return c.forwardToBenchSvc(ctx, service, operation, requestJSON, idempotencyKey)
 	}
 	return "", engine.NewPermanentError("call", "", fmt.Errorf("service %s.%s not configured: no endpoint registered", service, operation))
 }
@@ -153,13 +173,18 @@ var benchSvcHTTPClient = &http.Client{
 	},
 }
 
-func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operation, requestJSON string) (string, error) {
+func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, error) {
 	url := fmt.Sprintf("%s/call/%s/%s", c.benchSvcURL, service, operation)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(requestJSON))
 	if err != nil {
 		return "", engine.NewPermanentError("bench-svc", "", fmt.Errorf("create request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		// The conventional header name, as used by Stripe and others. A service
+		// that does not recognise it ignores it, so this is safe to always send.
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 	t0 := time.Now()
 	resp, err := benchSvcHTTPClient.Do(req)
 	if err != nil {

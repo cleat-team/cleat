@@ -650,19 +650,51 @@ it returns. Not attempted here.
 > instruction — do not start the intent work before the crash harness exists — turned out
 > to be right for a reason it did not anticipate.
 >
-> **Measured, both ways.** `tests/crash` kills a worker during the third of three durable
-> calls and counts what the external service was asked to do:
+> **Measured, three ways.** `tests/crash` kills a worker during the third of three durable
+> calls and counts what the external service was asked to *do* — not what it received:
 >
 > | | Reserve | Charge | Ship | events durable at crash |
 > |---|---|---|---|---|
-> | with the fix | 1 | 1 | **2** | 2 |
 > | fix reverted | **2** | **2** | 2 | **0** |
+> | with the flush fix | 1 | 1 | **2** | 2 |
+> | + idempotency keys (phase B) | 1 | 1 | **1** | 2 |
 >
-> The first row is the documented contract: only the interrupted call is retried. The
-> second is what shipped — a crash re-executed two charges that had **already completed
-> successfully**. That is the end-to-end demonstration that the flush fix is load-bearing
-> for crash recovery, and it is the reason the harness uses three calls rather than one:
-> with a single call both rows read "2", and the two cases are indistinguishable.
+> Row one is what shipped: a crash re-executed two charges that had **already completed
+> successfully**. Row two is the documented at-least-once contract — only the interrupted
+> call is retried. Row three is phase B: the duplicate request is still *sent*, and the
+> service does not act on it twice.
+>
+> This is the reason the harness uses three calls rather than one: with a single call every
+> row reads "2" and the cases are indistinguishable.
+
+**Phase B — idempotency keys: ✅ done.**
+
+`DurableCallIdempotencyKey` (`engine/idempotency.go`) derives
+`base32(sha256(workflowID || 0x00 || runID || 0x00 || step))`. Every input is deterministic
+on replay, so a resumed workflow derives the same key the original run used. All five
+durable-call sites route through one `callService` helper — deriving the key per call site
+is how the step number and the recorded event drift apart.
+
+**Deviation from `docs/durable-call-intent-design.md` §4, deliberately.** The design adds
+the key as a parameter to `ServiceCaller.Call`, and names the cost: *"a breaking change for
+external callers and plugin authors. That is the main expense of this tier."* Implemented
+instead as an **optional** `IdempotentCaller` interface: same mechanism, no existing
+implementation stops compiling. The trade is that a caller which could honour keys but has
+not been updated silently does not — so `CallerHonoursIdempotencyKeys` makes that
+detectable, and the crash test asserts the service actually received keys before trusting
+its result. If the interface is ever collapsed into `ServiceCaller`, nothing here forecloses
+it.
+
+Tests: key stability **across a real replay** (run to completion, truncate the history to
+two events as a crash would leave it, resume, require the resumed steps' keys to match the
+original run's) — proven to fail by making the derivation non-deterministic. Plus retry
+attempts sharing one key, per-step/run/workflow distinctness, the NUL-separator ambiguity
+case, and the fallback for plain callers.
+
+**Cross-stream:** `cmd/cleat-worker/setup.go` is WS-3's. `dbServiceCaller` now implements
+`IdempotentCaller` and sends the `Idempotency-Key` header, because the engine-side mechanism
+is inert without a caller that implements it — and shipping a mechanism nothing calls is the
+exact §1.4 shape this phase exists to avoid. Additive: `Call` is unchanged in behaviour.
 
 > **Sharpened 2026-08-02 by empirical test, not grep.** The original framing here — "the
 > whole feature is dead" — was too coarse. The *read* side is live and correct: a

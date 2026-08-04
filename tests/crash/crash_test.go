@@ -176,3 +176,72 @@ func TestEventsArePersistedDuringExecution(t *testing.T) {
 			"--- worker log ---\n%s", n, w.output())
 	}
 }
+
+// TestCrashWithIdempotencyKeysDoesNotDuplicate is IMPROVEMENT-PLAN §1.4 phase B,
+// measured the same way as the crash test above and differing in exactly one
+// respect: the service honours Idempotency-Key.
+//
+// Same crash, same window, same worker. The interrupted call is still re-issued
+// on recovery — the engine cannot know it succeeded — but it arrives carrying
+// the key the original attempt used, so the service returns the original
+// outcome instead of charging again.
+//
+//	without keys (the test above): Reserve=1 Charge=1 Ship=2
+//	with keys (this test):         Reserve=1 Charge=1 Ship=1
+//
+// That difference is the entire value of phase B, and it is why this assertion
+// is on work performed rather than on requests received. The service still
+// receives the duplicate request; what it does not do is act on it twice.
+func TestCrashWithIdempotencyKeysDoesNotDuplicate(t *testing.T) {
+	db := ownerDB(t)
+	defer db.Close()
+
+	suffix := uniqueSuffix()
+	taskQueue := "queue-idem-" + suffix
+	wfID := "idem-wf-" + suffix
+	orderID := "order-" + suffix
+
+	deployFixture(t, db, taskQueue)
+	bin := buildWorker(t)
+
+	svc := newChargeService(t)
+	svc.honourKeys = true
+	release := svc.holdOperation("Ship")
+
+	first := startWorker(t, bin, taskQueue, svc.srv.URL)
+	startWorkflow(t, db, wfID, orderID, taskQueue)
+
+	svc.awaitHeldCall(t, first, startBudget)
+
+	first.kill()
+	release()
+
+	second := startWorker(t, bin, taskQueue, svc.srv.URL)
+
+	status, errMsg := awaitTerminal(t, db, wfID, completeBudget)
+	if status != "done" && status != "completed" {
+		t.Fatalf("workflow ended %q (%s)\n--- worker log ---\n%s", status, errMsg, second.output())
+	}
+
+	reserve, charge, ship := svc.allCounts()
+	t.Logf("with idempotency keys: Reserve=%d Charge=%d Ship=%d; %d requests, %d distinct keys",
+		reserve, charge, ship, svc.total, svc.keyCount())
+
+	// The service must actually have been sent keys. Without this the test
+	// passes trivially against a worker that sends none and simply never
+	// duplicated — and the mechanism under test would be untested.
+	if svc.keyCount() == 0 {
+		t.Fatalf("the service received no Idempotency-Key at all, so this test " +
+			"proves nothing: the worker's ServiceCaller does not implement " +
+			"engine.IdempotentCaller")
+	}
+
+	if ship != 1 {
+		t.Errorf("Ship=%d, want 1: the interrupted call was re-issued with the "+
+			"key its first attempt used, so a key-honouring service must not "+
+			"perform the charge twice", ship)
+	}
+	if reserve != 1 || charge != 1 {
+		t.Errorf("Reserve=%d Charge=%d, want 1/1", reserve, charge)
+	}
+}
