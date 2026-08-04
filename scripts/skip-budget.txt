@@ -57,7 +57,10 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # sites on CLEAT_TEST_MSSQL. It provokes a real deadlock to check the
 # classifier against the error the driver actually returns, so it cannot run
 # without a server.
-test-go/engine	353	# observed on the runner: 2984 pass, plus the MSSQL guard, session-context, RLS and deadlock tests
+#
+# 353 -> 355: TestEnforceParentClosePolicy runs against registeredBackends, so
+# its mysql and mssql subtests skip in the Postgres-only engine job.
+test-go/engine	355	# observed on the runner: 2984 pass, plus the MSSQL guard, session-context, RLS and deadlock tests
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -102,7 +105,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	353	# same as test-go/engine, and for the same reason; see the note there
+cluster	355	# same as test-go/engine, and for the same reason; see the note there
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is

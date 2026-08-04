@@ -2275,9 +2275,9 @@ a run that the HTTP layer already answered 409 for still runnable — the §1.2 
 **Still to do:** `mssql_events.go` and `mssql_signals_promises.go` (9 boundaries), which
 §2.60 (#283) is changing. Do those after it lands rather than into a conflict.
 
-### 2.50 Parent close policy fails silently on all three dialects — 🔴 **OPEN** (MSSQL half fixed)
+### 2.50 Parent close policy fails silently on all three dialects — ✅ **FIXED**
 
-Found while wiring §2.26. `enforceParentClosePolicy` is what applies a terminated parent's
+Found while wiring §2.26. `enforceParentClosePolicy` is what applies a *closing* parent's
 policy to its children: `TERMINATE` children are failed, `REQUEST_CANCEL` children get the
 cancellation flag. It discarded every error it produced.
 
@@ -2294,11 +2294,30 @@ children is the obvious way — **the children of a terminated parent keep runni
 is no log line, no metric and no error anywhere in the system.
 
 This is the §1.2 shape one level further out: not an unchecked `RowsAffected`, but an
-unchecked everything. The MSSQL fix checks the errors, retries them when SQL Server
-guarantees a rollback, and logs what survives; the function stays void because its contract
-with callers has not changed. The PostgreSQL and MySQL halves are the follow-up, and MySQL's
-missing transaction is a second question on its own — two independent statements mean a
-partial application is possible today.
+unchecked everything.
+
+**All three dialects fixed, 2026-08-04.** Each checks its errors and logs what it could not
+do, naming the consequence rather than the statement — *"children of a closed parent are
+unaffected by its close policy"*. MSSQL additionally retries on a rollback-guaranteed error
+(§2.26); PostgreSQL and MySQL have no equivalent retry infrastructure and a deadlock there is
+still a hard failure, now at least a visible one. **MySQL also gains the transaction it never
+had**: two bare `s.db.ExecContext` calls meant TERMINATE children could be failed while
+REQUEST_CANCEL children went unflagged, with nothing to indicate a partial application.
+
+**The feature itself was never tested, and it works.** Nothing in the repo exercised parent
+close policy on any dialect — the only existing references assert this SQL is *absent* on the
+fence-lost path, which says nothing about whether it does the right thing when it should run.
+`TestEnforceParentClosePolicy` now covers all three policies at once against every configured
+backend, so a change that handles one and breaks another cannot pass. Confirmed able to fail:
+pointing the TERMINATE predicate at a policy name that matches nothing fails on all three with
+`TERMINATE child status = "ready", want "failed"`.
+
+**Observation, not yet a claim:** no dialect's `TerminateWorkflow` calls
+`enforceParentClosePolicy`. The policy is applied by `CompleteWorkflow`, `FailWorkflow`,
+`MoveToDeadLetterQueue`, `ContinueAsNew` and `FinalizeWorkflowSegment` — so a parent that is
+*terminated* leaves its children running whatever their policy says. Whether that is a defect
+depends on a contract this repo does not document anywhere: there is no user-facing
+description of parent close policy at all. Worth settling before changing behaviour.
 
 **Validated against a real server, which is the check this section says was never made.**
 `TestMSSQLDeadlock_ClassifiedFromTheRealDriverError` provokes a genuine deadlock — two
