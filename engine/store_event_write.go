@@ -226,5 +226,12 @@ func (s *PostgresStore) VerifyWorkflowEvents(ctx context.Context, workflowID str
 		}
 		prevChecksum = expected
 	}
+
+	// The chain above certifies payload, which is the only copy the checksum
+	// covers and the only one replay reads. It says nothing about the
+	// duplicate columns every SQL consumer reads -- see store_event_shadow.go.
+	if err := s.verifyShadowColumns(ctx, tx, workflowID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
