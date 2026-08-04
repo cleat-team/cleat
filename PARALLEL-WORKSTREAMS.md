@@ -243,10 +243,17 @@ its general form.
 | **§2.28 residual** | ✅ **Closed.** Four of five languages run on wasmtime — `go`, `assemblyscript`, `java`, `rust`. Python stays on wazero deliberately, with the reason recorded to the instance in `engine.WasmtimeLanguages` and §2.72. The "shipped image must stay CGO + glibc" half is guarded: `Dockerfile:41` runs `/cleat-worker --verify-backend`. |
 | **§2.40 residual** | 🔶 `cmd/cleat` is clean under `ineffassign` since §2.43 removed its two dead fallbacks. Four findings remain — `internal/closure/threading.go:42`, and the three defensive `argIdx` increments in `plugins/scheduledbackup/{commands,routes}.go` and `plugins/webhookingest/host_functions.go` that need `//nolint` rather than deletion. **None are WS-3's files**; only `.golangci.yml` is. |
 
-**Open and genuinely WS-3's:** no CI job installs `wasm32-unknown-unknown`, so
-`cleat build --target rust` — the build path users actually invoke — is exercised nowhere.
-`e2e-cross-language.yml` installs it for `tests/cross-language`; nothing installs it for the
-product build.
+**Nothing open in WS-3's own files.** The last item — no CI job installing
+`wasm32-unknown-unknown`, so `cleat build --target rust` was exercised nowhere — closed in
+#291, which found it sitting on top of §2.70's defect in a second workflow: all four
+plugin-harness jobs ran `CGO_ENABLED: "0"`, and `TestPluginCalls_Wasm_Go` was skipping
+unconditionally on a wazero panic that only happens because the job forced wazero. That job
+now runs with CGO on, installs the right Rust target, and enforces the result with a skip
+budget: `skipped=1 budget=1 (passed=4 failed=0)` on the runner, Python being the one skip.
+
+**§1.7's residual is the only WS-3 item left, and it is not in WS-3's files** — 53 of the ~89
+unaudited `s.tenantID` call sites are in `engine/mysql_ops.go`. Coordinate with WS-1 rather
+than editing it.
 
 **Also found here, owned elsewhere, all recorded in `IMPROVEMENT-PLAN.md`:** `engine/testutil`'s
 MSSQL schema defines none of the seven security policies, so no *other* MSSQL test has a
