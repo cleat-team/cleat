@@ -3603,7 +3603,7 @@ opaque TLS handshake failure, not an auth error. And Edge is a **15.0/2019-era s
 SQL Server 2022; it is enough to run this repo's suite and to stop writing MSSQL migrations
 blind, but a green run on Edge is not a claim about 2022. CI still has the real thing.
 
-#### 2.60b The engine suite is not deterministic against MySQL or SQL Server — 🔴 **OPEN**
+#### 2.60b The engine suite is not deterministic against MySQL or SQL Server — ✅ **FIXED** (WS-2, 2026-08-04)
 
 > ~~**Four MySQL engine tests fail on `develop`.** Surfaced by running the engine suite
 > against a live MySQL for the first time. Verified pre-existing: they fail identically on a
@@ -3660,10 +3660,26 @@ the migration says `VARCHAR(255)`, so the indexes this same file creates over th
 built; and `workflow_update_requests.tenant_id` missing the migration's `DEFAULT`, so an
 insert that omits it fails against a schema the product never ships.
 
-**What to do:** give MySQL and SQL Server the fingerprint treatment `applyPostgresSchemaFile`
-already has, and collapse the two testutil MySQL schemas into one. Until then **a single green
-run on these dialects is not evidence**, which is the part worth inheriting — it is why the
-paragraph above is struck through rather than deleted.
+**Fixed by collapsing to one definition per dialect.** `SetupMinimalSchema` and
+`SetupFullSchema` now both route to the single schema for that dialect: the real migration file
+for PostgreSQL, `SetupMySQLFullSchema` for MySQL, `SetupMSSQLFullSchema` for SQL Server. 368
+lines of duplicated DDL deleted.
+
+The index creation had to move with them, and that turned out to be the actual seam: the
+dedicated files created **no** indexes and the `schema.go` arms created eight, so which entry
+point a test called changed the schema it got, on top of which test ran first. `SetupFullSchema`
+is kept as an alias rather than deleted — roughly forty call sites use it, and the
+minimal/full distinction is precisely the line the duplication grew along.
+
+**Three full runs against freshly created MySQL and SQL Server databases: green, green,
+green.** That is the evidence for the fix, and it is deliberately not a single run — a single
+green run on these dialects was never evidence, which is the part worth inheriting and why the
+original wrong diagnosis above is struck through rather than deleted.
+
+The fingerprint treatment `applyPostgresSchemaFile` has is *not* part of this and is still
+worth doing: it would stop the DDL re-running per test, which is a cost and a DDL-versus-DML
+deadlock risk (§2.39) rather than a correctness problem now that there is only one schema to
+apply.
 
 #### 2.60c A non-JSON signal payload was accepted on PostgreSQL and rejected elsewhere — ✅ **FIXED** (WS-2, 2026-08-04)
 
