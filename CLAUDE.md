@@ -67,9 +67,20 @@ yourself on wazero unexpectedly, check whether CGO got disabled.
 They are not equivalent: resource limits and determinism enforcement differ. When changing
 execution paths, check both, but treat wasmtime as the behaviour of record.
 
-> **Currently:** `go build ./...` fails with `'wasmtime.h' file not found` because
+> **Do not build or test the engine with `CGO_ENABLED=0`.** `NewWasmtimeBackend` is behind
+> `//go:build cgo`, so disabling CGO does not merely skip a check — it removes the primary
+> backend from the binary entirely and silently runs everything on wazero, the fallback with
+> the known bug tail. An engine result obtained that way is not evidence about the engine.
+>
+> This note used to read: *"`go build ./...` fails with `'wasmtime.h' file not found` because
 > `engine/cgo_test_helpers.go` hardcodes machine-specific paths. Use `CGO_ENABLED=0` until
-> that is fixed. See `IMPROVEMENT-PLAN.md` Phase 0.
+> that is fixed."* That was true when written and was fixed by `c26c332` without the note
+> being updated, so it went on steering engine work onto the wrong backend. Verified
+> 2026-08-04 on a clean checkout: `go build ./...`, `go vet ./engine/` and `go test ./engine/`
+> all pass with CGO at its default `1`, in the same 14s the CGO-less run took.
+>
+> If you hit a genuine toolchain failure that forces `CGO_ENABLED=0`, say so in the PR rather
+> than leaving the reader to assume wasmtime was exercised.
 
 ## Project state
 
