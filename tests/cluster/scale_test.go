@@ -59,6 +59,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 	workflowIDs := make([]string, 0, numWorkflows)
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("scale-test-addremove-%d", i)
+		EnsureDef(t, db, "scale-workflow", 1)
 		_, err := db.Exec(`
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 			VALUES ($1, 'scale-workflow', 1, 'ready', '{}', 'default')
@@ -99,7 +100,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 			if releasedCount >= 5 {
 				break
 			}
-			if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", 0, time.Now()); err == nil {
+			if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", wf.Generation, time.Now()); err == nil {
 				releasedCount++
 			}
 		}
@@ -127,7 +128,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 	if err == nil {
 		for _, wf := range wfs2 {
 			if wf.AssignedTo == "worker-2" || wf.AssignedTo == "worker-3" {
-				store.ReleaseWorkflow(ctx, wf.ID, wf.AssignedTo, 0, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, wf.AssignedTo, wf.Generation, time.Now())
 			}
 		}
 	}
@@ -173,6 +174,7 @@ func TestScaleUpWorkers(t *testing.T) {
 	workflowIDs := make([]string, 0, numWorkflows)
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("scale-test-scaleup-%d", i)
+		EnsureDef(t, db, "scaleup-workflow", 1)
 		_, err := db.Exec(`
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 			VALUES ($1, 'scaleup-workflow', 1, 'ready', '{}', 'default')
@@ -211,11 +213,30 @@ func TestScaleUpWorkers(t *testing.T) {
 		float64(claimed1)/duration1.Seconds())
 
 	// Release workflows for the multi-worker test.
-	wfs, err := store.ListWorkflows(ctx, engine.WorkflowFilter{Status: "running", Limit: 1000})
-	if err == nil {
-		for _, wf := range wfs {
-			store.ReleaseWorkflow(ctx, wf.ID, "worker-1", 0, time.Now())
+	//
+	// By ID, not by ListWorkflows(Status: "running", Limit: 1000). That query
+	// returns every running workflow in the cluster -- including the ones the
+	// live compose workers own -- so under a full run this test's own rows fell
+	// outside the limit and were never released. The error was discarded too,
+	// so the phase below then measured "throughput" over an empty queue and
+	// reported 0/sec as a Log rather than a failure.
+	var releasedForPhase3 int
+	for _, id := range workflowIDs {
+		wf, err := store.GetWorkflowByID(ctx, id)
+		if err != nil {
+			t.Fatalf("GetWorkflowByID(%s): %v", id, err)
 		}
+		if wf == nil || wf.Status != "running" {
+			continue
+		}
+		if err := store.ReleaseWorkflow(ctx, id, "worker-1", wf.Generation, time.Now()); err != nil {
+			t.Fatalf("ReleaseWorkflow(%s, gen=%d): %v", id, wf.Generation, err)
+		}
+		releasedForPhase3++
+	}
+	if releasedForPhase3 == 0 {
+		t.Fatalf("released none of the %d workflows claimed above, so the multi-worker "+
+			"phase has nothing to claim and measures nothing", claimed1)
 	}
 
 	// Measure throughput with 3 workers.
@@ -250,9 +271,16 @@ func TestScaleUpWorkers(t *testing.T) {
 		t.Error("No workflows claimed by 3 workers")
 	}
 
-	// Verify that 3 workers claimed at least as many as 1 worker.
-	if claimed3 < int32(claimed1) {
-		t.Logf("Note: 3 workers claimed %d vs 1 worker claimed %d (may be fewer due to timing)", claimed3, claimed1)
+	// Every workflow released above must be claimed again. Left as a Log this
+	// was the only check on the multi-worker phase, and "3 workers claimed 0 vs
+	// 1 worker claimed 50 (may be fewer due to timing)" passed.
+	//
+	// Not a throughput assertion: the rates are logged, not compared, because
+	// a shared runner is not a place to assert that three workers are faster
+	// than one. What is asserted is that no work went missing.
+	if int(claimed3) != releasedForPhase3 {
+		t.Errorf("released %d workflows and the three workers claimed %d of them; "+
+			"the rest are ready and unclaimed", releasedForPhase3, claimed3)
 	}
 
 	t.Logf("Scale-up test completed: 1 worker %.0f/sec, 3 workers %.0f/sec",

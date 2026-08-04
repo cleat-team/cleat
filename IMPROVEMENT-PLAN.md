@@ -2273,19 +2273,73 @@ runner; what it asserts is correctness under concurrency.
 | `integrity` | ✅ wired — §2.31 |
 | `upgrade` | ✅ wired — §2.33 |
 | `scale` | ✅ wired — §2.34 |
-| `cluster` | 🔶 open — needs the compose cluster; ci.yml's cluster job already brings one up |
+| `cluster` | ✅ wired — §2.36 |
 | `cross-language` | 🔶 open — needs the Rust/Python/AssemblyScript toolchains |
 | `soak` | 🔶 open, and unwired twice over: gated behind the `soak_test` build tag, so `go vet ./tests/soak/...` reports no packages at all |
 
-Across the three suites wired so far: **92 tests that no job had ever run**, of which **31
-failed** the first time a database appeared, and one of those failures was a live engine
-defect (§2.30). None of it was visible from a green CI.
+Across the four suites wired so far: **103 tests that no job had ever run**, of which **42
+failed** the first time a database appeared, and two of those were live defects in production
+code (§2.30, and the `docker compose` call in §2.36). None of it was visible from a green CI.
 
 **Follow-up, and it matters:** the new matrix entries create new check-run contexts
 (`Test Go (integrity) on 1.26`, `… (upgrade) …`, `… (scale) …`) that are **not** in the
 required-status-check list configured in §2.25. Until they are added, a failure in any of them
 does not block a merge — which is the same defect as everything above, one level up. Add them
 once each has produced a real check-run to name.
+
+### 2.36 `tests/cluster` — ✅ **DONE**
+
+Eleven tests: worker registration, workflow spread across queues, failover when a worker
+dies, PostgreSQL kill-and-restart, full cluster restart, replay determinism, WASM version
+isolation, and scale-up. **All eleven failed** the first time they were pointed at the
+running cluster.
+
+| Cause | Count |
+|---|---|
+| Missing `workflow_defs` row → FK violation | 10 |
+| A `workflow_defs` INSERT with the same missing `)` as §2.33 | 1 |
+
+Behind those, once the schema was satisfied, four more:
+
+1. **`docker-compose`, not `docker compose`.** `helpers.go` shelled out to the hyphenated v1
+   binary in three places. It is gone from current GitHub runners and from Docker Desktop, and
+   ci.yml's cluster job has used the v2 plugin form throughout — so the first thing this suite
+   would have done on a runner is fail to find the command.
+2. **The tests raced the live workers.** They inserted on `queue-1/2/3`, which is exactly what
+   the three compose workers serve, then claimed and expected to win.
+   `TestFullClusterRestart` released a workflow and asserted it could claim it back;
+   `cleat-worker-1` got there first. They now use `queue-cluster-tests-{1,2,3}`, which no
+   worker serves — these are store-level tests running against the cluster's database, and the
+   live workers' behaviour is `tests/exhaustion`'s job.
+3. **`generation = 0` again**, in `CompleteWorkflow` and four `ReleaseWorkflow` calls. Fifth
+   suite in a row.
+4. **`ListWorkflows(Status: "running", Limit: 1000)`** in the scale test returned every running
+   workflow in the cluster, so under a full run the test's own rows fell outside the limit and
+   were never released — and the release error was discarded.
+
+**Three tests could not fail.** This is the part worth keeping:
+
+| Test | What it printed, and passed |
+|---|---|
+| `TestKillWorkerMidExecution` | `Note: no worker-1 workflows were reclaimed by remaining workers (may be timing)` |
+| `TestKillPostgresAndRestart` | `No workflows to claim after restart (may have been consumed by another worker)` |
+| `TestScaleUpWorkers` | `Note: 3 workers claimed 0 vs 1 worker claimed 50 (may be fewer due to timing)` |
+
+Each is the exact output a completely broken failover, recovery or claim path produces. All
+three are assertions now. The scale test asserts that **no work went missing** — every released
+workflow is claimed again — rather than that three workers are faster than one, which is not
+something to assert on a shared runner.
+
+Result: **11 pass, 0 skip, 0 fail**, 4.2s. Wired into ci.yml's cluster job, after the
+exhaustion step, since `TestKillPostgresAndRestart` restarts the database.
+
+**One more thing the first CI run caught.** The cluster job sets `CLEAT_TEST_DB` to a separate
+`cleat_tests` database, deliberately, so that `./engine/...` does not share a table with four
+live workers. This suite wants the opposite — it restarts the postgres container and asserts on
+failover, so it has to be looking at the database the cluster actually runs on. Against
+`cleat_tests` every test failed with `relation "workflow_defs" does not exist`: nothing builds a
+schema there until `engine/testutil` does, and this package does not use it. The step overrides
+the variable, with the reason recorded next to it.
 
 ---
 

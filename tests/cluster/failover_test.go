@@ -36,7 +36,7 @@ func requireDB(t *testing.T) (*sql.DB, *engine.PostgresStore) {
 		t.Skipf("Skipping: cannot ping database: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return db, engine.NewPostgresStore(db, "queue-1", "queue-2", "queue-3")
+	return db, engine.NewPostgresStore(db, TestQueue1, TestQueue2, TestQueue3)
 }
 
 // TestKillWorkerMidExecution kills one worker and verifies that in-flight
@@ -55,7 +55,8 @@ func TestKillWorkerMidExecution(t *testing.T) {
 	workflowIDs := make([]string, 0, numWorkflows)
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("test-cluster-failover-%d", i)
-		q := fmt.Sprintf("queue-%d", (i%3)+1)
+		q := []string{TestQueue1, TestQueue2, TestQueue3}[i%3]
+		EnsureDef(t, db, "failover-test", 1)
 		_, err := db.Exec(`
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 			VALUES ($1, 'failover-test', 1, 'ready', '{}', $2)
@@ -74,8 +75,16 @@ func TestKillWorkerMidExecution(t *testing.T) {
 	}()
 
 	// Claim workflows using multiple workers to simulate distribution.
+	//
+	// The claimed instance is kept, not just its ID: ReleaseWorkflow needs the
+	// generation ClaimWorkflow handed back. This map used to be
+	// map[id]workerID, so the release below passed a literal 0, lost the
+	// fence, logged the refusal and carried on -- and the assertion at the end
+	// was a t.Log too, so the test passed while releasing nothing and
+	// reclaiming nothing.
 	var mu sync.Mutex
-	claimed := make(map[string]string)
+	claimed := make(map[string]*engine.WorkflowInstance)
+	claimedBy := make(map[string]string)
 	var wg sync.WaitGroup
 	for _, wid := range []string{"worker-1", "worker-2", "worker-3"} {
 		wg.Add(1)
@@ -90,7 +99,8 @@ func TestKillWorkerMidExecution(t *testing.T) {
 					return
 				}
 				mu.Lock()
-				claimed[wf.ID] = wID
+				claimed[wf.ID] = wf
+				claimedBy[wf.ID] = wID
 				mu.Unlock()
 			}
 		}(wid)
@@ -98,12 +108,18 @@ func TestKillWorkerMidExecution(t *testing.T) {
 	wg.Wait()
 
 	// Simulate worker-1 crash: release its workflows back to ready.
-	for id, workerID := range claimed {
+	var released int
+	for id, workerID := range claimedBy {
 		if workerID == "worker-1" {
-			if err := store.ReleaseWorkflow(ctx, id, "worker-1", 0, time.Now()); err != nil {
-				t.Logf("ReleaseWorkflow for %s: %v", id, err)
+			if err := store.ReleaseWorkflow(ctx, id, "worker-1", claimed[id].Generation, time.Now()); err != nil {
+				t.Fatalf("ReleaseWorkflow for %s: %v", id, err)
 			}
+			released++
 		}
+	}
+	if released == 0 {
+		t.Fatalf("worker-1 claimed none of the %d workflows, so this test has nothing "+
+			"to fail over and would pass without exercising failover at all", numWorkflows)
 	}
 
 	// Verify that remaining workers can claim the released workflows.
@@ -123,7 +139,7 @@ func TestKillWorkerMidExecution(t *testing.T) {
 
 	// Count how many of worker-1's original workflows got reclaimed.
 	var reclaimedFromWorker1 int
-	for id, wID := range claimed {
+	for id, wID := range claimedBy {
 		if wID == "worker-1" {
 			if _, ok := reclaimed[id]; ok {
 				reclaimedFromWorker1++
@@ -131,11 +147,15 @@ func TestKillWorkerMidExecution(t *testing.T) {
 		}
 	}
 
+	// An assertion, not a note. "No workflows were reclaimed (may be timing)"
+	// is the same output a completely broken failover path produces, and this
+	// test is the only thing that would have said otherwise.
 	if reclaimedFromWorker1 == 0 {
-		t.Log("Note: no worker-1 workflows were reclaimed by remaining workers (may be timing)")
-	} else {
-		t.Logf("Reclaimed %d workflows from worker-1 on remaining workers", reclaimedFromWorker1)
+		t.Errorf("worker-1 released %d workflows and the remaining workers reclaimed "+
+			"none of them: work orphaned by a crashed worker is not being picked up",
+			released)
 	}
+	t.Logf("Reclaimed %d of %d workflows released by worker-1", reclaimedFromWorker1, released)
 }
 
 // TestKillPostgresAndRestart kills the PostgreSQL container, restarts it,
@@ -156,11 +176,12 @@ func TestKillPostgresAndRestart(t *testing.T) {
 
 	// Create a workflow before the kill.
 	runID := "test-cluster-pg-restart"
+	EnsureDef(t, db, "pg-restart", 1)
 	_, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'pg-restart', 1, 'ready', '{}', 'queue-1')
+		VALUES ($1, 'pg-restart', 1, 'ready', '{}', $2)
 		ON CONFLICT (id) DO NOTHING
-	`, runID)
+	`, runID, TestQueue1)
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
@@ -196,15 +217,19 @@ func TestKillPostgresAndRestart(t *testing.T) {
 	newDB, newStore := requireDB(t)
 	_ = newDB
 
+	// An assertion, not a note. This used to log "No workflows to claim after
+	// restart (may have been consumed by another worker)" and pass -- which is
+	// also what a database that never recovered produces. Nothing else can
+	// consume it now: the workflow is on a queue no compose worker serves.
 	wf, err := newStore.ClaimWorkflow(ctx, "worker-1")
 	if err != nil {
 		t.Fatalf("Claim after restart failed: %v", err)
 	}
 	if wf == nil {
-		t.Log("No workflows to claim after restart (may have been consumed by another worker)")
-	} else {
-		t.Logf("Successfully claimed workflow %s after postgres restart", wf.ID)
+		t.Fatal("no workflow could be claimed after the PostgreSQL restart, " +
+			"though one was inserted before it")
 	}
+	t.Logf("Successfully claimed workflow %s after postgres restart", wf.ID)
 }
 
 // TestFullClusterRestart stops all workers, restarts them, and verifies state
@@ -224,11 +249,12 @@ func TestFullClusterRestart(t *testing.T) {
 
 	// Create workflows and process some of them.
 	runID := "test-cluster-restart"
+	EnsureDef(t, db, "restart-test", 1)
 	_, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'restart-test', 1, 'ready', '{}', 'queue-1')
+		VALUES ($1, 'restart-test', 1, 'ready', '{}', $2)
 		ON CONFLICT (id) DO NOTHING
-	`, runID)
+	`, runID, TestQueue1)
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
@@ -251,7 +277,7 @@ func TestFullClusterRestart(t *testing.T) {
 	}
 
 	// Release the workflow (simulating worker restart before completion).
-	if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", 0, time.Now()); err != nil {
+	if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", wf.Generation, time.Now()); err != nil {
 		t.Fatalf("ReleaseWorkflow: %v", err)
 	}
 

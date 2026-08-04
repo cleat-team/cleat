@@ -20,7 +20,13 @@ func composeDir() string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(b)))
 }
 
-// SetupCluster starts the cluster via docker-compose and waits for all workers to become healthy.
+// SetupCluster starts the cluster via docker compose and waits for all workers
+// to become healthy.
+//
+// `docker compose`, not `docker-compose`. The hyphenated v1 binary is gone from
+// current GitHub runners and from Docker Desktop; ci.yml's cluster job has used
+// the v2 plugin form throughout. This package still shelled out to v1, so the
+// first thing it would have done on a runner is fail to find the command.
 func SetupCluster(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
@@ -30,7 +36,7 @@ func SetupCluster(t *testing.T) {
 	dir := composeDir()
 
 	// Bring up postgres first, then workers.
-	cmd := exec.Command("docker-compose",
+	cmd := exec.Command("docker", "compose",
 		"-f", filepath.Join(dir, "docker-compose.cluster.yml"),
 		"up", "-d", "postgres",
 	)
@@ -44,7 +50,7 @@ func SetupCluster(t *testing.T) {
 	waitForPostgres(t, 60*time.Second)
 
 	// Bring up workers and dashboard.
-	cmd = exec.Command("docker-compose",
+	cmd = exec.Command("docker", "compose",
 		"-f", filepath.Join(dir, "docker-compose.cluster.yml"),
 		"up", "-d", "worker-1", "worker-2", "worker-3", "dashboard",
 	)
@@ -63,7 +69,7 @@ func TeardownCluster(t *testing.T) {
 	t.Helper()
 	dir := composeDir()
 
-	cmd := exec.Command("docker-compose",
+	cmd := exec.Command("docker", "compose",
 		"-f", filepath.Join(dir, "docker-compose.cluster.yml"),
 		"down", "-v", "--remove-orphans",
 	)
@@ -116,6 +122,42 @@ func waitForPostgres(t *testing.T, timeout time.Duration) {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// The task queues this package uses.
+//
+// Deliberately *not* queue-1/2/3: those are what the compose cluster's three
+// workers serve (docker-compose.cluster.yml), so a test that inserts a workflow
+// there and then claims it races a live worker that is doing the same thing.
+// TestFullClusterRestart failed exactly that way -- it released a workflow and
+// asserted it could claim it back, and worker-1 got there first.
+//
+// These tests exercise the store's claim/release/replay bookkeeping against the
+// cluster's database. The live workers' behaviour is tests/exhaustion's job.
+const (
+	TestQueue1 = "queue-cluster-tests-1"
+	TestQueue2 = "queue-cluster-tests-2"
+	TestQueue3 = "queue-cluster-tests-3"
+)
+
+// EnsureDef inserts the workflow_defs row a test's instances refer to.
+//
+// migrations/postgres/001_schema.sql puts
+// `FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)`
+// on workflow_instances, and every test in this package inserts instances with
+// a raw INSERT naming a definition it never created. Against the real schema
+// all eleven failed on that constraint -- the suite is in UNWIRED_SUITES
+// (scripts/check-ci-package-coverage.sh) and nothing had ever run it.
+//
+// The bytes are a bare WASM header. Nothing here executes the module: these
+// tests are about claiming, failover and replay bookkeeping, not about running
+// guest code.
+func EnsureDef(t *testing.T, db *sql.DB, name string, version int) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ($1, $2, '\x0061736d01000000', '{}') ON CONFLICT DO NOTHING`, name, version); err != nil {
+		t.Fatalf("EnsureDef(%s, %d): %v", name, version, err)
 	}
 }
 

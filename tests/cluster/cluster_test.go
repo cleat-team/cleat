@@ -52,17 +52,18 @@ func TestClusterWorkersRegister(t *testing.T) {
 		t.Skip("Skipping cluster test in short mode")
 	}
 
-	db, store := testStore(t, "queue-1", "queue-2", "queue-3")
+	db, store := testStore(t, TestQueue1, TestQueue2, TestQueue3)
 	ctx := context.Background()
 
 	cleanTestWorkflows(t, db)
 
 	// Create test workflows in each queue.
 	workflowIDs := make([]string, 0, 3)
-	queues := []string{"queue-1", "queue-2", "queue-3"}
+	queues := []string{TestQueue1, TestQueue2, TestQueue3}
 
 	for i, q := range queues {
 		id := fmt.Sprintf("test-cluster-register-%d", i)
+		EnsureDef(t, db, "test", 1)
 		_, err := db.Exec(`
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 			VALUES ($1, 'test', 1, 'ready', '{}', $2)
@@ -112,18 +113,19 @@ func TestClusterSpreadWorkflows(t *testing.T) {
 		t.Skip("Skipping cluster test in short mode")
 	}
 
-	db, store := testStore(t, "queue-1", "queue-2", "queue-3")
+	db, store := testStore(t, TestQueue1, TestQueue2, TestQueue3)
 	ctx := context.Background()
 
 	cleanTestWorkflows(t, db)
 
 	const numWorkflows = 100
-	queues := []string{"queue-1", "queue-2", "queue-3"}
+	queues := []string{TestQueue1, TestQueue2, TestQueue3}
 	workflowIDs := make([]string, 0, numWorkflows)
 
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("test-cluster-spread-%d", i)
 		q := queues[i%len(queues)]
+		EnsureDef(t, db, "spread-test", 1)
 		_, err := db.Exec(`
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 			VALUES ($1, 'spread-test', 1, 'ready', '{}', $2)
@@ -186,17 +188,18 @@ func TestClusterBasicWorkflowExecution(t *testing.T) {
 		t.Skip("Skipping cluster test in short mode")
 	}
 
-	db, store := testStore(t, "queue-1")
+	db, store := testStore(t, TestQueue1)
 	ctx := context.Background()
 
 	cleanTestWorkflows(t, db)
 
 	runID := "test-cluster-execution"
+	EnsureDef(t, db, "basic-test", 1)
 	_, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'basic-test', 1, 'ready', '{}', 'queue-1')
+		VALUES ($1, 'basic-test', 1, 'ready', '{}', $2)
 		ON CONFLICT (id) DO NOTHING
-	`, runID)
+	`, runID, TestQueue1)
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
@@ -233,8 +236,15 @@ func TestClusterBasicWorkflowExecution(t *testing.T) {
 		t.Errorf("Expected 1 event, got %d", len(history))
 	}
 
+	// wf.Generation, not a literal 0: ClaimWorkflow bumps the generation, so a
+	// hardcoded 0 loses the fence and the store correctly refuses the write.
+	// The same mistake appears in failover_test.go and scale_test.go, and in
+	// tests/integrity, tests/upgrade and tests/scale -- see IMPROVEMENT-PLAN
+	// 2.31, 2.33 and 2.34. Every one of them read the fence working as a
+	// failure.
+	//
 	// Complete the workflow.
-	if err := store.CompleteWorkflow(ctx, wf.ID, "worker-1", 0, `{"result":"done"}`, nil); err != nil {
+	if err := store.CompleteWorkflow(ctx, wf.ID, "worker-1", wf.Generation, `{"result":"done"}`, nil); err != nil {
 		t.Fatalf("CompleteWorkflow: %v", err)
 	}
 

@@ -899,6 +899,29 @@ jobs:
       - name: Resource exhaustion — runaway workflow is terminated
         run: go test -count=1 -timeout=300s ./tests/exhaustion/...
 
+      # After the exhaustion step, not before: TestKillPostgresAndRestart stops
+      # and restarts the postgres container, and TestFullClusterRestart releases
+      # and re-claims work. Both restore what they touch, but there is no reason
+      # to run them upstream of a test that depends on a settled cluster.
+      #
+      # The suite claims on queue-cluster-tests-{1,2,3}, which no worker in
+      # docker-compose.cluster.yml serves, so it does not race the live workers
+      # for the rows it inserts.
+      - name: Cluster suite — claiming, failover and replay against the live cluster
+        # The cluster's OWN database, overriding the job-wide CLEAT_TEST_DB.
+        #
+        # That variable points at cleat_tests, a separate database this job
+        # keeps for ./engine/... precisely so those tests do not share a table
+        # with four live workers. This suite wants the opposite: it restarts the
+        # postgres container, kills workers and asserts on failover, so it has
+        # to be looking at the database the cluster actually runs on. Against
+        # cleat_tests every test failed with `relation "workflow_defs" does not
+        # exist` -- nothing builds a schema there until engine/testutil does,
+        # and this package does not use it.
+        env:
+          CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
+        run: go test -count=1 -timeout=300s ./tests/cluster/...
+
       - name: Run integration tests
         shell: bash
         run: |
