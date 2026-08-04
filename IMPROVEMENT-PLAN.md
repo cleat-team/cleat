@@ -1684,6 +1684,48 @@ guest adapter branches on `errCode != 0`, so an abandoned retry loop reached the
 
 ### 2.35 The call error class is not persisted, so replay cannot recover it — 🔶 **PARTLY FIXED**
 
+> **Residual sharpened 2026-08-04 by reading the call sites, not the type.** The entry below
+> says the seven `ErrorCode` values have no path into history. True, but the reason is more
+> specific than "nobody supplies them", and there is a live trap in it.
+>
+> `CleatError` *does* participate in retry classification — it implements `RetryableError`, and
+> `isDefinitelyNonRetryable` honours it through `errors.As`. So the plumbing is not missing. What
+> collapses the taxonomy is the implementation:
+>
+> ```go
+> func (e *CleatError) Retryable() bool { return e.Code == ErrTransient }
+> ```
+>
+> Seven values, one bit, and **everything that is not `ErrTransient` reads non-retryable** —
+> including `ErrUnknown`, which is the zero value, so a `CleatError` built without a `Code` is
+> silently non-retryable.
+>
+> **The trap is `ErrTimeout`.** It reads non-retryable, while the doc comment on the constructor
+> immediately above it says:
+>
+> > `NewTransientError` creates a retryable error (DB connection, **timeout**).
+>
+> So the package documents timeouts as the canonical retryable case and classifies
+> `NewTimeoutError` as non-retryable. An external caller — `engine` is a public library since
+> `3eeb74e` — that reaches for the obviously-named constructor gets the opposite of the
+> documented behaviour, silently, on a path where the cost is a call that should have been
+> retried and was not.
+>
+> **In-repo only three of the six constructors are ever produced:** `NewPermanentError` and
+> `NewTransientError` (`cmd/cleat-worker/setup.go`, the shipped `ServiceCaller`) and
+> `NewCancelledError` (`engine/mssql_errors.go:229`). `NewTimeoutError`, `NewAmbiguousError` and
+> `NewRetriesExhaustedError` have no non-test caller. That is *not* a dead-code finding —
+> `scripts/check-test-only-code.sh` deliberately does not flag exported identifiers in library
+> packages, and says so — but it does mean the effective in-repo taxonomy is three-valued, and
+> that the three unused codes have never been exercised against a real retry decision.
+>
+> **Smallest useful fix, and it is not the schema work:** make `Retryable()` enumerate rather
+> than compare, so each of the seven has a stated answer and `ErrTimeout` gets the one its
+> neighbour's documentation promises. That is a behaviour change for any external caller
+> currently relying on `NewTimeoutError` being non-retryable, so it wants a CHANGELOG note
+> rather than a quiet edit. Persisting the full code is the larger, separate half of this entry.
+
+
 The constraint that bounds §2.15, and it is a real one rather than an excuse.
 
 A recorded call failure is replayed from `EventRecord.Err` — a bare string. If the fresh path
