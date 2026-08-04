@@ -3168,6 +3168,52 @@ Two caveats stated rather than buried:
 
 ---
 
+### 2.71 MSSQL session context is cleared by connection pooling — 🔴 **OPEN** (found by WS-3, 2026-08-04)
+
+`MSSQLStoreFactory` gives each tenant a pool whose wrapped connector runs
+`sp_set_session_context`. The doc comment at `engine/mssql_store.go:270-272` says this happens
+"on every new connection, so RLS is enforced automatically."
+
+It happens once per connection, and does not survive the connection being recycled.
+`database/sql` calls `ResetSession` when a connection is returned to the pool, `go-mssqldb`
+issues `sp_reset_connection`, and that clears `SESSION_CONTEXT`. Measured directly against
+SQL Server 2022 with `SetMaxOpenConns(1)`, so the reacquired connection is provably the same
+one:
+
+```
+same connection, right after setting: 11111111-1111-1111-1111-111111111111
+after return to pool and re-acquire:  <NULL>
+```
+
+**Consequence.** With the shipped schema's seven filter predicates in place and no session
+context, every tenant-scoped *read* matches nothing. Writes are unaffected — the write paths
+call `setSessionContext(tx)` inside their own transaction (`mssql_lifecycle.go:521`,
+`mssql_events.go:407`, `mssql_signals_promises.go:92`). Reads such as `ListWorkflows` and
+`GetWorkflowByID` rely on the connector alone, and `ListWorkflows`'s own
+`WHERE tenant_id = @p1` returns the right rows only for RLS to then discard them.
+
+It fails **closed**, so this is a correctness and availability defect rather than a leak. But
+on SQL Server with the real schema, tenant-scoped reads return nothing.
+
+**Why no test caught it.** `engine/testutil/mssql_schema.go` hand-writes its `CREATE TABLE`
+statements and defines **none** of the seven `CREATE SECURITY POLICY` statements the real
+migration carries. Every MSSQL test in the repo therefore runs against a schema with no
+tenant backstop, where a cleared session context has no observable effect. Same shape as the
+PostgreSQL superuser trap in §1.7: the mechanism under test is absent from the test
+environment, and its absence looks like success.
+
+**Fix direction** (not taken here — `engine/mssql_store.go` and `engine/testutil/` belong to
+other workstreams, and cross-stream coupling #3 says coordinate before touching the MSSQL
+path): establish the session context per transaction as the write paths already do, or
+re-apply it on `ResetSession`. Separately, the MSSQL test schema should apply the real
+migration so the policies exist, or every future isolation test on that backend will pass
+without meaning anything.
+
+`cmd/cleat-worker/tenant_isolation_mssql_test.go` is written and skipped pointing at this
+item; unskipping it is the acceptance test.
+
+---
+
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by
 diffing against `develop` and by `git apply --check`, not by reading commit messages — the
 mistake §0.2's correction calls out. Three of the four highest-value findings (§2.18, §2.19,

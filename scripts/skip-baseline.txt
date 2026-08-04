@@ -10,6 +10,8 @@ cmd/cleat-bench	TestHelperProcess	1
 cmd/cleat-gen-plugin	TestHelperProcess	1
 cmd/cleat-worker	TestAPIMetrics	1
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
+cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	2
+cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
 engine	RegisterBackend	4
 engine	TestAssemblyScriptWorkflowExecute	3
 engine	TestCascadeDelete	2
