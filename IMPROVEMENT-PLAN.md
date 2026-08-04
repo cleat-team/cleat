@@ -161,8 +161,10 @@ one-line hygiene fix. Either way the test is the deliverable.
 
 ### 6. Then Phase 2's remaining seam tests
 
-2.1 golden path, 2.2 two-worker race, 2.3 cancellation e2e, 2.4 crash recovery, 2.7 deploy
-manifests. 2.6 (tenant isolation through the HTTP API) is now worth more than it was: RLS
+2.1 golden path, 2.2 two-worker race, 2.3 cancellation e2e, 2.4 crash recovery. 2.7's flag
+contract is done (§2.27); what is left of it is booting the manifests, which needs a
+cluster in CI and is the same infrastructure 2.2–2.6 want.
+2.6 (tenant isolation through the HTTP API) is now worth more than it was: RLS
 is genuinely enforced as of 1.10, so an end-to-end test can finally prove isolation rather
 than prove a policy exists — and §2.20 gives it a concrete first target.
 
@@ -687,7 +689,7 @@ This is the part that prevents recurrence, and the highest-value work in the pla
 | 2.4 | **Crash recovery.** SIGKILL the worker mid-`DurableCall`, restart, assert the documented semantics (exactly-once vs at-least-once — pick one and assert *that*). | 1.4 |
 | 2.5 | **Resource exhaustion.** Deploy an infinite-loop workflow. Assert the worker survives and the workflow is terminated. Run per backend. | 1.5 |
 | 2.6 | **Tenant isolation.** Two tenants; assert A cannot read, list, cancel, or admin-act on B's workflows through the HTTP API. Run against all three backends. | 1.7 |
-| 2.7 | **Deploy manifests.** Actually start `k8s/`, `charts/cleat/`, `docker-compose.cluster.yml` and assert the worker reaches ready. | `--namespace`/`--tenant-id` crash-loop; all three are currently broken |
+| 2.7 | **Deploy manifests.** Flag contract ✅ **done**, see §2.27. Actually *starting* them and asserting the worker reaches ready still needs a cluster — open. | `--namespace`/`--tenant-id` crash-loop — confirmed in `k8s/` and `charts/cleat/`, **not** in `docker-compose.cluster.yml` |
 | 2.8 | **Dead-code detector.** ✅ **Done** — `scripts/check-test-only-code.sh`. See below; it was indeed the highest-signal cheap check. | 1.4 class — the single highest-signal cheap check |
 | 2.9 | **Doc/code consistency.** Assert `ABI.md` version == `wasm/metadata.go:47 CurrentABIVersion`; documented worker flags exist in the binary; documented buffer sizes match `engine/memory.go:39`. | ABI.md claiming v4/5 while code ships v1; the 65536-vs-1048576 buffer mismatch |
 
@@ -1721,6 +1723,60 @@ and it should not be wrapped around the 8 `BeginTx` boundaries either without de
 transaction, which of those two categories it tolerates. That is the follow-up. Until it is
 done, the support position stands as §2.8 stated it: **on SQL Server, a deadlock is a hard
 error today.**
+
+---
+
+### 2.27 Two of the three deployment manifests crash-loop on an undefined flag — ✅ **FIXED**
+
+Phase 2's row 2.7 said "all three are currently broken". Two are. The third is not, and the
+difference matters, so it is recorded rather than rounded off.
+
+**Confirmed, by running the binary with each manifest's own arguments:**
+
+| Manifest | Flags it passes | `cleat-worker` exit |
+|---|---|---|
+| `k8s/deployment.yaml` | `--namespace=default` | **2** — `flag provided but not defined: -namespace` |
+| `charts/cleat/templates/deployment.yaml` | `--tenant-id=…`, `--namespace=…` | **2** — `flag provided but not defined: -tenant-id` |
+| `docker-compose.cluster.yml` | all defined | 1 — parses, starts, then fails on the bogus DSN I gave it |
+
+Go's `flag` package treats an unknown flag as fatal: usage to stderr, `os.Exit(2)`. In
+Kubernetes that is a CrashLoopBackOff on every pod of both deployments, permanently. Not an
+edge case, not a misconfiguration — the manifests as committed cannot start the binary they
+name.
+
+**Provenance.** `--namespace` was real once; `dfa8702` deleted the namespace concept from
+the store interface and removed the flag, and neither manifest followed. `--tenant-id` is
+different: **no commit has ever registered it in `cmd/cleat-worker`.** The chart shipped a
+`worker.tenantId` value, documented as "Tenant ID for RLS and isolation", that has never
+reached a running process. Tenancy is resolved per request via `--tenant-resolver`
+(default `single-tenant`); the chart does not expose it, which is a real gap but a separate
+one — filed, not silently invented here.
+
+**The test** is `tests/manifests/manifests_test.go`, wired into the `test-go` matrix as
+`manifests` with a skip budget of 0. It builds `cmd/cleat-worker`, reads the flag set from
+`--help`, and checks every `args:`/`command:` entry in all three manifests against it.
+
+Reading `--help` rather than scanning the source for `flag.String(...)` was not stylistic. I
+wrote the source scan first; compared against the real binary it **missed five flags that
+exist** (`max-body-size`, `memory-hard-limit`, `memory-soft-limit`, `rate-limit`,
+`rate-limit-per-tenant`). A check built on it would have failed manifests that work. The
+binary's usage output is what the container actually gets.
+
+**Verified non-vacuous** against three injected defects:
+
+| Injected | Result |
+|---|---|
+| The real bug — manifests as committed | fails, naming `--namespace` and `--tenant-id` |
+| `args:` renamed so the extractor finds nothing | fails: "extracted only 0 flags … the manifest's arg block is no longer being read" |
+| `--db` line deleted, so the wrong block is read | fails: "…does not include `--db` — the arg block being read is not the worker's" |
+
+The last two matter because this test's whole failure mode is silence: a regex that stops
+matching turns it green. That is §2.16 in a different costume.
+
+**What this does not cover.** Row 2.7 asks that the manifests be *started* and the worker
+reach ready. That still needs a cluster — `helm`, `kubectl` and `kind` are all absent
+locally, and per the standing constraints `docker-compose.cluster.yml` cannot be exercised
+here at all. This covers the failure that was shipped; the boot test remains open.
 
 ---
 

@@ -12,10 +12,13 @@ image:
 worker:
   # -- Max concurrent workflow executions (--concurrency).
   concurrency: 10
-  # -- Tenant ID for RLS and isolation (--tenant-id).
-  tenantId: "00000000-0000-0000-0000-000000000000"
-  # -- Namespace / task queue to claim from (--namespace).
+  # -- Task queue to claim work from (--task-queue). Comma-separated for several.
   taskQueues: "default"
+  # Note: there is deliberately no tenantId here. cleat-worker has no
+  # --tenant-id flag (it never had one), so the value this chart used to pass
+  # made every pod exit 2 at flag parsing. Tenancy is resolved per request via
+  # --tenant-resolver, which defaults to single-tenant; this chart does not
+  # expose it yet.
   # -- Heartbeat interval for claimed workflow instances (--heartbeat).
   heartbeatInterval: "5s"
   # -- Poll interval when no work is available (--poll).

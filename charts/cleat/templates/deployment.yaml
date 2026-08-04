@@ -30,8 +30,7 @@ spec:
           args:
             - "--db=$(DATABASE_URL)"
             - "--concurrency={{ .Values.worker.concurrency }}"
-            - "--tenant-id={{ .Values.worker.tenantId }}"
-            - "--namespace={{ .Values.worker.taskQueues }}"
+            - "--task-queue={{ .Values.worker.taskQueues }}"
             - "--api-addr=:{{ .Values.api.port }}"
             - "--heartbeat={{ .Values.worker.heartbeatInterval }}"
             - "--poll={{ .Values.worker.pollInterval }}"
