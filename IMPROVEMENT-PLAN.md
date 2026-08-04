@@ -2181,7 +2181,7 @@ Final: **68 pass, 0 skip, 0 fail** (67s, CGO on, live PostgreSQL 16).
 Five suites remain in `UNWIRED_SUITES`: `cluster`, `cross-language`, `scale`, `soak`,
 `upgrade`. On this evidence, assume each contains failures rather than coverage.
 
-### 2.32 The checksum covers `payload`; every SQL consumer reads the shadow columns — 🔶 **OPEN**
+### 2.32 The checksum covers `payload`; every SQL consumer reads the shadow columns — ✅ **FIXED**
 
 `event_history` stores each event twice: in the individual columns (`service`, `operation`,
 `request`, `response`, …) and again in a `payload` JSONB. `LoadEventHistory` scans the columns
@@ -2203,6 +2203,44 @@ already stored, so it needs a migration or a versioned checksum. The alternative
 verification compare columns against `payload` (cheap, no migration, detects divergence
 without changing the chain), or to stop writing the duplicates at all and treat `payload` as
 the sole record. The third is the real fix and the largest.
+
+**Taken: the second.** `engine/store_event_shadow.go` adds `verifyShadowColumns`, called from
+`VerifyWorkflowEvents` after the chain check. It rebuilds each row from its columns, applies
+`populateFromPayload` to a copy, and compares. Because `populateFromPayload` only assigns keys
+the payload actually carries, the two records can differ *only* where payload disagrees with a
+column — so the comparison needs no per-event-type knowledge and no migration, and every
+checksum already stored stays valid.
+
+`TestWalCorruption_PayloadTampering`'s pinning assertion did exactly what it was put there to
+do: closing this item failed it, and it has been inverted rather than deleted.
+
+**Two deliberate limits, both asserted rather than assumed.**
+
+- **Only unencrypted, unredacted fields.** `Request`, `Response`, `Err`, `SignalPayload`,
+  `ChildInput`, `NewInput`, `PluginInput`, `PluginOutput`, `PromiseResult` and `PromiseError`
+  pass through `decryptAndRedactEventRecord` and `RedactOnRead` on the column path, while the
+  payload path is decrypted but *never redacted*. Comparing those two would report a
+  divergence for every redacted field in the database. The 14 fields covered are metadata —
+  `service`, `operation`, `signal_names`, `child_name`, `plugin_name`, … — which is exactly
+  the set a dashboard displays.
+- **Only keys the payload carries.** `eventRecordToPayload` omits several when empty
+  (`duration_ms` on a call), and `populateFromPayload` cannot overwrite a key that is not
+  there. Tampering with a column whose payload counterpart was omitted is still invisible. The
+  headline case from this section, `operation` on a call event, is always present.
+  `TestVerifyWorkflowEvents_ShadowCheckIsNotVacuous` asserts the payload actually carries
+  `operation` and `service`, so if the writer ever stops populating them the detection test
+  cannot start passing vacuously.
+
+Verified by removing the call and re-running: `VerifyWorkflowEvents accepted an event whose
+operation column no longer matches its payload`. `TestVerifyWorkflowEvents_ShadowCheckSurvives\
+CleanHistory` drives one event of every shape that carries mirrored metadata as the
+false-positive guard — a verifier that fails on untampered data would be worse than the gap it
+closes. Full `./engine/` and `./tests/integrity/` suites pass against PostgreSQL 16.
+
+**Still open: the underlying duplication.** `payload` remains authoritative and the columns
+remain a second copy that nothing keeps in sync at write time. This detects divergence; it does
+not prevent it. Treating `payload` as the sole record is still the real fix, and it is still
+the largest — `populateFromPayload` has ten call sites across the three dialects.
 
 ### 2.33 `tests/upgrade` had never run either — ✅ **DONE**
 
@@ -2444,6 +2482,19 @@ Deliberately not a PR gate: an hour per pull request would be absurd, and a leak
 trend instrument that should not block a merge on one noisy run.
 
 **`UNWIRED_SUITES` is now empty.** Every suite under `tests/` is run by a workflow.
+
+### 2.39 The DB-backed suites cannot share a database concurrently — 🔶 **OPEN**, low priority
+
+`go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...` produces **17 failures**.
+Run one at a time, all three pass. Go runs distinct packages in parallel, they all point at
+`CLEAT_TEST_DB`, and `ClaimWorkflow` does not care which suite inserted a row — `tests/scale`
+claims `tests/integrity`'s workflows out from under it, and each suite's `testDB` deletes on
+prefixes the others are still using.
+
+CI does not hit this: each is a separate matrix job with its own database. But anyone who runs
+the obvious command locally gets a screen of failures that mean nothing, which is its own kind
+of false signal. Fixes, cheapest first: a per-package `task_queue` (the `soak` suite already
+does this, and it is why `soak` is unaffected), or a per-package schema.
 
 ---
 

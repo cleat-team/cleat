@@ -117,9 +117,15 @@ func TestWalCorruption_PayloadTampering(t *testing.T) {
 		t.Errorf("expected error message to contain 'checksum mismatch', got: %v", err)
 	}
 
-	// The shadow columns are NOT covered. Recorded as an assertion rather than
-	// a comment so that closing IMPROVEMENT-PLAN 2.31 fails here and forces
-	// this test to be updated, instead of leaving a stale claim behind.
+	// The shadow columns are still not part of the checksum -- but as of
+	// IMPROVEMENT-PLAN 2.32 verification compares them against payload
+	// separately, so tampering with one is detected even though the chain
+	// itself is untouched.
+	//
+	// This assertion used to say the opposite, and was written that way
+	// deliberately: it pinned the gap so that closing it would fail here and
+	// force the test to be updated rather than leave a stale claim behind.
+	// That is exactly what happened, and this is the inversion.
 	runID2 := createTestWorkflow(t, db, store, ctx)
 	if err := store.AppendEventHistoryBatch(ctx, runID2, []engine.EventRecord{
 		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "original", Request: `{"data":"original"}`, Response: `{}`},
@@ -129,10 +135,15 @@ func TestWalCorruption_PayloadTampering(t *testing.T) {
 	if _, err := db.Exec(`UPDATE event_history SET operation = 'tampered-op' WHERE workflow_id = $1 AND step = 0`, runID2); err != nil {
 		t.Fatalf("tamper operation column: %v", err)
 	}
-	if err := store.VerifyWorkflowEvents(ctx, runID2); err != nil {
-		t.Errorf("the operation column is not part of the checksum, so tampering "+
-			"with it should still verify clean -- if this now fails, 2.31 has been "+
-			"closed and this assertion should be inverted: %v", err)
+	err = store.VerifyWorkflowEvents(ctx, runID2)
+	if err == nil {
+		t.Error("tampering with the operation column verified clean: the column is what the " +
+			"admin dashboard and cleatctl display, so this row now shows a value replay will never use")
+	} else if !strings.Contains(err.Error(), "operation") {
+		// Specifically not a checksum mismatch: the chain is intact here, and
+		// an error naming the wrong mechanism would send the next person
+		// looking for corruption that is not there.
+		t.Errorf("expected the error to name the diverging column, got: %v", err)
 	}
 }
 

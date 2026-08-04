@@ -310,6 +310,21 @@ func fullHistoryRow(step int, eventType string) []driver.Value {
 	return row
 }
 
+// shadowHistoryRow builds a row for the 17-column shadow-column query in
+// verifyShadowColumns: step, event_type, service, operation, duration_ms,
+// signal_names, timeout_ms, signal_name, defer_description, defer_id,
+// child_name, run_id, plugin_name, plugin_func, promise_name, promise_id,
+// payload.
+func shadowHistoryRow(step int, eventType, service, op, payload string) []driver.Value {
+	row := make([]driver.Value, 17)
+	row[0] = int64(step)
+	row[1] = eventType
+	row[2] = service
+	row[3] = op
+	row[16] = payload
+	return row
+}
+
 func TestPostgresStore_VerifyWorkflowEvents_EmptyHistory(t *testing.T) {
 	db := newNoopDB(t)
 	defer db.Close()
@@ -340,6 +355,19 @@ func TestPostgresStore_VerifyWorkflowEvents_NoChecksums(t *testing.T) {
 func TestPostgresStore_VerifyWorkflowEvents_Valid(t *testing.T) {
 	expectedCS := computeEventChecksum(EventRecord{Step: 0, EventType: "call"}, "")
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		// First, and matched on a substring unique to it: VerifyWorkflowEvents
+		// also queries the shadow columns now (see store_event_shadow.go), and
+		// that query contains "operation" too. Without a rule of its own it
+		// falls through to the LoadEventHistory rule below and is handed
+		// 30-column rows for a 17-column scan.
+		//
+		// The row is deliberately self-consistent -- columns agreeing with
+		// payload -- so this still exercises the comparison rather than
+		// skipping it.
+		{
+			match: "promise_id, payload",
+			data:  [][]driver.Value{shadowHistoryRow(0, "call", "svc", "op", `{"service":"svc","operation":"op"}`)},
+		},
 		{
 			match: "operation",
 			data:  [][]driver.Value{fullHistoryRow(0, "call")},
