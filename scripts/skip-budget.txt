@@ -110,6 +110,16 @@ cluster	353	# same as test-go/engine, and for the same reason; see the note ther
 # the same treatment as the deadcode and test-only-code baselines. Drop it to 0
 # when the skip is removed.
 plugin-harness/multi-db	1
+# 1 = TestPluginCalls_Wasm_Python only, which needs componentize-py that this
+# job does not install; Python runs on wazero by decision (2.72) so building it
+# here would prove nothing about the routing. Go, Rust, AssemblyScript and Java
+# must all run.
+#
+# The budget is here because the step had no -v and no report, so a skipped
+# language was indistinguishable from a passing one -- which is how Go sat
+# unconditionally skipped and Rust skipped for want of a toolchain, in a job
+# named WASM Integration. Measured on the runner after both were fixed.
+plugin-harness/wasm	1
 # 0: the Cross-Language E2E workflow installs Rust and the wasm32-wasip1 target,
 # so every test in tests/cross-language has what it needs. Measured on darwin
 # with cargo present: 7 pass, 0 skip. Without cargo all seven skip, which is

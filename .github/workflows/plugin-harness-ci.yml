@@ -60,13 +60,33 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - run: go test -count=1 -timeout=600s ./tests/plugin-harness/... -run 'TestPluginCalls_Wasm'
+      # -json into a report, and a skip budget over it. Without that, this step
+      # ran `go test` with no -v, so a skipped language and a passing one looked
+      # identical in the log -- which is how TestPluginCalls_Wasm_Go sat
+      # unconditionally skipped and TestPluginCalls_Wasm_Rust skipped for want
+      # of a toolchain, in a job whose name says WASM Integration.
+      #
+      # The budget is the enforcement: if either regresses to skipping, this
+      # fails rather than going quietly green.
+      - name: Run WASM integration tests
+        shell: bash
+        run: |
+          # pipefail: without it tee supplies the exit status and a failing
+          # `go test` reports as a green step.
+          set -o pipefail
+          go test -count=1 -timeout=600s -json \
+            ./tests/plugin-harness/... -run 'TestPluginCalls_Wasm' \
+            2>&1 | tee wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
           # when a C compiler is present and 0 otherwise, so relying on the
           # default silently reinstates the wazero-only run on a runner without
           # gcc. Pinned, that case fails loudly.
           CGO_ENABLED: "1"
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh plugin-harness/wasm wasm-integration-report.json
 
   # --------------------------------------------------------------------------
   # Layer 3 — Multi-DB (real databases, standard Go wasip1 workflow)
