@@ -30,6 +30,8 @@ engine	TestIntegrationSignalAndResume	1
 engine	TestIntegrationWorkflowMaxDuration	1
 engine	TestJavaWorkflowExecute	3
 engine	TestMSSQLFactoryClose	2
+engine	TestMSSQLSessionContext_SurvivesConnectionReuse	2
+engine	TestMSSQLSessionContext_TenantPoolsStaySeparate	2
 engine	TestMSSQLStoreBasic	1
 engine	TestMSSQLStoreFactory	2
 engine	TestMSSQLStore_BeginTxWithContext_Failure	2
