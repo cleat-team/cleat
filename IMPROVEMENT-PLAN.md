@@ -3525,6 +3525,103 @@ needs the branch.
   later, and lists the Admin API as "incoming" after #217 shipped it. Salvage only the note
   that cleat-238 (`--dump-ir`) and cleat-241 (canary routing) remain unbuilt.
 
+### 2.60 Per-step event flush never ran on MySQL or SQL Server — ✅ **FIXED** (WS-2, 2026-08-04)
+
+Same shape as §1.4's RLS blocker, on a different axis. `engine/flush.go`'s `insertEventSQL`
+is hand-written PostgreSQL — `$N` placeholders, `ON CONFLICT`, and since the RLS fix
+`set_config`. `cmd/cleat-worker/main.go` opens whatever the `--db` DSN produces and
+`setup.go:1580` passes it to `engine.WithDB` unconditionally, under the comment *"Always
+provide DB so per-step flush and adaptive flusher work."* `flushEvent`'s only guard is
+`e.db == nil`.
+
+So on the other two dialects **every per-step flush failed at parse time**, and
+`engine/lifecycle.go:180` logged it and carried on. Measured live on all three, with
+PostgreSQL as the control:
+
+| dialect | before | error |
+|---|---|---|
+| postgres | PASS | — (control) |
+| mysql | FAIL | `Error 1064 … near 'CONFLICT (workflow_id, step) DO UPDATE SET …'` |
+| mssql | FAIL | `'set_config' is not a recognized built-in function name` |
+
+Nothing was lost outright — `FinalizeWorkflowSegment` appends the whole segment through the
+dialect-correct store path at segment end. What was lost is the reason per-step flush
+exists: surviving a crash **mid**-segment. A MySQL or SQL Server deployment silently got the
+behaviour `docs/durable-calls.md` attributes to `--no-per-step-flush` ("higher throughput,
+weaker crash safety") without setting the flag, and with nothing observable from outside.
+
+Fixed with an unexported `perStepEventFlusher` interface. `MySQLStore` and `MSSQLStore`
+implement it; `PostgresStore` deliberately does not, so the primary dialect keeps the path it
+has always had.
+
+**The judgement call worth reviewing is `event_count`.** The store append maintains it, but
+`FinalizeWorkflowSegment` appends the same events again — idempotently for rows, but its
+increment is unconditional. Counting in the per-step path too would count every event twice:
+`GetEventCount` doubles and `--max-events-per-workflow` trips at half the configured limit,
+and neither symptom looks like a flush bug. So `flushEventForStep` passes
+`incrementCount=false`, matching PostgreSQL's raw insert, which has never touched
+`event_count` either. `TestPerStepFlushDoesNotDoubleCountEvents` pins it; flipping the flag
+fails it on both dialects.
+
+**Found by trying to write §1.4 phase D's migration.** Phase D adds a column to
+`event_history` in three dialects; standing up the three dialects to do that is what surfaced
+this. The plan's instruction not to build the fix before the observation held again, for a
+reason it did not anticipate — for the second time in two sessions.
+
+#### 2.60a Local SQL Server on Apple Silicon — the §1.7 blocker is removable
+
+`PARALLEL-WORKSTREAMS.md` records that §1.7 was deliberately skipped in every recent session
+because verifying an RLS migration needs a live MySQL and SQL Server, and *"the first task in
+§1.7 is not the migration — it is standing up MySQL and MSSQL you can actually test against."*
+
+`mcr.microsoft.com/mssql/server:2022-latest` cannot do it on arm64. It is amd64-only and
+QEMU rejects its address mapping outright:
+
+```
+/opt/mssql/bin/sqlservr: Invalid mapping of address 0x4005353000 in reserved
+address space below 0x400000000000
+```
+
+**`mcr.microsoft.com/azure-sql-edge:latest` runs natively on arm64** and is a real SQL Server
+engine — `Microsoft Azure SQL Edge Developer (RTM) - 15.0.2000.1574 (ARM64)`. Against it the
+repo's MSSQL engine tests are **296 pass / 2 fail / 0 skip**, and both failures are the
+`finalize_workflow_status` procedure that `engine/testutil` never defines — the gap already
+recorded under Phase 0's caveat 4. `sp_set_session_context` is present, so §2.71's fix is
+testable here too.
+
+```
+docker run -d --name cleat-ws2-mssql -e ACCEPT_EULA=1 \
+  -e MSSQL_SA_PASSWORD='CleatTest123!' -p 1434:1433 \
+  mcr.microsoft.com/azure-sql-edge:latest
+
+CLEAT_TEST_MSSQL='sqlserver://sa:CleatTest123!@localhost:1434?database=cleat&encrypt=disable'
+```
+
+Two caveats, both load-bearing. `encrypt=disable` is required: Edge's self-signed certificate
+has a negative serial number and current Go rejects it (`x509: negative serial number`) — an
+opaque TLS handshake failure, not an auth error. And Edge is a **15.0/2019-era subset**, not
+SQL Server 2022; it is enough to run this repo's suite and to stop writing MSSQL migrations
+blind, but a green run on Edge is not a claim about 2022. CI still has the real thing.
+
+#### 2.60b Four MySQL engine tests fail on `develop` — 🔴 **OPEN**
+
+Surfaced by running the engine suite against a live MySQL for the first time. Verified
+pre-existing: they fail identically on a stashed tree. Not fixed here — they are unrelated to
+the flush path and each wants its own diagnosis.
+
+- `TestCascadeDelete/mysql` — `Error 1170: BLOB/TEXT column 'sticky_worker_id' used in key
+  specification without a key length`. A `engine/testutil` schema defect: the column is TEXT
+  where the real migration presumably has a bounded type, so the index cannot be created.
+- `TestDeliverSignal/mysql` — expects `{"data":"hello"}`, gets `{"data": "hello"}`. MySQL's
+  `JSON` column normalises whitespace on round-trip; the test compares bytes.
+- `TestPollAndClaimSignal/mysql`, `TestPollSignal_NonDestructive/mysql` — `Error 3140:
+  Invalid JSON text` inserting a non-JSON payload into a `JSON` column. The signal payload is
+  a bare string on these paths, which PostgreSQL's `TEXT` accepts and MySQL's `JSON` does not.
+
+The first is a test-schema bug. The other three are the same question in two forms: whether a
+signal payload is required to be JSON. PostgreSQL and MySQL currently disagree, and the
+suites only ever ran on PostgreSQL.
+
 ### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
 
 `multi-db-ci.yml` prefixed all four of its test steps with `CGO_ENABLED=0`. Because
