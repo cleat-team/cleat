@@ -104,10 +104,22 @@ func buildZombieWriterScenario(t *testing.T, ctx context.Context, store Workflow
 	staleGeneration := wfA.Generation // captured before A stalls; never refreshed
 
 	// A never calls back. The reaper reclaims the child (status ->
-	// ready, assigned_to -> NULL, generation bumped per CLEAT-1.4)
-	// -- a 1ms timeout is enough since A's heartbeat was just set.
-	time.Sleep(2 * time.Millisecond)
-	reaped, err := store.ReapStaleInstances(ctx, 1*time.Millisecond)
+	// ready, assigned_to -> NULL, generation bumped per CLEAT-1.4).
+	//
+	// The timeout is negative on purpose, which makes the reap
+	// unconditional: every dialect computes its cutoff as
+	// `now - INTERVAL timeout`, so a negative timeout puts the cutoff one
+	// second in the *future* and any heartbeat qualifies.
+	//
+	// This used to sleep 2ms and pass a 1ms timeout. That was a wall-clock
+	// race: `int(0.001)` truncates to 0, so the predicate degraded to
+	// `heartbeat_at < now()`, and the test depended on the server's clock
+	// having advanced past the heartbeat ClaimWorkflow had just written. It
+	// held locally and on four CI runs, then failed the fifth with
+	// `ReapStaleInstances reclaimed 0 instances`. Staleness is not what this
+	// test is about -- it needs the child reclaimed, not reclaimed for a
+	// particular reason -- so the timing is removed rather than widened.
+	reaped, err := store.ReapStaleInstances(ctx, -1*time.Second)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}
