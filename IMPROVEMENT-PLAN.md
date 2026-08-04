@@ -2237,14 +2237,37 @@ correctly still baselined, because it gates on `isMSSQLRetryable`, which include
 unknown-outcome class.
 
 Wired into `ClaimWorkflows` and `ClaimStickyWorkflows` — the highest-contention transactions
-in the engine and where a deadlock is most likely. Budget is 2 retries at 20ms/40ms: at most
-60ms of added latency on a path that previously failed outright. A deadlock victim claimed
-nothing, so the replay is a clean retry.
+in the engine and where a deadlock is most likely. Budget is 2 retries at 20ms/40ms
+(`mssqlTxRetries`/`mssqlTxRetryDelay`): at most 60ms of added latency on a path that
+previously failed outright. A deadlock victim claimed nothing, so the replay is a clean
+retry.
 
 **The count in this section was wrong.** There are ~20 transaction boundaries in the MSSQL
-store, not 8. The remaining ones are a follow-up, and each needs the same one-line judgement:
-a rollback-guaranteed retry is always safe, so the only question per boundary is whether it
-is worth the wrapper.
+store, not 8.
+
+**Second increment, 2026-08-04:** the five terminal writes — `CompleteWorkflow`,
+`FailWorkflow`, `MoveToDeadLetterQueue`, `ContinueAsNew`, `FinalizeWorkflowSegment` — now use
+the same wrapper. A deadlock on any of them previously lost the workflow's terminal write and
+surfaced to the worker as an ordinary error, which `recordTerminalFailure` then reports and
+drops (§1.2). These are the highest-consequence boundaries after the claim: the claim losing
+a race costs one poll cycle, a terminal write losing one costs the record of the workflow
+having finished.
+
+Wrapping them does **not** disturb the fence. `ErrFenceLost` is returned before the commit
+and is not an `mssql.Error`, so it falls through the rollback-guarantee check and is returned
+on the first attempt — retrying it would be actively wrong, since the fence is lost because
+another worker legitimately owns the workflow and that does not change on a second attempt.
+`TestWithRollbackGuaranteedRetry_DoesNotRetryFenceLost` pins that, and the pre-existing
+`TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` covers the refactor end to end.
+
+Post-commit cleanup is inside the retried closure and that is safe: a rollback-guaranteed
+error means the commit failed, so the function returned before reaching the cleanup.
+
+**Still to do:** the remaining boundaries in `mssql_events.go`, `mssql_signals_promises.go`,
+`mssql_deployment.go` and `mssql_operations.go`. Each needs the same one-line judgement — a
+rollback-guaranteed retry is always safe, so the only question per boundary is whether it is
+worth the wrapper. `mssql_events.go` and `mssql_signals_promises.go` are being changed by
+§2.60 (#283); do those after it lands rather than into a conflict.
 
 **Validated against a real server, which is the check this section says was never made.**
 `TestMSSQLDeadlock_ClassifiedFromTheRealDriverError` provokes a genuine deadlock — two

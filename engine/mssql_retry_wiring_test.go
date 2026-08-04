@@ -111,3 +111,26 @@ func TestWithRollbackGuaranteedRetry_HonoursContext(t *testing.T) {
 		t.Errorf("fn ran %d time(s), want 1 -- a cancelled context must not be slept through", attempts)
 	}
 }
+
+// TestWithRollbackGuaranteedRetry_DoesNotRetryFenceLost guards the claim made
+// where the terminal writes are wrapped: wrapping them must not disturb the
+// fence.
+//
+// ErrFenceLost is returned before the commit and is not an mssql.Error, so it
+// falls through the rollback-guarantee check and is returned on the first
+// attempt. Retrying it would be actively wrong -- the fence is lost because
+// another worker legitimately owns the workflow, and that does not change on
+// a second attempt.
+func TestWithRollbackGuaranteedRetry_DoesNotRetryFenceLost(t *testing.T) {
+	attempts := 0
+	err := withRollbackGuaranteedRetry(context.Background(), "complete workflow", 2, time.Millisecond, func() error {
+		attempts++
+		return ErrFenceLost
+	})
+	if !errors.Is(err, ErrFenceLost) {
+		t.Fatalf("err = %v, want ErrFenceLost returned unchanged", err)
+	}
+	if attempts != 1 {
+		t.Errorf("fn ran %d time(s), want 1 -- a lost fence is not a transient fault", attempts)
+	}
+}

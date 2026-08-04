@@ -79,11 +79,11 @@ func withRollbackGuaranteedRetry(ctx context.Context, op string, maxRetries int,
 	return fmt.Errorf("%s: exhausted %d retries: %w", op, maxRetries, lastErr)
 }
 
-// mssqlClaimRetries and mssqlClaimRetryDelay bound the claim-path retry. The
-// claim is the highest-contention transaction in the engine and the one where
-// a deadlock is most likely; three attempts at 20ms/40ms costs at most 60ms of
-// added latency on a path that otherwise fails outright.
+// mssqlTxRetries and mssqlTxRetryDelay bound a retry at a transaction
+// boundary. Three attempts at 20ms/40ms cost at most 60ms of added latency on
+// a path that otherwise fails outright, which is the right trade for a
+// deadlock: the alternative is surfacing it to the caller as a hard error.
 const (
-	mssqlClaimRetries    = 2
-	mssqlClaimRetryDelay = 20 * time.Millisecond
+	mssqlTxRetries    = 2
+	mssqlTxRetryDelay = 20 * time.Millisecond
 )
