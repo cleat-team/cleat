@@ -1,8 +1,9 @@
 # Design: crash recovery for external calls
 
-Status: **design, not implemented.** Supersedes the approach sketched in
-`engine/flush.go` (`flushCallIntent` / `completeCallEvent`), which should be deleted rather
-than wired in — see §2.
+Status: **design, not implemented.** Supersedes the approach that was sketched in
+`engine/flush.go` (`flushCallIntent` / `completeCallEvent`) and **deleted in Phase A** rather
+than wired in — see §2 for why. The detector and the `pendingSentinel` constant were kept:
+they are the read half of this design and they work.
 
 Companion to [`durable-calls.md`](durable-calls.md), which describes the contract as it
 stands today. IMPROVEMENT-PLAN item 1.4.
@@ -26,9 +27,13 @@ This is documented and it is a defensible default: exactly-once execution across
 unreliable boundary is not achievable in general. What is achievable, and what is missing, is
 **making the duplicate visible or unnecessary**.
 
-## 2. Why the existing code cannot simply be wired in
+## 2. Why the existing code could not simply be wired in
 
-`flushCallIntent` and `completeCallEvent` implement write-ahead intent: insert a row marked
+> Line references in this section are to the tree **as of `dfccee4`**, before Phase A removed
+> the two functions. They are kept because they are the evidence for the design decisions
+> below, not because the code is still there.
+
+`flushCallIntent` and `completeCallEvent` implemented write-ahead intent: insert a row marked
 pending, dispatch, then update it with the outcome. The read side is live and correct — a
 pending row is detected on replay at `engine/durablecalls.go:150` and reported as
 `[AMBIGUOUS]`. The write side has never had a caller.
@@ -221,16 +226,17 @@ intent write removed, it is measuring something else.
 
 | Phase | Work | Effort | Depends on |
 |---|---|---|---|
-| **A** | Delete `flushCallIntent`/`completeCallEvent`; keep the detector; correct `durable-calls.md`; drop the baseline entries | ~0.5 session | — |
+| ~~**A**~~ | ~~Delete `flushCallIntent`/`completeCallEvent`; keep the detector; correct `durable-calls.md`; drop the baseline entries~~ ✅ **done** | — | — |
 | **B** | Tier 1 idempotency keys | ~1 session | `Caller` interface change |
 | **C** | 2.4 crash harness + counting-service fixture | ~1 session | — |
 | **D** | Tier 2 intent + schema migration | ~2 sessions | **C** |
 | **E** | Tier 3 resolution hook + typed error | ~1 session | D |
 | **F** | Admin force-resolve | ~0.5 session | E, **and 1.7's ownership check** |
 
-**Recommended now: Phase A only.** It is cheap and it removes a false signal — 350 lines that
-read as a finished durability feature, are cited by 48 tests, and cannot be used. Everything
-else can wait for durable-call correctness to become a priority.
+**Phase A is done.** It removed 101 lines of engine code and the 17 tests that were its only
+callers — code that read as a finished durability feature, was cited by 48 test references,
+and could not be used. Everything below waits for durable-call correctness to become a
+priority.
 
 **Best value when it does: B.** Idempotency keys need no schema change, cost no extra write,
 and solve the problem outright wherever the callee supports them. It is the only tier that
