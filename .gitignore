@@ -107,3 +107,7 @@ examples/*/node_modules/
 .gradle/
 **/.gradle/
 examples/*/build/
+
+# CI test-report artifacts (go test -json | tee ...), written into the repo
+# root by the workflow steps that check skip budgets.
+*-report.json
