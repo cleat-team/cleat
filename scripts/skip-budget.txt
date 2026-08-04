@@ -42,6 +42,9 @@ test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
 test-go/support	2	# measured: TestRunMigrations_{ExecInTxError,InsertRecordError}
 test-go/commands	4	# measured: TestAPIMetrics, TestHelperProcess, TestRunBuild_PythonTarget_WasmRoundtrip
+# 0 and it should stay 0: this job needs nothing but a Go toolchain, so a skip
+# here can only mean the test stopped running.
+test-go/manifests	0	# measured: 3 subtests pass, 0 skip
 fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # Same number as test-go/engine, and for the same reason: this job also runs
 # `go test ./engine/...`, against the cluster's own database. It was seeded at 0

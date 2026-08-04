@@ -21,7 +21,7 @@ spec:
             - "--db=$(DATABASE_URL)"
             - "--api-addr=:8080"
             - "--concurrency=10"
-            - "--namespace=default"
+            - "--task-queue=default"
             - "--memory-soft-limit=0.80"
             - "--memory-hard-limit=0.95"
             - "--memory-check-interval=2s"

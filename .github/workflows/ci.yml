@@ -253,6 +253,13 @@ jobs:
             path: ./plugin/... ./pluginapi/... ./auth/... ./migration/... ./monitoring/...
           - name: commands
             path: ./cmd/...
+          # tests/ is otherwise not in this matrix -- cluster/scale/soak need
+          # infrastructure and plugin-harness and cross-language have their own
+          # workflows. manifests needs nothing but a Go toolchain, and it is the
+          # only thing that checks the shipped deployment manifests against the
+          # binary they start.
+          - name: manifests
+            path: ./tests/manifests/...
     steps:
       - uses: actions/checkout@v4
 
