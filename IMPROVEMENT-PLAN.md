@@ -589,11 +589,72 @@ unlimited, and `cmd/cleat-worker/main.go:704` prefers wasmtime whenever CGO is a
 (`engine/db.go:1056-1076`) clear `assigned_to` but leave `generation`. Weakens the token to
 defence-in-depth-in-name-only. Bump it in both.
 
-### 1.7 Tenant isolation not enforced at the HTTP layer (~2–3 sessions)
+### 1.7 Tenant isolation not enforced at the HTTP layer — 🔶 **CORE FIXED 2026-08-04**
 
 `defaultTenantID := "00000000-0000-0000-0000-000000000000"` at
 `cmd/cleat-worker/main.go:159`, used process-wide. Callers authenticate per-tenant; every
 request is then served from one hardcoded scope. Real RLS exists underneath and is bypassed.
+
+**Fixed.** Handlers now resolve a per-request store through `scopedStore`/`storeFor`
+(`cmd/cleat-worker/server.go`) instead of using the process-wide `apiServer.store`, across all
+45 call sites. Every backend already had the scoping this needed and none of it was being
+asked for: Postgres sets `cleat.tenant_id` in `beginTxWithRLS`, SQL Server hands out a
+per-tenant pool whose connector calls `sp_set_session_context`, MySQL routes to a per-tenant
+database. All three cache pools, so the cost is a struct allocation and a map lookup.
+
+Failure is closed: with `--require-auth` on, a handler reached without a tenant is refused
+rather than defaulted — the fallback *was* the bug. With auth off the process-wide store is
+returned deliberately, and `TestAuthOffStillServesDefaultTenant` guards that side so the fix
+cannot be over-applied into a 401 for every single-tenant deployment. That is the same trap
+§1.1/§1.2 carry in WS-1's list: the naive fix converts silent corruption into spurious
+failure on the legitimate path.
+
+Two cross-tenant **writes** that scoping the store does not close, because they take a tenant
+as an *argument* rather than reading one:
+
+- `handleStartWorkflow` read `tenant_id` straight from the request body. Any authenticated
+  caller could start a workflow in any tenant by naming it in the JSON. The authenticated
+  tenant is now authoritative, and a disagreeing body value is refused rather than silently
+  overridden — a caller that asked for another tenant is either misconfigured or probing, and
+  quietly writing somewhere other than where they asked is its own bug.
+- `handleDeadLetterReprocess` passed `engine.DefaultTenantUUID` literally, so a tenant
+  retrying its own dead-lettered workflow moved that run into the default tenant's scope.
+
+**Found on the way.** The sharded startup path built `store` as a `ShardedStore` over all
+shards but assigned `factory` the *first shard's* factory (`if i == 0`). Harmless while the
+factory served background work; once handlers open stores from it, every tenant-scoped
+request would have been narrowed to shard 0 — reads that silently miss data and report
+success. `cmd/cleat-worker/sharded_factory.go` opens one store per shard and wraps them.
+
+**The test that mattered failed first, for the right reason.** The DB-backed test
+(`tenant_isolation_db_test.go`) initially showed both tenants seeing both rows. Not a defect
+in the fix: PostgreSQL bypasses RLS **unconditionally for superusers**, and
+`CLEAT_TEST_POSTGRES` conventionally points at one — the postgres image's `POSTGRES_USER`
+bootstrap role is a superuser. This is exactly the gap `migrations/postgres/005_app_role.sql`
+was written to close, reproduced live. Rebuilt on `testutil.OpenPostgresRLSTestDB`
+(NOSUPERUSER, non-owning) it passes, and fails again with the fix reverted.
+
+The general lesson is worth keeping: **a tenant-isolation test that connects as a superuser
+proves nothing and looks green.** Any future backend's isolation test must assert the
+connecting role is subject to RLS before asserting anything about tenants.
+
+**Still open on §1.7:**
+
+- MySQL and SQL Server isolation tests. MSSQL should behave like Postgres (its seven policies
+  were verified enforcing, see above). MySQL has no row-level security at all, so its
+  isolation rests entirely on per-tenant databases and needs its own test rather than a
+  shared one that would imply a backstop it does not have.
+- The ~89 unaudited `MySQLStore` `s.tenantID` call sites (see the `requireTenant` note
+  elsewhere in this plan). Scoping the store does not audit them.
+- ~~Whether the shipped deployment actually connects as `cleat_app` rather than a
+  superuser.~~ **Checked 2026-08-04 — it does.** `docker-compose.cluster.yml` gives every
+  worker `--db=postgres://cleat_app:...` with a separate superuser `--migrate-db`, and
+  `deploy/postgres/900-app-role.sh` refuses to proceed if `cleat_app` turns out to be a
+  superuser or to hold `BYPASSRLS`. Worth stating because it is the precondition for
+  everything above: the HTTP fix and the RLS policies are *both* no-ops on Postgres against a
+  superuser connection. Single-node local runs pointed at `postgres://cleat:cleat@…` do get
+  the superuser bypass, which is acceptable for single-tenant development but means a local
+  run is not evidence about isolation.
 
 - ~~Also: `migrations/mysql/` and `migrations/mssql/` have **zero** RLS policies against
   Postgres's seven.~~ **Half wrong — corrected 2026-08-04 against a live SQL Server 2022
