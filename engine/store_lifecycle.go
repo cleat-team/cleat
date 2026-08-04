@@ -474,36 +474,58 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 // enforceParentClosePolicy applies ParentClosePolicy to all child workflows
 // of the given parent workflow. Best-effort post-commit cleanup.
 
+// enforceParentClosePolicy applies a closing parent's policy to its children.
+//
+// It used to discard every error it produced: neither ExecContext's nor
+// Commit's return value was assigned, in either transaction. When it failed,
+// the children of a closed parent were simply unaffected by its policy --
+// TERMINATE children kept running, REQUEST_CANCEL children were never
+// flagged -- with no log line, no metric and no error anywhere. The function
+// is void and its callers treat it as best-effort post-commit cleanup, so
+// nothing downstream noticed either. See IMPROVEMENT-PLAN.md 2.50.
+//
+// It stays void: the contract with callers has not changed, only whether a
+// failure is observable.
 func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
-	tx, err := s.beginTxWithRLS(ctx)
-	if err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin TERMINATE tx failed", "error", err)
-		return
-	}
-	defer tx.Rollback()
-	tx.ExecContext(ctx, `
+	steps := []struct {
+		policy string
+		query  string
+	}{
+		{"TERMINATE", `
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = 'parent workflow terminated'
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
-	`, parentWorkflowID)
-	tx.Commit()
-
-	tx2, err := s.beginTxWithRLS(ctx)
-	if err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin REQUEST_CANCEL tx failed", "error", err)
-		return
-	}
-	defer tx2.Rollback()
-	tx2.ExecContext(ctx, `
+	`},
+		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
-	`, parentWorkflowID)
-	tx2.Commit()
+	`},
+	}
+
+	for _, step := range steps {
+		if err := s.runParentClosePolicyStep(ctx, step.query, parentWorkflowID); err != nil {
+			s.log().WarnContext(ctx, "enforceParentClosePolicy failed; children of a closed parent are unaffected by its close policy",
+				"policy", step.policy, "parent_workflow_id", parentWorkflowID, "error", err)
+		}
+	}
+}
+
+func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, parentWorkflowID string) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, query, parentWorkflowID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed

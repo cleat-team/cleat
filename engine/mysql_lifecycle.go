@@ -739,24 +739,56 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 
 // enforceParentClosePolicy applies ParentClosePolicy to all child workflows
 // of the given parent workflow. Runs as a best-effort operation.
+// enforceParentClosePolicy applies a closing parent's policy to its children.
+//
+// Two defects, both from IMPROVEMENT-PLAN.md 2.50. It discarded the result of
+// both ExecContext calls, so a failure was structurally invisible: the
+// children of a closed parent were unaffected by its policy and nothing
+// recorded it. And it used no transaction at all, so the two statements could
+// apply partially -- TERMINATE children failed while REQUEST_CANCEL children
+// were left unflagged, or the reverse, with no way to tell afterwards.
+//
+// Both are fixed here. The function stays void: the contract with callers has
+// not changed, only whether a failure is observable.
 func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin failed; children of a closed parent are unaffected by its close policy",
+			"parent_workflow_id", parentWorkflowID, "error", err)
+		return
+	}
+	defer tx.Rollback()
+
 	// Terminate children with TERMINATE policy.
-	s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = 'parent workflow terminated'
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
-	`, parentWorkflowID)
+	`, parentWorkflowID); err != nil {
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: TERMINATE children not failed",
+			"parent_workflow_id", parentWorkflowID, "error", err)
+		return
+	}
 
 	// Request cancellation for children with REQUEST_CANCEL policy.
-	s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
-	`, parentWorkflowID)
+	`, parentWorkflowID); err != nil {
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: REQUEST_CANCEL children not flagged",
+			"parent_workflow_id", parentWorkflowID, "error", err)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: commit failed; children of a closed parent are unaffected by its close policy",
+			"parent_workflow_id", parentWorkflowID, "error", err)
+	}
 }
 
 // finishClaim commits a claim transaction and enforces the claim-limit
