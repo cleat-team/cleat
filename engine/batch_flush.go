@@ -229,6 +229,23 @@ func (bf *BatchFlusher) flush(ctx context.Context, batch []batchEntry) {
 	}
 	defer tx.Rollback()
 
+	// One tenant context for the whole batch. Same defect as the single-event
+	// path (see setRLSOnFlushTx): without it every insert here is rejected by
+	// event_history's RLS policy on the connection the worker actually uses,
+	// and the rejection surfaces only as a log line. Cheap here -- one extra
+	// statement amortised across up to maxBatch events.
+	if bf.tenantID != "" {
+		if err := setRLSOnFlushTx(ctx, tx, bf.tenantID); err != nil {
+			err = fmt.Errorf("batch flush: set tenant context: %w", err)
+			for i := range batch {
+				if batch[i].done != nil {
+					batch[i].done <- err
+				}
+			}
+			return
+		}
+	}
+
 	for i := range batch {
 		entry := &batch[i]
 		if _, execErr := tx.ExecContext(ctx, insertEventSQL, entry.params...); execErr != nil {
