@@ -380,6 +380,83 @@ type wasmImport struct {
 }
 
 // readImportSection extracts all (module, field) pairs from the WASM import section.
+// skipImportDesc advances past one import descriptor, which is a kind byte
+// followed by a kind-specific payload, and returns the new offset.
+//
+// The four kinds are defined by the WebAssembly core spec (importdesc):
+//
+//	0x00 func    typeidx                        -- one LEB128
+//	0x01 table   reftype + limits               -- one byte, then limits
+//	0x02 mem     limits                         -- limits
+//	0x03 global  valtype + mut                  -- two bytes
+//
+// limits is a flags byte, a minimum, and a maximum when flags has bit 0 set.
+//
+// Only 0x00 occurs in practice for the workflows cleat builds -- Go, Rust,
+// AssemblyScript and TeaVM guests all import functions only -- but the other
+// three are handled rather than assumed away, since guessing wrong here
+// desynchronises the whole section rather than losing one entry.
+func skipImportDesc(b []byte, offset, sectionEnd int) (int, error) {
+	if offset >= sectionEnd {
+		return 0, fmt.Errorf("descriptor truncated: no kind byte")
+	}
+	kind := b[offset]
+	offset++
+
+	readULEB := func(what string) error {
+		v, n := decodeULEB128(b[offset:])
+		_ = v
+		if n <= 0 || offset+n > sectionEnd {
+			return fmt.Errorf("descriptor truncated: %s", what)
+		}
+		offset += n
+		return nil
+	}
+	skipLimits := func() error {
+		if offset >= sectionEnd {
+			return fmt.Errorf("descriptor truncated: limits flags")
+		}
+		flags := b[offset]
+		offset++
+		if err := readULEB("limits minimum"); err != nil {
+			return err
+		}
+		if flags&0x01 != 0 {
+			if err := readULEB("limits maximum"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	switch kind {
+	case 0x00: // func: typeidx
+		if err := readULEB("func typeidx"); err != nil {
+			return 0, err
+		}
+	case 0x01: // table: reftype then limits
+		if offset >= sectionEnd {
+			return 0, fmt.Errorf("descriptor truncated: table reftype")
+		}
+		offset++
+		if err := skipLimits(); err != nil {
+			return 0, err
+		}
+	case 0x02: // mem: limits
+		if err := skipLimits(); err != nil {
+			return 0, err
+		}
+	case 0x03: // global: valtype then mutability
+		if offset+2 > sectionEnd {
+			return 0, fmt.Errorf("descriptor truncated: global valtype/mut")
+		}
+		offset += 2
+	default:
+		return 0, fmt.Errorf("unknown import kind 0x%02x", kind)
+	}
+	return offset, nil
+}
+
 func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 	if len(wasmBytes) < 8 || !hasWasmHeader(wasmBytes) {
 		return nil, fmt.Errorf("not a valid WASM binary")
@@ -437,9 +514,23 @@ func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 			fieldName := string(wasmBytes[offset : offset+int(fieldLen)])
 			offset += int(fieldLen)
 
-			// Skip kind byte.
-			if offset < sectionEnd {
-				offset++
+			// Skip the import descriptor: a kind byte followed by a
+			// kind-specific payload.
+			//
+			// This used to advance by one byte -- the kind -- and stop. The
+			// payload was left unread, so the next iteration started on it and
+			// read a type index as the following import's module-name length.
+			// The parser desynchronised after the *first* import and every
+			// module with two or more imports returned "corrupt WASM import N".
+			//
+			// Nothing reported it, because both callers treat an error as
+			// "cannot tell": NeededEnvImports falls back to registering every
+			// host function, and detectLanguageFromImports returns "", which
+			// DetectLanguage turns into its "go" default. So the AssemblyScript
+			// and TeaVM branches below it had never once been reached.
+			var derr error
+			if offset, derr = skipImportDesc(wasmBytes, offset, sectionEnd); derr != nil {
+				return nil, fmt.Errorf("corrupt WASM import %d: %w", i, derr)
 			}
 
 			imports = append(imports, wasmImport{module: moduleName, field: fieldName})

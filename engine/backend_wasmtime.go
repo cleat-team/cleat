@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -357,15 +358,36 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Detect Component Model binaries and dispatch to the component execution path.
 	if isComponentWasm(wasmBytes) {
 		// Try native component model via CGo first.
-		if result, err := b.ExecuteComponentCGo(wasmBytes, entryPoint, []byte(input), OutBufSize); err == nil {
+		result, cgoErr := b.ExecuteComponentCGo(wasmBytes, entryPoint, []byte(input), OutBufSize)
+		if cgoErr == nil {
 			return result, nil
 		}
+		// Say why the fast path was not taken. This used to be
+		// `if result, err := ...; err == nil`, discarding the error entirely,
+		// so a native-path failure surfaced only as whatever the fallback below
+		// happened to report -- typically an unresolved-import error from
+		// decomposition, which reads like "wasmtime cannot run this component"
+		// when the real cause was something else. Two examples, both observed:
+		// the CGo path is stubbed out unless the wasmtime_component_cgo build
+		// tag is set (no build sets it), and its export lookup resolves only
+		// top-level names, so a component exporting through an interface
+		// instance reports the export as missing.
+		//
+		// Logged rather than returned: the fallback may still succeed, and
+		// turning a recoverable miss into a hard failure would change
+		// behaviour. The point is only that the reason stops vanishing.
+		slog.DebugContext(ctx, "wasmtime native component path unavailable, falling back to decomposition",
+			"entry_point", entryPoint, "error", cgoErr)
 		// Fall back to manual decomposition + instantiation.
 		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
 		if bundleErr != nil {
-			return nil, fmt.Errorf("host: parse component bundle: %w", bundleErr)
+			return nil, fmt.Errorf("host: parse component bundle (native component path first failed: %v): %w", cgoErr, bundleErr)
 		}
-		return b.ExecuteComponent(ctx, wasmBytes, bundle, entryPoint, input, session)
+		res, fallbackErr := b.ExecuteComponent(ctx, wasmBytes, bundle, entryPoint, input, session)
+		if fallbackErr != nil {
+			return nil, fmt.Errorf("%w (native component path first failed: %v)", fallbackErr, cgoErr)
+		}
+		return res, nil
 	}
 
 	// Compile the WASM module (cached by xxhash key, computed above).

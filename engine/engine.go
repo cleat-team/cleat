@@ -263,6 +263,23 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 	}
 }
 
+// WithBackends registers one backend for several languages at once.
+//
+// backendForWasm looks the detected language up in this map and returns nil
+// when it is absent, which sends the workflow to the fallback runtime. So the
+// set of languages registered here is the whole of the routing decision, and
+// registering them one call at a time made it easy to leave one out silently.
+func WithBackends(languages []string, backend WasmBackend) EngineOption {
+	return func(e *Engine) {
+		if e.backends == nil {
+			e.backends = make(map[string]WasmBackend)
+		}
+		for _, lang := range languages {
+			e.backends[lang] = backend
+		}
+	}
+}
+
 // WithReplayStepCallback sets a callback invoked after each replayed event.
 func WithReplayStepCallback(cb ReplayStepCallback) EngineOption {
 	return func(e *Engine) { e.stepCallback = cb }
