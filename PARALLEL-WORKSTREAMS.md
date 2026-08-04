@@ -86,13 +86,12 @@ concurrency store files, `engine/mysql_ops.go`, `engine/mssql_operations.go`,
 
 | item | what |
 |---|---|
-| **§1.2 residual** | The store layer is done; **the callers are not.** All 12 store sites (`CompleteWorkflow`, `FailWorkflow`, `MoveToDeadLetterQueue`, `ContinueAsNew` × 3 dialects) check `RowsAffected` and return `ErrFenceLost` before any cleanup. Only 2 of the ~15 call sites in `cmd/cleat-worker/` inspect that error; the rest discard the return value entirely. **Start here.** |
-| **§2.26** | `mssqlRetry` is still test-only. Wiring it needs a per-transaction rollback-guarantee decision across 8 `BeginTx` boundaries. Unblocked once WS-3's `CLEAT_TEST_MSSQL` instance is up (WS-1 uses the default `1433`). |
+| **§2.26** | `mssqlRetry` is still test-only. Wiring it needs a per-transaction rollback-guarantee decision across 8 `BeginTx` boundaries. Unblocked once WS-3's `CLEAT_TEST_MSSQL` instance is up (WS-1 uses the default `1433`). **Start here — it is the only WS-1 item still open.** |
 
 ### Already landed — do not start these
 
-Three of the five items originally listed here were merged **before this document was
-written**, in `c26c332` (#218), which is an ancestor of the `3c13fb7` it was written against.
+Four of the five items originally listed here are done. Three were merged **before this
+document was written**, in `c26c332` (#218), which is an ancestor of the `3c13fb7` it was written against.
 The table was built from `IMPROVEMENT-PLAN.md`'s `§` headings without their ✅ markers, so it
 pointed WS-1 at finished work. Verified against the tree on 2026-08-04:
 
@@ -101,6 +100,7 @@ pointed WS-1 at finished work. Verified against the tree on 2026-08-04:
 | **§1.1** | "start here, largest live data-loss item" | landed: `migrations/{postgres,mysql,mssql}/004_fix_finalize_workflow_status_fence.sql` captures the fenced `UPDATE`'s row count (`GET DIAGNOSTICS … ROW_COUNT` / `@@ROWCOUNT`) and skips the terminal block when it is zero. `engine/fence_lost_integration_test.go` covers both the Go rollback and the SQL guard on its own. |
 | **§1.6** | open, ~0.5 session | landed in all three dialects: `generation = generation + 1` in `ReapStaleInstances` (`store_lifecycle.go:705`, `mysql_lifecycle.go:723`, `mssql_operations.go:13`) and in `TerminateWorkflow` (`db.go:1056`). |
 | **§2.17** | "still open — three candidate fixes" | `IMPROVEMENT-PLAN.md` §2.17 is marked ✅ **FIXED**. |
+| **§1.2** | "the same shape in Go", open | the store half had already landed; the caller half is now closed too — #263 (a concurrency-key conflict returned 409 and ran the workflow anyway), #265 (`cleat-bench` had never completed a run), #267 (a lost fence was invisible and still counted as a failure). |
 
 **The trap:** §1.2 is easy to "fix" by making every caller treat `ErrFenceLost` as a failure,
 which converts silent corruption into a spurious failure on the *legitimate* path. The two
