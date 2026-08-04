@@ -124,7 +124,18 @@ jobs:
       # The -run regex matches only cross-language E2E tests.
       # ------------------------------------------------------------------
       - name: Run cross-language E2E tests
+        shell: bash
         run: |
+          # pipefail, for the same reason the step below it already has it:
+          # without it `tee` supplies the exit status and a failing `go test`
+          # is reported as a green step.
+          #
+          # That fix was applied to the next step and not this one, and this
+          # one was hiding a real failure -- TestPythonWasmEndToEnd had been
+          # failing on develop while this workflow reported success. It is the
+          # only job that installs componentize-py, so it is the only place
+          # that failure could ever have shown up.
+          set -o pipefail
           go test -count=1 -short=false -timeout=10m \
             -v \
             -run "TestRust|TestPython|TestAssemblyScript|TestJava" \

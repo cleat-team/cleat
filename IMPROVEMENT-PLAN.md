@@ -3621,6 +3621,36 @@ The abort fix is covered by `engine/wasmtime_abort_arity_test.go`, which builds 
 from WAT rather than depending on that fixture — deliberately, so the regression test does not
 inherit the staleness that blocks the thing it is testing.
 
+**Correction, 2026-08-04, and it improves the picture.** The paragraph above concluded that
+Python could not be settled because the checked-in fixture is stale. That is true of the
+*fixture* and false as a statement about the repo: `e2e-cross-language.yml` installs
+`componentize-py` and `engine/python_wasm_e2e_test.go` builds a component **fresh** on every
+run. There has been a real signal all along.
+
+It was invisible. `TestPythonWasmEndToEnd` has been **failing on `develop`** while the workflow
+reported success, because the step running it pipes `go test` into `tee` without
+`set -o pipefail` — so `tee`'s exit status is the step's. The very next step in the same file
+carries that fix, with a comment explaining exactly this hazard. It was applied to one step
+and not the other.
+
+What the hidden failure says, on a freshly built component rather than the stale fixture:
+
+```
+instantiate instance 41 (module 4, 3 args, imports: [env GOT.mem GOT.func]):
+  incompatible import type for `env::abort`
+ (native component path first failed: wasmtime component CGo fast path not built)
+```
+
+That is this section's `env::abort` defect, and nothing further — the `env::cleat_call` ABI
+skew is an artefact of the stale checked-in fixture, not of Python. So the abort fix and the
+missing `pipefail` ship together: one makes the failure visible, the other fixes it.
+
+Also worth keeping: `componentize-py`'s `componentize` step cannot run on macOS/arm64 here. It
+dies with `EXC_GUARD / GUARD_TYPE_MACH_PORT — SET_EXCEPTION_BEHAVIOR on mach port`, which is
+its embedded wasmtime installing a mach exception handler into a guarded port. Not OOM, which
+was the first guess and was wrong. Linux runners have no such guard, so CI is the place this
+gets exercised, and now it is the place it will be seen.
+
 ---
 
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by
