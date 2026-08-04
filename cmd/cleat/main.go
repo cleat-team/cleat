@@ -831,87 +831,86 @@ func runVetPython(dir string, jsonOut bool) int {
 
 // runVetAS performs a basic vet check on AssemblyScript source files.
 // AssemblyScript vetting is currently limited; full AST analysis is planned.
+// runVetAS vets an AssemblyScript workflow by compiling it with the cleat
+// transform and no code generation.
+//
+// It used to vet nothing. It walked the tree counting .as/.ts files, resolved
+// node and the transform path, discarded both (`_ = nodePath`, and a
+// `transformFile` candidate search whose result was never read), printed
+// "Scanned N file(s)" and returned 0 -- on every path, for every input. A
+// workflow calling Math.random() inside a durable function passed vet, and so
+// did one with no AssemblyScript in it at all. See IMPROVEMENT-PLAN.md 2.43.
+//
+// What makes vetting possible now is 2.42: the transform's E001-E005
+// determinism checks used to be console.error() and nothing else, so even
+// `cleat build` exited 0 on a violation. They throw from afterParse now, which
+// is what makes asc fail. Running asc with --noEmit gets the whole check --
+// parse, transform, diagnostics -- without writing a .wasm.
+//
+// A missing toolchain is an error rather than a pass. `cleat build` already
+// exits 1 when npx is absent, and a vet that returns 0 because it could not
+// look is the exact defect being fixed here.
 func runVetAS(dir string) int {
 	if dir == "" {
 		dir = "."
 	}
 
-	// Check for package.json.
 	if _, err := os.Stat(filepath.Join(dir, "package.json")); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: no package.json found in %s\n", dir)
+		fmt.Fprintf(os.Stderr, "AssemblyScript workflows are npm projects; run 'cleat vet' from the project root or pass its path.\n")
 		return 1
+	}
+
+	entry := filepath.Join(dir, "assembly", "index.ts")
+	if _, err := os.Stat(entry); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: no assembly/index.ts found in %s\n", dir)
+		fmt.Fprintf(os.Stderr, "This is the entry point 'cleat build --target assemblyscript' compiles; vet checks the same one.\n")
+		return 1
+	}
+
+	if _, err := exec.LookPath("npx"); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: npx not found, so the AssemblyScript vet cannot run. Install Node.js: https://nodejs.org\n")
+		fmt.Fprintf(os.Stderr, "Reporting this rather than passing: a vet that cannot run its checks has not vetted anything.\n")
+		return 1
+	}
+
+	// Mirrors runBuildAssemblyScript: the transform is resolved from
+	// node_modules as @cleat/transform, so it has to be installed to run.
+	if _, err := os.Stat(filepath.Join(dir, "node_modules")); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Installing npm dependencies...\n")
+		cmd := exec.Command("npm", "install")
+		cmd.Dir = dir
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: npm install failed: %v\n", err)
+			return 1
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Vetting AssemblyScript project in %s...\n", dir)
-	fmt.Fprintf(os.Stderr, "Note: AssemblyScript vetting is experimental. Checking transform-level validation.\n")
 
-	// Check for the cleat-as package transform validation.
-	asDir := filepath.Join(dir, "packages", "cleat-as")
-	if _, err := os.Stat(asDir); os.IsNotExist(err) {
-		// The transform may be at the AS project level; check for assembly/ dir.
-		asDir = dir
-	}
+	// --noEmit runs parse and the transform, including the E001-E005
+	// determinism diagnostics, without producing a .wasm. Everything else
+	// matches the build invocation so vet and build agree about what compiles.
+	cmd := exec.Command("npx",
+		"asc", filepath.Join("assembly", "index.ts"),
+		"--runtime", "stub",
+		"--transform", "@cleat/transform",
+		"--noEmit",
+	)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
 
-	// Find .as files.
-	var asFiles []string
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if d.Name() == "node_modules" || d.Name() == ".git" || strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(path, ".as") || strings.HasSuffix(path, ".ts") {
-			asFiles = append(asFiles, path)
-		}
-		return nil
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error scanning AS files: %v\n", err)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nAssemblyScript vet failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Determinism violations are reported above as E001-E005.\n")
 		return 1
 	}
 
-	if len(asFiles) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: no .as or .ts source files found in %s\n", dir)
-		return 0
-	}
-
-	// Run the AS transform's vet validation via Node.js if available.
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: node not found, skipping AssemblyScript vet transform.\n")
-		fmt.Fprintf(os.Stderr, "Scanned %d file(s) — no pattern-based checks available for AS yet.\n", len(asFiles))
-		return 0
-	}
-
-	// Check if the transform's afterParse validation is available.
-	transformFile := filepath.Join(dir, "packages", "cleat-as", "transform", "index.js")
-	if _, err := os.Stat(transformFile); os.IsNotExist(err) {
-		// Fall back to looking relative to the repo root.
-		candidates := []string{
-			filepath.Join("packages", "cleat-as", "transform", "index.js"),
-			filepath.Join(dir, "..", "packages", "cleat-as", "transform", "index.js"),
-		}
-		found := false
-		for _, c := range candidates {
-			if _, statErr := os.Stat(c); statErr == nil {
-				transformFile = c
-				found = true
-				break
-			}
-		}
-		if !found {
-			fmt.Fprintf(os.Stderr, "Scanned %d file(s) — AS transform validation unavailable.\n", len(asFiles))
-			return 0
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "Scanned %d file(s) — use 'cleat build' for full AS validation.\n", len(asFiles))
-
-	_ = nodePath
+	fmt.Fprintf(os.Stderr, "AssemblyScript vet passed.\n")
 	return 0
 }
 
