@@ -401,11 +401,13 @@ The live paths (`freshCall`, `freshCallWithHeartbeat`, `freshCallWithRetry`) cal
 
 ### 1.5 Primary WASM backend has no hang protection (~1–2 sessions) — fixed for wasmtime, **still open for every deployment**
 
-> **Re-opened 2026-08-04 by §2.28.** The epoch-interruption fix below is real and tested, but
-> it lives behind `//go:build cgo` and the shipped Dockerfile builds `CGO_ENABLED=0`, so no
-> container has it. Measured on the wazero backend the containers actually run: a workflow
-> with a 2-second budget ran for 2m35s and returned **success**. Read §2.28 before treating
-> this item as done.
+> **Re-opened and re-closed 2026-08-04 by §2.28.** The epoch-interruption fix below is real
+> and tested, but it lives behind `//go:build cgo` and the shipped Dockerfile built with
+> `CGO_ENABLED=0`, so no container had it: measured on the wazero backend the containers
+> actually ran, a workflow with a 2-second budget ran for 2m35s and returned **success**.
+> The image now builds with CGO on a glibc base and a `--verify-backend` build step keeps it
+> that way. Go guests are fenced in deployments; non-Go guests on wazero still are not.
+> Read §2.28 for the residual.
 
 
 > **Raise this to the top of Phase 1.** wasmtime is the primary backend — it is the standard
@@ -1792,7 +1794,7 @@ here at all. This covers the failure that was shipped; the boot test remains ope
 
 ---
 
-### 2.28 The execution-time fence does not exist in any deployment — OPEN, and this is a Phase 1 finding
+### 2.28 The execution-time fence does not exist in any deployment — ✅ **FIXED for Go WASM**, residual gap below
 
 Found by doing what 2.7 asks and actually booting `docker-compose.cluster.yml` (all five
 containers healthy in under 20s, zero restarts — the compose file is fine). The finding was
@@ -1855,6 +1857,53 @@ A regression test is written and parked at
 `TestIntegrationWorkflowMaxDuration`, with a bounded wait so a regression names the defect
 instead of hanging the package. It is deliberately **not** committed: it fails today, and
 landing a known-red test would put CI back in the state Phase 0 just dug it out of.
+
+#### Resolution — route 2, ship the backend that already works
+
+Chosen over making wazero interruptible, because the wasmtime fence exists and is tested and
+the alternative meant inventing a second mechanism.
+
+**Alpine was the actual blocker, not CGO.** Building the existing image with `CGO_ENABLED=1`
+fails at link time: `undefined reference to fstat64`, `ftruncate64`. Those are glibc LFS
+symbols musl does not export, and `wasmtime-go` ships a prebuilt glibc `libwasmtime.a`. So
+the Dockerfile's `CGO_ENABLED=0` was not a preference — Alpine made it the only option that
+compiled, and the comment above it ("a fully static binary, no libc dependency") described
+the consequence as though it were the goal. Builder and runtime are now `bookworm` /
+`bookworm-slim`.
+
+**Verified on the shipped artifact, not the build log:**
+
+```
+$ docker run --rm cleat-worker:latest --verify-backend
+verify-backend: OK: wasmtime backend available          # exit 0
+
+$ docker run -d --network … cleat-worker:latest --db=… ; docker logs …
+"msg":"wasmtime backend registered for Go WASM","instance_timeout":30000000000
+```
+
+**The guard.** `--verify-backend` constructs a real wasmtime engine and exits 0/1, and the
+Dockerfile runs it as a build step, so a future `CGO_ENABLED=0` or musl base fails the build
+instead of shipping silently. It is asserted in both directions — `verify_backend_cgo_test.go`
+requires 0, `verify_backend_nocgo_test.go` requires non-zero *and* that the message names
+`CGO_ENABLED=0`. A guard that only ever reports OK is not a guard, which is §2.16's lesson.
+
+Also removed: the cluster job's `CGO_ENABLED=0 go build -o cleat-worker` step. Nothing ran the
+binary — the cluster runs containers — and sitting directly above the image build it read as
+though `CGO_ENABLED=0` were the shipped configuration. That belief is what let this survive.
+
+**The cost, stated plainly.** The image goes from **69.7 MB to 231 MB** (the binary alone is
+55 MB, mostly `libwasmtime.a`). That is a 3.3× increase and it is the price of the fence. If
+it matters, the runtime layer is the cheaper half to attack — a distroless base would save
+~50 MB, but the compose healthcheck shells out to `wget`, so that is a change with its own
+tail.
+
+#### Residual: non-Go guests are still unfenced
+
+The log line reads *"wasmtime backend registered for **Go WASM**"*. Modules in the languages
+wazero is retained for still execute on wazero, where the fence still does not fire. This is
+narrower than before — Go is the common case and is now bounded — but it is not zero, and the
+parked test above stays parked for exactly this reason. Closing it needs route 1 after all,
+for those guests only.
 
 ---
 

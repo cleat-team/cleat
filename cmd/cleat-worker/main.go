@@ -51,6 +51,12 @@ import (
 func main() {
 	flag.Parse()
 
+	// Before anything else, and before any database is needed: --verify-backend
+	// answers "does this binary have the wasmtime backend?" and exits.
+	if *verifyBackend {
+		os.Exit(runVerifyBackend(os.Stdout))
+	}
+
 	// Apply CLEAT_CHILD_BINDING_OVERRIDE env var as fallback when the flag is not set.
 	applyChildBindingOverrideEnv()
 
