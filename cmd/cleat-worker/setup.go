@@ -1272,7 +1272,7 @@ func (w *Worker) dispatchLoop() {
 		// the drain check above and the DB claim calls.
 		if w.draining.Load() {
 			for _, wf := range wfs {
-				w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
+				w.releaseWorkflow(wf)
 			}
 			continue
 		}
@@ -1330,8 +1330,6 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	w.Metrics.RecordWasmCompileDuration(context.Background(), time.Since(wasmStart), wf.DefName)
 	if err != nil {
 		w.logger.ErrorContext(context.Background(), "failed to load WASM", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		var ce *engine.CleatError
 		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
@@ -1340,12 +1338,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errorOp = ce.Op
 		}
 		errMsg := err.Error()
-		if strings.Contains(errMsg, "retries exhausted") {
-			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
-			w.Metrics.RecordWorkflowsDeadLettered(context.Background())
-		} else {
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
-		}
+		w.recordTerminalFailure(wf, workflowStartTime, errMsg, errorCode, errorOp)
 		return
 	}
 
@@ -1361,9 +1354,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errMsg := fmt.Sprintf("module requires %d pages (%.0f MB) but max is %d pages (%d MB); increase --wasm-memory-max-mb or reduce module memory usage",
 				requiredPages, requiredMB, allowedPages, *w.wasmMemoryMaxMB)
 			w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)
-			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, engine.ErrUnknown.String(), "", nil)
+			w.recordTerminalFailure(wf, workflowStartTime, errMsg, engine.ErrUnknown.String(), "")
 			return
 		}
 	}
@@ -1377,9 +1368,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errMsg := fmt.Sprintf("cumulative WASM allocation limit reached: current %d bytes (%.0f MB) + required %d bytes (%.0f MB) exceeds max %d bytes (%.0f MB)",
 				cur, float64(cur)/1024/1024, byteEstimate, float64(byteEstimate)/1024/1024, w.wasmCumulativeAllocationMaxBytes, float64(w.wasmCumulativeAllocationMaxBytes)/1024/1024)
 			w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)
-			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, engine.ErrUnknown.String(), "", nil)
+			w.recordTerminalFailure(wf, workflowStartTime, errMsg, engine.ErrUnknown.String(), "")
 			return
 		}
 		defer w.cumulativeAlloc.Add(-byteEstimate)
@@ -1390,12 +1379,10 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if err != nil {
 		if isConnectionError(err) {
 			w.logger.WarnContext(context.Background(), "DB down loading history", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
-			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
+			w.releaseWorkflow(wf)
 			return
 		}
-		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: history load: %v", wf.ID, err), engine.ErrUnknown.String(), "", nil)
+		w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("workflow %s: history load: %v", wf.ID, err), engine.ErrUnknown.String(), "")
 		return
 	}
 
@@ -1406,11 +1393,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// ---- Determine entry point ----
 	entryPoint := determineEntryPoint(wf.Input, wasmBytes)
 	if entryPoint == "" {
-		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation,
+		w.recordTerminalFailure(wf, workflowStartTime,
 			"cannot determine entry point: no __entry_point in input and no handle_* export in WASM binary",
-			engine.ErrPermanent.String(), "", nil)
+			engine.ErrPermanent.String(), "")
 		return
 	}
 
@@ -1441,9 +1426,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		rt, rtErr = engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 		rt.Metrics = w.Metrics
 		if rtErr != nil {
-			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: create runtime: %v", wf.ID, rtErr), engine.ErrUnknown.String(), "", nil)
+			w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("workflow %s: create runtime: %v", wf.ID, rtErr), engine.ErrUnknown.String(), "")
 			if rt != nil {
 				rt.Close(w.ctx)
 			}
@@ -1470,9 +1453,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			"version mismatch: workflow instance %s expects def_version %d but WASM binary metadata reports version %d (def=%s). The workflow_defs row and the deployed WASM binary are out of sync.",
 			wf.ID, wf.DefVersion, wfMeta.WorkflowVersion, wf.DefName)
 		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "version_check", nil)
+		w.recordTerminalFailure(wf, workflowStartTime, err.Error(), engine.ErrPermanent.String(), "version_check")
 		return
 	}
 
@@ -1493,9 +1474,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 					"missing plugin: workflow requires plugin %q version %s but it is not installed in this worker. Available plugins: %v",
 					pluginName, requiredVersion, pluginNames(workerPlugins))
 				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-				w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-				w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "plugin_check", nil)
+				w.recordTerminalFailure(wf, workflowStartTime, err.Error(), engine.ErrPermanent.String(), "plugin_check")
 				return
 			}
 			if workerVersion != requiredVersion {
@@ -1503,9 +1482,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 					"plugin version mismatch: workflow requires plugin %q version %s but worker has version %s",
 					pluginName, requiredVersion, workerVersion)
 				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-				w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-				w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "plugin_check", nil)
+				w.recordTerminalFailure(wf, workflowStartTime, err.Error(), engine.ErrPermanent.String(), "plugin_check")
 				return
 			}
 		}
@@ -1581,9 +1558,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		tenantDB, err := w.tenantPools.For(w.ctx, wf.TenantID)
 		if err != nil {
 			w.logger.ErrorContext(context.Background(), "cannot get tenant pool", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), engine.ErrUnknown.String(), "", nil)
+			w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("tenant pool: %v", err), engine.ErrUnknown.String(), "")
 			return
 		}
 		engineOpts = append(engineOpts, engine.WithDB(tenantDB))
@@ -1654,8 +1629,6 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 	if err != nil {
 		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		var ce *engine.CleatError
 		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
@@ -1664,12 +1637,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errorOp = ce.Op
 		}
 		errMsg := err.Error()
-		if strings.Contains(errMsg, "retries exhausted") {
-			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
-			w.Metrics.RecordWorkflowsDeadLettered(context.Background())
-		} else {
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
-		}
+		w.recordTerminalFailure(wf, workflowStartTime, errMsg, errorCode, errorOp)
 		return
 	}
 
@@ -1703,9 +1671,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 		if err != nil {
 			w.logger.ErrorContext(context.Background(), "continue_as_new failed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-			w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-			w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("continue_as_new: %v", err), engine.ErrUnknown.String(), "", nil)
+			w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("continue_as_new: %v", err), engine.ErrUnknown.String(), "")
 			return
 		}
 		w.logger.InfoContext(context.Background(), "continued as new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "new_run_id", newRunID)
@@ -1742,12 +1708,10 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		w.Metrics.RecordDBQueryLatency(context.Background(), time.Since(queryStart), "finalize")
 		if isConnectionError(err) {
 			w.logger.WarnContext(context.Background(), "DB down finalizing", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
-			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
+			w.releaseWorkflow(wf)
 			return
 		}
 		w.logger.ErrorContext(context.Background(), "finalize error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		w.Metrics.RecordWorkflowFailed(context.Background(), wf.DefName, "", "")
-		w.Metrics.RecordWorkflowDuration(context.Background(), time.Since(workflowStartTime), wf.DefName, "failed", "")
 		var ce *engine.CleatError
 		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
@@ -1756,12 +1720,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			errorOp = ce.Op
 		}
 		errMsg := err.Error()
-		if strings.Contains(errMsg, "retries exhausted") {
-			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
-			w.Metrics.RecordWorkflowsDeadLettered(context.Background())
-		} else {
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
-		}
+		w.recordTerminalFailure(wf, workflowStartTime, errMsg, errorCode, errorOp)
 		return
 	}
 	w.Metrics.RecordDBQueryLatency(context.Background(), time.Since(queryStart), "finalize")
@@ -2237,16 +2196,92 @@ func (w *Worker) waitForDB() {
 	}
 }
 
-func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
-	if errMsg != "" {
-		if strings.Contains(errMsg, "retries exhausted") {
-			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, "", "")
-			w.Metrics.RecordWorkflowsDeadLettered(context.Background())
-		} else {
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, "", "", nil)
-		}
+// recordTerminalFailure writes the terminal failure for wf and records the
+// failure metrics -- but only if the fenced write actually applied.
+//
+// Every terminal store write is fenced on (assigned_to, generation). A lost
+// fence is not an error: it means this worker stalled long enough to be
+// reaped, another worker legitimately reclaimed the workflow, and the store
+// correctly refused this worker's write. What was missing was any caller
+// noticing. Two things went wrong as a result:
+//
+//   - the failure was invisible. Nothing logged it, so a worker losing every
+//     race looked identical to one doing its job.
+//   - RecordWorkflowFailed was emitted *before* the store call, so a workflow
+//     the new owner goes on to complete successfully was still counted as
+//     failed. The failure counter disagreed with the database.
+//
+// Metrics are therefore recorded after the write, conditional on it applying.
+// The precedent is the two call sites that already handled ErrFenceLost (the
+// ContinueAsNew and FinalizeWorkflowSegment paths): debug-log and return,
+// having done nothing. See IMPROVEMENT-PLAN.md 1.2.
+func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string) (applied, deadLettered bool) {
+	ctx := context.Background()
+
+	deadLettered = strings.Contains(errMsg, "retries exhausted")
+	var err error
+	if deadLettered {
+		err = w.store.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
 	} else {
-		w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
+		err = w.store.FailWorkflow(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
+	}
+
+	if errors.Is(err, engine.ErrFenceLost) {
+		w.logger.DebugContext(ctx, "terminal failure: fence lost, workflow reassigned to another worker",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return false, deadLettered
+	}
+	if err != nil {
+		w.logger.ErrorContext(ctx, "terminal failure write failed, workflow stays claimed until its lease expires",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		return false, deadLettered
+	}
+	return true, deadLettered
+}
+
+// recordTerminalFailure is writeTerminalFailure plus the failure metrics the
+// dispatch paths record, emitted only when the write applied.
+func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string) {
+	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp)
+	if !applied {
+		return
+	}
+	ctx := context.Background()
+	w.Metrics.RecordWorkflowFailed(ctx, wf.DefName, "", "")
+	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, "failed", "")
+	if deadLettered {
+		w.Metrics.RecordWorkflowsDeadLettered(ctx)
+	}
+}
+
+// releaseWorkflow returns wf to the ready pool, treating a lost fence as the
+// no-op it is: another worker owns the workflow, so there is nothing to
+// release. See recordTerminalFailure for why this is not an error.
+func (w *Worker) releaseWorkflow(wf *engine.WorkflowInstance) {
+	ctx := context.Background()
+	err := w.store.ReleaseWorkflow(ctx, wf.ID, w.id, wf.Generation, wf.NextWakeAt)
+	if errors.Is(err, engine.ErrFenceLost) {
+		w.logger.DebugContext(ctx, "release: fence lost, workflow reassigned to another worker",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return
+	}
+	if err != nil {
+		w.logger.WarnContext(ctx, "release failed, workflow stays claimed until its lease expires",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+	}
+}
+
+func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
+	if errMsg == "" {
+		w.releaseWorkflow(wf)
+		return
+	}
+	// Deliberately not recordTerminalFailure: this path never recorded the
+	// failed/duration pair, and it has no start time to report a duration
+	// from. Only the dead-letter counter, as before -- now conditional on the
+	// write applying.
+	if applied, deadLettered := w.writeTerminalFailure(wf, errMsg, "", ""); applied && deadLettered {
+		w.Metrics.RecordWorkflowsDeadLettered(context.Background())
 	}
 }
 
