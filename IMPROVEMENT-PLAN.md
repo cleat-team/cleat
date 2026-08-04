@@ -595,9 +595,31 @@ defence-in-depth-in-name-only. Bump it in both.
 `cmd/cleat-worker/main.go:159`, used process-wide. Callers authenticate per-tenant; every
 request is then served from one hardcoded scope. Real RLS exists underneath and is bypassed.
 
-- Also: `migrations/mysql/` and `migrations/mssql/` have **zero** RLS policies against
-  Postgres's seven. On those backends a missed `tenant_id` filter is a silent cross-tenant
-  leak with no database backstop.
+- ~~Also: `migrations/mysql/` and `migrations/mssql/` have **zero** RLS policies against
+  Postgres's seven.~~ **Half wrong — corrected 2026-08-04 against a live SQL Server 2022
+  (CU26).** Only **MySQL** has zero. `migrations/mssql/001_schema.sql:405-458` defines
+  **seven** `CREATE SECURITY POLICY` statements (`TenantFilter_Defs`, `_Instances`,
+  `_EventHistory`, `_Signals`, `_Schedules`, `_Tags`, `_Routing`) over an inline TVF keyed on
+  `SESSION_CONTEXT(N'tenant_id')` — the same seven tables Postgres covers.
+
+  Applied to a scratch database and exercised, they are real and **fail closed**: with two
+  rows under different tenants, each tenant sees exactly its own, and with no session context
+  set the table reads as **empty** rather than as everything. `sa` does not bypass them —
+  SQL Server filter predicates have no owner exemption, so MSSQL needs no equivalent of
+  Postgres's `FORCE ROW LEVEL SECURITY`.
+
+  This changes §1.7's scope materially. MSSQL does not need a policy migration written; it
+  needs the *session context actually set per request*, which is the same `defaultTenantID`
+  defect above. **MySQL is the only backend with no database backstop** — and it cannot get
+  the same one, because MySQL has no row-level security feature at all (`CREATE POLICY` is a
+  syntax error on 8.4). Its isolation has to come from the application layer or from
+  per-tenant databases, which is what `buildTenantDSN`/`NewMySQLStoreFactory` already gesture
+  at. Decide which before writing anything.
+
+  Corollary worth stating: because MSSQL RLS reads as empty rather than erroring when no
+  tenant is set, a missing session context on that backend is invisible in exactly the way a
+  passing test cannot see. Any §1.7 test must assert *rows returned for the right tenant*,
+  not merely "no error".
 - ~~Also: the new admin API has no ownership check tying `workflowID` to the caller's tenant.~~
   ✅ **FIXED 2026-08-04.** `callerOwnsTarget` in `cmd/cleat-worker/api_admin.go` now gates all
   three destructive routes: it loads the workflow, compares `TenantID` against
@@ -3020,6 +3042,70 @@ needs the branch.
   wasip1 description back to TinyGo while adding a TinyGo-deprecation note two paragraphs
   later, and lists the Admin API as "incoming" after #217 shipped it. Salvage only the note
   that cleat-238 (`--dump-ir`) and cleat-241 (canary routing) remain unbuilt.
+
+### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
+
+`multi-db-ci.yml` prefixed all four of its test steps with `CGO_ENABLED=0`. Because
+`NewWasmtimeBackend` is behind `//go:build cgo`, that does not skip a check — it compiles the
+primary backend out and runs everything on the fallback. The workflow whose stated purpose is
+validating MySQL and SQL Server *under workflow execution* was never executing a workflow on
+the engine of record.
+
+Measured rather than argued — `go test -list` against `./engine/`:
+
+| | tests compiled in |
+|---|---|
+| `CGO_ENABLED=0` | 2401 |
+| CGO on | 2557 |
+
+The **156-test difference** is the entire `TestClosure_*` family — the real WASM
+host-function paths — plus 28 wasmtime-specific tests, including the four §1.5
+runaway-workflow regressions. None of them had ever run in this workflow.
+
+The failure mode is this repo's signature shape — a green signal attached to nothing:
+
+```
+$ CGO_ENABLED=0 go test -count=1 -run 'Wasmtime' ./engine/
+ok  	github.com/cleat-team/cleat/engine	0.370s
+```
+
+That `ok` is what multi-DB CI reported. Zero tests matched, because the file defining them is
+`//go:build cgo`. Counting the §1.5 runaway-workflow regressions specifically: `-run
+InfiniteLoop` executes **0** tests under `CGO_ENABLED=0` and **2** with CGO on. A suite that
+cannot run cannot fail, and reports success either way.
+
+Fixed by hoisting `CGO_ENABLED: 1` to a workflow-level `env:` and deleting the four inline
+prefixes. **Set explicitly, not merely removed:** Go defaults `CGO_ENABLED` to 1 only when a C
+compiler is present and to 0 otherwise, so relying on the default silently reinstates the same
+failure on a runner without gcc. Pinned to 1, that case fails loudly instead.
+
+Timeouts raised (300s→900s on the two full-engine jobs, 600s→900s on `MultiBackend`) because
+the step now runs 156 more tests, several of which compile WASM modules. Not tuning — a
+timeout here would present as a test failure and send the next reader down the wrong path.
+
+Verified locally against the live MySQL 8.4 and SQL Server 2022 stood up for §1.7, with
+`go env CGO_ENABLED` confirmed as `1` first: full `./engine/...` green apart from the two
+port-hardcoded factory tests noted below; `TestPluginMigrations` green; both
+`*_MultiBackend` plugin tests green across all three backends; wasmtime suites confirmed
+executing rather than skipping.
+
+Two caveats stated rather than buried:
+
+- The two failures in the local `./engine/...` run are `TestMySQLStoreFactory` and
+  `TestMySQLIntegration_FactoryOpenStore`, which ignore `CLEAT_TEST_MYSQL` and hardcode
+  `tcp(127.0.0.1:3306)` (already recorded above as config drift). They fail only because the
+  WS-3 sandbox runs MySQL on `3308`; CI publishes `3306`, so they pass there. **This means
+  the CI-green claim for that one step is inferred, not observed** — the honest boundary of
+  what was verified locally.
+- `ci.yml:145` (`go vet ./...`), `ci.yml:629` (`go build ./cmd/...`) and
+  `ecosystem-ci.yml:24` (`go install ./cmd/cleat`) still pass `CGO_ENABLED=0`. Not touched
+  here: they are build/vet steps, not execution tests, so the wazero substitution does not
+  apply the same way. They are worth a separate look — `ci.yml:731` already carries a comment
+  about a CGO-less binary that "read as though `CGO_ENABLED=0` were the shipped
+  configuration, which is the belief that let 2.28 survive," so the hazard was recognised in
+  that file and missed in this one.
+
+---
 
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by
 diffing against `develop` and by `git apply --check`, not by reading commit messages — the
