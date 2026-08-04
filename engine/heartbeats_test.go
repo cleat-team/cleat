@@ -138,8 +138,8 @@ func TestDurableCallWithHeartbeat_Replay_Divergence_WrongEventType(t *testing.T)
 	if errCode != 1 {
 		t.Errorf("errCode = %d, want 1 (divergence)", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("callErrorCode = %d, want 1 (divergence)", callErrorCode)
+	if callErrorCode != callErrorUnknown {
+		t.Errorf("callErrorCode = %d, want %d -- a divergence is a bug in the workflow code, not something to retry", callErrorCode, callErrorUnknown)
 	}
 }
 
@@ -161,8 +161,8 @@ func TestDurableCallWithHeartbeat_Replay_Divergence_ServiceMismatch(t *testing.T
 	if errCode != 1 {
 		t.Errorf("errCode = %d, want 1 (divergence)", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("callErrorCode = %d, want 1 (divergence)", callErrorCode)
+	if callErrorCode != callErrorUnknown {
+		t.Errorf("callErrorCode = %d, want %d -- a divergence is a bug in the workflow code, not something to retry", callErrorCode, callErrorUnknown)
 	}
 }
 
@@ -185,8 +185,8 @@ func TestDurableCallWithHeartbeat_Replay_ErrorEvent(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("errCode = %d, want 1 (cached error)", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("callErrorCode = %d, want 1 (cached error)", callErrorCode)
+	if callErrorCode != callFailureCode {
+		t.Errorf("callErrorCode = %d, want %d -- a recorded service failure, classified the same as on the fresh path", callErrorCode, callFailureCode)
 	}
 	if s.stepCount != 2 {
 		t.Errorf("stepCount = %d, want 2 (consumed heartbeat + call)", s.stepCount)
@@ -212,8 +212,8 @@ func TestDurableCallWithHeartbeat_Replay_PendingSentinel(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("errCode = %d, want 1 (ambiguous)", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("callErrorCode = %d, want 1 (ambiguous)", callErrorCode)
+	if callErrorCode != callErrorUnknown {
+		t.Errorf("callErrorCode = %d, want %d -- ambiguous: the call may have succeeded, so retrying risks a duplicate", callErrorCode, callErrorUnknown)
 	}
 }
 
@@ -284,8 +284,8 @@ func TestDurableCallWithHeartbeat_Fresh_Error(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("errCode = %d, want 1", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("callErrorCode = %d, want 1", callErrorCode)
+	if callErrorCode != callFailureCode {
+		t.Errorf("callErrorCode = %d, want %d -- a service failure the engine cannot classify further", callErrorCode, callFailureCode)
 	}
 }
 

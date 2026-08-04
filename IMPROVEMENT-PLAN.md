@@ -1162,7 +1162,7 @@ handler.
 
 ---
 
-### 2.15 Durable call failures are all classified as retryable timeouts — OPEN
+### 2.15 Durable call failures are all classified as retryable timeouts — ✅ **FIXED** (with a bounded residual, 2.35)
 
 `cleat.CallErrorCode` exists "so callers can distinguish retryable from non-retryable errors
 without string-matching" (`cleat/runtime.go`). It cannot currently do that. Every failure
@@ -1171,9 +1171,53 @@ which the guest enum reads as `CallErrorTimeout` — **retryable** — whether t
 cause was a service error, a replay divergence, a cancellation or an ambiguous result.
 `engine/plugins.go` packs `0` (`CallErrorUnknown`) throughout instead.
 
-So a permanent failure is reported to workflow authors as a transient one. Fixing it means
-classifying errors at the `ServiceCaller` boundary, which is a design change rather than a
-patch, and is why it was left out of the 2.10 work.
+So a permanent failure is reported to workflow authors as a transient one.
+
+**Fixed 2026-08-04.** The failures the *engine* produces are now classified honestly, and the
+one that cannot be is documented rather than guessed at.
+
+Non-retryable now (`CallErrorUnknown`), where all three used to say "timeout, try again":
+
+| Failure | Why retrying is wrong |
+|---|---|
+| Workflow cancelled | Repeating the call is the one thing the caller must not do |
+| Replay divergence | A bug in the workflow code; the same call diverges again |
+| Ambiguous outcome | The call **may already have succeeded** — retrying risks a duplicate side effect |
+| No plugin registry configured | A deployment problem; no amount of retrying supplies one |
+
+A call the *service* failed keeps reporting as retryable (`CallErrorUnavailable`), deliberately:
+the previous hardcoded `CallErrorTimeout` was retryable too, so nothing branching on
+`Retryable()` changes behaviour. What changed is that it stops claiming the call timed out when
+the engine has no idea what happened.
+
+**A separate defect found on the way.** `DurableCallWithRetry` returned
+`packDurableCallResult(0, 0, 0)` when the context was cancelled mid-backoff. The generated
+guest adapter branches on `errCode != 0`, so an abandoned retry loop reached the workflow as a
+**successful call with an empty response**. It now returns the context error with a nonzero
+`errCode`.
+
+### 2.35 The call error class is not persisted, so replay cannot recover it — 🔶 **OPEN**
+
+The constraint that bounds §2.15, and it is a real one rather than an excuse.
+
+A recorded call failure is replayed from `EventRecord.Err` — a bare string. If the fresh path
+derived a classification the replay path cannot, **the same step would be retryable on the
+first run and non-retryable on the replay of it**: a determinism bug in the engine, introduced
+in the name of better error reporting. So every *recorded* failure — a plain call failure,
+retries exhausted, a plugin function erroring — has to use one constant on both paths, and
+does. `TestFreshAndReplayAgreeOnRecordedFailure` drives both and requires them to match.
+
+The same constraint forces the streaming plugin family to a single code: every stream failure,
+whether a missing registry, a blocked guard or the function itself erroring, is recorded by
+`recordStreamError` and comes back through one replay site that cannot tell them apart.
+
+**The fix is to persist the code alongside the event** (a column, or a field in the `payload`
+JSONB). Once it round-trips, classification at the `ServiceCaller` boundary becomes possible —
+a caller that knows a 404 from a connection reset can say so, and replay will agree.
+
+Deliberately **no mechanism was added ahead of that**. An interface nothing can call yet is
+how `engine/flush.go` accumulated 350 lines of durability code that had never run (§1.4,
+`docs/durable-call-intent-design.md`).
 
 ---
 

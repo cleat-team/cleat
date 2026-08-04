@@ -53,8 +53,8 @@ func TestPluginCall_ReplayCachedError(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("expected errCode 1, got %d", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("expected callErrorCode 1, got %d", callErrorCode)
+	if callErrorCode != callFailureCode {
+		t.Errorf("callErrorCode = %d, want %d -- a recorded plugin failure, classified the same as on the fresh path", callErrorCode, callFailureCode)
 	}
 }
 
@@ -72,8 +72,8 @@ func TestPluginCall_ReplayDivergentEventType(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("expected errCode 1 (divergence), got %d", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("expected callErrorCode 1, got %d", callErrorCode)
+	if callErrorCode != callErrorUnknown {
+		t.Errorf("callErrorCode = %d, want %d -- a divergence is a bug in the workflow code, not something to retry", callErrorCode, callErrorUnknown)
 	}
 }
 
@@ -227,8 +227,8 @@ func TestPluginCall_FreshPluginError(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("expected errCode 1, got %d", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("expected callErrorCode 1, got %d", callErrorCode)
+	if callErrorCode != callFailureCode {
+		t.Errorf("callErrorCode = %d, want %d -- the plugin function failed; the engine cannot classify it further", callErrorCode, callFailureCode)
 	}
 	if s.history[0].PluginError != "plugin error: invalid input" {
 		t.Errorf("expected PluginError %q, got %q", "plugin error: invalid input", s.history[0].PluginError)
@@ -252,8 +252,8 @@ func TestPluginCall_FreshUnknownPlugin(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("expected errCode 1, got %d", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("expected callErrorCode 1, got %d", callErrorCode)
+	if callErrorCode != callFailureCode {
+		t.Errorf("callErrorCode = %d, want %d -- an unregistered plugin arrives as a plugin function error", callErrorCode, callFailureCode)
 	}
 	if s.history[0].PluginName != "test-plugin" {
 		t.Errorf("expected PluginName %q, got %q", "test-plugin", s.history[0].PluginName)
@@ -271,8 +271,8 @@ func TestPluginCall_FreshNoRegistry(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("expected errCode 1, got %d", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("expected callErrorCode 1, got %d", callErrorCode)
+	if callErrorCode != callErrorUnknown {
+		t.Errorf("callErrorCode = %d, want %d -- no plugin registry is a deployment problem; retrying supplies none", callErrorCode, callErrorUnknown)
 	}
 }
 

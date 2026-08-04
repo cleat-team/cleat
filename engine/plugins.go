@@ -199,8 +199,9 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 				truncateWithHash(inputJSON, maxPayloadLen),
 				truncateWithHash(rec.PluginInput, maxPayloadLen),
 				truncateWithHash(rec.PluginOutput, maxPayloadLen))
+			// Not retryable: a divergence is a bug in the workflow code.
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
 		if rec.PluginName != pluginName || rec.PluginFunc != functionName {
@@ -212,8 +213,9 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 				truncateWithHash(inputJSON, maxPayloadLen),
 				truncateWithHash(rec.PluginInput, maxPayloadLen),
 				truncateWithHash(rec.PluginOutput, maxPayloadLen))
+			// Not retryable: a divergence is a bug in the workflow code.
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
 		if rec.Idempotent {
@@ -234,8 +236,11 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 		}
 
 		if rec.PluginError != "" {
+			// Must match the fresh path below: the class was never persisted,
+			// so the two have to use the same constant or the same step
+			// changes retryability on replay.
 			written, _ := s.writeResult(ctx, m, responsePtr, rec.PluginError, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callFailureCode, 1)
 		}
 
 		written, _ := s.writeResult(ctx, m, responsePtr, rec.PluginOutput, responseMaxLen)
@@ -270,8 +275,10 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 	// Look up the plugin function.
 	if s.engine.pluginRegistry == nil {
 		errMsg := fmt.Sprintf("plugin function %s/%s not available: no plugin registry configured. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
+		// Not retryable, and nothing is recorded on this path: the worker has
+		// no plugin registry, which no amount of retrying changes.
 		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-		return packDurableCallResult(int(written), 1, 1)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 	fn, idempotent, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
 
@@ -344,7 +351,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 
 	if fnErr != nil {
 		written, _ := s.writeResult(ctx, m, responsePtr, errStr, responseMaxLen)
-		return packDurableCallResult(int(written), 1, 1)
+		return packDurableCallResult(int(written), callFailureCode, 1)
 	}
 
 	written, _ := s.writeResult(ctx, m, responsePtr, outputJSON, responseMaxLen)
@@ -387,7 +394,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 		errMsg := "plugin_call_streaming: no plugin stream registry configured"
 		s.recordStreamError(pluginName, functionName, inputJSON, errMsg)
 		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 1)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
 	fn, ok := s.engine.pluginStreamRegistry.Lookup(pluginName, functionName)
@@ -395,7 +402,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 		errMsg := fmt.Sprintf("plugin stream function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
 		s.recordStreamError(pluginName, functionName, inputJSON, errMsg)
 		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 1)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
 	// Check plugin call guard for streaming calls too.
@@ -404,7 +411,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 			errMsg := err.Error()
 			s.recordStreamError(pluginName, functionName, inputJSON, errMsg)
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), 0, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 	}
 
@@ -428,7 +435,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: %v", pluginName, functionName, err)
 		s.recordStreamError(pluginName, functionName, inputJSON, errMsg)
 		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 1)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
 	var collected []plugin.StreamEvent
@@ -472,7 +479,7 @@ done:
 	if err != nil {
 		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: marshal chunks: %v", pluginName, functionName, err)
 		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 1)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
 	written, _ := s.writeResult(ctx, m, responsePtr, string(outJSON), responseMaxLen)
@@ -513,9 +520,17 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 	// A single finished chunk with no real chunk content is a stream-level
 	// error recorded by recordStreamError. Return it with error status to
 	// match what freshPluginCallStreaming produced on the error path.
+	//
+	// The whole streaming family reports callErrorUnknown -- non-retryable --
+	// rather than the callFailureCode the non-streaming path uses, and it has
+	// to: every stream failure, whether a missing registry, a blocked guard or
+	// the function itself erroring, is recorded by recordStreamError and comes
+	// back through this one site, which cannot tell them apart. One replay
+	// site means one code. Splitting them needs the class persisted
+	// (IMPROVEMENT-PLAN 2.35).
 	if len(collected) == 1 && collected[0].Finish {
 		written, _ := s.writeResult(ctx, m, responsePtr, collected[0].Content, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 1)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
 	// Return collected chunks as JSON.
@@ -523,7 +538,7 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 	if err != nil {
 		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: marshal chunks: %v", pluginName, functionName, err)
 		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 1)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 
 	written, _ := s.writeResult(ctx, m, responsePtr, string(outJSON), responseMaxLen)

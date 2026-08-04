@@ -50,8 +50,10 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	if s.engine.signalStore != nil {
 		cancelled, _, err := s.engine.signalStore.PollCancellation(ctx, s.engine.workflowID)
 		if err == nil && cancelled {
+			// Not retryable: the workflow was cancelled, so repeating the call
+			// is the one thing the caller must not do.
 			written, _ := s.writeResult(ctx, m, responsePtr, "workflow cancelled", responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 	}
 
@@ -100,7 +102,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 
 	if err != nil {
 		written, _ := s.writeResult(ctx, m, responsePtr, err.Error(), responseMaxLen)
-		return packDurableCallResult(int(written), 1, 1)
+		return packDurableCallResult(int(written), callFailureCode, 1)
 	}
 
 	written, _ := s.writeResult(ctx, m, responsePtr, resp, responseMaxLen)
@@ -128,8 +130,10 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 				rec.Step, rec.EventType,
 				truncateWithHash(requestJSON, maxPayloadLen),
 				truncateWithHash(rec.Request, maxPayloadLen))
+			// Not retryable: a divergence is a bug in the workflow code, and
+			// running the same call again produces the same divergence.
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
@@ -140,8 +144,10 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 				rec.Step, service, operation, rec.Service, rec.Op,
 				truncateWithHash(requestJSON, maxPayloadLen),
 				truncateWithHash(rec.Request, maxPayloadLen))
+			// Not retryable: a divergence is a bug in the workflow code, and
+			// running the same call again produces the same divergence.
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
 		// Detect a pending call intent: the external call was dispatched
@@ -154,13 +160,19 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)
+			// Not retryable, and this is the case the old blanket "timeout"
+			// got most wrong: the call may well have succeeded. Telling the
+			// guest to retry is telling it to risk a duplicate side effect.
 			written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
 		if rec.Err != "" {
+			// callFailureCode, the same constant the fresh path uses, because
+			// the class was never persisted -- see the note on it. These two
+			// must agree or the same step changes retryability on replay.
 			written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callFailureCode, 1)
 		}
 
 		written, _ := s.writeResult(ctx, m, responsePtr, rec.Response, responseMaxLen)
@@ -250,7 +262,12 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			}
 			select {
 			case <-ctx.Done():
-				return packDurableCallResult(0, 0, 0)
+				// errCode 0 here reported a *successful* call with an empty
+				// response: the guest's generated adapter branches on
+				// `errCode != 0`, so a retry loop abandoned mid-backoff looked
+				// to the workflow like the service had answered with "".
+				written, _ := s.writeResult(ctx, m, responsePtr, ctx.Err().Error(), responseMaxLen)
+				return packDurableCallResult(int(written), callErrorUnknown, 1)
 			case <-time.After(time.Duration(backoffMs) * time.Millisecond):
 			}
 		}
@@ -271,8 +288,12 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	}
 	s.recordEvent(rec)
 
+	// callFailureCode, not a distinct "retries exhausted" code, for the same
+	// reason as the plain call failure: this event is recorded, and replay
+	// re-reads it as a bare string. Fresh and replay must classify it the same
+	// way. IMPROVEMENT-PLAN 2.35.
 	written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-	return packDurableCallResult(int(written), 1, 1)
+	return packDurableCallResult(int(written), callFailureCode, 1)
 }
 
 func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs int64) int64 {
