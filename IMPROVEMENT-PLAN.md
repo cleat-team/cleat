@@ -1269,12 +1269,33 @@ event the fresh run actually recorded* rather than a hand-written literal — a 
 the test agree with itself while the writer and reader disagreed. Each of the three arms was
 verified by breaking it.
 
-**Still open: the full class.** No `ServiceCaller` in the repo returns anything but a bare
-`fmt.Errorf` — not the worker's `dbServiceCaller` (`cmd/cleat-worker/setup.go:134`), not any
-other. A richer taxonomy would be values nothing populates. The remaining work is at the
-`ServiceCaller` boundary, and it is now unblocked: the persistence exists, so a caller that
-knows a 404 from a connection reset can say so and replay will agree. The streaming plugin
-family (`recordStreamError`) is likewise still single-coded.
+**Update: the worker's caller now classifies.** With the persistence in place, the
+`ServiceCaller` boundary was unblocked, and `dbServiceCaller` (`cmd/cleat-worker/setup.go`) —
+the only `ServiceCaller` that runs in production — now returns `engine.NewPermanentError` /
+`engine.NewTransientError` instead of bare `fmt.Errorf`. No new type: `CleatError` already
+implements `Retryable()`, which is what `isDefinitelyNonRetryable` consults.
+
+The case that mattered: **`service %s.%s not configured: no endpoint registered`**. A workflow
+calling a service that does not exist burned its entire retry budget on a deployment mistake,
+with backoff, and was then told the failure was retryable — so a workflow with its own retry
+wrapper went round again, forever. It now fails on the first attempt and says so.
+
+Classified as permanent: unconfigured service, malformed `http.fetch` request (bad JSON,
+missing URL, invalid method), and 4xx from bench-svc except 408 and 429. Transient: connection
+failures, response-read failures, and every 5xx. Error messages are byte-identical to before,
+because operators grep them and `DurableCallWithRetry`'s `nonRetryableErrors` patterns match on
+substrings.
+
+Two things pinned deliberately. `TestHTTPFetchNetworkFailureStaysRetryable` guards the
+over-eager direction — marking a failed connection permanent would turn every transient blip
+into a failed workflow. `TestHTTPFetchStatusIsNotAnError` pins that `http.fetch` reports the
+status *in its response*, so a 404 is a successful call that returned 404 and is not classified
+at all.
+
+**Still open: the richer taxonomy, and plugins.** `Retryable()` is one bit; `ErrorCode` carries
+seven values that still have no path into the event history, because
+`EventRecord.ErrNonRetryable` is a bool by design (see above). The streaming plugin family (`recordStreamError`) remains
+single-coded, and `PluginError` is still a bare string on replay.
 
 ---
 
