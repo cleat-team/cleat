@@ -30,6 +30,13 @@ log and report the failure. That rule is the reason the last two sessions found 
 If it still passes, the test is decoration. Several of tonight's findings were tests that
 had never been able to fail — do not add more.
 
+**Build and test with CGO on — the default.** `NewWasmtimeBackend` is behind
+`//go:build cgo`, so `CGO_ENABLED=0` does not skip a check, it removes the primary backend
+from the binary and runs everything on wazero instead. `CLAUDE.md` told you to disable CGO
+until 2026-08-04; that instruction was stale (fixed by `c26c332`, note never updated) and is
+now corrected. This matters most to **WS-1 and WS-2, who live in `engine/`** — an engine
+result obtained under `CGO_ENABLED=0` is not evidence about the engine.
+
 **Verify by running, not by reasoning.** Tonight, in this repo: a heap-leak detector that
 missed an injected 140 MB leak, a diagnosis that was wrong about the *cause* while its fix
 was still load-bearing, and an E005 check that failed a real example the first time it ran

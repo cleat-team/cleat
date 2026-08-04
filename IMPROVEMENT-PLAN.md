@@ -16,6 +16,38 @@ Effort is given in solo+AI sessions (a session ≈ half a day of your attention)
 
 ---
 
+## Handover, 2026-08-04
+
+Work is now split across three concurrent sessions — see **`PARALLEL-WORKSTREAMS.md`** for
+who owns which paths, the reserved migration ranges, the per-sandbox database, and the three
+cross-stream couplings. Read that before this file; then read only your own items below.
+
+Four things worth knowing before you start, none of which are derivable from the code:
+
+1. **Build with CGO on.** `NewWasmtimeBackend` is behind `//go:build cgo`, so
+   `CGO_ENABLED=0` removes the primary backend from the binary and runs everything on
+   wazero. `CLAUDE.md` said to disable CGO; that was stale (fixed by `c26c332`, note never
+   updated) and is now corrected. Matters most to the two streams working in `engine/`.
+2. **§1.7 needs a live MySQL and SQL Server first.** It is the highest-severity open item and
+   every recent session skipped it for the same reason: verifying an RLS migration needs
+   databases to verify against, and shipping an unverified security migration is the
+   anti-pattern those sessions were spent removing. Stand the databases up, or take §2.43
+   instead. Do not write it blind.
+3. **`examples/*/node_modules` is committed.** `npm install` in an example deletes tracked
+   files. Build the AS examples anyway — that is what caught the §2.42 E005 false positive —
+   but `git checkout -- examples/ tests/plugin-harness/` before committing.
+4. **A wrong diagnosis is kept next to the right one** in §2.39, on purpose. If an item here
+   turns out to be misdiagnosed, correct it in place and say so rather than quietly replacing
+   it; the wrong reasoning is what stops the next person re-deriving it.
+
+The recurring defect class across the last three sessions, and the reason to run things
+rather than read them: **a signal attached to the wrong thing.** Suites nobody ran,
+assertions that were `t.Log` calls, gates documented but never enabled, a complete
+static-analysis layer with five numbered error codes and a passing test that had never once
+executed on real source (§2.42). Every one of them looked correct in review.
+
+---
+
 ## Start here — next session
 
 PR #218 landed as `c26c332`: the CI signal is restored and every workflow is genuinely
