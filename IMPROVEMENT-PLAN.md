@@ -3681,6 +3681,35 @@ worth doing: it would stop the DDL re-running per test, which is a cost and a DD
 deadlock risk (§2.39) rather than a correctness problem now that there is only one schema to
 apply.
 
+#### 2.60d `CleanupPostgresTestData` is an unqualified `DELETE FROM` on eleven tables — 🔴 **OPEN**
+
+```go
+for _, table := range tables {
+	if _, err := db.Exec("DELETE FROM " + table); err != nil {
+		t.Logf("cleanup: delete from %s: %v", table, err)
+	}
+}
+```
+
+No `WHERE`, no tenant qualification, and a failure is `t.Logf` rather than `t.Fatalf` — so a
+cleanup that silently does nothing is indistinguishable from one that worked. Every package
+that points at the same `CLEAT_TEST_DB` shares those eleven tables, and Go runs packages in
+parallel by default, so one suite's cleanup deletes another suite's live rows mid-run. This is
+what made `tests/crash` need a database of its own (§2.4) rather than a fix here.
+
+**Two things make it worse than it reads.** The name says Postgres, but the SQL is
+dialect-neutral, so `store_backends_test.go` calls it with the MySQL and SQL Server handles too
+and wipes those databases as thoroughly. And it is the most likely remaining source of the
+cross-suite state that §2.60b's schema collapse only half addressed — the collapse fixed *which
+schema* you get, not *whose rows* are in it.
+
+Fixing it properly means deciding what test isolation is: a database per package (what
+`tests/crash` does, and it works), a tenant per package with tenant-scoped deletes, or
+transactions rolled back per test. That is a bigger decision than the ~40 call sites suggest,
+which is why it is recorded rather than done here. The cheap intermediate step — make the
+failure a `Fatalf` — is not obviously right either, because several callers currently rely on
+the delete failing harmlessly on tables their dialect does not have.
+
 #### 2.60c A non-JSON signal payload was accepted on PostgreSQL and rejected elsewhere — ✅ **FIXED** (WS-2, 2026-08-04)
 
 All three schemas require `workflow_signals.payload` to hold valid JSON, each saying so
