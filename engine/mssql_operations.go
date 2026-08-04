@@ -11,6 +11,19 @@ import (
 )
 
 func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+	var out int
+	err := withRollbackGuaranteedRetry(ctx, "reap stale instances", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		out, err = s.reapStaleInstancesOnce(ctx, timeout)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return out, nil
+}
+
+func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Duration) (int, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: begin: %w", err)
@@ -46,6 +59,19 @@ func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 }
 
 func (s *MSSQLStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	var out int
+	err := withRollbackGuaranteedRetry(ctx, "get event count", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		out, err = s.getEventCountOnce(ctx, workflowID)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return out, nil
+}
+
+func (s *MSSQLStore) getEventCountOnce(ctx context.Context, workflowID string) (int, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("get event count for %s: begin: %w", workflowID, err)
@@ -76,6 +102,12 @@ func (s *MSSQLStore) QueueDepth(ctx context.Context) (int64, error) {
 }
 
 func (s *MSSQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
+	return withRollbackGuaranteedRetry(ctx, "update sticky worker", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.updateStickyWorkerOnce(ctx, workflowID, workerID)
+	})
+}
+
+func (s *MSSQLStore) updateStickyWorkerOnce(ctx context.Context, workflowID, workerID string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("update sticky worker: begin: %w", err)
@@ -92,6 +124,12 @@ func (s *MSSQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerI
 }
 
 func (s *MSSQLStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
+	return withRollbackGuaranteedRetry(ctx, "clear sticky worker", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.clearStickyWorkerOnce(ctx, workflowID)
+	})
+}
+
+func (s *MSSQLStore) clearStickyWorkerOnce(ctx context.Context, workflowID string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("clear sticky worker: begin: %w", err)
@@ -108,6 +146,12 @@ func (s *MSSQLStore) ClearStickyWorker(ctx context.Context, workflowID string) e
 }
 
 func (s *MSSQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
+	return withRollbackGuaranteedRetry(ctx, "release workflow concurrency keys", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.releaseWorkflowConcurrencyKeysOnce(ctx, workflowID)
+	})
+}
+
+func (s *MSSQLStore) releaseWorkflowConcurrencyKeysOnce(ctx context.Context, workflowID string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: begin: %w", err)
@@ -122,6 +166,12 @@ func (s *MSSQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflo
 }
 
 func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	return withRollbackGuaranteedRetry(ctx, "terminate workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.terminateWorkflowOnce(ctx, workflowID, reason)
+	})
+}
+
+func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reason string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("terminate workflow: begin: %w", err)
