@@ -26,6 +26,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# CGO is load-bearing here, not incidental. Every step in this file used to run
+# `CGO_ENABLED=0 go test`, which does not merely skip a check: `NewWasmtimeBackend`
+# is behind `//go:build cgo`, so disabling CGO removes the primary backend from the
+# binary and silently runs everything on wazero, the fallback with the known bug tail.
+#
+# Measured on 2026-08-04: `go test -list` reports 2401 tests in ./engine/ with
+# CGO_ENABLED=0 against 2557 with CGO on. The 156-test difference is the entire
+# TestClosure_* family -- the real WASM host-function execution paths -- plus 28
+# wasmtime-specific tests. A workflow whose whole purpose is validating MySQL and
+# SQL Server under workflow execution was compiling those tests out.
+#
+# Set explicitly rather than left to default. Go's default is 1 only when a C
+# compiler is present and 0 otherwise, so the default silently reintroduces exactly
+# the failure mode above on a runner without gcc. Pinned to 1, that case fails loudly.
+env:
+  CGO_ENABLED: 1
+
 # ===========================================================================
 # JOBS
 # ===========================================================================
@@ -60,7 +77,7 @@ jobs:
           go-version: stable
 
       - name: Run tests
-        run: CGO_ENABLED=0 go test -count=1 -timeout=300s ./engine/...
+        run: go test -count=1 -timeout=900s ./engine/...
 
   # -------------------------------------------------------------------------
   # Test SQL Server backend
@@ -96,7 +113,7 @@ jobs:
           go-version: stable
 
       - name: Run tests
-        run: CGO_ENABLED=0 go test -count=1 -timeout=300s ./engine/...
+        run: go test -count=1 -timeout=900s ./engine/...
 
   # -------------------------------------------------------------------------
   # Plugin migration smoke test (all three backends)
@@ -175,7 +192,7 @@ jobs:
           docker exec $(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server:2022-latest" -q) /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Run plugin migration tests
-        run: CGO_ENABLED=0 go test -count=1 -timeout=300s -run TestPluginMigrations ./engine/...
+        run: go test -count=1 -timeout=600s -run TestPluginMigrations ./engine/...
 
       - name: Run plugin behavioral tests (all backends)
-        run: CGO_ENABLED=0 go test -count=1 -timeout=600s -run 'MultiBackend' ./plugins/...
+        run: go test -count=1 -timeout=900s -run 'MultiBackend' ./plugins/...

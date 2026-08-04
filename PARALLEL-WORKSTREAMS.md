@@ -61,15 +61,67 @@ Give each stream its own instance.
 |---|---|---|---|
 | WS-1 | `5432` — the existing `cleat-postgres-1` | `3306` | `1433` |
 | WS-2 | `5433` | `3307` | `1434` |
-| WS-3 | `5434` | `3308` | `1435` |
+| WS-3 | `5434` | `3308` — `cleat-ws3-mysql` | `1435` — `cleat-ws3-mssql` |
 
 The same offset scheme in all three dialects: WS-1 keeps the defaults, WS-2 and WS-3 step up
-from there. MySQL and SQL Server are being stood up by WS-3 (2026-08-04); until they exist,
-`§2.26` and the MySQL/MSSQL halves of any fence work stay unverified — say so rather than
-claiming dialect coverage you did not run.
+from there. WS-3 stood up its MySQL 8.4 and SQL Server 2022 on 2026-08-04 and they are the
+only two that exist so far; `§2.26` and the MySQL/MSSQL halves of any fence work stay
+unverified until a stream has its own — say so rather than claiming dialect coverage you did
+not run.
+
+**Do not `docker compose -f docker-compose.dev.yml up`** — it binds Postgres to `5432` and
+would collide with WS-1's live instance. Start containers individually with explicit
+`--name` and `-p`.
 
 `docker compose down -v` destroys the user's database: the `cleat` project owns
 `cleat-postgres-1`. Remove containers **by name**.
+
+### SQL Server needs its own colima VM on Apple Silicon
+
+The default colima profile is `vmType: vz` with `rosetta: false`, so amd64 images fall back
+to QEMU — and `mcr.microsoft.com/mssql/server:2022-latest` **cannot start under QEMU**. It
+exits immediately with `Invalid mapping of address ... in reserved address space`. There is
+no arm64 SQL Server image; Rosetta is the only route.
+
+Enabling Rosetta on the default profile means restarting that VM, which would stop all three
+streams' Postgres containers. So WS-3 created a **second profile** instead:
+
+```
+colima start cleat-ws3 --vm-type vz --vz-rosetta --cpu 2 --memory 6 --disk 40
+docker --context colima-cleat-ws3 run -d --name cleat-ws3-mssql --platform linux/amd64 \
+  -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=CleatTest123!' -e MSSQL_PID=Developer \
+  -p 1435:1433 mcr.microsoft.com/mssql/server:2022-latest
+```
+
+**`colima start` rewrites the global docker context** in `~/.docker/config.json`, which would
+silently repoint every other stream's `docker` command at the new VM. It was set back with
+`docker context use colima` immediately, and all SQL Server management uses an explicit
+`--context colima-cleat-ws3`. If you start a colima profile, do the same. Port forwarding
+reaches `127.0.0.1:1435` from the host regardless of context, so Go tests need no context flag.
+
+### Connection strings
+
+```
+CLEAT_TEST_MYSQL='root:cleat@tcp(127.0.0.1:3308)/cleat?tls=false&parseTime=true&multiStatements=true'
+CLEAT_TEST_MSSQL='sqlserver://sa:CleatTest123!@127.0.0.1:1435?database=cleat'
+```
+
+SQL Server needs `CREATE DATABASE cleat` once; MySQL gets it from `MYSQL_DATABASE`. Neither
+needs migrations applied by hand — the suites install what they need (`applyMySQLProcedures`,
+`applyMSSQLProcedures` in `engine/store_backends_procedures_test.go`).
+
+Two known potholes, neither introduced by this setup:
+
+- `TestMySQLStoreFactory` and `TestMySQLIntegration_FactoryOpenStore` **fail on any port
+  other than 3306.** They gate on `CLEAT_TEST_MYSQL` and then ignore its value, hardcoding
+  `tcp(127.0.0.1:3306)`. Already recorded in `IMPROVEMENT-PLAN.md` as config drift that was
+  "harmless in CI" — it stops being harmless off the default port. `engine/` is WS-1/WS-2
+  territory, so WS-3 left it alone.
+- `TestMSSQLIntegration_FinalizeWorkflowSegment_{Done,Suspend}` **fail when run under a
+  `-run` filter that excludes the procedures test**, because they need
+  `finalize_workflow_status` installed by another file's `sync.Once` and do not call
+  `applyMSSQLProcedures` themselves. They pass in a full `go test ./engine/...`. An
+  order-dependency, not a product bug.
 
 ---
 
