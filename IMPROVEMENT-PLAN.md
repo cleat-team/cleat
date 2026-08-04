@@ -379,9 +379,36 @@ completion.
 >
 > The gap is the *write* side. Nothing calls `flushCallIntent` before dispatching a real
 > external call, so in an actual crash **no sentinel is ever written and the detector has
-> nothing to find.** Detection is real but unreachable in production. The fix is to wire the
+> nothing to find.** Detection is real but unreachable in production. ~~The fix is to wire the
 > intent write into `freshCall` / `freshCallWithRetry` / `freshCallWithHeartbeat` — the
-> detector needs no changes.
+> detector needs no changes.~~
+>
+> **Correction, 2026-08-04 — that prescription is wrong, and following it would break every
+> workflow that makes a durable call.** Full analysis and a replacement design in
+> [`docs/durable-call-intent-design.md`](docs/durable-call-intent-design.md). In short:
+>
+> 1. Every completion path — `insertEventSQL` and both adaptive-flush batches — carries
+>    `ON CONFLICT … DO UPDATE … WHERE event_history.response = '' AND event_history.error IS NULL`.
+>    `flushCallIntent` writes `error = pendingSentinel`, which is not NULL, so the completion
+>    is a **silent no-op** and the sentinel persists. Every replay then reports `[AMBIGUOUS]`
+>    forever.
+> 2. The intent row's checksum is computed over a record with an empty `Err` while the row
+>    stores `pendingSentinel`, so in the exact crash window this feature exists to handle,
+>    replay fails checksum verification instead of reporting ambiguity.
+> 3. Both functions read the previous checksum from the database rather than `s.lastChecksum`,
+>    which diverges under the adaptive flusher.
+>
+> None of these can appear until the code has a caller, which is why 48 test references are
+> all green. **The 350 lines are not a head start.** This is the second time the plan's own
+> prescribed fix has been wrong in the details; §2.26 was the first.
+>
+> The design doc's recommendation is **Phase A only for now**: delete the two writer
+> functions, keep the detector, correct `docs/durable-calls.md:66` ("the write-side wiring
+> will follow" reads as routine), and drop the baseline entries. Best value when this becomes
+> a priority is deterministic **idempotency keys**, which need no schema change, cost no extra
+> write, and make duplicates impossible rather than merely visible. Do not start the intent
+> work before the 2.4 crash harness exists — building the fix before the observation is how
+> this happened.
 >
 > Note also that both ambiguity and replay divergence are reported *inside the workflow
 > result string*, not as a Go error from `Engine.Replay`. Any future test or operator
