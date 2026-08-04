@@ -263,6 +263,28 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 			t.Logf("setup MSSQL full schema: migration warning: %v", err)
 		}
 	}
+
+	// Indexes. These used to live in SetupFullSchema, so the schema you got
+	// depended on which entry point the test called. Both now route here.
+	// IMPROVEMENT-PLAN 2.60b.
+	//
+	// Best-effort: several columns are NVARCHAR(MAX) in this schema and cannot
+	// be index keys, which execMSSQLBestEffort tolerates deliberately.
+	execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_ready' AND object_id = OBJECT_ID('workflow_instances'))
+		CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at) WHERE status = 'ready'`)
+	execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_heartbeat' AND object_id = OBJECT_ID('workflow_instances'))
+		CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running'`)
+	execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_stale' AND object_id = OBJECT_ID('workflow_instances'))
+		CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`)
+	execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_sticky' AND object_id = OBJECT_ID('workflow_instances'))
+		CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`)
+	_, _ = db.Exec(`DROP INDEX IF EXISTS idx_instances_tenant_queue_ready ON dbo.workflow_instances`)
+	execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_tenant_queue_ready' AND object_id = OBJECT_ID('workflow_instances'))
+		CREATE INDEX idx_instances_tenant_queue_ready ON dbo.workflow_instances(tenant_id, task_queue, status, priority ASC, next_wake_at) WHERE status = 'ready'`)
+	execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_concurrency_keys_workflow' AND object_id = OBJECT_ID('concurrency_keys'))
+		CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
+	execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_mem_samples_def' AND object_id = OBJECT_ID('workflow_memory_samples'))
+		CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
 }
 
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.

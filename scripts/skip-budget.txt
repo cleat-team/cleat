@@ -60,7 +60,19 @@ test-go/core	0	# measured: 693 pass, 0 skip
 #
 # 353 -> 355: TestEnforceParentClosePolicy runs against registeredBackends, so
 # its mysql and mssql subtests skip in the Postgres-only engine job.
-test-go/engine	355	# observed on the runner: 2984 pass, plus the MSSQL guard, session-context, RLS and deadlock tests
+#
+# 355 -> 359: the four MySQL/SQL Server subtests the runner attributes to
+# TestPerStepFlushWorksOnEveryDialect, TestPerStepFlushDoesNotDoubleCountEvents
+# and TestSignalPayloadRoundTripsOnEveryDialect (IMPROVEMENT-PLAN 2.60). The two
+# increments are independent and additive: 355 came from another workstream's
+# test, +4 from these.
+#
+# Measured locally against a clean worktree of develop the delta is +6, not +4.
+# The runner's number is the one set here, because the runner is where the guard
+# runs, but the discrepancy is unexplained -- so if this fails at 361 that is the
+# real number and not a regression. Do not widen it to silence a failure; a
+# ceiling that cannot be reached is a guard that cannot fail.
+test-go/engine	359	# observed on the runner: 3094 pass, 357 skip at budget 353, plus 355's two
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -111,7 +123,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	355	# same as test-go/engine, and for the same reason; see the note there
+cluster	359	# same as test-go/engine, and for the same reason; see the note there
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is

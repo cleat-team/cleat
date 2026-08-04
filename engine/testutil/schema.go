@@ -189,389 +189,47 @@ func applyPostgresSchemaFile(t *testing.T, db *sql.DB) {
 	}
 }
 
-// SetupMinimalSchema creates the minimal tables needed by all DB tests:
-// workflow_defs, workflow_instances, event_history, workflow_signals.
-// Uses CREATE TABLE IF NOT EXISTS (or equivalent) so it is idempotent.
+// SetupMinimalSchema builds the test schema for one dialect.
 //
-// For DialectPostgres this actually applies the full real schema (see
-// applyPostgresSchemaFile) since that file is cheap, idempotent, and not
-// worth hand-splitting into a separate "minimal" subset.
+// There is exactly one schema definition per dialect and this is how you reach
+// it: the real migration file for PostgreSQL, SetupMySQLFullSchema for MySQL,
+// SetupMSSQLFullSchema for SQL Server. "Minimal" is now a historical name --
+// every dialect gets its full schema, because the minimal/full split is what
+// made the duplication possible.
+//
+// It used to hold its own hand-written MySQL and SQL Server DDL, so each of
+// those dialects had *two* independent definitions in this package plus a third
+// in migrations/. All of them use CREATE TABLE IF NOT EXISTS against one shared
+// test database, so whichever test ran first decided the schema for the whole
+// package and Go's ordering decided which test that was. Four consecutive full
+// runs against live MySQL and SQL Server produced four different failure sets,
+// and two of the failing tests passed in isolation against the same database
+// moments before and after failing in the suite. IMPROVEMENT-PLAN 2.60b.
+//
+// The three columns where the copies had actually drifted were real defects and
+// are fixed; collapsing to one definition is what stops the next three.
 func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 	t.Helper()
 
-	if dialect == DialectPostgres {
-		applyPostgresSchemaFile(t, db)
-		return
-	}
-
-	var stmts []string
 	switch dialect {
+	case DialectPostgres:
+		applyPostgresSchemaFile(t, db)
 	case DialectMySQL:
-		stmts = []string{
-			`CREATE TABLE IF NOT EXISTS workflow_defs (
-				name VARCHAR(255) NOT NULL, version INTEGER NOT NULL,
-				wasm_bytes LONGBLOB NOT NULL, entry_points JSON NOT NULL DEFAULT ('[]'),
-				min_version INTEGER NOT NULL DEFAULT 0,
-				max_history_length INTEGER NOT NULL DEFAULT 0,
-				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				abi_version INTEGER NOT NULL DEFAULT 1,
-				plugin_deps JSON NOT NULL DEFAULT ('{}'),
-				deprecated TINYINT(1) NOT NULL DEFAULT 0,
-				tenant_id VARCHAR(36),
-				task_queue VARCHAR(255) NOT NULL DEFAULT 'default',
-				PRIMARY KEY (name, version))`,
-			`CREATE TABLE IF NOT EXISTS workflow_instances (
-				id VARCHAR(255) PRIMARY KEY, def_name VARCHAR(255) NOT NULL,
-				def_version INTEGER NOT NULL DEFAULT 1,
-				status VARCHAR(255) NOT NULL DEFAULT 'ready', input JSON NOT NULL DEFAULT ('{}'),
-				assigned_to VARCHAR(255), heartbeat_at TIMESTAMP(6),
-				next_wake_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6), completed_at TIMESTAMP(6),
-				result JSON, error_msg TEXT, error_code VARCHAR(255), error_op VARCHAR(255),
-				parent_workflow_id TEXT,
-				parent_close_policy VARCHAR(255) DEFAULT 'ABANDON',
-				trace_id TEXT, query_state JSON DEFAULT ('{}'),
-				task_queue VARCHAR(255) NOT NULL DEFAULT 'default',
-				cancellation_requested TINYINT(1) NOT NULL DEFAULT 0,
-				-- sticky_worker_id is VARCHAR, not TEXT: this file creates
-				-- idx_instances_sticky over it below, and MySQL rejects an index
-				-- on a TEXT column without a key length ("Error 1170: BLOB/TEXT
-				-- column 'sticky_worker_id' used in key specification without a
-				-- key length"). migrations/mysql/001_schema.sql and
-				-- engine/testutil/mysql_schema.go both already say VARCHAR(255);
-				-- this was the only one of the three copies that disagreed.
-				cancellation_reason TEXT, sticky_worker_id VARCHAR(255),
-				tenant_id VARCHAR(36),
-				compaction_state JSON, compacted_at TIMESTAMP(6), compaction_step INTEGER,
-				plugin_vers JSON NOT NULL DEFAULT ('{}'),
-				event_count BIGINT NOT NULL DEFAULT 0,
-				priority INTEGER NOT NULL DEFAULT 0,
-				allowed_signals JSON DEFAULT NULL,
-					generation BIGINT NOT NULL DEFAULT 0)`,
-			`CREATE TABLE IF NOT EXISTS event_history (
-				workflow_id VARCHAR(255) NOT NULL, step INTEGER NOT NULL,
-				event_type VARCHAR(255) NOT NULL DEFAULT 'call',
-				service TEXT, operation TEXT, request TEXT, response TEXT, error TEXT,
-				duration_ms BIGINT, signal_names TEXT, timeout_ms BIGINT,
-				signal_name TEXT, signal_payload TEXT, defer_description TEXT,
-				defer_id TEXT, child_name TEXT, child_input TEXT, run_id TEXT,
-				new_input TEXT, plugin_name TEXT, plugin_func TEXT,
-				plugin_input TEXT, plugin_output TEXT, plugin_error TEXT,
-				promise_name TEXT, promise_id TEXT, promise_result TEXT, promise_error TEXT,
-				tenant_id VARCHAR(36),
-				payload JSON,
-				checksum TEXT,
-				thread_id VARCHAR(255) NOT NULL DEFAULT 'main',
-				local_step INTEGER NOT NULL DEFAULT 0,
-				global_seq BIGINT NOT NULL DEFAULT 0,
-				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				PRIMARY KEY (workflow_id, step),
-				FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE)`,
-			`CREATE TABLE IF NOT EXISTS workflow_signals (
-				workflow_id VARCHAR(255) NOT NULL, signal_name VARCHAR(255) NOT NULL,
-				payload JSON NOT NULL DEFAULT ('{}'),
-				delivered_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				tenant_id VARCHAR(36),
-				PRIMARY KEY (workflow_id, signal_name))`,
-		}
+		SetupMySQLFullSchema(t, db)
 	case DialectMSSQL:
-		stmts = []string{
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_defs')
-				CREATE TABLE workflow_defs (
-					name NVARCHAR(255) NOT NULL, version INTEGER NOT NULL,
-					wasm_bytes VARBINARY(MAX) NOT NULL,
-					entry_points NVARCHAR(MAX) NOT NULL DEFAULT '[]',
-					min_version INTEGER NOT NULL DEFAULT 0,
-					max_history_length INTEGER NOT NULL DEFAULT 0,
-					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					abi_version INTEGER NOT NULL DEFAULT 1,
-					plugin_deps NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-					deprecated BIT NOT NULL DEFAULT 0,
-					tenant_id UNIQUEIDENTIFIER,
-					task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
-					PRIMARY KEY (name, version))`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_instances')
-				CREATE TABLE workflow_instances (
-					id NVARCHAR(64) NOT NULL PRIMARY KEY,
-					def_name NVARCHAR(255) NOT NULL,
-					def_version INTEGER NOT NULL DEFAULT 1,
-					status NVARCHAR(MAX) NOT NULL DEFAULT 'ready',
-					input NVARCHAR(MAX) NOT NULL DEFAULT ('{}'),
-					assigned_to NVARCHAR(MAX), heartbeat_at DATETIMEOFFSET,
-					next_wake_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					completed_at DATETIMEOFFSET,
-					result NVARCHAR(MAX), error_msg NVARCHAR(MAX),
-					error_code NVARCHAR(MAX), error_op NVARCHAR(MAX),
-					parent_workflow_id NVARCHAR(MAX),
-					parent_close_policy NVARCHAR(MAX) DEFAULT 'ABANDON',
-					trace_id NVARCHAR(MAX),
-					query_state NVARCHAR(MAX) DEFAULT ('{}'),
-					task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
-					cancellation_requested BIT NOT NULL DEFAULT 0,
-					cancellation_reason NVARCHAR(MAX),
-					sticky_worker_id NVARCHAR(MAX),
-					tenant_id UNIQUEIDENTIFIER,
-					compaction_state NVARCHAR(MAX), compacted_at DATETIMEOFFSET, compaction_step INTEGER,
-					plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-					event_count BIGINT NOT NULL DEFAULT 0,
-					priority INTEGER NOT NULL DEFAULT 0,
-					allowed_signals NVARCHAR(MAX) NULL,
-					generation BIGINT NOT NULL DEFAULT 0)`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_history')
-				CREATE TABLE event_history (
-					workflow_id NVARCHAR(64) NOT NULL, step INTEGER NOT NULL,
-					event_type NVARCHAR(MAX) NOT NULL DEFAULT 'call',
-					service NVARCHAR(MAX), operation NVARCHAR(MAX),
-					request NVARCHAR(MAX), response NVARCHAR(MAX), error NVARCHAR(MAX),
-					duration_ms BIGINT, signal_names NVARCHAR(MAX), timeout_ms BIGINT,
-					signal_name NVARCHAR(MAX), signal_payload NVARCHAR(MAX),
-					defer_description NVARCHAR(MAX),
-					defer_id NVARCHAR(MAX), child_name NVARCHAR(MAX),
-					child_input NVARCHAR(MAX), run_id NVARCHAR(MAX),
-					new_input NVARCHAR(MAX), plugin_name NVARCHAR(MAX),
-					plugin_func NVARCHAR(MAX),
-					plugin_input NVARCHAR(MAX), plugin_output NVARCHAR(MAX),
-					plugin_error NVARCHAR(MAX),
-					promise_name NVARCHAR(MAX), promise_id NVARCHAR(MAX),
-					promise_result NVARCHAR(MAX), promise_error NVARCHAR(MAX),
-					tenant_id UNIQUEIDENTIFIER,
-					payload NVARCHAR(MAX),
-					checksum NVARCHAR(MAX),
-					thread_id NVARCHAR(MAX) NOT NULL DEFAULT 'main',
-					local_step INTEGER NOT NULL DEFAULT 0,
-					global_seq BIGINT NOT NULL DEFAULT 0,
-					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					PRIMARY KEY (workflow_id, step),
-					CONSTRAINT fk_event_history_workflow FOREIGN KEY (workflow_id)
-						REFERENCES workflow_instances(id) ON DELETE CASCADE)`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_signals')
-				CREATE TABLE workflow_signals (
-					workflow_id NVARCHAR(64) NOT NULL,
-					signal_name NVARCHAR(255) NOT NULL,
-					payload NVARCHAR(MAX) NOT NULL DEFAULT ('{}'),
-					delivered_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					tenant_id UNIQUEIDENTIFIER,
-					PRIMARY KEY (workflow_id, signal_name))`,
-		}
+		SetupMSSQLFullSchema(t, db)
 	default:
 		t.Fatalf("setup minimal schema: unknown dialect: %s", dialect)
 	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("create table: %v", err)
-		}
-	}
 }
 
-// SetupFullSchema calls SetupMinimalSchema and then adds the remaining tables
-// (workflow_schedules, concurrency_keys, workflow_promises, idempotency_keys,
-// workflow_update_requests), all indexes, the pgcrypto extension (PostgreSQL only),
-// and ALTER TABLE ADD COLUMN IF NOT EXISTS (PostgreSQL only).
-//
-// For DialectPostgres, SetupMinimalSchema above already applied the full,
-// real migrations/postgres/001_schema.sql (which is the final, consolidated
-// schema -- all tables, all indexes, RLS included), so there is nothing left
-// to add here.
+// SetupFullSchema is SetupMinimalSchema. It is kept because roughly forty call
+// sites use it and the distinction it used to draw -- a subset of tables, then
+// the rest -- is exactly the seam the two dialects duplicated themselves
+// across. Every dialect now gets one complete schema either way.
 func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 	t.Helper()
 	SetupMinimalSchema(t, db, dialect)
-
-	if dialect == DialectPostgres {
-		return
-	}
-
-	var stmts []string
-	switch dialect {
-	case DialectMySQL:
-		stmts = []string{
-			// Additional tables
-			`CREATE TABLE IF NOT EXISTS workflow_schedules (
-				name VARCHAR(255) PRIMARY KEY, def_name VARCHAR(255) NOT NULL,
-				entry_point VARCHAR(255) NOT NULL DEFAULT '', cron_expression TEXT NOT NULL,
-				input JSON NOT NULL DEFAULT ('{}'), enabled TINYINT(1) NOT NULL DEFAULT 1,
-				next_run_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6), last_run_at TIMESTAMP(6),
-				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				tenant_id VARCHAR(36))`,
-			`CREATE TABLE IF NOT EXISTS concurrency_keys (
-				key_hash VARBINARY(255) PRIMARY KEY, key_text TEXT NOT NULL,
-				-- VARCHAR, not TEXT, for the same reason as
-				-- workflow_instances.sticky_worker_id above: this file creates
-				-- idx_concurrency_keys_workflow over it and MySQL will not index
-				-- a TEXT column without a key length.
-				-- migrations/mysql/001_schema.sql agrees.
-				workflow_id VARCHAR(255) NOT NULL,
-				acquired_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				expires_at TIMESTAMP(6) NOT NULL,
-				tenant_id VARCHAR(255))`,
-			`CREATE TABLE IF NOT EXISTS workflow_promises (
-				workflow_id VARCHAR(255) NOT NULL, promise_id VARCHAR(255) NOT NULL,
-				promise_name TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0,
-				status VARCHAR(255) NOT NULL DEFAULT 'pending',
-				result JSON, error_msg TEXT,
-				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				resolved_at TIMESTAMP(6),
-				tenant_id VARCHAR(255) NOT NULL,
-				PRIMARY KEY (workflow_id, promise_id))`,
-			`CREATE TABLE IF NOT EXISTS idempotency_keys (
-				key_hash VARBINARY(32) NOT NULL PRIMARY KEY,
-				workflow_id VARCHAR(255) NOT NULL,
-				result JSON,
-				error_msg TEXT,
-				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				expires_at TIMESTAMP(6) NOT NULL) /* TTL is application-configured (default 720h) */`,
-			`CREATE TABLE IF NOT EXISTS workflow_update_requests (
-				workflow_id VARCHAR(255) NOT NULL, update_name VARCHAR(255) NOT NULL,
-				priority INTEGER NOT NULL DEFAULT 0,
-				payload JSON NOT NULL DEFAULT ('{}'),
-				promise_id VARCHAR(255),
-				status VARCHAR(255) NOT NULL DEFAULT 'pending',
-				result JSON,
-				error_msg TEXT,
-				-- The DEFAULT is not decoration. migrations/mysql/001_schema.sql
-				-- has one here and this copy did not, so an insert that omits
-				-- tenant_id succeeds against the shipped schema and fails here
-				-- with "Error 1364: Field 'tenant_id' doesn't have a default
-				-- value" -- a test failing on a schema the product never uses.
-				-- (workflow_promises above has no default in the migration
-				-- either, so it is left alone: the rule is match the migration,
-				-- not add defaults everywhere.)
-				tenant_id VARCHAR(255) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
-				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				completed_at TIMESTAMP(6),
-				PRIMARY KEY (workflow_id, update_name))`,
-			// Memory statistics tables
-			`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
-				id BIGINT AUTO_INCREMENT PRIMARY KEY,
-				def_name VARCHAR(255) NOT NULL,
-				sample_bytes BIGINT NOT NULL,
-				recorded_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6))`,
-			`CREATE TABLE IF NOT EXISTS workflow_memory_stats (
-				def_name VARCHAR(255) PRIMARY KEY,
-				mean_bytes DOUBLE NOT NULL DEFAULT 0,
-				sample_count INTEGER NOT NULL DEFAULT 0,
-				alpha DOUBLE NOT NULL DEFAULT 0.3,
-				updated_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6))`,
-		}
-	case DialectMSSQL:
-		stmts = []string{
-			// Additional tables
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_schedules')
-				CREATE TABLE workflow_schedules (
-					name NVARCHAR(255) PRIMARY KEY, def_name NVARCHAR(MAX) NOT NULL,
-					entry_point NVARCHAR(MAX) NOT NULL DEFAULT '',
-					cron_expression NVARCHAR(MAX) NOT NULL,
-					input NVARCHAR(MAX) NOT NULL DEFAULT ('{}'),
-					enabled BIT NOT NULL DEFAULT 1,
-					next_run_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					last_run_at DATETIMEOFFSET,
-					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					tenant_id UNIQUEIDENTIFIER)`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'concurrency_keys')
-				CREATE TABLE concurrency_keys (
-					key_hash VARBINARY(32) NOT NULL PRIMARY KEY,
-					key_text NVARCHAR(MAX) NOT NULL,
-					workflow_id NVARCHAR(64) NOT NULL,
-					acquired_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					expires_at DATETIMEOFFSET NOT NULL,
-					tenant_id NVARCHAR(128))`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_promises')
-				CREATE TABLE workflow_promises (
-					workflow_id NVARCHAR(64) NOT NULL, promise_id NVARCHAR(64) NOT NULL,
-					promise_name NVARCHAR(MAX) NOT NULL, priority INTEGER NOT NULL DEFAULT 0,
-					status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
-					result NVARCHAR(MAX), error_msg NVARCHAR(MAX),
-					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					resolved_at DATETIMEOFFSET,
-					tenant_id UNIQUEIDENTIFIER,
-					PRIMARY KEY (workflow_id, promise_id))`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'idempotency_keys')
-				CREATE TABLE idempotency_keys (
-					key_hash VARBINARY(32) NOT NULL PRIMARY KEY,
-					workflow_id NVARCHAR(64) NOT NULL,
-					result NVARCHAR(MAX),
-					error_msg NVARCHAR(MAX),
-					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					expires_at DATETIMEOFFSET NOT NULL) -- TTL is application-configured (default 720h)`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_update_requests')
-				CREATE TABLE workflow_update_requests (
-					workflow_id NVARCHAR(64) NOT NULL, update_name NVARCHAR(255) NOT NULL,
-					priority INTEGER NOT NULL DEFAULT 0,
-					payload NVARCHAR(MAX) NOT NULL DEFAULT ('{}'),
-					promise_id NVARCHAR(64),
-					status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
-					result NVARCHAR(MAX),
-					error_msg NVARCHAR(MAX),
-					tenant_id UNIQUEIDENTIFIER,
-					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					completed_at DATETIMEOFFSET,
-					PRIMARY KEY (workflow_id, update_name))`,
-			// ADD COLUMN for migrated columns
-			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_instances') AND name = 'error_code')
-				ALTER TABLE workflow_instances ADD error_code NVARCHAR(MAX) NULL`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_instances') AND name = 'error_op')
-				ALTER TABLE workflow_instances ADD error_op NVARCHAR(MAX) NULL`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('concurrency_keys') AND name = 'tenant_id')
-				ALTER TABLE concurrency_keys ADD tenant_id NVARCHAR(128) NULL`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_promises') AND name = 'tenant_id')
-				ALTER TABLE workflow_promises ADD tenant_id UNIQUEIDENTIFIER NULL`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_update_requests') AND name = 'tenant_id')
-				ALTER TABLE workflow_update_requests ADD tenant_id UNIQUEIDENTIFIER NULL`,
-			// Memory statistics tables
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_samples')
-				CREATE TABLE workflow_memory_samples (
-					id BIGINT IDENTITY(1,1) PRIMARY KEY,
-					def_name NVARCHAR(MAX) NOT NULL,
-					sample_bytes BIGINT NOT NULL,
-					recorded_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME())`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_stats')
-				CREATE TABLE workflow_memory_stats (
-					def_name NVARCHAR(255) NOT NULL PRIMARY KEY,
-					mean_bytes FLOAT(53) NOT NULL DEFAULT 0,
-					sample_count INTEGER NOT NULL DEFAULT 0,
-					alpha FLOAT(53) NOT NULL DEFAULT 0.3,
-					updated_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME())`,
-		}
-	default:
-		t.Fatalf("setup full schema: unknown dialect: %s", dialect)
-	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("setup schema: %v", err)
-		}
-	}
-	// MySQL does not support IF NOT EXISTS for indexes, so create them
-	// idempotently by ignoring "Duplicate key name" errors.
-	if dialect == DialectMySQL {
-		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at)`)
-		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at)`)
-		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at)`)
-		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id)`)
-		_, _ = db.Exec(`DROP INDEX idx_instances_tenant_queue_ready ON workflow_instances`)
-		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority, next_wake_at)`)
-		execIgnoreDupKey(t, db, `CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
-		execIgnoreDupKey(t, db, `CREATE INDEX idx_idempotency_keys_expires ON idempotency_keys(expires_at)`)
-		execIgnoreDupKey(t, db, `CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
-	}
-	// MSSQL test schemas use NVARCHAR(MAX) for status and other columns,
-	// which cannot be index keys. These indexes are best-effort.
-	if dialect == DialectMSSQL {
-		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_ready' AND object_id = OBJECT_ID('workflow_instances'))
-			CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at) WHERE status = 'ready'`)
-		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_heartbeat' AND object_id = OBJECT_ID('workflow_instances'))
-			CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running'`)
-		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_stale' AND object_id = OBJECT_ID('workflow_instances'))
-			CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`)
-		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_sticky' AND object_id = OBJECT_ID('workflow_instances'))
-			CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`)
-		_, _ = db.Exec(`DROP INDEX IF EXISTS idx_instances_tenant_queue_ready ON dbo.workflow_instances`)
-		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_tenant_queue_ready' AND object_id = OBJECT_ID('workflow_instances'))
-			CREATE INDEX idx_instances_tenant_queue_ready ON dbo.workflow_instances(tenant_id, task_queue, status, priority ASC, next_wake_at) WHERE status = 'ready'`)
-		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_concurrency_keys_workflow' AND object_id = OBJECT_ID('concurrency_keys'))
-			CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
-		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_mem_samples_def' AND object_id = OBJECT_ID('workflow_memory_samples'))
-			CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
-	}
 }
 
 // CleanupPostgresTestData deletes all rows from the cleat test tables.
