@@ -3776,6 +3776,49 @@ lands; `engine/python_wasm_e2e_test.go` reads that list, so it moves over with n
 
 ---
 
+### 2.73 Plugin-harness CI ran on wazero too, and a skip was hiding the cost — ✅ **FIXED** (WS-3, 2026-08-04)
+
+`plugin-harness-ci.yml` set `CGO_ENABLED: "0"` in **all four** jobs. Same defect §2.70 fixed in
+`multi-db-ci.yml`: `NewWasmtimeBackend` is behind `//go:build cgo`, so this did not skip a
+check, it removed the primary backend and ran everything on wazero.
+
+**Here it had a visible cost.** `TestPluginCalls_Wasm_Go` skipped unconditionally on
+*"wazero v1.11.1 nil Sys context panic"* — and that panic only happens because the job forced
+wazero. Measured both ways before changing anything:
+
+| | |
+|---|---|
+| CGO on | **PASS** |
+| CGO off | `invalid memory address or nil pointer dereference (recovered by wazero)` |
+
+So the primary language had no WASM integration coverage, guarded by a skip describing a bug
+in a runtime the product does not use for Go. CGO is now pinned to `"1"` in every job and the
+skip is gone; `skip-baseline` drops that entry 2 sites → 1.
+
+**`cleat build --target rust` is now exercised.** It was exercised nowhere:
+`TestPluginCalls_Wasm_Rust` is the only test that runs it, and this job installed no Rust, so
+it skipped. Worse, its guard checked for **`wasm32-wasip1`** while `build_rust.go:34` compiles
+for `wasm32-unknown-unknown` — so the check was for a target the build does not use. A machine
+with wasip1 and not unknown-unknown passed the guard and then failed inside cargo; one with
+unknown-unknown and not wasip1 skipped a build that would have worked. Guard corrected, and
+the job now installs the right target.
+
+**Not fixed, and the skip stays: Layer 3.** `TestPluginCalls_MultiDB` carries the same
+wazero-panic skip, but removing it does *not* pass with CGO on — postgres succeeds and the
+other two dialects fail on migration handling that has nothing to do with wazero:
+
+```
+mysql: RunCoreMigrations: execute 003_procedures.sql: Error 1064 ... near 'DELIMITER //
+mssql: RunCoreMigrations: execute 001_schema.sql: Could not create constraint or index
+```
+
+The MySQL one is the `DELIMITER` idiom that `splitMySQLDelimited` handles in
+`engine/store_backends_procedures_test.go` and this runner does not; the MSSQL one has the
+shape of the `GO` batch-separator problem. So that skip was concealing two real defects behind
+a third, and `plugin-harness/multi-db` keeps its budget of 1 until they are fixed.
+
+---
+
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by
 diffing against `develop` and by `git apply --check`, not by reading commit messages — the
 mistake §0.2's correction calls out. Three of the four highest-value findings (§2.18, §2.19,

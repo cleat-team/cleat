@@ -1,5 +1,18 @@
 name: Plugin Harness Tests
 
+# CGO on, everywhere in this file. It was "0" in all four jobs, which does not
+# skip a check -- NewWasmtimeBackend is behind //go:build cgo, so disabling CGO
+# removes the primary backend and runs everything on wazero. The same defect
+# 2.70 fixed in multi-db-ci.yml, in a second workflow.
+#
+# Here it had a visible cost: TestPluginCalls_Wasm_Go skipped unconditionally on
+# a "wazero v1.11.1 nil Sys context panic", and that panic only happens because
+# the job forced wazero. With CGO on the test passes, so the skip is gone and
+# the primary language has WASM integration coverage again.
+#
+# Measured before changing it -- CGO on: PASS; CGO off: the exact nil-pointer
+# dereference the skip described.
+
 on:
   push:
     branches: [main, develop]
@@ -26,7 +39,7 @@ jobs:
         run: make tools-go
       - run: go test -count=1 -timeout=120s ./tests/plugin-harness/... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
         env:
-          CGO_ENABLED: "0"
+          CGO_ENABLED: "1"
 
   # --------------------------------------------------------------------------
   # Layer 2 — WASM integration (compiled Go workflow via standard Go wasip1)
@@ -39,9 +52,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - run: go test -count=1 -timeout=300s ./tests/plugin-harness/... -run 'TestPluginCalls_Wasm'
+      # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
+      # compiles for the former (cmd/cleat/build_rust.go). Without it
+      # TestPluginCalls_Wasm_Rust skips, and it is the only test anywhere that
+      # runs the Rust build path users actually invoke.
+      - name: Setup Rust + wasm32-unknown-unknown
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: go test -count=1 -timeout=600s ./tests/plugin-harness/... -run 'TestPluginCalls_Wasm'
         env:
-          CGO_ENABLED: "0"
+          # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
+          # when a C compiler is present and 0 otherwise, so relying on the
+          # default silently reinstates the wazero-only run on a runner without
+          # gcc. Pinned, that case fails loudly.
+          CGO_ENABLED: "1"
 
   # --------------------------------------------------------------------------
   # Layer 3 — Multi-DB (real databases, standard Go wasip1 workflow)
@@ -115,7 +140,7 @@ jobs:
       # budget step below runs regardless via `if: always()`.
       - run: go test -count=1 -timeout=600s -json ./tests/plugin-harness/... -run 'TestPluginCalls_MultiDB' > test-report.json 2>&1
         env:
-          CGO_ENABLED: "0"
+          CGO_ENABLED: "1"
 
       - name: Skip budget
         if: always()
@@ -168,4 +193,4 @@ jobs:
           go-version: stable
       - run: go test -count=1 -timeout=120s -v ./tests/plugin-harness/... -run 'TestBlobstore_S3'
         env:
-          CGO_ENABLED: "0"
+          CGO_ENABLED: "1"

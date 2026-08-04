@@ -94,8 +94,14 @@ func buildGoWorkflowWasm(t *testing.T) []byte {
 	return nil
 }
 
-// buildRustWorkflowWasm compiles the Rust workflow in testdata/rustworkflow to WASM
-// using cleat build --target rust (cargo build --target wasm32-wasip1).
+// buildRustWorkflowWasm compiles the Rust workflow in testdata/rustworkflow to
+// WASM using `cleat build --target rust`, which is the command users run.
+//
+// That path compiles for wasm32-unknown-unknown (cmd/cleat/build_rust.go:34),
+// not wasm32-wasip1. This comment and the guard below both said wasip1, so the
+// check was for a target the build does not use: a machine with wasip1 and not
+// unknown-unknown passed the guard and then failed inside cargo, and one with
+// unknown-unknown and not wasip1 skipped a build that would have worked.
 func buildRustWorkflowWasm(t *testing.T) []byte {
 	t.Helper()
 
@@ -106,11 +112,11 @@ func buildRustWorkflowWasm(t *testing.T) []byte {
 		t.Skip("Rust toolchain not available — install from https://rustup.rs")
 	}
 
-	// Verify wasm32-wasip1 target is installed (used by cleat build --target rust).
+	// Verify the target `cleat build --target rust` actually compiles for.
 	checkCmd := exec.Command("rustup", "target", "list", "--installed")
 	checkOut, _ := checkCmd.Output()
-	if !strings.Contains(string(checkOut), "wasm32-wasip1") {
-		t.Skip("wasm32-wasip1 target not installed — run: rustup target add wasm32-wasip1")
+	if !strings.Contains(string(checkOut), "wasm32-unknown-unknown") {
+		t.Skip("wasm32-unknown-unknown target not installed — run: rustup target add wasm32-unknown-unknown")
 	}
 
 	tmpDir := t.TempDir()
@@ -283,11 +289,12 @@ func TestPluginCalls_Wasm_Go(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping WASM compilation test in short mode")
 	}
-	// TODO: wazero v1.11.1 pre-release nil Sys context panic when CGO_ENABLED=0.
-	// The WASI clock_time_get host function dereferences nil Sys on the WASI host
-	// module. Fake Sys via Compile+InstantiateModule+WithWalltime doesn't prevent
-	// it — host modules appear to bypass the ModuleConfig sys context.
-	t.Skip("skipping: wazero v1.11.1 nil Sys context panic (see runtime.go)")
+	// The unconditional skip that used to be here read "wazero v1.11.1 nil Sys
+	// context panic" and was a workaround for the job running with
+	// CGO_ENABLED=0. That forced wazero, and the panic is wazero's. With CGO on
+	// -- the shipped configuration, and now this workflow's -- a Go workflow
+	// runs on wasmtime and the test passes. Measured both ways before removing
+	// it: CGO on passes, CGO off reproduces the exact nil-pointer dereference.
 
 	// Create in-memory test env (discovers and initialises plugins).
 	env := NewTestPluginEnvInMemory(t)
