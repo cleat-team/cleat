@@ -3222,7 +3222,7 @@ Two caveats stated rather than buried:
 
 ---
 
-### 2.71 MSSQL session context is cleared by connection pooling — 🔴 **OPEN** (found by WS-3, 2026-08-04)
+### 2.71 MSSQL session context is cleared by connection pooling — 🔶 **PARTLY FIXED** (found by WS-3, fixed by WS-1, 2026-08-04)
 
 `MSSQLStoreFactory` gives each tenant a pool whose wrapped connector runs
 `sp_set_session_context`. The doc comment at `engine/mssql_store.go:270-272` says this happens
@@ -3265,6 +3265,55 @@ without meaning anything.
 
 `cmd/cleat-worker/tenant_isolation_mssql_test.go` is written and skipped pointing at this
 item; unskipping it is the acceptance test.
+
+#### The connection half — fixed, and it was worse than described
+
+Measured against a real SQL Server 2022 rather than reasoned about, and the first
+measurement corrected the diagnosis. The session context was not merely lost *after* a busy
+period: it was absent from **every** query, including the first one on a brand-new pool.
+
+`getOrCreateTenantPool` calls `PingContext` when it builds the pool. That returns the
+connection to the pool, so the very first application query is already being handed a
+recycled connection and has already been through `sp_reset_connection`. "Tenant-scoped reads
+sometimes return nothing" is really "tenant-scoped reads never work".
+
+```
+session context on a fresh connection = "", want "11111111-1111-1111-1111-111111111111"
+```
+
+Fixed by wrapping the driver connection in `tenantSessionConn`, whose `ResetSession` lets the
+driver do its own reset first — that *is* the `sp_reset_connection` that clears the context —
+and then re-applies `sp_set_session_context`. An error there is returned rather than
+swallowed, so `database/sql` discards the connection: one whose tenant could not be
+established must never serve a query.
+
+The wrapper forwards the optional interfaces go-mssqldb's `*Conn` implements (`Prepare`,
+`Close`, `Begin`, `PrepareContext`, `BeginTx`, `Ping`, `IsValid`, `CheckNamedValue`).
+`QueryerContext` and `ExecerContext` are deliberately not claimed: the driver does not
+implement them either, and claiming them would break the fallback `database/sql` relies on.
+
+Two existing tests asserted `Connect` returns the *identical* connection object. That is an
+identity assertion the fix necessarily breaks, and it pinned an implementation detail rather
+than a behaviour; they now assert the wrapper carries the right connection and the right
+tenant.
+
+- Tests: `engine/mssql_session_context_test.go`. `SetMaxOpenConns(1)` makes the reuse
+  provable — a pass cannot come from a fresh connection being opened instead. A second test
+  interleaves two tenants' pools so that a reset hook which cached one tenant, or read from
+  a shared variable, would pass the first test and fail this one. Both confirmed to fail with
+  the re-apply removed.
+
+#### The schema half — still open, and larger than it looks
+
+`engine/testutil/mssql_schema.go` hand-writes 334 lines of `CREATE TABLE` and defines none of
+the seven security policies. Pointing it at the real migration is the right fix and is **not**
+a small change: it switches RLS on for every MSSQL test in the repo, and any test that does
+not establish a session context will start returning nothing. That is the point — but it is a
+test-suite migration, not a one-liner, and `engine/testutil/` is WS-2's.
+
+Until it lands, no MSSQL test can observe tenant isolation working or failing, and the
+connection fix above is verified by reading `SESSION_CONTEXT` directly rather than by
+observing a policy enforce it.
 
 ---
 
