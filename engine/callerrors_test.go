@@ -168,3 +168,138 @@ func TestFreshAndReplayAgreeOnRecordedFailure(t *testing.T) {
 		t.Errorf("errCode differs: fresh %d, replay %d", f, r)
 	}
 }
+
+// nonRetryableErr self-reports as non-retryable via the RetryableError
+// interface engine/helpers.go already honours. It is the only machine-readable
+// signal a ServiceCaller can send today.
+type nonRetryableErr struct{ msg string }
+
+func (e *nonRetryableErr) Error() string   { return e.msg }
+func (e *nonRetryableErr) Retryable() bool { return false }
+
+// callWithRetry drives the real retry loop against a caller that always fails
+// with err, and returns the packed result plus the event that was recorded.
+func callWithRetry(t *testing.T, err error) (int64, EventRecord) {
+	t.Helper()
+	s := &execSession{engine: NewEngine(nil, &erroringCaller{err: err})}
+	// maxAttempts 5 with 1ms intervals: enough that "stopped early" is
+	// distinguishable from "ran out of attempts".
+	result := s.DurableCallWithRetry(context.Background(), nil, "svc", "op", `{}`,
+		5, 1, 100, 1, "", 0, 0)
+	if len(s.history) != 1 {
+		t.Fatalf("expected exactly one recorded event, got %d", len(s.history))
+	}
+	return result, s.history[0]
+}
+
+// TestNonRetryableCallIsNotReportedAsRetryable is the regression test for the
+// contradiction 2.35 was blocking.
+//
+// isDefinitelyNonRetryable breaks the retry loop precisely because the error
+// is not worth retrying -- and the engine then reported callFailureCode, which
+// cleat.CallError.Retryable() says *is* retryable. A workflow branching on
+// err.Retryable(), which is what the guest SDK offers, would go on to retry a
+// call the engine had just decided against. For a non-idempotent operation the
+// caller marked non-retryable, that is a duplicate side effect.
+func TestNonRetryableCallIsNotReportedAsRetryable(t *testing.T) {
+	result, rec := callWithRetry(t, &nonRetryableErr{msg: "bad request"})
+
+	code := callErrorCodeOf(result)
+	if e := (&cleat.CallError{Code: cleat.CallErrorCode(code)}); e.Retryable() {
+		t.Errorf("the engine stopped retrying because isDefinitelyNonRetryable said so, "+
+			"then told the guest the call is retryable (code %d)", code)
+	}
+	if !rec.ErrNonRetryable {
+		t.Error("the classification was not recorded on the event, so replay cannot reproduce it")
+	}
+}
+
+// TestRetriesExhaustedStaysRetryable pins the other half. Running out of
+// attempts is not the same as being told not to try: the error was retryable,
+// the budget simply ran out, and calling again later may well work.
+func TestRetriesExhaustedStaysRetryable(t *testing.T) {
+	result, rec := callWithRetry(t, errors.New("connection reset"))
+
+	code := callErrorCodeOf(result)
+	if e := (&cleat.CallError{Code: cleat.CallErrorCode(code)}); !e.Retryable() {
+		t.Errorf("a transient failure that exhausted its retries is reported as non-retryable (code %d)", code)
+	}
+	if rec.ErrNonRetryable {
+		t.Error("a retryable failure was recorded as non-retryable")
+	}
+}
+
+// TestFreshAndReplayAgreeOnNonRetryableFailure is the determinism guarantee,
+// and the reason the bit has to be persisted at all.
+//
+// It replays the event the fresh run actually recorded rather than a
+// hand-written literal -- a literal would let the test agree with itself while
+// the writer and the reader disagreed.
+func TestFreshAndReplayAgreeOnNonRetryableFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"non-retryable", &nonRetryableErr{msg: "bad request"}},
+		{"retries exhausted", errors.New("connection reset")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			freshResult, rec := callWithRetry(t, tc.err)
+
+			replay := &execSession{
+				engine:   NewEngine(nil, &mockCaller{}),
+				isReplay: true,
+				history:  []EventRecord{rec},
+			}
+			replayResult := replay.DurableCall(context.Background(), nil, "svc", "op", `{}`, 0, 0)
+
+			if f, r := callErrorCodeOf(freshResult), callErrorCodeOf(replayResult); f != r {
+				t.Errorf("classifies as %d when fresh and %d on replay; the workflow would "+
+					"change its retry behaviour between the first run and the replay of it", f, r)
+			}
+		})
+	}
+}
+
+// TestErrNonRetryableRoundTripsThroughPayload closes the loop the two paths
+// above assume. They pass an EventRecord straight from one to the other; in
+// production it goes through the payload JSONB and back, and a bit that does
+// not survive that trip would make replay disagree with the fresh run in
+// exactly the way this whole mechanism exists to prevent.
+func TestErrNonRetryableRoundTripsThroughPayload(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		rec := EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op",
+			Request: `{}`, Err: "boom", ErrNonRetryable: want}
+
+		payload, err := eventRecordToPayload(rec)
+		if err != nil {
+			t.Fatalf("eventRecordToPayload: %v", err)
+		}
+
+		got := EventRecord{Step: 0, EventType: EventTypeCall}
+		populateFromPayload(&got, payload)
+		if got.ErrNonRetryable != want {
+			t.Errorf("ErrNonRetryable=%v did not survive the payload round trip (payload: %s)", want, payload)
+		}
+	}
+}
+
+// TestLegacyFailureReplaysAsRetryable pins the compatibility default.
+//
+// Every call failure already in every event_history in existence was written
+// without this key. They must keep replaying as callFailureCode -- the code
+// they were recorded under -- or upgrading the engine silently changes the
+// retry behaviour of workflows that are mid-flight.
+func TestLegacyFailureReplaysAsRetryable(t *testing.T) {
+	legacy := []byte(`{"service":"svc","operation":"op","error":"boom"}`)
+	rec := EventRecord{Step: 0, EventType: EventTypeCall}
+	populateFromPayload(&rec, legacy)
+
+	if rec.ErrNonRetryable {
+		t.Fatal("a payload with no error_non_retryable key read back as non-retryable")
+	}
+	if got := recordedFailureCode(rec.ErrNonRetryable); got != callFailureCode {
+		t.Errorf("legacy failure replays as %d, want callFailureCode (%d): upgrading the engine "+
+			"would change the retry behaviour of workflows already in flight", got, callFailureCode)
+	}
+}

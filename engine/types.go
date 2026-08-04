@@ -76,6 +76,25 @@ type EventRecord struct {
 	Response string `json:"response,omitempty"`
 	Err      string `json:"err,omitempty"`
 
+	// ErrNonRetryable records that Err was classified as non-retryable when
+	// the call was first made, so replay can reproduce that classification
+	// instead of guessing at it from the message string.
+	//
+	// This is one bit rather than the full error class IMPROVEMENT-PLAN 2.35
+	// describes, and deliberately so: it is the only part of a classification
+	// the engine can actually populate today. ServiceCaller returns a bare
+	// `error`, and the sole machine-readable signal any implementation can
+	// send is the optional RetryableError interface, which
+	// isDefinitelyNonRetryable already honours. Recording a richer taxonomy
+	// would mean inventing values no caller supplies.
+	//
+	// The zero value is the pre-2.35 behaviour: an event recorded before this
+	// field existed carries no such key, reads back as false, and replays as
+	// callFailureCode exactly as it always did. That is why this is a bool and
+	// not a code -- a code field's zero value would collide with
+	// callErrorUnknown, which is a real classification.
+	ErrNonRetryable bool `json:"err_non_retryable,omitempty"`
+
 	// Sleep fields.
 	DurationMs int64 `json:"duration_ms,omitempty"`
 
