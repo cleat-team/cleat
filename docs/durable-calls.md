@@ -63,7 +63,9 @@ If the worker crashes between step 2 and step 3, the event history contains:
 
 On replay, `replayCall` detects the `pendingSentinel` in the error column and returns `ErrAmbiguous` instead of silently re-executing. The workflow author is notified that the outcome is unknown and must check the external service.
 
-This intent-logging approach is being phased in. The replay infrastructure (detection of `pendingSentinel` and return of `ErrAmbiguous`) is in place; the write-side wiring will follow.
+**The intent-logging write side is not implemented, and the code sketched for it should not be used.** The replay infrastructure (detection of `pendingSentinel` and return of `ErrAmbiguous`) is in place and correct, but nothing writes a `pendingSentinel`, so in a real crash the detector has nothing to find. `flushCallIntent` / `completeCallEvent` in `engine/flush.go` are not a working write side: wiring them in as they stand would leave every durable call permanently ambiguous. See [`durable-call-intent-design.md`](durable-call-intent-design.md) for why, and for the replacement design.
+
+Until that lands, **the contract is exactly what §1 says: at-least-once, with duplicates on crash that are silent.** Design workflows accordingly — the cheapest mitigation available today is to make external operations idempotent yourself, for example by passing your own idempotency key derived from a workflow-stable value.
 
 ---
 
