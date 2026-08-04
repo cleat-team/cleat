@@ -28,14 +28,14 @@ func TestWASMVersionUpgrade(t *testing.T) {
 	// New version (different bytes).
 	wasmV2 := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x02}
 
-	_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
-		VALUES ($1, 1, $2, '{old_entry}', 'default') ON CONFLICT DO NOTHING`,
+	_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ($1, 1, $2, '{old_entry}') ON CONFLICT DO NOTHING`,
 		defName, wasmV1)
 	if err != nil {
 		t.Fatalf("register v1: %v", err)
 	}
-	_, err = db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
-		VALUES ($1, 2, $2, '{new_entry}', 'default') ON CONFLICT DO NOTHING`,
+	_, err = db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ($1, 2, $2, '{new_entry}') ON CONFLICT DO NOTHING`,
 		defName, wasmV2)
 	if err != nil {
 		t.Fatalf("register v2: %v", err)
@@ -129,8 +129,8 @@ func TestInFlightUsesOldVersion(t *testing.T) {
 
 	// Register version 1.
 	wasmV1 := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01}
-	_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
-		VALUES ($1, 1, $2, '{entry}', 'default') ON CONFLICT DO NOTHING`,
+	_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ($1, 1, $2, '{entry}') ON CONFLICT DO NOTHING`,
 		defName, wasmV1)
 	if err != nil {
 		t.Fatalf("register v1: %v", err)
@@ -161,8 +161,8 @@ func TestInFlightUsesOldVersion(t *testing.T) {
 
 	// Now register version 2 (simulating an upgrade while workflow is in-flight).
 	wasmV2 := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x02}
-	_, err = db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
-		VALUES ($1, 2, $2, '{entry}', 'default') ON CONFLICT DO NOTHING`,
+	_, err = db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ($1, 2, $2, '{entry}') ON CONFLICT DO NOTHING`,
 		defName, wasmV2)
 	if err != nil {
 		t.Fatalf("register v2: %v", err)
@@ -211,8 +211,8 @@ func TestVersionFallback(t *testing.T) {
 
 	// Register only version 1.
 	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
-	_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
-		VALUES ($1, 1, $2, '{entry}', 'default') ON CONFLICT DO NOTHING`,
+	_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ($1, 1, $2, '{entry}') ON CONFLICT DO NOTHING`,
 		defName, wasmBytes)
 	if err != nil {
 		t.Fatalf("register v1: %v", err)

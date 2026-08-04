@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/lib/pq"
 )
 
 // TestRollingWorkerRestart simulates restarting workers one at a time and
@@ -71,6 +72,13 @@ func TestRollingWorkerRestart(t *testing.T) {
 				continue
 			}
 
+			// Every store call below passes wf.Generation, the value the
+			// claim just handed back -- not a literal 0. ClaimWorkflow bumps
+			// the generation, so a hardcoded 0 loses the fence from the second
+			// claim onward and the store correctly refuses the write. These
+			// tests used to send 0 and report the refusal as a worker error,
+			// which is the fence working.
+			//
 			// Append a completion event.
 			rec := engine.EventRecord{
 				Step:      0,
@@ -83,13 +91,13 @@ func TestRollingWorkerRestart(t *testing.T) {
 			if err := store.AppendEventHistory(ctx, wf.ID, rec); err != nil {
 				errCh <- fmt.Errorf("worker %s append: %w", workerID, err)
 				// Release the workflow so another worker can pick it up.
-				store.ReleaseWorkflow(ctx, wf.ID, workerID, 0, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, workerID, wf.Generation, time.Now())
 				continue
 			}
 
-			if err := store.CompleteWorkflow(ctx, wf.ID, workerID, 0, `{"status":"done"}`, nil); err != nil {
+			if err := store.CompleteWorkflow(ctx, wf.ID, workerID, wf.Generation, `{"status":"done"}`, nil); err != nil {
 				errCh <- fmt.Errorf("worker %s complete: %w", workerID, err)
-				store.ReleaseWorkflow(ctx, wf.ID, workerID, 0, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, workerID, wf.Generation, time.Now())
 				continue
 			}
 
@@ -124,9 +132,41 @@ func TestRollingWorkerRestart(t *testing.T) {
 	}
 
 	// Check how many workflows completed.
+	//
+	// This used to be a t.Logf and nothing else, so the test passed while
+	// printing "0/50 workflows completed" -- it asserted that the workers did
+	// not error, not that they did any work. With the fence bug above, 0 was
+	// the actual number.
+	//
+	// The property worth checking is that a rolling restart loses no work, so
+	// drain whatever is still ready with one final worker and then require
+	// every workflow to be done.
 	finalCompleted := atomic.LoadInt64(&completed)
-	t.Logf("Rolling restart test: %d/%d workflows completed by %d workers",
+	t.Logf("Rolling restart test: %d/%d workflows completed before draining, by %d workers",
 		finalCompleted, numWorkflows, numWorkers)
+	if finalCompleted == 0 {
+		t.Fatalf("no workflows completed at all during the rolling restart")
+	}
+
+	for i := 0; i < numWorkflows*2; i++ {
+		wf, err := store.ClaimWorkflow(ctx, "drain-worker")
+		if err != nil || wf == nil {
+			break
+		}
+		if err := store.CompleteWorkflow(ctx, wf.ID, "drain-worker", wf.Generation, `{"status":"done"}`, nil); err != nil {
+			t.Fatalf("drain %s: %v", wf.ID, err)
+		}
+	}
+
+	var notDone int
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances
+		WHERE id = ANY($1) AND status <> 'done'`, pq.Array(wfIDs)).Scan(&notDone); err != nil {
+		t.Fatalf("count unfinished: %v", err)
+	}
+	if notDone != 0 {
+		t.Errorf("%d of %d workflows did not reach 'done' across the rolling restart",
+			notDone, numWorkflows)
+	}
 }
 
 // TestRollingRestartNoDuplicateExecution verifies that no workflow is executed
@@ -216,14 +256,14 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 			}
 			if err := store.AppendEventHistory(ctx, wf.ID, rec); err != nil {
 				errCh <- fmt.Errorf("append: %w", err)
-				store.ReleaseWorkflow(ctx, wf.ID, workerID, 0, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, workerID, wf.Generation, time.Now())
 				atomic.AddInt32(&state.executeCount, -1)
 				continue
 			}
 
-			if err := store.CompleteWorkflow(ctx, wf.ID, workerID, 0, `{"status":"done"}`, nil); err != nil {
+			if err := store.CompleteWorkflow(ctx, wf.ID, workerID, wf.Generation, `{"status":"done"}`, nil); err != nil {
 				errCh <- fmt.Errorf("complete: %w", err)
-				store.ReleaseWorkflow(ctx, wf.ID, workerID, 0, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, workerID, wf.Generation, time.Now())
 				atomic.AddInt32(&state.executeCount, -1)
 				continue
 			}
@@ -287,6 +327,14 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 
 	t.Logf("No-duplicate test: %d workflows processed, %d total executions, %d duplicates detected",
 		completedCount, totalExecutions, dupCount)
+
+	// Without this, "0 duplicates" is the answer you also get when nothing
+	// ran -- which is exactly what happened while the fence bug above made
+	// every completion fail. A duplicate-detection test that processed no
+	// workflows has detected nothing.
+	if totalExecutions == 0 {
+		t.Fatalf("no workflows were executed, so the duplicate count proves nothing")
+	}
 
 	if dupCount > 0 {
 		t.Errorf("detected %d duplicate executions during rolling restart", dupCount)

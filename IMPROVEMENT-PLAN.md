@@ -2130,6 +2130,47 @@ verification compare columns against `payload` (cheap, no migration, detects div
 without changing the chain), or to stop writing the duplicates at all and treat `payload` as
 the sole record. The third is the real fix and the largest.
 
+### 2.33 `tests/upgrade` had never run either — ✅ **DONE**
+
+Eight tests, and **all eight failed** the first time a database was pointed at them. Four
+distinct causes, none of them subtle:
+
+1. **Five `INSERT INTO workflow_defs` statements had a syntax error.** A missing `)` after the
+   column list, and a fifth value for a four-column insert:
+   ```sql
+   INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
+       VALUES ($1, 1, $2, '{old_entry}', 'default')
+   ```
+   `pq: syntax error at or near "VALUES"`. Nothing compiles SQL in a string literal, and
+   nothing ever executed it.
+2. **Three "no data loss" assertions compared JSONB formatting.** `input::text` returns
+   PostgreSQL's normalised rendering — `{"key": "value"}`, with a space — which never equalled
+   the Go literal `{"key":"value"}`. They now let PostgreSQL do the comparison
+   (`input = $2::jsonb`) and read the text only for the failure message.
+3. **The rolling-restart tests passed a hardcoded `generation = 0`** after `ClaimWorkflow` had
+   bumped it, so every completion lost the fence. Same defect as `tests/integrity`'s
+   `TestConcurrentStatusUpdates`: the test counted the fence *working* as a worker error.
+4. **An order dependency between packages.** The rolling tests insert instances with
+   `def_name='test'` but nothing in the package creates that definition. They passed on a
+   machine where another suite had already made the row and failed on a fresh database —
+   verified by deleting the row and re-running. `testDB` now seeds it.
+
+**Two of the tests were vacuous even with the fence bug in place.** `TestRollingWorkerRestart`
+logged `0/50 workflows completed` and passed: it asserted only that the workers did not error.
+`TestRollingRestartNoDuplicateExecution` reported `0 workflows processed, 0 total executions,
+0 duplicates` — and "no duplicates" is also what you get when nothing runs. Both logs are now
+assertions, and the first drains any remaining work and requires every workflow to reach
+`done`, which is the property a rolling restart is supposed to have.
+
+`testDB` moved to `engine/testutil` for the same reasons as §2.31.
+
+Result: **8 pass, 0 skip, 0 fail**, wired into the `test-go` matrix with budget
+`test-go/upgrade 0`. Before: `50/50` and `30 executions` where it had been `0/50` and `0`.
+
+Three suites remain in `UNWIRED_SUITES`: `cluster`, `cross-language`, `scale`. (`soak` is also
+listed but is gated behind the `soak_test` build tag, so `go vet ./tests/soak/...` reports no
+packages at all — it is unwired twice over.)
+
 ---
 
 ## Salvage register — PR #208, closed unmerged
