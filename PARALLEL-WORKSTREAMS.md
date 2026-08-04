@@ -1,6 +1,7 @@
 # Three parallel workstreams
 
-Written 2026-08-04, against `develop` at `3c13fb7`. Companion to `IMPROVEMENT-PLAN.md`,
+Written 2026-08-04, against `develop` at `3c13fb7`; WS-1's item list corrected the same day
+against `9df4396` (see "Already landed"). Companion to `IMPROVEMENT-PLAN.md`,
 which stays the source of truth for *what* each item is; this file is only about *who does
 what, where, and without colliding*.
 
@@ -56,11 +57,16 @@ Concurrent suites in a single checkout are safe since §2.39 (per-suite task que
 schema fingerprint), but three checkouts on different branches can hold *different schemas*.
 Give each stream its own instance.
 
-| | Postgres |
-|---|---|
-| WS-1 | `5432` — the existing `cleat-postgres-1` |
-| WS-2 | `5433` |
-| WS-3 | `5434` |
+| | Postgres | MySQL (`CLEAT_TEST_MYSQL`) | SQL Server (`CLEAT_TEST_MSSQL`) |
+|---|---|---|---|
+| WS-1 | `5432` — the existing `cleat-postgres-1` | `3306` | `1433` |
+| WS-2 | `5433` | `3307` | `1434` |
+| WS-3 | `5434` | `3308` | `1435` |
+
+The same offset scheme in all three dialects: WS-1 keeps the defaults, WS-2 and WS-3 step up
+from there. MySQL and SQL Server are being stood up by WS-3 (2026-08-04); until they exist,
+`§2.26` and the MySQL/MSSQL halves of any fence work stay unverified — say so rather than
+claiming dialect coverage you did not run.
 
 `docker compose down -v` destroys the user's database: the `cleat` project owns
 `cleat-postgres-1`. Remove containers **by name**.
@@ -80,16 +86,27 @@ concurrency store files, `engine/mysql_ops.go`, `engine/mssql_operations.go`,
 
 | item | what |
 |---|---|
-| **§1.1** | `finalize_workflow_status` fences the status `UPDATE` on `assigned_to` + `generation`, then runs the terminal block **unconditionally**. A zombie worker that correctly lost the fence still executes it. ~2 sessions. **Start here** — it is the largest live data-loss item in the plan. |
-| **§1.2** | The same shape in Go: `ClearStickyWorker`, `ReleaseWorkflowConcurrencyKeys`, `enforceParentClosePolicy`. Fenced `UPDATE`, error checked, `RowsAffected()` never inspected, unconditional post-commit cleanup. |
-| **§1.6** | `ReapStaleInstances` and `TerminateWorkflow` clear `assigned_to` but leave `generation`, making the token defence-in-depth in name only. ~0.5 session — cheap, do it early for the confidence. |
-| **§2.17** | `ShardedStore` hands every shard the full limit and strands the excess as `running` with no executor. Demonstrated at 3 shards / limit 2: claimed 6, returned 2, stranded 4. Three candidate fixes trade off differently on the hot claim path — that choice is why it is still open. |
-| **§2.26** | `mssqlRetry` is still test-only. Wiring it needs a per-transaction rollback-guarantee decision across 8 `BeginTx` boundaries. Do this last; it needs live SQL Server. |
+| **§1.2 residual** | The store layer is done; **the callers are not.** All 12 store sites (`CompleteWorkflow`, `FailWorkflow`, `MoveToDeadLetterQueue`, `ContinueAsNew` × 3 dialects) check `RowsAffected` and return `ErrFenceLost` before any cleanup. Only 2 of the ~15 call sites in `cmd/cleat-worker/` inspect that error; the rest discard the return value entirely. **Start here.** |
+| **§2.26** | `mssqlRetry` is still test-only. Wiring it needs a per-transaction rollback-guarantee decision across 8 `BeginTx` boundaries. Unblocked once WS-3's `CLEAT_TEST_MSSQL` instance is up (WS-1 uses the default `1433`). |
 
-**The trap:** §1.1 and §1.2 are easy to "fix" by checking `RowsAffected` and returning an
-error, which converts silent corruption into a spurious failure on the *legitimate* path.
-Establish first what a lost fence should do — it is usually "stop, quietly, having done
-nothing", not "error".
+### Already landed — do not start these
+
+Three of the five items originally listed here were merged **before this document was
+written**, in `c26c332` (#218), which is an ancestor of the `3c13fb7` it was written against.
+The table was built from `IMPROVEMENT-PLAN.md`'s `§` headings without their ✅ markers, so it
+pointed WS-1 at finished work. Verified against the tree on 2026-08-04:
+
+| item | doc said | actual |
+|---|---|---|
+| **§1.1** | "start here, largest live data-loss item" | landed: `migrations/{postgres,mysql,mssql}/004_fix_finalize_workflow_status_fence.sql` captures the fenced `UPDATE`'s row count (`GET DIAGNOSTICS … ROW_COUNT` / `@@ROWCOUNT`) and skips the terminal block when it is zero. `engine/fence_lost_integration_test.go` covers both the Go rollback and the SQL guard on its own. |
+| **§1.6** | open, ~0.5 session | landed in all three dialects: `generation = generation + 1` in `ReapStaleInstances` (`store_lifecycle.go:705`, `mysql_lifecycle.go:723`, `mssql_operations.go:13`) and in `TerminateWorkflow` (`db.go:1056`). |
+| **§2.17** | "still open — three candidate fixes" | `IMPROVEMENT-PLAN.md` §2.17 is marked ✅ **FIXED**. |
+
+**The trap:** §1.2 is easy to "fix" by making every caller treat `ErrFenceLost` as a failure,
+which converts silent corruption into a spurious failure on the *legitimate* path. The two
+call sites that already handle it establish the precedent, and it is the right one — log at
+debug and `return`, because losing a fence means another worker legitimately owns the
+workflow. "Stop, quietly, having done nothing", not "error".
 
 ---
 
@@ -147,7 +164,8 @@ write the migration blind.
 1. **`engine/db.go` is WS-1's**, but WS-2's §1.4 phase F (admin force-resolve) wants store
    methods there. Add them in a new file rather than editing `db.go`, or ask WS-1.
 2. **`finalize_workflow_status` is WS-1's** (§1.1). WS-2's §1.4 phase D may want to write
-   intent in the same procedure. WS-1 lands §1.1 first; WS-2 builds on the result.
+   intent in the same procedure. §1.1 has already landed (`c26c332`), so WS-2 can build on the
+   result now rather than waiting on WS-1.
 3. **WS-3's §1.7 adds RLS to MySQL/MSSQL migrations**, and WS-1's §2.26 touches MSSQL
    operations. Different files, same dialect — coordinate before either lands a schema change
    to the MSSQL path.
@@ -156,6 +174,12 @@ Nothing else in the three lists overlaps.
 
 ## Sequencing, if you want the highest yield first
 
-WS-2 §1.3 (cancellation, ~1 session) and WS-1 §1.6 (generation bump, ~0.5 session) are the
-two cheapest real fixes on the board. Both are small enough to land on day one and give each
-stream a green PR before starting its multi-session item.
+WS-2 §1.3 (cancellation, ~1 session) is the cheapest real fix left on the board — small
+enough to land on day one and give that stream a green PR before starting its multi-session
+item. WS-1's day-one item was §1.6, which turns out to be already merged; its equivalent is
+the §1.2 caller residual above.
+
+**Check the `§` heading's status marker in `IMPROVEMENT-PLAN.md` before starting anything
+here.** This table was wrong about three of five items on the day it was written, for the
+ordinary reason: it was derived from the plan's headings and the derivation dropped the ✅.
+The plan is the source of truth for *what* an item is **and whether it is still open**.
