@@ -105,7 +105,7 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		tx.Rollback()
 		return nil, nil
 	}
-	return wfs, tx.Commit()
+	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
@@ -187,7 +187,7 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		tx.Rollback()
 		return nil, nil
 	}
-	return wfs, tx.Commit()
+	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
 // ---------------------------------------------------------------------------
@@ -734,4 +734,21 @@ func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		  AND status NOT IN ('done', 'failed')
 	`, parentWorkflowID)
 	tx2.Commit()
+}
+
+// finishClaim commits a claim transaction and enforces the claim-limit
+// invariant, releasing any excess rather than truncating it away. See
+// enforceClaimLimit in claim_limit.go for why.
+func (s *MSSQLStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID string, limit int, wfs []*WorkflowInstance) ([]*WorkflowInstance, error) {
+	keep, excess := enforceClaimLimit(ctx, s.log(), "mssql", workerID, limit, wfs)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for _, wf := range excess {
+		if err := s.ReleaseWorkflow(context.Background(), wf.ID, workerID, wf.Generation, wf.NextWakeAt); err != nil {
+			s.log().ErrorContext(ctx, "releasing an over-claimed workflow failed; it stays claimed until its lease expires",
+				"worker_id", workerID, "workflow_id", wf.ID, "error", err)
+		}
+	}
+	return keep, nil
 }

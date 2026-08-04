@@ -123,7 +123,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		return nil, fmt.Errorf("claim workflows rows: %w", err)
 	}
 
-	return wfs, tx.Commit()
+	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
@@ -221,7 +221,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		return nil, fmt.Errorf("claim sticky workflows rows: %w", err)
 	}
 
-	return wfs, tx.Commit()
+	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
 // ---------------------------------------------------------------------------
@@ -757,4 +757,21 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
 	`, parentWorkflowID)
+}
+
+// finishClaim commits a claim transaction and enforces the claim-limit
+// invariant, releasing any excess rather than truncating it away. See
+// enforceClaimLimit in claim_limit.go for why.
+func (s *MySQLStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID string, limit int, wfs []*WorkflowInstance) ([]*WorkflowInstance, error) {
+	keep, excess := enforceClaimLimit(ctx, s.log(), "mysql", workerID, limit, wfs)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for _, wf := range excess {
+		if err := s.ReleaseWorkflow(context.Background(), wf.ID, workerID, wf.Generation, wf.NextWakeAt); err != nil {
+			s.log().ErrorContext(ctx, "releasing an over-claimed workflow failed; it stays claimed until its lease expires",
+				"worker_id", workerID, "workflow_id", wf.ID, "error", err)
+		}
+	}
+	return keep, nil
 }

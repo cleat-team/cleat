@@ -1118,6 +1118,30 @@ either form; `ShardedStore` (the test builds a plain `NewPostgresStore`, and its
 predates the failure); a retry wrapper (there is none). If it recurs, capture the statement
 and its plan rather than reasoning from the row count.
 
+**A recurrence is now capturable, and no longer strands rows.** Nothing in the claim path
+checked the invariant, so an over-claim was indistinguishable from a normal claim and the
+instruction above could not be followed — the evidence was gone by the time anyone looked.
+`enforceClaimLimit` (`engine/claim_limit.go`) is wired into all six claim entry points
+(`ClaimWorkflows` and `ClaimStickyWorkflows` × three dialects) via each store's
+`finishClaim`. On violation it logs at ERROR with dialect, worker, limit, returned count and
+the excess IDs, and **releases the excess back to `ready`** rather than truncating it away.
+
+Truncation is the part that matters: silently dropping the excess is exactly what made §2.17
+a bug rather than a nuisance — the rows stay `running` with `assigned_to` set, held by a
+worker that will never execute them, until the lease expires.
+
+This is a backstop for a defect believed fixed, not a fix, and it is deliberately cheap: a
+length comparison on a path that already allocates a slice per claim. `limit <= 0` is not
+enforced, since no caller means "claim zero rows" by it.
+
+- Tests: `engine/claim_limit_invariant_test.go`. The decision is unit-tested including the
+  2.11 shape (limit 3, ten rows) and an assertion that the log line carries what a diagnosis
+  would need. The release is tested against a real PostgreSQL by claiming ten rows and
+  handing `finishClaim` a limit of 3 — the trigger is not reproducible (24,000 attempts
+  failed to make the SQL over-claim), so what is tested is the recovery. With the release
+  replaced by truncation it fails with seven rows left `status="running"
+  assigned_to=worker-over-claim`.
+
 ---
 
 ### 2.12 The conditional-skip audit — 231 → 184, and three defects behind the skips
