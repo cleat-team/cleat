@@ -37,7 +37,7 @@ func (s *MSSQLStore) ClaimWorkflow(ctx context.Context, workerID string) (*Workf
 // withRollbackGuaranteedRetry (IMPROVEMENT-PLAN.md 2.26).
 func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	var claimed []*WorkflowInstance
-	err := withRollbackGuaranteedRetry(ctx, "claim workflows", mssqlClaimRetries, mssqlClaimRetryDelay, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "claim workflows", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		var err error
 		claimed, err = s.claimWorkflowsOnce(ctx, workerID, limit)
 		return err
@@ -135,7 +135,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 // withRollbackGuaranteedRetry (IMPROVEMENT-PLAN.md 2.26).
 func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	var claimed []*WorkflowInstance
-	err := withRollbackGuaranteedRetry(ctx, "claim sticky workflows", mssqlClaimRetries, mssqlClaimRetryDelay, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "claim sticky workflows", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		var err error
 		claimed, err = s.claimStickyWorkflowsOnce(ctx, workerID, limit)
 		return err
@@ -270,7 +270,17 @@ func (s *MSSQLStore) BatchHeartbeat(ctx context.Context, workerID string) (int64
 }
 
 // CompleteWorkflow marks a workflow as completed with a result.
+// CompleteWorkflow retries only on errors SQL Server guarantees it rolled
+// back, so a deadlock no longer loses the terminal write. ErrFenceLost is
+// returned before the commit and is not an mssql.Error, so the fence
+// semantics are untouched by the retry. See withRollbackGuaranteedRetry.
 func (s *MSSQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
+	return withRollbackGuaranteedRetry(ctx, "complete workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.completeWorkflowOnce(ctx, workflowID, workerID, generation, result, queryState)
+	})
+}
+
+func (s *MSSQLStore) completeWorkflowOnce(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("complete workflow: begin: %w", err)
@@ -320,7 +330,17 @@ func (s *MSSQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 }
 
 // FailWorkflow marks a workflow as failed.
+// FailWorkflow retries only on errors SQL Server guarantees it rolled
+// back, so a deadlock no longer loses the terminal write. ErrFenceLost is
+// returned before the commit and is not an mssql.Error, so the fence
+// semantics are untouched by the retry. See withRollbackGuaranteedRetry.
 func (s *MSSQLStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+	return withRollbackGuaranteedRetry(ctx, "fail workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.failWorkflowOnce(ctx, workflowID, workerID, generation, errorMsg, errorCode, errorOp, queryState)
+	})
+}
+
+func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("fail workflow: begin: %w", err)
@@ -377,7 +397,17 @@ func (s *MSSQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
+// MoveToDeadLetterQueue retries only on errors SQL Server guarantees it rolled
+// back, so a deadlock no longer loses the terminal write. ErrFenceLost is
+// returned before the commit and is not an mssql.Error, so the fence
+// semantics are untouched by the retry. See withRollbackGuaranteedRetry.
 func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+	return withRollbackGuaranteedRetry(ctx, "move to dead letter queue", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.moveToDeadLetterQueueOnce(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp)
+	})
+}
+
+func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("move to dead letter queue: begin: %w", err)
@@ -468,7 +498,22 @@ func (s *MSSQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID s
 
 // ContinueAsNew atomically creates a new workflow run and completes the current
 // one in a single database transaction. Returns the new run ID on success.
+// ContinueAsNew retries only on errors SQL Server guarantees it rolled back.
+// See withRollbackGuaranteedRetry.
 func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
+	var newRunID string
+	err := withRollbackGuaranteedRetry(ctx, "continue as new", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		newRunID, err = s.continueAsNewOnce(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, newEvents, result, queryState, priority)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return newRunID, nil
+}
+
+func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
@@ -541,7 +586,17 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 //   - "ready"  — returns the workflow to the ready queue (suspend)
 //
 // Fields not relevant to the chosen status are ignored.
+// FinalizeWorkflowSegment retries only on errors SQL Server guarantees it rolled
+// back, so a deadlock no longer loses the terminal write. ErrFenceLost is
+// returned before the commit and is not an mssql.Error, so the fence
+// semantics are untouched by the retry. See withRollbackGuaranteedRetry.
 func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	return withRollbackGuaranteedRetry(ctx, "finalize workflow segment", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.finalizeWorkflowSegmentOnce(ctx, runID, workerID, generation, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
+	})
+}
+
+func (s *MSSQLStore) finalizeWorkflowSegmentOnce(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	if !validFinalStatus(finalStatus) {
 		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
 	}
