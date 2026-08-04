@@ -24,7 +24,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	n := numConcurrentWorkflows()
@@ -35,7 +35,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("scale-maxwf-%d-%d", i, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
@@ -153,7 +153,7 @@ func TestConcurrentWorkflowMemory(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	n := numConcurrentWorkflows()
@@ -168,7 +168,7 @@ func TestConcurrentWorkflowMemory(t *testing.T) {
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("scale-mem-%d-%d", i, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}

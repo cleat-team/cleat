@@ -393,7 +393,7 @@ func TestReplayStressFuzzedEventOrder(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 
 	// Event type codes (matching compaction_fuzz_test.go conventions).
 	// We use a representative subset that exercises all the core field groups.
@@ -455,7 +455,7 @@ func TestReplayStressFuzzedEventOrder(t *testing.T) {
 			runID := fmt.Sprintf("stress-fuzz-%d-%d", size, time.Now().UnixNano())
 			idCopy := runID
 			db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-				VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+				VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 			defer func() {
 				db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, idCopy)
 				db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, idCopy)

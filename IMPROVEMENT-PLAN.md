@@ -2540,18 +2540,44 @@ trend instrument that should not block a merge on one noisy run.
 
 **`UNWIRED_SUITES` is now empty.** Every suite under `tests/` is run by a workflow.
 
-### 2.39 The DB-backed suites cannot share a database concurrently — 🔶 **OPEN**, low priority
+### 2.39 The DB-backed suites cannot share a database concurrently — ✅ **FIXED**
 
-`go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...` produces **17 failures**.
-Run one at a time, all three pass. Go runs distinct packages in parallel, they all point at
-`CLEAT_TEST_DB`, and `ClaimWorkflow` does not care which suite inserted a row — `tests/scale`
-claims `tests/integrity`'s workflows out from under it, and each suite's `testDB` deletes on
-prefixes the others are still using.
+`go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...` produced **17 failures**.
+Run one at a time, all three passed. CI never hit it — each is a separate matrix job with its
+own database — but the obvious local command gave a screen of red that meant nothing, which is
+its own kind of false signal.
 
-CI does not hit this: each is a separate matrix job with its own database. But anyone who runs
-the obvious command locally gets a screen of failures that mean nothing, which is its own kind
-of false signal. Fixes, cheapest first: a per-package `task_queue` (the `soak` suite already
-does this, and it is why `soak` is unaffected), or a per-package schema.
+**The first diagnosis recorded here was wrong**, and is kept rather than quietly replaced.
+It said `ClaimWorkflow` does not care which suite inserted a row, so `tests/scale` claims
+`tests/integrity`'s workflows. That is true, and it is *not* what caused most of the failures.
+Giving every suite its own `task_queue` fixed **one** test. The other sixteen kept failing, and
+the actual error said so plainly:
+
+```
+apply migrations/postgres/001_schema.sql: pq: deadlock detected (40P01)
+append events in tx: increment event_count: pq: deadlock detected (40P01)
+```
+
+`testutil.TestDB` called `applyPostgresSchemaFile` on **every** invocation — 24 times for
+`tests/integrity` alone — and each application takes `ACCESS EXCLUSIVE` on tables another
+package is reading and writing at that moment. The advisory lock already in place serialises
+schema application against schema application, which is not the collision that bites: it is DDL
+against *DML*, from a different process, that deadlocks.
+
+**Both fixes were needed, and each was verified to be load-bearing** by running without it:
+
+- **`applyPostgresSchemaFile` now fingerprints the schema file** (SHA-256, recorded in a
+  `cleat_test_schema` table) and skips the DDL when that exact file has already been applied.
+  Fixes the 16 deadlocks. Also takes `tests/integrity` from **22.7s to 5.8s**, because applying
+  the full schema 24 times was never doing anything the first application had not.
+- **Per-suite `task_queue`** (`queue-integrity-tests`, `queue-upgrade-tests`,
+  `queue-scale-tests`) in the store constructor and the inserts. Fixes
+  `TestMaxConcurrentWorkflows`, which without it still failed on 2 of 2 runs *after* the
+  fingerprint fix. `tests/soak` already did this, which is why it was never affected.
+
+Three consecutive concurrent runs green. Tests that add their own columns (all
+`IF NOT EXISTS`) or drop objects they created are unaffected — the fingerprint tracks the
+schema *file*.
 
 ---
 

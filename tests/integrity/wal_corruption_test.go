@@ -23,7 +23,7 @@ func TestWalCorruption_ChecksumTampering(t *testing.T) {
 	// Ensure the checksum column exists.
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -82,7 +82,7 @@ func TestWalCorruption_PayloadTampering(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -155,7 +155,7 @@ func TestWalCorruption_MissingEvent(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -216,7 +216,7 @@ func TestWalCorruption_EventOrdering(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -264,7 +264,7 @@ func TestWalCorruption_PgSwitchWAL(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	// Test pg_switch_wal() multiple times, inserting events between switches.
@@ -272,7 +272,7 @@ func TestWalCorruption_PgSwitchWAL(t *testing.T) {
 		// Create a separate workflow run for each iteration.
 		runID := fmt.Sprintf("int-wal-%d-%d", time.Now().UnixNano(), i)
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 		if err != nil {
 			t.Fatalf("create workflow instance: %v", err)
 		}
@@ -337,13 +337,13 @@ func TestWalCorruption_ReplayVerification(t *testing.T) {
 	// Use the minimal schema so we get the checksum column.
 	testutil.SetupMinimalSchema(t, db, testutil.DialectPostgres)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-replay-%d", time.Now().UnixNano())
 
 	// Create a workflow instance directly.
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -410,12 +410,12 @@ func TestWalCorruption_DefaultOnReplayFailure(t *testing.T) {
 	defer db.Close()
 
 	testutil.SetupMinimalSchema(t, db, testutil.DialectPostgres)
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-default-on-%d", time.Now().UnixNano())
 
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
