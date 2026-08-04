@@ -18,8 +18,6 @@ engine	const mssqlErrTimeout
 engine	const mssqlErrUniqueConstraint
 engine	field lastCancellationCheck
 engine	field metrics
-engine	func (*Engine).completeCallEvent
-engine	func (*Engine).flushCallIntent
 engine	func (*FaultInjector).applyLatencySleep
 engine	func (*ShardedStore).tryEachShard
 engine	func Dialect.batchLimit

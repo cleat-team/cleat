@@ -333,10 +333,24 @@ const (
 	sleepStatusSuspend   = 1
 )
 
-// pendingSentinel is stored in the error column of event_history to mark a
-// DurableCall whose external call has been dispatched but whose outcome is
-// not yet persisted.  On replay, a pending event means the call outcome is
-// ambiguous — the external service may have processed it.
+// pendingSentinel marks a DurableCall whose external call has been dispatched
+// but whose outcome is not yet persisted. On replay, a pending event means the
+// call outcome is ambiguous — the external service may have processed it.
+//
+// NOTHING WRITES THIS. The detectors below are live and correct, but no
+// production path ever stores a pendingSentinel, so in a real crash there is
+// nothing for them to find. The contract today is exactly what
+// docs/durable-calls.md states: at-least-once, with silent duplicates on crash.
+//
+// The write side that used to sit in flush.go (flushCallIntent /
+// completeCallEvent) was deleted rather than wired in: every completion path
+// guards its upsert on `error IS NULL`, so an intent row could never be
+// completed, and the sentinel would have stuck forever. See
+// docs/durable-call-intent-design.md for that analysis and for the replacement
+// design, which drops this sentinel in favour of a dedicated intent_at column.
+//
+// Keep the constant and the detectors: they cost nothing, they are the read
+// half of that design, and deleting them would lose the one part that works.
 const pendingSentinel = "__CLEAT_PENDING_INTENT__"
 
 // PendingSentinel is the exported form of pendingSentinel, provided so that
