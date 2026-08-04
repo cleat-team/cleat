@@ -130,7 +130,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		_ = tx.Rollback()
 		return nil, nil
 	}
-	return wfs, tx.Commit()
+	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
@@ -206,7 +206,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		_ = tx.Rollback()
 		return nil, nil
 	}
-	return wfs, tx.Commit()
+	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
 // LoadEventHistory returns all event records for a workflow, ordered by step.
@@ -725,3 +725,20 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 // ---- SignalStore interface implementation ----
 
 // DeliverSignal satisfies the SignalStore interface.
+
+// finishClaim commits a claim transaction and enforces the claim-limit
+// invariant, releasing any excess rather than truncating it away. See
+// enforceClaimLimit in claim_limit.go for why.
+func (s *PostgresStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID string, limit int, wfs []*WorkflowInstance) ([]*WorkflowInstance, error) {
+	keep, excess := enforceClaimLimit(ctx, s.log(), "postgres", workerID, limit, wfs)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for _, wf := range excess {
+		if err := s.ReleaseWorkflow(context.Background(), wf.ID, workerID, wf.Generation, wf.NextWakeAt); err != nil {
+			s.log().ErrorContext(ctx, "releasing an over-claimed workflow failed; it stays claimed until its lease expires",
+				"worker_id", workerID, "workflow_id", wf.ID, "error", err)
+		}
+	}
+	return keep, nil
+}
