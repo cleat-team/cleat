@@ -1649,7 +1649,7 @@ That is the second vacuous assertion caught in this session by the same habit of
 the fix and re-running. Both would have passed review.
 
 
-### 2.25 Nothing prevents a red PR from merging into `develop` — OPEN (needs repo admin)
+### 2.25 Nothing prevents a red PR from merging into `develop` — ✅ **FIXED** 2026-08-04
 
 `develop` has branch protection enabled, and it enforces almost nothing:
 
@@ -1680,9 +1680,38 @@ PR was 42, because GitHub registers checks progressively and `pending == 0` rout
 merge happened to be fine (all six workflow runs on the merge commit succeeded), but that
 was luck.
 
-**The fix is a repo setting, not a code change,** so it is left for whoever administers the
-repository: require the jobs that matter on `develop`. Until then, any automation that
-merges must gate on **workflow runs for the head SHA** rather than the check-name rollup:
+**Resolution.** `develop` now requires 16 status checks, with `enforce_admins: true` — a hard
+gate that binds the repository owner too. Verified live after applying:
+
+```console
+$ gh api repos/cleat-team/cleat/branches/develop/protection \
+    --jq '{contexts: (.required_status_checks.contexts|length), enforce_admins: .enforce_admins.enabled, strict: .required_status_checks.strict}'
+{"contexts":16,"enforce_admins":true,"strict":false}
+```
+
+Required: `Lint`, `lint-go`, the eight `Test Go (<pkg>) on 1.26` matrix jobs,
+`Cluster Integration Tests`, `Build`, `Fuzz Tests`, `Vulnerability Check`,
+`Developer Certificate of Origin`, `Validate branch name`.
+
+Deliberately **not** required: everything that reaches an external registry — Java/TeaVM,
+the Plugin Harness layers, MySQL/SQL Server, and the Rust/Python/AssemblyScript SDK
+integrations. The Maven Central 403 that reddened `Layer 2 — WASM Integration` earlier the
+same day would otherwise have blocked every merge until a third party recovered, with no
+second maintainer to unblock it. `Benchmarks` and `Coverage` are excluded for a harder
+reason: they are skipped or push-to-main only, and a required check that never runs blocks
+its PR forever. `strict: false` so a busy day does not force a rebase per PR.
+
+**One trap, caught before it bit.** Required contexts are **check-run (job) names, not
+workflow names.** The workflow is called "Branch Naming Check"; the context is
+`Validate branch name`. Requiring the former — under `enforce_admins: true` — would have made
+every PR in the repository permanently unmergeable, including by the owner. It was caught by
+diffing the proposed list against the check-runs actually present on three real PRs of
+different shapes (docs-only, code, CI-config), which is the check to repeat before adding any
+context: path filters can skip jobs, so a docs-only PR is the one that finds the gap.
+
+Automation that merges should still gate on **workflow runs for the head SHA** rather than
+the check-name rollup — GitHub is now the real gate, but a watcher that reports honestly is
+still worth having:
 
 ```sh
 SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid)
