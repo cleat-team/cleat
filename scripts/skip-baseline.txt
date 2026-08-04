@@ -37,6 +37,7 @@ engine	TestMSSQLStoreFactory	2
 engine	TestMSSQLStore_BeginTxWithContext_Failure	2
 engine	TestMSSQLStore_SetSessionContext_EmptyTenant	2
 engine	TestMSSQLStore_StartNewRun_TenantID	1
+engine	TestMSSQLTenantIsolation_UnderRealSecurityPolicies	2
 engine	TestMySQLStoreConfigOptions	1
 engine	TestMySQLStoreFactory	1
 engine	TestMySQLStore_CompleteWorkflow_UpdateError	1

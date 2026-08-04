@@ -3303,7 +3303,7 @@ tenant.
   a shared variable, would pass the first test and fail this one. Both confirmed to fail with
   the re-apply removed.
 
-#### The schema half — still open, and larger than it looks
+#### The schema half — now observable, and the missing tables are recorded
 
 `engine/testutil/mssql_schema.go` hand-writes 334 lines of `CREATE TABLE` and defines none of
 the seven security policies. Pointing it at the real migration is the right fix and is **not**
@@ -3311,9 +3311,34 @@ a small change: it switches RLS on for every MSSQL test in the repo, and any tes
 not establish a session context will start returning nothing. That is the point — but it is a
 test-suite migration, not a one-liner, and `engine/testutil/` is WS-2's.
 
-Until it lands, no MSSQL test can observe tenant isolation working or failing, and the
-connection fix above is verified by reading `SESSION_CONTEXT` directly rather than by
-observing a policy enforce it.
+Rather than block on that, MSSQL now gets the shape PostgreSQL already uses for exactly this
+problem: leave the default test schema alone and give the tests that care about RLS a scope
+where it is genuinely switched on — the analogue of `testutil.OpenPostgresRLSTestDB`.
+`engine/mssql_rls_enforcement_test.go` reads `fn_tenant_filter` and the seven
+`CREATE SECURITY POLICY` statements **out of the real migration** and applies them, so the
+predicate under test is the shipped one and cannot drift from it. It drops them again on
+cleanup, and drops any left by an interrupted earlier run before it starts — a filter
+predicate left behind blanks every later MSSQL test in the binary.
+
+That closes the verification gap without the suite-wide migration: `TestMSSQLTenantIsolation_UnderRealSecurityPolicies`
+fails with the §2.71 fix reverted, reporting the production symptom rather than a mechanism —
+`round 0: tenant A got <nil> for its own workflow`.
+
+**One thing this nearly got wrong, which is worth keeping.** The cross-tenant half of the
+test was first written as "tenant A's *store* must not return tenant B's workflow". That
+assertion passes against a **wide-open filter predicate**, because `MSSQLStore`'s own SQL
+carries `tenant_id = @p` and the Go layer does the filtering regardless of what RLS does —
+the same "a test can pass because of a layer other than the one you think you are testing"
+defect as §1.1's first fence test. Caught by making the predicate permissive and watching the
+test stay green. It now runs the cross-tenant check as a raw statement on the tenant's own
+pool, where no Go-level filter exists and the policy is the only thing that can hide the row;
+with a permissive predicate that fails with
+`tenant A's connection can see the other tenant's workflow … (1 row(s))`.
+
+**Still open:** the test schema is missing two tenant-scoped tables the shipped schema has —
+`workflow_routing` and `workflow_tags` — so their policies cannot be applied at all. That set
+is now asserted rather than assumed, so a *new* divergence fails the test instead of being
+tolerated silently. Pointing `engine/testutil/` at the real migration remains the real fix.
 
 ---
 
