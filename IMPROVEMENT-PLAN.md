@@ -3331,6 +3331,54 @@ fallback's error.
 branches looked correct, and the routing looked correct; the fixtures were the only thing that
 disagreed. Every claim above came from executing against checked-in toolchain output.
 
+#### 2.72 follow-up — one routing table, and Rust moved onto wasmtime (2026-08-04)
+
+The routing decision existed **twice**, and the two copies disagreed:
+
+| | registered for wasmtime |
+|---|---|
+| `cmd/cleat-worker` | `go` |
+| `cleat/wasmtest` | `go, assemblyscript, python, java` |
+
+So the test harness ran Python on a backend the worker never sends it to, and neither routed
+Rust. A harness whose routing differs from the worker's is exercising a configuration nobody
+runs — which is worse than exercising the wrong one loudly, because it looks like coverage.
+
+Now single: `engine.WasmtimeLanguages` / `engine.RunsOnWasmtime`, with both consumers reading
+from it. `cmd/cleat-worker/backend_routing.go` forwards rather than re-listing, so the two
+cannot drift again.
+
+**Python removed from the harness's list.** It fails on wasmtime — its component reaches the
+decomposition path and dies on `incompatible import type for env::abort`, reproduced through
+`cleat/wasmtest` with a real `HostHandler`, so not a probe artefact. Nothing caught the
+mismatch because nothing ran it: `plugin-harness-ci.yml` installs no Python toolchain, so
+`TestPluginCalls_Wasm_Python` skips and that registration had never once been exercised.
+
+**Rust moved onto wasmtime**, and the sequencing is the point. It could not be justified
+before, because `tests/cross-language` built `wasm32-wasip1` while `cleat build --target rust`
+ships the `wasm32-unknown-unknown` cdylib (`build_rust.go:34`) — so the suite covered an
+artifact no user runs, and could not have tested the claim that kept Rust out:
+
+> wasmtime-go v44 still crashes on fn.Call for Rust cdylib core modules
+
+That claim was structurally uncheckable by the only suite that would have checked it, because
+the suite never built a cdylib. It does not reproduce. With the suite switched to the shipped
+target, all seven of its tests pass on wasmtime — including both cross-replay directions,
+executing under one runtime and replaying the recorded history under the other — as does
+`TestPluginCalls_Wasm_Rust`.
+
+Same shape as the stale `CGO_ENABLED=0` note in `CLAUDE.md`: a reason that was true when
+written, outlived its cause, and stayed because the thing that would have contradicted it was
+pointed somewhere else.
+
+**Where each language now runs:** wasmtime for `go`, `assemblyscript`, `java`, `rust`; wazero
+for `python` alone, until the native component path (§2.72 above) is buildable.
+
+**Observed, not chased:** `TestPluginCalls_Wasm_Go` skips locally while the AS, Java and Rust
+siblings pass. Not investigated, and not caused by this change — Go's routing is unaltered —
+but a Go-path test skipping in the harness for the primary language is worth someone's
+attention.
+
 ---
 
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by

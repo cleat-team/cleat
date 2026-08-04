@@ -263,6 +263,67 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 	}
 }
 
+// WasmtimeLanguages are the guest languages served by the wasmtime backend.
+// Everything else falls back to the wazero Runtime.
+//
+// This is the single source of truth, and it is single deliberately. There used
+// to be two: cmd/cleat-worker registered "go" alone, and cleat/wasmtest
+// registered go, assemblyscript, python and java. They disagreed in both
+// directions -- the harness ran Python on a backend the worker never sends it
+// to, and neither routed Rust -- so a test passing in the harness said nothing
+// about the configuration the product actually runs.
+//
+// Membership means "verified to load and execute on wasmtime", not "ought to
+// work". Each entry here was run before it was added:
+//
+//   - go: the primary path and the backend of record (CLAUDE.md).
+//
+//   - assemblyscript, java: reached wasmtime for a long time by accident --
+//     DetectLanguage could not identify them and defaulted to "go" -- and were
+//     confirmed to load and execute before being named explicitly. See 2.72.
+//
+//   - rust: exercised by tests/cross-language, which builds the same
+//     wasm32-unknown-unknown cdylib that `cleat build --target rust` ships. All
+//     seven tests pass on wasmtime, including both cross-replay directions
+//     (execute under one runtime, replay the recorded history under the other),
+//     plus TestPluginCalls_Wasm_Rust in the plugin harness.
+//
+//     Rust was previously excluded on the grounds that "wasmtime-go v44 still
+//     crashes on fn.Call for Rust cdylib core modules". That does not
+//     reproduce. The reason was true when written, as far as anyone can tell,
+//     and outlived its cause -- the same shape as the stale CGO_ENABLED=0 note
+//     in CLAUDE.md. Until 2026-08-04 it could not have been rechecked cheaply:
+//     tests/cross-language built wasm32-wasip1 rather than the shipped target,
+//     so the suite covered an artifact no user runs.
+//
+// Absent, and why:
+//
+//   - python: fails on wasmtime. Its Component Model binary reaches the
+//     decomposition path and dies on `incompatible import type for env::abort`.
+//     Reproduced through cleat/wasmtest with a real HostHandler, so it is not an
+//     artefact of a half-configured probe. The native component path in
+//     engine/component_cgo.go may address it, but that is behind a build tag no
+//     build sets. See IMPROVEMENT-PLAN.md 2.72.
+//
+// See IMPROVEMENT-PLAN.md 2.72.
+var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust"}
+
+// RunsOnWasmtime reports whether a detected guest language is served by the
+// wasmtime backend.
+//
+// Callers that build an Engine should register backends from WasmtimeLanguages
+// rather than consulting this; it exists for the worker, which also has to
+// decide whether to construct a wazero Runtime at all. Those two decisions have
+// to agree, and reading them from the same list is what makes them agree.
+func RunsOnWasmtime(lang string) bool {
+	for _, l := range WasmtimeLanguages {
+		if l == lang {
+			return true
+		}
+	}
+	return false
+}
+
 // WithBackends registers one backend for several languages at once.
 //
 // backendForWasm looks the detected language up in this map and returns nil
