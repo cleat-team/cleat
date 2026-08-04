@@ -31,7 +31,24 @@ func (s *MSSQLStore) ClaimWorkflow(ctx context.Context, workerID string) (*Workf
 // ClaimWorkflows atomically claims up to limit runnable workflow instances.
 // Uses UPDATE...OUTPUT with READPAST/UPDLOCK hints (SQL Server's equivalent
 // of FOR UPDATE SKIP LOCKED) wrapped in a transaction with RLS context.
+// ClaimWorkflows retries on errors SQL Server guarantees it rolled back --
+// a deadlock victim claimed nothing, so replaying the claim is sound. Errors
+// that leave the outcome unknown are not retried; see
+// withRollbackGuaranteedRetry (IMPROVEMENT-PLAN.md 2.26).
 func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	var claimed []*WorkflowInstance
+	err := withRollbackGuaranteedRetry(ctx, "claim workflows", mssqlClaimRetries, mssqlClaimRetryDelay, func() error {
+		var err error
+		claimed, err = s.claimWorkflowsOnce(ctx, workerID, limit)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
+}
+
+func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: begin: %w", err)
@@ -112,7 +129,24 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 // that are sticky to this worker. Uses the sticky_worker_id filter for
 // low-contention claiming. Returns fewer than limit if not enough sticky
 // workflows are ready. Callers should fall back to ClaimWorkflows for remaining capacity.
+// ClaimStickyWorkflows retries on errors SQL Server guarantees it rolled back --
+// a deadlock victim claimed nothing, so replaying the claim is sound. Errors
+// that leave the outcome unknown are not retried; see
+// withRollbackGuaranteedRetry (IMPROVEMENT-PLAN.md 2.26).
 func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	var claimed []*WorkflowInstance
+	err := withRollbackGuaranteedRetry(ctx, "claim sticky workflows", mssqlClaimRetries, mssqlClaimRetryDelay, func() error {
+		var err error
+		claimed, err = s.claimStickyWorkflowsOnce(ctx, workerID, limit)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
+}
+
+func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: begin: %w", err)
