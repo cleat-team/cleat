@@ -371,7 +371,30 @@ a stale worker and the delete. With the guard removed it reports
 `event_history was corrupted … got []` — the whole history gone.
 
 The general form: **an end-to-end test can pass because of a layer other than the one you
-think you are testing.** The only way to know which layer is holding is to break the specific
+think you are testing.**
+
+**The same gap existed on SQL Server, and was not noticed when it was closed for MySQL.**
+`TestFinalizeWorkflowStatus_SQLFenceGuard` and its `_MySQL` counterpart were added; the
+`_MSSQL` one was not, so the §1.1 fix shipped for three dialects with proof for two.
+Confirmed the hard way rather than assumed: with
+`IF @rows_updated > 0 AND` stripped from `migrations/mssql/004_*.sql`,
+`TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` **still passes** — the Go-layer
+rollback covers for the missing SQL guard exactly as documented for the other two dialects.
+`TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL` catches it, reporting
+`event_history was corrupted … got []`.
+
+**And the MSSQL integration tests never installed the procedures they exercise.**
+`setupMSSQLIntegrationTest` called `SetupMSSQLFullSchema` but not `applyMSSQLProcedures`, so
+`TestMSSQLIntegration_FinalizeWorkflowSegment_{Done,Suspend}` passed only because some other
+test had created `finalize_workflow_status` in the same database via `MSSQLBackend.Setup` —
+and `CREATE PROCEDURE` persists, so after the first full run against any database the
+dependency was invisible. On a **fresh** database a filtered run fails with
+`Could not find stored procedure 'finalize_workflow_status'`. CI never saw it: it creates a
+fresh database and runs the whole suite, so the installing test always goes first.
+
+That is the same shape as everything else in this document — a test that passes because of
+something other than the thing it names — and it is why this was found by pointing a real
+SQL Server at a filtered run rather than by reading the setup helper. The only way to know which layer is holding is to break the specific
 one and watch. This is the same defect class as the `tee` without `pipefail` and the mock that
 discarded its argument — a green result produced by something other than the thing under test.
 

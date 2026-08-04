@@ -417,3 +417,101 @@ func TestFinalizeWorkflowStatus_SQLFenceGuard_MySQL(t *testing.T) {
 		}
 	}
 }
+
+// TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL is the SQL Server
+// counterpart of the two guard tests above. It was missing.
+//
+// `migrations/mssql/004_fix_finalize_workflow_status_fence.sql` ships the
+// same `@@ROWCOUNT`-captured guard as the Postgres and MySQL migrations, and
+// until this test existed nothing could tell whether it did anything. The
+// reason is identical to the one documented for the other two dialects, and
+// worth restating because it is the whole point: MSSQLStore's
+// FinalizeWorkflowSegment (engine/mssql_lifecycle.go) wraps the EXEC in its
+// own BeginTx/Rollback and returns ErrFenceLost *before* tx.Commit(), so the
+// deferred rollback discards everything the procedure did -- including an
+// unconditional DELETE FROM event_history -- whether or not the SQL guard is
+// present. TestFinalizeWorkflowSegment_ZombieWriterFence/mssql therefore
+// passes with the guard stripped out of the migration.
+//
+// So the §1.1 fix shipped for three dialects with proof for two. This calls
+// the procedure directly against a plain *sql.DB, outside any transaction,
+// where the guard is the only thing between a stale worker and the delete.
+func TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL(t *testing.T) {
+	backend := &MSSQLBackend{}
+	if !backend.Enabled() {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
+	store, teardown := backend.Setup(t)
+	defer teardown()
+	setupTestData(t, store)
+	truncateAll(t, store)
+	ctx := context.Background()
+
+	mssqlStore, ok := store.(*MSSQLStore)
+	if !ok {
+		t.Fatalf("expected *MSSQLStore, got %T", store)
+	}
+
+	scenario := buildZombieWriterScenario(t, ctx, store)
+
+	// ---- Worker A's stale fence, direct EXEC, no enclosing transaction. ----
+
+	var fenceHeld bool
+	err := mssqlStore.db.QueryRowContext(ctx, `
+		EXEC finalize_workflow_status @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10
+	`,
+		scenario.childID,
+		scenario.staleWorkerID,
+		scenario.staleGeneration,
+		"done",
+		`{"stale":"result-from-A-direct-sql"}`,
+		"",   // @p6  error code
+		"",   // @p7  error op
+		"{}", // @p8  query state
+		nil,  // @p9  next_wake_at -- NULL, irrelevant to a "done" call
+		"",   // @p10 notify channel
+	).Scan(&fenceHeld)
+	if err != nil {
+		t.Fatalf("direct finalize_workflow_status EXEC: %v", err)
+	}
+	if fenceHeld {
+		t.Fatalf("finalize_workflow_status(worker=%q generation=%d) returned fence held = true, want false -- the SQL-level generation fence did not hold",
+			scenario.staleWorkerID, scenario.staleGeneration)
+	}
+
+	// ---- event_history must be untouched: the terminal block must not run
+	// for a caller whose fenced UPDATE matched zero rows. ----
+
+	after, err := store.LoadEventHistory(ctx, scenario.childID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory (after A's direct stale call): %v", err)
+	}
+	if len(after) != 1 || after[0].Response != "live-response-from-B" {
+		t.Fatalf("event_history was corrupted by the stale writer's direct SQL call: got %+v, want B's single live event untouched", after)
+	}
+
+	// ---- Ownership and status must still reflect B. ----
+
+	childAfter, err := store.GetWorkflowByID(ctx, scenario.childID)
+	if err != nil {
+		t.Fatalf("GetWorkflowByID (child): %v", err)
+	}
+	if childAfter.Status != "ready" {
+		t.Errorf("child status = %q, want %q (untouched by A's direct stale call)", childAfter.Status, "ready")
+	}
+	if childAfter.Generation != scenario.liveGeneration {
+		t.Errorf("child generation = %d, want %d (B's, untouched by A)", childAfter.Generation, scenario.liveGeneration)
+	}
+
+	// ---- The parent's await_child event must not carry A's stale result. ----
+
+	parentEvents, err := store.LoadEventHistory(ctx, scenario.parentID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory (parent): %v", err)
+	}
+	for _, ev := range parentEvents {
+		if ev.EventType == "await_child" && ev.RunID == scenario.childID && strings.Contains(ev.Response, "stale") {
+			t.Fatalf("parent's await_child event was corrupted by the stale writer's direct SQL call: %+v", ev)
+		}
+	}
+}

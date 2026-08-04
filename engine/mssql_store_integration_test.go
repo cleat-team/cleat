@@ -36,6 +36,14 @@ func setupMSSQLIntegrationTest(t *testing.T) (*MSSQLStore, *sql.DB) {
 
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
+	// The stored procedures are part of the schema these tests exercise --
+	// FinalizeWorkflowSegment EXECs finalize_workflow_status. Without this
+	// they passed only because some *other* test had installed the
+	// procedure into the same database via MSSQLBackend.Setup, and
+	// CREATE PROCEDURE persists, so the dependency was invisible after the
+	// first full run. On a fresh database a filtered run failed with
+	// "Could not find stored procedure 'finalize_workflow_status'".
+	applyMSSQLProcedures(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 
 	store := NewMSSQLStore(db, "default")
