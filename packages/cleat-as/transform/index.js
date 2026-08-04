@@ -3,6 +3,14 @@
 const fs = require("fs");
 const path = require("path");
 
+// Properties that point back up the tree or into the compiler's own state.
+// _walkCalls walks every other own property, so these have to be excluded by
+// name: node.range.source.statements is the entire file, which would turn a
+// walk of one function body into a walk of the whole program.
+const WALK_SKIP_KEYS = new Set([
+  "range", "source", "parent", "program", "parser", "tokenizer",
+]);
+
 /**
  * AssemblyScript transformer for the cleat durable execution framework.
  *
@@ -58,6 +66,17 @@ class CleatEntryTransformer {
       // Find functions that directly call HostCalls methods
       const durableLeaves = this._findDurableLeaves(callGraph);
 
+      // A @cleatEntry function IS durable: it is the workflow, and every line
+      // of it replays. Seeding the closure only from _findDurableLeaves --
+      // functions that make an h.* call -- meant an entry point that happens
+      // not to call the host was never validated, which is precisely the
+      // workflow whose only nondeterminism is a bare Math.random().
+      for (const stmt of source.statements) {
+        if (this._isDurableEntryFunc(stmt) && stmt.name && stmt.name.text) {
+          durableLeaves.add(stmt.name.text);
+        }
+      }
+
       if (durableLeaves.size === 0) continue;
 
       // Compute transitive closure of durable functions
@@ -73,6 +92,31 @@ class CleatEntryTransformer {
 
       // Verify that functions in the durable closure have access to 'h'
       this._verifyThreading(source, durableFunctions, callGraph);
+    }
+
+    // E001-E005 were `console.error` and nothing else, so `cleat build` on a
+    // workflow calling Math.random() inside a durable function printed a
+    // diagnostic, exited 0, and produced a deployable .wasm. Determinism
+    // violations corrupt replay silently, which is the worst time to find out.
+    // Throwing here is what makes asc fail.
+    const violations = this._violations || [];
+    if (violations.length > 0) {
+      if (process.env.CLEAT_AS_ALLOW_NONDETERMINISM === "1") {
+        console.error(
+          "[cleat/transform] CLEAT_AS_ALLOW_NONDETERMINISM=1: continuing despite " +
+          violations.length + " determinism violation(s). The resulting workflow " +
+          "will not replay correctly. This escape hatch exists so a false positive " +
+          "cannot block you -- please report one rather than leaving this set."
+        );
+      } else {
+        throw new Error(
+          "[cleat/transform] " + violations.length + " determinism violation(s); " +
+          "see the E001-E005 diagnostics above. A workflow that is not " +
+          "deterministic produces different results on replay than it did on the " +
+          "original run. Set CLEAT_AS_ALLOW_NONDETERMINISM=1 to downgrade these to " +
+          "warnings if you believe one is a false positive."
+        );
+      }
     }
 
     if (sourceEntries.length === 0) return;
@@ -219,91 +263,176 @@ class CleatEntryTransformer {
     if (!body || !body.statements) return;
 
     const self = this;
-    self._walkStatements(body.statements, function(callExpr) {
-      if (!callExpr || !callExpr.callee) return;
-      const callee = callExpr.callee;
+    self._walkCalls(body.statements, function(callExpr) {
+      const calleeName = self._calleeName(callExpr);
+      if (!calleeName) return;
 
-      // MemberExpression patterns: Math.random(), Date.now(), console.log(), process.*
-      if (callee.object && typeof callee.object === 'object' && callee.property && typeof callee.property === 'object') {
-        const objName = callee.object.text || (callee.object.name ? callee.object.name.text : null);
-        const propName = callee.property.text || (callee.property.name ? callee.property.name.text : null);
+      const dot = calleeName.indexOf(".");
+      if (dot < 0) return; // plain function call, not a member access
+      const objName = calleeName.substring(0, dot);
+      const propName = calleeName.substring(dot + 1);
 
-        if (objName === "Math" && (propName === "random" || propName === "seedRandom")) {
-          const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E001: Math." + propName + "() in durable function '" + funcName + "' at " + loc + "\n  → Math.random() produces different values on each replay, breaking workflow determinism.\n  → Use h.random() for deterministic randomness.");
-          return;
-        }
+      const loc = self._getSourceLocation(callExpr, sourceName);
 
-        if (objName === "Date" && propName === "now") {
-          const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E002: Date.now() in durable function '" + funcName + "' at " + loc + "\n  → Date.now() returns wall-clock time which differs across replays, breaking determinism.\n  → Use h.now() for deterministic time.");
-          return;
-        }
+      if (objName === "Math" && (propName === "random" || propName === "seedRandom")) {
+        self._reportViolation("E001: Math." + propName + "() in durable function '" + funcName + "' at " + loc + "\n  → Math.random() produces different values on each replay, breaking workflow determinism.\n  → Use h.random() for deterministic randomness.");
+        return;
+      }
 
-        if (objName === "console" && propName === "log") {
-          const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E003: console.log() in durable function '" + funcName + "' at " + loc + "\n  → console.log() output is not recorded in workflow event history and is lost on replay.\n  → Use h.log() for durable logging.");
-          return;
-        }
+      if (objName === "Date" && propName === "now") {
+        self._reportViolation("E002: Date.now() in durable function '" + funcName + "' at " + loc + "\n  → Date.now() returns wall-clock time which differs across replays, breaking determinism.\n  → Use h.now() for deterministic time.");
+        return;
+      }
 
-        if (objName === "process") {
-          const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E004: process." + propName + " in durable function '" + funcName + "' at " + loc + "\n  → Process/environment access differs across replays, breaking determinism.\n  → Pass configuration as workflow input instead of reading from process.env.");
-          return;
-        }
+      if (objName === "console" && propName === "log") {
+        self._reportViolation("E003: console.log() in durable function '" + funcName + "' at " + loc + "\n  → console.log() output is not recorded in workflow event history and is lost on replay.\n  → Use h.log() for durable logging.");
+        return;
+      }
+
+      if (objName === "process") {
+        self._reportViolation("E004: process." + propName + " in durable function '" + funcName + "' at " + loc + "\n  → Process/environment access differs across replays, breaking determinism.\n  → Pass configuration as workflow input instead of reading from process.env.");
+        return;
       }
     });
   }
 
   // ---------------------------------------------------------------
-  // Recursively walk AST statements and invoke callback for each
-  // CallExpression node. Handles nested calls and control flow.
+  // Record a determinism violation. These are numbered E001..E005 --
+  // they are errors, not warnings -- but for as long as they were only
+  // console.error() calls, `cleat build` exited 0 and shipped the .wasm
+  // anyway. Collect them here; afterParse() throws at the end if the list
+  // is non-empty, which is what makes asc fail.
   // ---------------------------------------------------------------
-  _walkStatements(statements, callback) {
+  _reportViolation(message) {
+    if (!this._violations) this._violations = [];
+    this._violations.push(message);
+    console.error("[cleat/transform] " + message);
+  }
+
+  // ---------------------------------------------------------------
+  // Recursively walk AST statements and invoke callback for each
+  // CallExpression node.
+  //
+  // This used to enumerate child properties by name -- statements,
+  // expression, args, init, object, property, callee, condition,
+  // consequent, alternate, declaration, value -- and test for a call with
+  // `if (node.callee)`. Those are ESTree/Babel names. AssemblyScript's AST
+  // uses different ones, and for the two that matter most it does not merely
+  // differ, it has no such property at all:
+  //
+  //   looked for              AssemblyScript actually has
+  //   node.callee             node.expression       (CallExpression)
+  //   callee.object           expression.expression (PropertyAccessExpression)
+  //   consequent / alternate  ifTrue / ifFalse      (IfStatement)
+  //   declaration             declarations (array)  (VariableStatement)
+  //   init                    initializer           (VariableDeclaration)
+  //
+  // So `node.callee` was never truthy on a real parse, the callback never
+  // fired, every call graph came back empty, _findDurableLeaves returned an
+  // empty set, and afterParse's `if (durableLeaves.size === 0) continue`
+  // skipped validation for every file. The determinism checks E001-E004 and
+  // the E005 threading check had never run on AssemblyScript source.
+  //
+  // Verified on examples/as-workflow before the fix: place_order calls
+  // h.cleatCall seven times and its recorded callee set was [].
+  //
+  // Enumerating the correct names would fix today's grammar and silently rot
+  // the next time AssemblyScript adds a node type. Walk every own property
+  // instead: it cannot miss a node kind. The cost is having to skip the
+  // properties that point back up -- node.range.source.statements is the
+  // whole file, which would turn a function-body walk into a whole-program
+  // walk -- and to guard against cycles.
+  // ---------------------------------------------------------------
+  _walkNodes(statements, visit) {
     if (!Array.isArray(statements)) return;
+
+    const seen = new Set();
 
     function walkNode(node) {
       if (!node || typeof node !== 'object') return;
+      if (seen.has(node)) return;
+      seen.add(node);
 
-      // If this is a CallExpression (has callee), invoke callback
-      if (node.callee) {
-        callback(node);
+      if (Array.isArray(node)) {
+        for (const item of node) walkNode(item);
+        return;
       }
 
-      // Recursively walk common AST child properties
-      if (node.statements && Array.isArray(node.statements)) {
-        for (const s of node.statements) walkNode(s);
+      visit(node);
+
+      for (const key of Object.keys(node)) {
+        if (WALK_SKIP_KEYS.has(key)) continue;
+        const child = node[key];
+        if (child && typeof child === 'object') walkNode(child);
       }
-      if (node.expression && typeof node.expression === 'object') {
-        walkNode(node.expression);
-      }
-      if (node.args && Array.isArray(node.args)) {
-        for (const a of node.args) walkNode(a);
-      }
-      if (node.init && typeof node.init === 'object') {
-        walkNode(node.init);
-      }
-      if (node.object && typeof node.object === 'object') {
-        walkNode(node.object);
-      }
-      if (node.property && typeof node.property === 'object') {
-        walkNode(node.property);
-      }
-      if (node.callee && typeof node.callee === 'object') {
-        walkNode(node.callee);
-      }
-      // Handle control flow (if/else)
-      if (node.condition) walkNode(node.condition);
-      if (node.consequent) walkNode(node.consequent);
-      if (node.alternate) walkNode(node.alternate);
-      // Handle variable declarations
-      if (node.declaration) walkNode(node.declaration);
-      if (node.value && typeof node.value === 'object') walkNode(node.value);
     }
 
     for (const stmt of statements) {
       walkNode(stmt);
     }
+  }
+
+  // Visit every CallExpression under the given statements.
+  _walkCalls(statements, callback) {
+    const self = this;
+    this._walkNodes(statements, function (node) {
+      if (self._isCall(node)) callback(node);
+    });
+  }
+
+  // ---------------------------------------------------------------
+  // Does this function construct its own HostCalls?
+  //
+  // AssemblyScript's NewExpression carries `typeName` and `args` but no
+  // `expression`, so it is deliberately not a call as far as _isCall is
+  // concerned -- `new Foo()` is not a determinism violation and should not
+  // enter the call graph as one.
+  // ---------------------------------------------------------------
+  _constructsHostCalls(stmt) {
+    if (!stmt || !stmt.body || !stmt.body.statements) return false;
+    let found = false;
+    this._walkNodes(stmt.body.statements, function (node) {
+      if (found || !node.typeName) return;
+      const tn = node.typeName;
+      const name = (tn.identifier && tn.identifier.text) || tn.text ||
+        (tn.name && tn.name.text) || null;
+      if (name === "HostCalls") found = true;
+    });
+    return found;
+  }
+
+  // ---------------------------------------------------------------
+  // Structural test for a call node. Deliberately not `kind === NodeKind.Call`:
+  // NodeKind is a numeric enum whose values shift when AssemblyScript inserts
+  // a node type, and a stale number fails silently rather than loudly.
+  // ---------------------------------------------------------------
+  _isCall(node) {
+    return Array.isArray(node.args) && !!node.expression;
+  }
+
+  // ---------------------------------------------------------------
+  // Dotted name of the thing being called: "h.cleatCall", "Math.random",
+  // or a bare "helperFunction". Returns null if the callee is something
+  // more complicated than an identifier or a single property access.
+  // ---------------------------------------------------------------
+  _calleeName(callNode) {
+    if (!callNode || !callNode.expression) return null;
+    const target = callNode.expression;
+
+    // PropertyAccessExpression: { expression: <object>, property: Identifier }
+    if (target.property && target.expression) {
+      const objName = target.expression.text ||
+        (target.expression.name ? target.expression.name.text : null);
+      const propName = target.property.text ||
+        (target.property.name ? target.property.name.text : null);
+      if (objName && propName) return objName + "." + propName;
+      return null;
+    }
+
+    // IdentifierExpression: a direct call.
+    if (target.text) return target.text;
+    if (target.name && target.name.text) return target.name.text;
+    return null;
   }
 
   // ---------------------------------------------------------------
@@ -323,25 +452,8 @@ class CleatEntryTransformer {
       const calleeSet = new Set();
       const self = this;
 
-      self._walkStatements(stmt.body.statements, function(callExpr) {
-        if (!callExpr || !callExpr.callee) return;
-        const callee = callExpr.callee;
-        let calleeName = null;
-
-        // MemberExpression: h.cleatCall, Math.random, etc.
-        if (callee.object && typeof callee.object === 'object' && callee.property && typeof callee.property === 'object') {
-          const objName = callee.object.text || (callee.object.name ? callee.object.name.text : null);
-          const propName = callee.property.text || (callee.property.name ? callee.property.name.text : null);
-          if (objName && propName) {
-            calleeName = objName + "." + propName;
-          }
-        }
-
-        // Simple identifier (direct function call)
-        if (!calleeName && callee.text) {
-          calleeName = callee.text;
-        }
-
+      self._walkCalls(stmt.body.statements, function(callExpr) {
+        const calleeName = self._calleeName(callExpr);
         if (calleeName) {
           calleeSet.add(calleeName);
         }
@@ -415,11 +527,18 @@ class CleatEntryTransformer {
       const params = stmt.signature.parameters || [];
       const hasH = params.length > 0 && params[0] && params[0].name && params[0].name.text === "h";
 
-      if (!hasH) {
+      // ...or builds its own. A hand-written raw ABI export takes
+      // (argsPtr, argsLen, outPtr, maxOutLen) and does `let h = new HostCalls()`
+      // in its body -- it has host access, it just did not receive it from a
+      // caller. examples/widget-store-as/assembly/workflows.ts is exactly this
+      // shape, and the first time E005 ran for real it failed that build.
+      // E005 exists to catch a durable helper that CANNOT reach the host, not
+      // one that reaches it a different way.
+      if (!hasH && !this._constructsHostCalls(stmt)) {
         const loc = this._getSourceLocation(stmt, sourceName);
         const chain = this._traceCallChain(funcName, callGraph);
-        console.error(
-          "[cleat/transform] E005: Durable function '" + funcName + "' at " + loc + " is missing HostCalls parameter 'h'.\n" +
+        this._reportViolation(
+          "E005: Durable function '" + funcName + "' at " + loc + " is missing HostCalls parameter 'h'.\n" +
           "  → Add 'h: HostCalls' as the first parameter.\n" +
           "  → Call chain: " + chain.join(" → ")
         );
@@ -451,9 +570,24 @@ class CleatEntryTransformer {
   // Get formatted source location "(file:line)" from an AST node.
   // Tries node.range.start.line or node.name.range.start.line.
   // ---------------------------------------------------------------
+  // AssemblyScript's Range is { start: number, end: number, source: Source }
+  // -- start is a character offset, not a { line } object. The old
+  // `range.start.line !== undefined` test was therefore never true, so every
+  // diagnostic that did manage to fire pointed at a file with no line number.
+  // Source.lineAt(pos) is how AssemblyScript itself resolves one.
   _getSourceLocation(node, sourceName) {
     const range = node.range || (node.name ? node.name.range : null);
-    if (range && range.start && range.start.line !== undefined) {
+    if (!range) return sourceName;
+
+    if (range.source && typeof range.source.lineAt === "function" &&
+        typeof range.start === "number") {
+      const line = range.source.lineAt(range.start);
+      const col = typeof range.source.columnAt === "function" ? range.source.columnAt() : 0;
+      return sourceName + ":" + line + (col ? ":" + col : "");
+    }
+
+    // Pre-existing shape kept as a fallback for hand-built nodes in tests.
+    if (range.start && range.start.line !== undefined) {
       return sourceName + ":" + range.start.line;
     }
     return sourceName;

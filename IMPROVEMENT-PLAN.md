@@ -2642,6 +2642,11 @@ defects** — the shape being *a fallback that is computed and then never used*:
   So the fallback locates the file and then ignores it.
 - `cmd/cleat/main.go:852` — `asDir = dir`, likewise never read.
 
+  **Both are in `runVetAS`, and chasing them turned up §2.42 and §2.43.** They are not
+  independent: the function never runs the validation those variables were resolved for. See
+  §2.43 — and note that the reason it could not have been fixed earlier is §2.42, where the
+  validation it would have called turned out never to have run at all.
+
 Three more are trailing `argIdx++` at the end of a block (`plugins/scheduledbackup/commands.go`,
 `routes.go`, `plugins/webhookingest/host_functions.go`). Those are dead but *defensive* —
 removing them would make adding the next clause a silent bug — so enabling `ineffassign` means
@@ -2695,6 +2700,103 @@ The regression test is a pair, and only works as a pair:
 - `TestDevWatch_RebuildsOnUserSources` is the non-vacuity half. A filter returning `false` for
   everything satisfies the first test while turning `--watch` into a silent no-op; verified
   that this fails it.
+
+---
+
+### 2.42 The AssemblyScript determinism checks had never run — ✅ **FIXED**
+
+Found while chasing §2.40's second and third dead fallbacks (`runVetAS`). The transform
+carries determinism checks numbered **E001–E005** — `Math.random()`, `Date.now()`,
+`console.log()`, `process.*`, missing-HostCalls. On real AssemblyScript source, all of them
+were inert.
+
+**Two independent reasons, either one sufficient.**
+
+1. **The walker could not read AssemblyScript.** `_walkStatements` enumerated child
+   properties by ESTree/Babel name. AssemblyScript's AST uses different ones, and for the
+   node that matters most it has no such property at all:
+
+   | transform looked for | AssemblyScript has |
+   |---|---|
+   | `node.callee` (the call test itself) | `node.expression` |
+   | `callee.object` | `expression.expression` |
+   | `consequent` / `alternate` | `ifTrue` / `ifFalse` |
+   | `declaration` | `declarations` (array) |
+   | `init` | `initializer` |
+
+   `node.callee` was never truthy on a real parse, so every call graph came back empty,
+   `_findDurableLeaves` returned an empty set, and `if (durableLeaves.size === 0) continue`
+   skipped validation for every file. Measured on `examples/as-workflow`: `place_order`
+   calls `h.cleatCall` seven times and its recorded callee set was `[]`.
+
+2. **Violations were `console.error` and nothing else.** Even when a diagnostic did fire,
+   nothing consumed it. Verified before the fix: `Math.random()` inside a `@cleatEntry`
+   function → **asc exit 0, no diagnostic, a deployable `.wasm` produced.**
+
+**Why no test caught it.** `detects_math_random` hands `_validateDurableFunction` a synthetic
+AST literal built in the shape the walker assumed, and calls it directly — bypassing
+`afterParse`, the call graph, and the durable-leaf gate. It asserted the diagnostic *string*
+was producible, which was true the whole time. The fixture agreed with the bug.
+
+**Fixed.** The walk is now shape-agnostic — it visits every own property rather than a list
+of names, so it cannot miss a node kind the way a name list rots when AssemblyScript adds
+one. Skipping the back-references (`node.range.source.statements` is the whole file) and a
+cycle guard are the cost. Violations are collected and thrown at the end of `afterParse`,
+which is what makes `asc` fail. `CLEAT_AS_ALLOW_NONDETERMINISM=1` downgrades them to loud
+warnings so a false positive cannot block anyone.
+
+**Two further defects fell out of it, both found only by running the thing:**
+
+- **Entry points were not in the durable closure.** It was seeded only from functions making
+  an `h.*` call, so a `@cleatEntry` workflow that happens not to call the host was never
+  validated — exactly the workflow whose only nondeterminism is a bare `Math.random()`. An
+  entry point *is* durable; it now seeds the closure.
+- **E005 false positive, caught on a real example.** The first real run failed the
+  `examples/widget-store-as` build: `checkoutWorkflow` is a hand-written raw ABI export
+  taking `(argsPtr, argsLen, outPtr, maxOutLen)` that does `let h = new HostCalls()` in its
+  body. It has host access, it just did not receive it from a caller. E005 exists to catch a
+  durable helper that *cannot* reach the host, so it now also accepts one that constructs its
+  own.
+
+**Verified:** E001/E002/E003 each fail the build with a real `line:column` (location never
+resolved before either — `Range.start` is a character offset, and the code tested
+`range.start.line !== undefined`, which was never true). The escape hatch lets a build
+through while still printing. All three AS projects in the repo build clean. The new
+`rejects_nondeterminism` test was confirmed to fail under each of the three fixes reverted
+separately.
+
+**Not verified, and left open:** I could not construct a *compilable* true positive for E005.
+The obvious fixture — a durable helper referencing `h` without receiving it — is rejected by
+AssemblyScript's own type checker first. E005 may be unreachable in code that compiles at
+all. It is left enabled, since the false positive above is fixed and it costs nothing, but
+nobody should treat it as a check known to work.
+
+**Also still open:** the durable closure propagates *upward* only (callers of a durable
+function become durable). A pure helper called *by* a workflow, making no host calls of its
+own, is not validated — so `Math.random()` inside it is still missed. Downward propagation is
+the obvious fix but risks false positives across the SDK, and I had no evidence about how
+noisy it would be.
+
+---
+
+### 2.43 `cleat vet --target assemblyscript` cannot fail — 🔴 **OPEN**
+
+The remaining two of §2.40's three dead fallbacks are both in `runVetAS`, and they are
+symptoms of the same thing: **the function never vets anything.**
+
+- `cmd/cleat/main.go:852` — `asDir = dir` is computed and never read.
+- `cmd/cleat/main.go:901` — the transform-file candidate search finds an alternative, assigns
+  `transformFile`, and only the `found` flag survives.
+- `nodePath` is resolved and then discarded with `_ = nodePath`.
+
+The comment says "Run the AS transform's vet validation via Node.js" — no node process is
+ever started. Every path returns 0, after printing a line that reads like a check ran. The
+three dead assignments are the residue of the validation that was going to use them.
+
+Now that §2.42 makes the transform's checks real, the fix is available in a way it was not
+before: run `asc --noEmit` with the transform and let it fail. Left open here because it
+needs a decision about requiring `node_modules`/`asc` for `cleat vet`, which changes the
+command's contract.
 
 ---
 
