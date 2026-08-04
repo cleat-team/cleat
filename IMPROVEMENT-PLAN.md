@@ -640,10 +640,17 @@ connecting role is subject to RLS before asserting anything about tenants.
 
 **Still open on §1.7:**
 
-- MySQL and SQL Server isolation tests. MSSQL should behave like Postgres (its seven policies
-  were verified enforcing, see above). MySQL has no row-level security at all, so its
-  isolation rests entirely on per-tenant databases and needs its own test rather than a
-  shared one that would imply a backstop it does not have.
+- ~~MySQL and SQL Server isolation tests.~~ **Both written.** MySQL passes against a live
+  8.4 (`tenant_isolation_mysql_test.go`), and is kept as a separate test rather than folded
+  into a shared multi-dialect one on purpose: MySQL has no row-level security at all, so its
+  isolation is entirely structural — a per-tenant *database* — and a shared test would read
+  as though it had the same backstop the other two do. It does not, which means on MySQL a
+  bug in the HTTP layer is the whole of the exposure. Reverting the fix fails it with
+  `Table 'cleat_00000000_0000_0000_0000_000000000000.workflow_instances' doesn't exist` —
+  the defect stated in one line, the request served from the default tenant's database.
+
+  SQL Server is written but **skipped, blocked on §2.71** — see below. Unskipping it is that
+  item's acceptance test.
 - The ~89 unaudited `MySQLStore` `s.tenantID` call sites (see the `requireTenant` note
   elsewhere in this plan). Scoping the store does not audit them.
 - ~~Whether the shipped deployment actually connects as `cleat_app` rather than a
