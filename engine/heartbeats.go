@@ -80,7 +80,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 
 			if res.err != nil {
 				written, _ := s.writeResult(ctx, m, responsePtr, res.err.Error(), responseMaxLen)
-				return packDurableCallResult(int(written), 1, 1)
+				return packDurableCallResult(int(written), callFailureCode, 1)
 			}
 			written, _ := s.writeResult(ctx, m, responsePtr, res.resp, responseMaxLen)
 			return packDurableCallResult(int(written), 0, 0)
@@ -117,8 +117,10 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 				rec.Step, rec.EventType,
 				truncateWithHash(requestJSON, maxPayloadLen),
 				truncateWithHash(rec.Request, maxPayloadLen))
+			// Not retryable: a divergence is a bug in the workflow code, and
+			// running the same call again produces the same divergence.
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
@@ -129,8 +131,10 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 				rec.Step, service, operation, rec.Service, rec.Op,
 				truncateWithHash(requestJSON, maxPayloadLen),
 				truncateWithHash(rec.Request, maxPayloadLen))
+			// Not retryable: a divergence is a bug in the workflow code, and
+			// running the same call again produces the same divergence.
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
 		// Detect a pending call intent: the external call was dispatched
@@ -143,13 +147,19 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)
+			// Not retryable, and this is the case the old blanket "timeout"
+			// got most wrong: the call may well have succeeded. Telling the
+			// guest to retry is telling it to risk a duplicate side effect.
 			written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 
 		if rec.Err != "" {
+			// callFailureCode, the same constant the fresh path uses, because
+			// the class was never persisted -- see the note on it. These two
+			// must agree or the same step changes retryability on replay.
 			written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
-			return packDurableCallResult(int(written), 1, 1)
+			return packDurableCallResult(int(written), callFailureCode, 1)
 		}
 
 		written, _ := s.writeResult(ctx, m, responsePtr, rec.Response, responseMaxLen)

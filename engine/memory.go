@@ -205,14 +205,6 @@ func packDurableCallResult(responseLen int, callErrorCode, errCode byte) int64 {
 	return int64(uint64(responseLen)<<40 | uint64(callErrorCode)<<8 | uint64(errCode))
 }
 
-// callErrorInvalidRequest mirrors cleat.CallErrorInvalidRequest, the guest-side
-// classification for a request the host refused to interpret.
-//
-// It is redeclared here rather than imported because engine does not depend on
-// the cleat package. TestCallErrorCodeMatchesGuestSDK asserts the two agree, so
-// this cannot drift silently.
-const callErrorInvalidRequest byte = 4
-
 // badParamDurableCall is the bad-parameter result for the host functions whose
 // guest adapter decodes the packDurableCallResult layout: cleat_call,
 // cleat_call_retry, cleat_call_heartbeat, cleat_plugin_call and

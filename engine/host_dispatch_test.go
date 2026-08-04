@@ -684,8 +684,11 @@ func TestCancellationObservedEndToEnd(t *testing.T) {
 
 	errCode := byte(result & 0xFF)
 	callErrorCode := byte((result >> 8) & 0xFF)
-	if errCode != 1 || callErrorCode != 1 {
-		t.Fatalf("expected cancellation error flags (errCode=1, callErrorCode=1), got errCode=%d callErrorCode=%d (raw=%d)", errCode, callErrorCode, result)
+	// callErrorUnknown, not the old CallErrorTimeout: a cancelled workflow is
+	// the one case where retrying the call is exactly what the caller must not
+	// do, and Timeout reports as retryable.
+	if errCode != 1 || callErrorCode != callErrorUnknown {
+		t.Fatalf("expected cancellation error flags (errCode=1, callErrorCode=%d), got errCode=%d callErrorCode=%d (raw=%d)", callErrorUnknown, errCode, callErrorCode, result)
 	}
 	respLen := uint32(result >> 40)
 	written := string(buf[:respLen])

@@ -67,8 +67,8 @@ func TestDurableCall_ReplayCachedError(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("expected errCode 1, got %d", errCode)
 	}
-	if callErrorCode != 1 {
-		t.Errorf("expected callErrorCode 1, got %d", callErrorCode)
+	if callErrorCode != callFailureCode {
+		t.Errorf("callErrorCode = %d, want %d -- a service failure the engine cannot classify further", callErrorCode, callFailureCode)
 	}
 }
 
