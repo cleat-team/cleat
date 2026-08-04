@@ -78,8 +78,16 @@ echo "OK: all $count top-level Go package dirs are covered or exempt."
 # `tests` is exempt above on the stated grounds that its suites are "driven by
 # their own dedicated CI jobs". That was an assertion, not a check, and it was
 # false for six of the seven suites: tests/cluster, tests/integrity,
-# tests/upgrade, tests/soak, tests/scale and tests/cross-language are named by
-# no workflow file at all. Only tests/plugin-harness is actually run.
+# tests/upgrade, tests/soak, tests/scale and tests/cross-language were named by
+# no workflow file at all. Only tests/plugin-harness was actually run.
+#
+# tests/integrity was wired into the test-go matrix on 2026-08-04 and dropped
+# from the list below. What it found on its first real run is the argument for
+# clearing the rest: 22 of its 30 tests failed immediately against a migrated
+# database (its fixture invented its own schema, without the foreign key
+# production has), and behind that sat a real engine defect -- the event
+# checksum chain was restarted on every write, so every workflow that suspends
+# and resumes verified as corrupt. See IMPROVEMENT-PLAN 2.30.
 #
 # That is the same defect this whole guard exists to catch -- an enumeration
 # that rotted -- hiding inside the guard's own exemption list. An exemption
@@ -96,7 +104,7 @@ echo "OK: all $count top-level Go package dirs are covered or exempt."
 # tracked in IMPROVEMENT-PLAN.md Phase 2. Removing a name from this list when
 # you wire its suite up must never fail the build; adding one requires saying
 # why here.
-UNWIRED_SUITES="cluster cross-language integrity scale soak upgrade"
+UNWIRED_SUITES="cluster cross-language scale soak upgrade"
 
 unreferenced=""
 regressed=""

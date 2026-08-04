@@ -2069,6 +2069,67 @@ stored checksum, not from an empty string
 agreement by weakening what verification catches, so it rewrites a persisted event's `payload`
 and requires the mismatch to still be reported.
 
+### 2.31 `tests/integrity` had never run — ✅ **DONE**
+
+Thirty tests covering replay determinism, checksum-chain verification, WAL corruption
+detection, compaction and the durable-call ambiguity detector — including
+`TestPendingSentinelDetection`, the only evidence that the detector kept in 1.4 Phase A
+actually works. All of it in `UNWIRED_SUITES`, run by no job.
+
+Run locally with no database it reports `ok 5.074s`. **All thirty tests skip.** That is the
+whole result: a green line with nothing behind it.
+
+Pointed at a real PostgreSQL, 22 of the 30 failed at once, every one of them on
+`workflow_instances_def_name_def_version_fkey`. The suite built its own schema with
+`CREATE TABLE IF NOT EXISTS`, and the `workflow_instances` it invented had no foreign key to
+`workflow_defs` — so the fixture and production had diverged, and nothing ran to notice. The
+same shape `engine/fault_test.go` documents in its own history.
+
+The helper now takes its connection from `engine/testutil`, which builds the schema from
+`migrations/postgres/` and *fails* rather than skips when `CLEAT_TEST_DB` is set but
+unreachable. Sixty lines of hand-rolled DDL deleted.
+
+What the remaining eight failures were, once the schema was real:
+
+| Failure | Cause |
+|---|---|
+| 3 × checksum mismatch | A real engine defect — §2.30 |
+| `TestConcurrentStatusUpdates` | Passed a hardcoded `generation = 0` to `CompleteWorkflow` after `ClaimWorkflow` had bumped it, so it counted the fence *working* as an error |
+| `TestWalCorruption_PayloadTampering` | Tampered with the `operation` column, which the checksum does not cover — §2.32 |
+
+**Wired into the `test-go` matrix**, which already provides both things it needs: a PostgreSQL
+service, and CGO (via `-race`) for the wasmtime backend. Budget `test-go/integrity 0`, and
+that number is load-bearing: with CGO off, seven tests skip on "wasmtime backend requires
+CGO", so a nonzero count means the job stopped testing the primary backend.
+
+Final: **68 pass, 0 skip, 0 fail** (67s, CGO on, live PostgreSQL 16).
+
+Five suites remain in `UNWIRED_SUITES`: `cluster`, `cross-language`, `scale`, `soak`,
+`upgrade`. On this evidence, assume each contains failures rather than coverage.
+
+### 2.32 The checksum covers `payload`; every SQL consumer reads the shadow columns — 🔶 **OPEN**
+
+`event_history` stores each event twice: in the individual columns (`service`, `operation`,
+`request`, `response`, …) and again in a `payload` JSONB. `LoadEventHistory` scans the columns
+first and then overwrites them from `payload` whenever it is non-NULL, so **`payload` is
+authoritative** and it is the only copy `computeEventChecksum` covers.
+
+Consequence: `UPDATE event_history SET operation = 'something-else'` is undetectable.
+`VerifyWorkflowEvents` reports the workflow clean, replay is unaffected — and every SQL
+consumer that reads the columns (the admin dashboard, `cleatctl`, ad-hoc queries, metrics)
+shows the altered value. An integrity checker that certifies a row whose displayed contents
+are a lie is doing half the job.
+
+`TestWalCorruption_PayloadTampering` asserted the opposite and could never have passed; it now
+tampers with `payload`, and carries a second assertion pinning the gap so that closing this
+item forces the test to be updated rather than leaving a stale claim.
+
+**Not a drop-in fix.** Extending the checksum to the shadow columns invalidates every checksum
+already stored, so it needs a migration or a versioned checksum. The alternatives are to have
+verification compare columns against `payload` (cheap, no migration, detects divergence
+without changing the chain), or to stop writing the duplicates at all and treat `payload` as
+the sole record. The third is the real fix and the largest.
+
 ---
 
 ## Salvage register — PR #208, closed unmerged

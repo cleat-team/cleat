@@ -4,100 +4,48 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 
 	_ "github.com/lib/pq"
 )
 
 // testDB returns a database connection for integrity tests.
-// It skips the test if no database is available or in short mode.
+//
+// The schema comes from engine/testutil, which builds it from
+// migrations/postgres/. It is deliberately not built here: the previous version
+// of this helper created every table itself with CREATE TABLE IF NOT EXISTS,
+// and the workflow_instances it invented had no foreign key to workflow_defs.
+// Against a real migrated database that difference failed 22 of the 30 tests in
+// this package on workflow_instances_def_name_def_version_fkey. Nobody found
+// out, because the suite was in UNWIRED_SUITES (see
+// scripts/check-ci-package-coverage.sh) and no job ran it.
+//
+// testutil.TestDB also fails, rather than skips, when CLEAT_TEST_DB is set but
+// unreachable -- so a database that stops arriving empties this job loudly
+// instead of quietly.
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("Skipping integrity test in short mode")
-	}
-	dsn := os.Getenv("CLEAT_TEST_DB")
-	if dsn == "" {
-		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
-	}
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Skipf("Skipping: no database available: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping: cannot ping database: %v", err)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
+
+	// Almost every test in this package inserts a workflow_instances row with
+	// def_name='test', def_version=1, and the foreign key requires the
+	// definition to exist first. Seeded once here rather than at each of the
+	// sixteen insert sites.
+	if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ('test', 1, '\x00', '{}') ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatalf("seed workflow_defs(test, 1): %v", err)
 	}
 
-	// Clean up any leftover test data from previous runs.
+	// Clean up any leftover test data from previous runs. Children first: the
+	// same foreign keys apply to deletes.
 	db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE 'int-%'`)
 	db.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'int-%'`)
 
-	// Ensure full schema exists.
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_defs (
-		name TEXT NOT NULL, version INTEGER NOT NULL,
-		wasm_bytes BYTEA NOT NULL, entry_points TEXT[] NOT NULL DEFAULT '{}',
-		min_version INTEGER NOT NULL DEFAULT 0,
-		max_history_length INTEGER NOT NULL DEFAULT 0,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (name, version))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_instances (
-		id TEXT PRIMARY KEY, def_name TEXT NOT NULL, def_version INTEGER NOT NULL DEFAULT 1,
-		status TEXT NOT NULL DEFAULT 'ready', input JSONB NOT NULL DEFAULT '{}',
-		assigned_to TEXT, heartbeat_at TIMESTAMPTZ,
-		next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(), completed_at TIMESTAMPTZ,
-		result JSONB, error_msg TEXT, parent_workflow_id TEXT,
-		trace_id TEXT,
-		query_state JSONB DEFAULT '{}', task_queue TEXT NOT NULL DEFAULT 'default',
-		cancellation_requested BOOLEAN NOT NULL DEFAULT false,
-		cancellation_reason TEXT, sticky_worker_id TEXT)`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS event_history (
-		workflow_id TEXT NOT NULL, step INTEGER NOT NULL,
-		event_type TEXT NOT NULL DEFAULT 'call',
-		service TEXT, operation TEXT, request JSONB, response JSONB, error TEXT,
-		duration_ms BIGINT, signal_names TEXT, timeout_ms BIGINT,
-		signal_name TEXT, signal_payload JSONB, defer_description TEXT,
-		defer_id TEXT, child_name TEXT, child_input JSONB, run_id TEXT,
-		new_input JSONB, plugin_name TEXT, plugin_func TEXT,
-		plugin_input JSONB, plugin_output JSONB, plugin_error TEXT,
-		promise_name TEXT, promise_id TEXT, promise_result TEXT, promise_error TEXT,
-		payload JSONB,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (workflow_id, step))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_signals (
-		workflow_id TEXT NOT NULL, signal_name TEXT NOT NULL,
-		payload JSONB NOT NULL DEFAULT '{}',
-		delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (workflow_id, signal_name))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_promises (
-		workflow_id TEXT NOT NULL, promise_id TEXT NOT NULL,
-		promise_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-		result JSONB, error_msg TEXT,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(), resolved_at TIMESTAMPTZ,
-		PRIMARY KEY (workflow_id, promise_id))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_schedules (
-		name TEXT PRIMARY KEY, def_name TEXT NOT NULL,
-		entry_point TEXT NOT NULL DEFAULT '', cron_expression TEXT NOT NULL,
-		input JSONB NOT NULL DEFAULT '{}', enabled BOOLEAN NOT NULL default true,
-		next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_run_at TIMESTAMPTZ,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS concurrency_keys (
-		key_hash BYTEA PRIMARY KEY, key_text TEXT NOT NULL,
-		workflow_id TEXT NOT NULL, acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		expires_at TIMESTAMPTZ NOT NULL)`)
-	db.Exec(`CREATE EXTENSION IF NOT EXISTS pgcrypto`)
-	// Add columns added via schema migrations that may not be in minimal tables.
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS compaction_state JSONB`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS compacted_at TIMESTAMPTZ`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS compaction_step INTEGER`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS tenant_id TEXT`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS sticky_worker_id TEXT`)
-	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS payload JSONB`)
 	return db
 }
 
