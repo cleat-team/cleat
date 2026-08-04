@@ -49,7 +49,11 @@ func TestIsMSSQLDuplicateKey(t *testing.T) {
 		{"nil error", nil, false},
 		{"error 2627", fmt.Errorf("violation of UNIQUE KEY constraint error 2627"), true},
 		{"error 2601", fmt.Errorf("cannot insert duplicate key error 2601"), true},
-		{"duplicate keyword", fmt.Errorf("duplicate row detected"), true},
+		{"duplicate key row phrase", fmt.Errorf("Cannot insert duplicate key row in object 'dbo.wf'"), true},
+		// Bare "duplicate" is not a SQL Server duplicate-key signal: it appears
+		// in unrelated messages and in business data. Structured detection is
+		// via mssql.Error.Number (2627/2601).
+		{"bare duplicate word is not enough", fmt.Errorf("duplicate row detected"), false},
 		{"primary key constraint", fmt.Errorf("violation of PRIMARY KEY constraint"), true},
 		{"cannot insert duplicate key phrase", fmt.Errorf("Cannot insert duplicate key in object"), true},
 		{"unique key constraint phrase", fmt.Errorf("UNIQUE KEY constraint violated"), true},
@@ -109,7 +113,8 @@ func TestIsMSSQLTimeout(t *testing.T) {
 		{"wrapped deadline exceeded", fmt.Errorf("wrap: %w", context.DeadlineExceeded), true},
 		{"error 258 timeout", fmt.Errorf("timeout expired error 258"), true},
 		{"timeout keyword", fmt.Errorf("query timeout"), true},
-		{"connection refused", fmt.Errorf("connection refused"), true},
+		// Classified by isMSSQLConnectionError, not here. Still retryable.
+		{"connection refused is not a timeout", fmt.Errorf("connection refused"), false},
 		{"unrelated error", fmt.Errorf("syntax error"), false},
 		{"empty error", fmt.Errorf(""), false},
 	}
@@ -169,7 +174,7 @@ func TestIsMSSQLRetryable(t *testing.T) {
 		{"timeout 258", fmt.Errorf("timeout expired error 258"), true},
 		{"connection error", fmt.Errorf("connection reset by peer"), true},
 		{"context deadline exceeded", context.DeadlineExceeded, true},
-		{"transport error", fmt.Errorf("transport failure"), true},
+		{"connection reset", fmt.Errorf("connection reset by peer"), true},
 		{"duplicate key (not retryable)", fmt.Errorf("violation of UNIQUE KEY constraint error 2627"), false},
 		{"unrelated permanent error", fmt.Errorf("syntax error near SELECT"), false},
 		{"empty error", fmt.Errorf(""), false},

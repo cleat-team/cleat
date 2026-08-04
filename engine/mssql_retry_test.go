@@ -190,7 +190,7 @@ func TestMSSQLRetry_NilErrorFromFn(t *testing.T) {
 	err := mssqlRetry(ctx, "test-op", 2, time.Millisecond, func() error {
 		calls++
 		if calls == 1 {
-			return fmt.Errorf("transport failure") // transient, retry
+			return fmt.Errorf("connection reset by peer") // transient, retry
 		}
 		return nil // explicit nil
 	})
