@@ -38,6 +38,10 @@ func (s *apiServer) handleInstancesRoutes(w http.ResponseWriter, r *http.Request
 
 // handleGetInstanceEvents returns paginated event history for a workflow instance.
 func (s *apiServer) handleGetInstanceEvents(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	offset := 0
 	limit := 1000
 	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v >= 0 {
@@ -50,13 +54,13 @@ func (s *apiServer) handleGetInstanceEvents(w http.ResponseWriter, r *http.Reque
 		limit = 1000
 	}
 
-	total, err := s.store.CountEventHistory(r.Context(), id)
+	total, err := st.CountEventHistory(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
 
-	history, err := s.store.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
+	history, err := st.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -71,7 +75,11 @@ func (s *apiServer) handleGetInstanceEvents(w http.ResponseWriter, r *http.Reque
 
 // handleGetInstanceState returns the full workflow instance state.
 func (s *apiServer) handleGetInstanceState(w http.ResponseWriter, r *http.Request, id string) {
-	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return

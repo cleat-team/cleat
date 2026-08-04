@@ -324,7 +324,7 @@ func TestStartAPIServer_EmptyAddr(t *testing.T) {
 	cfg := &Config{}
 	w := newTestWorker(&mockStore{})
 	// Should return immediately without starting a server (no panic).
-	StartAPIServer(cfg, w, nil, nil, nil, nil)
+	StartAPIServer(cfg, w, nil, nil, nil, nil, nil)
 }
 
 func TestStartAPIServer_WithNilMux(t *testing.T) {
@@ -334,5 +334,5 @@ func TestStartAPIServer_WithNilMux(t *testing.T) {
 
 	cfg := &Config{APIAddr: "localhost:0"}
 	// Should create a new mux and start a server in background without panic.
-	StartAPIServer(cfg, w, nil, nil, nil, nil)
+	StartAPIServer(cfg, w, nil, nil, nil, nil, nil)
 }

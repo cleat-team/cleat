@@ -68,6 +68,10 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 // It answers 404, never 403: 403 would confirm that the workflow exists, which
 // is itself information the caller is not entitled to.
 func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id string) bool {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return false
+	}
 	caller, ok := auth.TenantIDFromContext(r.Context())
 	if !ok {
 		// No tenant on the request means authentication is disabled
@@ -77,7 +81,7 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 		return true
 	}
 
-	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return false
