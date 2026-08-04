@@ -209,6 +209,7 @@ func main() {
 		stores := make([]engine.WorkflowStore, len(configs))
 		closers := make([]func() error, len(configs))
 		shardDBs := make([]*sql.DB, len(configs))
+		shardFactories := make([]engine.StoreFactory, 0, len(configs))
 		for i, cfg := range configs {
 			dsn := cfg.ConnStr
 			if cfg.Schema != "" && cfg.Schema != "public" && !strings.Contains(dsn, "search_path=") {
@@ -238,9 +239,7 @@ func main() {
 			if payloadEncryption != nil {
 				f.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 			}
-			if i == 0 {
-				factory = f
-			}
+			shardFactories = append(shardFactories, f)
 			s, closer, err := f.OpenStore(ctx, defaultTenantID, taskQueues...)
 			if err != nil {
 				sdb.Close()
@@ -257,6 +256,12 @@ func main() {
 			os.Exit(1)
 		}
 		store = shardedStore
+
+		// Span every shard, not just the first. This used to be `factory = f`
+		// under `if i == 0`, which was harmless while the factory was only used
+		// for background work but would have narrowed every tenant-scoped HTTP
+		// request to shard 0 once handlers started opening stores from it.
+		factory = &shardedStoreFactory{configs: configs, factories: shardFactories}
 		defer shardedStore.Close()
 
 		// Use the first shard's database for plugin migrations and
@@ -874,7 +879,15 @@ func main() {
 	// Start HTTP API server if configured.
 
 	if *apiAddr != "" {
-		api := &apiServer{store: store, worker: w, maxBodySize: *maxBodySize, db: db}
+		api := &apiServer{
+			store:       store,
+			worker:      w,
+			maxBodySize: *maxBodySize,
+			db:          db,
+			factory:     factory,
+			taskQueues:  taskQueues,
+			requireAuth: *requireAuth,
+		}
 
 		// Use plugin mux if available, otherwise create a fresh one.
 		mux := plugMux

@@ -54,10 +54,114 @@ type createDefRequest struct {
 // ---- HTTP API server ----
 
 type apiServer struct {
+	// store is the process-wide store, opened at startup against
+	// engine.DefaultTenantUUID. It is NOT safe to serve authenticated requests
+	// from: it is scoped to the default tenant, so every caller would read and
+	// write that one tenant's data regardless of who they authenticated as.
+	// Handlers must go through storeFor. See the storeFor doc comment.
 	store       engine.WorkflowStore
 	worker      *Worker
 	maxBodySize int64
 	db          *sql.DB
+
+	// factory opens per-tenant stores. Every backend already implements the
+	// tenant scoping this needs -- PostgreSQL sets cleat.tenant_id via
+	// set_config so its RLS policies apply, SQL Server hands out a per-tenant
+	// pool whose connector calls sp_set_session_context, and MySQL routes to a
+	// per-tenant database. All three cache their pools, so opening a store per
+	// request is a struct allocation and a map lookup, not a new connection.
+	factory engine.StoreFactory
+
+	// taskQueues is passed through to factory.OpenStore so a request-scoped
+	// store polls the same queues as the process-wide one.
+	taskQueues []string
+
+	// requireAuth mirrors --require-auth. It decides what an unauthenticated
+	// request means: with auth on, no tenant in context is a bug or a bypass
+	// attempt and is refused; with auth off, there is only ever one tenant and
+	// the default-tenant store is correct. See storeFor.
+	requireAuth bool
+}
+
+// errNoTenant is returned by storeFor when a request carries no authenticated
+// tenant and the server is configured to require one.
+var errNoTenant = errors.New("request has no authenticated tenant")
+
+// storeFor returns a WorkflowStore scoped to the tenant that authenticated
+// this request.
+//
+// This is the fix for the defect where callers authenticated per-tenant and
+// were then all served from one hardcoded scope: apiServer.store is opened once
+// at startup against engine.DefaultTenantUUID, so a handler using it directly
+// reads and writes the default tenant's rows no matter who is calling. The real
+// row-level security underneath is not bypassed by being defeated -- it is
+// bypassed by being handed the wrong tenant, which it then enforces faithfully.
+//
+// Failure is closed. When --require-auth is on, a request that reached a
+// handler without a tenant in its context does not fall back to the default
+// tenant; it is refused. The fallback is what the bug was.
+//
+// When --require-auth is off there is no tenant to scope to and only one tenant
+// exists, so the process-wide store is returned deliberately. That is the single
+// documented path to the default scope, rather than the previous situation where
+// every handler took it silently.
+func (s *apiServer) storeFor(r *http.Request) (engine.WorkflowStore, error) {
+	tid, ok := auth.TenantIDFromContext(r.Context())
+	if !ok {
+		if s.requireAuth {
+			return nil, errNoTenant
+		}
+		return s.store, nil
+	}
+
+	// A tenant is present but nothing can scope to it. Refusing is the only
+	// safe answer: returning s.store here would serve one tenant's request
+	// from another tenant's data, which is the exact defect this function
+	// exists to close.
+	if s.factory == nil {
+		return nil, fmt.Errorf("no store factory configured, cannot scope request to tenant %s", tid)
+	}
+
+	st, _, err := s.factory.OpenStore(r.Context(), tid.String(), s.taskQueues...)
+	if err != nil {
+		return nil, fmt.Errorf("open store for tenant %s: %w", tid, err)
+	}
+	return st, nil
+}
+
+// tenantFor returns the tenant ID a request's writes should be attributed to:
+// the authenticated tenant when there is one, and the default tenant otherwise
+// (which storeFor only permits when --require-auth is off).
+//
+// Handlers that pass a tenant to the store as a *value* need this rather than
+// storeFor alone. Scoping the store is not sufficient for those: StartNewRun
+// takes a tenantID argument, so a scoped store still writes wherever that
+// argument says.
+func (s *apiServer) tenantFor(r *http.Request) string {
+	if tid, ok := auth.TenantIDFromContext(r.Context()); ok {
+		return tid.String()
+	}
+	return engine.DefaultTenantUUID
+}
+
+// scopedStore resolves the request's tenant-scoped store and writes the error
+// response itself when it cannot, returning ok=false. Handlers use this so the
+// refusal is uniform and cannot be forgotten at an individual call site.
+//
+// The status codes distinguish the two failures: a missing tenant is the
+// caller's problem (401), while a factory that cannot open a store for a tenant
+// that did authenticate is the server's (500).
+func (s *apiServer) scopedStore(w http.ResponseWriter, r *http.Request) (engine.WorkflowStore, bool) {
+	st, err := s.storeFor(r)
+	if err != nil {
+		if errors.Is(err, errNoTenant) {
+			s.writeError(w, http.StatusUnauthorized, "authentication required")
+			return nil, false
+		}
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	return st, true
 }
 
 func (s *apiServer) writeJSON(w http.ResponseWriter, status int, v any) {
@@ -148,6 +252,10 @@ func (s *apiServer) handleDrainStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleWorkflowsList handles GET /api/workflows (without trailing path).
 func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodGet {
 		s.writeError(w, 405, "method not allowed")
 		return
@@ -160,7 +268,7 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		Search:        q.Get("search"),
 		Limit:         100,
 	}
-	workflows, err := s.store.ListWorkflows(r.Context(), filter)
+	workflows, err := st.ListWorkflows(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -241,9 +349,13 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	// Check if this is a query state request.
 	if key := r.URL.Query().Get("key"); key != "" {
-		value, err := s.store.GetQueryState(r.Context(), id, key)
+		value, err := st.GetQueryState(r.Context(), id, key)
 		if err != nil {
 			s.writeError(w, 500, err.Error())
 			return
@@ -253,7 +365,7 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 	}
 
 	// Return full workflow info.
-	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -266,6 +378,10 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 }
 
 func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, name string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	if s.worker.draining.Load() {
 		s.writeError(w, 503, "worker is draining; cannot accept new workflows")
 		return
@@ -308,16 +424,35 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Resolve tenant_id: prefer tenant_id, fall back to deprecated namespace.
+	//
+	// The authenticated tenant is authoritative and overrides both. Before this,
+	// tenantID came from the request body unchecked, so any authenticated caller
+	// could start a workflow in any tenant by naming it in the JSON -- a
+	// cross-tenant *write*, which scoping the store alone does not close because
+	// StartNewRun takes the tenant as an argument.
+	//
+	// A body value that disagrees is refused rather than quietly overridden: a
+	// caller that asked for another tenant has either misconfigured something or
+	// is probing, and silently writing somewhere other than where they asked is
+	// its own bug. When auth is off there is no authenticated tenant to compare
+	// against and the body value stands, which is how single-tenant and local
+	// deployments address a tenant at all.
 	tenantID := input.TenantID
 	if tenantID == "" {
 		tenantID = input.Namespace
 	}
-	if tenantID == "" {
+	if authTenant, ok := auth.TenantIDFromContext(r.Context()); ok {
+		if tenantID != "" && tenantID != authTenant.String() {
+			s.writeError(w, http.StatusForbidden, "tenant_id does not match the authenticated tenant")
+			return
+		}
+		tenantID = authTenant.String()
+	} else if tenantID == "" {
 		tenantID = engine.DefaultTenantUUID
 	}
 
 	// Find the latest version of this workflow.
-	versions, err := s.store.ListVersions(r.Context(), name)
+	versions, err := st.ListVersions(r.Context(), name)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -330,7 +465,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// Check A/B routing rules: if a routing rule matches, use the specified
 	// version instead of the default latest.
 	targetVersion := versions[0] // default: latest
-	if routedVersion, routedErr := s.store.PickVersionByRouting(r.Context(), name); routedErr == nil && routedVersion > 0 {
+	if routedVersion, routedErr := st.PickVersionByRouting(r.Context(), name); routedErr == nil && routedVersion > 0 {
 		targetVersion = routedVersion
 		slog.InfoContext(r.Context(), "A/B routing applied",
 			"workflow", name,
@@ -360,7 +495,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	// Redact sensitive fields in the input before storing.
 	in = json.RawMessage(engine.Redact(string(in)))
-	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority)
+	runID, alreadyExisted, err := st.StartNewRun(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -372,7 +507,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 
 	// Propagate W3C trace context from incoming request.
 	if traceID := extractTraceIDFromTraceParent(r.Header.Get("traceparent")); traceID != "" {
-		if err := s.store.TraceWorkflow(r.Context(), runID, traceID); err != nil {
+		if err := st.TraceWorkflow(r.Context(), runID, traceID); err != nil {
 			slog.Warn("failed to set trace_id", "run_id", runID, "error", err)
 		}
 	}
@@ -380,7 +515,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// If concurrency key is specified, try to acquire it for the new run.
 	if concurrencyKey != "" {
 		ttl := 30 * time.Minute
-		acquired, err := s.store.AcquireConcurrencyKey(r.Context(), concurrencyKey, runID, ttl)
+		acquired, err := st.AcquireConcurrencyKey(r.Context(), concurrencyKey, runID, ttl)
 		if err != nil {
 			s.writeError(w, 500, err.Error())
 			return
@@ -406,7 +541,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 			// against a worker that claimed the run in the window since
 			// StartNewRun — that worker's own fenced write then returns
 			// ErrFenceLost and it stops.
-			if err := s.store.TerminateWorkflow(context.Background(), runID, "concurrency key conflict: "+concurrencyKey); err != nil {
+			if err := st.TerminateWorkflow(context.Background(), runID, "concurrency key conflict: "+concurrencyKey); err != nil {
 				// The run is live and will execute despite the 409 below.
 				// Report it rather than letting the client believe the key
 				// was enforced.
@@ -424,6 +559,10 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		SignalName string `json:"signal_name"`
 		Payload    string `json:"payload"`
@@ -449,7 +588,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	// Check signal authorization for HTTP API callers.
 	// External callers have no defName; they must be allowed via "*" wildcard.
 	if s.worker.requireSignalAuth != nil && *s.worker.requireSignalAuth {
-		callers, err := s.store.GetAllowedSignalCallers(r.Context(), id)
+		callers, err := st.GetAllowedSignalCallers(r.Context(), id)
 		if err != nil {
 			s.writeError(w, 500, err.Error())
 			return
@@ -459,7 +598,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 			return
 		}
 	}
-	if err := s.store.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
+	if err := st.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
@@ -467,6 +606,10 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		Reason string `json:"reason"`
 	}
@@ -482,7 +625,7 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 			return
 		}
 	}
-	if err := s.store.RequestCancellation(r.Context(), id, req.Reason); err != nil {
+	if err := st.RequestCancellation(r.Context(), id, req.Reason); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
@@ -490,6 +633,10 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	offset := 0
 	limit := 1000
 	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v >= 0 {
@@ -502,13 +649,13 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 		limit = 1000
 	}
 
-	total, err := s.store.CountEventHistory(r.Context(), id)
+	total, err := st.CountEventHistory(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
 
-	history, err := s.store.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
+	history, err := st.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -522,8 +669,12 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 }
 
 func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	key := r.URL.Query().Get("key")
-	value, err := s.store.GetQueryState(r.Context(), id, key)
+	value, err := st.GetQueryState(r.Context(), id, key)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -532,8 +683,12 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	// Look up the workflow instance to get def_name and def_version.
-	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -544,7 +699,7 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	// Load the dag_spec from workflow_defs.
-	spec, err := s.store.LoadDAGSpec(r.Context(), wf.DefName, wf.DefVersion)
+	spec, err := st.LoadDAGSpec(r.Context(), wf.DefName, wf.DefVersion)
 	if err != nil {
 		s.writeError(w, 404, err.Error())
 		return
@@ -572,7 +727,11 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 
 // handleListPromises handles GET /api/workflows/:id/promises
 func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, id string) {
-	promises, err := s.store.ListPromises(r.Context(), id)
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	promises, err := st.ListPromises(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -585,6 +744,10 @@ func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, i
 
 // handleResolvePromise handles POST /api/workflows/:id/promises/:promiseId/resolve
 func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request, id, promiseID string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		Result string `json:"result"`
 	}
@@ -598,7 +761,7 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 		s.writeError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-	if err := s.store.ResolvePromise(r.Context(), id, promiseID, req.Result); err != nil {
+	if err := st.ResolvePromise(r.Context(), id, promiseID, req.Result); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
@@ -607,6 +770,10 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 
 // handleRejectPromise handles POST /api/workflows/:id/promises/:promiseId/reject
 func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, id, promiseID string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		Reason string `json:"reason"`
 	}
@@ -620,7 +787,7 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-	if err := s.store.RejectPromise(r.Context(), id, promiseID, req.Reason); err != nil {
+	if err := st.RejectPromise(r.Context(), id, promiseID, req.Reason); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
@@ -629,8 +796,12 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 
 // handleWorkflowUpdate handles POST /api/workflows/:id/update/:name
 func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id, updateName string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	// Verify the workflow exists.
-	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -663,7 +834,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	payload = engine.Redact(payload)
 
 	// Check if there's already a pending update with the same name.
-	pending, pErr := s.store.GetPendingUpdateRequests(r.Context(), id)
+	pending, pErr := st.GetPendingUpdateRequests(r.Context(), id)
 	if pErr != nil {
 		s.writeError(w, 500, pErr.Error())
 		return
@@ -683,13 +854,13 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Create the update request in the database.
-	if err := s.store.CreateUpdateRequest(r.Context(), id, updateName, payload, promiseID); err != nil {
+	if err := st.CreateUpdateRequest(r.Context(), id, updateName, payload, promiseID); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
 
 	// Create an associated promise record so the caller can poll for the result.
-	if ps, ok := s.store.(engine.PromiseStore); ok {
+	if ps, ok := st.(engine.PromiseStore); ok {
 		if pErr := ps.CreatePromise(r.Context(), id, "update:"+updateName, promiseID); pErr != nil {
 			slog.Warn("failed to create promise for update", "worker_id", id, "update_name", updateName, "error", pErr)
 		}
@@ -702,6 +873,10 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 
 // handleSchedulesList handles GET /api/schedules and POST /api/schedules
 func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	if r.Method == http.MethodPost {
 		s.handleCreateSchedule(w, r)
 		return
@@ -710,7 +885,7 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
-	schedules, err := s.store.ListSchedules(r.Context())
+	schedules, err := st.ListSchedules(r.Context())
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -723,6 +898,10 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 
 // handleSchedules routes /api/schedules/* requests.
 func (s *apiServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/schedules/")
 	if path == "" || path == "/" {
 		s.handleSchedulesList(w, r)
@@ -737,19 +916,19 @@ func (s *apiServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case len(parts) == 2 && parts[1] == "enable" && r.Method == http.MethodPost:
-		if err := s.store.SetScheduleEnabled(r.Context(), name, true); err != nil {
+		if err := st.SetScheduleEnabled(r.Context(), name, true); err != nil {
 			s.writeError(w, 500, err.Error())
 			return
 		}
 		s.writeJSON(w, 200, map[string]string{"status": "enabled"})
 	case len(parts) == 2 && parts[1] == "disable" && r.Method == http.MethodPost:
-		if err := s.store.SetScheduleEnabled(r.Context(), name, false); err != nil {
+		if err := st.SetScheduleEnabled(r.Context(), name, false); err != nil {
 			s.writeError(w, 500, err.Error())
 			return
 		}
 		s.writeJSON(w, 200, map[string]string{"status": "disabled"})
 	case len(parts) == 1 && r.Method == http.MethodDelete:
-		if err := s.store.DeleteSchedule(r.Context(), name); err != nil {
+		if err := st.DeleteSchedule(r.Context(), name); err != nil {
 			s.writeError(w, 500, err.Error())
 			return
 		}
@@ -761,6 +940,10 @@ func (s *apiServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateSchedule handles POST /api/schedules
 func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodPost {
 		s.writeError(w, 405, "method not allowed")
 		return
@@ -794,7 +977,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		Input:          req.Input,
 		Enabled:        true,
 	}
-	if err := s.store.CreateSchedule(r.Context(), sch); err != nil {
+	if err := st.CreateSchedule(r.Context(), sch); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
@@ -803,12 +986,16 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 
 // handleDefinitions handles GET /api/definitions
 func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodGet {
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
 
-	defs, err := s.store.ListWorkflowDefs(r.Context(), "")
+	defs, err := st.ListWorkflowDefs(r.Context(), "")
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -816,7 +1003,7 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 
 	// Load memory stats for enrichment.
 	memoryStats := make(map[string]*engine.WorkflowMemoryStats)
-	if stats, err := s.store.LoadMemoryStats(r.Context()); err == nil {
+	if stats, err := st.LoadMemoryStats(r.Context()); err == nil {
 		for i := range stats {
 			memoryStats[stats[i].DefName] = &stats[i]
 		}
@@ -835,7 +1022,7 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 
 	var response []defResponse
 	for _, def := range defs {
-		count, _ := s.store.CountActiveInstances(r.Context(), def.Name, def.Version)
+		count, _ := st.CountActiveInstances(r.Context(), def.Name, def.Version)
 		dr := defResponse{
 			Name:            def.Name,
 			Version:         def.Version,
@@ -857,6 +1044,10 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodPost {
 		s.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
@@ -895,7 +1086,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	// Auto-increment version if not specified
 	version := req.Version
 	if version <= 0 {
-		defs, err := s.store.ListWorkflowDefs(ctx, req.Name)
+		defs, err := st.ListWorkflowDefs(ctx, req.Name)
 		if err == nil {
 			for _, d := range defs {
 				if d.Version >= version {
@@ -916,7 +1107,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		PluginDeps: req.PluginDeps,
 	}
 
-	if err := s.store.DeployWorkflowDef(ctx, def); err != nil {
+	if err := st.DeployWorkflowDef(ctx, def); err != nil {
 		slog.Error("deploy workflow def failed", "error", err)
 		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deploy: " + err.Error()})
 		return

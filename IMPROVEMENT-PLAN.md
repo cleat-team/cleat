@@ -589,11 +589,79 @@ unlimited, and `cmd/cleat-worker/main.go:704` prefers wasmtime whenever CGO is a
 (`engine/db.go:1056-1076`) clear `assigned_to` but leave `generation`. Weakens the token to
 defence-in-depth-in-name-only. Bump it in both.
 
-### 1.7 Tenant isolation not enforced at the HTTP layer (~2–3 sessions)
+### 1.7 Tenant isolation not enforced at the HTTP layer — 🔶 **CORE FIXED 2026-08-04**
 
 `defaultTenantID := "00000000-0000-0000-0000-000000000000"` at
 `cmd/cleat-worker/main.go:159`, used process-wide. Callers authenticate per-tenant; every
 request is then served from one hardcoded scope. Real RLS exists underneath and is bypassed.
+
+**Fixed.** Handlers now resolve a per-request store through `scopedStore`/`storeFor`
+(`cmd/cleat-worker/server.go`) instead of using the process-wide `apiServer.store`, across all
+45 call sites. Every backend already had the scoping this needed and none of it was being
+asked for: Postgres sets `cleat.tenant_id` in `beginTxWithRLS`, SQL Server hands out a
+per-tenant pool whose connector calls `sp_set_session_context`, MySQL routes to a per-tenant
+database. All three cache pools, so the cost is a struct allocation and a map lookup.
+
+Failure is closed: with `--require-auth` on, a handler reached without a tenant is refused
+rather than defaulted — the fallback *was* the bug. With auth off the process-wide store is
+returned deliberately, and `TestAuthOffStillServesDefaultTenant` guards that side so the fix
+cannot be over-applied into a 401 for every single-tenant deployment. That is the same trap
+§1.1/§1.2 carry in WS-1's list: the naive fix converts silent corruption into spurious
+failure on the legitimate path.
+
+Two cross-tenant **writes** that scoping the store does not close, because they take a tenant
+as an *argument* rather than reading one:
+
+- `handleStartWorkflow` read `tenant_id` straight from the request body. Any authenticated
+  caller could start a workflow in any tenant by naming it in the JSON. The authenticated
+  tenant is now authoritative, and a disagreeing body value is refused rather than silently
+  overridden — a caller that asked for another tenant is either misconfigured or probing, and
+  quietly writing somewhere other than where they asked is its own bug.
+- `handleDeadLetterReprocess` passed `engine.DefaultTenantUUID` literally, so a tenant
+  retrying its own dead-lettered workflow moved that run into the default tenant's scope.
+
+**Found on the way.** The sharded startup path built `store` as a `ShardedStore` over all
+shards but assigned `factory` the *first shard's* factory (`if i == 0`). Harmless while the
+factory served background work; once handlers open stores from it, every tenant-scoped
+request would have been narrowed to shard 0 — reads that silently miss data and report
+success. `cmd/cleat-worker/sharded_factory.go` opens one store per shard and wraps them.
+
+**The test that mattered failed first, for the right reason.** The DB-backed test
+(`tenant_isolation_db_test.go`) initially showed both tenants seeing both rows. Not a defect
+in the fix: PostgreSQL bypasses RLS **unconditionally for superusers**, and
+`CLEAT_TEST_POSTGRES` conventionally points at one — the postgres image's `POSTGRES_USER`
+bootstrap role is a superuser. This is exactly the gap `migrations/postgres/005_app_role.sql`
+was written to close, reproduced live. Rebuilt on `testutil.OpenPostgresRLSTestDB`
+(NOSUPERUSER, non-owning) it passes, and fails again with the fix reverted.
+
+The general lesson is worth keeping: **a tenant-isolation test that connects as a superuser
+proves nothing and looks green.** Any future backend's isolation test must assert the
+connecting role is subject to RLS before asserting anything about tenants.
+
+**Still open on §1.7:**
+
+- ~~MySQL and SQL Server isolation tests.~~ **Both written.** MySQL passes against a live
+  8.4 (`tenant_isolation_mysql_test.go`), and is kept as a separate test rather than folded
+  into a shared multi-dialect one on purpose: MySQL has no row-level security at all, so its
+  isolation is entirely structural — a per-tenant *database* — and a shared test would read
+  as though it had the same backstop the other two do. It does not, which means on MySQL a
+  bug in the HTTP layer is the whole of the exposure. Reverting the fix fails it with
+  `Table 'cleat_00000000_0000_0000_0000_000000000000.workflow_instances' doesn't exist` —
+  the defect stated in one line, the request served from the default tenant's database.
+
+  SQL Server is written but **skipped, blocked on §2.71** — see below. Unskipping it is that
+  item's acceptance test.
+- The ~89 unaudited `MySQLStore` `s.tenantID` call sites (see the `requireTenant` note
+  elsewhere in this plan). Scoping the store does not audit them.
+- ~~Whether the shipped deployment actually connects as `cleat_app` rather than a
+  superuser.~~ **Checked 2026-08-04 — it does.** `docker-compose.cluster.yml` gives every
+  worker `--db=postgres://cleat_app:...` with a separate superuser `--migrate-db`, and
+  `deploy/postgres/900-app-role.sh` refuses to proceed if `cleat_app` turns out to be a
+  superuser or to hold `BYPASSRLS`. Worth stating because it is the precondition for
+  everything above: the HTTP fix and the RLS policies are *both* no-ops on Postgres against a
+  superuser connection. Single-node local runs pointed at `postgres://cleat:cleat@…` do get
+  the superuser bypass, which is acceptable for single-tenant development but means a local
+  run is not evidence about isolation.
 
 - ~~Also: `migrations/mysql/` and `migrations/mssql/` have **zero** RLS policies against
   Postgres's seven.~~ **Half wrong — corrected 2026-08-04 against a live SQL Server 2022
@@ -3128,6 +3196,52 @@ Two caveats stated rather than buried:
   about a CGO-less binary that "read as though `CGO_ENABLED=0` were the shipped
   configuration, which is the belief that let 2.28 survive," so the hazard was recognised in
   that file and missed in this one.
+
+---
+
+### 2.71 MSSQL session context is cleared by connection pooling — 🔴 **OPEN** (found by WS-3, 2026-08-04)
+
+`MSSQLStoreFactory` gives each tenant a pool whose wrapped connector runs
+`sp_set_session_context`. The doc comment at `engine/mssql_store.go:270-272` says this happens
+"on every new connection, so RLS is enforced automatically."
+
+It happens once per connection, and does not survive the connection being recycled.
+`database/sql` calls `ResetSession` when a connection is returned to the pool, `go-mssqldb`
+issues `sp_reset_connection`, and that clears `SESSION_CONTEXT`. Measured directly against
+SQL Server 2022 with `SetMaxOpenConns(1)`, so the reacquired connection is provably the same
+one:
+
+```
+same connection, right after setting: 11111111-1111-1111-1111-111111111111
+after return to pool and re-acquire:  <NULL>
+```
+
+**Consequence.** With the shipped schema's seven filter predicates in place and no session
+context, every tenant-scoped *read* matches nothing. Writes are unaffected — the write paths
+call `setSessionContext(tx)` inside their own transaction (`mssql_lifecycle.go:521`,
+`mssql_events.go:407`, `mssql_signals_promises.go:92`). Reads such as `ListWorkflows` and
+`GetWorkflowByID` rely on the connector alone, and `ListWorkflows`'s own
+`WHERE tenant_id = @p1` returns the right rows only for RLS to then discard them.
+
+It fails **closed**, so this is a correctness and availability defect rather than a leak. But
+on SQL Server with the real schema, tenant-scoped reads return nothing.
+
+**Why no test caught it.** `engine/testutil/mssql_schema.go` hand-writes its `CREATE TABLE`
+statements and defines **none** of the seven `CREATE SECURITY POLICY` statements the real
+migration carries. Every MSSQL test in the repo therefore runs against a schema with no
+tenant backstop, where a cleared session context has no observable effect. Same shape as the
+PostgreSQL superuser trap in §1.7: the mechanism under test is absent from the test
+environment, and its absence looks like success.
+
+**Fix direction** (not taken here — `engine/mssql_store.go` and `engine/testutil/` belong to
+other workstreams, and cross-stream coupling #3 says coordinate before touching the MSSQL
+path): establish the session context per transaction as the write paths already do, or
+re-apply it on `ResetSession`. Separately, the MSSQL test schema should apply the real
+migration so the policies exist, or every future isolation test on that backend will pass
+without meaning anything.
+
+`cmd/cleat-worker/tenant_isolation_mssql_test.go` is written and skipped pointing at this
+item; unskipping it is the acceptance test.
 
 ---
 

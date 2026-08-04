@@ -645,7 +645,16 @@ func newTestPrometheus() *prometheus.Metrics {
 
 // newTestAPIServer creates an apiServer with a proper maxBodySize for tests.
 func newTestAPIServer(ms *mockStore) *apiServer {
-	return &apiServer{store: ms, worker: newTestWorker(ms), maxBodySize: 1 << 20}
+	// factory serves every tenant from the same mock store, which is what these
+	// tests assumed implicitly before handlers scoped requests per tenant.
+	// Tests that care *which* tenant's store was reached build their own
+	// factory -- see twoTenantServer in tenant_isolation_test.go.
+	return &apiServer{
+		store:       ms,
+		worker:      newTestWorker(ms),
+		maxBodySize: 1 << 20,
+		factory:     &fakeStoreFactory{fallback: ms},
+	}
 }
 
 // waitForCond polls cond until it returns true or the timeout elapses.

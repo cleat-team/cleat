@@ -41,7 +41,24 @@ test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
 test-go/support	2	# measured: TestRunMigrations_{ExecInTxError,InsertRecordError}
-test-go/commands	4	# measured: TestAPIMetrics, TestHelperProcess, TestRunBuild_PythonTarget_WasmRoundtrip
+# 4 -> 5: TestTenantIsolationOverHTTP_MSSQL skips unconditionally, blocked on
+# 2.71 -- MSSQLStoreFactory's per-tenant sp_set_session_context is cleared when
+# a pooled connection is recycled, so with the real schema every tenant-scoped
+# read on SQL Server returns nothing. The test is written, applies the real
+# migration, and asserts the policies are enabled before asserting anything
+# about tenants; it is recorded here rather than deleted so that unskipping it
+# is the acceptance test for 2.71. Same treatment as plugin-harness/multi-db.
+# Drop back to 4 when it goes.
+#
+# 5 -> 6: TestTenantIsolationOverHTTP_MySQL. This job configures PostgreSQL
+# only, so MySQL is "nobody asked" -- the one thing a skip is allowed to mean.
+# It passes against a live MySQL 8.4 and was confirmed to fail with the fix
+# reverted. Wiring a MySQL service into this job would take it back to 5.
+#
+# Note what did NOT move: TestTenantIsolationOverHTTP_Postgres is absent from
+# this list because CLEAT_TEST_DB is set for this job, so the database-backed
+# tenant isolation test actually runs in CI rather than evaporating.
+test-go/commands	6	# measured: TestAPIMetrics, TestHelperProcess, TestRunBuild_PythonTarget_WasmRoundtrip, TestTenantIsolationOverHTTP_{MSSQL,MySQL}
 # 0 and it should stay 0: this job needs nothing but a Go toolchain, so a skip
 # here can only mean the test stopped running.
 test-go/manifests	0	# measured: 3 subtests pass, 0 skip
