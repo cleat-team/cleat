@@ -1615,6 +1615,30 @@ coverage of argument decoding while feeding the decoder inputs nobody had checke
 
 ### 2.17 `ShardedStore` claims `limit` from *every* shard and strands the excess — ✅ **FIXED**
 
+**Regression coverage extended to a real database, 2026-08-04.** The guard for this was
+`TestShardedClaimWorkflows_DoesNotOverClaim`, which runs entirely against `mockShardStore`:
+its claim function returns exactly the budget it is handed and increments a counter the test
+itself maintains. §2.17's evidence, though, was a *database* observation — rows left
+`running` with no executor.
+
+`TestShardedClaimWorkflows_DoesNotOverClaim_RealDB` closes that gap: three real
+`PostgresStore`s on separate pools, the real claim SQL under `FOR UPDATE SKIP LOCKED`
+contention, and the assertion §2.17 actually made — how many rows the database is left
+holding, not how long the returned slice is. Reinstating the bug reproduces the original
+numbers exactly:
+
+```
+a claim for 2 left 6 row(s) 'running' in the database but returned 2 --
+4 row(s) are claimed by a worker that will never run them
+```
+
+**Honest scope.** The mock test also fails against that mutation, so this is not filling a
+hole the old test left for the classic bug. What it adds is that the assertion is tied to row
+state rather than to a counter the test controls, and that the real store is exercised
+respecting the budget it is given — the shape of §2.11's still-unexplained "asked for 3, got
+10", which a mock returning exactly `l` cannot represent. The three shards share one database,
+so it exercises the fan-out and row state, not cross-database routing.
+
 Found while investigating 2.11. This is a real over-claim, in production-wired code
 (`cmd/cleat-worker/main.go`), and it is not the one 2.11 was chasing.
 
