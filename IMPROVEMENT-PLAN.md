@@ -3651,6 +3651,32 @@ its embedded wasmtime installing a mach exception handler into a guarded port. N
 was the first guess and was wrong. Linux runners have no such guard, so CI is the place this
 gets exercised, and now it is the place it will be seen.
 
+**What the now-visible signal actually says.** With the `env::abort` fix in place, a freshly
+built component gets further and stops somewhere else:
+
+```
+before: instantiate instance 41 (module 4): incompatible import type for `env::abort`
+after:  instantiate instance 52 (module 8): undefined element: out of bounds table access
+```
+
+Eleven instances further in. So the abort defect was real and is fixed, and **Python still
+does not run on wasmtime** — it now fails in the decomposition path's table/element handling.
+`backend_wasmtime.go` already has a retry for exactly that string ("Element segment / table
+errors can result from adapter-provided tables conflicting with our placeholders"), and it
+does not rescue this case. That is where the next attempt should start.
+
+**The test was asking for the wrong thing.** `engine/python_wasm_e2e_test.go` had an
+unconditional `if true` block registering `WithBackend("python", wt)` — forcing Python onto
+wasmtime, which is a configuration the product does not use and Python does not survive. It
+now registers `WasmtimeLanguages`, so it exercises what ships, and Python runs on wazero as it
+does in the worker. When the component path can instantiate a Python component, adding
+`"python"` to that one list switches this test over with no edit to it.
+
+The sequence is worth keeping as a unit: a step without `pipefail` hid a failing test; the
+test was failing because it forced a routing the product had already rejected; and the routing
+had been rejected for a reason that was itself only half-diagnosed until the abort fix moved
+the error. Four layers, each concealing the next.
+
 ---
 
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by

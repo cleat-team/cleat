@@ -84,13 +84,22 @@ func TestPythonWasmEndToEnd(t *testing.T) {
 
 	caller := &mockCaller{}
 	var engineOpts []EngineOption
-	if true {
-		if wt, wtErr := NewWasmtimeBackend(ctx); wtErr == nil {
-			engineOpts = append(engineOpts, WithBackend("python", wt))
-			t.Log("wasmtime backend registered for python")
-		} else {
-			t.Logf("wasmtime backend not available: %v (falling back to wazero)", wtErr)
-		}
+	// Register exactly the languages the worker registers. This used to be an
+	// unconditional `if true` block wiring WithBackend("python", wt), which
+	// forced Python onto wasmtime -- a configuration the product does not use
+	// and that Python does not survive, so this test had been failing on
+	// develop. Invisibly: the workflow step running it piped `go test` into
+	// `tee` without pipefail, so the failure reported green.
+	//
+	// WasmtimeLanguages is the single source of truth for that routing
+	// (IMPROVEMENT-PLAN 2.72). Reading it here means this test exercises what
+	// ships, and that adding Python to it -- once the component path can
+	// instantiate one -- switches this test over with no edit here.
+	if wt, wtErr := NewWasmtimeBackend(ctx); wtErr == nil {
+		engineOpts = append(engineOpts, WithBackends(WasmtimeLanguages, wt))
+		t.Logf("wasmtime registered for %v; python is not among them and runs on wazero", WasmtimeLanguages)
+	} else {
+		t.Logf("wasmtime backend not available: %v (everything falls back to wazero)", wtErr)
 	}
 	engine := NewEngine(rt, caller, engineOpts...)
 
