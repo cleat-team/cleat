@@ -200,12 +200,12 @@ func (e *Engine) flushCallIntent(ctx context.Context, workflowID string, rec Eve
 	}
 	checksum := computeEventChecksum(rec, prevChecksum)
 	_, err = tx.ExecContext(ctx, `
-			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error, checksum)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error, checksum, tenant_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (workflow_id, step) DO NOTHING
 		`, workflowID, rec.Step, rec.EventType,
 		nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), pendingSentinel,
-		checksum)
+		checksum, e.tenantID)
 	if err != nil {
 		return fmt.Errorf("flush call intent: exec: %w", err)
 	}
