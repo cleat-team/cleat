@@ -26,7 +26,13 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 		}
 	}
 
-	healthy := true
+	// issues is the single source of truth for health. There used to be a
+	// parallel `healthy` bool as well, and the two had already drifted: every
+	// check after the ping keys off len(issues), so the `healthy = false` in
+	// the accessible-tables check (found by ineffassign) was never read. That
+	// happened to be harmless, because the same branch also appends to issues
+	// -- but a check added later that set only the bool would have failed to
+	// fail, silently, which is the worst way for a health check to be wrong.
 	issues := []string{}
 
 	// 1. Ping.
@@ -34,13 +40,14 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 	if err := db.PingContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "DATABASE: DISCONNECTED (%v)\n", err)
 		issues = append(issues, fmt.Sprintf("ping failed: %v", err))
-		healthy = false
 	} else {
 		pingDur := time.Since(pingStart)
 		fmt.Printf("DATABASE: connected (ping: %v)\n", pingDur)
 	}
 
-	if !healthy {
+	// A failed ping is fatal on its own: every check below needs the
+	// connection, so continuing would report a cascade of derived failures.
+	if len(issues) > 0 {
 		fmt.Fprintf(os.Stderr, "\nSTATUS: UNHEALTHY\n")
 		fmt.Fprintf(os.Stderr, "Issues:\n")
 		for _, issue := range issues {
@@ -122,7 +129,6 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 		}
 		if accessibleCount == 0 {
 			issues = append(issues, "no accessible tables (schema mismatch or wrong database)")
-			healthy = false
 		}
 	} else {
 		fmt.Printf("TABLES: all %d accessible\n", accessibleCount)

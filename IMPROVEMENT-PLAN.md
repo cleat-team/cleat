@@ -2600,9 +2600,57 @@ Three consecutive concurrent runs green. Tests that add their own columns (all
 `IF NOT EXISTS`) or drop objects they created are unaffected — the fingerprint tracks the
 schema *file*.
 
----
+### 2.40 `lint-go` ran one linter and advertised ten — 🔶 **PARTLY FIXED**
 
-## Salvage register — PR #208, closed unmerged
+`ci.yml`'s header listed `errcheck, gosimple, govet, ineffassign, staticcheck, unused,
+misspell, unconvert, gocyclo, gofmt`. `.golangci.yml` disables eight of them, and `gofmt` was
+never enabled — it is not in golangci-lint's default set, so listing it under `disable:` was a
+no-op. The job ran **`govet` and nothing else**, and `cmd/cleat-worker/config.go` sat
+unformatted on `develop` with CI green.
+
+Fixed: a `gofmt` step of its own (not via golangci-lint, whose config excludes `_test.go` from
+every linter and would have left most of the repo out), `misspell` actually enabled, and the
+header corrected to describe the job that exists.
+
+**The backlog is now measured rather than asserted.** The old note — "the engine refactoring
+introduced hundreds of pre-existing issues" — was true when written and had since become
+unfalsifiable: no way to tell which linters were still hundreds and which had quietly become
+tractable. Measured against the repo's own exclusions, with golangci-lint's default caps
+removed (`max-issues-per-linter` and `max-same-issues` silently truncate — `errcheck` reads as
+50 with them on and 307 with them off):
+
+| linter | issues | |
+|---|---|---|
+| `misspell` | **0** | enabled |
+| `ineffassign` | 8 | see below |
+| `gosimple` | 9 | |
+| `unused` | 16 | |
+| `staticcheck` | 17 | |
+| `unconvert` | 23 | |
+| `gocyclo` | 28 | |
+| `gosec` | 193 | |
+| `errcheck` | 307 | |
+
+**`ineffassign`'s eight are worth reading before enabling it, because three are real
+defects** — the shape being *a fallback that is computed and then never used*:
+
+- `cmd/cleat/dev.go:387` — `runDevWithWatch` resolves `moduleDir`, defaults it to `"."`, and
+  never reads it again.
+- `cmd/cleat/main.go:901` — the transform-file candidate search finds an alternative,
+  assigns `transformFile`, and nothing reads it afterwards; only the `found` flag survives.
+  So the fallback locates the file and then ignores it.
+- `cmd/cleat/main.go:852` — `asDir = dir`, likewise never read.
+
+Three more are trailing `argIdx++` at the end of a block (`plugins/scheduledbackup/commands.go`,
+`routes.go`, `plugins/webhookingest/host_functions.go`). Those are dead but *defensive* —
+removing them would make adding the next clause a silent bug — so enabling `ineffassign` means
+`//nolint` on them, not deleting them.
+
+The eighth, `cmd/cleatctl/checkdb.go:125`, turned out to be benign and is fixed here anyway:
+`healthy = false` is never read, because everything after the ping check keys off
+`len(issues) > 0`. Behaviour was correct — the same branch also appends to `issues` — but a
+future check that set `healthy` without appending would have silently failed to fail. Now
+there is one source of truth.
 
 PR #208 (`fix/wasm-build-replace-propagation`) was closed without merging on 2026-08-03.
 Recorded here so nothing below has to be rediscovered from scratch.
