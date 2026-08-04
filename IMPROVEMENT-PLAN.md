@@ -1495,7 +1495,7 @@ The rest of the audit came back clean. All other inserts into the eight RLS-prot
 the zero-UUID default tenant, so the omissions in `store_deployment.go:161` and
 `versioned_loader.go:176` are by design, not defects.
 
-### 2.23 `StartChildWorkflowInSchema` — same omission, but a one-line fix would be a false fix — OPEN
+### 2.23 `StartChildWorkflowInSchema` — same omission, but a one-line fix would be a false fix — ✅ **FIXED**
 
 `engine/store_children.go:169` omits `tenant_id` from its `<targetSchema>.workflow_instances`
 insert, with `s.tenantID` available and unused — superficially §2.20 again. **It is not, and
@@ -1523,6 +1523,57 @@ The real question underneath is a design decision, not a mechanical one: **which
 a cross-schema child** — the parent's, or the target schema's? Until that is answered there
 is no correct value to pass. Reachable from `engine/children.go:230` whenever a workflow
 requests a target schema.
+
+**Resolution (2026-08-04).** The design question was answered by the project owner: the child
+belongs to the **target schema's** tenant. The motivating case is two microservices, and the
+child runs as part of the destination service, so it is the destination's workflow.
+
+Both halves of the analysis above held up when finally exercised. Reverting to the original
+code against a real peer schema fails with
+
+```
+pq: cleat.tenant_id is not set -- tenant context required for RLS-scoped query (P0001)
+```
+
+— i.e. exactly as predicted, the missing column was never the operative problem, and a
+column-only patch would have changed nothing.
+
+**The mapping.** Peer schemas are configured by name alone (`--peer-schemas`), with no tenant
+attached, so the engine has no direct way to learn the destination's tenant. It does have a
+convention: `admin.create_tenant_role` names each tenant's schema
+`'tenant_' || replace(tenant_id::text, '-', '_')`. `tenantIDForSchema` inverts that. Where it
+succeeds, `StartChildWorkflowInSchema` opens a transaction, sets `cleat.tenant_id` to the
+**target** tenant, and writes that value into the column.
+
+**Where it fails — an operator-chosen name like `svc_billing` — nothing is written**, and the
+destination table's own `DEFAULT` applies. This is deliberate. Writing the *parent's* tenant
+would be the false fix in its second form: it makes the insert succeed while filing one
+service's workflow under another service's tenant, which is a silent cross-tenant
+misattribution in a system whose entire isolation story is `tenant_id`. If the destination
+enforces RLS, the insert is refused instead — the correct outcome for "we cannot say who this
+belongs to".
+
+**On coverage — this is the part worth keeping.** The only existing tests
+(`TestGap_StartChildWorkflowInSchema{,_Error}`) use a mock DB matching on the string
+`"gen_random_uuid"`. They never touch a database, so they could not observe tenant
+attribution at all, and passed throughout. Writing a real one exposed why: **nothing in the
+repo provisions a peer schema.** Every migration pins `SET search_path = public`, and
+`admin.create_tenant_role` creates `tenant_<uuid>` as an empty namespace whose grants all
+point back at `public.*`. So the cross-schema feature writes to
+`<schema>.workflow_instances`, a table this project never creates. The new test builds one by
+hand — tables, `FORCE ROW LEVEL SECURITY`, and the same fail-closed policy — which is the
+only way to run this path at all today.
+
+The regression test is verified against **both** wrong implementations: the original (fails
+with the `assert_tenant_set` error above) and the plausible false fix (fails with *"child was
+attributed to the PARENT tenant"*). A test that only caught the first would have ranked the
+false fix as correct.
+
+**Still open:** peer-schema provisioning itself. `GetChildResultInSchema` reads back from the
+peer schema with no tenant context either, and would hit the same wall against an
+RLS-enforcing destination; it is untested for the same reason. Neither the `k8s/`, `charts/`
+nor compose deployments configure `--peer-schemas`, so the feature has no end-to-end exercise
+anywhere.
 
 ### 2.24 The wasmtime epoch ticker races `Close` — ✅ **FIXED**
 

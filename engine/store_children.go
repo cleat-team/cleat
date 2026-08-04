@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -163,22 +164,108 @@ func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID stri
 	return count, tx.Commit()
 }
 
+// tenantSchemaPrefix is the prefix admin.create_tenant_role gives each tenant's
+// schema: 'tenant_' || replace(tenant_id::text, '-', '_').
+const tenantSchemaPrefix = "tenant_"
+
+// tenantIDForSchema recovers the tenant a schema belongs to, for schemas named
+// by admin.create_tenant_role (migrations/postgres/001_schema.sql), which
+// creates `tenant_<uuid with - replaced by _>` for each tenant.
+//
+// A cross-schema child belongs to the *target* schema's tenant, not the
+// parent's: the whole point of the feature is that schema B is a separate
+// microservice, and the child runs as part of B. So the attribution has to
+// come from the target schema, and the naming convention is the only mapping
+// the engine has -- peer schemas are configured by name alone
+// (--peer-schemas), with no tenant attached.
+//
+// Returns ok=false for any schema not following the convention, which is not
+// an error: see StartChildWorkflowInSchema for what happens then.
+func tenantIDForSchema(schema string) (string, bool) {
+	if !strings.HasPrefix(schema, tenantSchemaPrefix) {
+		return "", false
+	}
+	candidate := strings.ReplaceAll(strings.TrimPrefix(schema, tenantSchemaPrefix), "_", "-")
+	parsed, err := uuid.Parse(candidate)
+	if err != nil {
+		return "", false
+	}
+	return parsed.String(), true
+}
+
 // StartChildWorkflowInSchema creates a child workflow in the given target schema.
 // Implements CrossSchemaChildStore for cross-instance workflow cooperation.
-
+//
+// Tenant attribution: the child belongs to the target schema's tenant, because
+// the target schema is a different microservice and the child runs as part of
+// it. Where that tenant is recoverable from the schema name (the convention
+// admin.create_tenant_role establishes), this sets both the RLS context and the
+// tenant_id column to it, so the row is attributed to the destination.
+//
+// Where it is not recoverable -- an operator-chosen peer schema name like
+// "svc_billing" -- the engine genuinely does not know which tenant owns the
+// destination, so it writes neither, and the destination table's own DEFAULT
+// applies. Writing the *parent's* tenant would be worse than writing nothing:
+// it would silently file one service's workflow under another service's tenant.
+// If the destination enforces RLS, that insert will be refused, which is the
+// correct outcome for "we cannot say who this belongs to" -- see
+// IMPROVEMENT-PLAN §2.23.
 func (s *PostgresStore) StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
-	var runID string
+	targetTenant, haveTenant := tenantIDForSchema(targetSchema)
+
+	qs := pq.QuoteIdentifier(targetSchema)
+	tenantCol, tenantVal := "", ""
+	if haveTenant {
+		tenantCol, tenantVal = ", tenant_id", ", $7"
+	}
 	q := fmt.Sprintf(`
-		INSERT INTO %s.workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, priority)
+		INSERT INTO %s.workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, priority%s)
 		VALUES (gen_random_uuid(), $1,
 		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM %s.workflow_defs WHERE name = $1 AND NOT deprecated) END,
 		        'ready', $2, $3,
 		        COALESCE(NULLIF($5, ''), 'ABANDON'),
-		        COALESCE((SELECT task_queue FROM %s.workflow_instances WHERE id = $3), 'default'), $6)
+		        COALESCE((SELECT task_queue FROM %s.workflow_instances WHERE id = $3), 'default'), $6%s)
 		RETURNING id
-	`, pq.QuoteIdentifier(targetSchema), pq.QuoteIdentifier(targetSchema), pq.QuoteIdentifier(targetSchema))
-	if err := s.db.QueryRowContext(ctx, q, defName, inputJSON, parentID, defVersion, parentClosePolicy, priority).Scan(&runID); err != nil {
+	`, qs, tenantCol, qs, qs, tenantVal)
+
+	args := []any{defName, inputJSON, parentID, defVersion, parentClosePolicy, priority}
+	if haveTenant {
+		args = append(args, targetTenant)
+	}
+
+	if !haveTenant {
+		// No tenant to establish, so no transaction is needed either -- keep the
+		// single-round-trip path this function has always had.
+		var runID string
+		if err := s.db.QueryRowContext(ctx, q, args...).Scan(&runID); err != nil {
+			return "", fmt.Errorf("start child workflow in schema %q: %w", targetSchema, err)
+		}
+		return runID, nil
+	}
+
+	// set_config(..., true) is transaction-local, so the INSERT has to share a
+	// transaction with it. Without one, each statement runs in its own implicit
+	// transaction and the setting is discarded before the INSERT sees it.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow in schema %q: begin: %w", targetSchema, err)
+	}
+	defer tx.Rollback()
+
+	// The *target* tenant, deliberately, not s.tenantID. This is the one place
+	// the engine writes a row on behalf of another tenant, and it is gated by
+	// the --peer-schemas allowlist plus whatever grants the destination schema
+	// has given this role.
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('cleat.tenant_id', $1, true)", targetTenant); err != nil {
+		return "", fmt.Errorf("start child workflow in schema %q: set tenant context: %w", targetSchema, err)
+	}
+
+	var runID string
+	if err := tx.QueryRowContext(ctx, q, args...).Scan(&runID); err != nil {
 		return "", fmt.Errorf("start child workflow in schema %q: %w", targetSchema, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("start child workflow in schema %q: commit: %w", targetSchema, err)
 	}
 	return runID, nil
 }
