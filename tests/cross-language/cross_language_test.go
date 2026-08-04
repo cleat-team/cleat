@@ -62,7 +62,18 @@ func buildRustWasm(t *testing.T, projectRoot string) string {
 		t.Skipf("Rust workflow example not found at %s - skipping", rustDir)
 	}
 
-	cmd := exec.Command("cargo", "build", "--target", "wasm32-wasip1", "--release")
+	// wasm32-unknown-unknown, matching cmd/cleat/build_rust.go, and it has to
+	// keep matching.
+	//
+	// This built wasm32-wasip1 until 2026-08-04, so every Rust test here
+	// exercised an artifact shape no user ever runs -- `cleat build --target
+	// rust` has always shipped the unknown-unknown cdylib. The two produce
+	// different import sets, and the difference is not cosmetic: the reason
+	// recorded for keeping Rust off the wasmtime backend was that wasmtime-go
+	// "crashes on fn.Call for Rust cdylib core modules", a claim this suite was
+	// structurally unable to check because it never built a cdylib. It does not
+	// reproduce, and Rust now runs on wasmtime.
+	cmd := exec.Command("cargo", "build", "--target", "wasm32-unknown-unknown", "--release")
 	cmd.Dir = rustDir
 	cmd.Env = append(os.Environ(),
 		"HOME="+os.Getenv("HOME"),
@@ -74,7 +85,7 @@ func buildRustWasm(t *testing.T, projectRoot string) string {
 		t.Fatalf("cargo build failed:\n%s\n%v", string(out), err)
 	}
 
-	wasmPath := filepath.Join(rustDir, "target", "wasm32-wasip1", "release", "rust_workflow.wasm")
+	wasmPath := filepath.Join(rustDir, "target", "wasm32-unknown-unknown", "release", "rust_workflow.wasm")
 	if _, err := os.Stat(wasmPath); err != nil {
 		t.Fatalf("Rust WASM not found at %s: %v", wasmPath, err)
 	}

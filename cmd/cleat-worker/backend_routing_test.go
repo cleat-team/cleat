@@ -50,19 +50,35 @@ func TestRealFixturesRouteToWasmtime(t *testing.T) {
 	}
 }
 
-// TestRustIsNotYetOnWasmtime pins a deliberate exclusion so that moving Rust is
-// an edit to wasmtimeLanguages rather than a side effect of something else.
+// TestRustRunsOnWasmtime pins Rust's move onto the primary backend.
 //
-// Rust does load and execute on wasmtime -- verified against both artifact
-// shapes, wasm32-wasip1 and the wasm32-unknown-unknown cdylib that
-// `cleat build --target rust` actually ships. It stays on wazero because
-// tests/cross-language builds Rust for wasm32-wasip1, not the shipped target,
-// so the suite that would gate the change does not currently cover the artifact
-// users run. See IMPROVEMENT-PLAN 2.72.
-func TestRustIsNotYetOnWasmtime(t *testing.T) {
-	if runsOnWasmtime("rust") {
-		t.Fatal("rust is routed to wasmtime; if that is intended, update this test " +
-			"and confirm tests/cross-language builds the shipped wasm32-unknown-unknown target")
+// It is gated by real coverage rather than by the probe that suggested it:
+// tests/cross-language now builds the same wasm32-unknown-unknown cdylib that
+// `cleat build --target rust` ships, and all seven of its tests pass on
+// wasmtime, including both cross-replay directions. TestPluginCalls_Wasm_Rust
+// covers it too.
+//
+// If this fails because someone moved Rust back, the reason belongs in the
+// comment on engine.WasmtimeLanguages -- the previous exclusion note claimed
+// wasmtime-go crashed on Rust cdylib modules, which stopped being true without
+// anyone noticing, because the suite that would have caught it built a
+// different target.
+func TestRustRunsOnWasmtime(t *testing.T) {
+	if !runsOnWasmtime("rust") {
+		t.Fatal("rust is no longer routed to wasmtime; if that is deliberate, " +
+			"record why in engine.WasmtimeLanguages")
+	}
+}
+
+// TestPythonStaysOnWazero pins the one language that genuinely fails on
+// wasmtime: its component reaches the decomposition path and dies on
+// `incompatible import type for env::abort`. cleat/wasmtest used to register it
+// for wasmtime anyway, and nothing noticed, because plugin-harness-ci.yml
+// installs no Python toolchain so the test that would exercise it skips.
+func TestPythonStaysOnWazero(t *testing.T) {
+	if runsOnWasmtime("python") {
+		t.Fatal("python is routed to wasmtime, where its component fails to instantiate; " +
+			"see IMPROVEMENT-PLAN 2.72")
 	}
 }
 

@@ -67,10 +67,22 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Setup Rust + wasm32-wasip1
+      # Both targets, and wasm32-unknown-unknown is the one that matters:
+      # `cleat build --target rust` produces that cdylib (cmd/cleat/build_rust.go),
+      # and tests/cross-language now builds the same shape rather than the
+      # wasm32-wasip1 artifact it used to, which no user runs.
+      #
+      # Adding it here was not optional and was initially missed: the suite built
+      # and passed locally on a machine that happened to have both targets
+      # installed, and failed in CI with `error[E0463]: can't find crate for
+      # 'std'`. A local pass on a richer toolchain than the runner's is not
+      # evidence the job works.
+      #
+      # wasm32-wasip1 stays for the SDK crates, which still build against it.
+      - name: Setup Rust + wasm targets
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-wasip1
+          targets: wasm32-wasip1, wasm32-unknown-unknown
 
       - name: Setup Python
         uses: actions/setup-python@v5
