@@ -118,9 +118,10 @@ CTE as documented defence — do not upgrade it to "fixed".
 ### 4. Six wasmtime host functions return empty results  —  ✅ **done**, see §2.18, §2.19
 
 > **Done, and the count was wrong: 18, not 6.** Only `_core.go` had been audited. A class
-> guard now covers all 31 out-parameter wrappers. §2.16 is partially addressed — the real
-> `execSession` pattern is applied to the ID functions, but 36 `mockHostHandler` assertions
-> elsewhere in `backend_wasmtime_test.go` remain untouched and still cannot fail.
+> guard now covers all 31 out-parameter wrappers. §2.16 is now closed too — the real
+> `execSession` pattern covers the ID functions, and the 36 `mockHostHandler` assertions
+> elsewhere in `backend_wasmtime_test.go` now assert what the handler actually received.
+> That change found 10 wrong argument lengths in the tests themselves.
 >
 > The original framing is kept below.
 
@@ -1113,7 +1114,7 @@ patch, and is why it was left out of the 2.10 work.
 
 ---
 
-### 2.16 Most wasmtime closure tests cannot see a handler defect — OPEN
+### 2.16 Most wasmtime closure tests cannot see a handler defect — FIXED
 
 Generalising the previous item. 34 of the 48 `TestClosure_*` tests in
 `engine/backend_wasmtime_test.go` follow the shape that hid 2.14: call the host function
@@ -1130,6 +1131,36 @@ The fix is not to rewrite all 34. It is to decide, per host function, whether it
 behaviour is worth a test that drives the real `execSession`, as
 `json_hostfuncs_cgo_test.go` now does, and to stop treating the `TestClosure_*` family as
 evidence that a host function *works*. It is evidence that it is *wired up*.
+
+**Resolution (2026-08-04).** Kept the family and made "wired up" an assertable claim
+instead of an unasserted one. `mockHostHandler` now records every call — method name and
+the string arguments the wrapper decoded out of guest memory — and `closureSetup.expectCall`
+asserts the wrapper reached the handler *exactly once*, as the *expected method*, carrying
+the strings the test wrote. 36 assertion sites converted.
+
+This is deliberately narrower than driving the real `execSession`, which stays the right
+tool for handler *behaviour* (§2.14's JSON pair, §2.18's ID functions). What it does cover
+is the seam these wrappers exist to implement, and it now fails on all three ways that seam
+breaks. Verified by injecting each defect against the new assertions:
+
+| Injected defect | Result |
+| --- | --- |
+| wrapper returns without calling the handler | `want exactly 1 host-handler call to HasState, got 0` |
+| `keyLen-1` when decoding the argument | `HasState received string args ["cleat_has_stat"] … do not include "cleat_has_state"` |
+| wrong handler method wired up (`DeleteState` for `HasState`) | `host handler saw DeleteState, want HasState` |
+
+A fourth attempt — deleting the `h.HasState(...)` call outright — left `key` unused and
+failed to *compile*, which proves nothing about the assertion. That trap is worth naming:
+a revert that breaks the build is an inconclusive check, not a passing one.
+
+**It immediately found 10 live defects — in the tests themselves.** Ten call sites passed a
+byte length that did not match the string literal they had just written into guest memory,
+so the handler was receiving truncated or NUL-padded arguments: `{"p":"load"}` sent as 11
+bytes, `{"in":"put"}` as 14, `["run-1","run-2"]` as 19, `cleanup-task` as 13. Every one had
+been wrong since the test was written and passed the whole time, because `got == 0` is what
+the mock returns no matter what arrives. That is the §2.16 shape producing bad tests rather
+than hiding bad code, and it is the more insidious direction — those tests were *reporting*
+coverage of argument decoding while feeding the decoder inputs nobody had checked.
 
 
 ### 2.17 `ShardedStore` claims `limit` from *every* shard and strands the excess — OPEN

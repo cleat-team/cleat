@@ -26,6 +26,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/bytecodealliance/wasmtime-go/v44"
@@ -1642,6 +1643,13 @@ type closureSetup struct {
 	inst    *wasmtime.Instance
 	mem     *wasmtime.Memory
 	data    []byte
+
+	// mock is the handler installed on backend, kept here so tests can assert
+	// on what the wrapper actually passed across the boundary.
+	mock *mockHostHandler
+	// written records every string writeString has put into guest memory
+	// since the last reset, so expectCall can check they all arrived.
+	written []string
 }
 
 // newClosureSetup creates a WASM module that imports all the given functions
@@ -1658,7 +1666,8 @@ func newClosureSetup(t *testing.T, imports []struct {
 		t.Fatalf("wasmtime backend failed to initialise: %v", err)
 	}
 	t.Cleanup(func() { b.Close(ctx) })
-	b.handler = &mockHostHandler{ret: 0}
+	mock := &mockHostHandler{ret: 0}
+	b.handler = mock
 
 	var names []string
 	var types [][]byte
@@ -1706,6 +1715,54 @@ func newClosureSetup(t *testing.T, imports []struct {
 		inst:    inst,
 		mem:     mem,
 		data:    mem.UnsafeData(store),
+		mock:    mock,
+	}
+}
+
+// reset clears the per-invocation state so a table-driven test can assert on
+// each subtest's own call rather than the accumulated total.
+func (s *closureSetup) reset() {
+	s.mock.reset()
+	s.written = nil
+}
+
+// expectCall asserts that the wrapper reached the host handler exactly once,
+// as the named method, carrying the strings this test wrote into guest memory.
+//
+// This is the assertion IMPROVEMENT-PLAN §2.16 is about. These tests used to
+// check only that the wrapper returned 0 -- which is what mockHostHandler
+// returns unconditionally, so the check passed whether the wrapper decoded its
+// arguments correctly, decoded them wrongly, or never called the handler at
+// all. Three shipped defects (§2.14, §2.18, §2.22) lived under exactly that
+// assertion.
+//
+// Reaching the handler with correctly-decoded arguments is the whole job of
+// these wrappers, so it is what the test asserts. A swapped ptr/len pair, an
+// argument read from the wrong offset, or an early return all fail here.
+func (s *closureSetup) expectCall(t *testing.T, method string) {
+	t.Helper()
+	// Reset on the way out so a test that drives several wrappers through one
+	// setup asserts each call against its own writes.
+	defer s.reset()
+	calls := s.mock.recorded()
+	if len(calls) != 1 {
+		got := make([]string, len(calls))
+		for i, c := range calls {
+			got[i] = c.method
+		}
+		t.Fatalf("want exactly 1 host-handler call to %s, got %d %v -- the wrapper "+
+			"did not reach the handler (or reached it more than once)", method, len(calls), got)
+	}
+	if calls[0].method != method {
+		t.Fatalf("host handler saw %s, want %s -- the wrong handler method is wired up",
+			calls[0].method, method)
+	}
+	for _, want := range s.written {
+		if !slices.Contains(calls[0].args, want) {
+			t.Errorf("%s received string args %q, which do not include %q as written "+
+				"into guest memory -- the wrapper is decoding ptr/len wrongly",
+				method, calls[0].args, want)
+		}
 	}
 }
 
@@ -1727,6 +1784,7 @@ func (s *closureSetup) call(t *testing.T, exportName string, args ...any) int64 
 
 func (s *closureSetup) writeString(offset int, sval string) {
 	copy(s.data[offset:], sval)
+	s.written = append(s.written, sval)
 }
 
 // i32 returns an int32 for use with call args.
@@ -1768,12 +1826,13 @@ func TestClosure_SimpleStringIn(t *testing.T) {
 	for _, tc := range []struct {
 		export string
 		name   string
+		method string
 	}{
-		{"test_cleat_release_lock", "cleat_release_lock"},
-		{"test_cleat_register_update_handler", "cleat_register_update_handler"},
-		{"test_cleat_delete_state", "cleat_delete_state"},
-		{"test_cleat_has_state", "cleat_has_state"},
-		{"test_cleat_register_query_handler", "cleat_register_query_handler"},
+		{"test_cleat_release_lock", "cleat_release_lock", "ReleaseLock"},
+		{"test_cleat_register_update_handler", "cleat_register_update_handler", "RegisterUpdateHandler"},
+		{"test_cleat_delete_state", "cleat_delete_state", "DeleteState"},
+		{"test_cleat_has_state", "cleat_has_state", "HasState"},
+		{"test_cleat_register_query_handler", "cleat_register_query_handler", "RegisterQueryHandler"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s.writeString(100, tc.name)
@@ -1781,6 +1840,7 @@ func TestClosure_SimpleStringIn(t *testing.T) {
 			if got != 0 {
 				t.Errorf("got %v, want 0", got)
 			}
+			s.expectCall(t, tc.method)
 		})
 	}
 }
@@ -1822,13 +1882,14 @@ func TestClosure_TwoStringIn(t *testing.T) {
 		export string
 		name   string
 		second string
+		method string
 	}{
-		{"test_cleat_set_state", "mykey", "myval"},
-		{"test_cleat_resolve_promise", "promise-1", "resolved"},
-		{"test_cleat_reject_promise", "promise-2", "error-msg"},
-		{"test_set_query_state", "qk", "qv"},
-		{"test_cleat_reply_to_signal", "corr-1", "resp"},
-		{"test_cleat_run_detached", "child-wf", `{"in":"put"}`},
+		{"test_cleat_set_state", "mykey", "myval", "SetState"},
+		{"test_cleat_resolve_promise", "promise-1", "resolved", "ResolvePromise"},
+		{"test_cleat_reject_promise", "promise-2", "error-msg", "RejectPromise"},
+		{"test_set_query_state", "qk", "qv", "SetQueryState"},
+		{"test_cleat_reply_to_signal", "corr-1", "resp", "ReplyToSignal"},
+		{"test_cleat_run_detached", "child-wf", `{"in":"put"}`, "RunDetached"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s.writeString(100, tc.name)
@@ -1837,6 +1898,7 @@ func TestClosure_TwoStringIn(t *testing.T) {
 			if got != 0 {
 				t.Errorf("got %v, want 0", got)
 			}
+			s.expectCall(t, tc.method)
 		})
 	}
 }
@@ -1866,15 +1928,17 @@ func TestClosure_ThreeStringIn(t *testing.T) {
 		if got != 0 {
 			t.Errorf("got %v, want 0", got)
 		}
+		s.expectCall(t, "DurableSend")
 	})
 	t.Run("cleat_signal_workflow", func(t *testing.T) {
 		s.writeString(50, "target-run-id")
 		s.writeString(100, "signal-name")
 		s.writeString(200, `{"p":"load"}`)
-		got := s.call(t, "test_cleat_signal_workflow", i32(50), i32(13), i32(100), i32(11), i32(200), i32(11))
+		got := s.call(t, "test_cleat_signal_workflow", i32(50), i32(13), i32(100), i32(11), i32(200), i32(12))
 		if got != 0 {
 			t.Errorf("got %v, want 0", got)
 		}
+		s.expectCall(t, "SignalWorkflow")
 	})
 }
 
@@ -1901,6 +1965,7 @@ func TestClosure_StringAndI64(t *testing.T) {
 		if got != 0 {
 			t.Errorf("got %v, want 0", got)
 		}
+		s.expectCall(t, "AcquireLock")
 	})
 	t.Run("cleat_incr_state", func(t *testing.T) {
 		s.writeString(60, "counter-key")
@@ -1908,6 +1973,7 @@ func TestClosure_StringAndI64(t *testing.T) {
 		if got != 0 {
 			t.Errorf("got %v, want 0", got)
 		}
+		s.expectCall(t, "IncrState")
 	})
 }
 
@@ -1926,6 +1992,7 @@ func TestClosure_CreatePromise(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "CreatePromise")
 }
 
 func TestClosure_ScheduleInvoke(t *testing.T) {
@@ -1945,6 +2012,7 @@ func TestClosure_ScheduleInvoke(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "DurableScheduleInvoke")
 }
 
 func TestClosure_UUID(t *testing.T) {
@@ -1962,6 +2030,7 @@ func TestClosure_UUID(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "UUID")
 }
 
 func TestClosure_SetScope(t *testing.T) {
@@ -1980,6 +2049,7 @@ func TestClosure_SetScope(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "SetScope")
 }
 
 func TestClosure_WorkflowID(t *testing.T) {
@@ -1996,6 +2066,7 @@ func TestClosure_WorkflowID(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "WorkflowID")
 }
 
 func TestClosure_RunID(t *testing.T) {
@@ -2012,6 +2083,7 @@ func TestClosure_RunID(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "RunID")
 }
 
 func TestClosure_GetScope(t *testing.T) {
@@ -2028,6 +2100,7 @@ func TestClosure_GetScope(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "GetScope")
 }
 
 func TestClosure_SideEffect(t *testing.T) {
@@ -2045,6 +2118,7 @@ func TestClosure_SideEffect(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "SideEffect")
 }
 
 func TestClosure_GetState(t *testing.T) {
@@ -2062,6 +2136,7 @@ func TestClosure_GetState(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "GetState")
 }
 
 func TestClosure_ListState(t *testing.T) {
@@ -2079,6 +2154,7 @@ func TestClosure_ListState(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "ListState")
 }
 
 func TestClosure_Fetch(t *testing.T) {
@@ -2099,6 +2175,7 @@ func TestClosure_Fetch(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "Fetch")
 }
 
 func TestClosure_ChildWorkflow(t *testing.T) {
@@ -2113,10 +2190,11 @@ func TestClosure_ChildWorkflow(t *testing.T) {
 
 	s.writeString(50, "child-wf")
 	s.writeString(100, `{"in":"put"}`)
-	got := s.call(t, "test_cleat_child_workflow", i32(50), i32(8), i32(100), i32(14), i32(200), i32(64))
+	got := s.call(t, "test_cleat_child_workflow", i32(50), i32(8), i32(100), i32(12), i32(200), i32(64))
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "ChildWorkflow")
 }
 
 func TestClosure_AwaitChild(t *testing.T) {
@@ -2134,6 +2212,7 @@ func TestClosure_AwaitChild(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "AwaitChild")
 }
 
 func TestClosure_AwaitAllChildren(t *testing.T) {
@@ -2147,10 +2226,11 @@ func TestClosure_AwaitAllChildren(t *testing.T) {
 	})
 
 	s.writeString(50, `["run-1","run-2"]`)
-	got := s.call(t, "test_cleat_await_all_children", i32(50), i32(19), i32(200), i32(1024))
+	got := s.call(t, "test_cleat_await_all_children", i32(50), i32(17), i32(200), i32(1024))
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "AwaitAllChildren")
 }
 
 func TestClosure_ContinueAsNew(t *testing.T) {
@@ -2164,10 +2244,11 @@ func TestClosure_ContinueAsNew(t *testing.T) {
 	})
 
 	s.writeString(50, `{"new":"input"}`)
-	got := s.call(t, "test_cleat_continue_as_new", i32(50), i32(14))
+	got := s.call(t, "test_cleat_continue_as_new", i32(50), i32(15))
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "ContinueAsNew")
 }
 
 func TestClosure_ContinueAsNewVersioned(t *testing.T) {
@@ -2181,10 +2262,11 @@ func TestClosure_ContinueAsNewVersioned(t *testing.T) {
 	})
 
 	s.writeString(50, `{"new":"input"}`)
-	got := s.call(t, "test_cleat_continue_as_new_versioned", i32(50), i32(14), i32(2))
+	got := s.call(t, "test_cleat_continue_as_new_versioned", i32(50), i32(15), i32(2))
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "ContinueAsNewWithVersion")
 }
 
 func TestClosure_PollSignal(t *testing.T) {
@@ -2202,6 +2284,7 @@ func TestClosure_PollSignal(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "PollSignal")
 }
 
 func TestClosure_PollChild(t *testing.T) {
@@ -2219,6 +2302,7 @@ func TestClosure_PollChild(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "PollChild")
 }
 
 func TestClosure_AwaitAnyChild(t *testing.T) {
@@ -2236,6 +2320,7 @@ func TestClosure_AwaitAnyChild(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "AwaitAnyChild")
 }
 
 // TestClosure_JsonParse and TestClosure_JsonStringify used to live here. They
@@ -2272,12 +2357,13 @@ func TestClosure_CallRetry(t *testing.T) {
 		i32(60), i32(5), // op
 		i32(90), i32(9), // req
 		int64(3), int64(100), int64(200), int64(5000), // retry config
-		i32(140), i32(12), // nonRetryable
+		i32(140), i32(11), // nonRetryable
 		i32(200), i32(512), // resp
 	)
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "DurableCallWithRetry")
 }
 
 func TestClosure_CallHeartbeat(t *testing.T) {
@@ -2307,6 +2393,7 @@ func TestClosure_CallHeartbeat(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "DurableCallWithHeartbeat")
 }
 
 func TestClosure_PluginCall(t *testing.T) {
@@ -2334,6 +2421,7 @@ func TestClosure_PluginCall(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "PluginCall")
 }
 
 func TestClosure_PluginCallStreaming(t *testing.T) {
@@ -2361,6 +2449,7 @@ func TestClosure_PluginCallStreaming(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "PluginCallStreaming")
 }
 
 func TestClosure_ChildWorkflowWithOptions(t *testing.T) {
@@ -2383,7 +2472,7 @@ func TestClosure_ChildWorkflowWithOptions(t *testing.T) {
 	s.writeString(120, "ABANDON")
 	got := s.call(t, "test_cleat_child_workflow_with_options",
 		i32(30), i32(8), // name
-		i32(70), i32(14), // input
+		i32(70), i32(12), // input
 		int64(2), int64(5), // version, priority
 		i32(120), i32(7), // parentClosePolicy
 		i32(200), i32(64), // runID
@@ -2391,6 +2480,7 @@ func TestClosure_ChildWorkflowWithOptions(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "ChildWorkflowWithOptions")
 }
 
 func TestClosure_ChildWorkflowInSchema(t *testing.T) {
@@ -2415,7 +2505,7 @@ func TestClosure_ChildWorkflowInSchema(t *testing.T) {
 	got := s.call(t, "test_cleat_child_workflow_in_schema",
 		i32(10), i32(12), // targetSchema
 		i32(40), i32(8), // name
-		i32(70), i32(14), // input
+		i32(70), i32(12), // input
 		int64(1), int64(3), // version, priority
 		i32(120), i32(9), // parentClosePolicy
 		i32(200), i32(64), // runID
@@ -2423,6 +2513,7 @@ func TestClosure_ChildWorkflowInSchema(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "ChildWorkflowInSchema")
 }
 
 func TestClosure_AwaitSignals(t *testing.T) {
@@ -2450,6 +2541,7 @@ func TestClosure_AwaitSignals(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "DurableAwaitSignals")
 }
 
 func TestClosure_AwaitPromise(t *testing.T) {
@@ -2475,6 +2567,7 @@ func TestClosure_AwaitPromise(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "AwaitPromise")
 }
 
 func TestClosure_SendSignalAndWait(t *testing.T) {
@@ -2497,13 +2590,14 @@ func TestClosure_SendSignalAndWait(t *testing.T) {
 	got := s.call(t, "test_cleat_send_signal_and_wait",
 		i32(30), i32(12), // targetRunID
 		i32(70), i32(9), // signalName
-		i32(110), i32(11), // payload
+		i32(110), i32(12), // payload
 		int64(10000),       // timeout
 		i32(200), i32(512), // resp
 	)
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "SendSignalAndWait")
 }
 
 func TestClosure_CleatDefer(t *testing.T) {
@@ -2517,10 +2611,11 @@ func TestClosure_CleatDefer(t *testing.T) {
 	})
 
 	s.writeString(40, "cleanup-task")
-	got := s.call(t, "test_cleat_defer", i32(40), i32(13), i32(200), i32(64))
+	got := s.call(t, "test_cleat_defer", i32(40), i32(12), i32(200), i32(64))
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "DurableDefer")
 }
 
 func TestClosure_CleatPollCancellation(t *testing.T) {
@@ -2537,6 +2632,7 @@ func TestClosure_CleatPollCancellation(t *testing.T) {
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
+	s.expectCall(t, "PollCancellation")
 }
 
 // TestClosure_ErrorPaths tests error-handling paths by passing zero-length strings.
