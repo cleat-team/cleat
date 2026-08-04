@@ -2373,11 +2373,77 @@ Two were live defects in production code — the event checksum chain (§2.30) a
 `generation = 0` in five separate suites, four SQL statements that had never been executed, and
 five assertions that were `t.Log` calls printing the exact output a total failure produces.
 
-`soak` remains, and is unwired twice over: gated behind the `soak_test` build tag, so
-`go vet ./tests/soak/...` reports no packages at all. It is designed to run for hours — a
-scheduled workflow, not a PR gate.
-
 The one suite with nothing wrong with it is the one testing the hardest thing.
+
+### 2.38 `tests/soak` tested `math/rand` — ✅ **DONE**
+
+The sixth suite, and the worst of them. It was unwired twice over: gated behind the
+`soak_test` build tag, so `go vet ./tests/soak/...` reported *no packages at all* and
+`go test ./...` never compiled it.
+
+Wiring it up would have been a mistake, because the suite did not test cleat. It opened a
+database, pinged it, and then discarded the handle:
+
+```go
+_ = db // used only for connectivity check; actual workload uses in-memory simulation
+```
+
+The "workload" underneath that comment was:
+
+```go
+time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
+success := rand.Float64() > 0.05 // 95% success rate
+```
+
+So the error rate it checked against its 10% threshold was a hardcoded 5% coin flip — the
+threshold was chosen to sit above the constant on the line above it. The `workflowType` it
+selected was passed into the goroutine and never referenced. `EventsPerWorkflow` was set and
+never read. The `memSamples` field was documented as "RSS (read from `/proc/self/status`)"
+and only ever fed `MemStats.Alloc`. The memory-leak check was a `t.Logf("WARNING: %v")`.
+
+An hour of that asserts that Go's scheduler and `math/rand` work. Scheduling it weekly would
+have produced a green **Soak Test** badge for an engine nothing had soaked — worse than
+leaving it unwired, because the badge is a claim.
+
+**What it does now.** The workload drives the real `PostgresStore` lifecycle — insert, claim,
+append the event mix, complete — at bounded concurrency, continuously, and re-verifies the
+checksum chain (§2.30) on one workflow in every hundred. Every error counted is an error the
+store returned. Measured against PostgreSQL 16: **37,804 workflows in 60s, 37,765 reaching
+`done`, 377 chain-verified, 0 errors**, with heap and goroutines flat.
+
+Four things had to be got right, and each was verified by breaking it:
+
+- **`NewPostgresStore(db, soakQueue)`.** `ClaimWorkflows` filters on `task_queue = ANY($2)`,
+  the store's own queue list, and the no-argument constructor polls `"default"` only. Without
+  the queue the claim returns `nil` forever — and a `nil` claim means "another worker got it
+  first", which is not an error. Removing it: **51,012 successes, 0 completions, 0.000% error
+  rate.** The suite would have run for an hour and reported perfect health having executed
+  nothing. That is why the final assertion counts rows in `'done'` from the database rather
+  than trusting the workload's own counters; only `CompleteWorkflow` puts them there.
+- **The leak windows.** The original monotonic-run check fired on 5 consecutive increases —
+  probability 1/5! per window, near-certain to fire by chance across the ~120 windows of an
+  hour, which is why its memory arm had been demoted to a log line. Replaced with a windowed
+  median comparison. The first version pinned the baseline at samples 5..9, which made
+  sensitivity depend on run length: an injected 4KB-per-workflow leak (140 MB over 30s) was
+  **not caught**. Anchoring the baseline to a *fraction* of the run gives a linear leak the
+  same lever arm at any duration; the same injected leak then fails at 3.7x. An injected
+  parked goroutine per workflow fails at 2.0x.
+- **The error threshold** dropped from 10% to 1%. Against a healthy database every one of
+  these operations should succeed; 10% existed to clear a simulated coin flip and would have
+  let one workflow in twelve fail unnoticed.
+- **`-timeout`.** The obvious spelling, `-timeout="${SOAK_DURATION}"`, kills the binary at the
+  exact moment the test stops its workload, so the panic races the assertions and a passing
+  run reports as a hang. The workflow computes it (`+25% and 15 minutes`) and the *test itself*
+  refuses to start if the harness timeout does not exceed its duration — caught in the first
+  millisecond rather than hours later. The computation is also bounded by the job's own budget,
+  because GitHub-hosted runners cancel a job at 360 minutes and a 24h dispatch would otherwise
+  burn 5.5 hours before being killed and reported as `cancelled`.
+
+Scheduled weekly (Mondays 06:00 UTC) plus `workflow_dispatch`, with skip budget `soak 0`.
+Deliberately not a PR gate: an hour per pull request would be absurd, and a leak detector is a
+trend instrument that should not block a merge on one noisy run.
+
+**`UNWIRED_SUITES` is now empty.** Every suite under `tests/` is run by a workflow.
 
 ---
 
