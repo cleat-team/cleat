@@ -121,6 +121,22 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 	return history, tx.Commit()
 }
 
+// chainOrder returns indices into recs in ascending Step order.
+//
+// The checksum chain has to be built in step order because that is the order
+// VerifyWorkflowEvents recomputes it in (LoadEventHistory is ORDER BY step). A
+// batch whose records arrive in some other order would otherwise persist a
+// chain that verification can never reproduce, and the workflow would read as
+// corrupt for the rest of its life.
+func chainOrder(recs []EventRecord) []int {
+	order := make([]int, len(recs))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return recs[order[a]].Step < recs[order[b]].Step })
+	return order
+}
+
 func nullStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
 }
