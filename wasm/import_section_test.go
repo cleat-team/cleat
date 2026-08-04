@@ -85,12 +85,17 @@ func TestReadImportSection_ParsesEveryImport(t *testing.T) {
 // because the parser they depend on failed before reaching them, and
 // DetectLanguage's "go" default made that look like a positive answer.
 func TestDetectLanguage_IdentifiesNonGoGuests(t *testing.T) {
+	// Only fixtures that are actually tracked in git. examples/rust-workflow
+	// builds under **/target/, which .gitignore excludes, so reading it here
+	// passes on a developer machine that has run cargo and fails in CI. Rust
+	// detection is covered synthetically below instead -- it keys off a
+	// "/rustc/" substring rather than the import section, so it needs no
+	// toolchain and no artifact.
 	cases := []struct {
 		name, path, want string
 	}{
 		{"assemblyscript", "../tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm", "assemblyscript"},
 		{"java-teavm", "../tests/plugin-harness/testdata/javaworkflow/build/wasm/wasm/workflow.wasm", "java"},
-		{"rust", "../examples/rust-workflow/target/wasm32-wasip1/release/rust_workflow.wasm", "rust"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,6 +108,16 @@ func TestDetectLanguage_IdentifiesNonGoGuests(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("rust", func(t *testing.T) {
+		// A Rust cdylib embeds standard-library paths; detectLanguageFromImports
+		// looks for "/rustc/" anywhere in the binary, before any import parsing.
+		mod := append([]byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00},
+			[]byte("/rustc/9fc2a81ee1a4c0a2f0d5b3c1e/library/std/src/lib.rs")...)
+		if got := DetectLanguage(mod); got != "rust" {
+			t.Errorf("DetectLanguage = %q, want %q", got, "rust")
+		}
+	})
 }
 
 // TestNeededEnvImports_NoLongerAlwaysNil covers the other caller. Its nil
