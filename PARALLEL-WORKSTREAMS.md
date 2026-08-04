@@ -236,20 +236,24 @@ its general form.
 **Owns:** `cmd/cleat-worker/` (HTTP, auth, tenancy), `auth/`, `cmd/cleat/`, `packages/`,
 `wasm/`, `.github/workflows/`, `.golangci.yml`, `Dockerfile`, `migrations/*/01[4-7]_*`.
 
-| item | what |
+| item | status |
 |---|---|
-| **§1.7** | Tenant isolation is not enforced at the HTTP layer. `defaultTenantID` is hardcoded at `cmd/cleat-worker/main.go:159` and used process-wide: callers authenticate per-tenant, every request is then served from one scope, and the real RLS underneath is bypassed. MySQL and MSSQL migrations have **zero** RLS policies. ~2–3 sessions. **Highest severity item in the plan.** |
-| **§2.43** | `cleat vet --target assemblyscript` cannot fail — it never starts a node process, and every path returns 0 after printing a line that reads like a check ran. Now fixable, because §2.42 made the transform's checks real: run `asc --noEmit` with the transform and let it fail. Needs a decision on whether `cleat vet` may require `asc`; note `cleat build` already exits 1 without `npx`, so there is a precedent. |
-| **§2.28 residual** | Non-Go guests still run on wazero and remain unfenced. Related: §1.5 is fixed for wasmtime but the shipped image must stay CGO + glibc or it silently ships the unfenced backend. |
-| **§2.40 residual** | Enabling `ineffassign` needs `//nolint` on three benign trailing `argIdx++` (defensive, do not delete them — removing one makes adding the next clause a silent bug). The two remaining dead fallbacks are both in `runVetAS` and are subsumed by §2.43. |
+| **§1.7** | 🔶 **Core fixed** (#269). Handlers resolve a per-request store through `scopedStore`; two cross-tenant *writes* closed (`tenant_id` taken from the request body; dead-letter reprocess hardcoding the default tenant); a sharded-path bug found on the way where `factory` was shard 0's while `store` spanned all shards. Isolation tests for Postgres and MySQL pass; the SQL Server one passes since §2.71. **Residual:** the ~89 unaudited `MySQLStore` `s.tenantID` call sites — 53 of them in `engine/mysql_ops.go`, **which is WS-1's**, so coordinate. |
+| **§2.43** | ✅ **Done** (#286). `runVetAS` now runs `asc --noEmit` with the transform and propagates the exit status. Note the flag is `--lang as`; there is no `--target` on `vet`. |
+| **§2.28 residual** | ✅ **Closed.** Four of five languages run on wasmtime — `go`, `assemblyscript`, `java`, `rust`. Python stays on wazero deliberately, with the reason recorded to the instance in `engine.WasmtimeLanguages` and §2.72. The "shipped image must stay CGO + glibc" half is guarded: `Dockerfile:41` runs `/cleat-worker --verify-backend`. |
+| **§2.40 residual** | 🔶 `cmd/cleat` is clean under `ineffassign` since §2.43 removed its two dead fallbacks. Four findings remain — `internal/closure/threading.go:42`, and the three defensive `argIdx` increments in `plugins/scheduledbackup/{commands,routes}.go` and `plugins/webhookingest/host_functions.go` that need `//nolint` rather than deletion. **None are WS-3's files**; only `.golangci.yml` is. |
 
-**Read this before starting §1.7.** It is the one item deliberately skipped in every recent
-session, and the reason is worth inheriting rather than rediscovering: verifying an RLS
-migration needs a live MySQL and SQL Server, which were not available locally. **Shipping an
-unverified security migration is the exact anti-pattern the last three sessions were spent
-removing.** So the first task in §1.7 is not the migration — it is standing up MySQL and
-MSSQL you can actually test against. If you cannot, say so and take §2.43 first; do not
-write the migration blind.
+**Open and genuinely WS-3's:** no CI job installs `wasm32-unknown-unknown`, so
+`cleat build --target rust` — the build path users actually invoke — is exercised nowhere.
+`e2e-cross-language.yml` installs it for `tests/cross-language`; nothing installs it for the
+product build.
+
+**Also found here, owned elsewhere, all recorded in `IMPROVEMENT-PLAN.md`:** `engine/testutil`'s
+MSSQL schema defines none of the seven security policies, so no *other* MSSQL test has a
+tenant backstop (§2.71 schema half, WS-2's); `TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL`
+is timing-flaky on a ~1 ms margin (WS-1's); `tests/plugin-harness` skips on
+`"wasmtime-go compatibility issue with this WASM module"`, a skip that would swallow exactly
+the class of regression §2.72 is about.
 
 ---
 
