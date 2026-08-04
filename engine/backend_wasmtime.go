@@ -436,7 +436,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// can store the workflow result and the Execute method can retrieve
 	// it even when the module subsequently traps (e.g. via proc_exit).
 	var completeResult, completeErr string
-	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi); err != nil {
+	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi, abortImportType(module)); err != nil {
 		return nil, fmt.Errorf("host: register imports: %w", err)
 	}
 
@@ -810,7 +810,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 			// Use dummy completeResult/completeErr since component modules don't
 			// use the Go dispatcher cleat_complete protocol.
 			var completeResult, completeErr string
-			if err := b.registerAllImports(linker, &completeResult, &completeErr, true); err != nil {
+			if err := b.registerAllImports(linker, &completeResult, &completeErr, true, abortImportType(cm)); err != nil {
 				return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
 			}
 
@@ -972,7 +972,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 					strings.Contains(instErr.Error(), "out of bounds") {
 					linker2 := wasmtime.NewLinker(b.engine)
 					var cr2, ce2 string
-					b.registerAllImports(linker2, &cr2, &ce2, true)
+					b.registerAllImports(linker2, &cr2, &ce2, true, abortImportType(cm))
 					// wit_dylib functions for component model adapter canonical ABI (fallback).
 					for _, impTy := range cm.Imports() {
 						if impTy.Module() != "env" || impTy.Name() == nil ||
@@ -1301,13 +1301,13 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 
 // registerAllImports registers all host function imports on the given linker.
 // Extracted so both Execute and ExecuteComponent can share the same setup.
-func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool) error {
+func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool, abortTy *wasmtime.FuncType) error {
 	if needsWasi {
 		if err := b.registerWasiStubs(linker); err != nil {
 			return err
 		}
 	}
-	if err := b.registerEnvStubs(linker); err != nil {
+	if err := b.registerEnvStubs(linker, abortTy); err != nil {
 		return err
 	}
 	if err := b.registerTeavmStubs(linker); err != nil {

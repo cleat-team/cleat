@@ -487,7 +487,7 @@ func TestRegisterAllImports_NeedsWasiTrue(t *testing.T) {
 	linker := wasmtime.NewLinker(b.engine)
 	var cr, ce string
 
-	err = b.registerAllImports(linker, &cr, &ce, true)
+	err = b.registerAllImports(linker, &cr, &ce, true, nil)
 	if err != nil {
 		t.Errorf("registerAllImports(needsWasi=true): %v", err)
 	}
@@ -504,7 +504,7 @@ func TestRegisterAllImports_NeedsWasiFalse(t *testing.T) {
 	linker := wasmtime.NewLinker(b.engine)
 	var cr, ce string
 
-	err = b.registerAllImports(linker, &cr, &ce, false)
+	err = b.registerAllImports(linker, &cr, &ce, false, nil)
 	if err != nil {
 		t.Errorf("registerAllImports(needsWasi=false): %v", err)
 	}
@@ -525,7 +525,7 @@ func TestRegisterAllImports_WasiErrorPropagation(t *testing.T) {
 	}
 
 	var cr, ce string
-	err = b.registerAllImports(linker, &cr, &ce, true)
+	err = b.registerAllImports(linker, &cr, &ce, true, nil)
 	if err == nil {
 		t.Error("expected error propagation from registerWasiStubs in registerAllImports")
 	}

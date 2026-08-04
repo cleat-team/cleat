@@ -3577,6 +3577,50 @@ siblings pass. Not investigated, and not caused by this change — Go's routing 
 but a Go-path test skipping in the harness for the primary language is worth someone's
 attention.
 
+#### Python: one blocker removed, one left, and it is a stale fixture
+
+**Removed.** `registerEnvStubs` registered `env.abort` unconditionally as
+`(msg, file, line, col i32)` — AssemblyScript's shape. A Linker holds one definition per
+`(module, name)`, so a core module importing a *no-argument* abort, which is what the modules
+inside a componentize-py component do, was rejected at instantiation:
+
+```
+incompatible import type for `env::abort`
+expected type `(func)`, found type `(func (param i32 i32 i32 i32))`
+```
+
+The comment on that registration argued the mismatch was benign because
+`DefineUnknownImportsAsTraps` would cover the other signature and "the first registration
+wins". The first registration does win — that is the defect. Instantiation fails before any
+trap-default can apply. `env.abort` is now registered with the type the module declares, read
+from `Module.Imports()`, so both toolchains are served from one linker.
+
+Measured effect on the checked-in Python component: instantiation advances from **instance 15
+(module 3)** to **instance 81 (module 10)**.
+
+**Left.** At instance 81 it fails on a different mismatch:
+
+```
+incompatible import type for `env::cleat_call`
+expected type `(func (param i32 i32 i32 i32 i32 i32 i32))`
+found type `(func (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64))`
+```
+
+The module wants a 7-parameter `cleat_call` with no result. Both backends implement the same
+8-parameter, `i64`-returning ABI — `engine/wasmtime_hostfuncs.go:24` and
+`engine/imports.go:118` agree — so this is not a backend difference. **The checked-in
+`call_all_plugins.wasm` predates the current host ABI.** It is a 19 MB artifact that no CI job
+rebuilds, because no workflow installs `componentize-py`.
+
+So Python-on-wasmtime cannot be settled with the fixture in the tree, and the next step is not
+a code change: it is getting `componentize-py` into a CI job so the component is rebuilt
+against the ABI the host actually implements. Until then the honest position is that the abort
+blocker is fixed and verified, and what lies past it is unknown.
+
+The abort fix is covered by `engine/wasmtime_abort_arity_test.go`, which builds its modules
+from WAT rather than depending on that fixture — deliberately, so the regression test does not
+inherit the staleness that blocks the thing it is testing.
+
 ---
 
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by
