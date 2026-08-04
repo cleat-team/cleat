@@ -621,6 +621,35 @@ it returns. Not attempted here.
 
 ### 1.4 Crash-recovery: the detector works, nothing writes what it detects (~2–3 sessions)
 
+> **Blocker found and fixed first, 2026-08-04 — ordinary event writes were being
+> discarded.** Before wiring intent writes into the call path it is worth knowing that
+> until `ddac7d1` the path's *ordinary* writes did not reach the database at all on the
+> connection cleat ships.
+>
+> `flushEvent` wrote through `e.db` directly and its quota path opened an unscoped
+> transaction; neither set `cleat.tenant_id`. `event_history`'s RLS policy is
+> `tenant_id = assert_tenant_set()`, which raises on the unset setting, so as `cleat_app`
+> — unprivileged, `NOBYPASSRLS`, mandatory since `c26c332` — every insert was rejected and
+> `engine/lifecycle.go:179` logged it and continued. A worker ran three durable calls,
+> failed three flushes, and finished with status `done`, a result, and **zero rows in
+> `event_history`**.
+>
+> Not total, which is why it survived: `adaptive_flush.go` already set the context with a
+> `WITH cfg AS (SELECT set_config(...))` CTE, so events persisted once a workflow's rate
+> pushed the flusher into batch mode, and not below it. And no test could see it, because
+> every database test in `engine/` connects as the owner, which on PostgreSQL is a
+> superuser and exempt from RLS — §1.10's shape applied to a code path instead of a policy.
+>
+> **This reorders the phases.** B–F are all about making a crash *observable*. A workflow
+> with no persisted events has nothing to replay from, so a crash re-executed every side
+> effect it had already performed — a larger contract violation than the one §1.4 exists to
+> fix, sitting underneath it. Regression tests in `engine/flush_rls_test.go`, with an
+> owner-connection control.
+>
+> **Found by building the §2.4 harness, not by reading `flush.go`.** The plan's own
+> instruction — do not start the intent work before the crash harness exists — turned out
+> to be right for a reason it did not anticipate.
+
 > **Sharpened 2026-08-02 by empirical test, not grep.** The original framing here — "the
 > whole feature is dead" — was too coarse. The *read* side is live and correct: a
 > `pendingSentinel` in history is caught at `engine/durablecalls.go:150` and reported to the
