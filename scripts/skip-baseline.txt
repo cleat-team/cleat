@@ -2,9 +2,11 @@ benchmarks	buildBenchWasm	2
 benchmarks	newBenchEngine	1
 cmd/cleat	TestASTransform	2
 cmd/cleat	TestRunBuild_PythonTarget_WasmRoundtrip	2
+cmd/cleat	TestVetAS	2
 cmd/cleat	TestVetExitCode	1
 cmd/cleat	TestVetPython	2
 cmd/cleat	compileASFixture	1
+cmd/cleat	newASVetProject	1
 cmd/cleat	runVetCmd	1
 cmd/cleat-bench	TestHelperProcess	1
 cmd/cleat-gen-plugin	TestHelperProcess	1

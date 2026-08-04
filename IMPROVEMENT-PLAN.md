@@ -3084,7 +3084,62 @@ noisy it would be.
 
 ---
 
-### 2.43 `cleat vet --target assemblyscript` cannot fail — 🔴 **OPEN**
+### 2.43 `cleat vet --lang as` cannot fail — ✅ **FIXED** (WS-3, 2026-08-04)
+
+> **Renamed.** This entry said `cleat vet --target assemblyscript`. There is no `--target`
+> flag on `vet`; it is `--lang`, and the value is `as` (`cmd/cleat/main.go:137`). `--target` is
+> `cleat build`'s flag. Minor, but the command as written never existed, so anyone trying to
+> reproduce the defect from this heading would have got an unrelated error.
+
+**Fixed by making `runVetAS` compile the project.** It now runs
+
+```
+npx asc assembly/index.ts --runtime stub --transform @cleat/transform --noEmit
+```
+
+and propagates the exit status. `--noEmit` performs the whole compilation — parse, transform,
+diagnostics — without writing a `.wasm`, so vet gets exactly the checks build gets, and the
+two agree about what compiles. Everything else in the invocation mirrors
+`runBuildAssemblyScript` for that reason.
+
+This was only possible because of §2.42: the transform's E001–E005 determinism checks used to
+be `console.error` and nothing else, so even `cleat build` exited 0 on a violation. They throw
+from `afterParse` now, and that throw is what fails `asc`.
+
+**A missing toolchain is now an error, not a pass.** `cleat build` already exits 1 when npx is
+absent, so there is precedent; and a vet that returns 0 because it could not look is precisely
+the defect being fixed. Same for a missing `package.json` or `assembly/index.ts`, both of
+which used to return 0.
+
+**Tests:** `cmd/cleat/vet_as_test.go`. The load-bearing assertion is the exit code on a
+*violating* workflow — a test that only checked a clean project passes would have been
+satisfied by the old always-0 implementation, which is the trap. Confirmed against the old
+behaviour: three of four subtests fail, and "accepts a deterministic workflow" passes either
+way, exactly as predicted.
+
+No CI job is affected: `scripts/ci-check.sh` is the only caller of `cleat vet`, and it runs
+`--lang go`.
+
+**§2.40 residual, measured after this change.** `cmd/cleat` is now clean under `ineffassign`
+— the two dead fallbacks this entry describes were two of its eight findings. Four unique
+findings remain repo-wide in non-test code, and enabling the linter needs each addressed:
+
+| file | assignment |
+|---|---|
+| `internal/closure/threading.go:42` | `usesGlobalH` |
+| `plugins/scheduledbackup/commands.go:211` | `argIdx` |
+| `plugins/scheduledbackup/routes.go:420` | `argIdx` |
+| `plugins/webhookingest/host_functions.go:87` | `argIdx` |
+
+The three `argIdx` ones are the defensive trailing increments §2.40 says to keep and annotate
+with `//nolint` rather than delete — removing one makes adding the next clause a silent bug.
+Neither `internal/` nor `plugins/` is WS-3's, so this is left measured rather than done.
+
+---
+
+#### Original entry
+
+### 2.43 `cleat vet --target assemblyscript` cannot fail — 🔴 **was OPEN**
 
 The remaining two of §2.40's three dead fallbacks are both in `runVetAS`, and they are
 symptoms of the same thing: **the function never vets anything.**
