@@ -298,12 +298,28 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 //
 // Absent, and why:
 //
-//   - python: fails on wasmtime. Its Component Model binary reaches the
-//     decomposition path and dies on `incompatible import type for env::abort`.
-//     Reproduced through cleat/wasmtest with a real HostHandler, so it is not an
-//     artefact of a half-configured probe. The native component path in
-//     engine/component_cgo.go may address it, but that is behind a build tag no
-//     build sets. See IMPROVEMENT-PLAN.md 2.72.
+//   - python: runs on wazero, deliberately. Not a gap waiting to be closed --
+//     a decision, with the reason known precisely.
+//
+//     Its Component Model binary reaches the decomposition path and stops at
+//     `undefined element: out of bounds table access` while instantiating one of
+//     the inner core modules. That is after the `env::abort` arity defect was
+//     fixed, which had been masking it: the failure moved eleven instances
+//     deeper, from instance 41 to instance 52. Measured on a component
+//     componentize-py built fresh in CI, not on the stale checked-in fixture.
+//
+//     backend_wasmtime.go already carries a retry keyed on that exact error
+//     ("adapter-provided tables conflicting with our placeholders") and it does
+//     not rescue this case, so the next attempt starts there. The native
+//     component path in engine/component_cgo.go is the other candidate, behind
+//     a build tag no build sets.
+//
+//     Do not read this as "wazero runs Python fine". An earlier draft of this
+//     comment said exactly that, and CI contradicted it: with the routing
+//     corrected so Python reaches wazero, TestPythonWasmEndToEnd fails there too,
+//     on `module[__main_module__] not instantiated`. Python is on wazero because
+//     that is where the product sends it, not because it is known to work there.
+//     See IMPROVEMENT-PLAN.md 2.72.
 //
 // See IMPROVEMENT-PLAN.md 2.72.
 var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust"}

@@ -3631,6 +3631,149 @@ siblings pass. Not investigated, and not caused by this change — Go's routing 
 but a Go-path test skipping in the harness for the primary language is worth someone's
 attention.
 
+#### Python: one blocker removed, one left, and it is a stale fixture
+
+**Removed.** `registerEnvStubs` registered `env.abort` unconditionally as
+`(msg, file, line, col i32)` — AssemblyScript's shape. A Linker holds one definition per
+`(module, name)`, so a core module importing a *no-argument* abort, which is what the modules
+inside a componentize-py component do, was rejected at instantiation:
+
+```
+incompatible import type for `env::abort`
+expected type `(func)`, found type `(func (param i32 i32 i32 i32))`
+```
+
+The comment on that registration argued the mismatch was benign because
+`DefineUnknownImportsAsTraps` would cover the other signature and "the first registration
+wins". The first registration does win — that is the defect. Instantiation fails before any
+trap-default can apply. `env.abort` is now registered with the type the module declares, read
+from `Module.Imports()`, so both toolchains are served from one linker.
+
+Measured effect on the checked-in Python component: instantiation advances from **instance 15
+(module 3)** to **instance 81 (module 10)**.
+
+**Left.** At instance 81 it fails on a different mismatch:
+
+```
+incompatible import type for `env::cleat_call`
+expected type `(func (param i32 i32 i32 i32 i32 i32 i32))`
+found type `(func (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64))`
+```
+
+The module wants a 7-parameter `cleat_call` with no result. Both backends implement the same
+8-parameter, `i64`-returning ABI — `engine/wasmtime_hostfuncs.go:24` and
+`engine/imports.go:118` agree — so this is not a backend difference. **The checked-in
+`call_all_plugins.wasm` predates the current host ABI.** It is a 19 MB artifact that no CI job
+rebuilds, because no workflow installs `componentize-py`.
+
+So Python-on-wasmtime cannot be settled with the fixture in the tree, and the next step is not
+a code change: it is getting `componentize-py` into a CI job so the component is rebuilt
+against the ABI the host actually implements. Until then the honest position is that the abort
+blocker is fixed and verified, and what lies past it is unknown.
+
+The abort fix is covered by `engine/wasmtime_abort_arity_test.go`, which builds its modules
+from WAT rather than depending on that fixture — deliberately, so the regression test does not
+inherit the staleness that blocks the thing it is testing.
+
+**Correction, 2026-08-04, and it improves the picture.** The paragraph above concluded that
+Python could not be settled because the checked-in fixture is stale. That is true of the
+*fixture* and false as a statement about the repo: `e2e-cross-language.yml` installs
+`componentize-py` and `engine/python_wasm_e2e_test.go` builds a component **fresh** on every
+run. There has been a real signal all along.
+
+It was invisible. `TestPythonWasmEndToEnd` has been **failing on `develop`** while the workflow
+reported success, because the step running it pipes `go test` into `tee` without
+`set -o pipefail` — so `tee`'s exit status is the step's. The very next step in the same file
+carries that fix, with a comment explaining exactly this hazard. It was applied to one step
+and not the other.
+
+What the hidden failure says, on a freshly built component rather than the stale fixture:
+
+```
+instantiate instance 41 (module 4, 3 args, imports: [env GOT.mem GOT.func]):
+  incompatible import type for `env::abort`
+ (native component path first failed: wasmtime component CGo fast path not built)
+```
+
+That is this section's `env::abort` defect, and nothing further — the `env::cleat_call` ABI
+skew is an artefact of the stale checked-in fixture, not of Python. So the abort fix and the
+missing `pipefail` ship together: one makes the failure visible, the other fixes it.
+
+Also worth keeping: `componentize-py`'s `componentize` step cannot run on macOS/arm64 here. It
+dies with `EXC_GUARD / GUARD_TYPE_MACH_PORT — SET_EXCEPTION_BEHAVIOR on mach port`, which is
+its embedded wasmtime installing a mach exception handler into a guarded port. Not OOM, which
+was the first guess and was wrong. Linux runners have no such guard, so CI is the place this
+gets exercised, and now it is the place it will be seen.
+
+**What the now-visible signal actually says.** With the `env::abort` fix in place, a freshly
+built component gets further and stops somewhere else:
+
+```
+before: instantiate instance 41 (module 4): incompatible import type for `env::abort`
+after:  instantiate instance 52 (module 8): undefined element: out of bounds table access
+```
+
+Eleven instances further in. So the abort defect was real and is fixed, and **Python still
+does not run on wasmtime** — it now fails in the decomposition path's table/element handling.
+`backend_wasmtime.go` already has a retry for exactly that string ("Element segment / table
+errors can result from adapter-provided tables conflicting with our placeholders"), and it
+does not rescue this case. That is where the next attempt should start.
+
+**The test was asking for the wrong thing.** `engine/python_wasm_e2e_test.go` had an
+unconditional `if true` block registering `WithBackend("python", wt)` — forcing Python onto
+wasmtime, which is a configuration the product does not use and Python does not survive. It
+now registers `WasmtimeLanguages`, so it exercises what ships, and Python runs on wazero as it
+does in the worker. When the component path can instantiate a Python component, adding
+`"python"` to that one list switches this test over with no edit to it.
+
+The sequence is worth keeping as a unit: a step without `pipefail` hid a failing test; the
+test was failing because it forced a routing the product had already rejected; and the routing
+had been rejected for a reason that was itself only half-diagnosed until the abort fix moved
+the error. Four layers, each concealing the next.
+
+#### Decision: Python stays on wazero — ✅ **SETTLED 2026-08-04**
+
+Not an open item. The point of the work above was to find out *why* Python was on the fallback
+runtime, and that is now known to the instance: it stops at `undefined element: out of bounds
+table access` instantiating an inner core module, eleven instances past where the `env::abort`
+defect used to mask it.
+
+**Correction — "wazero runs Python correctly" was wrong, and CI said so within the hour.**
+That sentence stood here and in the comment on `engine.WasmtimeLanguages`. It was inferred
+from the product's routing, not from anything that ran. With the routing corrected so Python
+actually reaches wazero, `TestPythonWasmEndToEnd` fails there too:
+
+```
+wasmtime: instantiate instance 52 (module 8): undefined element: out of bounds table access
+wazero:   instantiate instance 8 (module 1): module[__main_module__] not instantiated
+```
+
+**Python is on wazero because that is where the product sends it, not because it is known to
+work there.** The honest statement of the outcome: four of five languages run on wasmtime, and
+the fifth runs on a backend where its one end-to-end test does not currently pass either.
+
+That test is now skipped and recorded — `skip-baseline` 1→2 sites, `e2e-cross-language` budget
+0→1 — rather than left failing or left hidden. Deleting it would lose the only thing in CI
+that builds a Python component at all. Unskipping it is the acceptance test for whichever
+instantiation path is fixed first.
+
+Note the sequencing, because it is the whole lesson of this entry: the claim was written, and
+the mechanism that would have contradicted it (`pipefail`) was fixed in the same change. The
+correction arrived one CI run later. Had the `pipefail` fix not been part of this work, the
+false claim would have sat in the source comment indefinitely, with a green workflow behind
+it.
+
+Two candidates remain for whoever wants to revisit, and neither is urgent:
+
+- The `undefined element` retry in `backend_wasmtime.go` ("adapter-provided tables conflicting
+  with our placeholders") is keyed on this exact error and does not rescue this case.
+- The native component path in `engine/component_cgo.go`, behind the `wasmtime_component_cgo`
+  build tag that no build sets, needs `CGO_CFLAGS` pointing at wasmtime-go's vendored headers
+  and a `componentGetFunc` that can resolve exports nested inside an interface instance.
+
+Adding `"python"` to `engine.WasmtimeLanguages` is the whole of the switch when one of those
+lands; `engine/python_wasm_e2e_test.go` reads that list, so it moves over with no edit.
+
 ---
 
 **Method note for Phase 3.** Every "already on develop" verdict above was settled by
