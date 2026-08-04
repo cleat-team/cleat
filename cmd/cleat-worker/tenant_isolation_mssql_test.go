@@ -38,35 +38,23 @@ const mssqlIsolationDB = "cleat_tenant_isolation_test"
 // engine/testutil belongs to another workstream, so this applies the migration
 // locally instead of changing the shared helper.
 func TestTenantIsolationOverHTTP_MSSQL(t *testing.T) {
-	// Skipped, and the reason is a live engine defect this test found rather
-	// than anything about the HTTP layer. See IMPROVEMENT-PLAN §2.71.
+	// Live coverage since 2026-08-04. It shipped skipped, because writing it
+	// surfaced a defect in the engine rather than in the HTTP layer: 2.71,
+	// MSSQLStoreFactory established sp_set_session_context once per connection,
+	// and database/sql's ResetSession -- answered by go-mssqldb with
+	// sp_reset_connection -- cleared it before any query ran. Under the shipped
+	// schema's seven filter predicates, a statement with no session context
+	// matches no rows, so every tenant-scoped read came back empty while writes
+	// kept working (they set the context inside their own transaction).
 	//
-	// MSSQLStoreFactory sets sp_set_session_context from a wrapped connector
-	// "on every new connection, so RLS is enforced automatically"
-	// (engine/mssql_store.go:270-272). That holds exactly until the connection
-	// is recycled: database/sql calls ResetSession when a connection returns to
-	// the pool, go-mssqldb issues sp_reset_connection, and SESSION_CONTEXT is
-	// cleared. Measured directly against SQL Server 2022 with a pool of one:
+	// Fixed in bfc2b50, which reapplies the context on recycle. Unskipping this
+	// was the acceptance criterion recorded with the defect, and it passes.
 	//
-	//   same connection, right after setting: 11111111-1111-1111-1111-111111111111
-	//   after return to pool and re-acquire:  <NULL>
-	//
-	// With the real schema's seven filter predicates in place and no session
-	// context, every tenant-scoped read matches nothing. Writes are unaffected
-	// because the write paths call setSessionContext(tx) inside their own
-	// transaction; reads such as ListWorkflows and GetWorkflowByID rely on the
-	// connector alone. So this test seeds two tenants successfully and then
-	// reads back an empty list for both.
-	//
-	// It fails closed rather than leaking, so it is a correctness and
-	// availability defect rather than a security one -- but on SQL Server with
-	// the shipped schema, tenant-scoped reads return nothing.
-	//
-	// engine/mssql_store.go is another workstream's file, so this is reported
-	// rather than fixed here. Unskip once the session context is established
-	// per transaction (or re-applied on ResetSession) instead of once per
-	// connection.
-	t.Skip("blocked on §2.71: MSSQL session context is cleared by connection pooling, so RLS filters every read")
+	// Note what it asserts before asserting anything about tenants: that the
+	// security policies are actually enabled. Without that check it would pass
+	// just as happily against a schema with no RLS -- which is the state
+	// engine/testutil's MSSQL helper leaves, and the reason no existing MSSQL
+	// test could have caught 2.71.
 
 	base := os.Getenv("CLEAT_TEST_MSSQL")
 	if base == "" {
