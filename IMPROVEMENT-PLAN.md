@@ -2130,6 +2130,89 @@ verification compare columns against `payload` (cheap, no migration, detects div
 without changing the chain), or to stop writing the duplicates at all and treat `payload` as
 the sole record. The third is the real fix and the largest.
 
+### 2.33 `tests/upgrade` had never run either — ✅ **DONE**
+
+Eight tests, and **all eight failed** the first time a database was pointed at them. Four
+distinct causes, none of them subtle:
+
+1. **Five `INSERT INTO workflow_defs` statements had a syntax error.** A missing `)` after the
+   column list, and a fifth value for a four-column insert:
+   ```sql
+   INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
+       VALUES ($1, 1, $2, '{old_entry}', 'default')
+   ```
+   `pq: syntax error at or near "VALUES"`. Nothing compiles SQL in a string literal, and
+   nothing ever executed it.
+2. **Three "no data loss" assertions compared JSONB formatting.** `input::text` returns
+   PostgreSQL's normalised rendering — `{"key": "value"}`, with a space — which never equalled
+   the Go literal `{"key":"value"}`. They now let PostgreSQL do the comparison
+   (`input = $2::jsonb`) and read the text only for the failure message.
+3. **The rolling-restart tests passed a hardcoded `generation = 0`** after `ClaimWorkflow` had
+   bumped it, so every completion lost the fence. Same defect as `tests/integrity`'s
+   `TestConcurrentStatusUpdates`: the test counted the fence *working* as a worker error.
+4. **An order dependency between packages.** The rolling tests insert instances with
+   `def_name='test'` but nothing in the package creates that definition. They passed on a
+   machine where another suite had already made the row and failed on a fresh database —
+   verified by deleting the row and re-running. `testDB` now seeds it.
+
+**Two of the tests were vacuous even with the fence bug in place.** `TestRollingWorkerRestart`
+logged `0/50 workflows completed` and passed: it asserted only that the workers did not error.
+`TestRollingRestartNoDuplicateExecution` reported `0 workflows processed, 0 total executions,
+0 duplicates` — and "no duplicates" is also what you get when nothing runs. Both logs are now
+assertions, and the first drains any remaining work and requires every workflow to reach
+`done`, which is the property a rolling restart is supposed to have.
+
+`testDB` moved to `engine/testutil` for the same reasons as §2.31.
+
+Result: **8 pass, 0 skip, 0 fail**, wired into the `test-go` matrix with budget
+`test-go/upgrade 0`. Before: `50/50` and `30 executions` where it had been `0/50` and `0`.
+
+### 2.34 `tests/scale` — ✅ **DONE**
+
+Cheapest of the three. 15 of 16 passed once the schema was real; the one failure was the same
+generation fence, with an extra defect underneath it:
+
+```go
+for wfID := range workCh {
+    wf, err := store.ClaimWorkflow(ctx, workerID)   // claims *some* workflow
+    ...
+    store.AppendEventHistoryBatch(ctx, wfID, events)          // writes to a different one
+    store.CompleteWorkflow(ctx, wfID, workerID, 0, ...)       // and completes it, ungenerationed
+}
+```
+
+The channel is a work counter, not an assignment — `ClaimWorkflow` decides what this worker
+gets. The loop wrote to `wfID` while holding `wf`, so every completion was against a workflow
+the worker did not own, and the hardcoded `0` lost the fence on top of that. It now uses
+`wf.ID` and `wf.Generation`.
+
+`testDB` moved to `engine/testutil` and seeds `('test', 1)`, as in §2.31 and §2.33.
+
+**16 pass, 0 skip, 0 fail**, ~23s. Budget `test-go/scale 0`. The throughput numbers stay
+logged rather than asserted, so it does not become a benchmark gate that fails on a slow
+runner; what it asserts is correctness under concurrency.
+
+### Where the unwired suites stand
+
+| Suite | State |
+|---|---|
+| `integrity` | ✅ wired — §2.31 |
+| `upgrade` | ✅ wired — §2.33 |
+| `scale` | ✅ wired — §2.34 |
+| `cluster` | 🔶 open — needs the compose cluster; ci.yml's cluster job already brings one up |
+| `cross-language` | 🔶 open — needs the Rust/Python/AssemblyScript toolchains |
+| `soak` | 🔶 open, and unwired twice over: gated behind the `soak_test` build tag, so `go vet ./tests/soak/...` reports no packages at all |
+
+Across the three suites wired so far: **92 tests that no job had ever run**, of which **31
+failed** the first time a database appeared, and one of those failures was a live engine
+defect (§2.30). None of it was visible from a green CI.
+
+**Follow-up, and it matters:** the new matrix entries create new check-run contexts
+(`Test Go (integrity) on 1.26`, `… (upgrade) …`, `… (scale) …`) that are **not** in the
+required-status-check list configured in §2.25. Until they are added, a failure in any of them
+does not block a merge — which is the same defect as everything above, one level up. Add them
+once each has produced a real check-run to name.
+
 ---
 
 ## Salvage register — PR #208, closed unmerged
