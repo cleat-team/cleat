@@ -470,9 +470,29 @@ request is then served from one hardcoded scope. Real RLS exists underneath and 
 - Also: `migrations/mysql/` and `migrations/mssql/` have **zero** RLS policies against
   Postgres's seven. On those backends a missed `tenant_id` filter is a silent cross-tenant
   leak with no database backstop.
-- Also: the new admin API has no ownership check tying `workflowID` to the caller's tenant.
-  Currently latent only because the store methods are stubs (`engine/store_admin_stubs.go`).
-  **Fix before implementing them.**
+- ~~Also: the new admin API has no ownership check tying `workflowID` to the caller's tenant.~~
+  ✅ **FIXED 2026-08-04.** `callerOwnsTarget` in `cmd/cleat-worker/api_admin.go` now gates all
+  three destructive routes: it loads the workflow, compares `TenantID` against
+  `auth.TenantIDFromContext`, and answers **404 rather than 403** — 403 would confirm the
+  workflow exists, making the endpoint an oracle for valid IDs. Checked once at the router
+  rather than in each handler, so a route added later cannot inherit the gap by omission.
+
+  The check was previously left out for a documented reason: an unconditional ownership check
+  "would 404 the success-path tests", whose mock store returns no workflow. That is a fixture
+  shortcoming deciding a security question, so the fixtures were fixed instead.
+
+  Note what the *existing* admin tests could not catch: none of them put a tenant on the
+  request, so `TenantIDFromContext` returns false and the new check short-circuits. They all
+  passed before and after the fix. The regression tests set a caller tenant explicitly and
+  assert **the store is never reached** — status code alone would accept a handler that
+  applied the operation and then returned 404. With the check removed, the audit log shows
+  exactly the shape of the bug:
+
+  ```
+  WARN admin: force-complete workflow workflow_id=wf-owned-by-a operator=bbbbbbbb-…
+  ```
+
+  Tenant B's operation on tenant A's workflow, recorded faithfully and not prevented.
 - Test: multi-tenant isolation (see 2.6).
 
 ### 1.8 MySQL never worked — fixed in `9fc2a81`

@@ -11,30 +11,9 @@ import (
 
 // handleAdminRoutes routes /api/admin/instances/* requests.
 //
-// SECURITY: none of the handlers below verify that the target workflowID
-// belongs to the tenant resolved onto the request context (see
-// operatorFromContext). auth.TenantIDFromContext gives us the caller's
-// tenant, but it is only used to label the audit operator field — it is
-// never compared against the target workflow's owning tenant before
-// force-complete/force-fail/re-replay is applied. The engine.WorkflowStore
-// admin methods (AdminForceComplete/AdminForceFail/AdminReReplay) also take
-// no tenant parameter, so there is no enforcement point below this layer
-// either. Today the concrete store implementations
-// (engine/store_admin_stubs.go) are unimplemented stubs, so this is latent
-// rather than exploitable. The moment those stubs are replaced with real
-// implementations, any authenticated caller (of any tenant) who knows or
-// guesses a workflow ID will be able to force-complete, force-fail, or
-// re-replay a workflow belonging to a different tenant. Before that lands,
-// this handler needs to: (1) load the workflow via s.store.GetWorkflowByID,
-// (2) compare its TenantID to auth.TenantIDFromContext(r.Context()), and
-// (3) return 404 (not 403, to avoid confirming existence) on mismatch. That
-// check is intentionally NOT added here yet because the current test suite
-// exercises these handlers against a mock store that does not return a
-// workflow (GetWorkflowByID defaults to nil), so an unconditional ownership
-// check here would 404 the success-path tests
-// (TestAdminForceComplete_Success, TestAdminForceFail_Success,
-// TestAdminReReplay_Success) even though they are asserting the intended
-// contract.
+// Every route below is gated on callerOwnsTarget: the admin operations are
+// destructive and take no tenant parameter, so this layer is the only
+// enforcement point there is.
 func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 	if !*enableAdminAPI {
 		s.writeError(w, 404, "not found")
@@ -55,16 +34,62 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 
 	id := parts[0]
 
+	var action func(http.ResponseWriter, *http.Request, string)
 	switch {
 	case len(parts) == 2 && parts[1] == "force-complete" && r.Method == http.MethodPost:
-		s.handleAdminForceComplete(w, r, id)
+		action = s.handleAdminForceComplete
 	case len(parts) == 2 && parts[1] == "force-fail" && r.Method == http.MethodPost:
-		s.handleAdminForceFail(w, r, id)
+		action = s.handleAdminForceFail
 	case len(parts) == 2 && parts[1] == "re-replay" && r.Method == http.MethodPost:
-		s.handleAdminReReplay(w, r, id)
+		action = s.handleAdminReReplay
 	default:
 		s.writeError(w, 404, "not found")
+		return
 	}
+
+	// Ownership is checked once, here, rather than in each handler: a handler
+	// added later would otherwise inherit the gap by omission.
+	if !s.callerOwnsTarget(w, r, id) {
+		return
+	}
+	action(w, r, id)
+}
+
+// callerOwnsTarget reports whether the caller's tenant owns workflow id, and
+// writes the response itself when the answer is no.
+//
+// This is the enforcement point for the admin API. The engine.WorkflowStore
+// admin methods (AdminForceComplete / AdminForceFail / AdminReReplay) take no
+// tenant parameter, so nothing below this layer can distinguish one tenant's
+// workflow from another's. Without this check, any authenticated caller who
+// knows or guesses a workflow ID could force-complete, force-fail or re-replay
+// a workflow belonging to a different tenant.
+//
+// It answers 404, never 403: 403 would confirm that the workflow exists, which
+// is itself information the caller is not entitled to.
+func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id string) bool {
+	caller, ok := auth.TenantIDFromContext(r.Context())
+	if !ok {
+		// No tenant on the request means authentication is disabled
+		// (--require-auth=false), so there are no tenants to keep apart and
+		// nothing to compare against. The operator has chosen to trust the
+		// network; this check cannot substitute for that decision.
+		return true
+	}
+
+	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return false
+	}
+	if wf == nil || wf.TenantID != caller.String() {
+		// Same response for "does not exist" and "belongs to someone else",
+		// deliberately: distinguishing them turns this endpoint into an oracle
+		// for which workflow IDs are real.
+		s.writeError(w, 404, "not found")
+		return false
+	}
+	return true
 }
 
 // operatorFromContext extracts the operator identity from the request context.
