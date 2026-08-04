@@ -649,6 +649,20 @@ it returns. Not attempted here.
 > **Found by building the §2.4 harness, not by reading `flush.go`.** The plan's own
 > instruction — do not start the intent work before the crash harness exists — turned out
 > to be right for a reason it did not anticipate.
+>
+> **Measured, both ways.** `tests/crash` kills a worker during the third of three durable
+> calls and counts what the external service was asked to do:
+>
+> | | Reserve | Charge | Ship | events durable at crash |
+> |---|---|---|---|---|
+> | with the fix | 1 | 1 | **2** | 2 |
+> | fix reverted | **2** | **2** | 2 | **0** |
+>
+> The first row is the documented contract: only the interrupted call is retried. The
+> second is what shipped — a crash re-executed two charges that had **already completed
+> successfully**. That is the end-to-end demonstration that the flush fix is load-bearing
+> for crash recovery, and it is the reason the harness uses three calls rather than one:
+> with a single call both rows read "2", and the two cases are indistinguishable.
 
 > **Sharpened 2026-08-02 by empirical test, not grep.** The original framing here — "the
 > whole feature is dead" — was too coarse. The *read* side is live and correct: a
@@ -1117,7 +1131,7 @@ This is the part that prevents recurrence, and the highest-value work in the pla
 | 2.1 | **Golden path.** Clean container, no repo knowledge, execute the README verbatim. | README drift, flag-order bugs, undocumented schema bootstrap, missing `--api-addr`, wrong endpoints — all 8 golden-path failures found today |
 | 2.2 | **Two-worker race.** Real Postgres. Claim, stall worker A (SIGSTOP), let the reaper fire, let B claim, resume A. Assert event history intact, no duplicate side effects, no stale parent result. | 1.1, 1.2, 1.6 |
 | 2.3 | **Cancellation e2e.** 🔶 **Partly done** — `engine/cancellation_e2e_test.go` covers both *pre-call* paths (`freshCall` and the guest `h.PollCancellation()`) against a real Postgres and a real WASM module, with controls, each proven to fail. **Still open: cancelling an already-in-flight call** — the heartbeat path at `engine/heartbeats.go:58`, which is the "stops within N seconds" half. See §1.3. | 1.3 |
-| 2.4 | **Crash recovery.** SIGKILL the worker mid-`DurableCall`, restart, assert the documented semantics (exactly-once vs at-least-once — pick one and assert *that*). | 1.4 |
+| 2.4 | **Crash recovery.** ✅ **Done** — `tests/crash`. A real `cleat-worker` subprocess on the shipped two-DSN configuration, SIGKILLed with a call in flight, against a real PostgreSQL with the external service counting its own invocations. Three calls, so the counts discriminate: `1/1/2` (documented at-least-once) vs `2/2/2` (nothing durable). Measured both ways — see §1.4. Includes a clean-run control and a no-crash durability test. | 1.4 |
 | 2.5 | **Resource exhaustion.** ✅ **Done** — `tests/exhaustion`, wired into the cluster job. See §2.29. Per-backend coverage is still wasmtime-only, matching what deployments run. | 1.5 |
 | 2.6 | **Tenant isolation.** Two tenants; assert A cannot read, list, cancel, or admin-act on B's workflows through the HTTP API. Run against all three backends. | 1.7 |
 | 2.7 | **Deploy manifests.** Flag contract ✅ **done**, see §2.27. Actually *starting* them and asserting the worker reaches ready still needs a cluster — open. | `--namespace`/`--tenant-id` crash-loop — confirmed in `k8s/` and `charts/cleat/`, **not** in `docker-compose.cluster.yml` |
