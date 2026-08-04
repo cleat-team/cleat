@@ -431,13 +431,30 @@ apply is the same lie the fenced no-op told.
   fail with the fix removed; the store-behaviour one was confirmed against a deliberately
   permissive fence, since it passes both before and after and would otherwise be decoration.
 
-**Still open — the same shape in `cmd/cleat-bench`:**
-`main.go:161,168,228,247,251` call `CompleteWorkflow`/`FailWorkflow` with `("", 0)` and
-discard the result with an explicit `_ =`. The benchmark never claims the runs it starts, so
-every terminal write matches zero rows: runs are left `'ready'` in the database, and the
-reported latency excludes the completion round-trip it is supposed to be measuring — a no-op
-`UPDATE` is cheaper than a real one. Not fixed here because the honest fix changes what the
-benchmark measures, and the numbers in `benchmarks/` depend on that choice.
+**The same shape in `cmd/cleat-bench` — fixed, and it was overstating throughput by ~1.7×.**
+`main.go` called `CompleteWorkflow`/`FailWorkflow` with `("", 0)` at five sites and discarded
+the result with an explicit `_ =`. The benchmark never claimed the runs it started, so every
+terminal write matched zero rows.
+
+Measured on PostgreSQL 16, 20 executions at concurrency 5, `examples/as-workflow`:
+
+| | fresh | replay | end state |
+|---|---|---|---|
+| before | 66.0/s, avg 15.1 ms | 54.1/s, avg 18.5 ms | **40 runs `ready`** — none completed |
+| after | 39.7/s, avg 25.2 ms | 32.0/s, avg 31.3 ms | 40 runs `done` |
+
+The benchmark had never completed a single run in its history, and reported the latency of
+an execution whose terminal write was a no-op `UPDATE` matching nothing — cheaper than one
+that writes a row.
+
+The fix takes ownership through the sticky path (`UpdateStickyWorker` with a per-iteration
+worker ID, then `ClaimStickyWorkflows`) so each goroutine claims the run it just started, and
+passes the resulting `(workerID, generation)` to the terminal write. Part of the delta is
+therefore the claim round-trip — which a real worker performs anyway — and part is the
+`UpdateStickyWorker` write, which is bench scaffolding a worker does not do. The rest is the
+completion write that was previously skipped. **Numbers from before this fix are not
+comparable to numbers after it**, and any published figure taken from this tool before
+2026-08-04 was measuring an incomplete path.
 
 **Also open — ~15 fire-and-forget sites in `cmd/cleat-worker/setup.go`** (`FailWorkflow`,
 `MoveToDeadLetterQueue`) that pass correct fence arguments and discard the return. These are
