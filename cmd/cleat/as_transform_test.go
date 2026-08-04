@@ -39,6 +39,14 @@ func TestASTransform(t *testing.T) {
 	hasNode := exec.Command("node", "--version").Run() == nil
 	hasNpx := exec.Command("npx", "--version").Run() == nil
 
+	// GitHub's runners ship node and npx, so in CI their absence is a broken
+	// environment, not an excuse. Skipping there would silently retire this
+	// whole file — which matters more than usual now that it is the only thing
+	// asserting the AssemblyScript determinism checks run at all (§2.42).
+	if (!hasNode || !hasNpx) && os.Getenv("CI") != "" {
+		t.Fatalf("node and npx are expected on CI runners (node=%v npx=%v); "+
+			"without them the AS transform is untested, not optional", hasNode, hasNpx)
+	}
 	if !hasNode && !hasNpx {
 		t.Skip("AS transform tests require node or npx")
 	}
@@ -551,7 +559,20 @@ func compileASFixture(t *testing.T, indexTS string, env ...string) asFixture {
 	npmCmd := exec.Command("npm", "install", "--no-audit", "--no-fund")
 	npmCmd.Dir = tmpDir
 	if out, err := npmCmd.CombinedOutput(); err != nil {
-		t.Skipf("npm install failed (may not have network): %v\n%s", err, out)
+		// In CI npm and the registry are always available -- confirmed on this
+		// very change, where all six TestASTransform subtests ran and passed on
+		// the runner. So a failure here is a real failure, and skipping would
+		// turn the tests that catch §2.42 green without running them, which is
+		// precisely the shape of bug those tests exist to prevent.
+		//
+		// Locally, an offline developer still gets a skip: the resource is
+		// genuinely optional there and nobody asked for it.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("npm install failed in CI, where the registry is expected to "+
+				"be reachable: %v\n%s", err, out)
+		}
+		t.Skipf("npm install failed and CI is unset, so treating this as an "+
+			"offline working copy: %v\n%s", err, out)
 	}
 
 	ascPath := filepath.Join(tmpDir, "node_modules", ".bin", "asc")

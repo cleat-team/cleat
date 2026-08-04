@@ -4,8 +4,8 @@ cmd/cleat	TestASTransform	2
 cmd/cleat	TestRunBuild_PythonTarget_WasmRoundtrip	2
 cmd/cleat	TestVetExitCode	1
 cmd/cleat	TestVetPython	2
+cmd/cleat	compileASFixture	1
 cmd/cleat	runVetCmd	1
-cmd/cleat	testASCompilesToWasm	1
 cmd/cleat-bench	TestHelperProcess	1
 cmd/cleat-gen-plugin	TestHelperProcess	1
 cmd/cleat-worker	TestAPIMetrics	1
@@ -96,7 +96,6 @@ tests/integrity	TestReplayStressRandomCrashPoints	1
 tests/integrity	TestWalCorruption_PgSwitchWAL	1
 tests/integrity	buildStressWasm	2
 tests/integrity	newStressEngine	1
-tests/integrity	testDB	3
 tests/plugin-harness	TestPluginCalls_MultiDB	2
 tests/plugin-harness	TestPluginCalls_Wasm_AS	2
 tests/plugin-harness	TestPluginCalls_Wasm_Go	2
@@ -108,7 +107,5 @@ tests/plugin-harness	buildGoWorkflowWasm	2
 tests/plugin-harness	buildJavaWorkflowWasm	2
 tests/plugin-harness	buildPythonWorkflowWasm	5
 tests/plugin-harness	buildRustWorkflowWasm	2
-tests/scale	testDB	3
-tests/soak	TestSoakWorkflowMix	3
-tests/upgrade	testDB	3
+tests/soak	TestSoakWorkflowMix	1
 wasm	TestComponentPythonBinary	1
