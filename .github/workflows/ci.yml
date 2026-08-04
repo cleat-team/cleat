@@ -5,8 +5,16 @@
 #
 # Jobs:
 #   lint              — go vet, ruff, shellcheck, clippy
-#   lint-go           — golangci-lint: errcheck, gosimple, govet, ineffassign,
-#                       staticcheck, unused, misspell, unconvert, gocyclo, gofmt
+#   lint-go           — gofmt, then golangci-lint.
+#                       golangci-lint currently runs *govet only*. This line
+#                       used to list errcheck, gosimple, ineffassign,
+#                       staticcheck, unused, misspell, unconvert, gocyclo and
+#                       gofmt as well; .golangci.yml disables all of those
+#                       except gofmt, which was never enabled in the first
+#                       place (it is not in golangci-lint's default set). The
+#                       disables are deliberate and documented in that file —
+#                       what was not deliberate was this comment claiming a
+#                       coverage the job did not have.
 #   vulncheck         — govulncheck ./... (Go vulnerability scanner)
 #   test-go           — matrix (go version x package group), race detector
 #   test-python       — matrix (python 3.10 / 3.11 / 3.12)
@@ -164,6 +172,31 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+      # gofmt as its own step, not as a golangci-lint linter.
+      #
+      # This file's header comment has listed gofmt among the enabled linters
+      # for as long as it has existed, and it was never enabled: .golangci.yml
+      # only ever *disables* linters, and gofmt is not in golangci-lint's
+      # default set (errcheck, gosimple, govet, ineffassign, staticcheck,
+      # unused). So the gate did not exist, and cmd/cleat-worker/config.go sat
+      # unformatted on develop with CI green.
+      #
+      # Run directly rather than by adding gofmt to .golangci.yml, because
+      # that config excludes ".*_test\.go$" from every linter -- which would
+      # leave the majority of the repo's Go files outside the check that is
+      # being added to catch exactly this.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l . | grep -v '/testdata/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            echo >&2
+            echo "Run: gofmt -w <file>" >&2
+            exit 1
+          fi
+          echo "OK: all Go files are gofmt-clean."
+
       - name: golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.7
