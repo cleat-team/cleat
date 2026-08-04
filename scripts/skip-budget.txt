@@ -36,7 +36,14 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # a runner -- the absolute count here cannot be reproduced off-CI, but the delta
 # is exactly one test and nothing else changed its skip behaviour. If the first
 # CI run disagrees, check-skip-budget.sh prints the exact number.
-test-go/engine	346	# observed on the runner: 2984 pass, 347 skip, minus 1 un-skipped
+#
+# 346 -> 347: TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL is new, and skips
+# when CLEAT_TEST_MSSQL is unset -- exactly as its _MySQL sibling has always
+# done. It closes the 1.1 coverage gap on the third dialect: the guard in
+# migrations/mssql/004 shipped with nothing able to detect its removal. A count
+# going up needs a reason, and this is one added dialect-conditional test, not
+# a test that stopped running.
+test-go/engine	347	# observed on the runner: 2984 pass, 347 skip, plus the new MSSQL guard test
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -81,7 +88,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	346	# same as test-go/engine, and for the same reason; see the note there
+cluster	347	# same as test-go/engine, and for the same reason; see the note there
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is

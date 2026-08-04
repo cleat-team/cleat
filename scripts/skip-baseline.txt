@@ -20,6 +20,7 @@ engine	TestEngineExecute	1
 engine	TestEngineExecuteCancelOrder	1
 engine	TestEngineReplay	1
 engine	TestEngineReplayDivergence	2
+engine	TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL	1
 engine	TestFinalizeWorkflowStatus_SQLFenceGuard_MySQL	1
 engine	TestIntegrationFullPipeline	1
 engine	TestIntegrationMultiStepSleep	1
