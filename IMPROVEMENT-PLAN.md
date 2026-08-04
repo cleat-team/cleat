@@ -1331,7 +1331,31 @@ would explain how this survived: the enforcement that exposes it is new.
 The fix is one column and one parameter. The test is the valuable part, and there is
 currently no test that spawns a child workflow under an RLS-enforcing connection.
 
-### 2.21 `applyPostgresSchemaFile` races itself, and its doc comment says it cannot — OPEN
+### 2.21 `applyPostgresSchemaFile` races itself, and its doc comment says it cannot — ✅ **FIXED**
+
+> **Reproduced deliberately, then fixed.** Eight goroutines applying the schema to one
+> database fail without serialisation and pass with it. Fixed with a session-level advisory
+> lock on a pinned `*sql.Conn` — pinned because advisory locks belong to a *session*, and
+> `database/sql` hands out arbitrary pooled connections, so locking via `db` can take the
+> lock on one connection and fail to release it on another.
+>
+> **The race has more than one symptom.** This entry records only
+> `duplicate key value violates unique constraint "pg_extension_name_index"`, from
+> `CREATE EXTENSION`. The reproduction also produces
+> `pq: tuple concurrently updated (XX000)`, from `CREATE OR REPLACE FUNCTION`. Same
+> non-atomic-DDL cause, different loser. Anyone matching on the first string alone will
+> conclude the second is a new bug.
+>
+> That nearly cost something: the non-vacuity check was `grep -c "duplicate key value"`,
+> which returned 0 and briefly looked like the test had gone vacuous. The test was fine —
+> the *check* was too narrow. **Grep for FAIL, not for a remembered error string.**
+>
+> Doc comment corrected, per this entry's own instruction — it now says the file is safe to
+> reapply *sequentially* and explicitly not concurrently.
+>
+> The original framing is kept below.
+
+#### Original framing
 
 Caught flaking CI on the docs PR that recorded §2.18–§2.20. Same commit, three Multi-DB CI
 runs, **success / failure / success** — so it is a flake, and the kind that erodes exactly
