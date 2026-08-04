@@ -1554,6 +1554,52 @@ return once the test closes `epochDone`. Verified to fail without the join.
 That is the second vacuous assertion caught in this session by the same habit of removing
 the fix and re-running. Both would have passed review.
 
+
+### 2.25 Nothing prevents a red PR from merging into `develop` — OPEN (needs repo admin)
+
+`develop` has branch protection enabled, and it enforces almost nothing:
+
+```console
+$ gh api repos/cleat-team/cleat/branches/develop/protection --jq 'has("required_status_checks")'
+false
+$ gh api repos/cleat-team/cleat/branches/develop/protection --jq 'has("required_pull_request_reviews")'
+false
+$ gh api repos/cleat-team/cleat/rulesets
+[]
+```
+
+No required status checks, no required reviews, no rulesets. `gh pr merge` will merge a PR
+whose entire test suite is failing, and **`mergeStateStatus == CLEAN` carries no CI
+information at all** — it reports the absence of conflicts, and reads CLEAN while every job
+is still red or has not started.
+
+This is the structural version of the Phase 0 finding. §0 is about CI reporting green while
+the `engine` package does not compile — a signal that lies. This is about the signal not
+being *connected to anything* even when it tells the truth. Both have the same effect:
+merges are gated by whoever is watching, not by the pipeline.
+
+**How it surfaced.** A merge-on-green watcher merged PR #227 on the condition
+`pending == 0 && fail == 0 && total > 30`. It fired at 31 checks when the full set for that
+PR was 42, because GitHub registers checks progressively and `pending == 0` routinely means
+"not created yet" rather than "finished". The next PR made the pattern unmistakable —
+`pending` was 0 at *every* poll while the total climbed 20 → 30 → 31 → 32 → 34 → 36. The
+merge happened to be fine (all six workflow runs on the merge commit succeeded), but that
+was luck.
+
+**The fix is a repo setting, not a code change,** so it is left for whoever administers the
+repository: require the jobs that matter on `develop`. Until then, any automation that
+merges must gate on **workflow runs for the head SHA** rather than the check-name rollup:
+
+```sh
+SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid)
+runs=$(gh run list -c "$SHA" --limit 100 --json status,conclusion,name)
+busy=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
+```
+
+and require the run count to hold steady across several consecutive polls. Do not hardcode
+an expected total: path filters mean different PRs trigger different workflows (#227 saw 36
+checks, #229 saw 42), so any fixed threshold either fires early or never fires.
+
 ---
 
 ## Salvage register — PR #208, closed unmerged
