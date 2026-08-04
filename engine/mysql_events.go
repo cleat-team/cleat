@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -55,8 +56,17 @@ func (s *MySQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 	}
 	defer stmt.Close()
 
-	var prevChecksum string
-	for _, rec := range recs {
+	// Chain in step order, seeded from what is already stored -- see
+	// chainOrder and PostgresStore.previousStoredChecksum for why both halves
+	// are required.
+	order := chainOrder(recs)
+	prevChecksum, err := s.previousStoredChecksum(ctx, tx, workflowID, recs[order[0]].Step)
+	if err != nil {
+		return err
+	}
+
+	for _, i := range order {
+		rec := recs[i]
 		payload, err := eventRecordToPayload(rec)
 		payloadArg := nullStr("")
 		if err == nil && len(payload) > 0 {
@@ -92,6 +102,25 @@ func (s *MySQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 	}
 
 	return nil
+}
+
+// previousStoredChecksum returns the checksum of the last event already stored
+// for workflowID before step, or "" when there is none. See
+// PostgresStore.previousStoredChecksum for the reasoning.
+func (s *MySQLStore) previousStoredChecksum(ctx context.Context, tx *sql.Tx, workflowID string, step int) (string, error) {
+	var checksum sql.NullString
+	err := tx.QueryRowContext(ctx, `
+		SELECT checksum FROM event_history
+		WHERE workflow_id = ? AND tenant_id = ? AND step < ?
+		ORDER BY step DESC LIMIT 1
+	`, workflowID, s.tenantID, step).Scan(&checksum)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("append events in tx: previous checksum: %w", err)
+	}
+	return checksum.String, nil
 }
 
 // ---------------------------------------------------------------------------

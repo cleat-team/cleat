@@ -2028,6 +2028,47 @@ Two things this cost, worth knowing before extending it:
 - The existing `tests/cluster` fixtures insert mock WASM (`"mock-wasm-v1"`), so nothing in the
   repo had run real WASM through a worker container before this.
 
+### 2.30 The event checksum chain is rebuilt from scratch on every write — ✅ **FIXED**
+
+Found by pointing a real database at `tests/integrity`, which is in `UNWIRED_SUITES` and had
+therefore never run. `VerifyWorkflowEvents` recomputes the checksum chain over the whole
+history in step order. `appendEventsInTx` built it two different ways from that:
+
+- **It restarted the chain at every call.** `prevChecksum` was a fresh `var prevChecksum
+  string` per invocation, so the first event of a second write chained from `""` rather than
+  from the previous event's stored checksum. The single-event path passed `""`
+  unconditionally, so `AppendEventHistory` never chained at all.
+- **It chained in slice order, not step order.** Verification reads `ORDER BY step`, so a
+  batch handed over in any other order persisted a chain that could not be reproduced.
+
+The first one reaches production. `cmd/cleat-worker/setup.go:1669` computes
+`newEvents = resultHistory[len(history):]` and hands *only that segment* to
+`FinalizeWorkflowSegment`, which calls the same helper — so **every workflow that suspends and
+resumes** (sleep, await-signal, timer) had a broken chain from its second segment onward, and
+`VerifyWorkflowEvents` reported it as corrupt. A verifier that cries corruption on healthy
+data is worse than no verifier: it is the noise a real corruption would hide in.
+
+Fixed in all three dialects: `chainOrder` walks the batch in step order, and a new
+`previousStoredChecksum` seeds from the row immediately preceding the batch — the row, not the
+last row *with* a checksum, because that is precisely what the verifier chains from.
+
+**Why it survived.** The eight existing `VerifyWorkflowEvents` tests in
+`engine/db_regression_test.go` drive sqlmock: they supply both the stored checksum and the row
+it is recomputed from, so the two can never disagree. Nothing wrote a chain and read it back.
+The replacement tests in `engine/store_event_chain_test.go` use a real database, and all three
+fail on the pre-fix tree:
+
+```
+verify events: workflow chain-...: step 1: checksum mismatch
+    (expected 3ae6e6ebac5922fd, got 261d761d2ec3f10b)
+step 1 was written by a second call, so its checksum must chain from step 0's
+stored checksum, not from an empty string
+```
+
+`TestAppendEventHistory_ChainDetectsTampering` is the counterweight: the fix must not buy
+agreement by weakening what verification catches, so it rewrites a persisted event's `payload`
+and requires the mismatch to still be reported.
+
 ---
 
 ## Salvage register — PR #208, closed unmerged

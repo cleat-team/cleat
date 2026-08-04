@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -413,6 +414,25 @@ func (s *MSSQLStore) AppendEventHistoryBatch(ctx context.Context, workflowID str
 	return tx.Commit()
 }
 
+// previousStoredChecksum returns the checksum of the last event already stored
+// for workflowID before step, or "" when there is none. See
+// PostgresStore.previousStoredChecksum for the reasoning.
+func (s *MSSQLStore) previousStoredChecksum(ctx context.Context, tx *sql.Tx, workflowID string, step int) (string, error) {
+	var checksum sql.NullString
+	err := tx.QueryRowContext(ctx, `
+		SELECT TOP 1 checksum FROM event_history
+		WHERE workflow_id = @p1 AND tenant_id = @p2 AND step < @p3
+		ORDER BY step DESC
+	`, workflowID, s.tenantID, step).Scan(&checksum)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("append events in tx: previous checksum: %w", err)
+	}
+	return checksum.String, nil
+}
+
 // appendEventsInTx inserts event records using an already-open transaction.
 // This is shared by AppendEventHistoryBatch and FinalizeWorkflowSegment so
 // that both can insert events atomically alongside other operations.
@@ -423,8 +443,17 @@ func (s *MSSQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 
 	// Use INSERT...SELECT WHERE NOT EXISTS for idempotent event insertion.
 	// This is the SQL Server equivalent of PostgreSQL's ON CONFLICT DO NOTHING.
-	var prevChecksum string
-	for _, rec := range recs {
+	// Chain in step order, seeded from what is already stored -- see
+	// chainOrder and PostgresStore.previousStoredChecksum for why both halves
+	// are required.
+	order := chainOrder(recs)
+	prevChecksum, err := s.previousStoredChecksum(ctx, tx, workflowID, recs[order[0]].Step)
+	if err != nil {
+		return err
+	}
+
+	for _, i := range order {
+		rec := recs[i]
 		payload, err := eventRecordToPayload(rec)
 		payloadArg := nullStr("")
 		if err == nil && len(payload) > 0 {

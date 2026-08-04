@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -30,10 +31,22 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 		return nil
 	}
 
+	// Seed the chain from what is already persisted, and walk the batch in
+	// step order. Both matter: a workflow that suspends and resumes writes its
+	// history over several calls (cmd/cleat-worker/setup.go finalizes each
+	// segment with only that segment's new events), so restarting the chain at
+	// each call makes VerifyWorkflowEvents report every resumed workflow as
+	// corrupt.
+	order := chainOrder(recs)
+	prevChecksum, err := s.previousStoredChecksum(ctx, tx, workflowID, recs[order[0]].Step)
+	if err != nil {
+		return err
+	}
+
 	// For a single event, use direct Exec to avoid a PREPARE round-trip.
 	// For multiple events, use PrepareContext to avoid re-parsing per event.
 	if len(recs) == 1 {
-		if err := s.appendOneEvent(ctx, tx, workflowID, recs[0], ""); err != nil {
+		if err := s.appendOneEvent(ctx, tx, workflowID, recs[0], prevChecksum); err != nil {
 			return err
 		}
 	} else {
@@ -52,13 +65,12 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 		}
 		defer stmt.Close()
 
-		var prevChecksum string
-		for _, rec := range recs {
+		for _, i := range order {
+			rec := recs[i]
 			if err := s.execEventStmt(ctx, stmt, workflowID, rec, prevChecksum); err != nil {
 				return err
 			}
-			checksum := computeEventChecksum(rec, prevChecksum)
-			prevChecksum = checksum
+			prevChecksum = computeEventChecksum(rec, prevChecksum)
 		}
 	}
 
@@ -74,6 +86,30 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 }
 
 // appendOneEvent inserts a single event without a prepared statement.
+// previousStoredChecksum returns the checksum of the last event already stored
+// for workflowID before step, or "" when there is none.
+//
+// It reads the immediately preceding row rather than the last row that has a
+// checksum, because that is what VerifyWorkflowEvents does: it walks the
+// history in step order and resets the chain to "" whenever a row's checksum is
+// missing. Seeding from anything else would agree with the table but not with
+// the verifier.
+func (s *PostgresStore) previousStoredChecksum(ctx context.Context, tx *sql.Tx, workflowID string, step int) (string, error) {
+	var checksum sql.NullString
+	err := tx.QueryRowContext(ctx, `
+		SELECT checksum FROM event_history
+		WHERE workflow_id = $1 AND tenant_id = $2 AND step < $3
+		ORDER BY step DESC LIMIT 1
+	`, workflowID, s.tenantID, step).Scan(&checksum)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("append events in tx: previous checksum: %w", err)
+	}
+	return checksum.String, nil
+}
+
 func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflowID string, rec EventRecord, prevChecksum string) error {
 	payload, _ := eventRecordToPayload(rec)
 	checksum := computeEventChecksum(rec, prevChecksum)
