@@ -118,6 +118,29 @@ jobs:
             -run "TestRust|TestPython|TestAssemblyScript|TestJava" \
             ./engine/... 2>&1 | tee e2e-report.txt
 
+      # tests/cross-language was in UNWIRED_SUITES: seven tests covering
+      # Rust<->Go cross-replay -- executing under one runtime and replaying the
+      # recorded history under the other, plus divergence detection across the
+      # boundary. No job referenced it, so none of them had ever run. They pass
+      # as written; this job is the only one that installs the toolchain they
+      # need.
+      - name: Run the cross-language suite
+        shell: bash
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          go test -count=1 -short=false -timeout=10m -json \
+            ./tests/cross-language/... 2>&1 | tee cross-language-report.json
+
+      # 0, and the number is the point: every test in that suite needs cargo and
+      # the wasm32-wasip1 target, which this job installs above. A skip here
+      # means the toolchain setup stopped working and the suite quietly went
+      # back to testing nothing.
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh e2e-cross-language cross-language-report.json
+
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
