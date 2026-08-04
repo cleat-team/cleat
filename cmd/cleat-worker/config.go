@@ -36,7 +36,7 @@ type Config struct {
 
 // Package-level flag variables used across the worker.
 var (
-	dbURL                         = flag.String("db", "", "Database connection URL (required). For Postgres: postgres://... For MySQL: user:pass@tcp(host:port)/dbname?parseTime=true For MSSQL: sqlserver://user:pass@host:port?database=dbname")
+	dbURL = flag.String("db", "", "Database connection URL (required). For Postgres: postgres://... For MySQL: user:pass@tcp(host:port)/dbname?parseTime=true For MSSQL: sqlserver://user:pass@host:port?database=dbname")
 
 	// migrateDBURL exists so that --db can be an unprivileged role.
 	//
