@@ -117,6 +117,56 @@ func main() {
 	reportStats("replay", replayLatencies)
 }
 
+// startAndClaimRun starts a run and takes ownership of it, returning the run
+// ID, the worker ID that now owns it, and its generation.
+//
+// The benchmark used to start a run and never claim it, then finish with
+//
+//	_ = store.CompleteWorkflow(ctx, runID, "", 0, "{}", nil)
+//
+// CompleteWorkflow is fenced on `assigned_to = $2 AND generation = $5`, and an
+// unclaimed run has assigned_to NULL — `NULL = ”` is NULL, not true — so the
+// UPDATE matched zero rows, returned engine.ErrFenceLost, and the `_ =`
+// discarded it. Every benchmarked run was left 'ready' in the database, and
+// the reported latency excluded the terminal write it was supposed to be
+// measuring: a no-op UPDATE that matches nothing is cheaper than one that
+// writes a row. See IMPROVEMENT-PLAN.md 1.2.
+//
+// Ownership is taken via the sticky path so that each goroutine claims the
+// run it just started rather than an arbitrary ready one: the sticky worker
+// ID is unique per iteration, and ClaimStickyWorkflows filters on it.
+func startAndClaimRun(ctx context.Context, store engine.WorkflowStore, defName string, defVersion int, input json.RawMessage, iteration int) (runID, workerID string, generation int64, err error) {
+	runID, _, err = store.StartNewRun(ctx, "", defName, defVersion, input, "", engine.DefaultTenantUUID, 0)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("start new run: %w", err)
+	}
+
+	workerID = fmt.Sprintf("cleat-bench-%d", iteration)
+	if err := store.UpdateStickyWorker(ctx, runID, workerID); err != nil {
+		return "", "", 0, fmt.Errorf("assign sticky worker for %s: %w", runID, err)
+	}
+
+	claimed, err := store.ClaimStickyWorkflows(ctx, workerID, 1)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("claim %s: %w", runID, err)
+	}
+	for _, wf := range claimed {
+		if wf.ID == runID {
+			return runID, workerID, wf.Generation, nil
+		}
+	}
+	return "", "", 0, fmt.Errorf("claim %s: run was not returned by ClaimStickyWorkflows (claimed %d other run(s))", runID, len(claimed))
+}
+
+// finishRun records the terminal status and reports a write that did not
+// apply. A silently skipped completion is what this benchmark did for its
+// whole history; it must never be silent again.
+func finishRun(err error, runID, what string) {
+	if err != nil {
+		log.Printf("%s for %s did not apply: %v -- this run's latency is not comparable", what, runID, err)
+	}
+}
+
 func runBenchmark(ctx context.Context, store engine.WorkflowStore, defName string, defVersion int, entryPoint string, count, concurrency int) []time.Duration {
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
@@ -130,15 +180,15 @@ func runBenchmark(ctx context.Context, store engine.WorkflowStore, defName strin
 	for i := 0; i < count; i++ {
 		sem <- struct{}{}
 		wg.Add(1)
-		go func() {
+		go func(iteration int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", engine.DefaultTenantUUID, 0)
+			runID, workerID, generation, err := startAndClaimRun(ctx, store, defName, defVersion, input, iteration)
 			if err != nil {
-				log.Printf("StartNewRun error: %v", err)
+				log.Printf("%v", err)
 				return
 			}
 
@@ -158,14 +208,14 @@ func runBenchmark(ctx context.Context, store engine.WorkflowStore, defName strin
 			result, history, _, _, _, err := eng.Execute(ctx, wasmBytes, entryPoint, input)
 			if err != nil {
 				log.Printf("Execute error for %s: %v", runID, err)
-				_ = store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
+				finishRun(store.FailWorkflow(ctx, runID, workerID, generation, err.Error(), "", "", nil), runID, "FailWorkflow")
 				return
 			}
 
 			_ = result
 			_ = history
 
-			_ = store.CompleteWorkflow(ctx, runID, "", 0, "{}", nil)
+			finishRun(store.CompleteWorkflow(ctx, runID, workerID, generation, "{}", nil), runID, "CompleteWorkflow")
 
 			elapsed := time.Since(start)
 			latenciesMu.Lock()
@@ -176,7 +226,7 @@ func runBenchmark(ctx context.Context, store engine.WorkflowStore, defName strin
 			if n%10 == 0 {
 				fmt.Printf("  %d/%d completed\n", n, count)
 			}
-		}()
+		}(i)
 	}
 	wg.Wait()
 	return latencies
@@ -195,15 +245,15 @@ func runReplayBenchmark(ctx context.Context, store engine.WorkflowStore, defName
 	for i := 0; i < count; i++ {
 		sem <- struct{}{}
 		wg.Add(1)
-		go func() {
+		go func(iteration int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", engine.DefaultTenantUUID, 0)
+			runID, workerID, generation, err := startAndClaimRun(ctx, store, defName, defVersion, input, iteration)
 			if err != nil {
-				log.Printf("StartNewRun error: %v", err)
+				log.Printf("%v", err)
 				return
 			}
 
@@ -225,7 +275,7 @@ func runReplayBenchmark(ctx context.Context, store engine.WorkflowStore, defName
 			_, history, _, _, _, err := eng.Execute(ctx, wasmBytes, entryPoint, input)
 			if err != nil {
 				log.Printf("First execute error: %v", err)
-				_ = store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
+				finishRun(store.FailWorkflow(ctx, runID, workerID, generation, err.Error(), "", "", nil), runID, "FailWorkflow")
 				return
 			}
 
@@ -244,11 +294,11 @@ func runReplayBenchmark(ctx context.Context, store engine.WorkflowStore, defName
 			_, _, _, _, _, err = engine2.Replay(ctx, wasmBytes, entryPoint, input, history)
 			if err != nil {
 				log.Printf("Replay error: %v", err)
-				_ = store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
+				finishRun(store.FailWorkflow(ctx, runID, workerID, generation, err.Error(), "", "", nil), runID, "FailWorkflow")
 				return
 			}
 
-			_ = store.CompleteWorkflow(ctx, runID, "", 0, "{}", nil)
+			finishRun(store.CompleteWorkflow(ctx, runID, workerID, generation, "{}", nil), runID, "CompleteWorkflow")
 
 			elapsed := time.Since(start)
 			latenciesMu.Lock()
@@ -259,7 +309,7 @@ func runReplayBenchmark(ctx context.Context, store engine.WorkflowStore, defName
 			if n%10 == 0 {
 				fmt.Printf("  %d/%d completed\n", n, count)
 			}
-		}()
+		}(i)
 	}
 	wg.Wait()
 	return latencies
