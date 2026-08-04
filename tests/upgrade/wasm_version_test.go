@@ -17,7 +17,7 @@ func TestWASMVersionUpgrade(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	// Register a workflow def with version 1 (old) and version 2 (new).
@@ -122,7 +122,7 @@ func TestInFlightUsesOldVersion(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	defName := fmt.Sprintf("upg-inflight-%d", time.Now().UnixNano())
@@ -204,7 +204,7 @@ func TestVersionFallback(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	defName := fmt.Sprintf("upg-fallback-%d", time.Now().UnixNano())

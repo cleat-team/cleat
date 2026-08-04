@@ -14,6 +14,19 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// suiteQueue keeps this suite's workflows off the queues the other tests/
+// suites use.
+//
+// Without it every DB-backed suite inserted onto "default" and constructed its
+// store with no queue list, which also polls "default". Go runs distinct
+// packages in parallel and they all point at CLEAT_TEST_DB, so
+// `go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...`
+// had tests/scale claiming tests/integrity's workflows out from under it:
+// 17 failures, and every one of them passes when the suites are run one at a
+// time. ClaimWorkflows filters on `task_queue = ANY($2)`, so giving each suite
+// its own queue is the whole fix. IMPROVEMENT-PLAN 2.39.
+const suiteQueue = "queue-integrity-tests"
+
 // testDB returns a database connection for integrity tests.
 //
 // The schema comes from engine/testutil, which builds it from
@@ -54,7 +67,7 @@ func createTestWorkflow(t *testing.T, db *sql.DB, store *engine.PostgresStore, c
 	t.Helper()
 	runID := fmt.Sprintf("int-eh-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -71,7 +84,7 @@ func TestEventHistoryConsistencyAfterFault(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -136,7 +149,7 @@ func TestEventHistoryGaps(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -182,7 +195,7 @@ func TestEventHistoryOrdering(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -225,7 +238,7 @@ func TestEventHistoryLargePayload(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 

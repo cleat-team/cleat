@@ -18,7 +18,7 @@ func TestRollingWorkerRestart(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	const numWorkflows = 50
@@ -29,7 +29,7 @@ func TestRollingWorkerRestart(t *testing.T) {
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("upg-rolling-%d-%d", i, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
@@ -175,7 +175,7 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	const numWorkflows = 30
@@ -190,7 +190,7 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("upg-nodup-%d-%d", i, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}

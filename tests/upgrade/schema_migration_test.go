@@ -13,6 +13,19 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// suiteQueue keeps this suite's workflows off the queues the other tests/
+// suites use.
+//
+// Without it every DB-backed suite inserted onto "default" and constructed its
+// store with no queue list, which also polls "default". Go runs distinct
+// packages in parallel and they all point at CLEAT_TEST_DB, so
+// `go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...`
+// had tests/scale claiming tests/integrity's workflows out from under it:
+// 17 failures, and every one of them passes when the suites are run one at a
+// time. ClaimWorkflows filters on `task_queue = ANY($2)`, so giving each suite
+// its own queue is the whole fix. IMPROVEMENT-PLAN 2.39.
+const suiteQueue = "queue-upgrade-tests"
+
 // testDB returns a database connection for upgrade tests.
 //
 // The schema comes from engine/testutil, which builds it from
@@ -68,7 +81,7 @@ func TestMigrationNoDataLoss(t *testing.T) {
 
 	runID := fmt.Sprintf("upg-mig-noloss-%d", time.Now().UnixNano())
 	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{"key":"value"}', 'default')`, runID, defName)
+		VALUES ($1, $2, 1, 'ready', '{"key":"value"}', '`+suiteQueue+`')`, runID, defName)
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
@@ -77,7 +90,7 @@ func TestMigrationNoDataLoss(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	err = store.AppendEventHistory(ctx, runID, engine.EventRecord{
 		Step: 0, EventType: engine.EventTypeCall,
 		Service: "svc", Op: "op", Request: `{"original":"data"}`, Response: `{"ok":true}`,
@@ -165,7 +178,7 @@ func TestMigrationRollback(t *testing.T) {
 
 	runID := fmt.Sprintf("upg-mig-roll-%d", time.Now().UnixNano())
 	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{"preserved":true}', 'default')`, runID, defName)
+		VALUES ($1, $2, 1, 'ready', '{"preserved":true}', '`+suiteQueue+`')`, runID, defName)
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
@@ -174,7 +187,7 @@ func TestMigrationRollback(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	err = store.AppendEventHistory(ctx, runID, engine.EventRecord{
 		Step: 0, EventType: engine.EventTypeCall,
 		Service: "svc", Op: "op", Request: `{"preserved":true}`, Response: `{"ok":true}`,
@@ -247,7 +260,7 @@ func TestMigrationIdempotent(t *testing.T) {
 
 	runID := fmt.Sprintf("upg-mig-idem-%d", time.Now().UnixNano())
 	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{"idempotent":true}', 'default')`, runID, defName)
+		VALUES ($1, $2, 1, 'ready', '{"idempotent":true}', '`+suiteQueue+`')`, runID, defName)
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
@@ -256,7 +269,7 @@ func TestMigrationIdempotent(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	err = store.AppendEventHistory(ctx, runID, engine.EventRecord{
 		Step: 0, EventType: engine.EventTypeCall,
 		Service: "svc", Op: "op", Request: `{"idempotent":true}`, Response: `{"ok":true}`,

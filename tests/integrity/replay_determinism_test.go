@@ -18,11 +18,11 @@ func TestReplayProducesIdenticalHistory(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-replay-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -84,14 +84,14 @@ func TestReplayDifferentInputsProducesDifferentHistory(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	// Create two workflows with different event sequences.
 	makeID := func(suffix string) string {
 		id := fmt.Sprintf("int-replay-diff-%s-%d", suffix, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %s: %v", suffix, err)
 		}
@@ -151,7 +151,7 @@ func TestReplayVersionMismatch(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	// Create a workflow definition at version 1 and version 2.
@@ -166,7 +166,7 @@ func TestReplayVersionMismatch(t *testing.T) {
 	// Create a workflow instance at version 1 with events.
 	runID := fmt.Sprintf("int-version-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{}', 'default')`, runID, defName)
+		VALUES ($1, $2, 1, 'ready', '{}', '`+suiteQueue+`')`, runID, defName)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -219,11 +219,11 @@ func TestReplayHashMismatch(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-hash-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}

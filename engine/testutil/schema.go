@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -141,10 +142,50 @@ func applyPostgresSchemaFile(t *testing.T, db *sql.DB) {
 		}
 	}()
 
+	// Skip the DDL entirely when this exact schema file has already been
+	// applied to this database.
+	//
+	// The advisory lock above serialises schema application against schema
+	// application, which is not the collision that actually bites. This
+	// function used to run on *every* TestDB call -- 24 times for
+	// tests/integrity alone -- and every run takes ACCESS EXCLUSIVE on tables
+	// another package's tests are reading and writing at that moment. Go runs
+	// distinct packages in parallel against the same CLEAT_TEST_DB, so
+	// `go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...`
+	// deadlocked DDL against DML:
+	//
+	//	apply migrations/postgres/001_schema.sql: pq: deadlock detected (40P01)
+	//	append events in tx: increment event_count: pq: deadlock detected (40P01)
+	//
+	// 17 failures, every one of which passes when the suites are run one at a
+	// time -- a screen of red that means nothing, which is its own kind of
+	// false signal. Fingerprinting makes the DDL run once for a given schema
+	// file instead of once per test. IMPROVEMENT-PLAN 2.39.
+	//
+	// Tests that add their own columns (all IF NOT EXISTS) or drop objects
+	// they themselves created are unaffected: the fingerprint tracks the
+	// schema *file*, and re-applying it is exactly what those tests do not
+	// need.
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256(data))
+	var applied string
+	err = conn.QueryRowContext(ctx, `SELECT fingerprint FROM cleat_test_schema WHERE id = 1`).Scan(&applied)
+	if err == nil && applied == fingerprint {
+		return
+	}
+
 	// No-args Exec keeps lib/pq on the simple query protocol, which is what
 	// allows the whole multi-statement file to go in one round trip.
 	if _, err := conn.ExecContext(ctx, string(data)); err != nil {
 		t.Fatalf("apply %s: %v", path, err)
+	}
+
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS cleat_test_schema (
+		id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL)`); err != nil {
+		t.Fatalf("apply %s: create fingerprint table: %v", path, err)
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO cleat_test_schema (id, fingerprint) VALUES (1, $1)
+		ON CONFLICT (id) DO UPDATE SET fingerprint = EXCLUDED.fingerprint`, fingerprint); err != nil {
+		t.Fatalf("apply %s: record fingerprint: %v", path, err)
 	}
 }
 

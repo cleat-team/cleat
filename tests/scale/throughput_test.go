@@ -14,6 +14,19 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// suiteQueue keeps this suite's workflows off the queues the other tests/
+// suites use.
+//
+// Without it every DB-backed suite inserted onto "default" and constructed its
+// store with no queue list, which also polls "default". Go runs distinct
+// packages in parallel and they all point at CLEAT_TEST_DB, so
+// `go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...`
+// had tests/scale claiming tests/integrity's workflows out from under it:
+// 17 failures, and every one of them passes when the suites are run one at a
+// time. ClaimWorkflows filters on `task_queue = ANY($2)`, so giving each suite
+// its own queue is the whole fix. IMPROVEMENT-PLAN 2.39.
+const suiteQueue = "queue-scale-tests"
+
 // testDB returns a database connection for scale tests.
 //
 // The schema comes from engine/testutil, which builds it from
@@ -55,7 +68,7 @@ func measureThroughput(t *testing.T, store *engine.PostgresStore, db *sql.DB, ct
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("scale-tp-%d-%d", i, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
@@ -127,7 +140,7 @@ func TestThroughputSingleWorker(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	const numWorkflows = 20
@@ -153,7 +166,7 @@ func TestThroughputMultiWorker(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	workerCounts := []int{2, 4, 8}
@@ -181,7 +194,7 @@ func TestThroughputScalingEfficiency(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	const numWorkflows = 50
