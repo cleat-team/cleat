@@ -899,6 +899,17 @@ jobs:
       - name: Resource exhaustion — runaway workflow is terminated
         run: go test -count=1 -timeout=300s ./tests/exhaustion/...
 
+      # After the exhaustion step, not before: TestKillPostgresAndRestart stops
+      # and restarts the postgres container, and TestFullClusterRestart releases
+      # and re-claims work. Both restore what they touch, but there is no reason
+      # to run them upstream of a test that depends on a settled cluster.
+      #
+      # The suite claims on queue-cluster-tests-{1,2,3}, which no worker in
+      # docker-compose.cluster.yml serves, so it does not race the live workers
+      # for the rows it inserts.
+      - name: Cluster suite — claiming, failover and replay against the live cluster
+        run: go test -count=1 -timeout=300s ./tests/cluster/...
+
       - name: Run integration tests
         shell: bash
         run: |
