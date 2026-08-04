@@ -81,6 +81,14 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		return nil
 	}
 
+	// Everything below this point is PostgreSQL-dialect SQL. When the store
+	// says otherwise, hand the event to it instead -- see perStepEventFlusher.
+	// PostgresStore does not implement the interface, so the primary dialect
+	// still takes the path it always has.
+	if f, ok := e.workflowStore.(perStepEventFlusher); ok {
+		return f.flushEventForStep(ctx, workflowID, rec)
+	}
+
 	flushStart := time.Now()
 	defer func() {
 		if DebugTiming {

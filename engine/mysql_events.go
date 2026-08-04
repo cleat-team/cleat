@@ -36,6 +36,14 @@ func (s *MySQLStore) AppendEventHistoryBatch(ctx context.Context, workflowID str
 // This is shared by AppendEventHistoryBatch and FinalizeWorkflowSegment so
 // that both can insert events atomically alongside other operations.
 func (s *MySQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowID string, recs []EventRecord) error {
+	return s.appendEventsInTxOpts(ctx, tx, workflowID, recs, true)
+}
+
+// appendEventsInTxOpts is appendEventsInTx with control over the event_count
+// bookkeeping. Only the per-step flush passes incrementCount=false; see
+// MySQLStore.flushEventForStep for why counting there would double-count every
+// event in the segment.
+func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workflowID string, recs []EventRecord, incrementCount bool) error {
 	if len(recs) == 0 {
 		return nil
 	}
@@ -95,10 +103,12 @@ func (s *MySQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 	}
 	// Increment event_count on workflow_instances so GetEventCount and quota
 	// enforcement have an up-to-date count.
-	if _, err := tx.ExecContext(ctx, `
+	if incrementCount {
+		if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET event_count = event_count + ? WHERE id = ? AND tenant_id = ?
 	`, len(recs), workflowID, s.tenantID); err != nil {
-		return fmt.Errorf("append events in tx: increment event_count: %w", err)
+			return fmt.Errorf("append events in tx: increment event_count: %w", err)
+		}
 	}
 
 	return nil
