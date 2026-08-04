@@ -138,7 +138,7 @@ func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJ
 	if c.benchSvcURL != "" {
 		return c.forwardToBenchSvc(ctx, service, operation, requestJSON)
 	}
-	return "", fmt.Errorf("service %s.%s not configured: no endpoint registered", service, operation)
+	return "", engine.NewPermanentError("call", "", fmt.Errorf("service %s.%s not configured: no endpoint registered", service, operation))
 }
 
 // benchSvcHTTPClient is a shared HTTP client for bench-svc forwarding with
@@ -157,33 +157,47 @@ func (c *dbServiceCaller) forwardToBenchSvc(ctx context.Context, service, operat
 	url := fmt.Sprintf("%s/call/%s/%s", c.benchSvcURL, service, operation)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(requestJSON))
 	if err != nil {
-		return "", fmt.Errorf("bench-svc: create request: %w", err)
+		return "", engine.NewPermanentError("bench-svc", "", fmt.Errorf("create request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	t0 := time.Now()
 	resp, err := benchSvcHTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("bench-svc: %w", err)
+		return "", engine.NewTransientError("bench-svc", "", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", fmt.Errorf("bench-svc: read response: %w", err)
+		return "", engine.NewTransientError("bench-svc", "", fmt.Errorf("read response: %w", err))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("bench-svc: %s", string(body))
+		return "", benchSvcStatusError(resp.StatusCode, body)
 	}
 	slog.Debug("BENCH-SVC-CALL", "duration_ms", time.Since(t0).Milliseconds(), "body_bytes", len(body))
 	return string(body), nil
 }
 
+// benchSvcStatusError classifies a non-200 from bench-svc by its status code.
+//
+// 4xx means bench-svc understood the request and rejected it, so sending the
+// same bytes again produces the same rejection. 408 and 429 are the documented
+// exceptions -- they are explicit invitations to try again. Everything else,
+// including every 5xx, stays retryable.
+func benchSvcStatusError(status int, body []byte) error {
+	err := fmt.Errorf("%s", string(body))
+	if status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests {
+		return engine.NewPermanentError("bench-svc", "", err)
+	}
+	return engine.NewTransientError("bench-svc", "", err)
+}
+
 func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON string) (string, error) {
 	var req fetchRequest
 	if err := json.Unmarshal([]byte(requestJSON), &req); err != nil {
-		return "", fmt.Errorf("http.fetch: invalid request JSON: %w", err)
+		return "", engine.NewPermanentError("http.fetch", "", fmt.Errorf("invalid request JSON: %w", err))
 	}
 	if req.URL == "" {
-		return "", fmt.Errorf("http.fetch: url is required")
+		return "", engine.NewPermanentError("http.fetch", "", errors.New("url is required"))
 	}
 	if req.Method == "" {
 		req.Method = "GET"
@@ -194,7 +208,7 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, body)
 	if err != nil {
-		return "", fmt.Errorf("http.fetch: invalid request %s %q: %w", req.Method, req.URL, err)
+		return "", engine.NewPermanentError("http.fetch", "", fmt.Errorf("invalid request %s %q: %w", req.Method, req.URL, err))
 	}
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
@@ -202,12 +216,12 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("http.fetch: request %s %q failed: %w", req.Method, req.URL, err)
+		return "", engine.NewTransientError("http.fetch", "", fmt.Errorf("request %s %q failed: %w", req.Method, req.URL, err))
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", fmt.Errorf("http.fetch: reading response: %w", err)
+		return "", engine.NewTransientError("http.fetch", "", fmt.Errorf("reading response: %w", err))
 	}
 	respHeaders := make(map[string]string)
 	for k := range resp.Header {
