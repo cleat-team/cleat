@@ -156,6 +156,13 @@ Two known potholes, neither introduced by this setup:
 ## WS-1 — Fencing and lost updates
 
 **Sandbox:** `/localssd/rcownie/cleat`   **Migrations:** `006–009`   **Postgres:** `5432`
+**MySQL:** `3306` (`cleat-ws1-mysql`)   **SQL Server:** `1433` (`cleat-ws1-mssql`)
+
+SQL Server needs a Rosetta colima profile — the default profile has `rosetta: false` and
+`sqlservr` aborts under QEMU on arm64. Create a separate profile rather than restarting
+`default`, which would stop every other stream's database:
+`colima start --profile cleat-ws1 --vm-type vz --vz-rosetta --cpu 2 --memory 4 --disk 20`.
+Run `docker context use colima` afterwards; `colima start --profile` switches it globally.
 
 One theme: the engine fences a write, ignores whether the fence held, and then performs the
 side effect anyway. Every item is a variation on an unchecked `RowsAffected`.
@@ -166,7 +173,8 @@ concurrency store files, `engine/mysql_ops.go`, `engine/mssql_operations.go`,
 
 | item | what |
 |---|---|
-| **§2.26** | `mssqlRetry` is still test-only. Wiring it needs a per-transaction rollback-guarantee decision across 8 `BeginTx` boundaries. Unblocked once WS-3's `CLEAT_TEST_MSSQL` instance is up (WS-1 uses the default `1433`). **Start here — it is the only WS-1 item still open.** |
+| **§2.26 residual** | The claim path retries deadlocks now; ~18 other MSSQL transaction boundaries do not. Each needs one judgement, not an audit: a **rollback-guaranteed** retry is safe anywhere, so the only question is whether the wrapper is worth it there. The unknown-outcome class (258, dropped connections) stays a hard failure and needs a real per-transaction idempotency decision — do not widen `withRollbackGuaranteedRetry` to `isMSSQLRetryable`. |
+| **§2.71 residual** | Point `engine/testutil/mssql_schema.go` at the real migration. It hand-writes 334 lines of `CREATE TABLE` and defines none of the seven security policies, and is missing `workflow_routing` and `workflow_tags` entirely. Turning RLS on reshapes ~220 MSSQL tests, so this is a suite migration. **`engine/testutil/` is WS-2's — needs reassigning or handing over.** |
 
 ### Already landed — do not start these
 
