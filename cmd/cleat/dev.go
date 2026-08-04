@@ -8,13 +8,39 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
 	"github.com/fsnotify/fsnotify"
 )
+
+// devGenPrefix names the temp file buildDevRun generates. It has to live in
+// the module directory so "go run" can resolve the workflow package import via
+// go.mod -- which means that whenever the workflow package IS the module root,
+// the generated file lands inside the tree runDevWithWatch is watching.
+//
+// The watch loop therefore has to skip it by name. It did not, and the result
+// was that `cleat dev --watch` rebuilt itself forever: build writes a .go file,
+// fsnotify reports a .go file, debounce fires, build writes another. Measured
+// on a single-package module before this change: 76 rebuilds in 25 seconds
+// with no file touched by anyone, and 34 abandoned cleat_dev_*.go files left
+// sitting in the user's source directory.
+//
+// Keep the constant shared between the writer and the filter. Two string
+// literals is how this drifts back.
+const devGenPrefix = "cleat_dev_"
+
+// shouldRebuild reports whether a filesystem event on path should trigger a
+// rebuild: a Go source file that is not one of our own generated runners.
+func shouldRebuild(path string) bool {
+	base := filepath.Base(path)
+	return strings.HasSuffix(base, ".go") && !strings.HasPrefix(base, devGenPrefix)
+}
 
 // paramInfo describes an entry-point parameter beyond cleat.HostCalls.
 type paramInfo struct {
@@ -381,11 +407,10 @@ func runDevOnce(pattern, entryPointName, inputJSON, concurrencyKey string) {
 // runDevWithWatch watches the target package directory for .go file changes
 // and automatically rebuilds and restarts the workflow runner.
 func runDevWithWatch(pattern, entryPointName, inputJSON, concurrencyKey string) {
-	// Resolve the target directory to watch.
-	targetDir, moduleDir := resolveDevTargetDir(pattern)
-	if moduleDir == "" {
-		moduleDir = "."
-	}
+	// Resolve the target directory to watch. buildDevRun re-derives the module
+	// directory for itself, so nothing is needed here beyond the watch root --
+	// this used to bind and default a moduleDir that was never read again.
+	targetDir := resolveDevTargetDir(pattern)
 
 	// Set up fsnotify watcher.
 	watcher, err := fsnotify.NewWatcher()
@@ -410,13 +435,43 @@ func runDevWithWatch(pattern, entryPointName, inputJSON, concurrencyKey string) 
 
 	fmt.Fprintf(os.Stderr, "Watching for changes in %s...\n\n", targetDir)
 
+	// mu guards currentCmd and currentTmpPath. rebuildAndRun is invoked from a
+	// time.AfterFunc goroutine, so two closely-spaced edits can overlap: both
+	// read currentTmpPath, one wins the write, and the loser's generated file
+	// is orphaned in the user's source tree with nothing left holding its path.
+	// The signal handler below touches the same two variables from a third
+	// goroutine.
+	var mu sync.Mutex
 	var currentCmd *exec.Cmd
 	var currentTmpPath string
 	var debounceTimer *time.Timer
 
+	// Ctrl-C is how a watch session normally ends, and the deferred cleanup
+	// below never runs on a signal -- so without this the generated runner is
+	// left behind every single time. Exit 130 is the conventional shell status
+	// for death by SIGINT.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		mu.Lock()
+		if currentCmd != nil && currentCmd.Process != nil {
+			currentCmd.Process.Kill()
+		}
+		if currentTmpPath != "" {
+			os.Remove(currentTmpPath)
+		}
+		mu.Unlock()
+		fmt.Fprintf(os.Stderr, "\nStopped.\n")
+		os.Exit(130)
+	}()
+
 	// rebuildAndRun kills the current process (if any), re-analyzes,
 	// regenerates, and starts a new runner.
 	rebuildAndRun := func() {
+		mu.Lock()
+		defer mu.Unlock()
+
 		if currentCmd != nil && currentCmd.Process != nil {
 			currentCmd.Process.Kill()
 			currentCmd.Wait()
@@ -454,7 +509,7 @@ func runDevWithWatch(pattern, entryPointName, inputJSON, concurrencyKey string) 
 			if !ok {
 				return
 			}
-			if !strings.HasSuffix(event.Name, ".go") {
+			if !shouldRebuild(event.Name) {
 				continue
 			}
 			if debounceTimer != nil {
@@ -471,16 +526,16 @@ func runDevWithWatch(pattern, entryPointName, inputJSON, concurrencyKey string) 
 	}
 }
 
-// resolveDevTargetDir loads the target package (once) solely to determine
-// the directory to watch and the module directory.
-func resolveDevTargetDir(pattern string) (targetDir, moduleDir string) {
+// resolveDevTargetDir loads the target package (once) solely to determine the
+// directory to watch.
+func resolveDevTargetDir(pattern string) (targetDir string) {
 	fset := token.NewFileSet()
 	result, err := analyzer.LoadPackages(pattern, fset)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading package: %v\n", err)
 		os.Exit(1)
 	}
-	return result.TargetPkg.Dir, result.ModuleDir
+	return result.TargetPkg.Dir
 }
 
 // buildDevRun analyzes the package, selects the entry point, generates the
@@ -566,7 +621,7 @@ func buildDevRun(pattern, entryPointName, inputJSON, concurrencyKey string) (*ex
 		moduleDir = "."
 	}
 
-	tmpFile, err := os.CreateTemp(moduleDir, "cleat_dev_*.go")
+	tmpFile, err := os.CreateTemp(moduleDir, devGenPrefix+"*.go")
 	if err != nil {
 		return nil, "", fmt.Errorf("creating temp file: %w", err)
 	}

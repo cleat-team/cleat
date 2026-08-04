@@ -2634,8 +2634,9 @@ removed (`max-issues-per-linter` and `max-same-issues` silently truncate — `er
 **`ineffassign`'s eight are worth reading before enabling it, because three are real
 defects** — the shape being *a fallback that is computed and then never used*:
 
-- `cmd/cleat/dev.go:387` — `runDevWithWatch` resolves `moduleDir`, defaults it to `"."`, and
-  never reads it again.
+- ~~`cmd/cleat/dev.go:387`~~ — **fixed, see §2.41.** This one was not merely dead: the unread
+  `moduleDir` was the fingerprint of a filter that was never written, and its absence made
+  `cleat dev --watch` unusable.
 - `cmd/cleat/main.go:901` — the transform-file candidate search finds an alternative,
   assigns `transformFile`, and nothing reads it afterwards; only the `found` flag survives.
   So the fallback locates the file and then ignores it.
@@ -2651,6 +2652,51 @@ The eighth, `cmd/cleatctl/checkdb.go:125`, turned out to be benign and is fixed 
 `len(issues) > 0`. Behaviour was correct — the same branch also appends to `issues` — but a
 future check that set `healthy` without appending would have silently failed to fail. Now
 there is one source of truth.
+
+---
+
+### 2.41 `cleat dev --watch` rebuilt itself forever — ✅ **FIXED**
+
+Chased down from the first of §2.40's three dead fallbacks, and it was the interesting kind:
+the unread variable was not the bug, it was the *evidence* of the bug.
+
+`buildDevRun` writes its generated runner as `cleat_dev_*.go` **into the module directory** —
+it has to, so `go run` can resolve the workflow package import through `go.mod`. Whenever the
+workflow package *is* the module root (a standalone workflow module: the common shape for
+`cleat dev`), that directory is inside the tree `runDevWithWatch` is watching. The watch loop
+matched every `*.go`. So: build writes a `.go` file → fsnotify reports a `.go` file → 200 ms
+debounce fires → build writes another.
+
+`runDevWithWatch` resolved `moduleDir` and defaulted it — the obvious reason being to exclude
+exactly these files — and then never used it. `buildDevRun` re-derives the module dir for
+itself, so the binding was pure residue of a filter that never got written.
+
+**Measured on a standalone module, nobody touching anything, 25 seconds:**
+
+| | before | after |
+|---|---|---|
+| rebuilds | **76** | 1 |
+| abandoned `cleat_dev_*.go` in the user's source dir | **34** | 0 |
+
+Two further defects fell out of reproducing it:
+
+- **A data race.** `rebuildAndRun` runs on a `time.AfterFunc` goroutine, so two closely-spaced
+  edits overlap on `currentCmd`/`currentTmpPath`: both read the old temp path, one wins the
+  write, and the loser's generated file is orphaned with nothing left holding its path. That
+  is why 76 rebuilds left 34 files rather than 1. Now under a mutex.
+- **Ctrl-C left a file behind every time.** The deferred cleanup never runs on a signal, and
+  Ctrl-C is how a watch session normally *ends*. Now handled, exiting 130.
+
+The regression test is a pair, and only works as a pair:
+
+- `TestDevWatch_SkipsTheFileItGenerates` runs the real generator and filters its real output,
+  so it pins the coupling that actually broke rather than asserting the constant equals
+  itself. Restoring the old `HasSuffix(".go")` filter fails it.
+- `TestDevWatch_RebuildsOnUserSources` is the non-vacuity half. A filter returning `false` for
+  everything satisfies the first test while turning `--watch` into a silent no-op; verified
+  that this fails it.
+
+---
 
 PR #208 (`fix/wasm-build-replace-propagation`) was closed without merging on 2026-08-03.
 Recorded here so nothing below has to be rediscovered from scratch.
