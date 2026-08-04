@@ -108,7 +108,7 @@ tests/integrity	buildStressWasm	2
 tests/integrity	newStressEngine	1
 tests/plugin-harness	TestPluginCalls_MultiDB	2
 tests/plugin-harness	TestPluginCalls_Wasm_AS	2
-tests/plugin-harness	TestPluginCalls_Wasm_Go	2
+tests/plugin-harness	TestPluginCalls_Wasm_Go	1
 tests/plugin-harness	TestPluginCalls_Wasm_Java	5
 tests/plugin-harness	TestPluginCalls_Wasm_Python	3
 tests/plugin-harness	TestPluginCalls_Wasm_Rust	2
