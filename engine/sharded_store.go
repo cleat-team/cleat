@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,6 +42,11 @@ type Shard struct {
 type ShardedStore struct {
 	shards []*Shard
 	mu     sync.RWMutex
+
+	// claimCursor rotates the shard a claim starts from. Claims walk shards in
+	// order and stop once the budget is spent, so a fixed starting point would
+	// drain shard 0 first and starve the tail under sustained load.
+	claimCursor atomic.Uint64
 }
 
 // NewShardedStore creates a ShardedStore from pre-constructed WorkflowStore
@@ -171,44 +177,69 @@ func (s *ShardedStore) ClaimWorkflow(ctx context.Context, workerID string) (*Wor
 // ClaimWorkflows claims up to limit runnable workflows across all shards.
 // Iterates through shards collecting workflows until limit is reached or shards exhausted.
 func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	return s.claimAcrossShards(ctx, workerID, limit, "claim_workflows",
+		func(sh *Shard, budget int) ([]*WorkflowInstance, error) {
+			return sh.Store.ClaimWorkflows(ctx, workerID, budget)
+		})
+}
+
+// claimAcrossShards walks shards in order, spending a decreasing budget, and
+// stops as soon as the budget is exhausted.
+//
+// It used to fan out to every shard concurrently with the *full* limit and then
+// truncate the merged slice. The return value respected the limit, which is why
+// nothing noticed -- but the rows beyond it had already been updated to
+// status='running' with assigned_to set to this worker, in their own shards, in
+// committed transactions. Truncating a slice does not release them: they were
+// claimed by a worker that would never execute them and stayed that way until
+// the lease or heartbeat reaper took them back. With S shards and limit L, one
+// poll could strand (S-1)*L workflows. See IMPROVEMENT-PLAN 2.17.
+//
+// Sequential is not the cost it looks like. When work is available the first
+// shard usually fills the budget and the loop stops after one round-trip --
+// fewer than the fan-out made. The serial walk only happens when shards are
+// empty, which is exactly when claim latency does not matter.
+func (s *ShardedStore) claimAcrossShards(ctx context.Context, workerID string, limit int, op string,
+	claim func(sh *Shard, budget int) ([]*WorkflowInstance, error)) ([]*WorkflowInstance, error) {
+
+	if limit <= 0 {
+		return nil, nil
+	}
+
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
-
-	type shardResult struct {
-		wfs  []*WorkflowInstance
-		err  error
-		name string
+	if len(shards) == 0 {
+		return nil, nil
 	}
 
-	resultCh := make(chan shardResult, len(shards))
-	var wg sync.WaitGroup
-
-	for _, shard := range shards {
-		wg.Add(1)
-		go func(sh *Shard) {
-			defer wg.Done()
-			wfs, err := sh.Store.ClaimWorkflows(ctx, workerID, limit)
-			resultCh <- shardResult{wfs: wfs, err: err, name: sh.Config.Name}
-		}(shard)
-	}
-
-	wg.Wait()
-	close(resultCh)
+	start := int(s.claimCursor.Add(1)-1) % len(shards)
 
 	var all []*WorkflowInstance
-	for res := range resultCh {
-		if res.err != nil {
-			return nil, fmt.Errorf("shard %q: %w", res.name, res.err)
+	for i := 0; i < len(shards); i++ {
+		budget := limit - len(all)
+		if budget <= 0 {
+			break
 		}
-		all = append(all, res.wfs...)
+		sh := shards[(start+i)%len(shards)]
+		wfs, err := claim(sh, budget)
+		if err != nil {
+			return nil, fmt.Errorf("shard %q: %w", sh.Config.Name, err)
+		}
+		// A shard that returns more than it was asked for has already
+		// committed those rows, so this cannot be silently truncated: it is a
+		// bug in that store, and the whole point of 2.17 was that the excess
+		// is invisible from the return value.
+		if len(wfs) > budget {
+			return nil, fmt.Errorf("%s: shard %q returned %d workflows for a budget of %d; "+
+				"the excess is already claimed in that shard and will be stranded",
+				op, sh.Config.Name, len(wfs), budget)
+		}
+		all = append(all, wfs...)
 	}
 
 	if len(all) == 0 {
 		return nil, nil
-	}
-	if len(all) > limit {
-		all = all[:limit]
 	}
 	return all, nil
 }
@@ -217,46 +248,10 @@ func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID string, limi
 // Sticky workflows use idx_instances_sticky for low-contention claiming.
 // Iterates through shards collecting workflows until limit is reached or shards exhausted.
 func (s *ShardedStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
-
-	type shardResult struct {
-		wfs  []*WorkflowInstance
-		err  error
-		name string
-	}
-
-	resultCh := make(chan shardResult, len(shards))
-	var wg sync.WaitGroup
-
-	for _, shard := range shards {
-		wg.Add(1)
-		go func(sh *Shard) {
-			defer wg.Done()
-			wfs, err := sh.Store.ClaimStickyWorkflows(ctx, workerID, limit)
-			resultCh <- shardResult{wfs: wfs, err: err, name: sh.Config.Name}
-		}(shard)
-	}
-
-	wg.Wait()
-	close(resultCh)
-
-	var all []*WorkflowInstance
-	for res := range resultCh {
-		if res.err != nil {
-			return nil, fmt.Errorf("shard %q: %w", res.name, res.err)
-		}
-		all = append(all, res.wfs...)
-	}
-
-	if len(all) == 0 {
-		return nil, nil
-	}
-	if len(all) > limit {
-		all = all[:limit]
-	}
-	return all, nil
+	return s.claimAcrossShards(ctx, workerID, limit, "claim_sticky_workflows",
+		func(sh *Shard, budget int) ([]*WorkflowInstance, error) {
+			return sh.Store.ClaimStickyWorkflows(ctx, workerID, budget)
+		})
 }
 
 // LoadEventHistory routes by workflow ID.
