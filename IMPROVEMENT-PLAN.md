@@ -2263,11 +2263,42 @@ another worker legitimately owns the workflow and that does not change on a seco
 Post-commit cleanup is inside the retried closure and that is safe: a rollback-guaranteed
 error means the commit failed, so the function returned before reaching the cleanup.
 
-**Still to do:** the remaining boundaries in `mssql_events.go`, `mssql_signals_promises.go`,
-`mssql_deployment.go` and `mssql_operations.go`. Each needs the same one-line judgement — a
-rollback-guaranteed retry is always safe, so the only question per boundary is whether it is
-worth the wrapper. `mssql_events.go` and `mssql_signals_promises.go` are being changed by
-§2.60 (#283); do those after it lands rather than into a conflict.
+**Third increment, 2026-08-04 — every MSSQL boundary outside §2.60's files.** `mssql_operations.go`
+(6), `mssql_deployment.go` (1), `mssql_schedules.go` (3) and the remaining `mssql_lifecycle.go`
+boundaries (`ReleaseWorkflow`, `RequestCancellation`, `Heartbeat`, `StartNewRun`,
+`enforceParentClosePolicy`). Two are worth calling out on consequence rather than volume:
+`ReleaseWorkflowConcurrencyKeys`, where a lost deadlock leaves a concurrency key held until
+its TTL and blocks every later run using that key, and `TerminateWorkflow`, where one leaves
+a run that the HTTP layer already answered 409 for still runnable — the §1.2 defect fixed in
+#263, reachable again through a different door.
+
+**Still to do:** `mssql_events.go` and `mssql_signals_promises.go` (9 boundaries), which
+§2.60 (#283) is changing. Do those after it lands rather than into a conflict.
+
+### 2.50 Parent close policy fails silently on all three dialects — 🔴 **OPEN** (MSSQL half fixed)
+
+Found while wiring §2.26. `enforceParentClosePolicy` is what applies a terminated parent's
+policy to its children: `TERMINATE` children are failed, `REQUEST_CANCEL` children get the
+cancellation flag. It discarded every error it produced.
+
+- **PostgreSQL** (`store_lifecycle.go`): neither `tx.ExecContext`'s nor `tx.Commit`'s return
+  value is assigned, in either of its two transactions.
+- **MySQL** (`mysql_lifecycle.go`): same, and it does not use a transaction at all — two bare
+  `s.db.ExecContext` calls with the results dropped.
+- **MSSQL**: same shape; **fixed** here, since a retry wrapper is meaningless on a function
+  that cannot see its own failures.
+
+The function is void and its callers treat it as best-effort post-commit cleanup, so nothing
+downstream notices either. When it fails — a deadlock against a worker claiming one of those
+children is the obvious way — **the children of a terminated parent keep running**, and there
+is no log line, no metric and no error anywhere in the system.
+
+This is the §1.2 shape one level further out: not an unchecked `RowsAffected`, but an
+unchecked everything. The MSSQL fix checks the errors, retries them when SQL Server
+guarantees a rollback, and logs what survives; the function stays void because its contract
+with callers has not changed. The PostgreSQL and MySQL halves are the follow-up, and MySQL's
+missing transaction is a second question on its own — two independent statements mean a
+partial application is possible today.
 
 **Validated against a real server, which is the check this section says was never made.**
 `TestMSSQLDeadlock_ClassifiedFromTheRealDriverError` provokes a genuine deadlock — two

@@ -401,6 +401,19 @@ func (s *MSSQLStore) ValidateVersion(ctx context.Context, defName string, defVer
 
 // GetActiveInstanceCountsByVersion returns a map of "name:version" -> count.
 func (s *MSSQLStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
+	var out map[string]int
+	err := withRollbackGuaranteedRetry(ctx, "get active instance counts", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		out, err = s.getActiveInstanceCountsByVersionOnce(ctx)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (map[string]int, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get active instance counts: begin: %w", err)

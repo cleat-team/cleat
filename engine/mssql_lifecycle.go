@@ -231,6 +231,19 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 // Heartbeat updates the heartbeat timestamp. Returns false if the workflow
 // is no longer assigned to this worker.
 func (s *MSSQLStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
+	var out bool
+	err := withRollbackGuaranteedRetry(ctx, "heartbeat", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		out, err = s.heartbeatOnce(ctx, workflowID, workerID, generation)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return out, nil
+}
+
+func (s *MSSQLStore) heartbeatOnce(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return false, fmt.Errorf("heartbeat: begin: %w", err)
@@ -471,6 +484,12 @@ func (s *MSSQLStore) RetryWorkflow(ctx context.Context, workflowID string) error
 
 // ReleaseWorkflow returns a workflow to the ready queue with a next wake time.
 func (s *MSSQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
+	return withRollbackGuaranteedRetry(ctx, "release workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.releaseWorkflowOnce(ctx, workflowID, workerID, generation, nextWakeAt)
+	})
+}
+
+func (s *MSSQLStore) releaseWorkflowOnce(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("release workflow: begin: %w", err)
@@ -660,6 +679,12 @@ func (s *MSSQLStore) finalizeWorkflowSegmentOnce(ctx context.Context, runID, wor
 
 // RequestCancellation sets the cancellation flag on a workflow.
 func (s *MSSQLStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
+	return withRollbackGuaranteedRetry(ctx, "request cancellation", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.requestCancellationOnce(ctx, workflowID, reason)
+	})
+}
+
+func (s *MSSQLStore) requestCancellationOnce(ctx context.Context, workflowID, reason string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("request cancellation: begin: %w", err)
@@ -695,6 +720,20 @@ func (s *MSSQLStore) CheckCancellation(ctx context.Context, workflowID string) (
 // StartNewRun creates a new workflow instance.
 // If idempotencyKey is non-empty, provides exactly-once semantics.
 func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
+	var newID string
+	var existed bool
+	err := withRollbackGuaranteedRetry(ctx, "start new run", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		newID, existed, err = s.startNewRunOnce(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority)
+		return err
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return newID, existed, nil
+}
+
+func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -793,36 +832,59 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 // enforceParentClosePolicy applies ParentClosePolicy to all child workflows
 // of the given parent workflow. Best-effort post-commit cleanup.
+// enforceParentClosePolicy applies a terminated parent's close policy to its
+// children.
+//
+// It used to discard every error it produced: neither ExecContext's nor
+// Commit's return value was assigned, in either of its two transactions. So
+// when this failed -- a deadlock against a worker claiming one of those
+// children is the obvious way -- the children of a terminated parent simply
+// kept running, and nothing recorded it. That is the 1.2 shape: a write whose
+// failure is structurally invisible.
+//
+// The errors are now checked, retried when SQL Server guarantees the
+// transaction rolled back, and logged when they survive that. The function
+// stays void because its callers treat it as best-effort post-commit cleanup;
+// what changes is that a failure is now observable instead of silent.
 func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
-	tx, err := s.beginTxWithContext(ctx)
-	if err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin TERMINATE tx failed", "error", err)
-		return
-	}
-	defer tx.Rollback()
-	tx.ExecContext(ctx, `
+	steps := []struct {
+		policy string
+		query  string
+	}{
+		{"TERMINATE", `
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = 'parent workflow terminated'
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
-	`, parentWorkflowID)
-	tx.Commit()
-
-	tx2, err := s.beginTxWithContext(ctx)
-	if err != nil {
-		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin REQUEST_CANCEL tx failed", "error", err)
-		return
-	}
-	defer tx2.Rollback()
-	tx2.ExecContext(ctx, `
+	`},
+		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
 		SET cancellation_requested = 1
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
-	`, parentWorkflowID)
-	tx2.Commit()
+	`},
+	}
+
+	for _, step := range steps {
+		err := withRollbackGuaranteedRetry(ctx, "enforce parent close policy "+step.policy,
+			mssqlTxRetries, mssqlTxRetryDelay, func() error {
+				tx, err := s.beginTxWithContext(ctx)
+				if err != nil {
+					return err
+				}
+				defer tx.Rollback()
+				if _, err := tx.ExecContext(ctx, step.query, parentWorkflowID); err != nil {
+					return err
+				}
+				return tx.Commit()
+			})
+		if err != nil {
+			s.log().WarnContext(ctx, "enforceParentClosePolicy failed; children of a terminated parent are unaffected by its close policy",
+				"policy", step.policy, "parent_workflow_id", parentWorkflowID, "error", err)
+		}
+	}
 }
 
 // finishClaim commits a claim transaction and enforces the claim-limit

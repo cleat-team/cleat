@@ -139,6 +139,12 @@ func (s *MSSQLStore) LoadCompactionState(ctx context.Context, workflowID string)
 }
 
 func (s *MSSQLStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
+	return withRollbackGuaranteedRetry(ctx, "compact history", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.compactHistoryOnce(ctx, workflowID, compactionState, compactionStep, keepStep)
+	})
+}
+
+func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("compact history: begin tx: %w", err)
@@ -178,6 +184,12 @@ func (s *MSSQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 }
 
 func (s *MSSQLStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error {
+	return withRollbackGuaranteedRetry(ctx, "record workflow memory sample", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.recordWorkflowMemorySampleOnce(ctx, defName, sampleBytes)
+	})
+}
+
+func (s *MSSQLStore) recordWorkflowMemorySampleOnce(ctx context.Context, defName string, sampleBytes int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("record memory sample: begin: %w", err)
@@ -307,6 +319,19 @@ func (s *MSSQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef 
 }
 
 func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	var out int64
+	err := withRollbackGuaranteedRetry(ctx, "delete expired events", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		out, err = s.deleteExpiredEventsOnce(ctx, olderThan)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return out, nil
+}
+
+func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
 		tx, err := s.beginTxWithContext(ctx)
