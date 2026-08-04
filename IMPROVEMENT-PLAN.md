@@ -1600,6 +1600,77 @@ and require the run count to hold steady across several consecutive polls. Do no
 an expected total: path filters mean different PRs trigger different workflows (#227 saw 36
 checks, #229 saw 42), so any fixed threshold either fires early or never fires.
 
+
+### 2.26 The SQL Server error classifier matched error numbers as substrings — ✅ **FIXED** (wiring still OPEN)
+
+**This corrects §2.8's recommendation.** §2.8 found `mssqlRetry` and the whole
+`engine/mssql_errors.go` classification family had no production caller, and concluded they
+should be wired in before the MySQL/SQL Server support claim is made publicly. Wiring them
+**as they stood would have been worse than leaving them dead.** The classifier was wrong in
+both directions at once.
+
+**Wrong direction 1 — permanent errors classified as retryable.** Every predicate matched
+the decimal error number as a bare substring of the error text, and SQL Server error text
+carries workflow IDs, row numbers, column names and interpolated business data:
+
+```go
+strings.Contains(msg, "258")    // isMSSQLTimeout
+strings.Contains(msg, "3960")   // isMSSQLSnapshotError
+strings.Contains(msg, "2627")   // isMSSQLDuplicateKey
+```
+
+Verified against the old implementation:
+
+| Error | Classified as | Retryable? |
+| --- | --- | --- |
+| `permission denied for workflow "wf-2589abc"` | timeout (258) | **yes** |
+| `Invalid column name 'col3960'.` | snapshot conflict (3960) | **yes** |
+| `invalid column value at row 26270` | duplicate key (2627) | — |
+| `workflow input rejected: amount 2601 exceeds limit` | duplicate key (2601) | — |
+
+`isMSSQLConnectionError` was broader still: `strings.Contains(msg, "connection")` made
+`invalid connection string: missing database` — a configuration error that fails identically
+on every attempt — retryable. Had `mssqlRetry` been wired up, each of these would be retried
+until the budget was exhausted, converting a clear failure into a slow one and consuming the
+retry budget a real deadlock needed.
+
+**Wrong direction 2 — real errors missed.** This only became visible on testing against the
+type the driver actually returns. `mssql.Error{Number: 258}` renders as
+`mssql: Wait operation timed out.` — the digits `258` appear **nowhere** in the text. So the
+substring matcher missed genuine server-reported timeouts and in-memory OLTP write conflicts
+(41302 and friends) entirely, while catching fabricated ones. It also missed
+`driver.ErrBadConn`, `io.ErrUnexpectedEOF` and `*net.OpError`, none of which mention
+"connection" in their text.
+
+**Why the tests did not catch it.** `engine/mssql_errors_test.go` feeds only `fmt.Errorf`
+strings — never an `mssql.Error`. The tests and the implementation shared the same wrong
+model, that a SQL Server error *is* text, so they agreed with each other perfectly. This is
+the §2.16 shape in a different package: a test that confirms the implementation rather than
+the requirement.
+
+**The fix.** Classify on `mssql.Error.Number` via `errors.As`, on `driver.ErrBadConn` /
+`net.OpError` / `net.Error.Timeout()` for transport faults, and on `errors.Is` for context
+errors. Text matching survives only as a fallback for errors that lost their type through a
+wrapper, and every remaining phrase is distinctive — no bare numbers, no bare `"connection"`
+or `"duplicate"`. `context.Canceled` is now explicitly **not** retryable: cancellation is a
+decision, not a fault.
+
+**Still open: the wiring itself.** The code remains test-only, and is still baselined in
+`scripts/deadcode-baseline.txt`, deliberately. Wiring needs a distinction the current code
+did not draw, and which `isMSSQLRollbackGuaranteed` now expresses:
+
+- **Deadlock (1205) and snapshot conflict (3960, 41301–41325)** guarantee the server rolled
+  the transaction back. Replaying is sound even when the work is not idempotent.
+- **Timeout (258) and dropped connections** leave the outcome *unknown* — the commit may have
+  succeeded with only the acknowledgement lost. Blindly replaying a non-idempotent statement
+  can double-apply it, which for a workflow engine means a duplicated side effect.
+
+So `mssqlRetry` cannot simply be wrapped around all 113 `ExecContext`/`QueryContext` sites,
+and it should not be wrapped around the 8 `BeginTx` boundaries either without deciding, per
+transaction, which of those two categories it tolerates. That is the follow-up. Until it is
+done, the support position stands as §2.8 stated it: **on SQL Server, a deadlock is a hard
+error today.**
+
 ---
 
 ## Salvage register — PR #208, closed unmerged
