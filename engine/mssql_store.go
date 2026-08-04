@@ -15,9 +15,23 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 )
 
-// tenantSessionConnector wraps a driver.Connector to call
-// sp_set_session_context on every new connection, enforcing
-// SQL Server RLS at the connection level for the configured tenant.
+// tenantSessionConnector wraps a driver.Connector so that every connection it
+// hands out has this tenant's sp_set_session_context applied -- on open, and
+// again every time database/sql recycles the connection.
+//
+// The recycle half is the load-bearing part, and it was missing (see
+// IMPROVEMENT-PLAN.md 2.71). Setting the context in Connect alone establishes
+// it once per *connection*, not once per *use*. When database/sql returns a
+// connection to the pool and later hands it out again it calls ResetSession;
+// go-mssqldb answers that with sp_reset_connection, which clears
+// SESSION_CONTEXT. Under the shipped schema's security policies a statement
+// with no session context matches no rows, so tenant-scoped reads returned
+// nothing.
+//
+// In practice that was every read, not merely the ones after a busy period:
+// getOrCreateTenantPool pings the pool when it builds it, so the first
+// connection is already back in the pool and already due a reset before any
+// query runs.
 type tenantSessionConnector struct {
 	driver.Connector
 	tenantID string
@@ -36,29 +50,106 @@ func (c *tenantSessionConnector) Connect(ctx context.Context) (driver.Conn, erro
 		conn.Close()
 		return nil, fmt.Errorf("mssql: invalid tenant ID %q: %w", c.tenantID, parseErr)
 	}
+	if err := applyTenantSessionContext(ctx, conn, c.tenantID); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return &tenantSessionConn{Conn: conn, tenantID: c.tenantID}, nil
+}
 
-	// Use Prepare+Exec to set the session context, since go-mssqldb v1.10+
-	// does not implement driver.ExecerContext on its connection type.
-	// Explicit command text (no parameter markers) is safe because tenantID
-	// was validated as a UUID above.
-	query := "EXEC sp_set_session_context @key=N'tenant_id', @value=N'" + c.tenantID + "'"
+// applyTenantSessionContext runs sp_set_session_context on a raw driver
+// connection.
+//
+// Prepare+Exec rather than ExecContext because go-mssqldb v1.10+ does not
+// implement driver.ExecerContext on its connection type. Explicit command text
+// (no parameter markers) is safe because tenantID is validated as a UUID by
+// every caller before it gets here.
+func applyTenantSessionContext(ctx context.Context, conn driver.Conn, tenantID string) error {
+	query := "EXEC sp_set_session_context @key=N'tenant_id', @value=N'" + tenantID + "'"
+
 	var stmt driver.Stmt
+	var err error
 	if prepCtx, ok := conn.(driver.ConnPrepareContext); ok {
 		stmt, err = prepCtx.PrepareContext(ctx, query)
 	} else {
 		stmt, err = conn.Prepare(query)
 	}
 	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("mssql: prepare session context for tenant %s: %w", c.tenantID, err)
+		return fmt.Errorf("mssql: prepare session context for tenant %s: %w", tenantID, err)
 	}
-	_, err = stmt.Exec(nil)
-	stmt.Close()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("mssql: set session context for tenant %s: %w", c.tenantID, err)
+	defer stmt.Close()
+
+	if _, err := stmt.Exec(nil); err != nil {
+		return fmt.Errorf("mssql: set session context for tenant %s: %w", tenantID, err)
 	}
-	return conn, nil
+	return nil
+}
+
+// tenantSessionConn re-applies the tenant session context whenever
+// database/sql resets the connection for reuse.
+//
+// It has to forward the optional interfaces go-mssqldb's *Conn implements,
+// because database/sql feature-detects them per connection and silently takes
+// slower or different paths when they are missing. As of v1.10.0 those are
+// Prepare, Close, Begin, PrepareContext, BeginTx, Ping, IsValid and
+// CheckNamedValue. QueryerContext and ExecerContext are deliberately absent
+// from this list: the driver does not implement them either, and claiming them
+// here would break the fallback database/sql relies on.
+type tenantSessionConn struct {
+	driver.Conn
+	tenantID string
+}
+
+// ResetSession lets the driver do its own reset first -- that is the
+// sp_reset_connection that clears SESSION_CONTEXT -- and then puts the tenant
+// back. Returning an error here makes database/sql discard the connection and
+// open a fresh one, which is the right outcome: a connection whose tenant
+// could not be established must never serve a query.
+func (c *tenantSessionConn) ResetSession(ctx context.Context) error {
+	if resetter, ok := c.Conn.(driver.SessionResetter); ok {
+		if err := resetter.ResetSession(ctx); err != nil {
+			return err
+		}
+	}
+	if c.tenantID == "" {
+		return nil
+	}
+	return applyTenantSessionContext(ctx, c.Conn, c.tenantID)
+}
+
+func (c *tenantSessionConn) IsValid() bool {
+	if v, ok := c.Conn.(driver.Validator); ok {
+		return v.IsValid()
+	}
+	return true
+}
+
+func (c *tenantSessionConn) Ping(ctx context.Context) error {
+	if p, ok := c.Conn.(driver.Pinger); ok {
+		return p.Ping(ctx)
+	}
+	return nil
+}
+
+func (c *tenantSessionConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	if p, ok := c.Conn.(driver.ConnPrepareContext); ok {
+		return p.PrepareContext(ctx, query)
+	}
+	return c.Conn.Prepare(query)
+}
+
+func (c *tenantSessionConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if b, ok := c.Conn.(driver.ConnBeginTx); ok {
+		return b.BeginTx(ctx, opts)
+	}
+	return c.Conn.Begin()
+}
+
+func (c *tenantSessionConn) CheckNamedValue(nv *driver.NamedValue) error {
+	if ck, ok := c.Conn.(driver.NamedValueChecker); ok {
+		return ck.CheckNamedValue(nv)
+	}
+	return driver.ErrSkip
 }
 
 // ---------------------------------------------------------------------------

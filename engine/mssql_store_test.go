@@ -577,8 +577,19 @@ func TestTenantSessionConnector_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	if conn != mockConn {
-		t.Fatal("Connect returned different connection")
+	// Connect wraps the driver connection so the tenant session context can
+	// be re-applied on ResetSession (IMPROVEMENT-PLAN.md 2.71). Assert the
+	// wrapper carries the right connection and tenant rather than asserting
+	// object identity, which the wrapper necessarily breaks.
+	wrapped, ok := conn.(*tenantSessionConn)
+	if !ok {
+		t.Fatalf("Connect returned %T, want *tenantSessionConn", conn)
+	}
+	if wrapped.Conn != driver.Conn(mockConn) {
+		t.Fatal("wrapper does not carry the connection the connector opened")
+	}
+	if wrapped.tenantID != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
+		t.Errorf("wrapper tenantID = %q, want the connector's tenant", wrapped.tenantID)
 	}
 	if inner.closed {
 		t.Error("connection should NOT be closed on success")
@@ -594,8 +605,12 @@ func TestTenantSessionConnector_SuccessWithPrepare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	if conn != mockConn {
-		t.Fatal("Connect returned different connection")
+	wrapped, ok := conn.(*tenantSessionConn)
+	if !ok {
+		t.Fatalf("Connect returned %T, want *tenantSessionConn", conn)
+	}
+	if wrapped.Conn != driver.Conn(mockConn) {
+		t.Fatal("wrapper does not carry the connection the connector opened")
 	}
 }
 
