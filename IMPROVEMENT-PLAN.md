@@ -2215,9 +2215,8 @@ wrapper, and every remaining phrase is distinctive — no bare numbers, no bare 
 or `"duplicate"`. `context.Canceled` is now explicitly **not** retryable: cancellation is a
 decision, not a fault.
 
-**Still open: the wiring itself.** The code remains test-only, and is still baselined in
-`scripts/deadcode-baseline.txt`, deliberately. Wiring needs a distinction the current code
-did not draw, and which `isMSSQLRollbackGuaranteed` now expresses:
+**The wiring — first increment done, 2026-08-04.** The distinction below is what made it
+possible to wire anything at all without a per-transaction idempotency audit:
 
 - **Deadlock (1205) and snapshot conflict (3960, 41301–41325)** guarantee the server rolled
   the transaction back. Replaying is sound even when the work is not idempotent.
@@ -2226,10 +2225,51 @@ did not draw, and which `isMSSQLRollbackGuaranteed` now expresses:
   can double-apply it, which for a workflow engine means a duplicated side effect.
 
 So `mssqlRetry` cannot simply be wrapped around all 113 `ExecContext`/`QueryContext` sites,
-and it should not be wrapped around the 8 `BeginTx` boundaries either without deciding, per
-transaction, which of those two categories it tolerates. That is the follow-up. Until it is
-done, the support position stands as §2.8 stated it: **on SQL Server, a deadlock is a hard
-error today.**
+and it should not be wrapped around the transaction boundaries either without deciding, per
+transaction, which of those two categories it tolerates.
+
+**The way through is to only retry the rollback-guaranteed set.** If the server has
+definitively undone the transaction, replaying it is sound *whether or not the work is
+idempotent* — so that retry needs no per-transaction analysis and is safe at any boundary.
+Unknown-outcome errors stay hard failures, exactly as before. `withRollbackGuaranteedRetry`
+in `engine/mssql_retry.go` is that narrower wrapper; `mssqlRetry` itself remains unwired and
+correctly still baselined, because it gates on `isMSSQLRetryable`, which includes the
+unknown-outcome class.
+
+Wired into `ClaimWorkflows` and `ClaimStickyWorkflows` — the highest-contention transactions
+in the engine and where a deadlock is most likely. Budget is 2 retries at 20ms/40ms: at most
+60ms of added latency on a path that previously failed outright. A deadlock victim claimed
+nothing, so the replay is a clean retry.
+
+**The count in this section was wrong.** There are ~20 transaction boundaries in the MSSQL
+store, not 8. The remaining ones are a follow-up, and each needs the same one-line judgement:
+a rollback-guaranteed retry is always safe, so the only question per boundary is whether it
+is worth the wrapper.
+
+**Validated against a real server, which is the check this section says was never made.**
+`TestMSSQLDeadlock_ClassifiedFromTheRealDriverError` provokes a genuine deadlock — two
+transactions taking row locks in opposite order — and asserts on the error the driver
+actually returns rather than a fabricated one:
+
+```
+driver error: Number=1205 Message="Transaction (Process ID 75) was deadlocked on lock
+resources with another process and has been chosen as the deadlock victim. Rerun the transaction."
+```
+
+`isMSSQLDeadlock`, `isMSSQLRetryable` and `isMSSQLRollbackGuaranteed` all classify that
+correctly. The original defect was a classifier and a test that shared the same wrong model,
+so the classification is now pinned to reality at one end and the retry policy unit-tested at
+the other.
+
+**Evidence the wiring is real, not merely present:** twelve entries left
+`scripts/deadcode-baseline.txt` — `isMSSQLRollbackGuaranteed`, `isMSSQLDeadlock`,
+`isMSSQLSnapshotError`, `hasNumber`, `mssqlErrNumber`, `mssqlSnapshotConflictNumbers` and the
+five error-number constants are now reachable from production code. `mssqlRetry`,
+`isMSSQLRetryable`, `isMSSQLTimeout`, `isMSSQLConnectionError` and `isMSSQLDuplicateKey`
+remain baselined, which is the correct outcome for the path deliberately left unwired.
+
+The §2.8 support position is now narrower: **on SQL Server a deadlock on the claim path is
+retried; everywhere else it is still a hard error.**
 
 ---
 
