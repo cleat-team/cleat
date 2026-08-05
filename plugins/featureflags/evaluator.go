@@ -141,7 +141,7 @@ func evaluateRule(rule Rule, attrVal any) bool {
 // parseRules parses a JSONB rules array into a slice of Rule structs.
 // Returns an empty slice if the input is nil or empty.
 func parseRules(raw json.RawMessage) ([]Rule, error) {
-	if raw == nil || len(raw) == 0 {
+	if len(raw) == 0 {
 		return []Rule{}, nil
 	}
 	// Normalize JSON array — wrap single objects in an array if needed.

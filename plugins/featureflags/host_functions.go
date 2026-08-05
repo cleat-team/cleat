@@ -96,7 +96,17 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 
 	result := EvaluateFlag(flake, input.Context)
 
-	output := evaluateFlagOutput{
+	// S1016 suggests evaluateFlagOutput(result), since the two structs are
+	// field-for-field identical today. Kept as a literal on purpose: this type
+	// is the host call's wire contract, and writing the fields out is what
+	// stops a field added to the internal EvaluationResult from silently
+	// appearing in a plugin's published output.
+	//
+	// If they are meant to be one type, the fix is to delete
+	// evaluateFlagOutput and marshal EvaluationResult directly. A conversion
+	// is the worst of the two: it keeps both names, so the wire format still
+	// looks independent, while coupling them so it is not.
+	output := evaluateFlagOutput{ //nolint:gosimple // deliberate: wire contract, see above
 		Enabled:    result.Enabled,
 		Key:        result.Key,
 		Evaluation: result.Evaluation,

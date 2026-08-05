@@ -7,9 +7,10 @@ linters:
     - misspell
     # Enabled 2026-08-05 (WS-3). Was 4 findings, not the 8 recorded below.
     - ineffassign
+    # Enabled 2026-08-05 (WS-3). 9 findings, 8 fixed and 1 suppressed.
+    - gosimple
   disable:
     - errcheck
-    - gosimple
     - staticcheck
     - unused
     - unconvert
@@ -59,6 +60,30 @@ linters:
   # The fourth was real, in internal/closure/threading.go: a map initialised
   # outside an `if` and unconditionally overwritten as the first statement
   # inside it, with no reader in the nil branch. Moved into the branch.
+  #
+  # gosimple, 2026-08-05 (WS-3): 9, matching the table. Eight were mechanical
+  # (five fmt.Sprintf with no arguments, two `x == nil || len(x) == 0`, one
+  # single-case select). The ninth is //nolint'd at the site with its reasoning:
+  # featureflags' evaluateFlagOutput is a host call's wire contract that happens
+  # to be field-identical to an internal type, and S1016's conversion would
+  # couple the two while still looking independent.
+  #
+  # THE WHOLE TABLE WAS RE-MEASURED THE SAME DAY, and it had moved a lot in
+  # 24 hours -- which is the argument for re-measuring rather than a curiosity:
+  #
+  #     linter        2026-08-04   2026-08-05
+  #     ineffassign        8            4      <- now enabled, 0
+  #     gosimple           9            9      <- now enabled, 0
+  #     unused            16           30
+  #     staticcheck       17           16
+  #     unconvert         23           24
+  #     gocyclo           28           35
+  #     gosec            193          283
+  #     errcheck         307          280
+  #
+  # unused nearly doubled and gosec grew by 90 in a day of three streams
+  # landing changes. Part of that is new code, which is the point: a disabled
+  # linter is not a backlog being worked off, it is one being added to.
 issues:
   exclude-files:
     - ".*_test\\.go$"
