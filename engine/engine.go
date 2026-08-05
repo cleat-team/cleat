@@ -82,6 +82,11 @@ type Engine struct {
 
 	noPerStepFlush bool // skip per-step flushEvent; rely on FinalizeWorkflowSegment for persistence
 
+	// intentOps holds the "service.operation" keys declared as
+	// WriteAheadIntent (IMPROVEMENT-PLAN 1.4 phase D). Empty means every call
+	// is AtLeastOnce, which is what shipped before and costs nothing.
+	intentOps map[string]bool
+
 	batchFlusher    *BatchFlusher          // batch flusher for higher throughput event persistence
 	flusherRegistry *TenantFlusherRegistry // per-tenant adaptive batch flushers based on step rate
 

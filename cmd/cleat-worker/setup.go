@@ -1645,6 +1645,13 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if noPerStepFlush != nil && *noPerStepFlush {
 		engineOpts = append(engineOpts, engine.WithNoPerStepFlush(true))
 	}
+	// IMPROVEMENT-PLAN 1.4 phase D. Without this the engine-side mechanism is
+	// reachable only by an embedder, and the worker -- the artifact a
+	// deployment actually runs -- could not turn it on. That is the shape 1.4
+	// is about: durability code that is tested, believed and unreachable.
+	if ops := parseWriteAheadIntentOps(writeAheadIntentOps); len(ops) > 0 {
+		engineOpts = append(engineOpts, engine.WithWriteAheadIntentOps(ops...))
+	}
 	if w.flusherRegistry != nil {
 		engineOpts = append(engineOpts, engine.WithFlusherRegistry(w.flusherRegistry))
 	} else {

@@ -106,7 +106,19 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # declares python in CLEAT_REQUIRE_TOOLCHAINS, where this test Fatals rather
 # than skips -- so the component-path fence is verified in exactly one job, and
 # that job's budget is 0.
-test-go/engine	374	# 359 measured on develop, +2 for 3.10, +12 for 3.20, +1 for the fence test
+#
+# 374 -> 386: the six three-dialect write-ahead call intent tests
+# (IMPROVEMENT-PLAN 1.4 phase D), each with a mysql and an mssql subtest that
+# skip where neither is configured. Measured as a delta with the same guard on
+# the same machine, PostgreSQL only: develop reports `skipped=369
+# (passed=3300)`, this branch reports `skipped=381 (passed=3313)`. The absolute
+# numbers sit below the runner's -- the discrepancy noted further up,
+# unexplained and long-standing -- so the delta is what carries, and it is
+# exactly the arm count of the six new tests.
+# TestWriteAheadIntent_FailsLoudlyWhenUnsupported needs no backend and adds no
+# skip. Additive with the fence test above: the two branches were measured
+# independently and touch no test in common.
+test-go/engine	386	# 373 on the runner, +1 for 3.31's fence test, +12 for 1.4 phase D's six
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -184,7 +196,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	374	# same as test-go/engine, and for the same reason; see the note there
+cluster	386	# same as test-go/engine, and for the same reason; see the note there
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is

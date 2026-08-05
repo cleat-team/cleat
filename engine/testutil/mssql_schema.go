@@ -101,6 +101,9 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
              payload NVARCHAR(MAX),
              created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
              checksum NVARCHAR(MAX),
+             -- Write-ahead call intent (1.4 phase D). Must match
+             -- migrations/mssql/020_event_intent.sql.
+             intent_at DATETIMEOFFSET NULL,
              tenant_id UNIQUEIDENTIFIER,
              PRIMARY KEY (workflow_id, step)
          )`,

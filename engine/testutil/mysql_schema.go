@@ -116,6 +116,11 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			payload            TEXT,
 			created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			checksum           VARCHAR(255),
+			-- Write-ahead call intent (1.4 phase D). Must match
+			-- migrations/mysql/020_event_intent.sql: an event is pending iff
+			-- intent_at IS NOT NULL AND checksum IS NULL, and LoadEventHistory
+			-- selects that expression on every dialect.
+			intent_at          TIMESTAMP(6) NULL DEFAULT NULL,
 			tenant_id          VARCHAR(255),
 			PRIMARY KEY (workflow_id, step),
 			FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id)

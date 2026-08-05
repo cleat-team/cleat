@@ -2010,6 +2010,7 @@ func TestMSSQLStore_LoadEventHistory_Success(t *testing.T) {
 			"",                    // promise_result
 			"",                    // promise_error
 			now,                   // created_at
+			false,                 // pending (intent_at IS NOT NULL AND checksum IS NULL)
 		}}},
 	}, nil)
 	defer db.Close()

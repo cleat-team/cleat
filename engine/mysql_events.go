@@ -146,7 +146,8 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
 		       promise_name, promise_id, promise_result, promise_error,
-		       CAST(UNIX_TIMESTAMP(created_at) * 1000 AS UNSIGNED) AS timestamp_ms
+		       CAST(UNIX_TIMESTAMP(created_at) * 1000 AS UNSIGNED) AS timestamp_ms,
+		       (intent_at IS NOT NULL AND checksum IS NULL) AS pending
 		FROM event_history
 		WHERE workflow_id = ? AND tenant_id = ?
 		ORDER BY step
@@ -175,7 +176,7 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
-			&rec.TimestampMs); err != nil {
+			&rec.TimestampMs, &rec.Pending); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 

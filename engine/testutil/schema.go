@@ -69,7 +69,8 @@ func execMSSQLBestEffort(t *testing.T, db *sql.DB, stmt string) {
 // It returns every migration that shapes a table, in version order, because
 // the schema a test runs against is all of them and not just the first.
 // 001_schema.sql is the bulk of it; 010 widens idempotency_keys' primary key
-// to (key_hash, tenant_id) (IMPROVEMENT-PLAN 3.10).
+// to (key_hash, tenant_id) (IMPROVEMENT-PLAN 3.10); 020 adds event_history's
+// intent_at, which LoadEventHistory selects on every dialect (1.4 phase D).
 //
 // The list is explicit rather than a directory glob. The other files in
 // migrations/postgres/ are not table shape: 002 seeds defaults, 003 and 004
@@ -92,6 +93,7 @@ func postgresSchemaFiles() []string {
 	return []string{
 		filepath.Join(dir, "001_schema.sql"),
 		filepath.Join(dir, "010_idempotency_keys_tenant_id.sql"),
+		filepath.Join(dir, "020_event_intent.sql"),
 	}
 }
 

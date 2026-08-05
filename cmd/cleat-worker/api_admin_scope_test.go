@@ -167,3 +167,37 @@ func TestAdminOpNotImplementedSentinelIsWrapped(t *testing.T) {
 		t.Fatal("the sentinel does not survive wrapping, so handleAdminOpError cannot recognise it")
 	}
 }
+
+// TestParseWriteAheadIntentOps covers the flag parsing for 1.4 phase D. The
+// empty cases matter: a trailing comma or a value split across a YAML line
+// would otherwise declare an operation named "", which would never match a
+// real call and would make the guarantee silently inert.
+func TestParseWriteAheadIntentOps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty", "", nil},
+		{"one", "billing.charge", []string{"billing.charge"}},
+		{"several", "billing.charge,mail.send", []string{"billing.charge", "mail.send"}},
+		{"trailing comma and spaces", " billing.charge , mail.send , ", []string{"billing.charge", "mail.send"}},
+		{"only separators", " , , ", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := tc.in
+			got := parseWriteAheadIntentOps(&in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("got %q, want %q", got, tc.want)
+				}
+			}
+		})
+	}
+	if got := parseWriteAheadIntentOps(nil); got != nil {
+		t.Errorf("nil flag returned %q, want nil", got)
+	}
+}

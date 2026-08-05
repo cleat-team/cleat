@@ -22,7 +22,8 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
 		       promise_name, promise_id, promise_result, promise_error,
-		       created_at
+		       created_at,
+		       CAST(CASE WHEN intent_at IS NOT NULL AND checksum IS NULL THEN 1 ELSE 0 END AS BIT) AS pending
 		FROM event_history
 		WHERE workflow_id = @p1 AND tenant_id = @p2
 		ORDER BY step
@@ -52,7 +53,7 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
-			&createdAt); err != nil {
+			&createdAt, &rec.Pending); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
