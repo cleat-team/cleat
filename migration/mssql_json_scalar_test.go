@@ -49,7 +49,7 @@ func TestMSSQLPayloadConstraintsAcceptJSONScalars(t *testing.T) {
 		payload string
 		accept  bool
 	}{
-		// What encodeSignalPayload produces for a non-JSON payload, and the
+		// What encodeJSONPayload produces for a non-JSON payload, and the
 		// value that made 2.60c only two-thirds fixed.
 		{"a JSON string scalar", `"payload-1"`, true},
 		{"a JSON number scalar", `123`, true},

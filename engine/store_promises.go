@@ -173,14 +173,15 @@ func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, upd
 	}
 	defer tx.Rollback()
 
-	// Ensure payload is valid JSON for JSONB column
-	if !json.Valid([]byte(payload)) {
-		payload = `"` + payload + `"`
-	}
+	// encodeJSONPayload, not `"` + payload + `"`: the concatenation produces
+	// invalid JSON the moment the payload contains a quote or a backslash, and
+	// is then rejected by the very column it exists to satisfy. That is the
+	// second half of 2.60c, which fixed it for signals and left this copy
+	// behind. IMPROVEMENT-PLAN 3.19.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
 		VALUES ($1, $2, $3, $4, 'pending', $5)
-	`, workflowID, updateName, payload, promiseID, s.tenantID)
+	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}

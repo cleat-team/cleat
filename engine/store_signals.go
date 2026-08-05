@@ -74,17 +74,17 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 	if err != nil {
 		return "", false, fmt.Errorf("poll signal: %w", err)
 	}
-	return decodeSignalPayload(payload), true, tx.Commit()
+	return decodeJSONPayload(payload), true, tx.Commit()
 }
 
-// encodeSignalPayload makes a payload acceptable to the `payload` column.
+// encodeJSONPayload makes a payload acceptable to the `payload` column.
 //
 // All three dialects require valid JSON there and say so differently:
 // PostgreSQL's column is JSONB, MySQL's is JSON, and SQL Server's is
 // NVARCHAR(MAX) with a CHECK (ISJSON(payload) = 1) constraint. A caller that
 // passes a bare string -- "payload-1", an opaque token, an ID -- is passing
 // something none of them will store, so it is wrapped as a JSON string literal
-// and decodeSignalPayload unwraps it on the way out.
+// and decodeJSONPayload unwraps it on the way out.
 //
 // This lived inline in PostgresStore.DeliverSignal and nowhere else, so a
 // non-JSON signal payload was accepted on PostgreSQL and rejected outright on
@@ -94,13 +94,17 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 //
 // DeliverSignal is reachable from the worker's signal endpoint, so that was a
 // live behavioural difference between the dialects, not just a test artefact.
-func encodeSignalPayload(payload string) string {
+func encodeJSONPayload(payload string) string {
 	if json.Valid([]byte(payload)) {
 		return payload
 	}
 	// Marshal rather than concatenating quotes: a payload containing a quote or
 	// a backslash would otherwise produce invalid JSON and be rejected by the
 	// very columns this exists to satisfy.
+	//
+	// Used for workflow_signals.payload (2.60c) and, since 3.19, for
+	// workflow_update_requests.payload -- the sibling column with the same
+	// constraint, which 2.60c did not reach.
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return payload
@@ -108,7 +112,7 @@ func encodeSignalPayload(payload string) string {
 	return string(encoded)
 }
 
-// decodeSignalPayload reverses what DeliverSignal does to a payload before
+// decodeJSONPayload reverses what DeliverSignal does to a payload before
 // writing it to the JSONB `payload` column (wrapping it in quotes if it
 // isn't already valid JSON, so the column accepts it) and normalizes
 // whitespace for payloads that were already JSON. Without this, callers get
@@ -118,7 +122,7 @@ func encodeSignalPayload(payload string) string {
 // ',' (so `{"data":"hello"}` round-trips as `{"data": "hello"}`), and a
 // plain, non-JSON string like "payload-1" comes back as the JSON string
 // literal `"payload-1"`, quotes included, rather than the original bytes.
-func decodeSignalPayload(raw string) string {
+func decodeJSONPayload(raw string) string {
 	var s string
 	if err := json.Unmarshal([]byte(raw), &s); err == nil {
 		return s
@@ -142,7 +146,7 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 	}
 	defer tx.Rollback()
 
-	payload = encodeSignalPayload(payload)
+	payload = encodeJSONPayload(payload)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		VALUES ($1, $2, $3, $4)
@@ -194,7 +198,7 @@ func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName s
 	if err != nil {
 		return "", false, fmt.Errorf("poll signal: %w", err)
 	}
-	return decodeSignalPayload(payload), true, tx.Commit()
+	return decodeJSONPayload(payload), true, tx.Commit()
 }
 
 // PollCancellation satisfies the SignalStore interface.

@@ -16,7 +16,7 @@ import (
 // JSON, and each says so differently: PostgreSQL's column is JSONB, MySQL's is
 // JSON, SQL Server's is NVARCHAR(MAX) with CHECK (ISJSON(payload) = 1). Only
 // PostgresStore.DeliverSignal knew that -- it wrapped a non-JSON payload in
-// quotes before writing, and decodeSignalPayload unwrapped it on the way out.
+// quotes before writing, and decodeJSONPayload unwrapped it on the way out.
 // MySQLStore and MSSQLStore did neither, so an opaque payload was accepted on
 // PostgreSQL and rejected outright on the other two:
 //
@@ -37,7 +37,7 @@ func TestSignalPayloadRoundTripsOnEveryDialect(t *testing.T) {
 		{"json object", `{"data":"hello"}`},
 		{"bare string", "payload-1"},
 		{"empty string", ""},
-		// A quote and a backslash are the reason encodeSignalPayload marshals
+		// A quote and a backslash are the reason encodeJSONPayload marshals
 		// rather than concatenating quote characters, which is what the
 		// PostgreSQL path used to do: `"` + `he"llo` + `"` is `"he"llo"`, which
 		// is not valid JSON and is rejected by the very column the wrapping
