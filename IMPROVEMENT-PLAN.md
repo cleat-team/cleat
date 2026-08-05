@@ -4551,7 +4551,7 @@ two writers above would put every definition in one tenant anyway. Expect a migr
 WS-1's range, the two writer fixes, and a decision about what "shared definition" should mean
 now that it is the accidental default.
 
-### 3.13 No cleat-worker can bootstrap a MySQL schema — 🔴 **OPEN**
+### 3.13 No cleat-worker can bootstrap a MySQL schema — ✅ **FIXED** (WS-1, 2026-08-05)
 
 Found by §3.10's migration test, which could not build a "before" state for MySQL.
 
@@ -4584,6 +4584,52 @@ The fix is comment- and string-aware splitting (or `multiStatements=true` and no
 all), plus running the real files against a scratch MySQL database in CI so this cannot
 recur. `migration/idempotency_tenant_test.go`'s MySQL arm is skipped pointing here, and that
 skip is the acceptance test for this item.
+
+#### Resolution — and the second reason, which was worse
+
+`splitSQL` now tracks the four things a semicolon can be inside — a line comment (`--` with
+the whitespace MySQL requires, and `#`), a block comment, a quoted string (both backslash and
+doubled-quote escapes), and a backtick identifier — and honours `DELIMITER`, which is what the
+file is asking the client to do. It is not a SQL parser and does not try to be; it knows
+enough to find statement boundaries and leaves the rest to the server.
+
+**The `DELIMITER` half was confirmed, and it is the more serious of the two.**
+`003_procedures.sql` creates `finalize_workflow_status` — the procedure the engine calls on
+every workflow completion, with no fallback. Its body is full of semicolons, so the old
+splitter cut it into fragments and then sent `DELIMITER //` to a server that has never heard
+of it. So even with 001 fixed, a MySQL deployment would have come up without the one procedure
+it cannot run without.
+
+**Tested three ways, deliberately:**
+
+- `migration.TestRunner_AppliesShippedMySQLMigrations` runs the real Runner over the real
+  `migrations/mysql/` against a scratch database and checks the tables, the composite
+  idempotency key from §3.10, and `finalize_workflow_status`. `TestRunner_SecondMySQLRunAppliesNothing`
+  covers the restart-against-a-migrated-database path separately, because "applies nothing on
+  a fresh database" and "re-applies on a live one" fail in different directions.
+- `TestSplitSQL` is a table of twelve cases against the pure function, which had **no unit
+  tests at all** — most of why this survived, since reproducing it needed nothing but calling
+  the function with a string that is checked into this repo. Reverting the function body to
+  the old one-liner fails seven of them.
+- `TestSplitSQL_ShippedMySQLFiles` runs the splitter over the real files with no database and
+  asserts the properties that matter: no fragment is pure prose (MySQL answers an empty query
+  with 1065), no fragment is a `DELIMITER` directive, and nothing containing `CREATE
+  PROCEDURE` has lost its `END`. That is the check that would have caught this on a laptop
+  with nothing installed.
+
+**And it now runs in CI, which was the actual gap.** `multi-db-ci.yml`'s `test-mysql` and
+`test-mssql` jobs ran `./engine/...` only; they are the only jobs with live MySQL and SQL
+Server, so a migration test could not run anywhere that had a server to run it against. Both
+now run `./migration/...` too. Without that, this fix would have been guarded by a test that
+skips in every job — which is the shape of the problem, not a fix for it.
+`migration/idempotency_tenant_test.go`'s MySQL arm is unskipped, as this item's acceptance
+test required.
+
+**Not done, and small:** `tests/plugin-harness/testdb.go` carries a *second*, independent
+statement splitter (dollar-quote and `GO` aware) that applies the same migration files. It
+copes with the shipped MySQL files today — verified against a live MySQL 8.4 — so this is
+duplication rather than a defect, but two splitters means the next one to drift does so
+silently.
 
 ### 3.30 What wazero is for — 🔶 **ANSWERED, and the answer is smaller than expected** (WS-3, 2026-08-05)
 

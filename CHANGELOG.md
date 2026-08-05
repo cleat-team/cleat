@@ -102,6 +102,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project renamed from "durable" to "cleat" across the codebase
 
 ### Fixed
+- **No `cleat-worker` could start against MySQL either.** The migration runner
+  split each file on every `;`, including semicolons inside comments and inside
+  stored-procedure bodies, so neither shipped MySQL file could be applied:
+  `001_schema.sql` failed with `Error 1064` on a semicolon in a comment, and
+  `003_procedures.sql` — which creates `finalize_workflow_status`, the
+  procedure the engine calls on every workflow completion with no fallback —
+  was cut into fragments and its `DELIMITER` directive sent to the server. A
+  worker pointed at a MySQL database whose schema had not been built by hand
+  logged the error and exited. Statement splitting is now comment-, string- and
+  `DELIMITER`-aware, and `multi-db-ci.yml` runs the migration tests against
+  live MySQL and SQL Server.
 - No `cleat-worker` could start against PostgreSQL: a session-scoped
   `SET search_path` in the migration files broke the migration runner's own
   bookkeeping, and concurrent workers raced each other's DDL at boot. Both

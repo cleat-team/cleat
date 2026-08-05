@@ -410,15 +410,202 @@ func splitMSSQL(sql string) []string {
 	return batches
 }
 
-// splitSQL splits a multi-statement SQL string into individual statements
-// on semicolons, ignoring trailing whitespace and empty statements.
+// splitSQL splits a multi-statement MySQL script into individual statements.
+//
+// It used to be `strings.Split(sql, ";")`, which cut on every semicolon in the
+// file regardless of what that semicolon was part of. Neither shipped MySQL
+// file survived it, and since every cleat-worker runs this at boot and exits
+// when it fails, neither could a worker on a database that had not been
+// schema'd by hand (IMPROVEMENT-PLAN 3.13):
+//
+//   - 001_schema.sql line 7 is the comment "-- CREATE INDEX has no IF NOT
+//     EXISTS in MySQL 8.0; re-runs error harmlessly." The naive split sent
+//     `re-runs error harmlessly.` to the server as a statement.
+//   - 003_procedures.sql defines finalize_workflow_status, whose body is full
+//     of semicolons, and wraps it in `DELIMITER //`. Splitting on ';' cuts the
+//     procedure into fragments; `DELIMITER` itself is a client directive that
+//     no server has ever accepted.
+//
+// So this tracks the four things a semicolon can be inside — a line comment, a
+// block comment, a quoted string, a quoted identifier — and honours DELIMITER,
+// which is what the file is asking the client to do.
+//
+// It is deliberately not a SQL parser. It knows just enough to find statement
+// boundaries, which is the job; anything beyond that belongs to the server.
 func splitSQL(sql string) []string {
-	var stmts []string
-	for _, s := range strings.Split(sql, ";") {
-		s = strings.TrimSpace(s)
-		if s != "" {
+	var (
+		stmts     []string
+		cur       strings.Builder
+		delimiter = ";"
+	)
+
+	flush := func() {
+		s := strings.TrimSpace(cur.String())
+		cur.Reset()
+		// A fragment that is only comments and whitespace is not a statement.
+		// MySQL rejects an empty query outright (1065), which is how a
+		// trailing comment block turns into a failed migration.
+		if s != "" && !isAllComments(s) {
 			stmts = append(stmts, s)
 		}
 	}
+
+	for i := 0; i < len(sql); {
+		// DELIMITER is recognised only at the start of a line, which is where
+		// the client tools recognise it and where the shipped files put it.
+		if atLineStart(sql, i) {
+			if word, rest, ok := parseDelimiterDirective(sql[i:]); ok {
+				flush()
+				delimiter = word
+				i += len(sql[i:]) - len(rest)
+				continue
+			}
+		}
+
+		switch {
+		case strings.HasPrefix(sql[i:], "/*"):
+			end := strings.Index(sql[i+2:], "*/")
+			if end < 0 {
+				i = len(sql) // unterminated: the rest is comment
+				continue
+			}
+			cur.WriteString(" ")
+			i += 2 + end + 2
+
+		// MySQL requires whitespace (or end of line) after `--`; `--x` is not
+		// a comment. `#` needs no such thing.
+		case strings.HasPrefix(sql[i:], "#"),
+			strings.HasPrefix(sql[i:], "--") && (i+2 >= len(sql) || isSpaceByte(sql[i+2])):
+			nl := strings.IndexByte(sql[i:], '\n')
+			if nl < 0 {
+				i = len(sql)
+				continue
+			}
+			cur.WriteString(" ")
+			i += nl // leave the newline for atLineStart
+
+		case sql[i] == '\'', sql[i] == '"', sql[i] == '`':
+			lit, n := scanQuoted(sql[i:])
+			cur.WriteString(lit)
+			i += n
+
+		case delimiter != "" && strings.HasPrefix(sql[i:], delimiter):
+			flush()
+			i += len(delimiter)
+
+		default:
+			cur.WriteByte(sql[i])
+			i++
+		}
+	}
+	flush()
 	return stmts
+}
+
+// atLineStart reports whether i is at the beginning of a line (only whitespace
+// behind it on that line).
+func atLineStart(sql string, i int) bool {
+	for j := i - 1; j >= 0; j-- {
+		switch sql[j] {
+		case '\n':
+			return true
+		case ' ', '\t', '\r':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// parseDelimiterDirective recognises a leading `DELIMITER <token>` line and
+// returns the new delimiter along with the input remaining after that line.
+func parseDelimiterDirective(s string) (delim, rest string, ok bool) {
+	const kw = "delimiter"
+	if len(s) < len(kw) || !strings.EqualFold(s[:len(kw)], kw) {
+		return "", "", false
+	}
+	r := s[len(kw):]
+	trimmed := strings.TrimLeft(r, " \t")
+	if len(trimmed) == len(r) { // no separating whitespace: not the directive
+		return "", "", false
+	}
+	line := trimmed
+	if nl := strings.IndexByte(trimmed, '\n'); nl >= 0 {
+		line = trimmed[:nl]
+		rest = trimmed[nl+1:]
+	} else {
+		rest = ""
+	}
+	delim = strings.TrimSpace(line)
+	if delim == "" {
+		return "", "", false
+	}
+	return delim, rest, true
+}
+
+// scanQuoted consumes one quoted string or identifier starting at s[0] and
+// returns it verbatim along with how many bytes it used.
+//
+// Both escape forms are handled, because both appear in real schemas: a
+// backslash escape, and a doubled quote character (” inside ”, “ inside “).
+func scanQuoted(s string) (string, int) {
+	q := s[0]
+	var b strings.Builder
+	b.WriteByte(q)
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && q != '`' && i+1 < len(s):
+			// Backslash escapes do not apply inside backtick identifiers.
+			b.WriteByte(c)
+			b.WriteByte(s[i+1])
+			i++
+		case c == q && i+1 < len(s) && s[i+1] == q:
+			b.WriteByte(c)
+			b.WriteByte(c)
+			i++
+		case c == q:
+			b.WriteByte(c)
+			return b.String(), i + 1
+		default:
+			b.WriteByte(c)
+		}
+	}
+	// Unterminated quote: hand back what there is and let the server complain,
+	// which produces a better message than anything this function could.
+	return b.String(), len(s)
+}
+
+// isAllComments reports whether a fragment carries no SQL at all -- only line
+// and block comments and whitespace. Such a fragment is what a trailing
+// comment block at the end of a file leaves behind, and sending it produces
+// "Query was empty" (1065) rather than a no-op.
+func isAllComments(s string) bool {
+	for i := 0; i < len(s); {
+		switch {
+		case isSpaceByte(s[i]):
+			i++
+		case strings.HasPrefix(s[i:], "/*"):
+			end := strings.Index(s[i+2:], "*/")
+			if end < 0 {
+				return true
+			}
+			i += 2 + end + 2
+		case strings.HasPrefix(s[i:], "#"),
+			strings.HasPrefix(s[i:], "--") && (i+2 >= len(s) || isSpaceByte(s[i+2])):
+			nl := strings.IndexByte(s[i:], '\n')
+			if nl < 0 {
+				return true
+			}
+			i += nl + 1
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isSpaceByte(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
