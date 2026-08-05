@@ -198,7 +198,15 @@ func (s *MySQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, upda
 func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	hash := sha256.Sum256([]byte(key))
 	keyHash := hash[:]
-	expiration := time.Now().Add(ttl)
+	// Microseconds against NOW(6), not time.Now().Add(ttl).
+	//
+	// The precision was already right here -- MySQL was the one dialect that
+	// did not truncate a sub-second TTL -- but the expiry was computed on the
+	// application's clock and then compared against the database's in every
+	// predicate below. That made this the one backend where host/database
+	// clock skew decides whether a lock is held, and it disagreed with the
+	// other two about whose clock owns the answer. IMPROVEMENT-PLAN 3.34.
+	ttlMicros := ttl.Microseconds()
 
 	// Step 1: delete any expired key for this hash (tenant-scoped).
 	_, err := s.db.ExecContext(ctx, `
@@ -212,8 +220,8 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	// workflow with a still-valid expiry), INSERT IGNORE is a silent no-op.
 	_, err = s.db.ExecContext(ctx, `
 		INSERT IGNORE INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
-		VALUES (?, ?, ?, ?, ?)
-	`, keyHash, key, workflowID, expiration, s.tenantID)
+		VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), ?)
+	`, keyHash, key, workflowID, ttlMicros, s.tenantID)
 	if err != nil {
 		return false, fmt.Errorf("AcquireConcurrencyKey: %w", err)
 	}

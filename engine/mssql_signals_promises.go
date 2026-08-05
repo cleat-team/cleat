@@ -369,11 +369,12 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	// Try to insert with a unique constraint.
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
-		SELECT @p1, @p2, @p3, DATEADD(SECOND, @p4, SYSUTCDATETIME()), @p5
+		SELECT @p1, @p2, @p3, DATEADD(MICROSECOND, @p6, DATEADD(SECOND, @p4, SYSUTCDATETIME())), @p5
 		WHERE NOT EXISTS (
 			SELECT 1 FROM concurrency_keys WHERE key_hash = @p1 AND expires_at > SYSUTCDATETIME()
 		)
-	`, keyHash[:], key, workflowID, int(ttl.Seconds()), s.tenantID)
+	`, keyHash[:], key, workflowID, int(ttl/time.Second), s.tenantID,
+		int((ttl % time.Second).Microseconds()))
 	if err != nil {
 		return false, fmt.Errorf("acquire concurrency key: %w", err)
 	}

@@ -180,7 +180,12 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # (passed=3372)`, this branch reports `skipped=409 (passed=3383)`. The absolute
 # numbers sit below the runner's, as they have all along, so the delta is what
 # carries.
-test-go/engine	413	# 403 on the runner, +10 for 1.4 phase E's resolver tests
+#
+# 413 -> 417: 3.34's two tests, TestConcurrencyKeyTTLKeepsSubSecondPrecision and
+# TestConcurrencyKeyExcludesWhileHeld, each with a mysql and an mssql arm that
+# skip here. Measured as a delta rather than assumed: with the file removed the
+# same command reports 408, with it 412, so +4 on whatever the runner's base is.
+test-go/engine	417	# 413 + 3.34's four dialect arms (local delta 408 -> 412)
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -262,7 +267,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	413	# same as test-go/engine, and for the same reason; see the note there
+cluster	417	# same as test-go/engine, and for the same reason; see the note there
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is
