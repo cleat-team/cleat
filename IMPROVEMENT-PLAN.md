@@ -292,8 +292,26 @@ Branch `fix/phase0-restore-ci-signal`, pushed, draft PR #218 against `develop`.
 **Acceptance gate: passed.** A deliberate breakage was pushed and `Test Go (core)` was
 observed going failure → success. "CI is fixed" is now an observation, not an inference.
 
-**Still open:** 1.4 (wire `flushCallIntent`), 1.7 (tenant scoping at the HTTP layer), the
-whole of Phase 2, `cmd/cleat-worker` gofmt, and the four items below.
+> ~~**Still open:** 1.4 (wire `flushCallIntent`), 1.7 (tenant scoping at the HTTP layer), the
+> whole of Phase 2, `cmd/cleat-worker` gofmt, and the four items below.~~
+>
+> **Audited 2026-08-04. Three of the five claims here are stale, and one is actively
+> misleading.** This paragraph was written by `c26c332` about the tree `c26c332` produced, and
+> nothing has revisited it since.
+>
+> - **1.4 "wire `flushCallIntent`" is the wrong instruction now.** `docs/durable-call-intent-design.md`
+>   §2 establishes that wiring it in would break every workflow that makes a durable call —
+>   the completion upsert guards on `error IS NULL` and the intent row's `error` is the
+>   sentinel, so the row could never be completed and every replay would report `[AMBIGUOUS]`
+>   forever. Phase A deleted both writer functions. §1.4 below carries the replacement design.
+> - **`cmd/cleat-worker` gofmt:** closed by `d75ac51`. `gofmt -l cmd/cleat-worker/` is empty.
+> - **1.7:** now 🔶 partly done, not open — see §1.7.
+> - Caveats 2 and 4 below are both closed; see the strikethroughs there.
+>
+> Only "the whole of Phase 2" was still true when written, and Phase 2 has since moved a long
+> way as well. **The audit that produced this was flagged twice in earlier sessions and run in
+> neither** — which is the same shape as everything else in this document: the signal existed
+> and nobody attached it to anything.
 
 ### Caveats carried by this branch
 
@@ -306,7 +324,14 @@ the code.
    `t.Skipf` — that skip is what made the subtest unfalsifiable, since any asc error at all
    was indistinguishable from the missing dependency. Proven to bite.
 
-2. **`testutil.TestDB` skips instead of failing when Postgres is unreachable.** Its
+2. ~~**`testutil.TestDB` skips instead of failing when Postgres is unreachable.**~~ ✅
+   **Closed** — verified 2026-08-04, not inferred. `engine/testutil/schema.go:661` now selects
+   `t.Fatalf` over `t.Skipf` whenever a DSN for *that dialect* was configured explicitly, so
+   all twelve-odd callers below get the behaviour centrally and the local
+   `requireBackendReachable` helper is gone (both surviving mentions are comments recording
+   that it used to exist). The per-dialect `configured` flag is the part worth keeping: the
+   Multi-DB MySQL job has no PostgreSQL at all, so a single "some DSN was set" flag would have
+   failed every PostgreSQL subtest there for the right reason in the wrong job. Original text:
    `MySQLTestDB`/`MSSQLTestDB` siblings already `t.Fatalf`; the Postgres path calls
    `t.Skipf` on any ping failure, even when the DSN came from an explicit
    `CLEAT_TEST_POSTGRES`/`CLEAT_TEST_DB` rather than its `localhost` fallback. A container
@@ -323,10 +348,19 @@ the code.
    via a trailing `SELECT` row that the Go call site already read correctly. Getting the
    MySQL lane far enough to execute 004 is what exposed 1.8.
 
-4. **`schema.sql` and `migrations/postgres/001_schema.sql` are two hand-maintained copies of
+4. ~~**`schema.sql` and `migrations/postgres/001_schema.sql` are two hand-maintained copies of
    one schema.** `93f8abf` resynchronised them. Nothing stops them diverging again, and the
    last divergence cost a debugging session (`generation` nullable in one, `NOT NULL DEFAULT
-   0` in the other). Candidate for Phase 2: assert the two agree, or generate one.
+   0` in the other). Candidate for Phase 2: assert the two agree, or generate one.~~ ✅
+   **Closed by the same commit that recorded it.** `c26c332` deleted the root `schema.sql`
+   outright (see `e13c2c8`, "1.9 done") — there is no second copy left to diverge, and
+   `git ls-files` finds no `schema.sql` anywhere in the tree. The caveat describes a hazard
+   that the diff it was attached to had already removed.
+
+   The residual worth keeping is a *different* pair: `engine/testutil/mssql_schema.go`
+   hand-writes its tables independently of `migrations/mssql/001_schema.sql` and defines none
+   of the seven security policies, so no MSSQL test has a tenant backstop. That is recorded in
+   PARALLEL-WORKSTREAMS.md's third cross-stream coupling and belongs to WS-2.
 
 **Process note for future sessions.** Two commits had to be rewound because `git add -A` was
 run while subagents were mid-edit; one nearly shipped a call site an agent had *deliberately*
