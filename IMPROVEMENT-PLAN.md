@@ -4655,6 +4655,47 @@ The generalisable finding, which is the one worth carrying: **"which backend run
 has to be told about the second.** Both defects above sat inside the backend that CLAUDE.md
 calls the behaviour of record.
 
+#### 3.31 addendum — the decomposition path has never successfully run anything (2026-08-05)
+
+Chased because writing the table above raised the question "what actually reaches decomposition
+now?", and the answer turns out to be stronger than "not much".
+
+Three facts, each checked rather than reasoned:
+
+1. **Decomposition is entered only for Component Model binaries.** `Execute` gates the whole
+   branch on `isComponentWasm`, which tests for the `0d 00 01 00` version/layer at offset 4.
+2. **Python is the only producer of one.** The four build targets are `build_as.go`,
+   `build_java.go`, `build_python.go` and `build_rust.go`; AssemblyScript, TeaVM Java and the
+   Rust cdylib all emit core modules. Scanning every `.wasm` tracked in the repo for the
+   component magic returns exactly two files, both the same Python fixture
+   (`tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm` and its
+   `.component.wasm` twin).
+3. **Python components fail decomposition.** The stale fixture failed there at instance 15,
+   then 81 after the `env::abort` arity fix; a component built fresh fails at instance 52
+   (§2.72). No Python component has ever come out the other side.
+
+Put together: **the ~600 lines of hand-rolled shared-everything dynamic linking in
+`backend_wasmtime.go` — the GOT.mem/GOT.func routing, the placeholder tables, the
+"instance with the most exports is the CPython runtime" heuristic, the multi-pass instantiation
+loop and its `undefined element` retry — have never successfully executed a workflow.** It is
+not dead code in the `check-test-only-code.sh` sense, because it is wired and reached; it is
+something rarer, code that is reached and has never once succeeded.
+
+Since 2026-08-05 it is also no longer the path Python takes, so it is now reached only when the
+native component path fails first.
+
+**Not proposing deletion**, and the reason matters: the native path has one known limit —
+`componentGetFunc` passes a nil parent export index, so it resolves only top-level exports and
+cannot reach a function nested inside an exported interface (§2.72). A component shaped that
+way would fall through to decomposition today. Deleting decomposition without first fixing that
+would turn a bad error message into a hard failure.
+
+So the honest disposition is: **fix `componentGetFunc`, then delete the decomposition path**,
+in that order, and the §3.31 gap above ("the decomposition path's fence is inherited rather
+than verified") resolves by deletion rather than by a test. Writing a fence test for it first
+would be work spent on code that is on its way out — which is worth saying explicitly, because
+"add the missing test" is the reflex the rest of this document encourages.
+
 ### 3.32 Every deferred callback runs on wazero, unfenced — 🔴 **OPEN** (found by WS-3, 2026-08-05)
 
 `Engine.RunDefer` does not consult `backendForWasm`. It reaches straight for `e.rt`, the
