@@ -39,9 +39,13 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 	// Phase 0: Detect package-level var h *cleat.HostCalls.
 	// Functions that reference this global have implicit access.
 	globalHObj := findGlobalHostCalls(result)
-	usesGlobalH := make(map[string]bool)
 	if globalHObj != nil {
-		usesGlobalH = findGlobalHUsers(result, globalHObj)
+		// Declared here rather than above the branch. The empty map it used to
+		// be initialised with outside was never read: the only reads are inside
+		// this branch, and the first statement in it overwrote the value. So
+		// the initialisation was doing nothing except making the variable look
+		// like it had a meaning in the nil case, which it does not.
+		usesGlobalH := findGlobalHUsers(result, globalHObj)
 		for name := range durableSet {
 			if usesGlobalH[name] {
 				threaded[name] = true

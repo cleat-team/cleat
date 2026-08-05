@@ -5,10 +5,11 @@ linters:
     # Not on by golangci-lint's default set, so listing it under `disable`
     # below never did anything -- it had to be enabled to run at all.
     - misspell
+    # Enabled 2026-08-05 (WS-3). Was 4 findings, not the 8 recorded below.
+    - ineffassign
   disable:
     - errcheck
     - gosimple
-    - ineffassign
     - staticcheck
     - unused
     - unconvert
@@ -42,6 +43,22 @@ linters:
   # Re-measure before believing these numbers. Recording them is the point --
   # the next person can take the cheapest one off the top instead of inheriting
   # a claim they have no way to check.
+  #
+  # ineffassign, 2026-08-05 (WS-3): and re-measuring was the right advice. It
+  # was **4**, not 8, on golangci-lint v1.64.7 against this file's exclusions.
+  # The table above is a measurement with a date on it, not a running total, so
+  # the other rows should be assumed equally stale until someone re-runs them.
+  #
+  # Three of the four were the defensive trailing `argIdx++` the workstream
+  # notes warned about, in scheduledbackup/{commands,routes}.go and
+  # webhookingest/host_functions.go. They are //nolint'd with the reason rather
+  # than deleted: each keeps a SQL placeholder counter correct so the next
+  # clause added below cannot silently reuse the previous one's $N. Deleting
+  # them passes the linter and plants a bug.
+  #
+  # The fourth was real, in internal/closure/threading.go: a map initialised
+  # outside an `if` and unconditionally overwritten as the first statement
+  # inside it, with no reader in the nil branch. Moved into the branch.
 issues:
   exclude-files:
     - ".*_test\\.go$"
