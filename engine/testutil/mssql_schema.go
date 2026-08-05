@@ -191,15 +191,21 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
              PRIMARY KEY (workflow_id, update_name)
          )`,
 
-		// idempotency_keys
+		// idempotency_keys. The primary key is (key_hash, tenant_id), not
+		// key_hash alone: an Idempotency-Key is a client-supplied header, so
+		// two tenants picking "order-123" must not collide.
+		// migrations/mssql/010_idempotency_keys_tenant_id.sql,
+		// IMPROVEMENT-PLAN 3.10.
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'idempotency_keys')
          CREATE TABLE idempotency_keys (
-             key_hash VARBINARY(900) NOT NULL PRIMARY KEY,
+             key_hash VARBINARY(32) NOT NULL,
              workflow_id NVARCHAR(MAX) NOT NULL,
              result NVARCHAR(MAX),
              error_msg NVARCHAR(MAX),
              created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             expires_at DATETIMEOFFSET NOT NULL DEFAULT DATEADD(DAY, 7, SYSUTCDATETIME())
+             expires_at DATETIMEOFFSET NOT NULL DEFAULT DATEADD(DAY, 7, SYSUTCDATETIME()),
+             tenant_id UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+             CONSTRAINT pk_idempotency_keys PRIMARY KEY (key_hash, tenant_id)
          )`,
 
 		// workflow_memory_samples (ID column uses IDENTITY, not as PK since it's BIGINT IDENTITY instead of BIGSERIAL)
@@ -264,6 +270,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		}
 	}
 
+	migrateMSSQLIdempotencyTenantID(t, db)
+
 	// Indexes. These used to live in SetupFullSchema, so the schema you got
 	// depended on which entry point the test called. Both now route here.
 	// IMPROVEMENT-PLAN 2.60b.
@@ -285,6 +293,85 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
 	execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_mem_samples_def' AND object_id = OBJECT_ID('workflow_memory_samples'))
 		CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
+}
+
+// migrateMSSQLIdempotencyTenantID brings an already-existing test database up
+// to the (key_hash, tenant_id) primary key that
+// migrations/mssql/010_idempotency_keys_tenant_id.sql introduces.
+//
+// The CREATE TABLE above cannot do this on its own: it is guarded on
+// sys.tables against a shared, long-lived test database, so a table created by
+// an earlier checkout keeps its old shape forever and the new column simply
+// never appears. That is the failure mode IMPROVEMENT-PLAN 2.60b describes.
+//
+// key_hash is narrowed to VARBINARY(32) on the way past, which is what
+// migrations/mssql/001_schema.sql has always declared. This file used to say
+// VARBINARY(900) -- harmless while the key was the whole primary key, but a
+// composite key of 900 + 16 bytes exceeds SQL Server's 900-byte index key
+// limit and the constraint is rejected outright. The values stored are
+// SHA-256 digests, so 32 is not a truncation.
+//
+// Errors fail the test rather than being logged: with the column missing,
+// StartNewRun's SQL names a column that is not there, and a warning here
+// would turn that into a confusing failure elsewhere.
+func migrateMSSQLIdempotencyTenantID(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	// Drop a pre-010 single-column primary key by its catalogue name: this
+	// file used to create the table with an inline PRIMARY KEY, which SQL
+	// Server names for itself, so the constraint is not reliably called
+	// pk_idempotency_keys.
+	if _, err := db.Exec(`
+		DECLARE @pk_name SYSNAME = (
+		    SELECT kc.name
+		    FROM sys.key_constraints kc
+		    WHERE kc.parent_object_id = OBJECT_ID(N'dbo.idempotency_keys')
+		      AND kc.type = 'PK'
+		      AND (
+		          SELECT COUNT(*)
+		          FROM sys.index_columns ic
+		          WHERE ic.object_id = kc.parent_object_id
+		            AND ic.index_id = kc.unique_index_id
+		      ) = 1
+		);
+		IF @pk_name IS NOT NULL
+		    EXEC('ALTER TABLE dbo.idempotency_keys DROP CONSTRAINT [' + @pk_name + ']')`); err != nil {
+		t.Fatalf("setup MSSQL full schema: drop idempotency_keys primary key: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		IF EXISTS (
+		    SELECT 1 FROM sys.columns
+		    WHERE object_id = OBJECT_ID(N'dbo.idempotency_keys')
+		      AND name = N'key_hash' AND max_length <> 32
+		)
+		    ALTER TABLE dbo.idempotency_keys ALTER COLUMN key_hash VARBINARY(32) NOT NULL`); err != nil {
+		t.Fatalf("setup MSSQL full schema: narrow idempotency_keys.key_hash: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		IF NOT EXISTS (
+		    SELECT 1 FROM sys.columns
+		    WHERE object_id = OBJECT_ID(N'dbo.idempotency_keys')
+		      AND name = N'tenant_id'
+		)
+		    ALTER TABLE dbo.idempotency_keys
+		        ADD tenant_id UNIQUEIDENTIFIER NOT NULL
+		        CONSTRAINT df_idempotency_keys_tenant_id
+		        DEFAULT '00000000-0000-0000-0000-000000000000'`); err != nil {
+		t.Fatalf("setup MSSQL full schema: add idempotency_keys.tenant_id: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		IF NOT EXISTS (
+		    SELECT 1 FROM sys.key_constraints
+		    WHERE parent_object_id = OBJECT_ID(N'dbo.idempotency_keys')
+		      AND type = 'PK'
+		)
+		    ALTER TABLE dbo.idempotency_keys
+		        ADD CONSTRAINT pk_idempotency_keys PRIMARY KEY (key_hash, tenant_id)`); err != nil {
+		t.Fatalf("setup MSSQL full schema: widen idempotency_keys primary key: %v", err)
+	}
 }
 
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.

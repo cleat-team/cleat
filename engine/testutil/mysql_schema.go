@@ -192,14 +192,20 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id)
 		) ENGINE=InnoDB`,
 
-		// idempotency_keys
+		// idempotency_keys. The primary key is (key_hash, tenant_id), not
+		// key_hash alone: an Idempotency-Key is a client-supplied header, so
+		// two tenants picking "order-123" must not collide.
+		// migrations/mysql/010_idempotency_keys_tenant_id.sql,
+		// IMPROVEMENT-PLAN 3.10.
 		`CREATE TABLE IF NOT EXISTS idempotency_keys (
-			key_hash     VARBINARY(32) PRIMARY KEY,
+			key_hash     VARBINARY(32) NOT NULL,
 			workflow_id  VARCHAR(255) NOT NULL,
 			result       JSON,
 			error_msg    TEXT,
 			created_at   TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-			expires_at   TIMESTAMP(6) NOT NULL DEFAULT (NOW(6) + INTERVAL 7 DAY)
+			expires_at   TIMESTAMP(6) NOT NULL DEFAULT (NOW(6) + INTERVAL 7 DAY),
+			tenant_id    CHAR(36) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+			PRIMARY KEY (key_hash, tenant_id)
 		) ENGINE=InnoDB`,
 
 		// workflow_memory_samples
@@ -262,6 +268,8 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 		_, _ = db.Exec(m) // best-effort, ignore errors
 	}
 
+	migrateMySQLIdempotencyTenantID(t, db)
+
 	// Indexes. These used to live in SetupFullSchema, which meant the schema you
 	// got depended on which entry point the test called: SetupMySQLFullSchema
 	// built the tables without them, SetupFullSchema built them with. Both now
@@ -277,6 +285,60 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 	execIgnoreDupKey(t, db, `CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
 	execIgnoreDupKey(t, db, `CREATE INDEX idx_idempotency_keys_expires ON idempotency_keys(expires_at)`)
 	execIgnoreDupKey(t, db, `CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
+}
+
+// migrateMySQLIdempotencyTenantID brings an already-existing test database up
+// to the (key_hash, tenant_id) primary key that
+// migrations/mysql/010_idempotency_keys_tenant_id.sql introduces.
+//
+// The CREATE TABLE above cannot do this on its own: it is IF NOT EXISTS
+// against a shared, long-lived test database, so a table created by an earlier
+// checkout keeps its old shape forever and the new column simply never
+// appears. That is the failure mode IMPROVEMENT-PLAN 2.60b describes -- the
+// schema you get depends on when your database was created, and the suite
+// still prints ok.
+//
+// Unlike the best-effort ALTERs above, this one fails the test rather than
+// swallowing the error: with the column missing, StartNewRun's SQL does not
+// merely degrade, it names a column that is not there, and a silent skip here
+// would turn that into a confusing failure elsewhere.
+func migrateMySQLIdempotencyTenantID(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	var haveColumn int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'idempotency_keys'
+		  AND COLUMN_NAME = 'tenant_id'`).Scan(&haveColumn); err != nil {
+		t.Fatalf("setup MySQL full schema: check idempotency_keys.tenant_id: %v", err)
+	}
+	if haveColumn == 0 {
+		if _, err := db.Exec(`ALTER TABLE idempotency_keys
+			ADD COLUMN tenant_id CHAR(36) NOT NULL
+			DEFAULT '00000000-0000-0000-0000-000000000000'`); err != nil {
+			t.Fatalf("setup MySQL full schema: add idempotency_keys.tenant_id: %v", err)
+		}
+	}
+
+	// information_schema.STATISTICS has one row per key column, so a PRIMARY
+	// of one row is the pre-010 shape.
+	var pkColumns int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'idempotency_keys'
+		  AND INDEX_NAME = 'PRIMARY'`).Scan(&pkColumns); err != nil {
+		t.Fatalf("setup MySQL full schema: check idempotency_keys primary key: %v", err)
+	}
+	switch pkColumns {
+	case 1:
+		if _, err := db.Exec(`ALTER TABLE idempotency_keys
+			DROP PRIMARY KEY, ADD PRIMARY KEY (key_hash, tenant_id)`); err != nil {
+			t.Fatalf("setup MySQL full schema: widen idempotency_keys primary key: %v", err)
+		}
+	case 0:
+		if _, err := db.Exec(`ALTER TABLE idempotency_keys
+			ADD PRIMARY KEY (key_hash, tenant_id)`); err != nil {
+			t.Fatalf("setup MySQL full schema: add idempotency_keys primary key: %v", err)
+		}
+	}
 }
 
 // CleanupMySQLTestData removes all test data from MySQL tables.

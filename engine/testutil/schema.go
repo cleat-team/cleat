@@ -48,10 +48,9 @@ func execMSSQLBestEffort(t *testing.T, db *sql.DB, stmt string) {
 	}
 }
 
-// postgresSchemaFile locates the real, shipped PostgreSQL schema migration
-// (migrations/postgres/001_schema.sql), applied directly by
-// SetupMinimalSchema/SetupFullSchema for DialectPostgres instead of a
-// hand-maintained duplicate.
+// postgresSchemaFiles locates the real, shipped PostgreSQL schema migrations,
+// applied directly by SetupMinimalSchema/SetupFullSchema for DialectPostgres
+// instead of a hand-maintained duplicate.
 //
 // This file previously hand-duplicated the schema (a third copy, alongside
 // migrations/postgres/001_schema.sql and the root schema.sql) and had
@@ -67,21 +66,39 @@ func execMSSQLBestEffort(t *testing.T, db *sql.DB, stmt string) {
 // engine/ (which imports testutil) and engine/testutil/ itself
 // (testutil_test.go) -- a single ".."-relative path cannot be correct for
 // both.
-func postgresSchemaFile() string {
+// It returns every migration that shapes a table, in version order, because
+// the schema a test runs against is all of them and not just the first.
+// 001_schema.sql is the bulk of it; 010 widens idempotency_keys' primary key
+// to (key_hash, tenant_id) (IMPROVEMENT-PLAN 3.10).
+//
+// The list is explicit rather than a directory glob. The other files in
+// migrations/postgres/ are not table shape: 002 seeds defaults, 003 and 004
+// define finalize_workflow_status (applied by applyPostgresProcedures in the
+// tests that exercise it), and 005 creates the cleat_app role, which
+// SetupPostgresRLSRole handles on its own terms. Globbing would drag all of
+// those into every SetupFullSchema call.
+//
+// A migration that adds or alters a column therefore has to be added here.
+// That is a maintenance cost, and the alternative -- a second, hand-written
+// copy of the DDL in Go -- is the one this function exists to avoid.
+func postgresSchemaFiles() []string {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
-		panic("postgresSchemaFile: runtime.Caller failed")
+		panic("postgresSchemaFiles: runtime.Caller failed")
 	}
 	// thisFile is .../engine/testutil/schema.go; the repo root is two
-	// levels up, and the schema lives at migrations/postgres/001_schema.sql
-	// under it.
-	return filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations", "postgres", "001_schema.sql")
+	// levels up, and the migrations live under migrations/postgres/.
+	dir := filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations", "postgres")
+	return []string{
+		filepath.Join(dir, "001_schema.sql"),
+		filepath.Join(dir, "010_idempotency_keys_tenant_id.sql"),
+	}
 }
 
-// applyPostgresSchemaFile reads and executes postgresSchemaFile() against db.
-// lib/pq's simple query protocol accepts the whole multi-statement file as a
-// single Exec (as applyPostgresProcedures in store_backends_procedures_test.go
-// already relies on for 003/004).
+// applyPostgresSchemaFile reads and executes each postgresSchemaFiles() entry
+// against db, in order. lib/pq's simple query protocol accepts a whole
+// multi-statement file as a single Exec (as applyPostgresProcedures in
+// store_backends_procedures_test.go already relies on for 003/004).
 //
 // The statements are idempotent (CREATE ... IF NOT EXISTS, CREATE OR REPLACE,
 // DROP POLICY IF EXISTS ... CREATE POLICY), so this is safe to call more than
@@ -119,26 +136,32 @@ func postgresSchemaFile() string {
 // SetupPostgresRLSRole and OpenPostgresRLSTestDB below.
 func applyPostgresSchemaFile(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := postgresSchemaFile()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	paths := postgresSchemaFiles()
+	files := make([][]byte, 0, len(paths))
+	var combined []byte
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		files = append(files, data)
+		combined = append(combined, data...)
 	}
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		t.Fatalf("apply %s: acquire connection: %v", path, err)
+		t.Fatalf("apply postgres schema: acquire connection: %v", err)
 	}
 	defer conn.Close()
 
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaApplyLockKey); err != nil {
-		t.Fatalf("apply %s: acquire advisory lock: %v", path, err)
+		t.Fatalf("apply postgres schema: acquire advisory lock: %v", err)
 	}
 	defer func() {
 		// Release explicitly. conn.Close() only returns the connection to the
 		// pool; the session lives on and would keep holding the lock.
 		if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, schemaApplyLockKey); err != nil {
-			t.Errorf("apply %s: release advisory lock: %v", path, err)
+			t.Errorf("apply postgres schema: release advisory lock: %v", err)
 		}
 	}()
 
@@ -164,9 +187,10 @@ func applyPostgresSchemaFile(t *testing.T, db *sql.DB) {
 	//
 	// Tests that add their own columns (all IF NOT EXISTS) or drop objects
 	// they themselves created are unaffected: the fingerprint tracks the
-	// schema *file*, and re-applying it is exactly what those tests do not
-	// need.
-	fingerprint := fmt.Sprintf("%x", sha256.Sum256(data))
+	// schema *files*, and re-applying them is exactly what those tests do not
+	// need. The fingerprint covers every file in the list, so adding one to
+	// postgresSchemaFiles re-applies the whole set once on each database.
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256(combined))
 	var applied string
 	err = conn.QueryRowContext(ctx, `SELECT fingerprint FROM cleat_test_schema WHERE id = 1`).Scan(&applied)
 	if err == nil && applied == fingerprint {
@@ -175,17 +199,19 @@ func applyPostgresSchemaFile(t *testing.T, db *sql.DB) {
 
 	// No-args Exec keeps lib/pq on the simple query protocol, which is what
 	// allows the whole multi-statement file to go in one round trip.
-	if _, err := conn.ExecContext(ctx, string(data)); err != nil {
-		t.Fatalf("apply %s: %v", path, err)
+	for i, data := range files {
+		if _, err := conn.ExecContext(ctx, string(data)); err != nil {
+			t.Fatalf("apply %s: %v", paths[i], err)
+		}
 	}
 
 	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS cleat_test_schema (
 		id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL)`); err != nil {
-		t.Fatalf("apply %s: create fingerprint table: %v", path, err)
+		t.Fatalf("apply postgres schema: create fingerprint table: %v", err)
 	}
 	if _, err := conn.ExecContext(ctx, `INSERT INTO cleat_test_schema (id, fingerprint) VALUES (1, $1)
 		ON CONFLICT (id) DO UPDATE SET fingerprint = EXCLUDED.fingerprint`, fingerprint); err != nil {
-		t.Fatalf("apply %s: record fingerprint: %v", path, err)
+		t.Fatalf("apply postgres schema: record fingerprint: %v", err)
 	}
 }
 
