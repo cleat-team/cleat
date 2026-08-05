@@ -72,7 +72,17 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # runs, but the discrepancy is unexplained -- so if this fails at 361 that is the
 # real number and not a regression. Do not widen it to silence a failure; a
 # ceiling that cannot be reached is a guard that cannot fail.
-test-go/engine	359	# observed on the runner: 3094 pass, 357 skip at budget 353, plus 355's two
+#
+# 359 -> 361: TestIdempotencyKeyIsScopedToTenant runs against
+# registeredBackends, so its mysql and mssql subtests skip in the Postgres-only
+# engine job (IMPROVEMENT-PLAN 3.10). Note this is NOT the +2 the paragraph
+# above warns about -- that one is an unexplained local/runner discrepancy, and
+# this is two named subtests. Read off two runs of the same guard rather than
+# derived: develop at 26efc98 reports `skipped=359 (passed=3114 failed=0)`, this
+# branch reports `skipped=361 (passed=3116 failed=0)`. Both counts moved by
+# exactly the arm count of one new three-dialect test, and nothing stopped
+# running. The postgres arm is the one that matters and it is in the +2 passing.
+test-go/engine	361	# observed on the runner: 3116 pass, 361 skip; develop measures 359 at 3114 pass
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -140,7 +150,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	359	# same as test-go/engine, and for the same reason; see the note there
+cluster	361	# same as test-go/engine, and for the same reason; see the note there
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is
