@@ -78,7 +78,7 @@ jobs:
       # requiring a tool for an output nothing consumes is what made this test
       # skip in the first place. Leaving it out keeps that honest.
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install componentize-py and the Python SDK
