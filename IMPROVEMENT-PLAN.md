@@ -868,6 +868,43 @@ assertion — no pending row exists — and the sibling test pins `Ship=2` for t
 rather than asserting it: the ambiguity is detected, reported to the guest, reported back by
 the guest — and then overwritten by a second completion, so the workflow reads as `done`.
 
+#### 1.4 phase E — automatic resolution — ✅ **DONE** (WS-2, 2026-08-05)
+
+Detection on its own converts a rare silent duplicate into a rare permanent failure, which for
+some workloads is worse: a workflow that learns its outcome is unknown, and has no way to find
+out, is stuck. `AmbiguityResolver` is the way out, and it costs nothing when unused.
+
+When replay finds a pending intent row the engine asks the resolver about **the idempotency key
+the original attempt actually sent** — derived through `DurableCallIdempotencyKey`, the same
+call `callService` makes, so the resolver is looking up something that really happened. If the
+resolver answers, the outcome is written over the pending row and replay carries on as though
+the call had returned normally. Which it did: the crash lost the answer, not the effect.
+
+**The resolution is persisted, and that is the load-bearing part.** A resolution that is used
+but not recorded means the next replay finds the row still pending and asks again — and a
+service that answers differently the second time, or is unreachable, makes the same step
+resolve one way on one replay and another way on the next. `ResolveCallIntent` exists
+separately from `CompleteCallIntent` for exactly one reason: it runs during replay, where the
+session is reading history rather than building it and holds no checksum chain, so the previous
+checksum is read from the row before it, inside the same transaction. That is safe here in a
+way it was not for the deleted `flushCallIntent` — everything before a pending row is persisted
+by definition, because the crash that created the row happened after them.
+
+**Every way of declining leaves the ambiguity exactly as it was** — reported, not resolved, and
+above all not repeated: no resolver configured, a resolver with no record, a resolver that
+errored, and a resolution that could not be recorded. The last is the interesting one and has
+its own test: using it would be the determinism bug described above.
+
+Falsified two ways: never consulting the resolver, and using its answer without persisting it.
+Both fail on all three dialects.
+
+**Still open in phase E:** the typed error. The design asks for a structured value carrying
+step, service, operation and key; today the detail is a formatted string inside the workflow
+result. That is §3.22 step 3, and it needs an ABI change (`wasm/` and the SDKs are WS-3's).
+Note the design's claim that "`ErrAmbiguous` already exists as error code 5" does not hold in
+this tree: `engine/callerrors.go` deliberately declares only the three codes the engine can
+select, and says why.
+
 **Still open in the phase:** E (the resolution hook and a typed `ErrAmbiguous` carrying step,
 service, operation and key — today ambiguity is reported inside the workflow result *string*)
 and F (admin force-resolve for a pending step, whose prerequisite §3.20 now exists). §3.22
@@ -5512,11 +5549,15 @@ component work they are in the middle of.
 inside a success result is one the worker cannot act on. Phase E's typed `ErrAmbiguous` is the
 real answer, and this is the concrete argument for prioritising it.
 
-**What is left is step 3 alone**, and it is phase E. The ambiguity now reaches an operator —
-it is in the result column, in valid JSON, and an unstorable result is logged rather than
-dropped — but the workflow is still recorded `done`, because an error that crosses the ABI as
-a string inside a success result is one the worker cannot act on. The crash test records that
-status rather than asserting it: asserting today's answer would pin it in place.
+**What is left is step 3 alone**, and it is phase E's remaining half. The ambiguity now
+reaches an operator — it is in the result column, in valid JSON, and an unstorable result is
+logged rather than dropped — but the workflow is still recorded `done`, because an error that
+crosses the ABI as a string inside a success result is one the worker cannot act on. The crash
+test records that status rather than asserting it: asserting today's answer would pin it in
+place.
+
+Phase E's *resolver* half has since landed, which shrinks how often this matters: an ambiguity
+a resolver can settle never reaches the workflow as an error at all.
 
 ## Phase 3 — Put falsification in the loop
 

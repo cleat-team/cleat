@@ -417,3 +417,207 @@ func TestDurableCall_IntentSurvivesNoPerStepFlush(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Resolution (IMPROVEMENT-PLAN 1.4 phase E)
+// ---------------------------------------------------------------------------
+
+// fakeResolver records what it was asked and answers as configured.
+type fakeResolver struct {
+	response string
+	resolved bool
+	err      error
+
+	calls int
+	keys  []string
+	ops   []string
+}
+
+func (r *fakeResolver) ResolveCall(_ context.Context, service, operation, idempotencyKey string) (string, bool, error) {
+	r.calls++
+	r.keys = append(r.keys, idempotencyKey)
+	r.ops = append(r.ops, service+"."+operation)
+	return r.response, r.resolved, r.err
+}
+
+// replaySessionFor builds a replay session over the workflow's stored history.
+func replaySessionFor(t *testing.T, ctx context.Context, store WorkflowStore, wfID string, opts ...EngineOption) (*execSession, *intentTestCaller) {
+	t.Helper()
+	history, err := store.LoadEventHistory(ctx, wfID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory: %v", err)
+	}
+	caller := &intentTestCaller{store: store, workflowID: wfID, responseToGive: `{"charged":true}`}
+	opts = append([]EngineOption{WithWorkflowStore(store), WithWorkflowID(wfID)}, opts...)
+	return &execSession{
+		engine:     NewEngine(nil, caller, opts...),
+		workflowID: wfID,
+		isReplay:   true,
+		history:    history,
+	}, caller
+}
+
+// writePendingCall leaves exactly what a crash mid-call leaves behind.
+func writePendingCall(t *testing.T, ctx context.Context, store WorkflowStore, wfID string) {
+	t.Helper()
+	if err := intentStoreOf(t, store).WriteCallIntent(ctx, wfID, EventRecord{
+		Step: 0, EventType: EventTypeCall,
+		Service: intentService, Op: intentOperation, Request: `{"amount":100}`,
+	}); err != nil {
+		t.Fatalf("WriteCallIntent: %v", err)
+	}
+}
+
+// TestResolveAmbiguity_CompletesTheStepAndPersistsIt is phase E's point:
+// detection alone converts a rare silent duplicate into a rare permanent
+// failure, which for some workloads is worse. A resolver that can look the
+// operation up turns it back into a non-event.
+func TestResolveAmbiguity_CompletesTheStepAndPersistsIt(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
+		ctx := context.Background()
+		wfID := newIntentWorkflow(t, ctx, store, "resolve-ok")
+		writePendingCall(t, ctx, store, wfID)
+
+		resolver := &fakeResolver{response: `{"charged":true,"via":"resolver"}`, resolved: true}
+		s, caller := replaySessionFor(t, ctx, store, wfID, WithAmbiguityResolver(resolver))
+
+		result := s.DurableCall(ctx, nil, intentService, intentOperation, `{"amount":100}`, 0, 0)
+		if errCodeOf(result) != 0 {
+			t.Fatalf("a resolved call still reported failure (code %d)", callErrorCodeOf(result))
+		}
+		if caller.calls != 0 {
+			t.Errorf("the service was called %d times; resolving an ambiguity must not repeat the "+
+				"side effect, which is the entire reason for asking", caller.calls)
+		}
+		if resolver.calls != 1 {
+			t.Fatalf("the resolver was asked %d times, want 1", resolver.calls)
+		}
+		if got, want := resolver.ops[0], intentService+"."+intentOperation; got != want {
+			t.Errorf("the resolver was asked about %q, want %q", got, want)
+		}
+		// The key must be the one the original attempt sent, or the resolver is
+		// looking up something that never happened.
+		if want := DurableCallIdempotencyKey(wfID, "", 0); resolver.keys[0] != want {
+			t.Errorf("resolver was given key %q, want %q -- the same derivation callService uses",
+				resolver.keys[0], want)
+		}
+
+		// Persisted, not merely returned: otherwise the next replay asks again,
+		// and a service that answers differently makes the same step resolve
+		// two ways.
+		after := stepRecord(t, ctx, store, wfID, 0)
+		if after.Pending {
+			t.Error("the row is still pending after resolution, so every later replay would ask again")
+		}
+		if !strings.Contains(after.Response, "resolver") {
+			t.Errorf("stored response = %q, want the resolved outcome", after.Response)
+		}
+		if err := store.VerifyWorkflowEvents(ctx, wfID); err != nil {
+			t.Errorf("VerifyWorkflowEvents after resolution: %v -- the chain must survive a row "+
+				"completed from a checksum read back rather than held in memory", err)
+		}
+
+		// And a second replay reads a normal completed event without asking.
+		s2, _ := replaySessionFor(t, ctx, store, wfID, WithAmbiguityResolver(resolver))
+		if r2 := s2.DurableCall(ctx, nil, intentService, intentOperation, `{"amount":100}`, 0, 0); errCodeOf(r2) != 0 {
+			t.Errorf("the second replay reported failure (code %d)", callErrorCodeOf(r2))
+		}
+		if resolver.calls != 1 {
+			t.Errorf("the resolver was asked %d times across two replays, want 1: a resolution that "+
+				"is not durable is a determinism bug waiting for a service to change its mind",
+				resolver.calls)
+		}
+	})
+}
+
+// TestResolveAmbiguity_FallsBackWhenItCannotSay covers the three ways a
+// resolver declines. All three must leave the ambiguity exactly as it was --
+// reported, not resolved, and above all not repeated.
+func TestResolveAmbiguity_FallsBackWhenItCannotSay(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		resolver *fakeResolver
+	}{
+		{"no resolver configured", nil},
+		{"the resolver has no record", &fakeResolver{resolved: false}},
+		{"the resolver itself failed", &fakeResolver{err: errors.New("lookup service down")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forEachBackend(t, func(t *testing.T, store WorkflowStore) {
+				ctx := context.Background()
+				wfID := newIntentWorkflow(t, ctx, store, "resolve-no")
+				writePendingCall(t, ctx, store, wfID)
+
+				var opts []EngineOption
+				if tc.resolver != nil {
+					opts = append(opts, WithAmbiguityResolver(tc.resolver))
+				}
+				s, caller := replaySessionFor(t, ctx, store, wfID, opts...)
+
+				result := s.DurableCall(ctx, nil, intentService, intentOperation, `{"amount":100}`, 0, 0)
+				if errCodeOf(result) == 0 {
+					t.Fatal("an unresolved ambiguity reported success, so the workflow would continue " +
+						"on a result nobody has")
+				}
+				if got := callErrorCodeOf(result); got != callErrorUnknown {
+					t.Errorf("callErrorCode = %d, want callErrorUnknown (%d)", got, callErrorUnknown)
+				}
+				if caller.calls != 0 {
+					t.Errorf("the service was called %d times; a resolver that cannot say is not a "+
+						"licence to repeat the call", caller.calls)
+				}
+				if rec := stepRecord(t, ctx, store, wfID, 0); !rec.Pending {
+					t.Error("the row stopped being pending even though nothing resolved it")
+				}
+			})
+		})
+	}
+}
+
+// TestResolveAmbiguity_UnrecordableResolutionIsNotUsed is the case that would
+// otherwise be a determinism bug: the resolver answered, the answer could not
+// be written down, and using it anyway would mean this replay proceeds on an
+// outcome the next replay will ask about again.
+func TestResolveAmbiguity_UnrecordableResolutionIsNotUsed(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
+		ctx := context.Background()
+		wfID := newIntentWorkflow(t, ctx, store, "resolve-unrec")
+		writePendingCall(t, ctx, store, wfID)
+
+		// Complete the row first, then hand the session a stale history that
+		// still shows it pending. The resolving UPDATE now matches no pending
+		// row, which is what a concurrent resolution looks like.
+		done := EventRecord{
+			Step: 0, EventType: EventTypeCall, Service: intentService, Op: intentOperation,
+			Request: `{"amount":100}`, Response: `{"charged":true}`, TimestampMs: time.Now().UnixMilli(),
+		}
+		payload, _ := eventRecordToPayload(done)
+		if err := intentStoreOf(t, store).CompleteCallIntent(ctx, wfID, done, payload,
+			computeEventChecksum(done, "")); err != nil {
+			t.Fatalf("CompleteCallIntent: %v", err)
+		}
+
+		resolver := &fakeResolver{response: `{"charged":true,"via":"resolver"}`, resolved: true}
+		caller := &intentTestCaller{store: store, workflowID: wfID}
+		s := &execSession{
+			engine: NewEngine(nil, caller, WithWorkflowStore(store), WithWorkflowID(wfID),
+				WithAmbiguityResolver(resolver)),
+			workflowID: wfID,
+			isReplay:   true,
+			history: []EventRecord{{
+				Step: 0, EventType: EventTypeCall, Service: intentService, Op: intentOperation,
+				Request: `{"amount":100}`, Pending: true,
+			}},
+		}
+
+		result := s.DurableCall(ctx, nil, intentService, intentOperation, `{"amount":100}`, 0, 0)
+		if errCodeOf(result) == 0 {
+			t.Error("a resolution that could not be recorded was used anyway; the next replay would " +
+				"find the step unresolved and ask again, and a resolver that changed its answer " +
+				"would make one run disagree with the next")
+		}
+		if !strings.Contains(stepRecord(t, ctx, store, wfID, 0).Response, "charged") {
+			t.Error("the already-completed outcome was overwritten")
+		}
+	})
+}

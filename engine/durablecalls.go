@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tetratelabs/wazero/api"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/cleat-team/cleat/internal/telemetry"
 )
@@ -184,6 +185,20 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 			if s.engine.Metrics != nil {
 				s.engine.Metrics.RecordAmbiguousCall(ctx)
 			}
+
+			// Ask, before giving up. A resolver that can look the operation up
+			// by its idempotency key turns most ambiguities into non-events:
+			// the outcome is recorded and replay carries on as though the call
+			// had returned normally, which it did -- the crash lost the answer,
+			// not the effect. See IMPROVEMENT-PLAN 1.4 phase E.
+			if resp, resolved := s.resolveAmbiguity(ctx, rec); resolved {
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "resolved"))
+				}
+				written, _ := s.writeResult(ctx, m, responsePtr, resp, responseMaxLen)
+				return packDurableCallResult(int(written), 0, 0)
+			}
+
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)

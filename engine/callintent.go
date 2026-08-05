@@ -184,3 +184,94 @@ func (s *execSession) recordEventPersisted(rec EventRecord, checksum string) {
 	atomic.AddInt64(&freshStepCount, 1)
 	s.lastChecksum = checksum
 }
+
+// ---------------------------------------------------------------------------
+// Resolution (IMPROVEMENT-PLAN 1.4 phase E)
+// ---------------------------------------------------------------------------
+
+// AmbiguityResolver answers the question a crash leaves open: did the call
+// actually happen, and what did it return?
+//
+// Detection on its own converts a rare silent duplicate into a rare permanent
+// failure, which for some workloads is worse. A workflow that learns its
+// outcome is unknown, and has no way to find out, is stuck. This is the way
+// out that costs nothing when it is not needed: most services that accept an
+// idempotency key can also be asked what happened to one.
+type AmbiguityResolver interface {
+	// ResolveCall reports the outcome of the operation identified by
+	// idempotencyKey, which is the key the original attempt sent.
+	//
+	// resolved=false means "cannot say" and is not an error: the service may
+	// have no record, or no way to look one up. The engine reports the
+	// ambiguity to the workflow, exactly as it does without a resolver.
+	//
+	// An error means the lookup itself failed. It is treated the same as
+	// "cannot say" -- an unreachable resolver must not turn a recoverable
+	// ambiguity into a different failure -- but it is logged, because a
+	// resolver that always errors is indistinguishable from one that never
+	// resolves anything.
+	ResolveCall(ctx context.Context, service, operation, idempotencyKey string) (response string, resolved bool, err error)
+}
+
+// WithAmbiguityResolver sets the resolver consulted when replay finds a call
+// that was dispatched but whose outcome was never recorded.
+func WithAmbiguityResolver(r AmbiguityResolver) EngineOption {
+	return func(e *Engine) { e.ambiguityResolver = r }
+}
+
+// resolveAmbiguity attempts to turn a pending intent row into a completed one.
+//
+// It returns the resolved response and true only when the resolver answered
+// AND the outcome was durably recorded. A resolution that could not be
+// persisted is deliberately not used: the workflow would proceed on it now and
+// the next replay would find the row still pending and ask again, which is the
+// determinism divergence this whole stream exists to prevent.
+func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (string, bool) {
+	r := s.engine.ambiguityResolver
+	if r == nil {
+		return "", false
+	}
+
+	key := DurableCallIdempotencyKey(s.workflowID, s.execRunID, rec.Step)
+	resp, resolved, err := r.ResolveCall(ctx, rec.Service, rec.Op, key)
+	if err != nil {
+		// Not fatal: an unreachable resolver leaves the ambiguity exactly as
+		// it was, which is the state this is trying to improve on and not a
+		// worse one. Logged because a resolver that always fails looks
+		// identical to one that never has an answer.
+		s.engine.log().WarnContext(ctx, "ambiguity resolver failed",
+			"workflow_id", s.workflowID, "step", rec.Step,
+			"service", rec.Service, "operation", rec.Op, "error", err)
+		return "", false
+	}
+	if !resolved {
+		return "", false
+	}
+
+	store, ok := s.engine.workflowStore.(callIntentResolver)
+	if !ok {
+		s.engine.log().WarnContext(ctx, "ambiguity resolved but the store cannot record it; reporting ambiguity instead",
+			"workflow_id", s.workflowID, "step", rec.Step, "store", fmt.Sprintf("%T", s.engine.workflowStore))
+		return "", false
+	}
+
+	completed := rec
+	completed.Response = resp
+	completed.Err = ""
+	completed.Pending = false
+	if completed.TimestampMs == 0 {
+		completed.TimestampMs = time.Now().UnixMilli()
+	}
+	payload, _ := eventRecordToPayload(completed)
+
+	if err := store.ResolveCallIntent(ctx, s.workflowID, completed, payload); err != nil {
+		s.engine.log().ErrorContext(ctx, "ambiguity was resolved but could not be recorded; reporting ambiguity instead",
+			"workflow_id", s.workflowID, "step", rec.Step, "error", err)
+		return "", false
+	}
+
+	s.engine.log().InfoContext(ctx, "ambiguous call resolved",
+		"workflow_id", s.workflowID, "step", rec.Step,
+		"service", rec.Service, "operation", rec.Op)
+	return resp, true
+}
