@@ -207,18 +207,22 @@ plugin-harness/multi-db	1
 # 1 = TestPluginCalls_Wasm_Python only, which needs componentize-py that this
 # job does not install. Go, Rust, AssemblyScript and Java must all run.
 #
-# The number is unchanged but its justification is not. It used to read "Python
-# runs on wazero by decision (2.72) so building it here would prove nothing
-# about the routing". Python now runs on wasmtime like everything else, so this
-# skip is no longer free: it is the ordinary "nobody asked" kind, and installing
-# componentize-py here would turn it into coverage of the routing that
-# e2e-cross-language currently carries alone.
+# 1 -> 0: the entry above said "installing componentize-py here would turn it
+# into coverage of the routing that e2e-cross-language currently carries
+# alone", and that is what this does. The job now installs componentize-py and
+# the Python SDK, so TestPluginCalls_Wasm_Python runs. All five languages run
+# in this job and none of them may skip.
+#
+# Verified on linux before the budget was dropped, not after: 17 plugin
+# results, execute and replay identical. It is the only test anywhere that
+# drives the whole plugin surface -- streaming included -- from a Component
+# Model guest.
 #
 # The budget is here because the step had no -v and no report, so a skipped
 # language was indistinguishable from a passing one -- which is how Go sat
 # unconditionally skipped and Rust skipped for want of a toolchain, in a job
 # named WASM Integration. Measured on the runner after both were fixed.
-plugin-harness/wasm	1
+plugin-harness/wasm	0
 # 0: the Cross-Language E2E workflow installs Rust and the wasm32-wasip1 target,
 # so every test in tests/cross-language has what it needs. Measured on darwin
 # with cargo present: 7 pass, 0 skip. Without cargo all seven skip, which is

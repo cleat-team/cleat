@@ -574,12 +574,16 @@ func TestPluginCalls_Wasm_Python(t *testing.T) {
 	entryPoint := "run"
 	result, history, err := wenv.Execute(t, wasmBytes, entryPoint, `{}`)
 	if err != nil {
-		if strings.Contains(err.Error(), "not instantiated") || strings.Contains(err.Error(), "unknown import") || strings.Contains(err.Error(), "indirect_function_table") {
-			t.Skipf("WASI 0.2.0 resource routing not yet supported: %v", err)
-		}
-		if strings.Contains(err.Error(), "wasmtime panic") {
-			t.Skipf("wasmtime-go compat issue: %v", err)
-		}
+		// No escape hatches. This used to skip on "not instantiated",
+		// "unknown import", "indirect_function_table" and "wasmtime panic" --
+		// which are, precisely and exclusively, the errors the decomposition
+		// path emits when it cannot assemble a component.
+		//
+		// That was defensible while Python ran there and failed. It is not now:
+		// Python executes on wasmtime's native Component Model runtime
+		// (IMPROVEMENT-PLAN 2.72), and if it ever regresses to decomposition
+		// those four strings are exactly what would come back. The skips would
+		// have turned the regression they were named after into a green run.
 		t.Fatalf("workflow execution failed: %v", err)
 	}
 

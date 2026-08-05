@@ -60,6 +60,32 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      # componentize-py, so TestPluginCalls_Wasm_Python runs instead of
+      # skipping. It was the last skip in this job, and it stopped being a
+      # justified one when Python moved onto wasmtime (IMPROVEMENT-PLAN 2.72):
+      # while Python ran on a fallback runtime that could not instantiate it,
+      # building a component here would have proved nothing about the routing.
+      # Now it proves the routing.
+      #
+      # It is worth the ~13s: the Python workflow exercises *every* plugin host
+      # function, streaming included, and asserts execute and replay produce
+      # identical results. No other test covers the plugin surface from a
+      # Component Model guest. Verified on linux before wiring it up -- 17
+      # plugin results, execute and replay identical.
+      #
+      # wasm-tools is deliberately NOT installed. `cleat build --target python`
+      # no longer needs it: the component is what the engine runs, and
+      # requiring a tool for an output nothing consumes is what made this test
+      # skip in the first place. Leaving it out keeps that honest.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install componentize-py and the Python SDK
+        run: |
+          pip install --upgrade pip
+          pip install componentize-py
+          pip install -e python-sdk
       # -json into a report, and a skip budget over it. Without that, this step
       # ran `go test` with no -v, so a skipped language and a passing one looked
       # identical in the log -- which is how TestPluginCalls_Wasm_Go sat
