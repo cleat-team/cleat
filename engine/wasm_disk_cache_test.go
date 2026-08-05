@@ -278,10 +278,34 @@ func TestWasmDiskCache_Eviction(t *testing.T) {
 		{"wf", 5, []byte("fifth inserted - should survive")},
 	}
 
-	// Store with small sleeps to guarantee distinct mtimes.
-	for _, e := range stored {
+	// Distinct mtimes, set explicitly rather than waited for.
+	//
+	// This loop used to be `StoreDef(...); time.Sleep(time.Millisecond)` with
+	// the comment "small sleeps to guarantee distinct mtimes". It does not
+	// guarantee that: filesystem mtime granularity is coarser than a
+	// millisecond on some runners, and evictLRU sorts by mtime with no
+	// tiebreak using sort.Slice, which is not stable. Two entries sharing an
+	// mtime therefore evict in arbitrary order.
+	//
+	// It failed on a SQL Server CI run as exactly that -- "wf v2 should have
+	// been evicted" together with "wf v3 should have survived" -- which is the
+	// pair swapping places. PARALLEL-WORKSTREAMS.md names this shape directly:
+	// a 2 ms sleep in the zombie-writer scenario survived four CI runs and lost
+	// the fifth, and "if an assertion depends on wall-clock time, remove the
+	// timing rather than widening it". Widening the sleep would have hidden it
+	// again for a while.
+	//
+	// os.Chtimes removes the dependency instead: the ordering under test is now
+	// stated, not raced for. The timestamps are in the past so that each
+	// StoreDef's own eviction pass -- it evicts inline -- sees the file it just
+	// wrote as the newest.
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i, e := range stored {
 		c.StoreDef(e.name, e.version, e.data)
-		time.Sleep(time.Millisecond)
+		ts := base.Add(time.Duration(i) * time.Second)
+		if err := os.Chtimes(c.cachePath(wasmCacheKey(e.data)), ts, ts); err != nil {
+			t.Fatalf("Chtimes for %s v%d: %v", e.name, e.version, err)
+		}
 	}
 
 	// First 2 entries should have been evicted.
