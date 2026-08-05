@@ -141,36 +141,22 @@ func postgresDialect() idempotencyDialect {
 func mysqlDialect() idempotencyDialect {
 	return idempotencyDialect{
 		dialect:         engine.DialectMySQL,
-		scratchDB:       newMySQLScratchDB,
+		scratchDB:       func(t *testing.T) *sql.DB { return newMySQLScratchDB(t, idempotencyScratchDB) },
 		rebind:          func(q string) string { return q },
 		futureTimestamp: "DATE_ADD(NOW(6), INTERVAL 1 DAY)",
 		tenantIDText:    "tenant_id",
 
-		// The Runner cannot apply migrations/mysql/001_schema.sql at all, so
-		// there is no "before" state to migrate from. splitSQL splits the file
-		// on every ';' with no regard for what it is inside, and line 7 of that
-		// file is the comment
-		//
-		//	-- CREATE INDEX has no IF NOT EXISTS in MySQL 8.0; re-runs error harmlessly.
-		//
-		// which becomes a statement reading "re-runs error harmlessly." and
-		// fails with Error 1064. Every cleat-worker runs this Runner at boot
-		// and exits on failure, so this is not only a test-harness problem:
-		// see IMPROVEMENT-PLAN 3.13, which is where this skip is removed.
-		//
-		// The MySQL half of 010 is still exercised behaviourally by
-		// engine.TestIdempotencyKeyIsScopedToTenant, via the equivalent
-		// statements in engine/testutil's MySQL schema. What is untested here
-		// is the shipped .sql file, which is the gap 3.13 closes.
-		skipReason: "blocked on IMPROVEMENT-PLAN 3.13: the Runner cannot parse " +
-			"migrations/mysql/001_schema.sql (splitSQL cuts a comment on its embedded ';')",
+		// This arm was skipped until IMPROVEMENT-PLAN 3.13: the Runner could
+		// not apply migrations/mysql/001_schema.sql at all, so there was no
+		// "before" state to migrate from. Removing that skip is 3.13's
+		// acceptance test, and this is where it was removed.
 	}
 }
 
 func mssqlDialect() idempotencyDialect {
 	return idempotencyDialect{
 		dialect:         engine.DialectMSSQL,
-		scratchDB:       newMSSQLScratchDB,
+		scratchDB:       func(t *testing.T) *sql.DB { return newMSSQLScratchDB(t, idempotencyScratchDB) },
 		rebind:          rebindAtP,
 		futureTimestamp: "DATEADD(DAY, 1, SYSUTCDATETIME())",
 		tenantIDText:    "LOWER(CONVERT(NVARCHAR(36), tenant_id))",
@@ -228,7 +214,11 @@ func stageMigrations(t *testing.T, dialect engine.Dialect, names ...string) stri
 	return root
 }
 
-const scratchDBName = "cleat_migration_idem_tenant_test"
+// Each test needs its own scratch database: these run in one package, and a
+// shared name would make them order-dependent -- the class of defect this
+// file's PostgreSQL sibling (newScratchDB) already guards against by taking a
+// name per test.
+const idempotencyScratchDB = "cleat_migration_idem_tenant_test"
 
 // newMySQLScratchDB creates an empty MySQL database and returns a handle to it.
 //
@@ -236,7 +226,7 @@ const scratchDBName = "cleat_migration_idem_tenant_test"
 // matching engine's MySQLBackend.Enabled: there is no default MySQL in CI's
 // support matrix, so an unset variable means "not configured here" rather
 // than "broken environment".
-func newMySQLScratchDB(t *testing.T) *sql.DB {
+func newMySQLScratchDB(t *testing.T, name string) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("CLEAT_TEST_MYSQL")
 	if dsn == "" {
@@ -251,10 +241,10 @@ func newMySQLScratchDB(t *testing.T) *sql.DB {
 	if err := admin.Ping(); err != nil {
 		t.Fatalf("configured MySQL is unreachable: %v", err)
 	}
-	if _, err := admin.Exec(`DROP DATABASE IF EXISTS ` + scratchDBName); err != nil {
+	if _, err := admin.Exec(`DROP DATABASE IF EXISTS ` + name); err != nil {
 		t.Fatalf("drop MySQL scratch database: %v", err)
 	}
-	if _, err := admin.Exec(`CREATE DATABASE ` + scratchDBName); err != nil {
+	if _, err := admin.Exec(`CREATE DATABASE ` + name); err != nil {
 		t.Fatalf("create MySQL scratch database: %v", err)
 	}
 	t.Cleanup(func() {
@@ -263,12 +253,12 @@ func newMySQLScratchDB(t *testing.T) *sql.DB {
 			return
 		}
 		defer cleanup.Close()
-		if _, err := cleanup.Exec(`DROP DATABASE IF EXISTS ` + scratchDBName); err != nil {
+		if _, err := cleanup.Exec(`DROP DATABASE IF EXISTS ` + name); err != nil {
 			t.Logf("drop MySQL scratch database: %v", err)
 		}
 	})
 
-	scratchDSN, err := swapMySQLDB(dsn, scratchDBName)
+	scratchDSN, err := swapMySQLDB(dsn, name)
 	if err != nil {
 		t.Fatalf("derive MySQL scratch DSN: %v", err)
 	}
@@ -311,7 +301,7 @@ func lastIndexByte(s string, c byte) int {
 // newMSSQLScratchDB creates an empty SQL Server database and returns a handle
 // to it. Skips when CLEAT_TEST_MSSQL is unset, for the reason in
 // newMySQLScratchDB.
-func newMSSQLScratchDB(t *testing.T) *sql.DB {
+func newMSSQLScratchDB(t *testing.T, name string) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("CLEAT_TEST_MSSQL")
 	if dsn == "" {
@@ -330,8 +320,8 @@ func newMSSQLScratchDB(t *testing.T) *sql.DB {
 	if err := admin.Ping(); err != nil {
 		t.Fatalf("configured SQL Server is unreachable: %v", err)
 	}
-	dropMSSQLScratchDB(t, admin)
-	if _, err := admin.Exec(`CREATE DATABASE ` + scratchDBName); err != nil {
+	dropMSSQLScratchDB(t, admin, name)
+	if _, err := admin.Exec(`CREATE DATABASE ` + name); err != nil {
 		t.Fatalf("create SQL Server scratch database: %v", err)
 	}
 	t.Cleanup(func() {
@@ -340,10 +330,10 @@ func newMSSQLScratchDB(t *testing.T) *sql.DB {
 			return
 		}
 		defer cleanup.Close()
-		dropMSSQLScratchDB(t, cleanup)
+		dropMSSQLScratchDB(t, cleanup, name)
 	})
 
-	scratchDSN, err := swapMSSQLDB(dsn, scratchDBName)
+	scratchDSN, err := swapMSSQLDB(dsn, name)
 	if err != nil {
 		t.Fatalf("derive SQL Server scratch DSN: %v", err)
 	}
@@ -362,11 +352,11 @@ func newMSSQLScratchDB(t *testing.T) *sql.DB {
 // previous run left connected: SQL Server refuses to drop a database that has
 // sessions on it, and SINGLE_USER WITH ROLLBACK IMMEDIATE is how you take them
 // off it.
-func dropMSSQLScratchDB(t *testing.T, admin *sql.DB) {
+func dropMSSQLScratchDB(t *testing.T, admin *sql.DB, name string) {
 	t.Helper()
-	_, _ = admin.Exec(`IF DB_ID('` + scratchDBName + `') IS NOT NULL
-		ALTER DATABASE ` + scratchDBName + ` SET SINGLE_USER WITH ROLLBACK IMMEDIATE`)
-	if _, err := admin.Exec(`DROP DATABASE IF EXISTS ` + scratchDBName); err != nil {
+	_, _ = admin.Exec(`IF DB_ID('` + name + `') IS NOT NULL
+		ALTER DATABASE ` + name + ` SET SINGLE_USER WITH ROLLBACK IMMEDIATE`)
+	if _, err := admin.Exec(`DROP DATABASE IF EXISTS ` + name); err != nil {
 		t.Logf("drop SQL Server scratch database: %v", err)
 	}
 }
