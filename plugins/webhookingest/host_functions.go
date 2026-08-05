@@ -84,7 +84,7 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 	if input.EventType != "" {
 		query += fmt.Sprintf(" AND event_type = $%d", argIdx)
 		args = append(args, input.EventType)
-		argIdx++
+		argIdx++ //nolint:ineffassign // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
 	}
 
 	query += " ORDER BY received_at DESC LIMIT 1"

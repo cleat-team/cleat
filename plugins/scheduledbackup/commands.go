@@ -208,7 +208,7 @@ func (p *Plugin) cliBackupList(cmds []string) error {
 		}
 		query += fmt.Sprintf(" AND h.config_id = $%d", argIdx)
 		qargs = append(qargs, cfgID)
-		argIdx++
+		argIdx++ //nolint:ineffassign // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
 	}
 
 	query += " ORDER BY h.started_at DESC"

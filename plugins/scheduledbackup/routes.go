@@ -417,7 +417,7 @@ func (p *Plugin) handleListHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		query += fmt.Sprintf(" AND config_id = $%d", argIdx)
 		args = append(args, configID)
-		argIdx++
+		argIdx++ //nolint:ineffassign // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
 	}
 
 	query += " ORDER BY started_at DESC"
