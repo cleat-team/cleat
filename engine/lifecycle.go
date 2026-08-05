@@ -163,13 +163,13 @@ func (s *execSession) recordEvent(rec EventRecord) {
 		if af != nil {
 			done, useBatch := af.Flush(context.Background(), s.workflowID, rec, checksum)
 			if useBatch {
-				select {
-				case err := <-done:
-					if err != nil {
-						s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
-					} else {
-						s.lastChecksum = checksum
-					}
+				// A blocking receive. It was a select with one case and no
+				// default, which is the same thing spelled in a way that
+				// suggests a second case was once intended or is coming.
+				if err := <-done; err != nil {
+					s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
+				} else {
+					s.lastChecksum = checksum
 				}
 				flushed = true
 			}

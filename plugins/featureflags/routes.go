@@ -119,7 +119,7 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Normalize rules to valid JSON array.
 	rulesJSON := req.Rules
-	if rulesJSON == nil || len(rulesJSON) == 0 {
+	if len(rulesJSON) == 0 {
 		rulesJSON = json.RawMessage("[]")
 	}
 

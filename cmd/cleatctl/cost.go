@@ -130,7 +130,7 @@ func (c *costCommand) Format() string {
 	b.WriteString(fmt.Sprintf("  Storage:               $%.0f/month\n", est.StorageMonthlyCost))
 	b.WriteString(fmt.Sprintf("  Workers (%s):          $%.0f/month (x%d instances)\n",
 		est.WorkerInstanceType, est.WorkerMonthlyCost, est.WorkerCount))
-	b.WriteString(fmt.Sprintf("  ----------------------------------------\n"))
+	b.WriteString("  ----------------------------------------\n")
 	b.WriteString(fmt.Sprintf("  Total:                 $%.0f/month\n", est.TotalMonthlyCost))
 
 	return b.String()
