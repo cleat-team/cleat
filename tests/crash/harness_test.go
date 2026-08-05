@@ -459,19 +459,25 @@ type worker struct {
 
 // startWorker launches the worker and waits until it claims work or the start
 // budget expires.
-func startWorker(t *testing.T, bin, taskQueue, svcURL string) *worker {
+// startWorker starts a worker against the given task queue. extraFlags are
+// appended verbatim, so a scenario can turn on a worker feature -- the point of
+// a harness that runs the real binary is that a flag the shipped artifact does
+// not honour cannot pass here.
+func startWorker(t *testing.T, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
 	t.Helper()
 
 	w := &worker{log: &strings.Builder{}}
-	//nolint:gosec // bin is built by this test from this repo.
-	cmd := exec.Command(bin,
+	args := []string{
 		"--db", appDSN(t),
 		"--migrate-db", ownerDSN(),
 		"--task-queue", taskQueue,
 		"--bench-svc-url", svcURL,
 		"--poll", "200ms",
 		"--concurrency", "1",
-	)
+	}
+	args = append(args, extraFlags...)
+	//nolint:gosec // bin is built by this test from this repo.
+	cmd := exec.Command(bin, args...)
 	// The worker resolves migrations/postgres relative to its working
 	// directory, so it must run from the repo root. Getting this wrong is not
 	// loud: the worker logs one ERROR line, keeps running, never claims
