@@ -4693,6 +4693,54 @@ which returns `(nil, err)` on four paths. Every one of them was a nil dereferenc
 the logged failure the code below it intended. The tell was the `if rt != nil { rt.Close() }`
 guard inside the error branch — written to handle a case it could never reach.
 
+#### 3.32 progress — the net exists, and one option is eliminated (2026-08-05)
+
+Two things that were prerequisites for fixing this, both done.
+
+**No test had ever executed a defer body.** The three `TestRunDefers_*` in `flush_test.go` each
+pass `wasmBytes = nil` and say so — *"wasmBytes is nil so RunDefer is not invoked; verify no
+panic"* — so they cover the sorting and the nil guards and stop exactly where the guest begins.
+`TestClosure_CleatDefer` covers the host function a workflow uses to *register* a defer, not
+running one. So the change this item asks for would have been made against nothing.
+`engine/defer_execution_test.go` closes that: a defer that returns cleanly, one that traps
+(the trap is the cheapest proof the body was entered — it needs no host handler and no
+output-ABI agreement, both of which a defer lacks), a missing export, and a wrong-signature
+export. Each verified to fail when the WAT it runs is changed to remove the condition.
+
+Two of those cases are not hypothetical. A defer whose export has the wrong signature is
+rejected before it runs with `expected 0 params, but passed 4`, and `runDefers` logs that and
+moves on — so a workflow author's cleanup silently never happens, and from outside it is
+indistinguishable from cleanup that ran. That is the same shape as this item and it now has a
+test.
+
+**"Just fence wazero" is dead, and that is now measured rather than assumed.** Three mechanisms
+have been tried against a guest that never calls into the host:
+
+| mechanism | result |
+|---|---|
+| `WithCloseOnContextDone(true)` | breaks *every* execution with `wasm trap: exit(code=0)` (§2.28) |
+| fuel metering (`fuelMeter`) | only decrements in `Before`, a function-entry hook — a tight loop inside one function never trips it |
+| `mod.CloseWithExitCode` from a watchdog goroutine | **no effect**: still running 25s after the close, measured 2026-08-05 |
+
+The third was the last plausible one, because `fuelMeter`'s own comment says closing the module
+is how it stops a guest — true only for a guest that keeps calling functions. So there is no
+way to bound a compute-bound wazero guest, and **routing to wasmtime is the only fix**, not one
+option among several.
+
+**What remains, and its cost.** Routing needs a non-nil `HostHandler`: `handlerFromContext` does
+an unchecked type assertion, so a defer reaching the wasmtime backend without one panics rather
+than failing. `HostHandler` has **54 methods**. So the work is either a rejecting
+implementation of all 54 (mechanical, but 54 methods of new production surface, and it makes
+"defers may not make host calls" explicit and permanent) or passing the live `execSession`,
+which `executor.go` already has in scope at all three call sites — but `cmd/cleat-worker`'s own
+`runDefers` has no session at all, so that route does not cover both callers.
+
+Worth noting for whoever takes it: the two defer paths already disagree. `invokeDefersOnTrap`
+runs defers on the **live module with the session's handler present**, so host calls from a
+defer work there; `runDefers` runs them on a fresh module with no handler, where the same call
+panics and is swallowed. Whatever is decided should make those two agree, because today
+whether your defer can call a service depends on which way the workflow failed.
+
 
 ### 3.20 Admin force-resolve was a stub the API answered for — ✅ **FIXED** (WS-2, 2026-08-05)
 
