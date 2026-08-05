@@ -457,10 +457,9 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// offset. Some WASM SDKs (Java/TeaVM, AssemblyScript) hardcode the
 	// 10 MiB convention and will break if the buffer moves lower.
 	currentSize := mem.Size()
-	legacyOffset := uint32(10 * 1024 * 1024)
-	scratchBase := currentSize + wasmPageSize // one guard page after current heap
-	if scratchBase < legacyOffset {
-		scratchBase = legacyOffset
+	scratchBase, scratchErr := scratchBaseFor(uint64(currentSize), OutBufSize)
+	if scratchErr != nil {
+		return "", false, scratchErr
 	}
 	inputOffset := scratchBase
 	outputOffset := scratchBase + OutBufSize
