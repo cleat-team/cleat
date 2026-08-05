@@ -4566,7 +4566,7 @@ None has a database backstop on MySQL (§1.7: zero RLS policies). Severity is bo
 HTTP layer's per-tenant scoping since §1.7, which is defence in depth working — but that is
 the only thing standing between these and a leak.
 
-### 3.12 One tenant's deploy silently replaces another's workflow code — 🔴 **OPEN** (all three dialects)
+### 3.12 One tenant's deploy silently replaces another's workflow code — 🔶 **OVERWRITE CLOSED, NAMESPACE STILL SHARED** (WS-1, 2026-08-05)
 
 Found while fixing §3.10: the two-tenant test could not deploy a definition of the same name
 from both stores, and the reason it could not turned out to be worse than the inconvenience.
@@ -4609,6 +4609,55 @@ The fix is not only a wider primary key: `(name, version, tenant_id)` without co
 two writers above would put every definition in one tenant anyway. Expect a migration in
 WS-1's range, the two writer fixes, and a decision about what "shared definition" should mean
 now that it is the accidental default.
+
+#### Resolution — the overwrite is closed, the namespace is not
+
+The bounded half is done, chosen over the full redesign because the key change reaches three
+foreign keys per dialect and ~96 query sites and wants its own review:
+
+- **A definition records its owner.** `PostgresStore.DeployWorkflowDef` uses `s.tenantID`
+  instead of the hardcoded default, and `MSSQLStore`'s `MERGE` names `tenant_id` in both its
+  INSERT and its UPDATE. `MySQLStore` already did.
+- **A deploy over someone else's definition is refused**, with an error wrapping
+  `engine.ErrWorkflowDefOwnedByAnotherTenant`, in a transaction that locks the row (and the
+  gap it would occupy) first. On PostgreSQL the guard is repeated in SQL, because under RLS
+  the conflicting row is invisible to the read and the INSERT hits the primary key instead —
+  so `23505` is mapped to the ownership error rather than surfacing as `duplicate key value
+  violates unique constraint`, which says nothing about what went wrong.
+- **What is not fixed:** two tenants still cannot each hold `order-processor`, and one
+  tenant's definition is still readable by name from another. The namespace is shared; taking
+  a name is now loud instead of silent.
+
+**The soft edge, stated rather than buried.** Every definition in every existing database is
+owned by the default tenant, so refusing those outright would break the first redeploy after
+the upgrade for every tenant at once. A default-tenant definition is therefore *adopted* by
+the first tenant to redeploy it. Until that happens, a tenant other than its creator can still
+take it over. `CHANGELOG.md` carries this as a breaking upgrade note.
+
+**Proven able to fail:** with the three writers reverted to `develop`'s, all three dialects
+report `tenant B deployed over tenant A's definition "order-processor" and was told it
+succeeded`, and postgres and mssql additionally report the owner as the default tenant. MySQL
+passes the ownership half unchanged, which is the asymmetry recorded above.
+
+**Two things the fix turned up in the test suite, both of which were the tests depending on
+the defect:**
+
+- Eight `TestTenantIsolation_*` fixtures deployed *one* `*WorkflowDef` to both tenants' stores.
+  That only ever worked because the second deploy overwrote the first. They now give tenant B
+  its own definition, which is what a multi-tenant deployment has to do until the key changes.
+  None of their assertions moved.
+- `TestMSSQLStore_StartNewRun_TenantID` inserted a `workflow_defs` row with an explicit NULL
+  `tenant_id`. `migrations/mssql/001_schema.sql` declares that column `NOT NULL DEFAULT '000…'`
+  and always has — the row the test inserted could not exist in a real database. It passed
+  because `engine/testutil`'s MSSQL schema left the column nullable: the §1.9 drift class
+  again, found by reading the column back rather than by reading the schema.
+
+**Residual, and it is the same shape as §3.11:** a definition's *contents* are still readable
+across tenants by name — `LoadWASM`, `GetWASMLength`, `LoadDAGSpec` and `LoadWorkflowConfig`
+key on `(name, version)` with no tenant. PostgreSQL's RLS policy for this table admits the
+default tenant deliberately, so pre-upgrade definitions stay globally readable by design; on
+MySQL and SQL Server there is nothing underneath at all. Closing that is the same work as
+putting the tenant in the key.
 
 ### 3.13 No cleat-worker can bootstrap a MySQL schema — ✅ **FIXED** (WS-1, 2026-08-05)
 
@@ -4965,6 +5014,42 @@ It is not the same size as the other two: resetting a workflow to `ready` means 
 its recorded history and continues, so it needs the replay semantics §1.4 phases D–F are
 about — not a fourth `UPDATE`. Taking it before those is how the write-ahead intent work got
 built before the observation that would have judged it.
+
+### 3.14 `examples/dag` is red on `develop`, and no CI job runs it — 🔴 **OPEN**
+
+Noticed while sweeping `go test ./...` for §3.12 regressions, and confirmed against a clean
+`develop` worktree at `2ee62d0` so it is not that change:
+
+```
+--- FAIL: TestDAGExecuteDiamond
+    pipeline_test.go:80: Execute failed: dag: await any child failed:
+    durable: AwaitAnyChild can only be called from within a workflow function
+    (the HostCalls runtime was not initialized)
+```
+
+Six tests, all in `examples/dag`, all the same cause. `.github/workflows/` runs
+`examples/as-workflow` and nothing else under `examples/`, and no job runs `./...`, so
+nothing has ever reported this. Low severity — it is example code, not the engine — but it is
+the §2.31/§2.33 pattern once more: a suite that exists, fails, and is watched by nobody.
+Either wire it into a job or say in the tree that examples are not tested.
+
+Two things that are **not** defects and are recorded so the next sweep does not re-derive them:
+
+- `tests/exhaustion` fails locally with `cluster database unreachable … this test requires
+  docker-compose.cluster.yml to be up`. That is the intended behaviour (§2.12: a configured
+  resource that is missing must fail, not skip); it runs in the `cluster` job, which provides
+  one.
+- `tests/plugin-harness` fails when the repo is entered through `/localssd/rcownie/cleat`,
+  the symlink `PARALLEL-WORKSTREAMS.md` tells all three streams to use:
+
+  ```
+  cleat build (go) failed:
+  directory /localssd/rcownie/cleat/cmd/cleat outside main module or its selected dependencies
+  ```
+
+  The harness shells out to `go run <projectRoot>/cmd/cleat`, and the Go toolchain rejects a
+  module path reached through a symlink. From `/Users/Shared/localssd/rcownie/cleat` the same
+  suite passes. Worth knowing before someone spends a session on a phantom regression.
 
 ## Phase 3 — Put falsification in the loop
 

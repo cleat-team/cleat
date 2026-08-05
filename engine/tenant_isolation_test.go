@@ -186,7 +186,8 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
 			// Also deploy in store B (needed to create instances).
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -199,7 +200,7 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			}
 
 			// Create a workflow in store B.
-			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-isolation", 1,
+			runIDB, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
 				"iso-test-b-1", tenantB, 0)
 			if err != nil {
@@ -301,7 +302,8 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -314,7 +316,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			}
 
 			// Create a workflow in store B.
-			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-signals", 1,
+			runIDB, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
 				"signal-test-b-1", tenantB, 0)
 			if err != nil {
@@ -393,7 +395,8 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -415,7 +418,7 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 			// Create a schedule in store B.
 			if err := storeB.CreateSchedule(ctx, Schedule{
 				Name:           "schedule-b",
-				DefName:        "test-schedules",
+				DefName:        defB.Name,
 				EntryPoint:     "main",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
@@ -492,7 +495,8 @@ func TestTenantIsolation_EventHistory(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -580,7 +584,8 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -593,7 +598,7 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			}
 
 			// Create a workflow in store B.
-			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-promises", 1,
+			runIDB, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
 				"promise-test-b-1", tenantB, 0)
 			if err != nil {
@@ -682,7 +687,8 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -694,7 +700,7 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 			}
 
 			// Create a workflow in store B.
-			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-reaper", 1,
+			runIDB, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 				json.RawMessage(`{}`), "reaper-b-1", tenantB, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
@@ -831,7 +837,8 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 			for _, wfID := range []string{"wf-a", "wf-a-2", "wf-a-3"} {
@@ -840,7 +847,7 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 				}
 			}
 			for _, wfID := range []string{"wf-b"} {
-				if _, _, err := storeB.StartNewRun(ctx, wfID, "test-concurrency-keys", 1, json.RawMessage(`{}`), "", tenantB, 0); err != nil {
+				if _, _, err := storeB.StartNewRun(ctx, wfID, defB.Name, 1, json.RawMessage(`{}`), "", tenantB, 0); err != nil {
 					t.Fatalf("StartNewRun(%s) on store B: %v", wfID, err)
 				}
 			}
@@ -1008,7 +1015,8 @@ func TestTenantIsolation_ActiveInstanceCounts(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -1022,7 +1030,7 @@ func TestTenantIsolation_ActiveInstanceCounts(t *testing.T) {
 				}
 			}
 			for i := 0; i < 2; i++ {
-				_, _, err := storeB.StartNewRun(ctx, "", "test-active-counts", 1,
+				_, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 					json.RawMessage(`{}`),
 					fmt.Sprintf("b-%d", i), tenantB, 0)
 				if err != nil {
@@ -1044,8 +1052,9 @@ func TestTenantIsolation_ActiveInstanceCounts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetActiveInstanceCountsByVersion on store B: %v", err)
 			}
-			if countsB["test-active-counts:1"] != 2 {
-				t.Errorf("store B expected 2 active instances, got %d", countsB["test-active-counts:1"])
+			keyB := defB.Name + ":1"
+			if countsB[keyB] != 2 {
+				t.Errorf("store B expected 2 active instances under %s, got %d", keyB, countsB[keyB])
 			}
 		})
 	}
@@ -1114,4 +1123,23 @@ func TestUnauthenticatedQueryRejection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// tenantBDef returns tenant B's own copy of a definition, under a name of its
+// own.
+//
+// These tests used to deploy one *WorkflowDef to both stores, which worked
+// only because a deploy silently overwrote whatever definition already held
+// that (name, version) -- the defect IMPROVEMENT-PLAN 3.12 closes. The primary
+// key on workflow_defs still carries no tenant, so two tenants genuinely
+// cannot hold the same name; giving B its own is what a multi-tenant
+// deployment has to do until the key changes.
+//
+// Nothing here asserts on the definition itself, so the name is fixture
+// detail. What the tests assert -- that neither tenant sees the other's
+// instances, events, signals, schedules, promises or counts -- is unchanged.
+func tenantBDef(def *WorkflowDef) *WorkflowDef {
+	b := *def
+	b.Name = def.Name + "-tenant-b"
+	return &b
 }

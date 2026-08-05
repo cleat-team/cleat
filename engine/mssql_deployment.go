@@ -244,7 +244,44 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	if pluginDepsJSON == nil {
 		pluginDepsJSON = []byte("{}")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	// Refuse to deploy over a definition owned by another tenant, and record
+	// this tenant as the owner.
+	//
+	// The MERGE below used to name neither tenant_id in its INSERT column list
+	// nor in its UPDATE, so every definition took the column default -- the
+	// default tenant -- and the (name, version) primary key turned a second
+	// tenant's deploy of the same name into an overwrite of the first's WASM
+	// bytes. SQL Server's security policies filter on the tenant column, so an
+	// unset column is also an unfenced row. IMPROVEMENT-PLAN 3.12.
+	//
+	// UPDLOCK, HOLDLOCK is the SQL Server spelling of "lock the row, and the
+	// range it would occupy if it does not exist yet", which is what stops a
+	// concurrent deploy of the same new name from landing between the read and
+	// the MERGE.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("deploy workflow def: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var owner sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id))
+		FROM workflow_defs WITH (UPDLOCK, HOLDLOCK)
+		WHERE name = @p1 AND version = @p2
+	`, def.Name, def.Version).Scan(&owner)
+	switch {
+	case err == nil:
+		if !canAdoptDef(owner.String, s.tenantID) {
+			return defOwnershipError(def.Name, def.Version)
+		}
+	case errors.Is(err, sql.ErrNoRows):
+		// Does not exist yet; the MERGE inserts it.
+	default:
+		return fmt.Errorf("deploy workflow def: read owner: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
 		MERGE workflow_defs AS target
 		USING (SELECT @p1 AS name, @p2 AS version) AS source
 		ON target.name = source.name AND target.version = source.version
@@ -253,12 +290,16 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			abi_version = @p4,
 			min_version = @p5,
 			plugin_deps = @p6,
-			deprecated = @p7
-		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated)
-		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7);
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated)
+			deprecated = @p7,
+			tenant_id = @p8
+		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
+		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8);
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("deploy workflow def: commit: %w", err)
 	}
 	return nil
 }

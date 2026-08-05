@@ -12,6 +12,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **A deploy no longer overwrites a workflow definition owned by another
+  tenant; it fails instead.** `workflow_defs` is keyed by `(name, version)`
+  with no tenant in the key, and all three backends upserted on that key — so
+  the second tenant to deploy a given name silently replaced the first
+  tenant's WASM bytes, and the first tenant's workflows then executed the
+  second tenant's code. `DeployWorkflowDef` now records the deploying tenant
+  and refuses to write over a definition that belongs to someone else,
+  returning an error wrapping `engine.ErrWorkflowDefOwnedByAnotherTenant`.
+
+  Who this breaks: a multi-tenant deployment in which two tenants deploy the
+  same definition name. That previously "worked" in the sense that one row
+  survived and served both; it now fails for whichever tenant does not own the
+  name. If you were relying on one shared definition across tenants, deploy it
+  as the default tenant (`00000000-0000-0000-0000-000000000000`) and do not
+  redeploy it as a specific tenant — a definition owned by the default tenant
+  stays readable by every tenant, which is what this table's PostgreSQL RLS
+  policy has always allowed.
+
+  What upgrades cleanly: every definition in an existing database is owned by
+  the default tenant, because `PostgresStore` hardcoded that value and
+  `MSSQLStore`'s `MERGE` omitted the column. Such a definition is *adopted* by
+  the first tenant that redeploys it, so ordinary redeploys keep working and
+  ownership takes effect from then on. Until a definition has been redeployed
+  once, a tenant other than its creator can still take it over.
+
+  This does not make two tenants able to hold the same name — that needs the
+  tenant in the primary key, and with it three foreign keys per dialect. The
+  name remains a global namespace; squatting one is now loud instead of
+  silent. IMPROVEMENT-PLAN §3.12.
+
 - **Workers now refuse to start on a PostgreSQL connection that bypasses
   row-level security.** Every tenant-scoped table has RLS enabled and FORCEd,
   and for `GetWorkflowByID` and `ListWorkflows` those policies are the only
