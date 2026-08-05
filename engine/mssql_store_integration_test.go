@@ -559,7 +559,7 @@ func TestMSSQLIntegration_EventHistory(t *testing.T) {
 	wfID := uuid.New().String()
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
-		VALUES (@p1, 'evt-wf', 1, 'running', SYSUTCDATETIME(), '{}', 'default', NULL)
+		VALUES (@p1, 'evt-wf', 1, 'running', SYSUTCDATETIME(), '{}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, wfID)
 	if err != nil {
 		t.Fatalf("insert workflow_instance: %v", err)
@@ -638,7 +638,7 @@ func TestMSSQLIntegration_VerifyWorkflowEvents(t *testing.T) {
 	wfID := uuid.New().String()
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
-		VALUES (@p1, 'verify-wf', 1, 'running', SYSUTCDATETIME(), '{}', 'default', NULL)
+		VALUES (@p1, 'verify-wf', 1, 'running', SYSUTCDATETIME(), '{}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, wfID)
 	if err != nil {
 		t.Fatalf("insert workflow_instance: %v", err)
@@ -670,7 +670,7 @@ func TestMSSQLIntegration_StreamEventHistory(t *testing.T) {
 	wfID := uuid.New().String()
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
-		VALUES (@p1, 'stream-wf', 1, 'running', SYSUTCDATETIME(), '{}', 'default', NULL)
+		VALUES (@p1, 'stream-wf', 1, 'running', SYSUTCDATETIME(), '{}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, wfID)
 	if err != nil {
 		t.Fatalf("insert workflow_instance: %v", err)

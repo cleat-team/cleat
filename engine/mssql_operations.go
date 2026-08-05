@@ -92,9 +92,14 @@ func (s *MSSQLStore) getEventCountOnce(ctx context.Context, workflowID string) (
 func (s *MSSQLStore) QueueDepth(ctx context.Context) (int64, error) {
 	var count int64
 	tqParam := s.buildTaskQueueParam()
+	// Scoped by tenant. SQL Server's security policies do this in production,
+	// but only when the session context is set on the connection the query
+	// lands on -- and the test schema defines no policies at all (2.71
+	// residual), so nothing was checking it either way. The predicate makes
+	// the three dialects agree. IMPROVEMENT-PLAN 3.11.
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM workflow_instances WHERE status = 'ready' AND task_queue IN (SELECT value FROM STRING_SPLIT(@p1, ','))`,
-		tqParam).Scan(&count)
+		`SELECT COUNT(*) FROM workflow_instances WHERE status = 'ready' AND task_queue IN (SELECT value FROM STRING_SPLIT(@p1, ',')) AND tenant_id = @p2`,
+		tqParam, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("queue depth: %w", err)
 	}

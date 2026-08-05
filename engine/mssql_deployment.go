@@ -31,7 +31,12 @@ func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion in
 // GetWASMLength returns the byte length of the stored WASM binary.
 func (s *MSSQLStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
 	var length int64
-	err := s.db.QueryRowContext(ctx, `SELECT len(wasm_bytes) FROM workflow_defs WHERE name = @p1 AND version = @p2`, defName, defVersion).Scan(&length)
+	// Scoped by tenant: definition names are user-chosen, so one tenant asking
+	// for another's name is ordinary rather than adversarial, and the size of
+	// their compiled WASM is not the caller's to read. IMPROVEMENT-PLAN 3.11.
+	err := s.db.QueryRowContext(ctx,
+		`SELECT len(wasm_bytes) FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3`,
+		defName, defVersion, s.tenantID).Scan(&length)
 	return length, err
 }
 

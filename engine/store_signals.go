@@ -215,7 +215,8 @@ func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID 
 
 	var raw sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT allowed_signals FROM workflow_instances WHERE id = $1`, workflowID).Scan(&raw)
+		`SELECT allowed_signals FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
+		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}

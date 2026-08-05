@@ -4546,7 +4546,7 @@ context at all. Fail-closed policies would turn all three into errors. That is a
 change to the transaction structure, not a line in a migration, and it is left open here
 rather than half-done.
 
-### 3.11 Four unscoped MySQL queries — 🔴 **OPEN**
+### 3.11 Four unscoped queries — ✅ **FIXED** (WS-1, 2026-08-05), and it was three dialects, not one
 
 From the same audit: 109 statements in the MySQL store touch tenant-scoped tables, 16 carry
 no `tenant_id` reference, and most of those 16 are false positives — `ClaimWorkflows`'
@@ -4565,6 +4565,72 @@ The four that survive that reading:
 None has a database backstop on MySQL (§1.7: zero RLS policies). Severity is bounded by the
 HTTP layer's per-tenant scoping since §1.7, which is defence in depth working — but that is
 the only thing standing between these and a leak.
+
+#### Resolution — measured per dialect, because the answer differs per method
+
+The audit read the MySQL store, so the item was written as a MySQL item. All four statements
+are unscoped in the PostgreSQL and SQL Server stores too; what differs is what sits
+underneath, and that turned out to vary by *method* rather than by dialect. Measured with two
+tenants and real rows rather than reasoned about:
+
+| method | postgres | mysql | mssql |
+|---|---|---|---|
+| `QueueDepth` | scoped — runs in `beginTxWithRLS` | **counted 5 of 5** | **counted 5 of 5** |
+| `GetWASMLength` | **errored for everyone** (below) | **read the other tenant's 8 bytes** | **read the other tenant's 8 bytes** |
+| `GetAllowedSignalCallers` | scoped by RLS | **read the other tenant's list** | **read the other tenant's list** |
+| `DeleteExpiredEvents` | scoped — runs in `beginTxWithRLS` | **deleted the other tenant's history** | **deleted the other tenant's history** |
+
+All four now carry an explicit `tenant_id` predicate on MySQL and SQL Server. On PostgreSQL
+the two that already ran inside an RLS transaction are left alone — the policy is the filter
+there, and a redundant predicate would only obscure that — and the two that did not now do.
+
+**`GetWASMLength` on PostgreSQL was not a leak; it was a silent cache bug.** It ran on `s.db`
+with no `cleat.tenant_id` set, so on the role the engine is meant to run as
+(`005_app_role.sql`, §1.10) the policy could not be evaluated and every call failed with
+`invalid input syntax for type uuid: "" (22P02)`. Its one caller is `Worker.loadWASM`, which
+uses the length as a cache-freshness check on **every cache hit** and treats an error as
+"keep serving the cache". So on PostgreSQL a redeployed definition was never picked up by a
+worker with a warm cache: the staleness check could not fire, and the error path even records
+a cache *hit* metric. Running it in an RLS transaction restores it.
+
+**`GetWASMLength`'s tenant scope depends on §3.12.** Until a definition records the tenant
+that deployed it, every definition is the default tenant's and the predicate matches nothing
+useful — the two arms of this test that cover it only pass with §3.12's writer fix in place.
+Two defects that had to be fixed in the same direction to make either observable.
+
+### 3.15 Signal authorization consults a list nothing can write — 🔴 **OPEN**
+
+Found while scoping `GetAllowedSignalCallers` for §3.11: the method reads
+`workflow_instances.allowed_signals`, and **nothing in the product ever writes that column.**
+Searched the whole tree, every language, excluding tests: the only writes are two raw
+`UPDATE`s inside test files. There is no store method, no API endpoint, no CLI verb, no SDK
+call.
+
+What consumes it is not optional. `cmd/cleat-worker/setup.go` installs the check whenever
+`--require-signal-auth` is set, and that flag **defaults to `true`**:
+
+```go
+callers, err := w.store.GetAllowedSignalCallers(ctx, targetWorkflowID)
+if len(callers) == 0 {
+    return fmt.Errorf("signal auth denied: workflow %s has no allowed callers configured", ...)
+}
+```
+
+`docs/reference/worker-config.md` documents the empty list as "deny all (fail-secure)" and
+tells operators to "add `"*"` (wildcard) to `allowed_signals`" to permit external callers —
+an instruction there is no way to follow.
+
+So on a default deployment every cross-workflow signal, every plugin-originated signal and
+every external HTTP signal is denied, and the documented way to allow one does not exist. The
+only coverage is `TestWithSignalAuthCheck`, which passes a stub closure and asserts the option
+plumbing — the §1.3 shape exactly: the test cannot see the defect because it replaces the
+thing that has it.
+
+**The fix is a decision, not a patch.** Either signal authorization gets a way to populate the
+list (store method, API, and something in the SDKs), or `--require-signal-auth` defaults to
+`false` until it does. Flipping the default is one line and turns a silently-broken security
+feature into an absent one; adding a writer is the feature it was always supposed to be. Not
+taken here because it is a product call rather than a defect fix.
 
 ### 3.12 One tenant's deploy silently replaces another's workflow code — 🔶 **OVERWRITE CLOSED, NAMESPACE STILL SHARED** (WS-1, 2026-08-05)
 
