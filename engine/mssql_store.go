@@ -79,7 +79,15 @@ func applyTenantSessionContext(ctx context.Context, conn driver.Conn, tenantID s
 	}
 	defer stmt.Close()
 
-	if _, err := stmt.Exec(nil); err != nil {
+	// driver.Stmt.Exec is deprecated in favour of StmtExecContext.ExecContext.
+	// Suppressed rather than changed, and flagged rather than left silent:
+	// go-mssqldb does implement StmtExecContext, so switching would work and
+	// would additionally propagate ctx -- today a cancelled context does not
+	// abort setting the session context. That is a behaviour change in the
+	// tenant-scoping path (2.71 territory, WS-1's file), and it does not belong
+	// in a lint sweep. Worth doing deliberately, mirroring the
+	// ConnPrepareContext branch a few lines above.
+	if _, err := stmt.Exec(nil); err != nil { //nolint:staticcheck // SA1019: see above
 		return fmt.Errorf("mssql: set session context for tenant %s: %w", tenantID, err)
 	}
 	return nil
@@ -142,7 +150,11 @@ func (c *tenantSessionConn) BeginTx(ctx context.Context, opts driver.TxOptions) 
 	if b, ok := c.Conn.(driver.ConnBeginTx); ok {
 		return b.BeginTx(ctx, opts)
 	}
-	return c.Conn.Begin()
+	// Deprecated by design: this is the documented fallback for a driver that
+	// does not implement ConnBeginTx, which is exactly what the branch above
+	// tests for. There is nothing newer to call here -- reaching this line
+	// means the newer interface is absent.
+	return c.Conn.Begin() //nolint:staticcheck // SA1019: intentional fallback
 }
 
 func (c *tenantSessionConn) CheckNamedValue(nv *driver.NamedValue) error {

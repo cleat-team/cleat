@@ -336,13 +336,10 @@ func placeholderSQL(dialect plugin.Dialect, tmpl string) string {
 	case plugin.DialectPostgres:
 		// Replace each %s with $1, $2, etc.
 		var result strings.Builder
-		idx := 1
-		for _, ch := range tmpl {
-			if ch == '%' && len(tmpl) > idx-1 {
-				// Check next char
-			}
-		}
-		// Simple approach: count %s patterns and replace sequentially.
+		// The loop that used to be here scanned every rune to find '%' and did
+		// nothing with it -- an `if` with an empty body inside a `for` with no
+		// other statements. Removed rather than filled in: the split below has
+		// been doing the actual work all along.
 		parts := strings.Split(tmpl, "%s")
 		for i, p := range parts {
 			result.WriteString(p)
