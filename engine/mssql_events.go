@@ -437,6 +437,14 @@ func (s *MSSQLStore) previousStoredChecksum(ctx context.Context, tx *sql.Tx, wor
 // This is shared by AppendEventHistoryBatch and FinalizeWorkflowSegment so
 // that both can insert events atomically alongside other operations.
 func (s *MSSQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowID string, recs []EventRecord) error {
+	return s.appendEventsInTxOpts(ctx, tx, workflowID, recs, true)
+}
+
+// appendEventsInTxOpts is appendEventsInTx with control over the event_count
+// bookkeeping. Only the per-step flush passes incrementCount=false; see
+// MSSQLStore.flushEventForStep for why counting there would double-count every
+// event in the segment.
+func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workflowID string, recs []EventRecord, incrementCount bool) error {
 	if len(recs) == 0 {
 		return nil
 	}
@@ -495,10 +503,12 @@ func (s *MSSQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 	}
 	// Increment event_count on workflow_instances so GetEventCount and quota
 	// enforcement work correctly on MSSQL.
-	if _, err := tx.ExecContext(ctx, `
+	if incrementCount {
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances SET event_count = event_count + @p1 WHERE id = @p2
 		`, len(recs), workflowID); err != nil {
-		return fmt.Errorf("append events in tx: increment event_count: %w", err)
+			return fmt.Errorf("append events in tx: increment event_count: %w", err)
+		}
 	}
 	return nil
 }

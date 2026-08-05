@@ -27,7 +27,7 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		WHEN MATCHED THEN UPDATE SET payload = source.payload, delivered_at = SYSUTCDATETIME()
 		WHEN NOT MATCHED THEN INSERT (workflow_id, signal_name, payload, tenant_id)
 		     VALUES (source.workflow_id, source.signal_name, source.payload, @p4);
-	`, workflowID, signalName, payload, s.tenantID)
+	`, workflowID, signalName, encodeSignalPayload(payload), s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -55,7 +55,7 @@ func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName stri
 	if err != nil {
 		return "", false, fmt.Errorf("poll signal: %w", err)
 	}
-	return payload, true, nil
+	return decodeSignalPayload(payload), true, nil
 }
 
 func (s *MSSQLStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
@@ -114,7 +114,7 @@ func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 	if err != nil {
 		return "", false, fmt.Errorf("poll and claim signal: delete: %w", err)
 	}
-	return payload, true, tx.Commit()
+	return decodeSignalPayload(payload), true, tx.Commit()
 }
 
 func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {

@@ -77,6 +77,37 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 	return decodeSignalPayload(payload), true, tx.Commit()
 }
 
+// encodeSignalPayload makes a payload acceptable to the `payload` column.
+//
+// All three dialects require valid JSON there and say so differently:
+// PostgreSQL's column is JSONB, MySQL's is JSON, and SQL Server's is
+// NVARCHAR(MAX) with a CHECK (ISJSON(payload) = 1) constraint. A caller that
+// passes a bare string -- "payload-1", an opaque token, an ID -- is passing
+// something none of them will store, so it is wrapped as a JSON string literal
+// and decodeSignalPayload unwraps it on the way out.
+//
+// This lived inline in PostgresStore.DeliverSignal and nowhere else, so a
+// non-JSON signal payload was accepted on PostgreSQL and rejected outright on
+// the other two:
+//
+//	mysql: Error 3140 (22032): Invalid JSON text: "Invalid value." at position 0
+//
+// DeliverSignal is reachable from the worker's signal endpoint, so that was a
+// live behavioural difference between the dialects, not just a test artefact.
+func encodeSignalPayload(payload string) string {
+	if json.Valid([]byte(payload)) {
+		return payload
+	}
+	// Marshal rather than concatenating quotes: a payload containing a quote or
+	// a backslash would otherwise produce invalid JSON and be rejected by the
+	// very columns this exists to satisfy.
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return payload
+	}
+	return string(encoded)
+}
+
 // decodeSignalPayload reverses what DeliverSignal does to a payload before
 // writing it to the JSONB `payload` column (wrapping it in quotes if it
 // isn't already valid JSON, so the column accepts it) and normalizes
@@ -111,10 +142,7 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 	}
 	defer tx.Rollback()
 
-	// Ensure payload is valid JSON for JSONB column
-	if !json.Valid([]byte(payload)) {
-		payload = `"` + payload + `"`
-	}
+	payload = encodeSignalPayload(payload)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		VALUES ($1, $2, $3, $4)

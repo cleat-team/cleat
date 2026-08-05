@@ -49,10 +49,18 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	callCtx := ctx
 	if s.engine.signalStore != nil {
 		cancelled, _, err := s.engine.signalStore.PollCancellation(ctx, s.engine.workflowID)
+		if err != nil {
+			// Failing open is the right default -- a database blip must not
+			// abort a workflow that has not been cancelled -- but it was
+			// previously silent, so a persistently failing poll made
+			// cancellation quietly stop working with nothing to see.
+			s.engine.log().WarnContext(ctx, "cancellation poll failed",
+				"workflow_id", s.engine.workflowID, "step", s.stepCount, "error", err)
+		}
 		if err == nil && cancelled {
 			// Not retryable: the workflow was cancelled, so repeating the call
 			// is the one thing the caller must not do.
-			written, _ := s.writeResult(ctx, m, responsePtr, "workflow cancelled", responseMaxLen)
+			written, _ := s.writeResult(ctx, m, responsePtr, cancelledCallError, responseMaxLen)
 			return packDurableCallResult(int(written), callErrorUnknown, 1)
 		}
 	}

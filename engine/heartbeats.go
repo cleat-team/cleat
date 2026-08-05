@@ -38,6 +38,16 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 	// with the session advancing.
 	callStep := s.stepCount
 
+	// Set when the heartbeat loop cancels the call because the workflow was
+	// cancelled, so the result branch can tell that apart from the call failing
+	// on its own. Without it the two are indistinguishable: cancelCall() makes
+	// the caller return a context error like any other, and the call would be
+	// reported as an ordinary retryable failure.
+	//
+	// Written and read on this goroutine only -- the ticker case and the result
+	// case are arms of the same select -- so no synchronisation is needed.
+	cancelledByWorkflow := false
+
 	go func() {
 		resp, err := s.callService(callCtx, service, operation, requestJSON, callStep)
 		resultCh <- callResult{resp: resp, err: err}
@@ -58,33 +68,66 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 			s.recordEvent(rec)
 
 			// Check for cancellation on each heartbeat tick.
+			//
+			// A failing poll is deliberately not treated as a cancellation: a
+			// database blip must not abort a call that is running normally, and
+			// the poll repeats on the next tick, so failing open costs at most
+			// one interval. See TestDurableCallWithHeartbeat_PollErrorDoesNotCancel.
 			if s.engine.signalStore != nil {
 				cancelled, _, pollErr := s.engine.signalStore.PollCancellation(ctx, s.engine.workflowID)
+				if pollErr != nil {
+					s.engine.log().WarnContext(ctx, "heartbeat cancellation poll failed",
+						"workflow_id", s.engine.workflowID, "step", callStep, "error", pollErr)
+				}
 				if pollErr == nil && cancelled {
+					cancelledByWorkflow = true
 					cancelCall() // Cancel the in-flight call.
 				}
 			}
 
 		case res := <-resultCh:
 			var callErr string
+			nonRetryable := false
 			if res.err != nil {
 				callErr = res.err.Error()
 			}
 
+			// A call the heartbeat loop cancelled is reported as a cancellation,
+			// not as whatever error the cancelled context produced. freshCall
+			// already does this before dispatch; this is the same outcome for a
+			// call cancelled after it started.
+			//
+			// Both halves matter. The guest-visible code has to be
+			// callErrorUnknown, which callerrors.go documents as non-retryable
+			// with a cancelled workflow as its first example -- reporting
+			// callFailureCode instead tells a guest branching on Retryable() to
+			// re-issue the call it was just cancelled out of. And the *recorded*
+			// event has to carry the same classification, because replay reads
+			// retryability off the event: an event holding the raw context error
+			// with ErrNonRetryable unset replays as an ordinary retryable
+			// failure, so the same step would be non-retryable on the first run
+			// and retryable on the replay of it. recordedFailureCode exists to
+			// stop exactly that.
+			if cancelledByWorkflow && res.err != nil {
+				callErr = cancelledCallError
+				nonRetryable = true
+			}
+
 			rec := EventRecord{
-				Step:      s.stepCount,
-				EventType: EventTypeCall,
-				Service:   service,
-				Op:        operation,
-				Request:   requestJSON,
-				Response:  res.resp,
-				Err:       callErr,
+				Step:            s.stepCount,
+				EventType:       EventTypeCall,
+				Service:         service,
+				Op:              operation,
+				Request:         requestJSON,
+				Response:        res.resp,
+				Err:             callErr,
+				ErrNonRetryable: nonRetryable,
 			}
 			s.recordEvent(rec)
 
 			if res.err != nil {
-				written, _ := s.writeResult(ctx, m, responsePtr, res.err.Error(), responseMaxLen)
-				return packDurableCallResult(int(written), callFailureCode, 1)
+				written, _ := s.writeResult(ctx, m, responsePtr, callErr, responseMaxLen)
+				return packDurableCallResult(int(written), recordedFailureCode(nonRetryable), 1)
 			}
 			written, _ := s.writeResult(ctx, m, responsePtr, res.resp, responseMaxLen)
 			return packDurableCallResult(int(written), 0, 0)

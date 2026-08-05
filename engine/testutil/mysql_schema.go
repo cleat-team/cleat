@@ -261,6 +261,22 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 	for _, m := range migrations {
 		_, _ = db.Exec(m) // best-effort, ignore errors
 	}
+
+	// Indexes. These used to live in SetupFullSchema, which meant the schema you
+	// got depended on which entry point the test called: SetupMySQLFullSchema
+	// built the tables without them, SetupFullSchema built them with. Both now
+	// route here, so there is one answer. IMPROVEMENT-PLAN 2.60b.
+	//
+	// MySQL has no CREATE INDEX IF NOT EXISTS, hence execIgnoreDupKey.
+	execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at)`)
+	execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at)`)
+	execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at)`)
+	execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id)`)
+	_, _ = db.Exec(`DROP INDEX idx_instances_tenant_queue_ready ON workflow_instances`)
+	execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority, next_wake_at)`)
+	execIgnoreDupKey(t, db, `CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
+	execIgnoreDupKey(t, db, `CREATE INDEX idx_idempotency_keys_expires ON idempotency_keys(expires_at)`)
+	execIgnoreDupKey(t, db, `CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
 }
 
 // CleanupMySQLTestData removes all test data from MySQL tables.

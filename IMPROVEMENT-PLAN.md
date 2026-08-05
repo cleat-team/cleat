@@ -541,6 +541,52 @@ its dead-letter counter, now conditional on the write applying.
   `("", 0)` — the §263 defect, which nothing else would catch — and the dead-letter routing
   that used to live inline at each site.
 
+### 1.3 residual — a cancelled heartbeat call was reported as retryable — ✅ **FIXED** (WS-2, 2026-08-04)
+
+The hardcoded `""` was fixed by `c26c332`; the missing end-to-end test landed in #264. This is
+what was left underneath, and it is a behaviour defect rather than a dead call site.
+
+Both call paths detect cancellation. `freshCall` reports it as `callErrorUnknown`, with a
+comment saying why: *"Not retryable: the workflow was cancelled, so repeating the call is the
+one thing the caller must not do."* `callerrors.go` agrees, naming a cancelled workflow as the
+first of the three canonical non-retryable cases.
+
+`freshCallWithHeartbeat` cancelled the in-flight call's context and then fell through to its
+**generic** error branch, which returns `callFailureCode` — `callErrorUnavailable`, documented
+as *"Retryable"*. So a workflow cancelled during a long call was told the call was worth trying
+again, and a guest branching on `Retryable()` would re-issue the call it had just been
+cancelled out of.
+
+The recorded event was the durable half of the same defect:
+
+```
+callErrorCode = 2, want 0 (callErrorUnknown, non-retryable)
+recorded Err  = "context canceled", want "workflow cancelled"
+recorded ErrNonRetryable = false
+```
+
+Replay reads retryability off the event via `recordedFailureCode`. An event carrying the raw
+context error with `ErrNonRetryable` unset replays as an ordinary retryable failure — so the
+same step was non-retryable on the first run and retryable on the replay of it. That is
+precisely the divergence `recordedFailureCode` was introduced to prevent (§2.35); this path
+routed around it by never recording the classification at all.
+
+Fixed by tracking why the call context was cancelled and reporting a cancellation on both the
+guest-visible code and the recorded event. `cancelledCallError` is now a shared constant, since
+two paths produce it and replay compares against what was written.
+
+**Also:** `PollCancellation` errors were discarded at both sites. Failing open is right — a
+database blip must not abort a workflow that has not been cancelled, and the poll repeats on
+the next tick — but it was *silent*, so a persistently failing poll made cancellation quietly
+stop working with nothing to see. Now logged at both sites, with
+`TestDurableCallWithHeartbeat_PollErrorDoesNotCancel` pinning the fail-open behaviour so the
+guard cannot be flipped by accident.
+
+Three tests, watched failing before the fix: the cancellation case, an uncancelled control (so
+the cancellation branch cannot be reached unconditionally and pass for the wrong reason), and
+the poll-error case.
+
+### 1.3 Cancellation is dead end-to-end (~1 session)
 
 ### 1.3 Cancellation is dead end-to-end — ✅ **FIXED**, and this section was stale
 
@@ -1637,6 +1683,67 @@ guest adapter branches on `errCode != 0`, so an abandoned retry loop reached the
 `errCode`.
 
 ### 2.35 The call error class is not persisted, so replay cannot recover it — 🔶 **PARTLY FIXED**
+
+> **Residual sharpened 2026-08-04 by reading the call sites, not the type.** The entry below
+> says the seven `ErrorCode` values have no path into history. True, but the reason is more
+> specific than "nobody supplies them", and there is a live trap in it.
+>
+> `CleatError` *does* participate in retry classification — it implements `RetryableError`, and
+> `isDefinitelyNonRetryable` honours it through `errors.As`. So the plumbing is not missing. What
+> collapses the taxonomy is the implementation:
+>
+> ```go
+> func (e *CleatError) Retryable() bool { return e.Code == ErrTransient }
+> ```
+>
+> Seven values, one bit, and **everything that is not `ErrTransient` reads non-retryable** —
+> including `ErrUnknown`, which is the zero value, so a `CleatError` built without a `Code` is
+> silently non-retryable.
+>
+> ~~**The trap is `ErrTimeout`.** It reads non-retryable, while the doc comment on the
+> constructor immediately above it says `NewTransientError` creates a retryable error "(DB
+> connection, **timeout**)". So the package documents timeouts as the canonical retryable case
+> and classifies `NewTimeoutError` as non-retryable. An external caller gets the opposite of
+> the documented behaviour, silently.~~
+>
+> **Wrong — retracted the same day, and kept here because it went out in a commit message
+> before I checked.** The two are different concepts, not one concept classified two ways. The
+> const block says so directly:
+>
+> ```go
+> ErrTransient  // retryable (DB connection, timeout)
+> ErrTimeout    // execution timeout
+> ```
+>
+> `ErrTransient` covers a *network or database* timeout, which is retryable. `ErrTimeout` is
+> the *workflow execution* timeout — the run exceeded its budget — and retrying that is exactly
+> wrong. `TestCleatError_Retryable` already asserts it, deliberately, in a subtest named
+> "timeout is not retryable". The classification is correct and there is nothing to fix.
+>
+> I reached the wrong conclusion by reading the two doc comments and not the word *execution*
+> in the second. The tell I ignored was the existing test: a behaviour with a subtest asserting
+> it is a decision, and the first question is what the decision was for, not whether it looks
+> odd next to its neighbour.
+>
+> **In-repo only three of the six constructors are ever produced:** `NewPermanentError` and
+> `NewTransientError` (`cmd/cleat-worker/setup.go`, the shipped `ServiceCaller`) and
+> `NewCancelledError` (`engine/mssql_errors.go:229`). `NewTimeoutError`, `NewAmbiguousError` and
+> `NewRetriesExhaustedError` have no non-test caller. That is *not* a dead-code finding —
+> `scripts/check-test-only-code.sh` deliberately does not flag exported identifiers in library
+> packages, and says so — but it does mean the effective in-repo taxonomy is three-valued, and
+> that the three unused codes have never been exercised against a real retry decision.
+>
+> **What actually survives**, once the retraction above is taken out: the observations are
+> right and the conclusion drawn from them was not. `Retryable()` does collapse seven values to
+> one bit; `ErrUnknown`, the zero value, does read non-retryable — which is the conservative
+> choice for a durable engine and defensible rather than defective; and three of the six
+> constructors do have no in-repo producer, which is explicitly *not* a dead-code finding.
+>
+> None of that is a new defect. It is a more precise restatement of what this entry already
+> said: **the full code has no path into history.** That remains the real residual, and it is
+> schema work — persisting `error_code` per event so replay can recover the classification
+> rather than re-deriving one bit of it. There is no cheap version hiding underneath.
+
 
 The constraint that bounds §2.15, and it is a real one rather than an excuse.
 
@@ -3524,6 +3631,232 @@ needs the branch.
   wasip1 description back to TinyGo while adding a TinyGo-deprecation note two paragraphs
   later, and lists the Admin API as "incoming" after #217 shipped it. Salvage only the note
   that cleat-238 (`--dump-ir`) and cleat-241 (canary routing) remain unbuilt.
+
+### 2.60 Per-step event flush never ran on MySQL or SQL Server — ✅ **FIXED** (WS-2, 2026-08-04)
+
+Same shape as §1.4's RLS blocker, on a different axis. `engine/flush.go`'s `insertEventSQL`
+is hand-written PostgreSQL — `$N` placeholders, `ON CONFLICT`, and since the RLS fix
+`set_config`. `cmd/cleat-worker/main.go` opens whatever the `--db` DSN produces and
+`setup.go:1580` passes it to `engine.WithDB` unconditionally, under the comment *"Always
+provide DB so per-step flush and adaptive flusher work."* `flushEvent`'s only guard is
+`e.db == nil`.
+
+So on the other two dialects **every per-step flush failed at parse time**, and
+`engine/lifecycle.go:180` logged it and carried on. Measured live on all three, with
+PostgreSQL as the control:
+
+| dialect | before | error |
+|---|---|---|
+| postgres | PASS | — (control) |
+| mysql | FAIL | `Error 1064 … near 'CONFLICT (workflow_id, step) DO UPDATE SET …'` |
+| mssql | FAIL | `'set_config' is not a recognized built-in function name` |
+
+Nothing was lost outright — `FinalizeWorkflowSegment` appends the whole segment through the
+dialect-correct store path at segment end. What was lost is the reason per-step flush
+exists: surviving a crash **mid**-segment. A MySQL or SQL Server deployment silently got the
+behaviour `docs/durable-calls.md` attributes to `--no-per-step-flush` ("higher throughput,
+weaker crash safety") without setting the flag, and with nothing observable from outside.
+
+Fixed with an unexported `perStepEventFlusher` interface. `MySQLStore` and `MSSQLStore`
+implement it; `PostgresStore` deliberately does not, so the primary dialect keeps the path it
+has always had.
+
+**The judgement call worth reviewing is `event_count`.** The store append maintains it, but
+`FinalizeWorkflowSegment` appends the same events again — idempotently for rows, but its
+increment is unconditional. Counting in the per-step path too would count every event twice:
+`GetEventCount` doubles and `--max-events-per-workflow` trips at half the configured limit,
+and neither symptom looks like a flush bug. So `flushEventForStep` passes
+`incrementCount=false`, matching PostgreSQL's raw insert, which has never touched
+`event_count` either. `TestPerStepFlushDoesNotDoubleCountEvents` pins it; flipping the flag
+fails it on both dialects.
+
+**Found by trying to write §1.4 phase D's migration.** Phase D adds a column to
+`event_history` in three dialects; standing up the three dialects to do that is what surfaced
+this. The plan's instruction not to build the fix before the observation held again, for a
+reason it did not anticipate — for the second time in two sessions.
+
+#### 2.60a Local SQL Server on Apple Silicon — the §1.7 blocker is removable
+
+`PARALLEL-WORKSTREAMS.md` records that §1.7 was deliberately skipped in every recent session
+because verifying an RLS migration needs a live MySQL and SQL Server, and *"the first task in
+§1.7 is not the migration — it is standing up MySQL and MSSQL you can actually test against."*
+
+`mcr.microsoft.com/mssql/server:2022-latest` cannot do it on arm64. It is amd64-only and
+QEMU rejects its address mapping outright:
+
+```
+/opt/mssql/bin/sqlservr: Invalid mapping of address 0x4005353000 in reserved
+address space below 0x400000000000
+```
+
+**`mcr.microsoft.com/azure-sql-edge:latest` runs natively on arm64** and is a real SQL Server
+engine — `Microsoft Azure SQL Edge Developer (RTM) - 15.0.2000.1574 (ARM64)`. Against it the
+repo's MSSQL engine tests are **296 pass / 2 fail / 0 skip**, and both failures are the
+`finalize_workflow_status` procedure that `engine/testutil` never defines — the gap already
+recorded under Phase 0's caveat 4. `sp_set_session_context` is present, so §2.71's fix is
+testable here too.
+
+```
+docker run -d --name cleat-ws2-mssql -e ACCEPT_EULA=1 \
+  -e MSSQL_SA_PASSWORD='CleatTest123!' -p 1434:1433 \
+  mcr.microsoft.com/azure-sql-edge:latest
+
+CLEAT_TEST_MSSQL='sqlserver://sa:CleatTest123!@localhost:1434?database=cleat&encrypt=disable'
+```
+
+Two caveats, both load-bearing. `encrypt=disable` is required: Edge's self-signed certificate
+has a negative serial number and current Go rejects it (`x509: negative serial number`) — an
+opaque TLS handshake failure, not an auth error. And Edge is a **15.0/2019-era subset**, not
+SQL Server 2022; it is enough to run this repo's suite and to stop writing MSSQL migrations
+blind, but a green run on Edge is not a claim about 2022. CI still has the real thing.
+
+#### 2.60b The engine suite is not deterministic against MySQL or SQL Server — ✅ **FIXED** (WS-2, 2026-08-04)
+
+> ~~**Four MySQL engine tests fail on `develop`.** Surfaced by running the engine suite
+> against a live MySQL for the first time. Verified pre-existing: they fail identically on a
+> stashed tree. Not fixed here — they are unrelated to the flush path and each wants its own
+> diagnosis.~~
+>
+> ~~`TestCascadeDelete/mysql` — `Error 1170: BLOB/TEXT column 'sticky_worker_id'…`, a
+> `engine/testutil` schema defect. `TestDeliverSignal/mysql` — MySQL's `JSON` column
+> normalises whitespace; the test compares bytes. `TestPollAndClaimSignal/mysql`,
+> `TestPollSignal_NonDestructive/mysql` — `Error 3140: Invalid JSON text`. The first is a
+> test-schema bug; the other three are the same question, whether a signal payload must be
+> JSON, which PostgreSQL's `TEXT` accepts and MySQL's `JSON` does not.~~
+>
+> **Wrong, and kept here on purpose.** Two errors. *(a)* PostgreSQL's column is `JSONB`, not
+> `TEXT` — all three dialects require JSON, so the dialects did not "disagree" about the
+> requirement at all; see §2.60c for what the difference actually was. *(b)* "Verified
+> pre-existing" was the worse mistake. The stashed-tree comparison was run against a database
+> those same tests had already populated, so it established only that both trees hit the same
+> accumulated state. On a **freshly created** MySQL database `develop`'s engine suite is
+> **green**. There were never four deterministic failures to fix.
+
+What is actually there is worse than four broken tests, because it does not show up as a
+stable red. Four consecutive full runs against live MySQL and SQL Server produced four
+different failure sets:
+
+| run | failures |
+|---|---|
+| 1 | `TestCascadeDelete/mysql`, `TestDeliverSignal/mysql`, `TestPollAndClaimSignal/mysql`, `TestPollSignal_NonDestructive/mysql` |
+| 2 | `TestMySQLIntegration_LoadDAGSpec`, `TestGetPendingUpdateRequests/mysql`, `TestCompleteUpdateRequest/mysql` |
+| 3 | `TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` — repeated three times, identical each time, so the non-determinism is between runs that change the database, not run-to-run coin-flipping |
+| 4 (fresh DBs) | `TestTenantIsolation_ConcurrencyKeys/mysql` |
+
+Both of the last two **pass in isolation, on the same database, immediately before and after
+failing in the full suite** — and the fence test passed *with* a change applied and failed
+*without* it, which is the inverted result that rules out attributing any of this to the code
+under test.
+
+**The mechanism.** `engine/testutil` holds two independent hand-written MySQL schemas —
+`schema.go`'s `DialectMySQL` block and `mysql_schema.go` — plus a third definition in
+`migrations/mysql/001_schema.sql`. All use `CREATE TABLE IF NOT EXISTS` against one shared
+database, so **whichever test runs first defines the tables for the whole package**, and Go's
+ordering decides which. Rows also accumulate: `CleanupPostgresTestData` is PostgreSQL-only
+and `truncateAll` does not reach everything on SQL Server, so reaping and tenant-isolation
+tests see other suites' leftovers.
+
+This is §2.39's shape — schema DDL racing another package's DML against one shared database —
+on the two dialects that never got §2.39's fix. PostgreSQL has the advisory lock *and* the
+content fingerprint that makes the apply run once; MySQL and SQL Server have neither.
+
+**Three real divergences were found underneath it and are fixed** (`engine/testutil/schema.go`,
+each one this file's MySQL block disagreeing with the shipped migration):
+`workflow_instances.sticky_worker_id` and `concurrency_keys.workflow_id` declared `TEXT` where
+the migration says `VARCHAR(255)`, so the indexes this same file creates over them cannot be
+built; and `workflow_update_requests.tenant_id` missing the migration's `DEFAULT`, so an
+insert that omits it fails against a schema the product never ships.
+
+**Fixed by collapsing to one definition per dialect.** `SetupMinimalSchema` and
+`SetupFullSchema` now both route to the single schema for that dialect: the real migration file
+for PostgreSQL, `SetupMySQLFullSchema` for MySQL, `SetupMSSQLFullSchema` for SQL Server. 368
+lines of duplicated DDL deleted.
+
+The index creation had to move with them, and that turned out to be the actual seam: the
+dedicated files created **no** indexes and the `schema.go` arms created eight, so which entry
+point a test called changed the schema it got, on top of which test ran first. `SetupFullSchema`
+is kept as an alias rather than deleted — roughly forty call sites use it, and the
+minimal/full distinction is precisely the line the duplication grew along.
+
+**Three full runs against freshly created MySQL and SQL Server databases: green, green,
+green.** That is the evidence for the fix, and it is deliberately not a single run — a single
+green run on these dialects was never evidence, which is the part worth inheriting and why the
+original wrong diagnosis above is struck through rather than deleted.
+
+The fingerprint treatment `applyPostgresSchemaFile` has is *not* part of this and is still
+worth doing: it would stop the DDL re-running per test, which is a cost and a DDL-versus-DML
+deadlock risk (§2.39) rather than a correctness problem now that there is only one schema to
+apply.
+
+#### 2.60d `CleanupPostgresTestData` is an unqualified `DELETE FROM` on eleven tables — 🔴 **OPEN**
+
+```go
+for _, table := range tables {
+	if _, err := db.Exec("DELETE FROM " + table); err != nil {
+		t.Logf("cleanup: delete from %s: %v", table, err)
+	}
+}
+```
+
+No `WHERE`, no tenant qualification, and a failure is `t.Logf` rather than `t.Fatalf` — so a
+cleanup that silently does nothing is indistinguishable from one that worked. Every package
+that points at the same `CLEAT_TEST_DB` shares those eleven tables, and Go runs packages in
+parallel by default, so one suite's cleanup deletes another suite's live rows mid-run. This is
+what made `tests/crash` need a database of its own (§2.4) rather than a fix here.
+
+**Two things make it worse than it reads.** The name says Postgres, but the SQL is
+dialect-neutral, so `store_backends_test.go` calls it with the MySQL and SQL Server handles too
+and wipes those databases as thoroughly. And it is the most likely remaining source of the
+cross-suite state that §2.60b's schema collapse only half addressed — the collapse fixed *which
+schema* you get, not *whose rows* are in it.
+
+**Direct evidence, 2026-08-04.** After §2.60b landed, the engine suite is green on freshly
+created MySQL and SQL Server databases and still fails on a *reused* one —
+`TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` and
+`TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL`, both of which pass again the moment the
+database is dropped and recreated. §2.60b fixed *which schema* you get; this is *whose rows*
+are in it, and it is the whole of what remains.
+
+Fixing it properly means deciding what test isolation is: a database per package (what
+`tests/crash` does, and it works), a tenant per package with tenant-scoped deletes, or
+transactions rolled back per test. That is a bigger decision than the ~40 call sites suggest,
+which is why it is recorded rather than done here. The cheap intermediate step — make the
+failure a `Fatalf` — is not obviously right either, because several callers currently rely on
+the delete failing harmlessly on tables their dialect does not have.
+
+#### 2.60c A non-JSON signal payload was accepted on PostgreSQL and rejected elsewhere — ✅ **FIXED** (WS-2, 2026-08-04)
+
+All three schemas require `workflow_signals.payload` to hold valid JSON, each saying so
+differently: PostgreSQL `JSONB`, MySQL `JSON`, SQL Server `NVARCHAR(MAX)` with
+`CHECK (ISJSON(payload) = 1)`. Only `PostgresStore.DeliverSignal` knew — it wrapped a non-JSON
+payload in quotes on the way in, and `decodeSignalPayload` unwrapped it on the way out.
+`MySQLStore` and `MSSQLStore` did neither, at six sites between them.
+
+So `DeliverSignal(ctx, wf, "sig", "payload-1")` — reachable from the worker's signal endpoint —
+succeeded on PostgreSQL and failed outright on the other two:
+
+```
+Error 3140 (22032): Invalid JSON text: "Invalid value." at position 0
+```
+
+Fixed by extracting `encodeSignalPayload` and applying it, with `decodeSignalPayload`, on all
+three stores.
+
+**A second defect fell out of it.** The PostgreSQL wrapping was `` `"` + payload + `"` ``,
+which produces invalid JSON the moment the payload contains a quote or a backslash — and is
+then rejected by the very column the wrapping exists to satisfy. `encodeSignalPayload` uses
+`json.Marshal`. Demonstrated by restoring the concatenation:
+
+```
+DeliverSignal("he\"llo") on postgres:   pq: invalid input syntax for type json (22P02)
+DeliverSignal("C:\\path\\to") on postgres: pq: invalid input syntax for type json (22P02)
+```
+
+So this was not only a cross-dialect inconsistency; PostgreSQL was rejecting ordinary payloads
+too. `TestSignalPayloadRoundTripsOnEveryDialect` covers six payload shapes across all three
+dialects and was watched failing on each half of the fix separately.
+
+### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
 
 ### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
 
