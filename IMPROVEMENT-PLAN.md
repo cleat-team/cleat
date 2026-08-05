@@ -4615,6 +4615,55 @@ that deployed it, every definition is the default tenant's and the predicate mat
 useful — the two arms of this test that cover it only pass with §3.12's writer fix in place.
 Two defects that had to be fixed in the same direction to make either observable.
 
+### 3.18 SQL Server rejects the JSON the other two dialects require — 🔴 **OPEN, needs a decision**
+
+The third thing the §2.71 measurement found, and the first that cannot be fixed without
+choosing something. It blocks the schema switch: with the shipped MSSQL schema in place, five
+subtests still fail, all of them this.
+
+`ISJSON(expression)` with no second argument returns 1 **only for a JSON object or array**. A
+JSON scalar — `"payload-1"`, `123`, `true` — returns 0. Measured directly:
+
+```
+ISJSON('"payload-1"') = 0
+ISJSON('{}')          = 1
+```
+
+§2.60c made all three stores encode a non-JSON signal payload with `json.Marshal`, which turns
+`payload-1` into the scalar `"payload-1"`. PostgreSQL's `JSONB` and MySQL's `JSON` both accept
+a scalar, so that fix is correct there — but the value it produces is exactly what SQL Server's
+shipped `CHECK (ISJSON(payload) = 1)` refuses. So `DeliverSignal` and `CreateUpdateRequest`
+fail on a SQL Server built from `migrations/mssql/001_schema.sql`, and §2.60c is only
+two-thirds fixed. The test schema's missing CHECK constraint is why it read as complete.
+
+**Why this is a decision and not a patch.** `ISJSON(payload, VALUE) = 1` accepts scalars and
+is the obvious repair — but the second argument requires **SQL Server 2022**, and `README.md`
+and `docs/reference/database-backends.md` both promise **2017+**. Fixing it that way silently
+raises the floor. The options:
+
+| | what it costs |
+|---|---|
+| `ISJSON(payload, VALUE)` in a migration | Requires SQL Server 2022; contradicts the documented 2017+ support unless that claim changes too |
+| Drop the CHECK on those two columns | Keeps 2017; SQL Server loses a backstop the other two get from their column types. The engine already guarantees valid JSON through `encodeSignalPayload`, so the constraint is defence in depth rather than the only guard |
+| Encode scalars as an object or array | Keeps both the constraint and 2017 — but changes the stored format on every dialect, needs a migration for existing rows, and changes `decodeSignalPayload` |
+
+Not chosen here. Any of them is a product call about what cleat supports, and the first and
+third change behaviour beyond the defect.
+
+**The §2.71 switch is written and waiting on this.** `engine/testutil`'s MSSQL schema pointing
+at the shipped migration works — the fingerprint-once shape from §3.16's note, the
+hand-written DDL retained unreachable for the review diff — and takes the suite from 95 failing
+subtests to 5. Those five are this item. The branch is `fix/mssql-test-schema-real`, unpushed;
+it is ~60 lines and has been re-derived twice, so re-deriving it is cheap if it is lost. Two
+smaller things also fall out of the switch when it lands:
+
+- one fixture inserts a `tenant_api_keys` row for a tenant absent from `admin.tenants`, which
+  the shipped schema has a foreign key for;
+- `TestMSSQLTenantIsolation_UnderRealSecurityPolicies` asserts that exactly
+  `[workflow_routing workflow_tags]` are missing from the test schema. Under the real schema
+  nothing is missing, so it fails **because the drift is closed** — the assertion becomes "no
+  tables are missing".
+
 ### 3.17 Completing a workflow wrote JSON `null` into `query_state`, and SQL Server refused it — ✅ **FIXED** (WS-1, 2026-08-05)
 
 The second thing the §2.71 measurement found, after §3.16 removed the first. Twelve sites
