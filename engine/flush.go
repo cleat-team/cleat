@@ -20,6 +20,26 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 		if uint32(len(data)) > maxLen {
 			data = data[:maxLen]
 		}
+		// ptr comes from the guest. Unchecked, `rawBuf[ptr:]` panics for any
+		// ptr past the end of linear memory -- reachable from guest code by
+		// calling e.g. cleat_workflow_id with a bad output pointer, and
+		// demonstrated by TestWriteResult_GuestPointerOutOfRange.
+		//
+		// It did not crash the worker: the recover around fn.Call in
+		// backend_wasmtime.go catches it. But it surfaced as `wasmtime panic
+		// in "run": runtime error: slice bounds out of range`, which reads as
+		// an engine defect rather than a guest passing a bad pointer, and it
+		// leaned on a recover to handle ordinary malformed guest input. The
+		// wazero path returns a clean error for the same input (mem.Write
+		// reports out-of-bounds), and wasmtimeWriteString in wasmtime_memory.go
+		// already does exactly this check -- writeResult was the one raw-buffer
+		// writer that skipped it.
+		//
+		// uint64 arithmetic so ptr+len cannot itself wrap.
+		if uint64(ptr)+uint64(len(data)) > uint64(len(rawBuf)) {
+			return 0, fmt.Errorf("writeResult: write %d bytes at ptr %d exceeds the %d-byte guest memory",
+				len(data), ptr, len(rawBuf))
+		}
 		n := copy(rawBuf[ptr:], data)
 		return uint32(n), nil
 	}
