@@ -234,3 +234,138 @@ var (
 	_ callIntentStore = (*MySQLStore)(nil)
 	_ callIntentStore = (*MSSQLStore)(nil)
 )
+
+// ---------------------------------------------------------------------------
+// Resolution
+// ---------------------------------------------------------------------------
+
+// ResolveCallIntent completes a pending intent row with an outcome obtained
+// from somewhere other than the original call -- today, an AmbiguityResolver
+// that asked the service what happened. See IMPROVEMENT-PLAN 1.4 phase E.
+//
+// It differs from CompleteCallIntent in where the checksum comes from, and that
+// is the whole reason it exists. CompleteCallIntent is called by the worker
+// that made the call, which is holding the chain in s.lastChecksum. A
+// resolution happens during replay, where the session is reading history rather
+// than building it and has no chain in hand -- so the previous checksum is read
+// from the row before this one, inside the same transaction as the update.
+//
+// That is safe here in a way it was not for the deleted flushCallIntent, whose
+// third defect was reading the chain from the database: everything before a
+// pending row has been persisted by definition, because the crash that created
+// the row happened after them. There is nothing in flight to disagree with.
+//
+// Persisting matters more than it might look. Without it every replay would ask
+// the resolver again, and a service that answered differently the second time
+// -- or was unreachable -- would make the same step resolve one way on one
+// replay and another way on the next. Replay determinism is the constraint this
+// whole stream is held to, so a resolution is written down once and read back
+// from then on.
+type callIntentResolver interface {
+	ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte) error
+}
+
+func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	prev, err := s.previousStoredChecksum(ctx, tx, workflowID, rec.Step)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: previous checksum: %w", err)
+	}
+	checksum := computeEventChecksum(rec, prev)
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE event_history
+		SET response = $3, error = $4, payload = $5, checksum = $6, intent_at = NULL
+		WHERE workflow_id = $1 AND step = $2 AND tenant_id = $7
+		  AND intent_at IS NOT NULL AND checksum IS NULL
+	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+		checksum, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("resolve call intent: rows affected: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("resolve call intent: step %d: %w (%d rows matched)", rec.Step, errIntentNotPending, n)
+	}
+	return tx.Commit()
+}
+
+func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte) error {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	prev, err := s.previousStoredChecksum(ctx, tx, workflowID, rec.Step)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: previous checksum: %w", err)
+	}
+	checksum := computeEventChecksum(rec, prev)
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE event_history
+		SET response = ?, error = ?, payload = ?, checksum = ?, intent_at = NULL
+		WHERE workflow_id = ? AND step = ? AND tenant_id = ?
+		  AND intent_at IS NOT NULL AND checksum IS NULL
+	`, rec.Response, nullStr(rec.Err), nullStr(string(payload)), checksum,
+		workflowID, rec.Step, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("resolve call intent: rows affected: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("resolve call intent: step %d: %w (%d rows matched)", rec.Step, errIntentNotPending, n)
+	}
+	return tx.Commit()
+}
+
+func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte) error {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	prev, err := s.previousStoredChecksum(ctx, tx, workflowID, rec.Step)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: previous checksum: %w", err)
+	}
+	checksum := computeEventChecksum(rec, prev)
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE event_history
+		SET response = @p3, error = @p4, payload = @p5, checksum = @p6, intent_at = NULL
+		WHERE workflow_id = @p1 AND step = @p2 AND tenant_id = @p7
+		  AND intent_at IS NOT NULL AND checksum IS NULL
+	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+		checksum, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("resolve call intent: rows affected: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("resolve call intent: step %d: %w (%d rows matched)", rec.Step, errIntentNotPending, n)
+	}
+	return tx.Commit()
+}
+
+var (
+	_ callIntentResolver = (*PostgresStore)(nil)
+	_ callIntentResolver = (*MySQLStore)(nil)
+	_ callIntentResolver = (*MSSQLStore)(nil)
+)

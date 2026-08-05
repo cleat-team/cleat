@@ -82,6 +82,11 @@ type Engine struct {
 
 	noPerStepFlush bool // skip per-step flushEvent; rely on FinalizeWorkflowSegment for persistence
 
+	// ambiguityResolver is consulted when replay finds a call whose outcome
+	// was never recorded (IMPROVEMENT-PLAN 1.4 phase E). Nil means ambiguity
+	// is reported to the workflow, which is the behaviour without it.
+	ambiguityResolver AmbiguityResolver
+
 	// intentOps holds the "service.operation" keys declared as
 	// WriteAheadIntent (IMPROVEMENT-PLAN 1.4 phase D). Empty means every call
 	// is AtLeastOnce, which is what shipped before and costs nothing.
