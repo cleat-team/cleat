@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **`--require-signal-auth` now defaults to `false`.** It gates a check that
+  reads `workflow_instances.allowed_signals`, and nothing in cleat can write
+  that column — no store method, no API endpoint, no CLI verb, no SDK call. The
+  check denies when the list is empty, so with the flag on by default every
+  cross-workflow signal, every plugin-originated signal and every external HTTP
+  signal was denied, and the documented remedy (add `"*"` to `allowed_signals`)
+  could not be carried out. A deployment that wants the old behaviour can pass
+  `--require-signal-auth=true`, but should know that it denies every signal.
+  The default goes back to `true` when there is a way to populate the list.
+
 - **A deploy no longer overwrites a workflow definition owned by another
   tenant; it fails instead.** `workflow_defs` is keyed by `(name, version)`
   with no tenant in the key, and all three backends upserted on that key — so

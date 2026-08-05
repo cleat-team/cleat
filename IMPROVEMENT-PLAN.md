@@ -4721,7 +4721,7 @@ the residual predicts:
 Re-measure after §3.16 lands: the number that matters is what is left once the schedule defect
 is gone.
 
-### 3.15 Signal authorization consults a list nothing can write — 🔴 **OPEN**
+### 3.15 Signal authorization consults a list nothing can write — 🔶 **DEFAULT TURNED OFF** (WS-1, 2026-08-05), feature still absent
 
 Found while scoping `GetAllowedSignalCallers` for §3.11: the method reads
 `workflow_instances.allowed_signals`, and **nothing in the product ever writes that column.**
@@ -4754,6 +4754,33 @@ list (store method, API, and something in the SDKs), or `--require-signal-auth` 
 `false` until it does. Flipping the default is one line and turns a silently-broken security
 feature into an absent one; adding a writer is the feature it was always supposed to be. Not
 taken here because it is a product call rather than a defect fix.
+
+#### Resolution — the default is off, and the denial is now observed rather than read
+
+Taken the second way, on the owner's instruction to use judgement. `--require-signal-auth`
+defaults to `false`; `docs/reference/worker-config.md` says plainly that the flag is not usable
+yet and why; `CHANGELOG.md` carries it as a breaking upgrade note. **The feature is still
+absent** — this makes that honest rather than making it work.
+
+Before changing a security default I verified the denial rather than trusting the code path,
+which meant giving the production wiring a name: the check was an anonymous closure inside
+`newWorker`, so the only thing testable was `engine.TestWithSignalAuthCheck`, which passes a
+*stub* closure and asserts the option plumbing — a test that replaces the thing under test.
+`signalAuthCheckFor(store)` is now a named function, and three tests drive it against a real
+PostgreSQL store:
+
+- a workflow created through the ordinary path denies every caller, with the empty-list reason.
+  That is the defect, pinned: as long as nothing can write the column, this is what enabling
+  the flag does;
+- the flag's default is `false`;
+- the mechanism still enforces a list that *is* present — caller listed, caller absent,
+  wildcard, empty list — set with raw SQL, because that remains the only way to set it. That
+  guards against the check rotting while it is unreachable, so whoever adds a writer inherits
+  something that works.
+
+**Still open:** the writer. A store method, an API endpoint and SDK surface, at which point the
+default goes back to `true`. The tests above are written so that the first one fails when that
+lands, which is the signal to revisit them.
 
 ### 3.12 One tenant's deploy silently replaces another's workflow code — 🔶 **OVERWRITE CLOSED, NAMESPACE STILL SHARED** (WS-1, 2026-08-05)
 

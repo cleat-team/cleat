@@ -809,6 +809,31 @@ func (ht *healthTracker) snapshot() (map[string]time.Time, map[string]bool, map[
 // Signal authorization
 // ---------------------------------------------------------------------------
 
+// signalAuthCheckFor builds the signal-authorization check the worker installs
+// when --require-signal-auth is set.
+//
+// A named function rather than a closure inside newWorker, so a test can drive
+// the thing the worker actually runs. The only coverage this had was
+// engine.TestWithSignalAuthCheck, which passes a stub closure and asserts that
+// the option plumbing calls it -- so it could not have seen that the real check
+// denies every signal, which is what IMPROVEMENT-PLAN 3.15 is about. Replacing
+// the thing under test with a stub is the shape of defect 1.3 as well.
+func signalAuthCheckFor(store engine.WorkflowStore) func(ctx context.Context, targetWorkflowID, callerDefName string) error {
+	return func(ctx context.Context, targetWorkflowID, callerDefName string) error {
+		callers, err := store.GetAllowedSignalCallers(ctx, targetWorkflowID)
+		if err != nil {
+			return err
+		}
+		if len(callers) == 0 {
+			return fmt.Errorf("signal auth denied: workflow %s has no allowed callers configured", targetWorkflowID)
+		}
+		if signalCallerAllowed(callers, callerDefName) {
+			return nil
+		}
+		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", callerDefName, targetWorkflowID)
+	}
+}
+
 // signalCallerAllowed checks whether a caller (by defName or "*" wildcard)
 // is permitted to signal a target workflow based on its allowed_signals list.
 func signalCallerAllowed(callers []string, callerDefName string) bool {
@@ -1582,19 +1607,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if w.requireSignalAuth != nil && *w.requireSignalAuth {
 		engineOpts = append(engineOpts,
 			engine.WithRequireSignalAuth(true),
-			engine.WithSignalAuthCheck(func(ctx context.Context, targetWorkflowID, callerDefName string) error {
-				callers, err := w.store.GetAllowedSignalCallers(ctx, targetWorkflowID)
-				if err != nil {
-					return err
-				}
-				if len(callers) == 0 {
-					return fmt.Errorf("signal auth denied: workflow %s has no allowed callers configured", targetWorkflowID)
-				}
-				if signalCallerAllowed(callers, callerDefName) {
-					return nil
-				}
-				return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", callerDefName, targetWorkflowID)
-			}),
+			engine.WithSignalAuthCheck(signalAuthCheckFor(w.store)),
 		)
 	}
 	// Enable event history checksum verification on replay by default.

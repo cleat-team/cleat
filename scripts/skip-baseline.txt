@@ -17,6 +17,7 @@ cmd/cleat-worker	TestDeployOverAnotherTenantsNameIsRefusedOverHTTP	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
+cmd/cleat-worker	newSignalAuthStore	1
 engine	RegisterBackend	4
 engine	TestAssemblyScriptWorkflowExecute	3
 engine	TestCascadeDelete	2

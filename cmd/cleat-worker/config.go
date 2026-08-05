@@ -60,25 +60,32 @@ var (
 		"Row-level security enforcement check on startup: \"auto\" refuses to start when "+
 			"--require-auth is set (multi-tenant) and warns otherwise, \"require\" always "+
 			"refuses, \"off\" skips the check. PostgreSQL only.")
-	driver                        = flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
-	concurrency                   = flag.Int("concurrency", 10, "Max concurrent workflow executions")
-	maxQueued                     = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
-	heartbeatInterval             = flag.Duration("heartbeat", 5*time.Second, "Heartbeat interval")
-	pollInterval                  = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
-	notifyChannel                 = flag.String("notify-channel", "cleat_dispatch", "PostgreSQL NOTIFY channel for dispatch wake-up (empty disables)")
-	apiAddr                       = flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
-	pprofAddr                     = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
-	taskQueuesStr                 = flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
-	compactionThreshold           = flag.Int("compaction-threshold", 100, "Number of events before history compaction triggers")
-	compactionInterval            = flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
-	shardsFile                    = flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
-	pluginConfigFile              = flag.String("plugin-config", "", "path to plugin config JSON file")
-	memorySoftLimit               = flag.Float64("memory-soft-limit", 0.80, "Memory soft limit fraction 0.0-1.0 (stop claiming new work)")
-	memoryHardLimit               = flag.Float64("memory-hard-limit", 0.95, "Memory hard limit fraction 0.0-1.0 (reject API workflows)")
-	memoryCheckInterval           = flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
-	memorySampleRetention         = flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
-	requireAuth                   = flag.Bool("require-auth", true, "Require API key authentication (default: true when --api-addr is set)")
-	requireSignalAuth             = flag.Bool("require-signal-auth", true, "Require signal authorization: checks caller identity against target's allowed_signals (default: true)")
+	driver                = flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
+	concurrency           = flag.Int("concurrency", 10, "Max concurrent workflow executions")
+	maxQueued             = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
+	heartbeatInterval     = flag.Duration("heartbeat", 5*time.Second, "Heartbeat interval")
+	pollInterval          = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
+	notifyChannel         = flag.String("notify-channel", "cleat_dispatch", "PostgreSQL NOTIFY channel for dispatch wake-up (empty disables)")
+	apiAddr               = flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
+	pprofAddr             = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
+	taskQueuesStr         = flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
+	compactionThreshold   = flag.Int("compaction-threshold", 100, "Number of events before history compaction triggers")
+	compactionInterval    = flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
+	shardsFile            = flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
+	pluginConfigFile      = flag.String("plugin-config", "", "path to plugin config JSON file")
+	memorySoftLimit       = flag.Float64("memory-soft-limit", 0.80, "Memory soft limit fraction 0.0-1.0 (stop claiming new work)")
+	memoryHardLimit       = flag.Float64("memory-hard-limit", 0.95, "Memory hard limit fraction 0.0-1.0 (reject API workflows)")
+	memoryCheckInterval   = flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
+	memorySampleRetention = flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
+	requireAuth           = flag.Bool("require-auth", true, "Require API key authentication (default: true when --api-addr is set)")
+	// Defaults to false, not true: nothing in the product can write
+	// workflow_instances.allowed_signals -- no store method, no API, no CLI,
+	// no SDK -- and the check denies when that list is empty. Defaulting it on
+	// therefore denied every cross-workflow, plugin and external signal on a
+	// deployment that had never opted into anything, with no supported way to
+	// permit one. IMPROVEMENT-PLAN 3.15. Turn it back on together with a way
+	// to populate the list.
+	requireSignalAuth             = flag.Bool("require-signal-auth", false, "Require signal authorization: checks caller identity against target's allowed_signals. Off by default: allowed_signals cannot yet be set (IMPROVEMENT-PLAN 3.15)")
 	generateAPIKeyFor             = flag.String("generate-api-key", "", "Generate a new API key for the given tenant UUID and exit")
 	maxBodySize                   = flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
 	httpReadTimeout               = flag.Duration("http-read-timeout", 30*time.Second, "HTTP read timeout")
