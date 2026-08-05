@@ -17,7 +17,7 @@ tenant isolation. Each backend has a complete implementation:
 
 - **PostgreSQLStore** (`internal/host/db.go`) — the original implementation
 - **MySQLStore** (`internal/host/mysql_store.go`) — MySQL 8.0+, MariaDB 10.6+
-- **MSSQLStore** (`internal/host/mssql_store.go`) — SQL Server 2017+, Azure SQL
+- **MSSQLStore** (`internal/host/mssql_store.go`) — SQL Server 2022+, Azure SQL
 
 Each backend also has a `StoreFactory` that encapsulates connection management,
 schema setup, and tenant isolation:
@@ -43,13 +43,13 @@ type StoreFactory interface {
 | PostgreSQL | 14 | 16 | RLS, `SKIP LOCKED`, `gen_random_uuid()`, and `JSONB` all available since 9.5+. 14+ ensures pgcrypto support. |
 | MySQL | 8.0 | 8.4 | `SKIP LOCKED` requires 8.0+. `NOW(6)` for microsecond precision. |
 | MariaDB | 10.6 | 11.x | Tested alongside MySQL 8.4. Supports `SKIP LOCKED`. Does not support RLS. |
-| SQL Server | 2017 | 2022 | `STRING_SPLIT` (used for task queue filtering) requires compatibility level 130 (2016+). Azure SQL Database fully supported. |
+| SQL Server | 2022 | 2022 | `ISJSON(x, VALUE)` — used by the payload CHECK constraints so a JSON scalar is accepted, as PostgreSQL and MySQL do — requires 2022. Azure SQL Database fully supported. See IMPROVEMENT-PLAN §3.18. |
 
 ---
 
 ## 3. Feature Comparison
 
-| Capability | PostgreSQL | MySQL 8.0+ / MariaDB | SQL Server 2017+ |
+| Capability | PostgreSQL | MySQL 8.0+ / MariaDB | SQL Server 2022+ |
 |------------|-----------|----------------------|-------------------|
 | **Tenant isolation** | RLS via `set_config()` + `CREATE POLICY` | Separate database per tenant (application-level `WHERE tenant_id = ?`) | RLS via `sp_set_session_context()` + `CREATE SECURITY POLICY` |
 | **Atomic claim read** | `UPDATE ... RETURNING *` (single statement) | SELECT + UPDATE + SELECT (three statements in a transaction) | `UPDATE ... OUTPUT INSERTED.*` (single statement) |

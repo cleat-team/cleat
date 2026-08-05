@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **SQL Server 2022 is now the minimum.** `migrations/mssql/011` uses
+  `ISJSON(payload, VALUE)`, whose second argument requires 2022, so that the
+  payload columns accept the JSON scalars PostgreSQL and MySQL have always
+  accepted — without it, `DeliverSignal` and `CreateUpdateRequest` failed on
+  any SQL Server built from the shipped schema. `README.md` and
+  `docs/reference/database-backends.md` previously said 2017+; nothing has ever
+  tested below 2022.
 - **`--require-signal-auth` now defaults to `false`.** It gates a check that
   reads `workflow_instances.allowed_signals`, and nothing in cleat can write
   that column — no store method, no API endpoint, no CLI verb, no SDK call. The
@@ -142,6 +149,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project renamed from "durable" to "cleat" across the codebase
 
 ### Fixed
+- **`CreateUpdateRequest` rejected ordinary payloads.** A non-JSON update
+  payload failed outright on MySQL and SQL Server, and one containing a quote
+  or a backslash failed on all three — `workflow_update_requests.payload` never
+  received the JSON encoding signals got in the same fix. Both the encode and
+  the decode are now shared, so every dialect stores and returns what the
+  caller passed in.
 - **Workflows could not complete on SQL Server.** `json.Marshal` of a nil map
   returns `null`, not nil, so a workflow with no query handlers wrote the JSON
   value `null` into `query_state` — which PostgreSQL and MySQL accept and the

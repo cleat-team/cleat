@@ -27,7 +27,7 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		WHEN MATCHED THEN UPDATE SET payload = source.payload, delivered_at = SYSUTCDATETIME()
 		WHEN NOT MATCHED THEN INSERT (workflow_id, signal_name, payload, tenant_id)
 		     VALUES (source.workflow_id, source.signal_name, source.payload, @p4);
-	`, workflowID, signalName, encodeSignalPayload(payload), s.tenantID)
+	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -55,7 +55,7 @@ func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName stri
 	if err != nil {
 		return "", false, fmt.Errorf("poll signal: %w", err)
 	}
-	return decodeSignalPayload(payload), true, nil
+	return decodeJSONPayload(payload), true, nil
 }
 
 func (s *MSSQLStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
@@ -115,7 +115,7 @@ func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 	if err != nil {
 		return "", false, fmt.Errorf("poll and claim signal: delete: %w", err)
 	}
-	return decodeSignalPayload(payload), true, tx.Commit()
+	return decodeJSONPayload(payload), true, tx.Commit()
 }
 
 func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
@@ -310,7 +310,7 @@ func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4, 'pending', @p5)
-	`, workflowID, updateName, payload, promiseID, s.tenantID)
+	`, workflowID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
 	return err
 }
 
@@ -334,6 +334,7 @@ func (s *MSSQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 			&req.Status, &req.Result, &req.ErrorMsg, &req.CreatedAt); err != nil {
 			return nil, err
 		}
+		req.Payload = decodeJSONPayload(req.Payload)
 		requests = append(requests, req)
 	}
 	return requests, rows.Err()

@@ -405,7 +405,7 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		VALUES (?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE payload = VALUES(payload), delivered_at = NOW(6)
-	`, workflowID, signalName, encodeSignalPayload(payload), s.tenantID)
+	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -435,7 +435,7 @@ func (s *MySQLStore) PollSignal(ctx context.Context, workflowID, signalName stri
 	if err != nil {
 		return "", false, fmt.Errorf("poll signal: %w", err)
 	}
-	return decodeSignalPayload(payload), true, nil
+	return decodeJSONPayload(payload), true, nil
 }
 
 // PollCancellation checks whether the workflow has been cancelled.
@@ -499,7 +499,7 @@ func (s *MySQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 		return "", false, fmt.Errorf("poll and claim signal: delete: %w", err)
 	}
 
-	return decodeSignalPayload(payload), true, tx.Commit()
+	return decodeJSONPayload(payload), true, tx.Commit()
 }
 
 // ---------------------------------------------------------------------------

@@ -138,7 +138,7 @@ func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 	_, err := s.db.ExecContext(ctx, `
 		INSERT IGNORE INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status)
 		VALUES (?, ?, ?, ?, 'pending')
-	`, workflowID, updateName, payload, promiseID)
+	`, workflowID, updateName, encodeJSONPayload(payload), promiseID)
 	return err
 }
 
@@ -167,7 +167,12 @@ func (s *MySQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 			&r.PromiseID, &r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
 			return nil, err
 		}
-		r.Payload = compactJSONString(r.Payload)
+		// decodeJSONPayload, not compactJSONString: a payload that was not
+		// JSON is stored as a JSON string, and the caller wants back what it
+		// passed in. PostgresStore has always done this with `payload #>> '{}'`
+		// -- these two readers returned the quoted form instead, so the same
+		// call gave different answers per dialect. IMPROVEMENT-PLAN 3.19.
+		r.Payload = decodeJSONPayload(r.Payload)
 		r.Result = compactJSONString(r.Result)
 		requests = append(requests, r)
 	}

@@ -4615,7 +4615,7 @@ that deployed it, every definition is the default tenant's and the predicate mat
 useful — the two arms of this test that cover it only pass with §3.12's writer fix in place.
 Two defects that had to be fixed in the same direction to make either observable.
 
-### 3.18 SQL Server rejects the JSON the other two dialects require — 🔴 **OPEN, needs a decision**
+### 3.18 SQL Server rejects the JSON the other two dialects require — ✅ **FIXED** (WS-1, 2026-08-05), floor raised to 2022
 
 The third thing the §2.71 measurement found, and the first that cannot be fixed without
 choosing something. It blocks the schema switch: with the shipped MSSQL schema in place, five
@@ -4649,6 +4649,47 @@ raises the floor. The options:
 
 Not chosen here. Any of them is a product call about what cleat supports, and the first and
 third change behaviour beyond the defect.
+
+#### Resolution — 2022+, and now it is the claim CI tests
+
+The owner chose the first option. `migrations/mssql/011_json_scalar_payloads.sql` changes both
+constraints to `ISJSON(payload, VALUE) = 1`, which accepts every value PostgreSQL's JSONB and
+MySQL's JSON accept — measured on the 2022 container: a string scalar and a number scalar pass,
+an object and an array pass, and `payload-1` is still refused, so the guard is not traded for a
+no-op. `README.md` and `docs/reference/database-backends.md` say 2022+.
+
+Worth stating plainly, because it was the argument for choosing this way: the 2017+ claim was
+**true in the code and tested nowhere**. The shipped SQL used only 2016/2017-era features, so
+it was not already broken — but `multi-db-ci.yml`, the compose files and the docs' own examples
+have only ever run 2022, and nothing anywhere asserts a version. The repo now promises what it
+verifies. A server older than 2022 fails migration 011 with `Incorrect syntax near 'VALUE'`,
+which is a better answer than silently rejecting every signal.
+
+### 3.19 `CreateUpdateRequest` was §2.60c's defect, one table over — ✅ **FIXED** (WS-1, 2026-08-05)
+
+§2.60c established that `workflow_signals.payload` must hold valid JSON on all three dialects
+and that only `PostgresStore` knew; it extracted `encodeSignalPayload` and applied it
+everywhere. It did not reach `workflow_update_requests.payload`, the sibling column with the
+same requirement, where each store was wrong in a different way:
+
+| store | what it did with a non-JSON payload |
+|---|---|
+| `PostgresStore` | wrapped with `` `"` + payload + `"` `` — the concatenation §2.60c itself identifies as producing invalid JSON when the payload contains a quote or a backslash |
+| `MySQLStore` | nothing; `Error 3140` |
+| `MSSQLStore` | nothing; CHECK constraint violation |
+
+So `CreateUpdateRequest(ctx, wf, "name", "payload-1", …)` succeeded on PostgreSQL and failed on
+the other two, and a payload containing a quote failed on all three. Found by pointing
+`engine/testutil`'s MSSQL schema at the shipped migration (§2.71) — the only place the
+constraint exists.
+
+**And the readers disagreed too**, which the test caught rather than accommodating.
+`PostgresStore` unwraps with `payload #>> '{}'`; the other two returned the quoted form. The
+same call therefore answered differently per backend. `encodeSignalPayload`/`decodeSignalPayload`
+are now `encodeJSONPayload`/`decodeJSONPayload` and both halves are applied on all three, so
+`GetPendingUpdateRequests` returns what the caller passed in everywhere.
+
+
 
 **The §2.71 switch is written and waiting on this.** `engine/testutil`'s MSSQL schema pointing
 at the shipped migration works — the fingerprint-once shape from §3.16's note, the

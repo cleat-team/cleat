@@ -9,10 +9,19 @@
 # the engine job runs against PostgreSQL only, so its MySQL and SQL Server
 # subtests are "nobody asked", which is the one thing a skip is allowed to mean.
 #
-# RULE OF THUMB, learned the expensive way three times in one afternoon: a new
-# test that runs against registeredBackends costs TWO skips in every job that
-# configures PostgreSQL only -- its mysql and mssql arms -- and that is
-# test-go/engine AND cluster, which move together. Bump both before pushing.
+# RULE OF THUMB, learned the expensive way four times in one afternoon: any new
+# test gated on a dialect costs a skip in every job that does not configure that
+# dialect. Two shapes to watch:
+#
+#   * a test running against registeredBackends costs TWO skips (its mysql and
+#     mssql arms) in every PostgreSQL-only job -- test-go/engine AND cluster,
+#     which move together;
+#   * a test gated on CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL costs ONE in whichever
+#     job runs its package without that dialect -- for ./migration/... that is
+#     test-go/support.
+#
+# Work out which jobs run the package you touched, and bump those, before
+# pushing.
 # To check without waiting for CI:
 #
 #   env -u CLEAT_TEST_MYSQL -u CLEAT_TEST_MSSQL -u CLEAT_TEST_POSTGRES \
@@ -155,11 +164,21 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # 399 -> 401: TestCompleteWorkflowStoresAnObjectForEmptyQueryState (3.17), a
 # three-dialect test whose mysql and mssql arms skip here. Observed on the
 # runner: `skipped=401 budget=399 (passed=3338 failed=0)`.
-test-go/engine	401	# 399 + 3.17's two dialect arms
+#
+# 401 -> 403: TestCreateUpdateRequestAcceptsAnyPayload (3.19), a three-dialect
+# test whose mysql and mssql arms skip here. Caught before pushing this time,
+# by the check documented at the top of this file: the local number moved
+# 396 -> 398 on the same command, and the runner sits a fixed distance above
+# local, so leaving the budget at 401 would have tripped the guard at ~403.
+test-go/engine	403	# 401 + 3.19's two dialect arms (local delta 396 -> 398)
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
-test-go/support	6	# measured: skipped=6 passed=259 with PostgreSQL only
+#
+# 6 -> 7: TestMSSQLPayloadConstraintsAcceptJSONScalars (3.18), which applies the
+# real migrations to a scratch database and needs a live SQL Server. Runs for
+# real in multi-db-ci.yml's test-mssql job, which has one.
+test-go/support	7	# measured: skipped=7 passed=259 with PostgreSQL only
 # The four in ./migration/ are all "this job configures PostgreSQL only":
 #
 #   TestIdempotencyTenantMigrationPreservesExistingKeys/{mysql,mssql}
@@ -233,7 +252,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	401	# same as test-go/engine, and for the same reason; see the note there
+cluster	403	# same as test-go/engine, and for the same reason; see the note there
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is
