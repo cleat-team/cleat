@@ -156,7 +156,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 				}
 
 				written, _ := s.writeResult(ctx, m, runIDPtr, rec.RunID, runIDMaxLen)
-				return packSimpleResult(0, uint32(written))
+				return packSimpleResult(0, written)
 			}
 		}
 		s.exitReplay()
@@ -263,7 +263,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	}
 
 	written, _ := s.writeResult(ctx, m, runIDPtr, runID, runIDMaxLen)
-	return packSimpleResult(0, uint32(written))
+	return packSimpleResult(0, written)
 }
 
 func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
@@ -279,10 +279,10 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 					}
 					if rec.Err != "" {
 						written, _ := s.writeResult(ctx, m, resultPtr, rec.Err, resultMaxLen)
-						return packAwaitChildResult(uint32(written), 1)
+						return packAwaitChildResult(written, 1)
 					}
 					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
-					return packAwaitChildResult(uint32(written), 0)
+					return packAwaitChildResult(written, 0)
 				}
 				s.engine.log().InfoContext(ctx, "await_child: no cached result, exitReplay to fresh", "workflow_id", s.workflowID, "runID", runID, "step", rec.Step)
 				// No cached result yet — fall through to fresh to re-check.
@@ -297,7 +297,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 				errMsg := fmt.Sprintf("replay divergence at step %d: expected await_child, got %s.\n  run ID: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 					rec.Step, rec.EventType, runID)
 				written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
-				return packAwaitChildResult(uint32(written), 1)
+				return packAwaitChildResult(written, 1)
 			}
 		} else {
 			s.exitReplay()
@@ -317,7 +317,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 			s.recordEvent(rec)
 
 			written, _ := s.writeResult(ctx, m, resultPtr, result, resultMaxLen)
-			return packAwaitChildResult(uint32(written), 0)
+			return packAwaitChildResult(written, 0)
 		}
 		if err != nil {
 			rec := EventRecord{
@@ -329,7 +329,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 			s.recordEvent(rec)
 
 			written, _ := s.writeResult(ctx, m, resultPtr, err.Error(), resultMaxLen)
-			return packAwaitChildResult(uint32(written), 1)
+			return packAwaitChildResult(written, 1)
 		}
 	}
 
@@ -378,7 +378,7 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 
 	out, _ := json.Marshal(pr)
 	written, _ := s.writeResult(ctx, m, resultPtr, string(out), resultMaxLen)
-	return packSimpleResult(0, uint32(written))
+	return packSimpleResult(0, written)
 }
 
 func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
@@ -391,7 +391,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 				}
 				if rec.Response != "" {
 					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
-					return packSimpleResult(0, uint32(written))
+					return packSimpleResult(0, written)
 				}
 				// Empty response: this was a suspend (no child was done yet).
 				// Peek at the next event — if it is also an AwaitAnyChild with
@@ -406,7 +406,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 							return 0
 						}
 						written, _ := s.writeResult(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
-						return packSimpleResult(0, uint32(written))
+						return packSimpleResult(0, written)
 					}
 				}
 				// No cached re-execution result — fall through to fresh.
@@ -464,7 +464,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 				}
 				s.recordEvent(rec)
 				written, _ := s.writeResult(ctx, m, resultPtr, string(outJSON), resultMaxLen)
-				return packSimpleResult(0, uint32(written))
+				return packSimpleResult(0, written)
 			}
 		}
 	}
@@ -496,7 +496,7 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 	var runIDs []string
 	if err := json.Unmarshal([]byte(runIDsJSON), &runIDs); err != nil {
 		written, _ := s.writeResult(ctx, m, resultsPtr, fmt.Sprintf(`[{"error":"invalid runIDs: %v"}]`, err), resultsMaxLen)
-		return packAwaitChildResult(uint32(written), 1)
+		return packAwaitChildResult(written, 1)
 	}
 
 	// Concurrently await all children.
@@ -540,7 +540,7 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 	s.recordEvent(rec)
 
 	written, _ := s.writeResult(ctx, m, resultsPtr, string(outcomesJSON), resultsMaxLen)
-	return packAwaitChildResult(uint32(written), 0)
+	return packAwaitChildResult(written, 0)
 }
 
 func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
@@ -560,7 +560,7 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 				truncateWithHash(runIDsJSON, maxPayloadLen),
 				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, resultsPtr, errMsg, resultsMaxLen)
-			return packAwaitChildResult(uint32(written), 1)
+			return packAwaitChildResult(written, 1)
 		}
 
 		if runIDsJSON != rec.Request {
@@ -572,11 +572,11 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 				truncateWithHash(runIDsJSON, maxPayloadLen),
 				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, resultsPtr, errMsg, resultsMaxLen)
-			return packAwaitChildResult(uint32(written), 1)
+			return packAwaitChildResult(written, 1)
 		}
 
 		written, _ := s.writeResult(ctx, m, resultsPtr, rec.Response, resultsMaxLen)
-		return packAwaitChildResult(uint32(written), 0)
+		return packAwaitChildResult(written, 0)
 	}
 
 	s.exitReplay()

@@ -1909,7 +1909,7 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 			}
 			if reaped > 0 {
 				w.logger.InfoContext(w.ctx, "Concurrency key reaper: removed expired keys", "worker_id", w.id, "count", reaped)
-				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "concurrency_key_reaper", int64(reaped))
+				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "concurrency_key_reaper", reaped)
 			}
 			w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "ok")
 			w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
@@ -2097,7 +2097,7 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 			if err == nil {
 				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "ok")
 				if deleted > 0 {
-					w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "memory_cleanup", int64(deleted))
+					w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "memory_cleanup", deleted)
 				}
 			}
 			w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())

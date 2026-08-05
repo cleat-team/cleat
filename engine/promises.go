@@ -63,14 +63,14 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 					return 0
 				}
 				written, _ := s.writeResult(ctx, m, resultPtr, rec.PromiseResult, resultMaxLen)
-				return packAwaitPromiseResult(uint32(written), false, 0)
+				return packAwaitPromiseResult(written, false, 0)
 			}
 			if rec.EventType == EventTypePromiseRejected {
 				if !s.advanceReplayStep(ctx, &rec) {
 					return 0
 				}
 				written, _ := s.writeResult(ctx, m, resultPtr, rec.PromiseError, resultMaxLen)
-				return packAwaitPromiseResult(uint32(written), false, 1)
+				return packAwaitPromiseResult(written, false, 1)
 			}
 			if rec.EventType == EventTypeAwaitPromise {
 				if !s.advanceReplayStep(ctx, &rec) {
@@ -96,7 +96,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			}
 			s.recordEvent(rec)
 			written, _ := s.writeResult(ctx, m, resultPtr, result, resultMaxLen)
-			return packAwaitPromiseResult(uint32(written), false, 0)
+			return packAwaitPromiseResult(written, false, 0)
 		}
 		if err == nil && status == "rejected" {
 			rec := EventRecord{
@@ -107,7 +107,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			}
 			s.recordEvent(rec)
 			written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
-			return packAwaitPromiseResult(uint32(written), false, 1)
+			return packAwaitPromiseResult(written, false, 1)
 		}
 	}
 

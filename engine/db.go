@@ -159,8 +159,8 @@ func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID
 	if s.encryption != nil && s.encryptSensitivePayloads {
 		// Request and Response are base64-decoded by tryDecodeBase64,
 		// so they hold raw ciphertext bytes and must be decrypted via Decrypt.
-		rec.Request = s.decryptField(string(rec.Request), "Request", workflowID, rec.Step, true)
-		rec.Response = s.decryptField(string(rec.Response), "Response", workflowID, rec.Step, true)
+		rec.Request = s.decryptField(rec.Request, "Request", workflowID, rec.Step, true)
+		rec.Response = s.decryptField(rec.Response, "Response", workflowID, rec.Step, true)
 		// Err, SignalPayload, ChildInput, NewInput, PluginInput, PluginOutput,
 		// PromiseResult, PromiseError are stored as base64-encoded ciphertexts
 		// (no extra base64 layer), so DecryptString is correct.
