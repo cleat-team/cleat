@@ -257,6 +257,30 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.DetachedRunID != "" {
 			payload["detached_run_id"] = rec.DetachedRunID
 		}
+	case "admin_action":
+		// Without this arm the payload is "{}", and computeEventChecksum
+		// hashes payload alone -- so who forced a workflow and what they did
+		// to it would sit entirely outside the checksum, editable in the
+		// columns afterwards with VerifyWorkflowEvents still calling the
+		// workflow clean. For an audit record that is the whole point of
+		// writing it into the history rather than beside it.
+		//
+		// Note that verifyShadowColumns does NOT cover this: it compares the
+		// columns against a record populated from payload, and
+		// populateFromPayload only overwrites keys the payload carries, so an
+		// absent key inherits the column's own value and always compares
+		// equal. An empty payload is invisible to it, not a divergence.
+		// TestAdminActionEventPayloadRoundTrip is what holds this arm up.
+		// See store_admin.go.
+		if rec.Service != "" {
+			payload["service"] = rec.Service
+		}
+		if rec.Op != "" {
+			payload["operation"] = rec.Op
+		}
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
 	case "side_effect":
 		if rec.SideEffectResult != "" {
 			payload["side_effect_result"] = rec.SideEffectResult
@@ -547,6 +571,16 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["detached_run_id"].(string); ok {
 			rec.DetachedRunID = v
+		}
+	case "admin_action":
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["operation"].(string); ok {
+			rec.Op = v
+		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
 		}
 	case "side_effect":
 		if v, ok := m["side_effect_result"].(string); ok {

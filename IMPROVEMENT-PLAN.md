@@ -4586,6 +4586,84 @@ recur. `migration/idempotency_tenant_test.go`'s MySQL arm is skipped pointing he
 skip is the acceptance test for this item.
 
 
+### 3.20 Admin force-resolve was a stub the API answered for — ✅ **FIXED** (WS-2, 2026-08-05)
+
+`AdminForceComplete` and `AdminForceFail` returned `"admin force-complete: not implemented
+yet"` on all three dialects. `cmd/cleat-worker/api_admin.go` routed
+`POST /api/admin/instances/{id}/force-{complete,fail}` to them behind the `X-Confirm` guard
+and the ownership check §1.7 added, so an operator trying to unstick a workflow got a **500
+from an endpoint whose route, confirmation header and authorization were all real** — the one
+part that was missing was the operation.
+
+Every existing test passed throughout, because all seven of them supply a `mockStore` whose
+`adminForceCompleteFn` returns `nil`. §2.17's shape again: the tests ran one layer above the
+thing that was broken.
+
+**What shipped.** Real bodies for both operations on all three dialects
+(`engine/store_admin.go`), each doing four things in one transaction:
+
+1. A terminal status write fenced on **generation but not on `assigned_to`** — the workflow
+   being force-resolved usually has no live owner to match, which is the whole reason the
+   operation exists. Generation is what makes a stale operator request fail instead of
+   resolving a workflow that has moved on.
+2. A **generation bump**, so the write fences off a worker that still believes it owns the
+   run. `ReapStaleInstances` bumps for the same reason. Tested: after a force-complete the
+   previous owner's `CompleteWorkflow` returns `ErrFenceLost` and does not overwrite the
+   operator's result.
+3. An **`admin_action` audit event appended through `appendEventsInTx`**, in the same
+   transaction — so the audit record joins the checksum chain rather than sitting beside it.
+4. The post-commit cleanup a normal terminal write does: sticky worker, concurrency keys,
+   parent close policy.
+
+**Three things found while building it, none of which was the stub.**
+
+- **The handlers applied the operation to the wrong store.** `callerOwnsTarget` checked
+  ownership against the caller's tenant-scoped store and then every handler called
+  `engine.ForceComplete(..., s.store, ...)` — the process-wide one. A force-resolve
+  authenticated as tenant B ran against the default tenant's scope. Invisible until now
+  because both stores answered `not implemented yet`, and because `newTestAPIServer` serves
+  every tenant from one mock, so the two stores are the same object in every existing test.
+  `callerOwnsTarget` now returns the store it checked against.
+- **`eventRecordToPayload` has no `admin_action` arm**, so the audit event's payload would
+  have been `{}` — and `computeEventChecksum` hashes payload alone. Who forced a workflow and
+  what they did to it would have sat entirely outside the checksum, editable in the columns
+  afterwards with `VerifyWorkflowEvents` still reporting the workflow clean. Note that
+  `verifyShadowColumns` does **not** catch this and looks like it would: `populateFromPayload`
+  only overwrites keys the payload carries, so a key the payload omits inherits the column's
+  value and always compares equal. An empty payload reads as agreement. The unit test is what
+  holds that arm up; removing the arm leaves every database test green.
+- **The audit append can be silently displaced.** Every dialect's event append is an upsert
+  that leaves an existing row alone, so if a concurrent writer takes the step number between
+  the `MAX(step)+1` read and the insert, the audit event vanishes and the status change
+  commits without it. The whole force-resolve is rolled back instead.
+
+**Tenant scoping is explicit on all three dialects**, including PostgreSQL where RLS would
+cover it. That is deliberate and is what makes the cross-tenant test mean anything: engine
+tests connect as the owner, RLS is bypassed for superusers, so a PostgreSQL-only enforcement
+would let the test pass against a store with no filter at all. The unmerged version of this
+code in #208 dropped the `tenant_id` filter from the MSSQL `UPDATE` while keeping it on
+MySQL, which is the gap this note existed to warn about.
+
+**Every test was proved able to fail** by reverting the specific mechanism: the tenant filter,
+the generation bump, the payload arm, the not-found/mismatch disambiguation, the collision
+check, the scoped store, and the status-code mapping — eight reverts, each failing only its
+own test. Two of those reverts corrected the work rather than confirming it: the collision
+test was initially passing because the confirm lookup was tenant-scoped and returned "no
+rows" for the planted row, never reaching the comparison it was meant to exercise (the lookup
+is now by primary key, which is the right scope for "is the row at this step mine"); and the
+payload arm's justification named `verifyShadowColumns`, which turned out not to detect it.
+
+**Also.** `result` is JSON-typed on every dialect (JSONB / JSON / `ISJSON` check), so a
+non-JSON result is now rejected as a 400 rather than surfacing as three different driver
+errors reported as 500; an omitted result means JSON `null`. And `ErrAdminOpNotImplemented`
+separates 501 from 500, so the one operation that genuinely is not built says so.
+
+**`AdminReReplay` is still a stub, deliberately**, and now answers **501** rather than 500.
+It is not the same size as the other two: resetting a workflow to `ready` means it replays
+its recorded history and continues, so it needs the replay semantics §1.4 phases D–F are
+about — not a fourth `UPDATE`. Taking it before those is how the write-ahead intent work got
+built before the observation that would have judged it.
+
 ## Phase 3 — Put falsification in the loop
 
 The economic finding: **~$900 of generation, ~$0 of falsification.** Compute was 4–12% of

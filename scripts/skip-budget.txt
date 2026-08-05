@@ -82,7 +82,20 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # branch reports `skipped=361 (passed=3116 failed=0)`. Both counts moved by
 # exactly the arm count of one new three-dialect test, and nothing stopped
 # running. The postgres arm is the one that matters and it is in the +2 passing.
-test-go/engine	361	# observed on the runner: 3116 pass, 361 skip; develop measures 359 at 3114 pass
+#
+# 361 -> 373: the six three-dialect admin force-resolve tests (IMPROVEMENT-PLAN
+# 3.20), each contributing a mysql and an mssql subtest that skip in a job
+# configured for PostgreSQL only. The seventh test in that file,
+# TestAdminForceResolve_AuditCollisionRollsBack, is PostgreSQL-only by
+# construction and adds no skip.
+#
+# 371 was MEASURED for these twelve, on a runner whose base was 359. 373 is that
+# measurement plus 3.10's two, which landed in between -- so the number here is
+# derived from two measured deltas rather than read off one run, and the two
+# increments are independent and additive. If the guard reports 373, that is the
+# confirmation. If it reports something else, that number is the real one and
+# this note is what needs correcting -- do not widen it to silence a failure.
+test-go/engine	373	# 359 measured on develop, +2 for 3.10, +12 for 3.20's six three-dialect tests
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -150,7 +163,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	361	# same as test-go/engine, and for the same reason; see the note there
+cluster	373	# same as test-go/engine, and for the same reason; see the note there
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is
