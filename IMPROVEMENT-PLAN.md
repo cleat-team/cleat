@@ -541,17 +541,83 @@ its dead-letter counter, now conditional on the write applying.
   `("", 0)` — the §263 defect, which nothing else would catch — and the dead-letter routing
   that used to live inline at each site.
 
-### 1.3 Cancellation is dead end-to-end (~1 session)
 
-`PollCancellation(ctx, "")` — hardcoded empty string at all three call sites. The store does
-`WHERE id = $1`, so it never matches. `RequestCancellation` sets a flag nothing observes.
+### 1.3 Cancellation is dead end-to-end — ✅ **FIXED**, and this section was stale
 
-- Files: `engine/durablecalls.go:51`, `engine/heartbeats.go:58`, `engine/signaller.go:121`
-- Fix: pass `s.engine.workflowID` — exactly as `PollSignal` already does twelve lines away
-  at `engine/signaller.go:133`.
-- **Also fix the mock**, or this recurs: `engine/host_test.go:2014` declares the parameter
-  `_ string` and discards it, which is why 2,560 engine tests passed against dead code.
-- Test: cancellation e2e (see 2.3).
+**The original entry, kept because the plan being wrong is itself the finding:**
+
+> `PollCancellation(ctx, "")` — hardcoded empty string at all three call sites. The store does
+> `WHERE id = $1`, so it never matches. `RequestCancellation` sets a flag nothing observes.
+>
+> - Files: `engine/durablecalls.go:51`, `engine/heartbeats.go:58`, `engine/signaller.go:121`
+> - Fix: pass `s.engine.workflowID` — exactly as `PollSignal` already does twelve lines away
+>   at `engine/signaller.go:133`.
+> - **Also fix the mock**, or this recurs: `engine/host_test.go:2014` declares the parameter
+>   `_ string` and discards it, which is why 2,560 engine tests passed against dead code.
+> - Test: cancellation e2e (see 2.3).
+
+**Correction, 2026-08-04.** Both prescribed fixes had already landed in `c26c332`, which also
+added `TestCancellationObservedEndToEnd` and `TestCancellationNotObservedForDifferentWorkflow`
+(`engine/host_dispatch_test.go:659`). All three call sites pass `s.engine.workflowID`;
+`mockCancellationStore` now captures every ID it is polled with and the tests assert on it.
+The section was never updated, so §1.3 sat at the top of a workstream as its "start here" item
+while being done.
+
+This is the same failure mode as the `CGO_ENABLED=0` note in `CLAUDE.md` — **fixed by the same
+commit, and also left in place afterwards.** `c26c332` is worth auditing for a third.
+
+What was genuinely missing was the test the entry asked for. Everything covering cancellation
+supplied its own `SignalStore`, so the workflow ID was whatever the mock chose to accept —
+including, for as long as it was there, `""`. `TestCancellationObservedEndToEnd` is a good test
+but is not end-to-end despite the name: it drives `s.DurableCall` directly against an in-memory
+store, with no database and no compiled module.
+
+Added in `engine/cancellation_e2e_test.go`, against a real `PostgresStore` and a real workflow
+compiled to WASM on wasmtime:
+
+- **`TestCancellationEndToEnd`** — operator cancels via the same store method the worker's HTTP
+  handler calls, then `place_order` runs. Asserts on the `ServiceCaller`, not the result string:
+  cancellation exists to stop side effects. Proven to fail by restoring the `""`, which produced
+  **6 side effects including `payments.Charge` and `shipping.CreateShipment`** on a cancelled
+  workflow.
+- **`TestCancellationGuestAPIEndToEnd`** — the guest-facing `h.PollCancellation()`
+  (`engine/signaller.go:121`), which `examples/subscription` and `examples/travel` branch on and
+  which had no end-to-end coverage at all, because no fixture called it. New fixture:
+  `testdata/cancelpoll`.
+- Both have **`_NotCancelled` controls**, without which either would pass against an engine that
+  refuses every call for any reason.
+- **`TestCancellationUnknownWorkflowIDIsNotSilent`** — pins the mechanism. `CheckCancellation`
+  returns `sql.ErrNoRows` for an ID matching no row and every call site guards on
+  `err == nil && cancelled`, so an ID that does not resolve reports "not cancelled" and the
+  workflow proceeds. The `""` was not failing loudly; it was missing quietly. **This guard is
+  still live and is the residual risk in this section** — see below.
+
+**Two things found by running it that reading would not have given:**
+
+1. **The two cancellation checks mask each other.** Breaking `signaller.go`'s poll left the
+   side-effect count at 0, because `freshCall`'s own pre-call check still refused the call. Only
+   the assertion on the cancellation *reason* failed. A test asserting solely on side effects
+   cannot distinguish "the guest handled its cancellation" from "the engine aborted the guest".
+2. **The wasmtime `t.Skip` in the older tests is the wrong category.** By
+   `scripts/check-skips.sh`'s own taxonomy this is case (c) — always satisfiable in this repo,
+   since CGO is on by default — so it must be `t.Fatal`. The new tests use `t.Fatalf`; the
+   pre-existing ones in `host_test.go` still skip, which means a `CGO_ENABLED=0` run reports
+   them green without exercising the primary backend. Not changed here: they are not this
+   section's files and the baseline is shared. **Worth its own item.**
+
+**Not covered: the heartbeat path.** `engine/heartbeats.go:58` cancels an *in-flight* call via
+`cancelCall()`. Both new tests check cancellation *before* a call goes out; neither interrupts
+one in progress, which is the "assert it actually stops within N seconds" half of §2.3. The call
+site passes the right ID, so the §1.3 defect is not present there, but nothing exercises it
+end-to-end. It needs a heartbeat-enabled call and a concurrent cancel — a different harness, not
+another case in this file.
+
+**Residual, still open:** the `err == nil && cancelled` guard at all three call sites. A poll
+that errors — unresolvable ID, dropped connection, RLS returning no row — is indistinguishable
+from "not cancelled", and the workflow proceeds to perform side effects. Making it loud is a
+behaviour change (a transient DB blip would start halting workflows), so it needs the same
+decision WS-1's §1.1 trap needs: establish what a failed *check* should do before changing what
+it returns. Not attempted here.
 
 ### 1.4 Crash-recovery: the detector works, nothing writes what it detects (~2–3 sessions)
 
@@ -1021,7 +1087,7 @@ This is the part that prevents recurrence, and the highest-value work in the pla
 |---|---|---|
 | 2.1 | **Golden path.** Clean container, no repo knowledge, execute the README verbatim. | README drift, flag-order bugs, undocumented schema bootstrap, missing `--api-addr`, wrong endpoints — all 8 golden-path failures found today |
 | 2.2 | **Two-worker race.** Real Postgres. Claim, stall worker A (SIGSTOP), let the reaper fire, let B claim, resume A. Assert event history intact, no duplicate side effects, no stale parent result. | 1.1, 1.2, 1.6 |
-| 2.3 | **Cancellation e2e.** Start a long workflow, `RequestCancellation`, assert it actually stops within N seconds. | 1.3 |
+| 2.3 | **Cancellation e2e.** 🔶 **Partly done** — `engine/cancellation_e2e_test.go` covers both *pre-call* paths (`freshCall` and the guest `h.PollCancellation()`) against a real Postgres and a real WASM module, with controls, each proven to fail. **Still open: cancelling an already-in-flight call** — the heartbeat path at `engine/heartbeats.go:58`, which is the "stops within N seconds" half. See §1.3. | 1.3 |
 | 2.4 | **Crash recovery.** SIGKILL the worker mid-`DurableCall`, restart, assert the documented semantics (exactly-once vs at-least-once — pick one and assert *that*). | 1.4 |
 | 2.5 | **Resource exhaustion.** ✅ **Done** — `tests/exhaustion`, wired into the cluster job. See §2.29. Per-backend coverage is still wasmtime-only, matching what deployments run. | 1.5 |
 | 2.6 | **Tenant isolation.** Two tenants; assert A cannot read, list, cancel, or admin-act on B's workflows through the HTTP API. Run against all three backends. | 1.7 |
