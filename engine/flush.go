@@ -281,9 +281,22 @@ func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[
 		// "cleat_defer_" + deferID so both paths find the same export.
 		deferName := "cleat_defer_" + entry.id
 		if wasmBytes != nil {
-			_, err := e.RunDefer(ctx, wasmBytes, deferName, nil)
-			if err != nil {
-				// Defer failures are not propagated — cleanup runs best-effort.
+			// Not propagated -- cleanup is best-effort and the original failure
+			// takes priority -- but logged, which it was not. This was an `if`
+			// with an empty body and a comment, so a defer that never ran was
+			// indistinguishable from one that ran and succeeded.
+			//
+			// That is not hypothetical. A defer export declared with the wrong
+			// signature is rejected before it executes with "expected 0 params,
+			// but passed 4", and an author would have seen their cleanup
+			// quietly not happen with nothing anywhere saying so. The same
+			// silence made a test in IMPROVEMENT-PLAN 3.32 pass while executing
+			// nothing at all. cmd/cleat-worker's own runDefers has always
+			// logged here; this brings the two into line.
+			if _, err := e.RunDefer(ctx, wasmBytes, deferName, nil); err != nil {
+				e.log().WarnContext(ctx, "defer execution failed",
+					"workflow_id", e.workflowID, "defer_id", entry.id,
+					"description", entry.desc, "export", deferName, "error", err)
 			}
 		}
 	}

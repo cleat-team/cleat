@@ -156,7 +156,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 				}
 
 				written, _ := s.writeResult(ctx, m, runIDPtr, rec.RunID, runIDMaxLen)
-				return int64(uint64(written)<<32 | 0)
+				return packSimpleResult(0, uint32(written))
 			}
 		}
 		s.exitReplay()
@@ -263,7 +263,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	}
 
 	written, _ := s.writeResult(ctx, m, runIDPtr, runID, runIDMaxLen)
-	return int64(uint64(written)<<32 | 0)
+	return packSimpleResult(0, uint32(written))
 }
 
 func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
@@ -378,7 +378,7 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 
 	out, _ := json.Marshal(pr)
 	written, _ := s.writeResult(ctx, m, resultPtr, string(out), resultMaxLen)
-	return int64(uint64(written)<<32 | 0)
+	return packSimpleResult(0, uint32(written))
 }
 
 func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
@@ -391,7 +391,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 				}
 				if rec.Response != "" {
 					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
-					return int64(uint64(written)<<32 | 0)
+					return packSimpleResult(0, uint32(written))
 				}
 				// Empty response: this was a suspend (no child was done yet).
 				// Peek at the next event — if it is also an AwaitAnyChild with
@@ -406,7 +406,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 							return 0
 						}
 						written, _ := s.writeResult(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
-						return int64(uint64(written)<<32 | 0)
+						return packSimpleResult(0, uint32(written))
 					}
 				}
 				// No cached re-execution result — fall through to fresh.
@@ -464,7 +464,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 				}
 				s.recordEvent(rec)
 				written, _ := s.writeResult(ctx, m, resultPtr, string(outJSON), resultMaxLen)
-				return int64(uint64(written)<<32 | 0)
+				return packSimpleResult(0, uint32(written))
 			}
 		}
 	}

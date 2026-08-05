@@ -9,9 +9,10 @@ linters:
     - ineffassign
     # Enabled 2026-08-05 (WS-3). 9 findings, 8 fixed and 1 suppressed.
     - gosimple
+    # Enabled 2026-08-05 (WS-3). 16 findings, 13 fixed and 3 suppressed.
+    - staticcheck
   disable:
     - errcheck
-    - staticcheck
     - unused
     - unconvert
     - gocyclo
@@ -67,6 +68,25 @@ linters:
   # featureflags' evaluateFlagOutput is a host call's wire contract that happens
   # to be field-identical to an internal type, and S1016's conversion would
   # couple the two while still looking independent.
+  #
+  # staticcheck, 2026-08-05 (WS-3): 16, and unlike the two above it was not all
+  # cosmetic. Two were worth having:
+  #
+  #   SA9003 engine/flush.go -- an `if err != nil` with an EMPTY BODY, so a
+  #     deferred callback that never ran was indistinguishable from one that ran
+  #     and succeeded. A defer export with the wrong signature is rejected with
+  #     "expected 0 params, but passed 4" and an author would have seen cleanup
+  #     quietly not happen. Now logged, matching what cmd/cleat-worker's own
+  #     runDefers has always done.
+  #   SA9003 tests/plugin-harness/testdb.go -- a `for` whose only statement was
+  #     an `if` with an empty body. Dead scaffolding; removed.
+  #
+  # Eight SA4016 were `uint64(written)<<32 | 0`, which is packSimpleResult(0, n)
+  # written out by hand; they now call the helper, which is both shorter and
+  # names what the two halves of the word mean. Three SA1019 deprecations are
+  # //nolint'd at the site with the reasoning, including one flagged for WS-1:
+  # go-mssqldb does implement StmtExecContext, so applyTenantSessionContext
+  # could propagate ctx, which it currently does not.
   #
   # THE WHOLE TABLE WAS RE-MEASURED THE SAME DAY, and it had moved a lot in
   # 24 hours -- which is the argument for re-measuring rather than a curiosity:
