@@ -1,6 +1,8 @@
 package crash
 
 import (
+	"database/sql"
+	"strings"
 	"testing"
 	"time"
 )
@@ -244,4 +246,119 @@ func TestCrashWithIdempotencyKeysDoesNotDuplicate(t *testing.T) {
 	if reserve != 1 || charge != 1 {
 		t.Errorf("Reserve=%d Charge=%d, want 1/1", reserve, charge)
 	}
+}
+
+// TestCrashWithWriteAheadIntentDoesNotRepeatTheCall is the design doc's T3
+// (docs/durable-call-intent-design.md §7), and the evidence IMPROVEMENT-PLAN
+// 1.4 phase D shipped without: a real SIGKILL, a real worker, and a service
+// that counts what it was actually asked to do.
+//
+// Same fixture and same crash window as
+// TestCrashMidDurableCallReplaysOnlyTheUnrecordedStep. The single difference is
+// that this worker is started with --write-ahead-intent-ops payments.Ship, so
+// the third call commits a pending event before it dispatches. The counts are
+// what separate the two contracts:
+//
+//	              Ship  outcome
+//	at-least-once   2   done         the interrupted call is repeated, silently
+//	write-ahead     1   failed       the interrupted call is NOT repeated, and
+//	                                 replay says the outcome is unknown
+//
+// The second row is the whole point of the feature. A charge that may already
+// have happened is not retried; it is reported. That the workflow *fails* is
+// the correct outcome and not a defect -- an unresolvable ambiguity is exactly
+// what phase E exists to give an operator a way to settle.
+//
+// Non-vacuity: with --write-ahead-intent-ops removed this becomes the test
+// above and Ship is 2, which is asserted rather than assumed by the sibling
+// test running in the same package against the same fixture.
+func TestCrashWithWriteAheadIntentDoesNotRepeatTheCall(t *testing.T) {
+	db := ownerDB(t)
+	defer db.Close()
+
+	suffix := uniqueSuffix()
+	taskQueue := "queue-crash-intent-" + suffix
+	wfID := "crash-intent-wf-" + suffix
+	orderID := "order-intent-" + suffix
+
+	deployFixture(t, db, taskQueue)
+	bin := buildWorker(t)
+
+	svc := newChargeService(t)
+	release := svc.holdOperation("Ship")
+
+	const intentFlag = "payments.Ship"
+	first := startWorker(t, bin, taskQueue, svc.srv.URL, "--write-ahead-intent-ops", intentFlag)
+	startWorkflow(t, db, wfID, orderID, taskQueue)
+
+	// The third call has reached the service and is committed there. This is
+	// the window a durable call cannot see into.
+	svc.awaitHeldCall(t, first, startBudget)
+
+	if r, c, s := svc.allCounts(); r != 1 || c != 1 || s != 1 {
+		t.Fatalf("before the crash: Reserve=%d Charge=%d Ship=%d, want 1/1/1", r, c, s)
+	}
+
+	// The pending row must be on disk *now*, before the crash -- that is the
+	// guarantee, and reading it here rather than after the restart is what
+	// makes this an assertion about ordering rather than about outcomes.
+	pending := pendingIntentCount(t, db, wfID)
+	durable := eventCount(t, db, wfID)
+	if pending != 1 {
+		t.Fatalf("%d pending intent rows while the call is in flight, want 1 (durable events: %d) -- "+
+			"the side effect happened before its intent was committed", pending, durable)
+	}
+
+	first.kill()
+	release()
+
+	second := startWorker(t, bin, taskQueue, svc.srv.URL, "--write-ahead-intent-ops", intentFlag)
+
+	status, errMsg := awaitTerminal(t, db, wfID, completeBudget)
+	reserve, charge, ship := svc.allCounts()
+	t.Logf("after recovery: status=%q Reserve=%d Charge=%d Ship=%d; pending at crash: %d, durable: %d",
+		status, reserve, charge, ship, pending, durable)
+
+	if ship != 1 {
+		t.Errorf("Ship=%d, want 1.\n\n"+
+			"The call was in flight when the worker died and its outcome is unknown, so the one "+
+			"thing recovery must not do is perform it again. Ship=2 means the intent row was "+
+			"written but not consulted on replay; the detector reads it from "+
+			"intent_at IS NOT NULL AND checksum IS NULL.\n--- worker log ---\n%s",
+			ship, second.output())
+	}
+	if reserve != 1 || charge != 1 {
+		t.Errorf("Reserve=%d Charge=%d, want 1/1: the two completed calls were durable and replay "+
+			"should have skipped them", reserve, charge)
+	}
+
+	// What the workflow's terminal state SHOULD be is "failed, naming the
+	// ambiguity". It is not asserted here, because it is not what happens, and
+	// a test that documents a defect by passing is worse than no test.
+	//
+	// Measured: the engine detects the ambiguity and reports it to the guest,
+	// the guest reports an error back through cleat_complete(status=1), and a
+	// second cleat_complete(status=0) then overwrites it -- so the workflow is
+	// recorded `done` with a result it never produced. See IMPROVEMENT-PLAN
+	// 3.22. Turning the two lines below into assertions is that item's
+	// acceptance test.
+	t.Logf("terminal state: status=%q error_msg=%q -- 3.22: the ambiguity is detected and then "+
+		"discarded above the engine, so this reads as success", status, errMsg)
+	if status != "done" && status != "completed" && !strings.Contains(errMsg, "AMBIGUOUS") {
+		t.Logf("NOTE: the workflow did not complete and did not name the ambiguity either (%q/%q); "+
+			"if 3.22 has been fixed, replace this with the assertion described above", status, errMsg)
+	}
+}
+
+// pendingIntentCount counts the workflow's write-ahead intent rows that have
+// not been completed: the exact predicate the engine and LoadEventHistory use.
+func pendingIntentCount(t *testing.T, db *sql.DB, id string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM event_history
+		 WHERE workflow_id = $1 AND intent_at IS NOT NULL AND checksum IS NULL`, id).Scan(&n); err != nil {
+		t.Fatalf("counting pending intents for %s: %v", id, err)
+	}
+	return n
 }

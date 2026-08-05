@@ -850,11 +850,28 @@ guard was in the `WHERE` clause, and the assertion would have passed against a s
 fence at all. The second completion now carries a different outcome, so all three dialects
 discriminate.
 
+**T3, the crash scenario, is done (2026-08-05)** and is the evidence this phase existed for.
+`TestCrashWithWriteAheadIntentDoesNotRepeatTheCall` SIGKILLs a real worker with the third of
+three durable calls committed at the service and unanswered, on the same fixture as §2.4's
+test, and differs from it in exactly one flag:
+
+| | Ship | what recovery did |
+|---|---|---|
+| at-least-once (§2.4's test) | **2** | repeated a call that may already have happened |
+| `--write-ahead-intent-ops payments.Ship` | **1** | did not repeat it |
+
+The pending row is asserted to exist *before* the crash, not after, so the claim is about
+ordering rather than outcomes. Non-vacuity: with the flag removed the test fails at that
+assertion — no pending row exists — and the sibling test pins `Ship=2` for the same fixture.
+
+**It also found §3.22**, which is the reason the test records the workflow's terminal state
+rather than asserting it: the ambiguity is detected, reported to the guest, reported back by
+the guest — and then overwritten by a second completion, so the workflow reads as `done`.
+
 **Still open in the phase:** E (the resolution hook and a typed `ErrAmbiguous` carrying step,
-service, operation and key — today ambiguity is reported inside the workflow result *string*),
-F (admin force-resolve for a pending step, whose prerequisite §3.20 now exists), and the crash
-harness scenario T3, which needs `tests/crash` to drive a worker started with
-`--write-ahead-intent-ops`. `pendingSentinel` is still detected alongside `Pending` because
+service, operation and key — today ambiguity is reported inside the workflow result *string*)
+and F (admin force-resolve for a pending step, whose prerequisite §3.20 now exists). §3.22
+should be fixed before either: both are about delivering an answer that this discards. `pendingSentinel` is still detected alongside `Pending` because
 `tests/integrity` exercises it directly; retiring it belongs with E.
 
 ### 1.5 Primary WASM backend has no hang protection (~1–2 sessions) — fixed for wasmtime, **still open for every deployment**
@@ -5167,6 +5184,51 @@ Two things that are **not** defects and are recorded so the next sweep does not 
   The harness shells out to `go run <projectRoot>/cmd/cleat`, and the Go toolchain rejects a
   module path reached through a symlink. From `/Users/Shared/localssd/rcownie/cleat` the same
   suite passes. Worth knowing before someone spends a session on a phantom regression.
+
+### 3.22 A workflow's own error is overwritten by a second completion — 🔴 **OPEN**
+
+Found by building §1.4 phase D's crash scenario (T3). It is not an intent-path defect — intent
+is only what made it visible, because it produces the first workflow in this repo that *should*
+end in failure after a crash.
+
+**What happens.** A worker replays a workflow whose third call left a write-ahead intent row.
+The engine detects the pending row and returns `[AMBIGUOUS] call outcome unknown at step 2 …`
+to the guest with `errCode = 1`. The guest's generated adapter maps that to a `cleat.CallError`
+correctly, the fixture returns it, and the generated export wrapper reports it:
+
+```
+PROBE wt cleat_complete status=1 len=221      <- the guest reports the ambiguity
+PROBE wt cleat_complete status=0 len=233      <- a second completion overwrites it
+```
+
+The worker then logs `workflow completed` and stores `status = done`, `result = {}`,
+`error_msg = ''`. **A workflow that could not know the outcome of a charge is recorded as
+having succeeded, with a result it never produced.**
+
+**Every layer below this is correct and was checked individually:** the intent row is committed
+before dispatch (observed from inside the call), the detector fires (`pending=true` on the
+replayed record), the interrupted call is *not* repeated (`Ship=1`, against `Ship=2` for the
+at-least-once path on the same fixture), and the guest reports `status=1` with a 221-byte
+message. The loss is above all of it.
+
+**Where to look.** `engine/runtime.go:520-545` checks `complete.Result` *before*
+`complete.Error`, so a run that produced both reads as success; and something invokes the
+module a second time after the first pass returns an error, which is the part not yet
+explained. `engine/wasmtime_hostfuncs.go:58-78` is the wasmtime `cleat_complete` — note that
+`engine/imports.go`'s is the **wazero** one and is not the path a CGO build takes, which is
+worth knowing before instrumenting either.
+
+**Cross-stream:** `engine/runtime.go`, `engine/executor.go` and `engine/wasmtime_*.go` are
+**WS-3's**. Recorded rather than fixed here for that reason.
+
+**Acceptance test:** `TestCrashWithWriteAheadIntentDoesNotRepeatTheCall` in `tests/crash`
+currently *logs* the terminal state instead of asserting it, with the two lines to turn into
+assertions marked in place. Making them assertions is how this item is closed.
+
+**Severity.** Detection that reaches nobody is worth little more than no detection: the whole
+of §1.4 phases D–F is about telling an operator that a side effect may have happened, and this
+discards that answer at the last step. It also means *any* workflow that fails after a replay
+may be recorded as done — the ambiguity path is simply the first one with a test.
 
 ## Phase 3 — Put falsification in the loop
 
