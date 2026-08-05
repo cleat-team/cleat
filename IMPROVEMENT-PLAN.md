@@ -5354,50 +5354,65 @@ Two things that are **not** defects and are recorded so the next sweep does not 
   module path reached through a symlink. From `/Users/Shared/localssd/rcownie/cleat` the same
   suite passes. Worth knowing before someone spends a session on a phantom regression.
 
-### 3.22 A workflow's own error is overwritten by a second completion — 🔴 **OPEN**
+### 3.22 An ambiguous call is erased, not reported — 🔶 **HALF FIXED** (WS-2, 2026-08-05)
 
-Found by building §1.4 phase D's crash scenario (T3). It is not an intent-path defect — intent
-is only what made it visible, because it produces the first workflow in this repo that *should*
-end in failure after a crash.
+Found by building §1.4's T3 crash scenario. Not an intent-path defect: intent is only what made
+it visible, by producing the first workflow in this repo that *should* end in failure after a
+crash.
 
-**What happens.** A worker replays a workflow whose third call left a write-ahead intent row.
-The engine detects the pending row and returns `[AMBIGUOUS] call outcome unknown at step 2 …`
-to the guest with `errCode = 1`. The guest's generated adapter maps that to a `cleat.CallError`
-correctly, the fixture returns it, and the generated export wrapper reports it:
+> **Correction, same day.** This entry first said the mechanism was "a second `cleat_complete`
+> with status 0 overwrites the first with status 1". That was inferred from two probe lines and
+> is **wrong**. Instrumenting `Engine.Replay`'s own boundary showed **one** execution returning
+> `err == nil` with a 233-byte result — not two competing completions. The real chain is below,
+> and it is worse: nothing overwrites anything, the information is dropped twice.
 
-```
-PROBE wt cleat_complete status=1 len=221      <- the guest reports the ambiguity
-PROBE wt cleat_complete status=0 len=233      <- a second completion overwrites it
-```
+**What actually happens**, end to end, each step measured:
 
-The worker then logs `workflow completed` and stores `status = done`, `result = {}`,
-`error_msg = ''`. **A workflow that could not know the outcome of a charge is recorded as
-having succeeded, with a result it never produced.**
+1. The engine detects the pending intent row and returns
+   `[AMBIGUOUS] call outcome unknown at step 2 …` to the guest with `errCode = 1`. Correct.
+2. The guest's adapter maps that to a `cleat.CallError`; the fixture returns it. Correct.
+3. The generated wrapper turns the returned error into a **JSON result string**, not a Go
+   error. `Engine.Replay` therefore returns `err == nil`. This is documented — §1.4 already
+   warns "ambiguity and replay divergence are reported inside the workflow result string, not
+   as a Go error from `Engine.Replay`" — but the worker does not check the result, so it takes
+   the success path.
+4. **That JSON is malformed.** `wasm/exports.go:579` emits
+   `[]byte("{\"error\":\"" + encodeJSONString(__e.Error()) + "\"}")` while
+   `encodeJSONString` **already wraps its argument in quotes** (`exports.go:229-241`, and its
+   own doc comment says so). The result is doubled quotes:
 
-**Every layer below this is correct and was checked individually:** the intent row is committed
-before dispatch (observed from inside the call), the detector fires (`pending=true` on the
-replayed record), the interrupted call is *not* repeated (`Ship=1`, against `Ship=2` for the
-at-least-once path on the same fixture), and the guest reports `status=1` with a 221-byte
-message. The loss is above all of it.
+   ```
+   {"error":""durable call payments.Ship: [0] [AMBIGUOUS] call outcome unknown at step 2: …""}
+   ```
 
-**Where to look.** `engine/runtime.go:520-545` checks `complete.Result` *before*
-`complete.Error`, so a run that produced both reads as success; and something invokes the
-module a second time after the first pass returns an error, which is the part not yet
-explained. `engine/wasmtime_hostfuncs.go:58-78` is the wasmtime `cleat_complete` — note that
-`engine/imports.go`'s is the **wazero** one and is not the path a CGO build takes, which is
-worth knowing before instrumenting either.
+   Line 376 uses the same helper correctly, which is why this is a one-line defect and not a
+   design problem.
+5. `FinalizeWorkflowSegment` replaced any result that is not valid JSON with `{}` — **silently,
+   in a two-line conditional with no log statement, in all three stores.** The workflow is
+   stored `done`, `result = {}`, `error_msg = ''`.
 
-**Cross-stream:** `engine/runtime.go`, `engine/executor.go` and `engine/wasmtime_*.go` are
-**WS-3's**. Recorded rather than fixed here for that reason.
+So the operator gets a clean success for a charge that may or may not have happened, and there
+is no record of the ambiguity anywhere: not in the result, not in the error, not in the log.
+
+**Fixed here (step 5).** `coerceResultJSON` in `engine/store_lifecycle.go`, used by all three
+stores, still replaces an unstorable result — failing the terminal write would lose a whole
+workflow over a formatting defect — but now logs at ERROR with the workflow ID and the
+discarded value, truncated. The empty case stays silent because an entry point with no return
+value produces it on every successful run. `TestCoerceResultJSON` covers it, including the
+exact malformed string above, and fails if the log line goes away.
+
+**Still open (step 4), and it is one line in WS-3's file.** `wasm/exports.go:579` should be
+`[]byte("{\"error\":" + encodeJSONString(__e.Error()) + "}")` — no manual quotes. Until then
+every workflow that returns an error through that path produces an unstorable result; the fix
+above makes that visible in the log rather than silent, but the result still cannot be kept.
+
+**Still open (step 3), and it is §1.4 phase E.** An error that crosses the boundary as a string
+inside a success result is one the worker cannot act on. Phase E's typed `ErrAmbiguous` is the
+real answer, and this is the concrete argument for prioritising it.
 
 **Acceptance test:** `TestCrashWithWriteAheadIntentDoesNotRepeatTheCall` in `tests/crash`
-currently *logs* the terminal state instead of asserting it, with the two lines to turn into
-assertions marked in place. Making them assertions is how this item is closed.
-
-**Severity.** Detection that reaches nobody is worth little more than no detection: the whole
-of §1.4 phases D–F is about telling an operator that a side effect may have happened, and this
-discards that answer at the last step. It also means *any* workflow that fails after a replay
-may be recorded as done — the ambiguity path is simply the first one with a test.
+currently *logs* the terminal state instead of asserting it, with the lines to turn into
+assertions marked in place. When steps 3 and 4 are done, that assertion is how this closes.
 
 ## Phase 3 — Put falsification in the loop
 

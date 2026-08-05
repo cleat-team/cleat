@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -307,10 +308,7 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 	// await_child population, pg_notify) to a server-side PL/pgSQL function.
 	// This replaces 5 individual round-trips with 1 function call.
 	qsJSON := marshalQueryState(queryState)
-	resultJSON := result
-	if resultJSON == "" || !json.Valid([]byte(resultJSON)) {
-		resultJSON = "{}"
-	}
+	resultJSON := coerceResultJSON(ctx, s.log(), runID, result)
 
 	var fenceHeld bool
 	if err := tx.QueryRowContext(ctx, `
@@ -761,4 +759,48 @@ func (s *PostgresStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID st
 		}
 	}
 	return keep, nil
+}
+
+// coerceResultJSON returns a result safe for the JSON-typed result column, and
+// says so out loud when it had to replace one.
+//
+// The column is JSONB on PostgreSQL, JSON on MySQL and NVARCHAR(MAX) under an
+// ISJSON check on SQL Server, so a result that is not valid JSON cannot be
+// stored and something has to give. Replacing it with "{}" is the right call --
+// failing the terminal write would lose the whole workflow over a formatting
+// defect -- but doing it silently is not.
+//
+// It was silent, and that is how IMPROVEMENT-PLAN 3.22 erased an ambiguous call
+// rather than merely mislabelling it: a workflow whose durable call came back
+// [AMBIGUOUS] returned `{"error":""durable call ...""}` -- doubled quotes, from
+// a generator that wraps an already-quoted string a second time -- which is
+// invalid, so the workflow was stored `done` with result `{}` and no error
+// anywhere. The engine had detected the ambiguity correctly and every trace of
+// it was dropped here, in a two-line conditional with no log statement.
+//
+// The empty case is not logged: an entry point with no return value produces it
+// on every successful run, and it is what the column default means anyway.
+func coerceResultJSON(ctx context.Context, log *slog.Logger, workflowID, result string) string {
+	if result == "" {
+		return "{}"
+	}
+	if json.Valid([]byte(result)) {
+		return result
+	}
+	if log != nil {
+		log.ErrorContext(ctx, "workflow result is not valid JSON and was replaced with {} -- "+
+			"whatever it carried, including any error the workflow returned, is not stored anywhere",
+			"workflow_id", workflowID, "result_len", len(result), "result", truncateForLog(result))
+	}
+	return "{}"
+}
+
+// truncateForLog bounds a value that goes into a log line. A workflow result is
+// caller-controlled and can be large.
+func truncateForLog(s string) string {
+	const max = 512
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "... (truncated)"
 }

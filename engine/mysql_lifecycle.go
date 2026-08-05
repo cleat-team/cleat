@@ -557,10 +557,7 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 	// await_child population) to a server-side stored procedure.
 	// This replaces 5 individual round-trips with 1 procedure call.
 	qsJSON := marshalQueryState(queryState)
-	resultJSON := result
-	if resultJSON == "" || !json.Valid([]byte(resultJSON)) {
-		resultJSON = "{}"
-	}
+	resultJSON := coerceResultJSON(ctx, s.log(), runID, result)
 
 	// p_next_wake_at is only meaningful for the "ready" status; callers
 	// finalizing as "done"/"failed" routinely pass the zero time.Time{}.
