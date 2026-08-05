@@ -520,7 +520,12 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 					// Complex type: use json.Unmarshal.
 					fmt.Fprintf(buf, "\t\tvar %s %s\n", f.GoName, f.GoType)
 					fmt.Fprintf(buf, "\t\tif err := json.Unmarshal([]byte(extractJSONRaw(string(argsJSON), %q)), &%s); err != nil {\n", f.JSONTag, f.GoName)
-					fmt.Fprintf(buf, "\t\t\treturn []byte(`{\"error\":\"unmarshal %s: ` + err.Error() + `\"}`)\n", f.JSONTag)
+					// encodeJSONString, not concatenation: a json.Unmarshal
+					// error routinely contains quotes (`invalid character '"'`),
+					// and an unescaped one here makes the result unstorable --
+					// FinalizeWorkflowSegment then replaces it with {} and the
+					// reason the call failed is gone. Same class as 3.22.
+					fmt.Fprintf(buf, "\t\t\treturn []byte(`{\"error\":` + encodeJSONString(\"unmarshal %s: \" + err.Error()) + `}`)\n", f.JSONTag)
 					buf.WriteString("\t\t}\n")
 				}
 			}
@@ -576,7 +581,14 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 		buf.WriteString("\t\t\treturn []byte(`\"__cleat_suspended__\"`)\n")
 		buf.WriteString("\t\t}\n")
 		buf.WriteString("\t\tif __e != nil {\n")
-		buf.WriteString("\t\t\treturn []byte(\"{\\\"error\\\":\\\"\" + encodeJSONString(__e.Error()) + \"\\\"}\")\n")
+		// encodeJSONString already wraps its argument in quotes (see its
+		// definition above), so the quotes go around the *key* only. Wrapping
+		// its output again produced {"error":""msg""} -- doubled quotes, not
+		// valid JSON -- and FinalizeWorkflowSegment replaces an unstorable
+		// result with {}, so every error returned through this path was
+		// dropped. See IMPROVEMENT-PLAN 3.22. The __r branch below has always
+		// used the helper this way.
+		buf.WriteString("\t\t\treturn []byte(\"{\\\"error\\\":\" + encodeJSONString(__e.Error()) + \"}\")\n")
 		buf.WriteString("\t\t}\n")
 		if hasResultValue {
 			buf.WriteString("\t\treturn []byte(encodeJSONString(__r))\n")
