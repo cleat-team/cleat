@@ -12,8 +12,8 @@ import (
 func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id)
-		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID)
+		VALUES (@p1, @p2, @p3, @p4, CAST(@p5 AS NVARCHAR(MAX)), @p6, @p7, @p8)
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputJSON(sch.Input), sch.Enabled, sch.NextRunAt, s.tenantID)
 	return err
 }
 
@@ -427,4 +427,28 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 		time.Sleep(10 * time.Millisecond)
 	}
 	return totalDeleted, nil
+}
+
+// scheduleInputJSON renders a schedule's input for a SQL Server text column.
+//
+// json.RawMessage is a []byte, and go-mssqldb binds a []byte as VARBINARY. The
+// value that reached workflow_schedules.input was therefore the binary
+// rendering of the JSON, not the JSON -- which the shipped schema rejects
+// outright:
+//
+//	The INSERT statement conflicted with the CHECK constraint
+//	"ck_workflow_schedules_input" ... column 'input'
+//
+// so CreateSchedule could not create a schedule on any SQL Server built from
+// migrations/mssql/001_schema.sql. Nothing caught it because engine/testutil's
+// MSSQL schema declares no CHECK constraint, so the malformed value went in
+// and every test passed. IMPROVEMENT-PLAN 3.16.
+//
+// An empty input becomes "{}": the column is NOT NULL with a '{}' default in
+// the shipped schema, and an empty string is not valid JSON either.
+func scheduleInputJSON(input json.RawMessage) string {
+	if len(input) == 0 {
+		return "{}"
+	}
+	return string(input)
 }

@@ -4598,6 +4598,57 @@ that deployed it, every definition is the default tenant's and the predicate mat
 useful — the two arms of this test that cover it only pass with §3.12's writer fix in place.
 Two defects that had to be fixed in the same direction to make either observable.
 
+### 3.16 `CreateSchedule` could not create a schedule on SQL Server — ✅ **FIXED** (WS-1, 2026-08-05)
+
+Found by measuring the §2.71 residual rather than by reading code: pointing `engine/testutil`'s
+MSSQL schema at the shipped `migrations/mssql/001_schema.sql` and running the engine suite
+produced 95 failing subtests, and the single largest cause was not row-level security at all.
+
+`json.RawMessage` is a `[]byte`, and go-mssqldb binds a `[]byte` as `VARBINARY`. So
+`workflow_schedules.input` received the *binary rendering* of the JSON rather than the JSON,
+and the shipped schema refuses it:
+
+```
+setupTestData: CreateSchedule: mssql: The INSERT statement conflicted with the
+CHECK constraint "ck_workflow_schedules_input" ... column 'input'
+```
+
+`CONSTRAINT ck_workflow_schedules_input CHECK (ISJSON(input) = 1)` has been in
+`001_schema.sql` all along, so **every scheduled workflow on a SQL Server built from the
+shipped schema failed to be created.** `StartNewRun` had the same shape and was written
+correctly — `CAST(@p4 AS NVARCHAR(MAX))` with `string(input)` — which is what the fix copies.
+
+**Why nothing caught it:** `engine/testutil`'s hand-written MSSQL schema declares no CHECK
+constraint on that column. The malformed value went in, the suite stayed green, and the defect
+was visible only on a database built from the file that ships. That is the §2.71 schema
+residual expressed as one concrete production failure, which is the argument for closing it.
+
+The constraint is now in the test schema too, with a repair step for rows an existing test
+database already holds (`ALTER TABLE ADD CONSTRAINT` validates existing rows and would fail on
+them). `TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint` applies the shipped
+constraint to the one table it is about rather than relying on the shared schema, and fails on
+all three input shapes with the fix reverted.
+
+#### What the §2.71 measurement says about the remaining work
+
+Worth recording so the next session does not repeat it. Pointing the MSSQL test schema at the
+real migration is a **suite migration**, as the residual says, but the failures are not what
+the residual predicts:
+
+- **95 failing subtests** from an empty database, before this fix.
+- The dominant cause was §3.16 above, not a missing session context.
+- A second cause is in the harness rather than the tests: `001_schema.sql` is **not
+  re-appliable**, though its header claims to be. The seven security policies bind
+  `dbo.fn_tenant_filter`, so the file's own `CREATE OR ALTER FUNCTION` fails the second time
+  with `Cannot ALTER 'dbo.fn_tenant_filter' because it is being referenced by object
+  'TenantFilter_Defs'`. The migration Runner never sees this because it applies each file once
+  and records the version; a test helper that runs on every `Setup` call sees it immediately.
+  Whoever does the switch needs the fingerprint-once shape `applyPostgresSchemaFile` already
+  uses.
+
+Re-measure after §3.16 lands: the number that matters is what is left once the schedule defect
+is gone.
+
 ### 3.15 Signal authorization consults a list nothing can write — 🔴 **OPEN**
 
 Found while scoping `GetAllowedSignalCallers` for §3.11: the method reads
