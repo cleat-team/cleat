@@ -442,14 +442,35 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 		}
 	}
 	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
-	rt.Metrics = w.Metrics
 	if err != nil {
-		rt.Metrics = w.Metrics
+		// Checked before touching rt: NewRuntime returns (nil, err) on four
+		// paths -- compiling or instantiating the WASI module, the teavm
+		// module, or the env module -- and `rt.Metrics = ...` sat above this
+		// check, so any of them panicked here instead of logging and
+		// returning. The dead `if rt != nil` guard inside this branch is what
+		// that looked like from the inside.
 		w.logger.ErrorContext(context.Background(), "runDefers: create runtime failed", "worker_id", w.id, "error", err)
 		return
 	}
+	rt.Metrics = w.Metrics
 	defer rt.Close(w.ctx)
 
+	// No backends registered, and registering them here would change nothing:
+	// Engine.RunDefer does not consult backendForWasm at all. It reaches
+	// straight for e.rt, the wazero Runtime, and when that is nil -- which is
+	// exactly the case when wasmtime is handling execution -- it builds a
+	// fresh wazero Runtime for the defer.
+	//
+	// So every deferred callback in cleat runs on wazero, on every path,
+	// whatever the routing table says, and wazero is where the execution fence
+	// does not fire (IMPROVEMENT-PLAN 2.28). Demonstrated, not read:
+	// TestDefersRunOnTheFencedBackend runs a defer export that never returns
+	// under a 1s budget and it is still running 20s later.
+	//
+	// Left as-is deliberately. Routing defers through a backend is not a
+	// one-line change -- defers today execute with no HostHandler in ctx, so
+	// what a defer body is allowed to do is an open question, not a detail.
+	// See IMPROVEMENT-PLAN 3.32.
 	eng := engine.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL})
 	eng.Metrics = w.Metrics
 
@@ -1449,14 +1470,19 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if needsWazeroRuntime {
 		var rtErr error
 		rt, rtErr = engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
-		rt.Metrics = w.Metrics
 		if rtErr != nil {
+			// Checked before touching rt, for the reason spelled out in
+			// runDefers: NewRuntime returns (nil, err) on four paths, and the
+			// `rt.Metrics = ...` that sat above this check turned every one of
+			// them into a nil dereference. The `if rt != nil` below is the
+			// tell -- it was written to handle a case it could never reach.
 			w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("workflow %s: create runtime: %v", wf.ID, rtErr), engine.ErrUnknown.String(), "")
 			if rt != nil {
 				rt.Close(w.ctx)
 			}
 			return
 		}
+		rt.Metrics = w.Metrics
 		defer rt.Close(w.ctx)
 	}
 

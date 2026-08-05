@@ -4585,6 +4585,114 @@ all), plus running the real files against a scratch MySQL database in CI so this
 recur. `migration/idempotency_tenant_test.go`'s MySQL arm is skipped pointing here, and that
 skip is the acceptance test for this item.
 
+### 3.30 What wazero is for — 🔶 **ANSWERED, and the answer is smaller than expected** (WS-3, 2026-08-05)
+
+Raised because Python moving onto wasmtime (§2.72) emptied the set of languages wazero was
+retained for. The question was whether it still has a stated, tested role.
+
+Read off the tree rather than reasoned about. Three things still reach it:
+
+1. **CGO-less builds.** `NewWasmtimeBackend` is behind `//go:build cgo`, so a
+   `CGO_ENABLED=0` binary has no wasmtime at all and everything runs on wazero. This is the
+   one legitimate remaining role. The shipped image is not in it — §2.28 moved the Dockerfile
+   to a glibc base with CGO on, and `--verify-backend` fails the build if that regresses.
+2. **`setup.go`'s `needsWazeroRuntime`**, which is `w.wasmtimeBackend == nil ||
+   !runsOnWasmtime(DetectLanguage(wasmBytes))`. The second clause is now dead for every
+   input: all five languages route to wasmtime, and `DetectLanguage` returns `"go"` when it
+   cannot tell. So it reduces to case 1.
+3. **Every deferred callback, unconditionally** — see §3.32. That is not a role, it is a
+   defect, and it is the one place an unfenced backend still executes guest code on a
+   fully-configured production worker.
+
+**So the answer:** wazero is the CGO-less fallback and nothing else, plus one path that
+reaches it by accident. `CLAUDE.md` has been corrected — it claimed wazero was "retained as a
+fallback for the languages that do not work under wasmtime", and that set is empty.
+
+Not proposed here: deleting it. A pure-Go build is a real distribution story and the CGO-less
+path is the only thing keeping it available. What should not survive is §3.32.
+
+### 3.31 The execution-limit story, per backend — 🔶 **PARTLY WRITTEN** (WS-3, 2026-08-05)
+
+The item asked for the limit story to be written and tested per *backend* rather than per
+language, on the grounds that §1.5 was a correct fix that reached no deployment for weeks
+because it sat behind a build tag the shipped image did not set.
+
+Writing it down is what found the gaps, so here it is in full. The wasmtime backend has
+**three** execution paths, not one, and they had three different answers:
+
+| path | entered when | fence before | fence now |
+|---|---|---|---|
+| core module (`Execute`) | Go, AssemblyScript, Java, Rust | caller's budget | unchanged |
+| native component (`ExecuteComponentCGo`) | any Component Model guest, i.e. Python | **backend default, caller's budget dropped** | caller's budget |
+| decomposition (`ExecuteComponent`) | native path fails for a non-limit reason | caller's budget | unchanged |
+| defers (`RunDefer`) | every deferred callback, on every path | **none — wazero** | **still none, §3.32** |
+
+The component-path defect: `ExecuteComponentCGo` passed `context.Background()` to
+`configureStore`, which takes the tighter of ctx's deadline and the backend's configured
+timeout. With no ctx deadline to reconcile against, every component guest silently got the
+backend-wide 30s default. Measured on a Python component that never returns: **a 2s budget
+ran for 32.9s**. The fence was firing the whole time, on the wrong deadline, which is why it
+did not look broken from outside.
+
+Two things fell out of fixing it, both of which would have undone it:
+
+- **The fallback handed a runaway guest a second budget.** `Execute` falls back from the
+  native path to decomposition on any error, so an interrupted guest was started again from
+  scratch and the effective bound became a multiple of the configured one. Limit traps no
+  longer fall back.
+- **`resourceLimitError` could not see a component-path limit at all.** It matched
+  `*wasmtime.Trap`, and the Component Model C API returns no trap code — only a rendered
+  message (`wasmtimeinc/wasmtime/error.h`). An exhausted budget arrived as a bare
+  `wasm trap: interrupt` under a page of guest backtrace.
+
+**What is still unwritten:** the *decomposition* path's fence is inherited rather than
+verified — it passes ctx correctly, but nothing exercises a runaway guest through it, because
+every component that reaches it today fails to instantiate for other reasons. And defers are
+§3.32.
+
+The generalisable finding, which is the one worth carrying: **"which backend runs this" and
+"which code path inside that backend runs this" are different questions, and the limit story
+has to be told about the second.** Both defects above sat inside the backend that CLAUDE.md
+calls the behaviour of record.
+
+### 3.32 Every deferred callback runs on wazero, unfenced — 🔴 **OPEN** (found by WS-3, 2026-08-05)
+
+`Engine.RunDefer` does not consult `backendForWasm`. It reaches straight for `e.rt`, the
+wazero Runtime, and when that is nil — which is exactly the case when wasmtime is handling
+execution — it constructs a *fresh wazero Runtime* for the defer.
+
+So every deferred callback in cleat runs on wazero, whatever the routing table says, on a
+fully-configured production worker where the workflow it belongs to just ran on wasmtime.
+wazero only observes context cancellation when the guest calls back into the host (§2.28), so
+a defer that loops without doing so is never stopped: it holds its worker slot until the
+process dies. A defer body is ordinary guest code — it can loop exactly like a workflow body
+can, and `--concurrency=N` runaway defers wedge a worker just as thoroughly.
+
+**Demonstrated, not read.** `cmd/cleat-worker/defer_backend_test.go` drives the real
+`w.runDefers` with a defer export that never returns, against a 1s wasmtime budget. It is
+still running 20 seconds later. The test is skipped and recorded (`test-go/commands` budget
+6 → 7); unskipping it is the acceptance test.
+
+**Worth keeping from writing that test**, because it is this repo's recurring failure mode in
+miniature: the first version declared the defer export with no parameters and **passed in
+0.01s with the fix reverted**, having never executed the guest. `CallExport` rejected it with
+`expected 0 params, but passed 4`, and `runDefers` logs defer failures without propagating
+them — so a test that ran nothing was indistinguishable from a test that proved something.
+The fixture's logger discards output, which is what hid the rejection.
+
+**Why it is recorded rather than fixed.** Routing defers through a backend is not a one-line
+change. Defers today execute with **no `HostHandler` in ctx** — `runDeferCompiledWithRT` never
+calls `withHandler` — so a defer that makes a host call is already broken, and it fails
+differently on the two backends. What a defer body is allowed to do wants deciding before the
+routing changes, or the fix will silently convert one failure mode into another. That decision
+is the work item; the fence follows from it.
+
+**Also fixed while in there** (`cmd/cleat-worker/setup.go`, both defer and workflow paths):
+`rt.Metrics = w.Metrics` executed *before* the `if err != nil` check on `engine.NewRuntime`,
+which returns `(nil, err)` on four paths. Every one of them was a nil dereference rather than
+the logged failure the code below it intended. The tell was the `if rt != nil { rt.Close() }`
+guard inside the error branch — written to handle a case it could never reach.
+
 
 ### 3.20 Admin force-resolve was a stub the API answered for — ✅ **FIXED** (WS-2, 2026-08-05)
 
