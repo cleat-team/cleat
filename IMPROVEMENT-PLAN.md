@@ -5395,7 +5395,7 @@ Two things that are **not** defects and are recorded so the next sweep does not 
   module path reached through a symlink. From `/Users/Shared/localssd/rcownie/cleat` the same
   suite passes. Worth knowing before someone spends a session on a phantom regression.
 
-### 3.22 An ambiguous call is erased, not reported — 🔶 **HALF FIXED** (WS-2, 2026-08-05)
+### 3.22 An ambiguous call is erased, not reported — 🔶 **MOSTLY FIXED** (WS-2, 2026-08-05)
 
 Found by building §1.4's T3 crash scenario. Not an intent-path defect: intent is only what made
 it visible, by producing the first workflow in this repo that *should* end in failure after a
@@ -5442,18 +5442,37 @@ discarded value, truncated. The empty case stays silent because an entry point w
 value produces it on every successful run. `TestCoerceResultJSON` covers it, including the
 exact malformed string above, and fails if the log line goes away.
 
-**Still open (step 4), and it is one line in WS-3's file.** `wasm/exports.go:579` should be
-`[]byte("{\"error\":" + encodeJSONString(__e.Error()) + "}")` — no manual quotes. Until then
-every workflow that returns an error through that path produces an unstorable result; the fix
-above makes that visible in the log rather than silent, but the result still cannot be kept.
+**Fixed (step 4).** `wasm/exports.go` now wraps the *key* only, because `encodeJSONString`
+supplies the value's quotes — the same way the `__r` branch four lines below has always used it.
+The adjacent unmarshal-error emission had the same class of defect by a different route
+(raw concatenation of `err.Error()` with no escaping at all, and a `json.Unmarshal` error
+routinely contains quotes), so both are fixed together.
+
+The stored result for the crash scenario is now, verified end to end:
+
+```json
+{"error": "durable call payments.Ship: [0] [AMBIGUOUS] call outcome unknown at step 2: the
+external call to payments.Ship was dispatched but the response was not recorded before a
+crash. Check the external service before retrying."}
+```
+
+`TestCrashWithWriteAheadIntentDoesNotRepeatTheCall` asserts the result mentions the ambiguity,
+and `wasm/error_json_test.go` executes the emitted expressions rather than pattern-matching the
+emitted text — the defect was in what the code *evaluated to*. Restoring the doubled quotes
+fails both, the second with `stored result is "{}"`.
+
+**Cross-stream:** `wasm/` is WS-3's. Two lines, in the error-encoding path rather than the
+component work they are in the middle of.
 
 **Still open (step 3), and it is §1.4 phase E.** An error that crosses the boundary as a string
 inside a success result is one the worker cannot act on. Phase E's typed `ErrAmbiguous` is the
 real answer, and this is the concrete argument for prioritising it.
 
-**Acceptance test:** `TestCrashWithWriteAheadIntentDoesNotRepeatTheCall` in `tests/crash`
-currently *logs* the terminal state instead of asserting it, with the lines to turn into
-assertions marked in place. When steps 3 and 4 are done, that assertion is how this closes.
+**What is left is step 3 alone**, and it is phase E. The ambiguity now reaches an operator —
+it is in the result column, in valid JSON, and an unstorable result is logged rather than
+dropped — but the workflow is still recorded `done`, because an error that crosses the ABI as
+a string inside a success result is one the worker cannot act on. The crash test records that
+status rather than asserting it: asserting today's answer would pin it in place.
 
 ## Phase 3 — Put falsification in the loop
 

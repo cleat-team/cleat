@@ -332,22 +332,35 @@ func TestCrashWithWriteAheadIntentDoesNotRepeatTheCall(t *testing.T) {
 			"should have skipped them", reserve, charge)
 	}
 
-	// What the workflow's terminal state SHOULD be is "failed, naming the
-	// ambiguity". It is not asserted here, because it is not what happens, and
-	// a test that documents a defect by passing is worse than no test.
-	//
-	// Measured: the engine detects the ambiguity and reports it to the guest,
-	// the guest reports an error back through cleat_complete(status=1), and a
-	// second cleat_complete(status=0) then overwrites it -- so the workflow is
-	// recorded `done` with a result it never produced. See IMPROVEMENT-PLAN
-	// 3.22. Turning the two lines below into assertions is that item's
-	// acceptance test.
-	t.Logf("terminal state: status=%q error_msg=%q -- 3.22: the ambiguity is detected and then "+
-		"discarded above the engine, so this reads as success", status, errMsg)
-	if status != "done" && status != "completed" && !strings.Contains(errMsg, "AMBIGUOUS") {
-		t.Logf("NOTE: the workflow did not complete and did not name the ambiguity either (%q/%q); "+
-			"if 3.22 has been fixed, replace this with the assertion described above", status, errMsg)
+	// The ambiguity must survive into the database. It did not: the generated
+	// wrapper built {"error":""..."" } -- doubled quotes, invalid JSON -- and
+	// FinalizeWorkflowSegment replaced the lot with {}, so a workflow that
+	// could not know the outcome of a charge was stored as a clean success
+	// with no trace of why. See IMPROVEMENT-PLAN 3.22.
+	result := workflowResult(t, db, wfID)
+	if !strings.Contains(result, "AMBIGUOUS") {
+		t.Errorf("stored result is %q, which does not mention the ambiguity.\n\n"+
+			"The engine detected it, the guest reported it, and it has to reach an operator "+
+			"somewhere -- result, error_msg or the log. A recovery that silently drops the one "+
+			"fact the workflow could not determine is indistinguishable from one that succeeded."+
+			"\n--- worker log ---\n%s", result, second.output())
 	}
+
+	// The status is still `done` rather than `failed`, which is 3.22 step 3 and
+	// is 1.4 phase E's job: an error that crosses the ABI as a string inside a
+	// success result is one the worker cannot act on. Recorded, not asserted --
+	// asserting today's wrong answer would pin it in place.
+	t.Logf("terminal state: status=%q error_msg=%q result=%q", status, errMsg, result)
+}
+
+// workflowResult reads the stored result column.
+func workflowResult(t *testing.T, db *sql.DB, id string) string {
+	t.Helper()
+	var result sql.NullString
+	if err := db.QueryRow(`SELECT result::text FROM workflow_instances WHERE id = $1`, id).Scan(&result); err != nil {
+		t.Fatalf("reading result for %s: %v", id, err)
+	}
+	return result.String
 }
 
 // pendingIntentCount counts the workflow's write-ahead intent rows that have
