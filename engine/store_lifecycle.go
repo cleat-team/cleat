@@ -238,10 +238,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	}
 
 	// Complete the current run.
-	qsJSON, _ := json.Marshal(queryState)
-	if qsJSON == nil {
-		qsJSON = []byte("{}")
-	}
+	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
@@ -309,10 +306,7 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 	// Delegate the terminal UPDATEs (status, idempotency, parent wake,
 	// await_child population, pg_notify) to a server-side PL/pgSQL function.
 	// This replaces 5 individual round-trips with 1 function call.
-	qsJSON, _ := json.Marshal(queryState)
-	if qsJSON == nil {
-		qsJSON = []byte("{}")
-	}
+	qsJSON := marshalQueryState(queryState)
 	resultJSON := result
 	if resultJSON == "" || !json.Valid([]byte(resultJSON)) {
 		resultJSON = "{}"
@@ -366,10 +360,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	}
 	defer tx.Rollback()
 
-	qsJSON, _ := json.Marshal(queryState)
-	if qsJSON == nil {
-		qsJSON = []byte("{}")
-	}
+	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
@@ -420,10 +411,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	}
 	defer tx.Rollback()
 
-	qsJSON, _ := json.Marshal(queryState)
-	if qsJSON == nil {
-		qsJSON = []byte("{}")
-	}
+	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',

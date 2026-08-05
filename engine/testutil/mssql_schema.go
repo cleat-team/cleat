@@ -68,6 +68,7 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
              compacted_at DATETIMEOFFSET,
              compaction_step INTEGER,
              plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
+             CONSTRAINT ck_workflow_instances_query_state CHECK (ISJSON(query_state) = 1),
              -- NOT NULL DEFAULT, as migrations/mssql/001_schema.sql declares
              -- it. Left nullable here, a fixture that inserted a row without
              -- naming tenant_id got NULL where a real database gives the
@@ -289,6 +290,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 	migrateMSSQLIdempotencyTenantID(t, db)
 	migrateMSSQLWorkflowDefsTenantID(t, db)
 	migrateMSSQLScheduleInputConstraint(t, db)
+	migrateMSSQLQueryStateConstraint(t, db)
 	migrateMSSQLEventIntentAt(t, db)
 	migrateMSSQLInstancesTenantID(t, db)
 
@@ -451,6 +453,39 @@ func migrateMSSQLIdempotencyTenantID(t *testing.T, db *sql.DB) {
 		    ALTER TABLE dbo.idempotency_keys
 		        ADD CONSTRAINT pk_idempotency_keys PRIMARY KEY (key_hash, tenant_id)`); err != nil {
 		t.Fatalf("setup MSSQL full schema: widen idempotency_keys primary key: %v", err)
+	}
+}
+
+// migrateMSSQLQueryStateConstraint adds the CHECK constraint that
+// migrations/mssql/001_schema.sql has always declared on
+// workflow_instances.query_state.
+//
+// Its absence hid IMPROVEMENT-PLAN 3.17: every dialect wrote the JSON value
+// `null` there for a workflow with no query handlers, because json.Marshal of
+// a nil map returns `null` rather than nil and the guard meant to substitute
+// `{}` tested for nil. PostgreSQL and MySQL accept a JSON null; SQL Server's
+// shipped schema does not, so CompleteWorkflow, FailWorkflow and ContinueAsNew
+// all failed there -- and this schema, having no constraint, showed nothing.
+//
+// Existing rows are repaired first: ALTER TABLE ADD CONSTRAINT validates them
+// and would fail on the `null`s a long-lived test database already holds.
+func migrateMSSQLQueryStateConstraint(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	if _, err := db.Exec(`UPDATE dbo.workflow_instances
+		SET query_state = '{}'
+		WHERE query_state IS NULL OR ISJSON(query_state) <> 1`); err != nil {
+		t.Fatalf("setup MSSQL full schema: repair workflow_instances.query_state: %v", err)
+	}
+	if _, err := db.Exec(`
+		IF NOT EXISTS (
+		    SELECT 1 FROM sys.check_constraints
+		    WHERE name = N'ck_workflow_instances_query_state'
+		      AND parent_object_id = OBJECT_ID(N'dbo.workflow_instances')
+		)
+		    ALTER TABLE dbo.workflow_instances
+		        ADD CONSTRAINT ck_workflow_instances_query_state CHECK (ISJSON(query_state) = 1)`); err != nil {
+		t.Fatalf("setup MSSQL full schema: add workflow_instances query_state constraint: %v", err)
 	}
 }
 
