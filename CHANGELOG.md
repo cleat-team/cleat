@@ -132,6 +132,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project renamed from "durable" to "cleat" across the codebase
 
 ### Fixed
+- **`CreateSchedule` could not create a schedule on SQL Server.**
+  `json.RawMessage` binds as `VARBINARY`, so `workflow_schedules.input` was
+  written as the binary rendering of the JSON, and the shipped schema's
+  `CHECK (ISJSON(input) = 1)` rejected the row. Every scheduled workflow on a
+  SQL Server built from `migrations/mssql/001_schema.sql` failed to be
+  created. The test schema declared no such constraint, which is why the suite
+  never showed it.
 - **No `cleat-worker` could start against MySQL either.** The migration runner
   split each file on every `;`, including semicolons inside comments and inside
   stored-procedure bodies, so neither shipped MySQL file could be applied:

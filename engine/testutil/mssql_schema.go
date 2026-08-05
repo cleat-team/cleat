@@ -159,7 +159,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
              next_run_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
              last_run_at DATETIMEOFFSET,
              created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             tenant_id UNIQUEIDENTIFIER
+             tenant_id UNIQUEIDENTIFIER,
+             CONSTRAINT ck_workflow_schedules_input CHECK (ISJSON(input) = 1)
          )`,
 
 		// concurrency_keys
@@ -287,6 +288,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 
 	migrateMSSQLIdempotencyTenantID(t, db)
 	migrateMSSQLWorkflowDefsTenantID(t, db)
+	migrateMSSQLScheduleInputConstraint(t, db)
 	migrateMSSQLEventIntentAt(t, db)
 	migrateMSSQLInstancesTenantID(t, db)
 
@@ -449,6 +451,39 @@ func migrateMSSQLIdempotencyTenantID(t *testing.T, db *sql.DB) {
 		    ALTER TABLE dbo.idempotency_keys
 		        ADD CONSTRAINT pk_idempotency_keys PRIMARY KEY (key_hash, tenant_id)`); err != nil {
 		t.Fatalf("setup MSSQL full schema: widen idempotency_keys primary key: %v", err)
+	}
+}
+
+// migrateMSSQLScheduleInputConstraint adds the CHECK constraint that
+// migrations/mssql/001_schema.sql has always declared on
+// workflow_schedules.input.
+//
+// Without it, this schema accepted a value the shipped one rejects, and that
+// gap hid a defect that broke every scheduled workflow on SQL Server:
+// json.RawMessage binds as VARBINARY, so the column received the binary
+// rendering of the JSON and `ISJSON(input) = 1` refused the row.
+// IMPROVEMENT-PLAN 3.16.
+//
+// Rows already in a long-lived test database may hold that malformed value, so
+// they are repaired before the constraint goes on -- ALTER TABLE ADD
+// CONSTRAINT validates existing rows and would fail on them.
+func migrateMSSQLScheduleInputConstraint(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	if _, err := db.Exec(`UPDATE dbo.workflow_schedules
+		SET input = '{}'
+		WHERE ISJSON(input) <> 1`); err != nil {
+		t.Fatalf("setup MSSQL full schema: repair workflow_schedules.input: %v", err)
+	}
+	if _, err := db.Exec(`
+		IF NOT EXISTS (
+		    SELECT 1 FROM sys.check_constraints
+		    WHERE name = N'ck_workflow_schedules_input'
+		      AND parent_object_id = OBJECT_ID(N'dbo.workflow_schedules')
+		)
+		    ALTER TABLE dbo.workflow_schedules
+		        ADD CONSTRAINT ck_workflow_schedules_input CHECK (ISJSON(input) = 1)`); err != nil {
+		t.Fatalf("setup MSSQL full schema: add workflow_schedules input constraint: %v", err)
 	}
 }
 
