@@ -1,15 +1,27 @@
 package testutil
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
 // SetupMSSQLMinimalSchema creates the core tables needed for MSSQLStore tests.
 // These are the minimum tables required: workflow_defs, workflow_instances, event_history, workflow_signals.
 func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	applyMSSQLSchemaFile(t, db)
+}
+
+// setupMSSQLHandWrittenSchema is the schema this package used to build itself.
+// Kept only so the diff that replaced it is reviewable; it is unreachable and
+// scheduled for deletion once the switch has settled.
+func setupMSSQLHandWrittenSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
 
 	statements := []string{
@@ -633,4 +645,152 @@ func MSSQLTestDB(t *testing.T) *sql.DB {
 	})
 
 	return db
+}
+
+// mssqlSchemaFiles locates the real, shipped SQL Server schema migrations.
+//
+// Same reasoning as postgresSchemaFiles, and the same defects it prevents. This
+// package used to hand-write 334 lines of CREATE TABLE for SQL Server -- a
+// second definition of a schema that already exists in the repo -- and the two
+// had drifted in ways that hid production defects rather than merely being
+// untidy:
+//
+//	no CHECK on workflow_schedules.input      hid 3.16 (no schedule could be
+//	                                          created on SQL Server)
+//	no CHECK on workflow_instances.query_state hid 3.17 (no workflow could
+//	                                          complete on SQL Server)
+//	no CHECK on the payload columns           hid 3.18/3.19 (signals and update
+//	                                          requests rejected)
+//	nullable tenant_id where the shipped
+//	schema says NOT NULL                      hid the 3.11 fixtures
+//	none of the seven security policies       is 2.71 itself
+//
+// Reading the shipped files makes that class structurally impossible. The list
+// is explicit, in version order, for the reason postgresSchemaFiles gives: a
+// migration that adds or alters a column has to be added here.
+func mssqlSchemaFiles() []string {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("mssqlSchemaFiles: runtime.Caller failed")
+	}
+	dir := filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations", "mssql")
+	return []string{
+		filepath.Join(dir, "001_schema.sql"),
+		filepath.Join(dir, "010_idempotency_keys_tenant_id.sql"),
+		filepath.Join(dir, "011_json_scalar_payloads.sql"),
+		filepath.Join(dir, "020_event_intent.sql"),
+	}
+}
+
+// applyMSSQLSchemaFile applies the shipped schema, once per database.
+//
+// Once per database is not an optimisation. migrations/mssql/001_schema.sql is
+// NOT re-appliable, though its header says it is: the seven security policies
+// bind dbo.fn_tenant_filter, so the file's own CREATE OR ALTER FUNCTION fails
+// the second time with
+//
+//	Cannot ALTER 'dbo.fn_tenant_filter' because it is being referenced by
+//	object 'TenantFilter_Defs'
+//
+// The migration Runner never meets this, because it applies each file once and
+// records the version. A helper called from every Setup meets it on the second
+// test in the binary, so the fingerprint table is what makes this usable at all
+// -- exactly as it is for PostgreSQL.
+func applyMSSQLSchemaFile(t *testing.T, db *sql.DB) {
+	t.Helper()
+	paths := mssqlSchemaFiles()
+	files := make([][]byte, 0, len(paths))
+	var combined []byte
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		files = append(files, data)
+		combined = append(combined, data...)
+	}
+
+	if _, err := db.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'cleat_test_schema')
+		CREATE TABLE cleat_test_schema (id INT PRIMARY KEY, fingerprint NVARCHAR(128) NOT NULL)`); err != nil {
+		t.Fatalf("apply mssql schema: create fingerprint table: %v", err)
+	}
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256(combined))
+	var applied string
+	if err := db.QueryRow(`SELECT fingerprint FROM cleat_test_schema WHERE id = 1`).Scan(&applied); err == nil && applied == fingerprint {
+		return
+	}
+
+	requireNoHandWrittenMSSQLSchema(t, db)
+
+	// GO is a client batch separator rather than a statement, so each file goes
+	// in batch by batch -- the same split migration.splitMSSQL performs.
+	for i, data := range files {
+		var batch []string
+		exec := func() {
+			stmt := strings.TrimSpace(strings.Join(batch, "\n"))
+			batch = nil
+			if stmt == "" {
+				return
+			}
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatalf("apply %s: %v\n\nbatch:\n%s", paths[i], err, stmt)
+			}
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.EqualFold(strings.TrimSpace(line), "GO") {
+				exec()
+				continue
+			}
+			batch = append(batch, line)
+		}
+		exec()
+	}
+
+	if _, err := db.Exec(`MERGE cleat_test_schema AS t
+		USING (SELECT 1 AS id, @p1 AS fingerprint) AS s ON t.id = s.id
+		WHEN MATCHED THEN UPDATE SET fingerprint = s.fingerprint
+		WHEN NOT MATCHED THEN INSERT (id, fingerprint) VALUES (s.id, s.fingerprint);`, fingerprint); err != nil {
+		t.Fatalf("apply mssql schema: record fingerprint: %v", err)
+	}
+}
+
+// requireNoHandWrittenMSSQLSchema refuses to apply the shipped schema on top of
+// the hand-written one, and says how to fix it.
+//
+// The two are not compatible in place. Every CREATE TABLE in the shipped file
+// is guarded by IF NOT EXISTS, so a table that already exists in the old shape
+// keeps it -- and the constraints, defaults and security policies that follow
+// are then applied to a table that may not satisfy them. The result is a
+// database that is half one schema and half the other, which is worse than
+// either. Applying it that way is also what made an earlier attempt at this
+// switch hang against a long-lived local database.
+//
+// So: an existing cleat database with no fingerprint row and no security
+// policies was built by the schema this change removes, and has to be dropped.
+// One command, once. CI is unaffected -- its databases are new every run.
+func requireNoHandWrittenMSSQLSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var tables, policies int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sys.tables WHERE name IN
+		('workflow_instances', 'workflow_defs', 'event_history')`).Scan(&tables); err != nil {
+		t.Fatalf("inspect existing schema: %v", err)
+	}
+	if tables == 0 {
+		return // empty database: nothing to reconcile
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sys.security_policies`).Scan(&policies); err != nil {
+		t.Fatalf("inspect existing security policies: %v", err)
+	}
+	if policies > 0 {
+		return // already the shipped schema; the fingerprint just has not been recorded
+	}
+	var dbName string
+	_ = db.QueryRow(`SELECT DB_NAME()`).Scan(&dbName)
+	t.Fatalf("the SQL Server test database %q was built by the hand-written test schema, "+
+		"which this checkout no longer uses (IMPROVEMENT-PLAN 2.71).\n\n"+
+		"The shipped schema cannot be applied over it: every CREATE TABLE is guarded by "+
+		"IF NOT EXISTS, so the old table shapes would survive and the constraints and "+
+		"security policies would be applied to tables that do not satisfy them.\n\n"+
+		"Drop it once and re-run:\n\n"+
+		"    DROP DATABASE %s; CREATE DATABASE %s;\n", dbName, dbName, dbName)
 }

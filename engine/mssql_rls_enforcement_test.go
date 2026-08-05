@@ -50,7 +50,13 @@ var (
 // that a *new* gap fails this test rather than being silently tolerated: the
 // point of the exercise is that a difference between the tested schema and the
 // shipped schema must be visible (1.9).
-var mssqlPolicyTablesMissingFromTestSchema = []string{"workflow_routing", "workflow_tags"}
+//
+// It is now empty, and that is the 2.71 schema residual closing: engine/testutil
+// builds the MSSQL schema from migrations/mssql/*.sql, so there is nothing for
+// the tested schema to be missing. The variable stays rather than the check
+// being deleted -- a future divergence should fail here, which is the whole
+// reason it was written as a set rather than a tolerance.
+var mssqlPolicyTablesMissingFromTestSchema = []string{}
 
 // enableMSSQLTenantPolicies applies the real fn_tenant_filter and the real
 // security policies to the test database, and removes them again on cleanup.

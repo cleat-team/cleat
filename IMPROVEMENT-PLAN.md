@@ -4207,6 +4207,38 @@ with a permissive predicate that fails with
 is now asserted rather than assumed, so a *new* divergence fails the test instead of being
 tolerated silently. Pointing `engine/testutil/` at the real migration remains the real fix.
 
+#### Where the switch stands, 2026-08-05 — written, one failure left, and it moves
+
+Branch `fix/mssql-test-schema-real-2`, pushed but **not ready**. `engine/testutil` builds the
+MSSQL schema from `migrations/mssql/{001,010,011,020}.sql`, fingerprinted so it applies once
+per database — 001 is not re-appliable, because its own security policies bind
+`fn_tenant_filter` and its `CREATE OR ALTER FUNCTION` then fails on the second call. A database
+built by the old hand-written schema is **refused with instructions** rather than migrated in
+place: every `CREATE TABLE` in the shipped file is guarded by `IF NOT EXISTS`, so the old
+shapes would survive while the constraints and policies were applied over them, and that
+half-and-half state is what hung the first attempt at this switch.
+
+**What the switch bought on the way**, all merged separately: §3.16, §3.17, §3.18 and §3.19 —
+four production defects the hand-written schema's missing constraints had hidden. The failure
+count went 95 → 29 → 20 → **1**.
+
+**The one that is left moves between tests.** Under the shipped schema the full suite fails a
+single MSSQL subtest with `ClaimWorkflow returned nil` — `TestClaimWorkflow/mssql` on one run,
+`TestFailWorkflow/mssql` on the next. Both pass in isolation.
+
+- **Established:** it needs the full suite; the symptom is always a claim finding nothing; it
+  appeared only once the policies were live.
+- **Suspected, and with evidence against it:** that `mssql_rls_enforcement_test.go` is the
+  trigger. That file installs the seven policies and drops them on cleanup — sensible when the
+  schema lacked them, and now dropping what the schema provides, which would give other tests a
+  window on a different database. But pairing it with `TestClaimWorkflow` did **not** reproduce
+  the failure. So it is a hypothesis, not a diagnosis.
+
+The first thing to try is making that file *assert* the policies rather than install them, and
+seeing whether the failure survives. Its
+`mssqlPolicyTablesMissingFromTestSchema` is already updated to the empty set — under the switch
+nothing is missing — kept as a set rather than deleted so a future divergence still fails there.
+
 **One exception, as of 2026-08-04.** `cmd/cleat-worker/tenant_isolation_mssql_test.go` was
 written and shipped skipped against this item; unskipping it was the recorded acceptance
 test, and it now passes. It sidesteps the shared helper entirely — it applies
