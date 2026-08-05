@@ -132,9 +132,14 @@ cluster	359	# same as test-go/engine, and for the same reason; see the note ther
 # when the skip is removed.
 plugin-harness/multi-db	1
 # 1 = TestPluginCalls_Wasm_Python only, which needs componentize-py that this
-# job does not install; Python runs on wazero by decision (2.72) so building it
-# here would prove nothing about the routing. Go, Rust, AssemblyScript and Java
-# must all run.
+# job does not install. Go, Rust, AssemblyScript and Java must all run.
+#
+# The number is unchanged but its justification is not. It used to read "Python
+# runs on wazero by decision (2.72) so building it here would prove nothing
+# about the routing". Python now runs on wasmtime like everything else, so this
+# skip is no longer free: it is the ordinary "nobody asked" kind, and installing
+# componentize-py here would turn it into coverage of the routing that
+# e2e-cross-language currently carries alone.
 #
 # The budget is here because the step had no -v and no report, so a skipped
 # language was indistinguishable from a passing one -- which is how Go sat
@@ -145,14 +150,16 @@ plugin-harness/wasm	1
 # so every test in tests/cross-language has what it needs. Measured on darwin
 # with cargo present: 7 pass, 0 skip. Without cargo all seven skip, which is
 # what this catches.
-# 0 -> 1: TestPythonWasmEndToEnd is skipped as known-broken (2.72). It fails on
-# both backends -- wasmtime at "undefined element: out of bounds table access",
-# wazero at "module[__main_module__] not instantiated" -- and had been failing
-# invisibly here because this job's first step piped `go test` into `tee`
-# without pipefail. That step now has pipefail, so the skip is what keeps the
-# job honest rather than red. Drop back to 0 when either instantiation path is
-# fixed; unskipping the test is that fix's acceptance test.
-e2e-cross-language	1
+# 0 -> 1 -> 0. The 1 was TestPythonWasmEndToEnd, skipped as known-broken (2.72)
+# after failing on both backends -- wasmtime at "undefined element: out of
+# bounds table access", wazero at "module[__main_module__] not instantiated".
+# That entry said "drop back to 0 when either instantiation path is fixed;
+# unskipping the test is that fix's acceptance test", and that is what happened
+# on 2026-08-05: the native component path was being compiled out by a build tag
+# no build set, and with it compiled in the same component runs. The test is
+# unskipped, so this is a real 0 again -- if Python regresses, this job goes red
+# rather than quietly skipping.
+e2e-cross-language	0
 # 0: the soak job provisions PostgreSQL, which is the only thing this suite
 # needs. The one way it can skip is testing.Short(), which nothing in the
 # workflow passes -- so a skip here means the job ran for an hour and tested

@@ -70,15 +70,24 @@ func TestRustRunsOnWasmtime(t *testing.T) {
 	}
 }
 
-// TestPythonStaysOnWazero pins the one language that genuinely fails on
-// wasmtime: its component reaches the decomposition path and dies on
-// `incompatible import type for env::abort`. cleat/wasmtest used to register it
-// for wasmtime anyway, and nothing noticed, because plugin-harness-ci.yml
-// installs no Python toolchain so the test that would exercise it skips.
-func TestPythonStaysOnWazero(t *testing.T) {
-	if runsOnWasmtime("python") {
-		t.Fatal("python is routed to wasmtime, where its component fails to instantiate; " +
-			"see IMPROVEMENT-PLAN 2.72")
+// TestPythonRunsOnWasmtime replaces TestPythonStaysOnWazero, which pinned the
+// opposite and was right about the observation while wrong about the cause.
+//
+// Python is a Component Model guest. Its component was failing in
+// backend_wasmtime.go's hand-rolled decomposition path -- but only ever reached
+// that path because the native one, which hands the component to wasmtime's own
+// Component Model runtime, was compiled out by the wasmtime_component_cgo build
+// tag that no build set. With the headers vendored and the tag gone, the same
+// component executes and records its durable call. See engine.WasmtimeLanguages
+// and IMPROVEMENT-PLAN 2.72.
+//
+// If this fails because someone moved Python back, the reason belongs in that
+// comment -- and check first whether the native component path is still being
+// compiled, because that is what this actually depends on.
+func TestPythonRunsOnWasmtime(t *testing.T) {
+	if !runsOnWasmtime("python") {
+		t.Fatal("python is no longer routed to wasmtime; if that is deliberate, " +
+			"record why in engine.WasmtimeLanguages")
 	}
 }
 
@@ -96,7 +105,9 @@ func TestGoStillRoutesToWasmtime(t *testing.T) {
 // an unregistered language, and the worker relies on that to build a wazero
 // Runtime instead.
 func TestUnknownLanguageFallsBack(t *testing.T) {
-	for _, lang := range []string{"python", "ruby", ""} {
+	// "python" was in this list and is now a supported language, so it no
+	// longer tests the fallback -- it would have tested the reverse.
+	for _, lang := range []string{"ruby", ""} {
 		if runsOnWasmtime(lang) {
 			t.Errorf("runsOnWasmtime(%q) = true; unrecognised guests must fall back to wazero", lang)
 		}

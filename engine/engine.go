@@ -296,33 +296,39 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 //     tests/cross-language built wasm32-wasip1 rather than the shipped target,
 //     so the suite covered an artifact no user runs.
 //
+//   - python: added 2026-08-05, and it is the entry whose history is worth
+//     knowing. Python is a Component Model guest, not a core module, so it
+//     takes backend_wasmtime.go's component branch rather than the ordinary
+//     instantiation path. There are two implementations of that branch: the
+//     native one in component_cgo.go, which hands the component to wasmtime's
+//     own Component Model runtime, and a hand-rolled decomposition path that
+//     re-implements shared-everything dynamic linking in Go.
+//
+//     Only the second one ever ran. The native path sat behind the
+//     wasmtime_component_cgo build tag, which no build, CI job, Makefile or
+//     Dockerfile set, so every build got a stub that returned "not built" and
+//     fell through to decomposition -- where componentize-py output stops at
+//     `undefined element: out of bounds table access` instantiating instance
+//     52 (module 8). Three sessions read that error as the state of
+//     Python-on-wasmtime. It was the state of the fallback.
+//
+//     With the headers vendored (engine/wasmtimeinc) so the tag could be
+//     dropped, the same component runs: executes, records its durable call,
+//     returns. No change to the component path's logic was needed -- it was
+//     correct and uncompiled. Verified with a real HostHandler on a component
+//     componentize-py built fresh, not on the stale checked-in fixture, and
+//     the acceptance test named in IMPROVEMENT-PLAN 2.72,
+//     TestPythonWasmEndToEnd, is unskipped.
+//
 // Absent, and why:
 //
-//   - python: runs on wazero, deliberately. Not a gap waiting to be closed --
-//     a decision, with the reason known precisely.
+//   - nothing. Every language cleat builds for is served by wasmtime. See
+//     IMPROVEMENT-PLAN 3.30 for what that leaves the wazero runtime doing:
+//     it is no longer the fallback for any language, and an unfenced backend
+//     that nothing routes to is a liability rather than a safety net.
 //
-//     Its Component Model binary reaches the decomposition path and stops at
-//     `undefined element: out of bounds table access` while instantiating one of
-//     the inner core modules. That is after the `env::abort` arity defect was
-//     fixed, which had been masking it: the failure moved eleven instances
-//     deeper, from instance 41 to instance 52. Measured on a component
-//     componentize-py built fresh in CI, not on the stale checked-in fixture.
-//
-//     backend_wasmtime.go already carries a retry keyed on that exact error
-//     ("adapter-provided tables conflicting with our placeholders") and it does
-//     not rescue this case, so the next attempt starts there. The native
-//     component path in engine/component_cgo.go is the other candidate, behind
-//     a build tag no build sets.
-//
-//     Do not read this as "wazero runs Python fine". An earlier draft of this
-//     comment said exactly that, and CI contradicted it: with the routing
-//     corrected so Python reaches wazero, TestPythonWasmEndToEnd fails there too,
-//     on `module[__main_module__] not instantiated`. Python is on wazero because
-//     that is where the product sends it, not because it is known to work there.
-//     See IMPROVEMENT-PLAN.md 2.72.
-//
-// See IMPROVEMENT-PLAN.md 2.72.
-var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust"}
+// See IMPROVEMENT-PLAN.md 2.72 and 1.5/2.28.
+var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python"}
 
 // RunsOnWasmtime reports whether a detected guest language is served by the
 // wasmtime backend.

@@ -1,8 +1,8 @@
-//go:build cgo && wasmtime_component_cgo
+//go:build cgo
 
-// Tests for the opt-in native wasmtime Component Model C API fast path; see
-// the comment at the top of component_cgo.go for the wasmtime_component_cgo
-// build tag and the CGO_CFLAGS needed to build with it.
+// Tests for the native wasmtime Component Model C API path; see the comment at
+// the top of component_cgo.go. These used to build only under the opt-in
+// wasmtime_component_cgo tag, which meant they ran nowhere: no CI job set it.
 
 package engine
 
@@ -949,7 +949,7 @@ func TestCgotestMakeU32Arg(t *testing.T) {
 func TestGoComponentCallbackNilHandler(t *testing.T) {
 	b := &wasmtimeBackend{}
 	id := registerCB(b, cbTypeNow)
-	err := cgotestGoComponentCallback(unsafe.Pointer(id), nil, 0, nil)
+	err := cgotestGoComponentCallback(id, nil, 0, nil)
 	if err != nil {
 		t.Errorf("goComponentCallback with nil handler returned error")
 	}
@@ -958,7 +958,7 @@ func TestGoComponentCallbackNilHandler(t *testing.T) {
 func TestGoComponentCallbackNilBackend(t *testing.T) {
 	entry := cbEntry{backend: nil, typ: cbTypeDurableSleep}
 	id := registerCB(entry.backend, entry.typ)
-	err := cgotestGoComponentCallback(unsafe.Pointer(id), nil, 0, nil)
+	err := cgotestGoComponentCallback(id, nil, 0, nil)
 	if err != nil {
 		t.Errorf("goComponentCallback with nil backend returned error")
 	}
@@ -968,7 +968,7 @@ func TestGoComponentCallbackDispatchDefault(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 0}}
 	id := registerCB(b, cbTypeDefault)
 	resultPtr := cgotestAllocResult()
-	err := cgotestGoComponentCallback(unsafe.Pointer(id), nil, 0, resultPtr)
+	err := cgotestGoComponentCallback(id, nil, 0, resultPtr)
 	if err != nil {
 		t.Errorf("goComponentCallback with default type returned error")
 	}
@@ -978,7 +978,7 @@ func TestGoComponentCallbackDispatchDefault(t *testing.T) {
 }
 
 func TestGoComponentCallbackMissingFromRegistry(t *testing.T) {
-	err := cgotestGoComponentCallback(unsafe.Pointer(uintptr(999999)), nil, 0, nil)
+	err := cgotestGoComponentCallback(uintptr(999999), nil, 0, nil)
 	if err != nil {
 		t.Errorf("goComponentCallback with missing ID returned error")
 	}

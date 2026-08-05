@@ -56,10 +56,15 @@ Key conventions:
 - **wasmtime** (`engine/backend_wasmtime.go`) — via CGo. **The primary backend.** It is the
   standard engine, and in practice substantially more reliable. Preferred automatically
   whenever CGO is available (`cmd/cleat-worker/main.go`).
-- **wazero** (`engine/backend_wazero.go`) — pure Go. Retained as a fallback for the
-  languages that do not work under wasmtime, and used when CGO is unavailable. The worker
+- **wazero** (`engine/backend_wazero.go`) — pure Go. Used when CGO is unavailable. The worker
   logs this as "legacy wazero". It has a real bug tail — do not treat a wazero-only failure
   as evidence about the engine as a whole.
+
+  It is **no longer the fallback for any language.** That sentence used to read "retained as
+  a fallback for the languages that do not work under wasmtime"; as of 2026-08-05 that set is
+  empty — `engine.WasmtimeLanguages` names all five, Python included. What wazero is *for*
+  now is an open question, tracked as IMPROVEMENT-PLAN §3.30, and it matters because the
+  execution fence does not fire there (§2.28): a runaway guest on wazero is not stopped.
 
 Prefer wasmtime when reproducing or debugging anything execution-related. If you find
 yourself on wazero unexpectedly, check whether CGO got disabled.

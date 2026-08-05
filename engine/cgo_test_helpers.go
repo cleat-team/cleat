@@ -1,15 +1,19 @@
-//go:build cgo && wasmtime_component_cgo
+//go:build cgo
 
 // Every symbol this file defines is only ever called from other _test.go
 // files (component_cgo_test.go), so in spirit this is test-only code. It is
 // deliberately NOT named *_test.go, though: Go (as of at least 1.26) rejects
 // `import "C"` in any _test.go file outright ("use of cgo in test ... not
 // supported"), for both `go build` and `go test`. So this file has to be an
-// ordinary .go file to be usable at all, and instead relies on the
-// wasmtime_component_cgo build tag -- the same opt-in tag used by
-// component_cgo.go and component_callbacks.go -- to stay out of default
-// builds. See the comment at the top of component_cgo.go for why that tag
-// exists and how to build with it enabled.
+// ordinary .go file to be usable at all.
+//
+// It used to carry the wasmtime_component_cgo tag to stay out of default
+// builds. That tag is gone (see component_cgo.go), so these helpers now
+// compile into ordinary builds. scripts/check-test-only-code.sh does not
+// report them -- staticcheck's U1000 does not see through cgo -- which is
+// worth knowing rather than relying on: the detector is blind here, so if
+// these helpers ever grow a production caller by accident, nothing will say
+// so.
 
 package engine
 
@@ -26,6 +30,11 @@ package engine
 //     wasmtime_component_func_type_t *ty,
 //     wasmtime_component_val_t *args, size_t nargs,
 //     wasmtime_component_val_t *results, size_t nresults);
+//
+// // See cbid_as_env in component_callbacks.go. A separate copy because cgo
+// // compiles each file's preamble into its own translation unit, so a static
+// // function in one is not visible from another.
+// static void *cbid_as_env_test(uintptr_t id) { return (void *)id; }
 //
 // static wasmtime_component_val_t cgotest_make_u64(uint64_t v) {
 //     wasmtime_component_val_t val;
@@ -222,6 +231,14 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 	return nil
 }
 
-func cgotestGoComponentCallback(env unsafe.Pointer, argsPtr unsafe.Pointer, nargs int, resultsPtr unsafe.Pointer) *C.wasmtime_error_t {
-	return C.goComponentCallback(env, nil, nil, (*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultsPtr), 1)
+// cgotestGoComponentCallback invokes the callback exactly as wasmtime does,
+// taking the registry id rather than a pointer.
+//
+// It takes a uintptr and casts in C for the same reason
+// component_callbacks.go's cbid_as_env does: the id is a token, and spelling
+// it as a Go unsafe.Pointer is both a vet finding and an invalid Go pointer in
+// a pointer-typed slot. Callers used to write unsafe.Pointer(id) at each call
+// site, which put four copies of that in the test file.
+func cgotestGoComponentCallback(cbID uintptr, argsPtr unsafe.Pointer, nargs int, resultsPtr unsafe.Pointer) *C.wasmtime_error_t {
+	return C.goComponentCallback(C.cbid_as_env_test(C.uintptr_t(cbID)), nil, nil, (*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultsPtr), 1)
 }

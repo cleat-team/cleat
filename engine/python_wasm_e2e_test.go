@@ -30,34 +30,16 @@ import (
 //   - Python 3.10+
 //   - cleat-sdk installed          (pip install -e python-sdk/)
 func TestPythonWasmEndToEnd(t *testing.T) {
-	// Recorded as broken rather than left failing, and rather than left hidden.
+	// Unskipped 2026-08-05. This was the acceptance test IMPROVEMENT-PLAN 2.72
+	// named for whichever component instantiation path was fixed first, and the
+	// native one (component_cgo.go) is now compiled into ordinary builds rather
+	// than gated behind a tag nothing set. See engine.go's WasmtimeLanguages
+	// comment for what that changed and what it did not.
 	//
-	// This test has been failing on develop for some time. It was invisible
-	// because the workflow step running it piped `go test` into `tee` without
-	// `set -o pipefail`, so tee's exit status was the step's and the job
-	// reported green. That step now has pipefail, which is what turned this
-	// from a silent failure into a visible one.
-	//
-	// It fails on *both* backends, on a component componentize-py builds fresh
-	// on each run:
-	//
-	//	wasmtime: instantiate instance 52 (module 8): undefined element:
-	//	          out of bounds table access
-	//	wazero:   instantiate instance 8 (module 1):
-	//	          module[__main_module__] not instantiated
-	//
-	// The wasmtime figure is after the env::abort arity fix in this same
-	// change, which moved it eleven instances deeper -- so that defect was real
-	// and is fixed, and this is a different one underneath it.
-	//
-	// Skipped with the failure written down, the same treatment
-	// TestPluginCalls_MultiDB gets for a known upstream bug: a red develop
-	// helps nobody, and deleting the test would lose the only thing that builds
-	// a Python component in CI. Unskipping it is the acceptance test for
-	// whichever of the two instantiation paths gets fixed first.
-	//
-	// See IMPROVEMENT-PLAN.md 2.72.
-	t.Skip("known broken on both backends; see IMPROVEMENT-PLAN 2.72 -- unskipping this is the acceptance test")
+	// It had been failing on develop invisibly, because the workflow step
+	// running it piped `go test` into `tee` without `set -o pipefail` -- so
+	// tee's exit status was the step's. That is fixed too; without it this
+	// test could pass or fail here and CI would report the same either way.
 
 	ctx := context.Background()
 
@@ -113,22 +95,23 @@ func TestPythonWasmEndToEnd(t *testing.T) {
 	caller := &mockCaller{}
 	var engineOpts []EngineOption
 	// Register exactly the languages the worker registers. This used to be an
-	// unconditional `if true` block wiring WithBackend("python", wt), which
-	// forced Python onto wasmtime -- a configuration the product does not use
-	// and that Python does not survive, so this test had been failing on
-	// develop. Invisibly: the workflow step running it piped `go test` into
-	// `tee` without pipefail, so the failure reported green.
+	// unconditional `if true` block wiring WithBackend("python", wt), forcing a
+	// routing the product did not use; reading WasmtimeLanguages instead means
+	// this test exercises what ships. Python is now in that list, so this test
+	// moved onto wasmtime without an edit here -- which was the point of
+	// writing it this way (IMPROVEMENT-PLAN 2.72).
 	//
-	// WasmtimeLanguages is the single source of truth for that routing
-	// (IMPROVEMENT-PLAN 2.72). Reading it here means this test exercises what
-	// ships, and that adding Python to it -- once the component path can
-	// instantiate one -- switches this test over with no edit here.
-	if wt, wtErr := NewWasmtimeBackend(ctx); wtErr == nil {
-		engineOpts = append(engineOpts, WithBackends(WasmtimeLanguages, wt))
-		t.Logf("wasmtime registered for %v; python is not among them and runs on wazero", WasmtimeLanguages)
-	} else {
-		t.Logf("wasmtime backend not available: %v (everything falls back to wazero)", wtErr)
+	// Not a skip if the backend is missing: a wasmtime backend that fails to
+	// construct is a real failure now that every language routes to it, and
+	// falling back to wazero here would quietly test a configuration nothing
+	// ships and report it as a pass.
+	wt, wtErr := NewWasmtimeBackend(ctx)
+	if wtErr != nil {
+		t.Fatalf("NewWasmtimeBackend: %v (every language in WasmtimeLanguages, "+
+			"python included, routes here -- there is no fallback left to test)", wtErr)
 	}
+	engineOpts = append(engineOpts, WithBackends(WasmtimeLanguages, wt))
+	t.Logf("wasmtime registered for %v", WasmtimeLanguages)
 	engine := NewEngine(rt, caller, engineOpts...)
 
 	// ---- Step 4: Execute the workflow ----
