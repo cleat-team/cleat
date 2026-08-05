@@ -107,24 +107,55 @@ func TestKillWorkerMidExecution(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Simulate worker-1 crash: release its workflows back to ready.
+	// Crash whichever worker actually claimed work, rather than assuming it was
+	// worker-1.
+	//
+	// Claiming is a race between three concurrent workers over six workflows,
+	// so worker-1 getting none of them is an ordinary outcome and not a defect.
+	// The guard below is right that the test must never pass vacuously -- it
+	// was just asserting the wrong thing, and it failed a CI run saying
+	// "worker-1 claimed none of the 6 workflows". What this test needs is *a*
+	// worker holding claims, not a particular one.
+	//
+	// Picked deterministically (most claims, ties broken by the fixed name
+	// order) so that a failure here is reproducible rather than depending on
+	// map iteration order, which is randomised.
+	workerIDs := []string{"worker-1", "worker-2", "worker-3"}
+	claimCounts := make(map[string]int, len(workerIDs))
+	for _, workerID := range claimedBy {
+		claimCounts[workerID]++
+	}
+	victim := ""
+	for _, wID := range workerIDs {
+		if claimCounts[wID] > claimCounts[victim] {
+			victim = wID
+		}
+	}
+	if claimCounts[victim] == 0 {
+		t.Fatalf("no worker claimed any of the %d workflows, so this test has nothing "+
+			"to fail over and would pass without exercising failover at all", numWorkflows)
+	}
+
+	// Simulate the victim crashing: release its workflows back to ready.
 	var released int
 	for id, workerID := range claimedBy {
-		if workerID == "worker-1" {
-			if err := store.ReleaseWorkflow(ctx, id, "worker-1", claimed[id].Generation, time.Now()); err != nil {
+		if workerID == victim {
+			if err := store.ReleaseWorkflow(ctx, id, victim, claimed[id].Generation, time.Now()); err != nil {
 				t.Fatalf("ReleaseWorkflow for %s: %v", id, err)
 			}
 			released++
 		}
 	}
-	if released == 0 {
-		t.Fatalf("worker-1 claimed none of the %d workflows, so this test has nothing "+
-			"to fail over and would pass without exercising failover at all", numWorkflows)
-	}
 
-	// Verify that remaining workers can claim the released workflows.
+	// Verify that the *other* workers can claim the released workflows.
+	survivors := make([]string, 0, len(workerIDs)-1)
+	for _, wID := range workerIDs {
+		if wID != victim {
+			survivors = append(survivors, wID)
+		}
+	}
 	reclaimed := make(map[string]string)
-	for _, wid := range []string{"worker-2", "worker-3"} {
+	for _, wid := range survivors {
 		for range 10 {
 			wf, err := store.ClaimWorkflow(ctx, wid)
 			if err != nil {
@@ -137,12 +168,12 @@ func TestKillWorkerMidExecution(t *testing.T) {
 		}
 	}
 
-	// Count how many of worker-1's original workflows got reclaimed.
-	var reclaimedFromWorker1 int
+	// Count how many of the victim's original workflows got reclaimed.
+	var reclaimedFromVictim int
 	for id, wID := range claimedBy {
-		if wID == "worker-1" {
+		if wID == victim {
 			if _, ok := reclaimed[id]; ok {
-				reclaimedFromWorker1++
+				reclaimedFromVictim++
 			}
 		}
 	}
@@ -150,12 +181,12 @@ func TestKillWorkerMidExecution(t *testing.T) {
 	// An assertion, not a note. "No workflows were reclaimed (may be timing)"
 	// is the same output a completely broken failover path produces, and this
 	// test is the only thing that would have said otherwise.
-	if reclaimedFromWorker1 == 0 {
-		t.Errorf("worker-1 released %d workflows and the remaining workers reclaimed "+
+	if reclaimedFromVictim == 0 {
+		t.Errorf("%s released %d workflows and the remaining workers (%v) reclaimed "+
 			"none of them: work orphaned by a crashed worker is not being picked up",
-			released)
+			victim, released, survivors)
 	}
-	t.Logf("Reclaimed %d of %d workflows released by worker-1", reclaimedFromWorker1, released)
+	t.Logf("Reclaimed %d of %d workflows released by %s", reclaimedFromVictim, released, victim)
 }
 
 // TestKillPostgresAndRestart kills the PostgreSQL container, restarts it,
