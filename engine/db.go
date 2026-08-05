@@ -702,13 +702,23 @@ func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflow
 
 	// Try to insert. ON CONFLICT DO NOTHING means if the key_hash already exists,
 	// the RETURNING clause returns no rows.
+	// make_interval(secs => <float>) rather than fmt.Sprintf("%d seconds",
+	// int(ttl.Seconds())).
+	//
+	// That truncated: a 500 ms TTL became "0 seconds", so the key was born
+	// expired and the next caller took it -- two workflows holding the same
+	// mutual-exclusion key, with nothing logged. Sub-second is not an exotic
+	// input here: the guest API is specified in milliseconds
+	// (engine/locking.go passes time.Duration(ttlMs)*time.Millisecond), so
+	// truncating to whole seconds contradicts the contract callers are
+	// written against. IMPROVEMENT-PLAN 3.34.
 	var returnedWorkflowID string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
-		VALUES (digest($1, 'sha256'), $1, $2, now() + $3::interval, $4)
+		VALUES (digest($1, 'sha256'), $1, $2, now() + make_interval(secs => $3), $4)
 		ON CONFLICT (key_hash) DO NOTHING
 		RETURNING workflow_id
-	`, key, workflowID, fmt.Sprintf("%d seconds", int(ttl.Seconds())), s.tenantID).Scan(&returnedWorkflowID)
+	`, key, workflowID, ttl.Seconds(), s.tenantID).Scan(&returnedWorkflowID)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil

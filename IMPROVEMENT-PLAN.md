@@ -5279,7 +5279,7 @@ defer work there; `runDefers` runs them on a fresh module with no handler, where
 panics and is swallowed. Whatever is decided should make those two agree, because today
 whether your defer can call a service depends on which way the workflow failed.
 
-### 3.34 A concurrency key's TTL means three different things — 🔴 **OPEN, for WS-1** (found by WS-3, 2026-08-05)
+### 3.34 A concurrency key's TTL means three different things — ✅ **FIXED** (WS-1, 2026-08-05; found by WS-3)
 
 Found by chasing an intermittent, and the intermittent is the least of it.
 
@@ -5322,6 +5322,60 @@ in #329. Fixing the truncation is what makes the test statable.
 are WS-1's, and the fix is a decision about the primitive rather than a patch: whether TTLs are
 sub-second at all, and whether expiry belongs on the database clock (defensible, and what two
 dialects do) or the application's. Whichever way it goes, all three should agree.
+
+#### Resolution — the TTL is exactly what was asked for, on the database's clock
+
+Both halves of WS-3's question, decided the same way for the same reason.
+
+**Sub-second TTLs are real, and are not rounded in either direction.** The guest API is
+specified in milliseconds — `engine/locking.go` passes `time.Duration(ttlMs)*time.Millisecond`
+straight from the WASM caller — so truncating to whole seconds contradicts the contract callers
+are written against. That settles WS-3's "whether TTLs are sub-second at all": they already
+are, at the only layer a user sees.
+
+**The database's clock owns expiry**, on all three. Every predicate that reads `expires_at`
+already compares it against the database clock (`expires_at < now()`, `> SYSUTCDATETIME()`,
+`<= NOW(6)`). MySQL computed the value on the application's and tested it against the
+database's, which is the skew WS-3 identified; workers on different hosts also have to agree
+about whether a lock is held.
+
+  postgres  now() + make_interval(secs => $3)                 -- fractional seconds
+  mysql     DATE_ADD(NOW(6), INTERVAL ? MICROSECOND)
+  mssql     DATEADD(MICROSECOND, @us, DATEADD(SECOND, @s, …))  -- split so DATEADD's
+                                                                 int argument cannot
+                                                                 overflow on a long TTL
+
+**Demonstrated, not reasoned about.** With the fix reverted, a 500 ms lock is stored *in the
+past* — `a 500ms lock was stored already expired (-6.397ms remaining)` on PostgreSQL,
+`-8.18ms` on SQL Server — and `TestConcurrencyKeyExcludesWhileHeld` shows the consequence
+directly: a second workflow acquires a key the first is holding.
+
+**No sleeps.** WS-3 noted that the intermittent which led them here asserts per-backend
+behaviour through a 10 ms sleep. These tests read the stored expiry back and do arithmetic
+against the database's own clock, and check exclusion by having a *second* workflow contend —
+neither needs a race to be observable.
+
+### 3.35 Re-acquiring a concurrency key you already hold answers differently per dialect — 🔴 **OPEN**
+
+Found while writing §3.34's exclusion test, by contending a key against itself and getting
+disagreement:
+
+| dialect | `AcquireConcurrencyKey(key, wf)` when *wf itself* already holds `key` |
+|---|---|
+| MySQL | **true** — `return ownerID == workflowID` (`engine/mysql_ops.go`) |
+| PostgreSQL | **false** — `ON CONFLICT DO NOTHING` returns no rows (`engine/db.go`) |
+| SQL Server | **false** — the `WHERE NOT EXISTS` guard matches, so nothing is inserted |
+
+So the same primitive is re-entrant on one backend and not on the other two, and neither
+behaviour is written down anywhere. It matters in both directions: a workflow that re-acquires
+its own lock is told it failed on two dialects (and may block itself or leak the lock until the
+TTL runs out), while on the third it succeeds and a matching release count becomes the
+caller's problem.
+
+Not fixed here for the reason §3.34 was handed over in the first place — it is a decision about
+what the primitive means, not a patch. The choice is between "re-entrant, and document it" and
+"never re-entrant, and return false consistently". §3.34's test deliberately contends with a
+*second* workflow so that it asks about mutual exclusion rather than about this.
 
 ### 3.33 gosec's 283 findings, triaged — 🔶 **2 fixed, 281 classified** (WS-3, 2026-08-05)
 
