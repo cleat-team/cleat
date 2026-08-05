@@ -246,10 +246,17 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	defer testutil.CleanupMSSQLTestData(t, db)
 
 	// Insert a workflow_defs row (required by FK constraint).
+	//
+	// tenant_id is the default tenant, not nil: migrations/mssql/001_schema.sql
+	// declares the column NOT NULL DEFAULT '000…' and always has. This passed
+	// nil only because engine/testutil's copy of the schema left the column
+	// nullable, which is the drift IMPROVEMENT-PLAN 3.12's ownership work
+	// corrected -- so the row this test used to insert could not exist in a
+	// real database.
 	_, err := db.Exec(`
 		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
-		"test-wf", 1, []byte("wasm"), "[]", "default", nil)
+		"test-wf", 1, []byte("wasm"), "[]", "default", DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("insert workflow_def: %v", err)
 	}

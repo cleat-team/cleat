@@ -670,7 +670,39 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	if pluginDepsJSON == nil {
 		pluginDepsJSON = []byte("{}")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	// Refuse to deploy over a definition owned by another tenant.
+	//
+	// MySQL has no row-level security, so this check is the only thing between
+	// a deploy and another tenant's WASM bytes: the primary key is (name,
+	// version) with no tenant in it, and ON DUPLICATE KEY UPDATE turns the
+	// collision into an overwrite. IMPROVEMENT-PLAN 3.12.
+	//
+	// Read and write in one transaction, with the row locked. SELECT ... FOR
+	// UPDATE also takes a gap lock on the unique index when the row does not
+	// exist, so a concurrent deploy of the same new name blocks here rather
+	// than slipping between the read and the insert.
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("DeployWorkflowDef: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var owner sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT tenant_id FROM workflow_defs WHERE name = ? AND version = ? FOR UPDATE`,
+		def.Name, def.Version).Scan(&owner)
+	switch {
+	case err == nil:
+		if !canAdoptDef(owner.String, s.tenantID) {
+			return defOwnershipError(def.Name, def.Version)
+		}
+	case errors.Is(err, sql.ErrNoRows):
+		// Does not exist yet; the insert below creates it.
+	default:
+		return fmt.Errorf("DeployWorkflowDef: read owner: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
@@ -678,12 +710,13 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			abi_version = VALUES(abi_version),
 			min_version = VALUES(min_version),
 			plugin_deps = VALUES(plugin_deps),
-			deprecated = VALUES(deprecated)
+			deprecated = VALUES(deprecated),
+			tenant_id = VALUES(tenant_id)
 	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ListWorkflowDefs returns all versions of a workflow, ordered by version DESC.

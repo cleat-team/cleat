@@ -13,7 +13,14 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
 
 	statements := []string{
-		// workflow_defs
+		// workflow_defs.
+		//
+		// tenant_id is NOT NULL DEFAULT '000…', as
+		// migrations/mssql/001_schema.sql declares it. This said a bare
+		// "tenant_id UNIQUEIDENTIFIER", so a definition deployed against the
+		// test schema came back with a NULL owner where the shipped schema
+		// gives the default tenant -- the drift class of IMPROVEMENT-PLAN 1.9,
+		// found by 3.12's ownership test reading the column back.
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_defs')
          CREATE TABLE workflow_defs (
              name NVARCHAR(900) NOT NULL,
@@ -27,7 +34,7 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
              task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
              max_history_length INTEGER NOT NULL DEFAULT 0,
              dag_spec NVARCHAR(MAX) DEFAULT NULL,
-             tenant_id UNIQUEIDENTIFIER,
+             tenant_id UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
              created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
              PRIMARY KEY (name, version)
          )`,
@@ -274,6 +281,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 	}
 
 	migrateMSSQLIdempotencyTenantID(t, db)
+	migrateMSSQLWorkflowDefsTenantID(t, db)
 
 	// Indexes. These used to live in SetupFullSchema, so the schema you got
 	// depended on which entry point the test called. Both now route here.
@@ -374,6 +382,51 @@ func migrateMSSQLIdempotencyTenantID(t *testing.T, db *sql.DB) {
 		    ALTER TABLE dbo.idempotency_keys
 		        ADD CONSTRAINT pk_idempotency_keys PRIMARY KEY (key_hash, tenant_id)`); err != nil {
 		t.Fatalf("setup MSSQL full schema: widen idempotency_keys primary key: %v", err)
+	}
+}
+
+// migrateMSSQLWorkflowDefsTenantID brings an already-existing test database up
+// to the `tenant_id UNIQUEIDENTIFIER NOT NULL DEFAULT '000…'` that
+// migrations/mssql/001_schema.sql has always declared, and that the CREATE
+// TABLE above now matches.
+//
+// Same reason as migrateMSSQLIdempotencyTenantID: the CREATE is guarded on
+// sys.tables against a shared, long-lived database, so a table built by an
+// earlier checkout keeps its nullable column forever. Existing NULLs are
+// backfilled to the default tenant, which is what the shipped schema would
+// have written for those rows.
+func migrateMSSQLWorkflowDefsTenantID(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	if _, err := db.Exec(`UPDATE dbo.workflow_defs
+		SET tenant_id = '00000000-0000-0000-0000-000000000000'
+		WHERE tenant_id IS NULL`); err != nil {
+		t.Fatalf("setup MSSQL full schema: backfill workflow_defs.tenant_id: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		IF EXISTS (
+		    SELECT 1 FROM sys.columns
+		    WHERE object_id = OBJECT_ID(N'dbo.workflow_defs')
+		      AND name = N'tenant_id' AND is_nullable = 1
+		)
+		    ALTER TABLE dbo.workflow_defs ALTER COLUMN tenant_id UNIQUEIDENTIFIER NOT NULL`); err != nil {
+		t.Fatalf("setup MSSQL full schema: workflow_defs.tenant_id NOT NULL: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		IF NOT EXISTS (
+		    SELECT 1 FROM sys.default_constraints
+		    WHERE parent_object_id = OBJECT_ID(N'dbo.workflow_defs')
+		      AND parent_column_id = (
+		          SELECT column_id FROM sys.columns
+		          WHERE object_id = OBJECT_ID(N'dbo.workflow_defs') AND name = N'tenant_id'
+		      )
+		)
+		    ALTER TABLE dbo.workflow_defs
+		        ADD CONSTRAINT df_workflow_defs_tenant_id
+		        DEFAULT '00000000-0000-0000-0000-000000000000' FOR tenant_id`); err != nil {
+		t.Fatalf("setup MSSQL full schema: workflow_defs.tenant_id default: %v", err)
 	}
 }
 

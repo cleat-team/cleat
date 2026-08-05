@@ -13,6 +13,7 @@ cmd/cleat-gen-plugin	TestHelperProcess	1
 cmd/cleat-worker	TestAPIMetrics	1
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
 cmd/cleat-worker	TestDefersRunOnTheFencedBackend	1
+cmd/cleat-worker	TestDeployOverAnotherTenantsNameIsRefusedOverHTTP	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
