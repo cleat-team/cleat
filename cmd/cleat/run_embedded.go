@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cleat-team/cleat/engine"
 )
@@ -162,7 +163,12 @@ func runEmbedded(args []string) {
 			})
 		})
 
-		srv := &http.Server{Addr: *apiAddr, Handler: mux}
+		// ReadHeaderTimeout bounds how long a client may take to send its
+		// headers. Without it a connection that opens and then dribbles bytes
+		// holds a goroutine indefinitely (gosec G112, slowloris). This is the
+		// local dev server, so the exposure is small -- but the fix is one
+		// field, and "it is only dev" is how a default ends up in production.
+		srv := &http.Server{Addr: *apiAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 				log.Printf("HTTP server: %v", err)

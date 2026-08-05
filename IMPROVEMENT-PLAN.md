@@ -5053,8 +5053,46 @@ defer work there; `runDefers` runs them on a fresh module with no handler, where
 panics and is swallowed. Whatever is decided should make those two agree, because today
 whether your defer can call a service depends on which way the workflow failed.
 
+### 3.33 gosec's 283 findings, triaged — 🔶 **2 fixed, 281 classified** (WS-3, 2026-08-05)
 
-### 3.20 Admin force-resolve was a stub the API answered for — ✅ **FIXED** (WS-2, 2026-08-05)
+`PARALLEL-WORKSTREAMS.md` calls gosec "unreviewed security findings in a codebase whose last
+two days have been tenancy defects" and says an unreviewed 283 is worse than a reviewed 283
+with 280 suppressions. This is the review. It does **not** enable the linter — G115 alone
+would block that — but it replaces a number with a distribution, which is what the decision
+needs.
+
+| rule | n | what it is | verdict |
+|---|---|---|---|
+| G115 | 229 | integer overflow conversion (`int` → `uint32` etc.) | **81% of the total.** Mostly flag and length conversions. Needs its own pass; see below |
+| G306 | 23 | `WriteFile` perms > 0600 | build outputs — `.wasm` artifacts and lockfiles at 0644. Not secrets |
+| G202 | 8 | SQL string concatenation | all in `engine/testutil/schema.go`, concatenating **constant** table names and placeholder strings in a test helper |
+| G204 | 6 | subprocess with variable args | `docker`, `vault`, `aws`, `npx` invoked with operator-configured paths, not request data |
+| G404 | 2 | weak RNG | jitter in `fault_injector.go` and sampling in `plugin/audit.go`. Neither is a security decision |
+| G101 | 2 | hardcoded credentials | a test DSN and a test role password constant |
+| G602 | 1 | slice bounds out of range | `wasmBytes[0:8]` in `RewriteWitImports`, which returns an error on `len < 8` in its first statement. gosec cannot see the guard |
+| G201 | 1 | SQL string formatting | `StartChildWorkflowInSchema` interpolates a schema name — but through `pq.QuoteIdentifier`, which is the correct tool, since an identifier cannot be a bind parameter |
+| G108 | 1 | pprof endpoint exposed | see below |
+| G114 / G112 | 2 | HTTP server without timeouts | **the only two actionable findings.** Fixed |
+
+**The two that were real**, both slowloris exposure rather than anything exotic:
+`cmd/cleat-worker`'s pprof listener used `http.ListenAndServe`, which cannot set a timeout at
+all, and `cmd/cleat run`'s inspection server built an `http.Server` without
+`ReadHeaderTimeout`. Both now set one.
+
+**On G108, which reads worse than it is.** `cmd/cleat-worker` blank-imports `net/http/pprof`,
+which registers `/debug/pprof` on `DefaultServeMux`. That is deliberate and it is *not* reachable
+on the API port: the API server is constructed with its own mux, and pprof is served only when
+`--pprof-addr` is set, which is empty by default. Worth keeping that way and now commented at
+the site, because a heap profile from a worker contains workflow payloads — the separation is
+load-bearing, not stylistic.
+
+**G115 is the real backlog item, and it is not obviously noise.** 229 conversions that could
+truncate. Most are flags (`uint32(*wasmOutputBufferSize)`) where a hostile value is already an
+operator problem, but the class includes every `int` → `uint32` in the ABI layer, where a
+truncated length is a memory-safety-adjacent bug rather than a style point. Reviewing it is a
+session on its own and should not be folded into a lint sweep — but "229 integer conversions in
+the WASM boundary layer, unreviewed" is a more useful thing to carry forward than "283 gosec
+findings".
 
 `AdminForceComplete` and `AdminForceFail` returned `"admin force-complete: not implemented
 yet"` on all three dialects. `cmd/cleat-worker/api_admin.go` routed
