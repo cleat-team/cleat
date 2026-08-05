@@ -630,10 +630,7 @@ func (s *MSSQLStore) finalizeWorkflowSegmentOnce(ctx context.Context, runID, wor
 	// await_child population) to a server-side stored procedure.
 	// This replaces 5 individual round-trips with 1 procedure call.
 	qsJSON := marshalQueryState(queryState)
-	resultJSON := result
-	if resultJSON == "" || !json.Valid([]byte(resultJSON)) {
-		resultJSON = "{}"
-	}
+	resultJSON := coerceResultJSON(ctx, s.log(), runID, result)
 
 	var fenceHeld bool
 	if err := tx.QueryRowContext(ctx, `
