@@ -114,19 +114,27 @@ func TestKillWorkerMidExecution(t *testing.T) {
 		claimedBy[wf.ID] = wID
 	}
 
-	// Crash whichever worker actually claimed work, rather than assuming it was
-	// worker-1.
+	// Crash whichever worker actually claimed work, rather than naming one.
 	//
-	// Claiming is a race between three concurrent workers over six workflows,
-	// so worker-1 getting none of them is an ordinary outcome and not a defect.
-	// The guard below is right that the test must never pass vacuously -- it
-	// was just asserting the wrong thing, and it failed a CI run saying
-	// "worker-1 claimed none of the 6 workflows". What this test needs is *a*
-	// worker holding claims, not a particular one.
+	// This comment used to say "claiming is a race between three concurrent
+	// workers", which was true when it was written and false by the time it
+	// landed. Two changes fixed the same CI failure independently and merged
+	// cleanly: #330 replaced the concurrent claiming with the round-robin loop
+	// above, and #329 (this block) stopped assuming which worker held claims.
+	// Neither is wrong, but the first removed the race the second describes.
+	//
+	// Kept rather than reverted to a hardcoded "worker-1", for two reasons.
+	// The vacuity guard reads better as "no worker claimed anything" than as
+	// "worker-1 claimed none", since the latter is a statement about the
+	// distribution and only the former is a statement about failover. And it
+	// means the test does not silently depend on the round-robin above staying
+	// round-robin: if anyone restores concurrent claiming, this keeps working
+	// instead of flaking again.
 	//
 	// Picked deterministically (most claims, ties broken by the fixed name
-	// order) so that a failure here is reproducible rather than depending on
-	// map iteration order, which is randomised.
+	// order) so a failure is reproducible rather than depending on map
+	// iteration order, which is randomised. With round-robin claiming every
+	// worker holds the same number, so this reliably selects worker-1 today.
 	workerIDs := []string{"worker-1", "worker-2", "worker-3"}
 	claimCounts := make(map[string]int, len(workerIDs))
 	for _, workerID := range claimedBy {
