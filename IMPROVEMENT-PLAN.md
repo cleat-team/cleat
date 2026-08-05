@@ -4380,6 +4380,73 @@ its own right, because it forces a line-by-line read of code nobody has looked a
 ---
 
 
+## Phase 3 items — round 2 (2026-08-05)
+
+### 3.10 Idempotency keys are global across tenants — 🔴 **OPEN** (all three dialects)
+
+Found while auditing the ~89 unaudited `MySQLStore` `s.tenantID` call sites (§1.7 / §2.12).
+The audit's premise is that MySQL has no RLS, so a missing Go-level tenant filter is an
+unbacked cross-tenant leak. This one is worse than a missing filter: **there is nothing to
+filter on.**
+
+`idempotency_keys` is keyed by `key_hash` alone on every dialect —
+`key_hash BYTEA NOT NULL PRIMARY KEY` (postgres), `PRIMARY KEY (key_hash)` (mysql),
+`CONSTRAINT pk_idempotency_keys PRIMARY KEY (key_hash)` (mssql) — and the table has **no
+`tenant_id` column at all**. The hash is `sha256.Sum256([]byte(idempotencyKey))`, with the
+tenant nowhere in it (`store_lifecycle.go:634`, `mssql_lifecycle.go:741`, and the MySQL
+equivalent).
+
+So an `Idempotency-Key` is global. Measured on postgres, mysql and mssql:
+
+```
+tenant B's first use of its own idempotency key "order-…" reported already-existing:
+  tenant A's key collided with it. B's workflow was never started
+tenant B was handed tenant A's workflow ID "idem-a-…" for its own idempotency key
+  -- a cross-tenant information leak on a user-supplied value
+tenant B has no workflow after StartNewRun returned "idem-a-…"
+```
+
+**Two impacts.** Tenant B receives tenant A's workflow ID — a cross-tenant information leak
+on a value the client supplies. And tenant B's workflow is **silently never started**, while
+the API answers `200 {"already_started": "true"}`. `Idempotency-Key` is a request header, so
+this is the expected outcome of two customers both choosing `order-123`, not an attack.
+
+Note that PostgreSQL's RLS cannot help here either: there is no tenant column to filter on.
+This is the one tenancy defect in the set that all three backends share equally.
+
+**The fix, and the decision in it.** Two options, differing only on upgrade:
+
+- **Add `tenant_id` and make the primary key `(key_hash, tenant_id)`.** Existing rows take
+  the default tenant, so single-tenant deployments keep deduplicating across the upgrade.
+  Migration in WS-1's range, three dialects. **Recommended.**
+- **Put the tenant into the hash.** One line per dialect, no migration — but every existing
+  key stops matching, so a retried request after the upgrade starts a *second* workflow.
+  That is precisely what idempotency exists to prevent, so the cheaper fix is the wrong one.
+
+A failing three-dialect test is on `bugfix/mysql-tenant-scoping-audit`
+(`engine/idempotency_tenant_test.go`), committed without a PR because it is red by design.
+
+### 3.11 Four unscoped MySQL queries — 🔴 **OPEN**
+
+From the same audit: 109 statements in the MySQL store touch tenant-scoped tables, 16 carry
+no `tenant_id` reference, and most of those 16 are false positives — `ClaimWorkflows`'
+`UPDATE ... WHERE id IN (...)` is scoped transitively by its candidate `SELECT`. **Read the
+enclosing function before believing the grep.**
+
+The four that survive that reading:
+
+| method | why it matters |
+|---|---|
+| `GetWASMLength` | `WHERE name = ? AND version = ?` — def names are user-chosen and collide across tenants, so this returns another tenant's WASM size |
+| `QueueDepth` | counts `workflow_instances` across every tenant |
+| `DeleteExpiredEvents` | **deletes** `event_history` across every tenant |
+| `GetAllowedSignalCallers` | reads authorization data by workflow ID with no tenant scope |
+
+None has a database backstop on MySQL (§1.7: zero RLS policies). Severity is bounded by the
+HTTP layer's per-tenant scoping since §1.7, which is defence in depth working — but that is
+the only thing standing between these and a leak.
+
+
 ## Phase 3 — Put falsification in the loop
 
 The economic finding: **~$900 of generation, ~$0 of falsification.** Compute was 4–12% of

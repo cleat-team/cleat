@@ -1,307 +1,238 @@
-# Three parallel workstreams
+# Three parallel workstreams — round 2
 
-Written 2026-08-04, against `develop` at `3c13fb7`; WS-1's item list corrected the same day
-against `9df4396` (see "Already landed"). Companion to `IMPROVEMENT-PLAN.md`,
-which stays the source of truth for *what* each item is; this file is only about *who does
-what, where, and without colliding*.
+Written 2026-08-05 against `develop` at `6926f2e`, replacing the 2026-08-04 edition. That one
+is done: every item on all three boards is closed or restated here, and there are **no open
+PRs**. Companion to `IMPROVEMENT-PLAN.md`, which stays the source of truth for *what* each
+item is **and whether it is still open**; this file is only about *who does what, where, and
+without colliding*.
 
-Three sessions run concurrently, one per sandbox:
+Baseline, verified before writing this rather than assumed: `go build ./...`,
+`go vet ./engine/` and `go test -count=1 ./engine/` are green against **PostgreSQL, MySQL and
+SQL Server together** (52.7s). Every item below is verifiable locally.
 
 | | sandbox | theme |
 |---|---|---|
-| **WS-1** | `/localssd/rcownie/cleat` | Fencing: a worker that lost the race still does damage |
-| **WS-2** | `/localssd/rcownie/cleat-agent1` | Persistence: things the engine decides and then forgets |
-| **WS-3** | `/localssd/rcownie/cleat-agent2` | Above the engine: tenancy, CLI, toolchain |
+| **WS-1** | `/localssd/rcownie/cleat` | Tenancy: isolation PostgreSQL enforces and the other two do not |
+| **WS-2** | `/localssd/rcownie/cleat-agent1` | Durability: surviving a crash, and replaying what happened |
+| **WS-3** | `/localssd/rcownie/cleat-agent2` | Execution boundaries: what stops a guest that will not stop |
 
-The split is by **file ownership**, not by topic. Topic-based splits read well and then
-collide in the diff. Each stream below lists the paths it owns; if you need to change a path
-another stream owns, say so rather than editing it.
+---
+
+## What round 1 established, and what it cost to learn
+
+Read this before picking anything up. Most of yesterday's findings came from one mechanism,
+and none came from reading code.
+
+**Make the thing runnable, then run it.** Nine defects were found in a day by standing up
+MySQL and SQL Server locally — which three prior sessions had recorded as impossible. It was
+a colima profile flag. The written record was wrong in the direction that made the problem
+look smaller, every time: §2.71 was recorded as "context lost after recycling" when it was
+*every query*; §2.26 said 8 transaction boundaries when there were 20; parent close policy
+had never been tested at all.
+
+**Audit the ✅ markers.** Three were checked yesterday; all three were overstated. §1.1's
+guard shipped for three dialects with proof for two. §2.17's regression test ran against a
+mock, one layer above where its own evidence had come from. §2.26's count was less than half
+the real number. A ✅ means someone fixed something; it does not mean anyone re-ran it.
+
+**Prove the test can fail — and know what that misses.** Removing the fix and re-running
+catches a test that *cannot* fail. It does not catch one that fails *sometimes*: a 2 ms sleep
+in the zombie-writer scenario survived four CI runs and lost the fifth. If an assertion
+depends on wall-clock time, remove the timing rather than widening it.
+
+**Watch which layer is holding the test up.** Twice yesterday an assertion passed because of
+a layer other than the one under test. §1.1's first fence test passed with the SQL guard
+deleted, because a Go-level rollback covered for it. An MSSQL cross-tenant assertion passed
+against a *wide-open* security policy, because `MSSQLStore`'s own SQL carries `tenant_id = @p`
+and the Go filter did the work. Both were caught by breaking the specific layer and watching.
+
+**`errcheck` would have caught two of yesterday's fixes.** §2.50 (parent close policy
+discarding every error it produced) and half of §1.2 (fire-and-forget terminal writes) are
+both literally unchecked-error findings. There are **307** more. See the standing item below.
 
 ---
 
 ## Rules for all three
 
 **Branch from `develop`, rebase before every push.** Three streams merging into one branch
-means `develop` moves under you several times a day.
+means `develop` moves under you several times a day. #283 sat long enough to go
+`CONFLICTING`; rebasing it cost more than landing early would have.
 
-**Never merge on red, never re-run a failing job hoping it passes.** If CI fails, read the
-log and report the failure. That rule is the reason the last two sessions found anything.
+**Never merge on red, never re-run a failing job hoping it passes.** Read the log. If it is
+genuinely infrastructure — yesterday's was `npm ci` dying with `ECONNRESET` — say so out loud
+and re-run *that*, rather than quietly retrying a test.
 
-**Prove the test can fail.** Before shipping a regression test, remove the fix and re-run it.
-If it still passes, the test is decoration. Several of tonight's findings were tests that
-had never been able to fail — do not add more.
+**Build and test with CGO on — the default.** `NewWasmtimeBackend` is behind `//go:build cgo`,
+so `CGO_ENABLED=0` does not skip a check: it removes the primary backend from the binary and
+runs everything on wazero. An engine result obtained that way is not evidence about the engine.
 
-**Build and test with CGO on — the default.** `NewWasmtimeBackend` is behind
-`//go:build cgo`, so `CGO_ENABLED=0` does not skip a check, it removes the primary backend
-from the binary and runs everything on wazero instead. `CLAUDE.md` told you to disable CGO
-until 2026-08-04; that instruction was stale (fixed by `c26c332`, note never updated) and is
-now corrected. This matters most to **WS-1 and WS-2, who live in `engine/`** — an engine
-result obtained under `CGO_ENABLED=0` is not evidence about the engine.
+**One PR, one thing.** Every PR yesterday that bundled a second concern was harder to review
+than the two would have been apart.
 
-**Verify by running, not by reasoning.** Tonight, in this repo: a heap-leak detector that
-missed an injected 140 MB leak, a diagnosis that was wrong about the *cause* while its fix
-was still load-bearing, and an E005 check that failed a real example the first time it ran
-for real. All three were caught by executing, none by reading.
+### Databases — all three run locally
 
-### Shared files — three of them, and a protocol for each
+Not a constraint on any item here.
+
+| | Postgres | MySQL | SQL Server |
+|---|---|---|---|
+| WS-1 | `5432` | `3306` | `1433` |
+| WS-2 | `5433` | `3307` | `1434` |
+| WS-3 | `5434` | `3308` | `1435` |
+
+```
+CLEAT_TEST_POSTGRES=postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable
+CLEAT_TEST_MYSQL='root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true'
+CLEAT_TEST_MSSQL='sqlserver://sa:CleatTest123!@localhost:1433?database=cleat'
+```
+
+`go test ./engine/` takes ~21 s with Postgres alone and ~50 s with all three — **check that
+delta**, because an unset DSN skips its dialect silently and the suite still prints `ok`.
+
+SQL Server needs a Rosetta context: bare `docker` resolves to the default colima profile,
+which has `rosetta: false`, and `sqlservr` aborts there under QEMU. The `cleat-ws1` and
+`cleat-ws3` profiles have it, as does Docker Desktop. Create a profile rather than restarting
+`default`, which would stop every other stream's database:
+`colima start --profile <name> --vm-type vz --vz-rosetta --cpu 2 --memory 4 --disk 20`, then
+`docker context use colima`.
+
+`docker compose down -v` destroys the user's database — the `cleat` project owns
+`cleat-postgres-1`. Remove containers **by name**.
+
+### Shared files, and a protocol for each
 
 | file | protocol |
 |---|---|
-| `IMPROVEMENT-PLAN.md` | Edit only your own `§` sections. New sections: WS-1 takes §2.50+, WS-2 §2.60+, WS-3 §2.70+. Rebase before push; markdown conflicts are cheap but constant otherwise. |
-| `scripts/skip-baseline.txt`, `scripts/test-only-baseline.txt` | Never hand-edit. Regenerate with `--update` **after** rebasing, and say in the commit why the count moved. A count going *down* is the point; a count going up needs a sentence. |
-| `migrations/{postgres,mysql,mssql}/` | Numbered sequentially per dialect, currently at `005`. Reserved ranges: **WS-1 006–009, WS-2 010–013, WS-3 014–017.** Do not renumber someone else's. |
-
-### One database each — do not share
-
-Concurrent suites in a single checkout are safe since §2.39 (per-suite task queues and a
-schema fingerprint), but three checkouts on different branches can hold *different schemas*.
-Give each stream its own instance.
-
-| | Postgres | MySQL (`CLEAT_TEST_MYSQL`) | SQL Server (`CLEAT_TEST_MSSQL`) |
-|---|---|---|---|
-| WS-1 | `5432` — the existing `cleat-postgres-1` | `3306` | `1433` |
-| WS-2 | `5433` | `3307` | `1434` |
-| WS-3 | `5434` | `3308` — `cleat-ws3-mysql` | `1435` — `cleat-ws3-mssql` |
-
-The same offset scheme in all three dialects: WS-1 keeps the defaults, WS-2 and WS-3 step up
-from there. WS-3 stood up its MySQL 8.4 and SQL Server 2022 on 2026-08-04 and they are the
-only two that exist so far; `§2.26` and the MySQL/MSSQL halves of any fence work stay
-unverified until a stream has its own — say so rather than claiming dialect coverage you did
-not run.
-
-**Do not `docker compose -f docker-compose.dev.yml up`** — it binds Postgres to `5432` and
-would collide with WS-1's live instance. Start containers individually with explicit
-`--name` and `-p`.
-
-`docker compose down -v` destroys the user's database: the `cleat` project owns
-`cleat-postgres-1`. Remove containers **by name**.
-
-### A long-lived test database eventually fails tests that are not broken
-
-Observed by WS-3 on 2026-08-04, after a few hours of repeated `go test ./engine/...` against
-one instance. Two tests failed on the stream's own database and passed on a freshly created
-one at the same server, same commit:
-
-- `TestStartChildWorkflowAtomicUnderRLS` — `reading child workflow_instances row: sql: no
-  rows in result set`, deterministic.
-- `TestClaimWorkflows_RespectsLimitUnderConcurrency` — only under the full suite, never in
-  isolation.
-
-Neither is a defect. Both are accumulated row and role state in a database that has had
-hundreds of suite runs applied to it, and the RLS-sensitive tests are the ones that notice,
-because a stale row that the policies do or do not match changes the answer.
-
-**Before reporting an engine failure, re-run it against a fresh database.** It costs one
-command and it is the difference between a real find and an afternoon spent on your own
-sandbox:
-
-```
-docker exec <your-postgres> psql -U cleat -d postgres -c "CREATE DATABASE cleat_probe;"
-CLEAT_TEST_POSTGRES='postgres://cleat:cleat@127.0.0.1:<your-port>/cleat_probe?sslmode=disable' \
-  go test -count=1 ./engine/...
-```
-
-This is the same failure mode as everything else in this file, in a different costume: a
-signal attached to the wrong thing. The test was reporting on the database, not on the code.
-
-### SQL Server needs its own colima VM on Apple Silicon
-
-The default colima profile is `vmType: vz` with `rosetta: false`, so amd64 images fall back
-to QEMU — and `mcr.microsoft.com/mssql/server:2022-latest` **cannot start under QEMU**. It
-exits immediately with `Invalid mapping of address ... in reserved address space`. There is
-no arm64 SQL Server image; Rosetta is the only route.
-
-Enabling Rosetta on the default profile means restarting that VM, which would stop all three
-streams' Postgres containers. So WS-3 created a **second profile** instead:
-
-```
-colima start cleat-ws3 --vm-type vz --vz-rosetta --cpu 2 --memory 6 --disk 40
-docker --context colima-cleat-ws3 run -d --name cleat-ws3-mssql --platform linux/amd64 \
-  -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=CleatTest123!' -e MSSQL_PID=Developer \
-  -p 1435:1433 mcr.microsoft.com/mssql/server:2022-latest
-```
-
-**`colima start` rewrites the global docker context** in `~/.docker/config.json`, which would
-silently repoint every other stream's `docker` command at the new VM. It was set back with
-`docker context use colima` immediately, and all SQL Server management uses an explicit
-`--context colima-cleat-ws3`. If you start a colima profile, do the same. Port forwarding
-reaches `127.0.0.1:1435` from the host regardless of context, so Go tests need no context flag.
-
-### Connection strings
-
-```
-CLEAT_TEST_MYSQL='root:cleat@tcp(127.0.0.1:3308)/cleat?tls=false&parseTime=true&multiStatements=true'
-CLEAT_TEST_MSSQL='sqlserver://sa:CleatTest123!@127.0.0.1:1435?database=cleat'
-```
-
-SQL Server needs `CREATE DATABASE cleat` once; MySQL gets it from `MYSQL_DATABASE`. Neither
-needs migrations applied by hand — the suites install what they need (`applyMySQLProcedures`,
-`applyMSSQLProcedures` in `engine/store_backends_procedures_test.go`).
-
-Two known potholes, neither introduced by this setup:
-
-- `TestMySQLStoreFactory` and `TestMySQLIntegration_FactoryOpenStore` **fail on any port
-  other than 3306.** They gate on `CLEAT_TEST_MYSQL` and then ignore its value, hardcoding
-  `tcp(127.0.0.1:3306)`. Already recorded in `IMPROVEMENT-PLAN.md` as config drift that was
-  "harmless in CI" — it stops being harmless off the default port. `engine/` is WS-1/WS-2
-  territory, so WS-3 left it alone.
-- `TestMSSQLIntegration_FinalizeWorkflowSegment_{Done,Suspend}` **fail when run under a
-  `-run` filter that excludes the procedures test**, because they need
-  `finalize_workflow_status` installed by another file's `sync.Once` and do not call
-  `applyMSSQLProcedures` themselves. They pass in a full `go test ./engine/...`. An
-  order-dependency, not a product bug.
+| `IMPROVEMENT-PLAN.md` | Edit only your own `§` sections. New sections: WS-1 takes §3.10+, WS-2 §3.20+, WS-3 §3.30+. |
+| `scripts/skip-baseline.txt`, `scripts/skip-budget.txt` | Never hand-edit. Regenerate with `scripts/check-skips.sh --update` **after** rebasing. A count going *down* is the point; **a count going up needs a sentence.** `test-go/engine` and `cluster` move together — the cluster job also runs `./engine/...`. Currently 187 skip sites, 731 skipped tests. |
+| `scripts/deadcode-baseline.txt` | Same; regenerate with `scripts/check-test-only-code.sh --update`. A shrinking baseline is the honest evidence that wiring landed — 12 entries left it when §2.26 was wired. Currently 59. |
+| `migrations/{postgres,mysql,mssql}/` | Numbered per dialect; Postgres is at `005`, the other two at `004`. Reserved: **WS-1 010–019, WS-2 020–029, WS-3 030–039** — sparse and above the high-water mark so no stream renumbers another. |
+| `.golangci.yml` | One linter per PR; say which one you are taking. See the standing item. |
 
 ---
 
-## WS-1 — Fencing and lost updates
+## WS-1 — Tenancy below PostgreSQL
 
-**Sandbox:** `/localssd/rcownie/cleat`   **Migrations:** `006–009`   **Postgres:** `5432`
-**MySQL:** `3306` (`cleat-ws1-mysql`)   **SQL Server:** `1433` (`cleat-ws1-mssql`)
+**Sandbox:** `/localssd/rcownie/cleat`   **Migrations:** `010–019`
 
-All three databases run locally — this is not a constraint on any item. `go test ./engine/`
-is green against all three (~43s with all three DSNs set, ~21s with Postgres alone; check
-that delta, because an unset DSN skips its dialect silently).
+One theme: PostgreSQL enforces tenant isolation with RLS and the other two backends do not,
+so on MySQL and SQL Server every scope check is a Go-level `WHERE tenant_id = ?` with nothing
+underneath it. §1.7 fixed the HTTP layer. This is everything below it.
 
-One gotcha, and it is about `docker context`, not about SQL Server: bare `docker` resolves to
-the **default colima profile**, which has `rosetta: false`, and amd64 images such as
-`mcr.microsoft.com/mssql/server` abort there under QEMU. Rosetta is available — the
-`cleat-ws1` and `cleat-ws3` colima profiles both have it, and Docker Desktop is running. Run
-amd64 images on one of those contexts. Containers on a non-active profile do not show up in
-`docker ps`, but their ports still forward to the host, so the DSNs work either way; reach
-the container itself with `docker --context colima-cleat-ws1 exec …`.
-
-One theme: the engine fences a write, ignores whether the fence held, and then performs the
-side effect anyway. Every item is a variation on an unchecked `RowsAffected`.
-
-**Owns:** `engine/store_lifecycle.go`, `engine/db.go`, `engine/sharded*.go`, the sticky and
-concurrency store files, `engine/mysql_ops.go`, `engine/mssql_operations.go`,
-`migrations/*/00[6-9]_*`.
+**Owns:** `engine/mysql_*.go`, `engine/mssql_*.go`, `engine/testutil/*schema*.go`,
+`migrations/{mysql,mssql}/`, and the idempotency block of `engine/store_lifecycle.go`.
 
 | item | what |
 |---|---|
-| **§2.26 residual** | The claim path retries deadlocks now; ~18 other MSSQL transaction boundaries do not. Each needs one judgement, not an audit: a **rollback-guaranteed** retry is safe anywhere, so the only question is whether the wrapper is worth it there. The unknown-outcome class (258, dropped connections) stays a hard failure and needs a real per-transaction idempotency decision — do not widen `withRollbackGuaranteedRetry` to `isMSSQLRetryable`. |
-| **§2.71 residual** | Point `engine/testutil/mssql_schema.go` at the real migration. It hand-writes 334 lines of `CREATE TABLE` and defines none of the seven security policies, and is missing `workflow_routing` and `workflow_tags` entirely. Turning RLS on reshapes ~220 MSSQL tests, so this is a suite migration. **`engine/testutil/` is WS-2's — needs reassigning or handing over.** |
+| **§3.10** | **Idempotency keys are global across tenants, on all three dialects.** `idempotency_keys` is keyed by `key_hash` alone and has **no `tenant_id` column**; the hash is `sha256(idempotencyKey)` with the tenant nowhere in it. Two tenants choosing `order-123` collide: the second is handed *the first tenant's workflow ID* with `already_started: true`, and its own workflow never starts. `Idempotency-Key` is a client-supplied header, so this is what happens when two customers name things normally — not an attack. **Start here.** A failing three-dialect test is already on `bugfix/mysql-tenant-scoping-audit`; what remains is a migration and one decision (below). |
+| **§1.7 residual** | `migrations/mysql/` has **zero** RLS policies against PostgreSQL's seven. On MySQL a missed `tenant_id` filter is a silent cross-tenant leak with no database backstop. MySQL 8.4 has no RLS: the options are a view layer, a connection-user scheme, or documenting MySQL as single-tenant-only. **The decision matters more than the code** — settle it before writing a migration. |
+| **§2.71 residual** | The MSSQL test schema defines **none** of the seven security policies (`grep -c "SECURITY POLICY" engine/testutil/mssql_schema.go` → `0`), so ~220 MSSQL tests run with no tenant backstop and cannot observe isolation working or failing. `engine/mssql_rls_enforcement_test.go` shows the shape: read the policies out of the real migration rather than restating them. Turning them on suite-wide fails every test that builds a store on a plain pool — that is the point, and it is a suite migration, not a flag. |
+| **§3.11** | Four unscoped MySQL queries from the `s.tenantID` audit: `GetWASMLength` (keyed on a user-chosen def name — cross-tenant metadata), `QueueDepth` (counts every tenant's rows), `DeleteExpiredEvents` (**deletes across all tenants**), `GetAllowedSignalCallers` (authorization data, unscoped). |
 
-### Already landed — do not start these
+**The §3.10 decision.** Two fixes, and the difference only shows on upgrade. Adding `tenant_id`
+with a composite primary key `(key_hash, tenant_id)` lets existing rows take the default
+tenant, so single-tenant deployments keep deduplicating across the upgrade — recommended.
+Putting the tenant into the hash is one line and no migration, but every existing key stops
+matching, so a retried request after upgrade starts a *second* workflow, which is exactly what
+idempotency exists to prevent.
 
-Four of the five items originally listed here are done. Three were merged **before this
-document was written**, in `c26c332` (#218), which is an ancestor of the `3c13fb7` it was written against.
-The table was built from `IMPROVEMENT-PLAN.md`'s `§` headings without their ✅ markers, so it
-pointed WS-1 at finished work. Verified against the tree on 2026-08-04:
-
-| item | doc said | actual |
-|---|---|---|
-| **§1.1** | "start here, largest live data-loss item" | landed: `migrations/{postgres,mysql,mssql}/004_fix_finalize_workflow_status_fence.sql` captures the fenced `UPDATE`'s row count (`GET DIAGNOSTICS … ROW_COUNT` / `@@ROWCOUNT`) and skips the terminal block when it is zero. `engine/fence_lost_integration_test.go` covers both the Go rollback and the SQL guard on its own. |
-| **§1.6** | open, ~0.5 session | landed in all three dialects: `generation = generation + 1` in `ReapStaleInstances` (`store_lifecycle.go:705`, `mysql_lifecycle.go:723`, `mssql_operations.go:13`) and in `TerminateWorkflow` (`db.go:1056`). |
-| **§2.17** | "still open — three candidate fixes" | `IMPROVEMENT-PLAN.md` §2.17 is marked ✅ **FIXED**. |
-| **§1.2** | "the same shape in Go", open | the store half had already landed; the caller half is now closed too — #263 (a concurrency-key conflict returned 409 and ran the workflow anyway), #265 (`cleat-bench` had never completed a run), #267 (a lost fence was invisible and still counted as a failure). |
-
-**The trap:** §1.2 is easy to "fix" by making every caller treat `ErrFenceLost` as a failure,
-which converts silent corruption into a spurious failure on the *legitimate* path. The two
-call sites that already handle it establish the precedent, and it is the right one — log at
-debug and `return`, because losing a fence means another worker legitimately owns the
-workflow. "Stop, quietly, having done nothing", not "error".
+**The trap:** `ClaimWorkflows` looks unscoped — `UPDATE ... WHERE id IN (...)` — and is not:
+its candidate `SELECT` filters `tenant_id`, so the ids are already restricted. A static sweep
+for "statements without `tenant_id`" gives 16 hits of which most are false positives. Read
+the enclosing function before believing the grep.
 
 ---
 
-## WS-2 — Persist what the engine decides
+## WS-2 — Durability: crash recovery and replay
 
-**Sandbox:** `/localssd/rcownie/cleat-agent1`   **Migrations:** `010–013`   **Postgres:** `5433`
+**Sandbox:** `/localssd/rcownie/cleat-agent1`   **Migrations:** `020–029`
 
-One theme: the engine computes something correct, acts on it, and does not write it down —
-so replay cannot reach the same conclusion.
+One theme: the engine can detect a crash but cannot yet say what was in flight when it
+happened, so recovery re-executes side effects it has already performed.
 
-**Owns:** `engine/durablecalls.go`, `engine/heartbeats.go`, `engine/signaller.go`,
-`engine/store_events*.go`, `engine/types.go`, `engine/callerrors.go`, `engine/testutil/`,
-`migrations/*/01[0-3]_*`.
+**Owns:** `engine/durablecalls.go`, `engine/flush*.go`, `engine/store_events*.go`,
+`engine/idempotency.go`, `engine/callerrors.go`, `engine/lifecycle.go`, `tests/crash/`.
 
 | item | what |
 |---|---|
-| **§1.3** | Cancellation is dead end-to-end. `PollCancellation(ctx, "")` — hardcoded empty string at all three call sites, and the store does `WHERE id = $1`, so it never matches. `RequestCancellation` sets a flag nothing observes. ~1 session, and the highest ratio of user-visible value to effort in the whole plan. **Start here.** |
-| **§1.4 B–F** | Crash recovery: the detector works, nothing writes what it detects. Phases in order — B idempotency keys, C the 2.4 crash harness, D intent + schema, E resolution, F admin force-resolve. **D must not come before C**: without the harness you cannot tell whether the schema is right. |
-| **§2.35 residual** | `ErrorCode`'s seven values still have no path into history, and the streaming plugin family (`recordStreamError`, `PluginError`) is a bare string on replay. The `ErrNonRetryable` bool that landed is the narrow version of this. |
-| **§2.32 residual** | The payload/column duplication itself. Treating `payload` as the sole record means 10 `populateFromPayload` call sites across 3 dialects. Shadow-column verification now *detects* divergence; this removes the possibility. |
+| **§3.20** | `AdminForceComplete` and `AdminForceFail` are stubs returning `not implemented yet` on every dialect, while `cmd/cleat-worker/api_admin.go` routes to them behind the ownership check §1.7 added. **The admin API answers as though force-resolve exists.** Small, and it removes a live lie from the API surface. It is also §1.4 phase F's prerequisite. **Start here.** |
+| **§1.4 C–F** | Crash recovery. **Phase B and the §2.4 harness are done** — `tests/crash` kills a worker mid-call and counts what the external service was asked to *do*, not what it received. Remaining: **D** intent + schema, **E** resolution, **F** admin force-resolve. D was deliberately blocked on C so the schema could be judged against a harness instead of a design doc; that harness now exists. |
+| **§2.35 residual** | `ErrorCode`'s seven values still have no path into history, so a failure classified on the fresh run is reclassified from a bare string on replay. `CleatError` already participates in retry classification through `errors.As`, so the plumbing exists — persistence is what is missing. The constraint governing the whole stream: **fresh and replay must classify identically**, or retryability changes between a run and its replay. |
+| **§2.11 residual** | "A claim for 3 returned 10" is **still unexplained**. Ruled out: the SQL in both forms, `ShardedStore`, a retry wrapper. §2.17's backstop now detects an over-claim, releases the excess and logs the evidence the plan asked for — so a recurrence is finally diagnosable. This is *watch for it*, not *go find it*; do not spend a session re-deriving what 24,000 claims failed to reproduce. |
 
-**The constraint that governs all of it:** a recorded failure replays from history, so fresh
-and replay must classify identically. Any new field has to round-trip through the payload or
-retryability changes between the original run and the replay — which is the §2.35 defect in
-its general form.
+**Cross-stream:** §1.4 phase F wants store methods on `engine/db.go`, which is WS-1's. Add
+them in a new file rather than editing `db.go`.
 
 ---
 
-## WS-3 — Above the engine
+## WS-3 — Execution boundaries
 
-**Sandbox:** `/localssd/rcownie/cleat-agent2`   **Migrations:** `014–017`   **Postgres:** `5434`
+**Sandbox:** `/localssd/rcownie/cleat-agent2`   **Migrations:** `030–039`
 
-**Owns:** `cmd/cleat-worker/` (HTTP, auth, tenancy), `auth/`, `cmd/cleat/`, `packages/`,
-`wasm/`, `.github/workflows/`, `.golangci.yml`, `Dockerfile`, `migrations/*/01[4-7]_*`.
+One theme: an unbounded guest. When workflows are agent-generated a runaway loop is routine
+rather than exotic, and the emergency brake has to work on every backend a guest can land on.
 
-| item | status |
+**Owns:** `engine/backend_*.go`, `engine/runtime.go`, `engine/executor.go`,
+`engine/wasmtime_*.go`, `engine/component_*.go`, `wasm/`, `packages/`, `crates/`,
+`python-sdk/`, `Dockerfile`, `.github/workflows/`.
+
+| item | what |
 |---|---|
-| **§1.7** | 🔶 **Core fixed** (#269). Handlers resolve a per-request store through `scopedStore`; two cross-tenant *writes* closed (`tenant_id` taken from the request body; dead-letter reprocess hardcoding the default tenant); a sharded-path bug found on the way where `factory` was shard 0's while `store` spanned all shards. Isolation tests for Postgres and MySQL pass; the SQL Server one passes since §2.71. **Residual:** the ~89 unaudited `MySQLStore` `s.tenantID` call sites — 53 of them in `engine/mysql_ops.go`, **which is WS-1's**, so coordinate. |
-| **§2.43** | ✅ **Done** (#286). `runVetAS` now runs `asc --noEmit` with the transform and propagates the exit status. Note the flag is `--lang as`; there is no `--target` on `vet`. |
-| **§2.28 residual** | ✅ **Closed.** Four of five languages run on wasmtime — `go`, `assemblyscript`, `java`, `rust`. Python stays on wazero deliberately, with the reason recorded to the instance in `engine.WasmtimeLanguages` and §2.72. The "shipped image must stay CGO + glibc" half is guarded: `Dockerfile:41` runs `/cleat-worker --verify-backend`. |
-| **§2.40 residual** | 🔶 `cmd/cleat` is clean under `ineffassign` since §2.43 removed its two dead fallbacks. Four findings remain — `internal/closure/threading.go:42`, and the three defensive `argIdx` increments in `plugins/scheduledbackup/{commands,routes}.go` and `plugins/webhookingest/host_functions.go` that need `//nolint` rather than deletion. **None are WS-3's files**; only `.golangci.yml` is. |
+| **§1.5 / §2.28 residual** | **Python runs on wazero, unfenced — and does not work there either.** `WasmtimeLanguages` is `{go, assemblyscript, java, rust}`; Python is absent. Its component reaches the decomposition path and stops at `undefined element: out of bounds table access` at instance 52 — eleven deeper than before the `env::abort` arity fix, so that fix helped and did not finish. On wazero it fails differently: `module[__main_module__] not instantiated`. **Start here** — `engine/engine.go:292-323` records where the next attempt begins, including a `backend_wasmtime.go` retry keyed on a neighbouring error that does not rescue this case, and the native component path behind a build tag no build sets. |
+| **§3.30** | Once Python is on wasmtime or explicitly dropped, decide what wazero is *for*. It is currently the fallback for one language that does not work on it. Either it has a stated, tested role or it is a second execution engine carrying a known bug tail for nobody. `CLAUDE.md` still calls it the fallback "for the languages that do not work under wasmtime" — that set may now be empty. |
+| **§3.31** | Write the execution-limit story per *backend* and test it per backend rather than per language. §1.5's history is a fix that existed, was correct, and reached no deployment for weeks because it sat behind a build tag the shipped image did not set. **A limit not verified on the artifact users run is not a limit.** |
 
-**Nothing open in WS-3's own files.** The last item — no CI job installing
-`wasm32-unknown-unknown`, so `cleat build --target rust` was exercised nowhere — closed in
-#291, which found it sitting on top of §2.70's defect in a second workflow: all four
-plugin-harness jobs ran `CGO_ENABLED: "0"`, and `TestPluginCalls_Wasm_Go` was skipping
-unconditionally on a wazero panic that only happens because the job forced wazero. That job
-now runs with CGO on, installs the right Rust target, and enforces the result with a skip
-budget: `skipped=1 budget=1 (passed=4 failed=0)` on the runner, Python being the one skip.
+---
 
-**§1.7's residual is the only WS-3 item left, and it is not in WS-3's files** — 53 of the ~89
-unaudited `s.tenantID` call sites are in `engine/mysql_ops.go`. Coordinate with WS-1 rather
-than editing it.
+## Standing item for everyone — the linter backlog
 
-**Also found here, owned elsewhere, all recorded in `IMPROVEMENT-PLAN.md`:** `engine/testutil`'s
-MSSQL schema defines none of the seven security policies, so no *other* MSSQL test has a
-tenant backstop (§2.71 schema half, WS-2's); `TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL`
-is timing-flaky on a ~1 ms margin (WS-1's); `tests/plugin-harness` skips on
-`"wasmtime-go compatibility issue with this WASM module"`, a skip that would swallow exactly
-the class of regression §2.72 is about.
+Not a workstream, because it touches every file; a protocol instead. **One linter per PR,
+repo-wide, and say in the PR which one you are taking** so two streams do not collide.
+Measured 2026-08-04 with golangci-lint's default caps removed — they silently truncate, and
+`errcheck` reads as 50 with them on and 307 with them off:
+
+```
+ineffassign  8      staticcheck  17     gosec    193
+gosimple     9      unconvert    23     errcheck 307
+unused      16      gocyclo      28
+```
+
+Take them off the top. `ineffassign` needs three `//nolint` on defensive trailing `argIdx++`
+— **do not delete them**; removing one makes adding the next clause a silent bug.
+
+The two at the bottom are the ones that matter and should not be deferred forever on size.
+**`errcheck` (307) is the class that produced §1.2 and §2.50**, both real defects fixed
+yesterday, both literally an unchecked error return. `gosec` (193) is unreviewed security
+findings in a codebase whose last two days have been tenancy defects. Neither must be cleared
+in one pass — `//nolint` with a reason is a fine answer per site, and an unreviewed 307 is
+worse than a reviewed 307 with 250 suppressions.
 
 ---
 
 ## Cross-stream couplings — the three that are real
 
-1. **`engine/db.go` is WS-1's**, but WS-2's §1.4 phase F (admin force-resolve) wants store
-   methods there. Add them in a new file rather than editing `db.go`, or ask WS-1.
-2. **`finalize_workflow_status` is WS-1's** (§1.1). WS-2's §1.4 phase D may want to write
-   intent in the same procedure. §1.1 has already landed (`c26c332`), so WS-2 can build on the
-   result now rather than waiting on WS-1.
-3. **WS-3's §1.7 adds RLS to MySQL/MSSQL migrations**, and WS-1's §2.26 touches MSSQL
-   operations. Different files, same dialect — coordinate before either lands a schema change
-   to the MSSQL path.
-
-   **Updated 2026-08-04.** §1.7 turned out not to need an MSSQL policy migration — the seven
-   policies already exist in `migrations/mssql/001_schema.sql` and were verified enforcing.
-   But WS-3 found **§2.71** while testing them, and it sits squarely in WS-1's half of this
-   coupling: `MSSQLStoreFactory`'s per-tenant `sp_set_session_context` is cleared when a
-   pooled connection is recycled, so with the real schema every tenant-scoped *read* on SQL
-   Server returns nothing. Writes are fine (they set the context inside their own
-   transaction). It fails closed, so it is correctness rather than a leak.
-
-   **WS-1: this is yours to fix** — `engine/mssql_store.go`, and it likely interacts with
-   §2.26's `BeginTx` boundaries, since the fix direction is to establish the session context
-   per transaction the way the write paths already do. `cmd/cleat-worker/tenant_isolation_mssql_test.go`
-   is written and skipped against it; unskipping it is the acceptance test.
-
-   Related, for whoever owns `engine/testutil/` (WS-2): `mssql_schema.go` hand-writes its
-   tables and defines none of the seven security policies, so **no MSSQL test in the repo has
-   a tenant backstop** and none could have caught §2.71.
-
-Nothing else in the three lists overlaps.
+1. **`engine/store_lifecycle.go` is shared.** WS-1 owns its idempotency block (§3.10); WS-2
+   owns the event and flush paths. Different regions of one file — expect textual conflicts,
+   not semantic ones, and rebase often.
+2. **`engine/testutil/` is WS-1's this round** (it was WS-2's), because §2.71's schema
+   residual is the blocking piece and lives there. WS-2 and WS-3 should ask before adding
+   test-schema columns: #283 consolidated two hand-written MySQL schemas into one, and a
+   third divergence would undo that.
+3. **`.github/workflows/` is WS-3's**, but any stream adding a dialect-conditional test moves
+   the skip budget for `test-go/engine` **and** `cluster` together. Regenerate, never
+   hand-edit, and expect a conflict if two streams add tests the same afternoon.
 
 ## Sequencing, if you want the highest yield first
 
-WS-2 §1.3 (cancellation, ~1 session) is the cheapest real fix left on the board — small
-enough to land on day one and give that stream a green PR before starting its multi-session
-item. WS-1's day-one item was §1.6, which turns out to be already merged; its equivalent is
-the §1.2 caller residual above.
+**WS-1 §3.1** is the cheapest real security fix on the board: proven on all three dialects,
+failing test already written, remaining work is a migration and one decision. **WS-2 §3.20**
+is about an hour and deletes an API that answers as though it works. **WS-3's Python item**
+has the clearest finish line and the best existing notes.
 
-**Check the `§` heading's status marker in `IMPROVEMENT-PLAN.md` before starting anything
-here.** This table was wrong about three of five items on the day it was written, for the
-ordinary reason: it was derived from the plan's headings and the derivation dropped the ✅.
-The plan is the source of truth for *what* an item is **and whether it is still open**.
+Each lands on day one and gives its stream a green PR before it starts a multi-session item.
+
+**And check the `§` heading's status marker in `IMPROVEMENT-PLAN.md` before starting anything
+here.** Last round's table was wrong about three of five items on the day it was written,
+because it was derived from the plan's headings and the derivation dropped the ✅. This one
+was built by reading the tree — `grep -c "SECURITY POLICY"`, `WasmtimeLanguages`, the
+migration listing, a green three-dialect run — but it starts going stale the moment someone
+lands a fix. The plan is the source of truth for status; this file is only the split.
