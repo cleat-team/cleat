@@ -132,6 +132,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project renamed from "durable" to "cleat" across the codebase
 
 ### Fixed
+- **Workflows could not complete on SQL Server.** `json.Marshal` of a nil map
+  returns `null`, not nil, so a workflow with no query handlers wrote the JSON
+  value `null` into `query_state` — which PostgreSQL and MySQL accept and the
+  shipped SQL Server schema rejects with
+  `CHECK (ISJSON(query_state) = 1)`. `CompleteWorkflow`, `FailWorkflow` and
+  `ContinueAsNew` all failed there. On the other two dialects the query state
+  was silently stored as `null` rather than `{}`.
 - **`CreateSchedule` could not create a schedule on SQL Server.**
   `json.RawMessage` binds as `VARBINARY`, so `workflow_schedules.input` was
   written as the binary rendering of the JSON, and the shipped schema's

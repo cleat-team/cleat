@@ -4615,6 +4615,61 @@ that deployed it, every definition is the default tenant's and the predicate mat
 useful — the two arms of this test that cover it only pass with §3.12's writer fix in place.
 Two defects that had to be fixed in the same direction to make either observable.
 
+### 3.17 Completing a workflow wrote JSON `null` into `query_state`, and SQL Server refused it — ✅ **FIXED** (WS-1, 2026-08-05)
+
+The second thing the §2.71 measurement found, after §3.16 removed the first. Twelve sites
+across all three stores read:
+
+```go
+qsJSON, _ := json.Marshal(queryState)
+if qsJSON == nil {
+    qsJSON = []byte("{}")
+}
+```
+
+`json.Marshal` of a nil map returns the four bytes `null`, **not nil**, so the guard never
+fired and `null` is what reached the database — for every workflow with no query handlers,
+which is most of them.
+
+PostgreSQL's `JSONB` and MySQL's `JSON` accept it, because a JSON null is valid JSON: the row
+goes in and the query state reads back as `null` instead of `{}`. SQL Server's shipped schema
+does not — `CHECK (ISJSON(query_state) = 1)` and `ISJSON('null')` is `0` — so **`CompleteWorkflow`,
+`FailWorkflow` and `ContinueAsNew` all failed outright** on a SQL Server built from
+`migrations/mssql/001_schema.sql`:
+
+```
+The UPDATE statement conflicted with the CHECK constraint
+"ck_workflow_instances_query_state"
+```
+
+13 of the 29 subtests still failing after §3.16 were this. Fixed with one helper,
+`marshalQueryState`, at all twelve sites.
+
+**The test is three-dialect on purpose.** Asserting only that SQL Server stops erroring would
+leave PostgreSQL and MySQL writing `null` forever, so
+`TestCompleteWorkflowStoresAnObjectForEmptyQueryState` reads the column verbatim on each
+dialect — the store's `GetQueryState` takes a key and returns one entry, which cannot tell an
+empty object from a JSON null. With the fix reverted: postgres and mysql report
+`query state stored as null (raw "null"), want {}`, and mssql reports the constraint
+violation. The `empty map` and `a handler` cases pass either way, which is the shape of the
+defect: only the nil case was wrong, and only the nil case is common.
+
+`ck_workflow_instances_query_state` is now in the test schema too, with a repair step for the
+`null`s an existing test database already holds.
+
+**Still open from the same measurement** (counts from the 29 remaining after §3.16):
+
+- 6 × `ck_workflow_signals_payload` and 2 × `ck_workflow_update_requests_payload` — the same
+  family, different columns. §2.60c covers signal payloads and was fixed on 2026-08-04, so
+  read that before assuming this is the same thing.
+- 1 × `fk_api_keys_tenant` — a fixture inserting an API key for a tenant that does not exist
+  in `admin.tenants`, which the shipped schema has a foreign key for and the test schema does
+  not.
+- `TestMSSQLTenantIsolation_UnderRealSecurityPolicies` asserts that exactly
+  `[workflow_routing workflow_tags]` are absent from the test schema. Under the real schema
+  nothing is absent, so that assertion fails **because the drift is closed** — it needs to
+  become "no tables are missing" as part of the switch.
+
 ### 3.16 `CreateSchedule` could not create a schedule on SQL Server — ✅ **FIXED** (WS-1, 2026-08-05)
 
 Found by measuring the §2.71 residual rather than by reading code: pointing `engine/testutil`'s

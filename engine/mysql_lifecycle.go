@@ -236,10 +236,7 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 	}
 	defer tx.Rollback()
 
-	qsJSON, _ := json.Marshal(queryState)
-	if qsJSON == nil {
-		qsJSON = []byte("{}")
-	}
+	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
@@ -288,10 +285,7 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 	}
 	defer tx.Rollback()
 
-	qsJSON, _ := json.Marshal(queryState)
-	if qsJSON == nil {
-		qsJSON = []byte("{}")
-	}
+	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
@@ -495,10 +489,7 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	}
 
 	// Complete the current run.
-	qsJSON, _ := json.Marshal(queryState)
-	if qsJSON == nil {
-		qsJSON = []byte("{}")
-	}
+	qsJSON := marshalQueryState(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
@@ -565,10 +556,7 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 	// Delegate the terminal UPDATEs (status, idempotency, parent wake,
 	// await_child population) to a server-side stored procedure.
 	// This replaces 5 individual round-trips with 1 procedure call.
-	qsJSON, _ := json.Marshal(queryState)
-	if qsJSON == nil {
-		qsJSON = []byte("{}")
-	}
+	qsJSON := marshalQueryState(queryState)
 	resultJSON := result
 	if resultJSON == "" || !json.Valid([]byte(resultJSON)) {
 		resultJSON = "{}"
