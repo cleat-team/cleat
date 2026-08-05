@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -74,7 +73,19 @@ func TestKillWorkerMidExecution(t *testing.T) {
 		}
 	}()
 
-	// Claim workflows using multiple workers to simulate distribution.
+	// Claim workflows across three workers, round-robin and in order.
+	//
+	// This used to run the three workers as goroutines racing each other, each
+	// allowed up to five claims for six workflows -- so worker-1 legitimately
+	// finished with none whenever the other two took all six between them, and
+	// the guard below turned that into a failed run. Observed on CI
+	// (2026-08-05): "worker-1 claimed none of the 6 workflows". The guard is
+	// right and stays; the race is what had to go.
+	//
+	// Round-robin gives each worker exactly two, which is what the test wanted
+	// from the distribution in the first place. Nothing here is testing
+	// concurrent claiming -- TestClaimSkipLocked and the scale suite do that --
+	// so the concurrency was cost without cover.
 	//
 	// The claimed instance is kept, not just its ID: ReleaseWorkflow needs the
 	// generation ClaimWorkflow handed back. This map used to be
@@ -82,30 +93,26 @@ func TestKillWorkerMidExecution(t *testing.T) {
 	// fence, logged the refusal and carried on -- and the assertion at the end
 	// was a t.Log too, so the test passed while releasing nothing and
 	// reclaiming nothing.
-	var mu sync.Mutex
 	claimed := make(map[string]*engine.WorkflowInstance)
 	claimedBy := make(map[string]string)
-	var wg sync.WaitGroup
-	for _, wid := range []string{"worker-1", "worker-2", "worker-3"} {
-		wg.Add(1)
-		go func(wID string) {
-			defer wg.Done()
-			for range 5 {
-				wf, err := store.ClaimWorkflow(ctx, wID)
-				if err != nil {
-					return
-				}
-				if wf == nil {
-					return
-				}
-				mu.Lock()
-				claimed[wf.ID] = wf
-				claimedBy[wf.ID] = wID
-				mu.Unlock()
-			}
-		}(wid)
+	workers := []string{"worker-1", "worker-2", "worker-3"}
+	for i := 0; i < numWorkflows; i++ {
+		wID := workers[i%len(workers)]
+		wf, err := store.ClaimWorkflow(ctx, wID)
+		if err != nil {
+			t.Fatalf("ClaimWorkflow(%s): %v", wID, err)
+		}
+		if wf == nil {
+			// Fewer ready workflows than expected: say which claim came up
+			// empty rather than leaving the guard below to report the
+			// aftermath.
+			t.Fatalf("ClaimWorkflow(%s) returned nothing on claim %d of %d; "+
+				"the workflows this test inserted are not all ready",
+				wID, i+1, numWorkflows)
+		}
+		claimed[wf.ID] = wf
+		claimedBy[wf.ID] = wID
 	}
-	wg.Wait()
 
 	// Simulate worker-1 crash: release its workflows back to ready.
 	var released int
