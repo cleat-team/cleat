@@ -798,6 +798,65 @@ The live paths (`freshCall`, `freshCallWithHeartbeat`, `freshCallWithRetry`) cal
   code is worse than either, because it reads as finished.
 - Test: crash-recovery e2e (see 2.4).
 
+#### 1.4 phase D — write-ahead intent — ✅ **DONE** (WS-2, 2026-08-05)
+
+Migration `020` on all three dialects adds `event_history.intent_at`. **An event is pending iff
+`intent_at IS NOT NULL AND checksum IS NULL`**, and the ordering that is the entire feature is
+
+    commit intent  ->  dispatch  ->  commit outcome
+
+A crash between the first and third leaves a pending row, which replay reports as ambiguous
+instead of calling the service a second time.
+
+**The three defects that made the deleted implementation unwirable are gone by construction, and
+each is checked:**
+
+- The sentinel is not in the `error` column, so the completion path's
+  `WHERE response = '' AND error IS NULL` guard no longer refuses to overwrite it. `error` means
+  only "the call failed".
+- A pending row carries **no checksum at all**, so `VerifyWorkflowEvents` skips it rather than
+  reporting corruption in the exact crash window this exists to handle.
+  `TestCallIntent_PendingRowIsNotCorruption` fails if the intent write stores one.
+- The chain is computed from `s.lastChecksum`, not from a database read, so it does not diverge
+  under the adaptive flusher.
+
+**The guarantee is observed from inside the call.** `TestDurableCall_CommitsIntentBeforeDispatch`
+reads the workflow's history back through the store *while the call is in flight* and requires
+the pending row to be visible. An implementation that wrote the intent afterwards would satisfy
+every after-the-fact assertion and fails this one — proved by moving the write below the
+dispatch, which fails all three dialects.
+
+**Reachable from the shipped artifact, not only from an embedder.** `--write-ahead-intent-ops`
+takes `service.operation` pairs. Without it the engine-side mechanism would be exactly what §1.4
+is about: durability code that is tested, believed and unreachable. Cross-stream —
+`cmd/cleat-worker/{config,setup}.go` is WS-3's, same justification as phase B's `dbServiceCaller`.
+
+**A design-doc claim was wrong and is corrected there rather than worked around.** §5 said
+`--no-per-step-flush` "defeats this entirely" and required rejecting the combination at startup.
+That holds for an implementation routing the intent through `flushEvent`; this one writes through
+the store and never consults `noPerStepFlush`. `TestDurableCall_IntentSurvivesNoPerStepFlush`
+asserts the two are orthogonal on all three dialects. No startup check was added.
+
+**Deviation on policy declaration.** The design leaves open whether semantics are declared at the
+call site or on the service. The call site would need a new argument on the `DurableCall` host
+function and every SDK that binds it — an ABI change, and `wasm/` and the SDKs are WS-3's. The
+engine-level registration is the half that can be built without one, and forecloses nothing.
+
+**Five falsifications, each failing only its own test:** the ordering, the pending row's absent
+checksum, the detector, the completion fence, and the `pending` expression in `LoadEventHistory`.
+The fence one corrected the test rather than confirming it — MySQL's `RowsAffected` counts rows
+*changed*, not matched, so re-completing with identical values reported 0 whether or not the
+guard was in the `WHERE` clause, and the assertion would have passed against a store with no
+fence at all. The second completion now carries a different outcome, so all three dialects
+discriminate.
+
+**Still open in the phase:** E (the resolution hook and a typed `ErrAmbiguous` carrying step,
+service, operation and key — today ambiguity is reported inside the workflow result *string*),
+F (admin force-resolve for a pending step, whose prerequisite §3.20 now exists), and the crash
+harness scenario T3, which needs `tests/crash` to drive a worker started with
+`--write-ahead-intent-ops`. `pendingSentinel` is still detected alongside `Pending` because
+`tests/integrity` exercises it directly; retiring it belongs with E.
+
 ### 1.5 Primary WASM backend has no hang protection (~1–2 sessions) — fixed for wasmtime, **still open for every deployment**
 
 > **Re-opened and re-closed 2026-08-04 by §2.28.** The epoch-interruption fix below is real

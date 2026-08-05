@@ -187,7 +187,7 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 		// Detect a pending call intent: the external call was dispatched
 		// but the outcome was never persisted.  Return ErrAmbiguous so
 		// the caller can check the external service before retrying.
-		if rec.Err == pendingSentinel {
+		if rec.isPendingIntent() {
 			if s.engine != nil && s.engine.Metrics != nil {
 				s.engine.Metrics.RecordAmbiguousCall(ctx)
 			}

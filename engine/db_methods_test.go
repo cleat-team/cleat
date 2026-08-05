@@ -1477,6 +1477,7 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					"",               // promise_error
 					int64(0),         // timestamp_ms
 					nil,              // created_at
+					false,            // pending (intent_at IS NOT NULL AND checksum IS NULL)
 				},
 				{
 					int64(1), // step
@@ -1492,6 +1493,7 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					"", "", "", "",
 					int64(0), // timestamp_ms
 					nil,      // created_at
+					false,    // pending
 				},
 			},
 		},

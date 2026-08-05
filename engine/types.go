@@ -95,6 +95,18 @@ type EventRecord struct {
 	// callErrorUnknown, which is a real classification.
 	ErrNonRetryable bool `json:"err_non_retryable,omitempty"`
 
+	// Pending records that this event is a write-ahead call intent whose
+	// outcome was never written: the external call was dispatched and the
+	// process died before the response came back. It is read from the row --
+	// intent_at IS NOT NULL AND checksum IS NULL -- and never written as part
+	// of one, which is why it carries no json tag. See store_intent.go.
+	//
+	// It is a derived read rather than a stored flag on purpose. The two
+	// columns are set and cleared by the same statements that write the
+	// outcome, so they cannot disagree with it; a third column recording
+	// "pending" could.
+	Pending bool `json:"-"`
+
 	// Sleep fields.
 	DurationMs int64 `json:"duration_ms,omitempty"`
 

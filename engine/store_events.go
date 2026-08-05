@@ -25,7 +25,8 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		       payload,
 		       promise_name, promise_id, promise_result, promise_error,
 		       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms,
-		       created_at
+		       created_at,
+		       (intent_at IS NOT NULL AND checksum IS NULL) AS pending
 		FROM event_history
 		WHERE workflow_id = $1 AND tenant_id = $2
 		ORDER BY step
@@ -55,7 +56,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
-			&rec.TimestampMs, &createdAt); err != nil {
+			&rec.TimestampMs, &createdAt, &rec.Pending); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 

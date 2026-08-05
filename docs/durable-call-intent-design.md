@@ -166,10 +166,16 @@ than a DB read removes 2.3.
 
 - Intent-mode steps must not also flow through `recordEvent`'s flush. Branch in `freshCall`,
   and assert it: a step that reaches both paths is a bug that would otherwise be silent.
-- `--no-per-step-flush` defeats this entirely — it defers persistence to batch finalization, so
+- ~~`--no-per-step-flush` defeats this entirely — it defers persistence to batch finalization, so
   the intent is not durable before dispatch. Using it with any `WriteAheadIntent` operation must
-  be **rejected at startup**, not warned about. (`--synchronous-commit-off` is not a threat: it
-  applies only to finalize transactions.)
+  be **rejected at startup**, not warned about.~~ **Wrong, and checked rather than assumed
+  (2026-08-05).** That is true of an implementation that routes the intent through `flushEvent`,
+  which is what this paragraph assumed. The implementation writes through the store's own
+  `WriteCallIntent`, which never consults `e.noPerStepFlush`, so the two settings are
+  orthogonal. `TestDurableCall_IntentSurvivesNoPerStepFlush` asserts it on all three dialects,
+  and if it ever fails, the startup rejection described here is the fix. No startup check was
+  added: forbidding a combination that works is a cost with no benefit.
+  (`--synchronous-commit-off` is not a threat: it applies only to finalize transactions.)
 - The adaptive flusher may batch completions but never intents. Simplest v1: keep completions
   synchronous too, measure, and only add batching if the numbers demand it.
 
@@ -229,7 +235,7 @@ intent write removed, it is measuring something else.
 | ~~**A**~~ | ~~Delete `flushCallIntent`/`completeCallEvent`; keep the detector; correct `durable-calls.md`; drop the baseline entries~~ ✅ **done** | — | — |
 | **B** | Tier 1 idempotency keys | ~1 session | `Caller` interface change |
 | **C** | 2.4 crash harness + counting-service fixture | ~1 session | — |
-| **D** | Tier 2 intent + schema migration | ~2 sessions | **C** |
+| ~~**D**~~ | ~~Tier 2 intent + schema migration~~ ✅ **done 2026-08-05** — migration `020` on three dialects, `WriteCallIntent`/`CompleteCallIntent`, `CallSemantics` + `WithWriteAheadIntentOps`, the `freshCall` branch, the detector retargeted off `pendingSentinel`, and `--write-ahead-intent-ops` on the worker | — | — |
 | **E** | Tier 3 resolution hook + typed error | ~1 session | D |
 | **F** | Admin force-resolve | ~0.5 session | E, **and 1.7's ownership check** |
 

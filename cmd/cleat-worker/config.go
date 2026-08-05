@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -100,6 +101,7 @@ var (
 	wasmInstructionLimit          = flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit). Backend-agnostic: enforced via a wazero function-call listener on the wazero backend and via wasmtime fuel (SetConsumeFuel/SetFuel) on the wasmtime backend — the two mechanisms count at different granularities (function calls vs. individual WASM instructions), so the same numeric value bounds differently on each backend.")
 	wasmInstanceTimeout           = flag.Duration("wasm-instance-timeout", 30*time.Second, "Max wall-clock time for a single WASM invocation (one fresh execution or one replay pass) before it is forcibly interrupted. Enforced via wasmtime epoch interruption on the wasmtime backend (bounds even a WASM module stuck in a tight loop that never calls back into the host) and via context cancellation on the wazero backend. This is the primary bound against a runaway workflow hanging a worker; 0 disables it and is NOT recommended.")
 	noPerStepFlush                = flag.Bool("no-per-step-flush", false, "Skip per-step event flush; rely on batch finalization for persistence (higher throughput, weaker crash safety)")
+	writeAheadIntentOps           = flag.String("write-ahead-intent-ops", "", "Comma-separated service.operation pairs that must use write-ahead call intent: the engine commits a pending event before dispatching, so a crash mid-call is reported as ambiguous on replay instead of silently repeating the side effect. Costs one extra synchronous round trip per call, so declare only operations that are not safe to repeat (a card charge, not a GET). Independent of --no-per-step-flush, which does not defer these writes.")
 	batchFlushDisabled            = flag.Bool("batch-flush-disabled", false, "Disable adaptive batch flushing (always use direct per-step flush)")
 	batchFlushMaxWaitMs           = flag.Int("batch-flush-max-wait-ms", 8, "Max milliseconds to wait accumulating events in batch mode")
 	batchFlushMaxSize             = flag.Int("batch-flush-max-size", 200, "Max events per batch flush transaction")
@@ -144,4 +146,24 @@ func resolveDBURL() {
 	if *dbURL == "" {
 		*dbURL = os.Getenv("DATABASE_URL")
 	}
+}
+
+// parseWriteAheadIntentOps splits the --write-ahead-intent-ops value into
+// "service.operation" keys, dropping empties and surrounding whitespace so a
+// trailing comma or a value wrapped across a YAML line does not silently
+// declare an operation named "".
+//
+// It takes the flag pointer rather than reading the global directly so tests
+// can exercise it without mutating process-wide flag state.
+func parseWriteAheadIntentOps(v *string) []string {
+	if v == nil || *v == "" {
+		return nil
+	}
+	var ops []string
+	for _, part := range strings.Split(*v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			ops = append(ops, part)
+		}
+	}
+	return ops
 }

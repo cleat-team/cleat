@@ -299,14 +299,17 @@ func TestPostgresStore_LoadEventHistoryPaginated_SecondPage(t *testing.T) {
 // VerifyWorkflowEvents tests
 // ---------------------------------------------------------------------------
 
-// fullHistoryRow builds a 30-column mock row for LoadEventHistory (called by VerifyWorkflowEvents).
+// fullHistoryRow builds a 31-column mock row for LoadEventHistory (called by VerifyWorkflowEvents).
 // Column 28 is timestamp_ms (int64, scanned directly into rec.TimestampMs — must be non-nil).
 // Column 29 is created_at (scanned into sql.NullTime — nil is fine for "invalid").
+// Column 30 is pending, the intent_at IS NOT NULL AND checksum IS NULL expression
+// (bool, scanned directly into rec.Pending — must be non-nil). See 1.4 phase D.
 func fullHistoryRow(step int, eventType string) []driver.Value {
-	row := make([]driver.Value, 30)
+	row := make([]driver.Value, 31)
 	row[0] = int64(step)
 	row[1] = eventType
 	row[28] = int64(0) // timestamp_ms — must be non-nil (scanned into int64)
+	row[30] = false    // pending — must be non-nil (scanned into bool)
 	return row
 }
 

@@ -85,6 +85,25 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "call", service, operation)
 	defer eventSpan.End()
 	callStart := time.Now()
+
+	// An operation declared WriteAheadIntent commits a pending row before the
+	// call is dispatched, so a crash mid-call is detectable on replay instead
+	// of silently repeating the side effect. It persists the event itself --
+	// see freshCallWithIntent for why it must not also flow through
+	// recordEvent -- so it returns here rather than falling through.
+	if s.engine.callSemantics(service, operation) == WriteAheadIntent {
+		resp, err := s.freshCallWithIntent(callCtx, service, operation, requestJSON, step)
+		if DebugTiming {
+			s.engine.log().InfoContext(ctx, "TIMING: freshCallWithIntent", "workflow_id", s.workflowID, "step", step, "call_ms", time.Since(callStart).Milliseconds())
+		}
+		if err != nil {
+			written, _ := s.writeResult(ctx, m, responsePtr, err.Error(), responseMaxLen)
+			return packDurableCallResult(int(written), callFailureCode, 1)
+		}
+		written, _ := s.writeResult(ctx, m, responsePtr, resp, responseMaxLen)
+		return packDurableCallResult(int(written), 0, 0)
+	}
+
 	resp, err := s.callService(callCtx, service, operation, requestJSON, step)
 	callElapsed := time.Since(callStart)
 
@@ -161,7 +180,7 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 		// Detect a pending call intent: the external call was dispatched
 		// but the outcome was never persisted.  Return ErrAmbiguous so
 		// the caller can check the external service before retrying.
-		if rec.Err == pendingSentinel {
+		if rec.isPendingIntent() {
 			if s.engine.Metrics != nil {
 				s.engine.Metrics.RecordAmbiguousCall(ctx)
 			}
