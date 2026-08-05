@@ -617,13 +617,12 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	}
 
 	// Set up scratch buffers for the direct export call (non-Go path).
-	outBufSz := OutBufSize                        // 1 MB default, configurable
-	const legacyOffset = uint32(10 * 1024 * 1024) // 10 MiB
+	outBufSz := OutBufSize // 1 MB default, configurable
 
 	currentSize := uint64(mem.DataSize(store))
-	scratchBase := uint32(currentSize + wasmPageSize)
-	if scratchBase < legacyOffset {
-		scratchBase = legacyOffset
+	scratchBase, scratchErr := scratchBaseFor(currentSize, outBufSz)
+	if scratchErr != nil {
+		return nil, scratchErr
 	}
 	inputOffset := scratchBase
 	outputOffset := scratchBase + outBufSz
@@ -1310,11 +1309,10 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 	}
 
 	outBufSz := OutBufSize
-	const legacyOffset = uint32(10 * 1024 * 1024)
 	currentSize := uint64(mem.DataSize(store))
-	scratchBase := uint32(currentSize + wasmPageSize)
-	if scratchBase < legacyOffset {
-		scratchBase = legacyOffset
+	scratchBase, scratchErr := scratchBaseFor(currentSize, outBufSz)
+	if scratchErr != nil {
+		return nil, scratchErr
 	}
 	inputOffset := scratchBase
 	outputOffset := scratchBase + outBufSz

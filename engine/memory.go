@@ -15,6 +15,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -39,6 +40,46 @@ const DefaultOutBufSize = 1048576
 var OutBufSize uint32 = 1048576
 
 const wasmPageSize = 65536 // 64 KB WASM page size
+
+// legacyScratchOffset is the floor for the host's scratch region.
+//
+// Some WASM SDKs (Java/TeaVM, AssemblyScript) hardcode a 10 MiB convention and
+// break if the buffers move below it.
+const legacyScratchOffset uint32 = 10 * 1024 * 1024
+
+// scratchBaseFor returns the offset at which the host places its input and
+// output scratch buffers, one guard page above the guest's current heap.
+//
+// It exists to make one line's arithmetic checkable. All three execution paths
+// computed it inline, and all three did it in uint32:
+//
+//	scratchBase := uint32(currentSize + wasmPageSize)
+//
+// wasm32 linear memory can reach 4 GiB, and `--wasm-memory-max-mb` is not
+// applied unless configured, so `currentSize` can come within a page of 2^32.
+// The addition then wraps to a small number, falls below legacyScratchOffset,
+// and gets clamped *up* to 10 MiB -- which is inside the guest's own heap. The
+// bounds check on the following write passes, because 10 MiB really is within
+// a 4 GiB memory, so the host would quietly overwrite guest data rather than
+// fail. Corruption, not an error, and nothing in the failure would point here.
+//
+// Doing it in uint64 and refusing to place a region that will not fit turns
+// that into a clean error. Returns the base offset; the caller's two buffers
+// occupy [base, base+2*outBufSz).
+func scratchBaseFor(currentSize uint64, outBufSz uint32) (uint32, error) {
+	base := currentSize + wasmPageSize
+	if base < uint64(legacyScratchOffset) {
+		base = uint64(legacyScratchOffset)
+	}
+	// Both scratch buffers must fit above base, inside the 32-bit address
+	// space the guest can actually address.
+	if end := base + 2*uint64(outBufSz); end > math.MaxUint32 {
+		return 0, fmt.Errorf("host: no room for scratch buffers: guest memory is %d bytes and "+
+			"2x%d-byte buffers one page above it would end at %d, past the 4 GiB wasm32 limit",
+			currentSize, outBufSz, end)
+	}
+	return uint32(base), nil
+}
 
 // DefaultMaxWasmStringLen is the default maximum WASM string length (1 MiB).
 const DefaultMaxWasmStringLen = 1048576
