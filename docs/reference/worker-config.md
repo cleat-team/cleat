@@ -192,7 +192,16 @@ Auto-generates an API key on first startup if no keys exist.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `true` | Require signal authorization for cross-workflow signals |
+| bool | `false` | Require signal authorization for cross-workflow signals |
+
+> **Not usable yet.** Nothing in cleat can write `allowed_signals` — there is no
+> API, CLI verb or SDK call that sets it — and the check denies when the list is
+> empty. Enabling this flag therefore denies *every* cross-workflow, plugin and
+> external signal, with no supported way to permit one. It defaulted to `true`
+> until 2026-08-05, which is why it now defaults to `false`. The instructions
+> below describe the intended behaviour and are accurate about the mechanism;
+> they are not followable until the list can be populated.
+> See IMPROVEMENT-PLAN §3.15.
 
 When enabled, a workflow or external caller can only signal a target
 workflow if its identity appears in the target's `allowed_signals` list.
@@ -205,7 +214,8 @@ Applies to WASM `cleat_signal_workflow`, `SendSignalAndWait`, plugin
   `allowed_signals` to permit them.
 - An empty `allowed_signals` means deny all (fail-secure).
 
-Set to `false` to disable signal authorization (backward compatible).
+Set to `true` to enable signal authorization. Until `allowed_signals` can be
+populated, that denies every signal.
 
 ---
 
