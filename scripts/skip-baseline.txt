@@ -45,6 +45,7 @@ engine	TestMySQLStoreConfigOptions	1
 engine	TestMySQLStoreFactory	1
 engine	TestMySQLStore_CompleteWorkflow_UpdateError	1
 engine	TestPluginMigrations_AllDialects	1
+engine	TestPythonComponentExecutionFence	1
 engine	TestPythonWasmEndToEnd	1
 engine	TestRLSTenantIsolation	1
 engine	TestRustWorkflowCancelOrder	1

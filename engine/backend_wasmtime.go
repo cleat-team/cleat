@@ -276,32 +276,95 @@ func (b *wasmtimeBackend) configureStore(ctx context.Context, store *wasmtime.St
 	return timeout, nil
 }
 
+// executionLimitError marks an error as "the host stopped this guest", as
+// opposed to "this guest failed".
+//
+// It exists because that question has to be answerable by a caller that did
+// not do the classifying. backend_wasmtime.go's Execute falls back from the
+// native component path to decomposition on failure, which is right for a
+// guest fault and wrong for an exhausted budget: re-running a runaway guest on
+// a second path hands it a second budget, so the effective bound becomes a
+// multiple of the configured one. Answering by re-inspecting the error at the
+// fallback site would mean duplicating the classification, which is how the
+// two copies in IMPROVEMENT-PLAN 2.72 came to disagree.
+type executionLimitError struct{ err error }
+
+func (e *executionLimitError) Error() string { return e.err.Error() }
+func (e *executionLimitError) Unwrap() error { return e.err }
+
+// isExecutionLimit reports whether err is one the host raised by enforcing a
+// bound, at any depth of wrapping.
+func isExecutionLimit(err error) bool {
+	var limitErr *executionLimitError
+	return errors.As(err, &limitErr)
+}
+
 // resourceLimitError recognizes traps caused by the resource bounds
 // configureStore applies (epoch interruption, fuel exhaustion) and turns
 // them into a clear, actionable message naming the limit that was hit and
 // its configured value. Returns nil for any other error (including other
 // kinds of traps), so the caller should fall back to its normal error
 // wrapping in that case.
+//
+// Two detection routes, because the two execution paths report the same trap
+// differently:
+//
+//   - Core modules and decomposition go through wasmtime-go, which surfaces a
+//     *wasmtime.Trap carrying a machine-readable code. Preferred wherever it
+//     is available.
+//   - The native component path goes through the Component Model C API, whose
+//     wasmtime_error_t exposes only a rendered message, an exit status and a
+//     wasm trace -- there is no trap-code accessor on it (see
+//     wasmtimeinc/wasmtime/error.h). So that path is matched on wasmtime's own
+//     rendering of the two trap codes.
+//
+// The string match is deliberately anchored on the full canonical phrases
+// rather than a fragment like "fuel" or "interrupt", which is the distinction
+// 2.26 was about: matching a short token inside a longer message is how the
+// SQL Server classifier matched error numbers as substrings.
 func (b *wasmtimeBackend) resourceLimitError(err error, timeout time.Duration) error {
 	if err == nil {
 		return nil
 	}
+	timeLimit := func() error {
+		return &executionLimitError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget; configure with --wasm-instance-timeout): %w", timeout, err)}
+	}
+	fuelLimit := func() error {
+		return &executionLimitError{fmt.Errorf("instruction limit exceeded (%d fuel units; configure with --wasm-instruction-limit): %w", b.limits.instructionLimit, err)}
+	}
+
 	var trap *wasmtime.Trap
-	if !errors.As(err, &trap) {
+	if errors.As(err, &trap) {
+		if code := trap.Code(); code != nil {
+			switch *code {
+			case wasmtime.Interrupt:
+				return timeLimit()
+			case wasmtime.OutOfFuel:
+				return fuelLimit()
+			}
+		}
 		return nil
 	}
-	code := trap.Code()
-	if code == nil {
-		return nil
-	}
-	switch *code {
-	case wasmtime.Interrupt:
-		return fmt.Errorf("execution time limit exceeded (%s wall-clock budget; configure with --wasm-instance-timeout): %w", timeout, err)
-	case wasmtime.OutOfFuel:
-		return fmt.Errorf("instruction limit exceeded (%d fuel units; configure with --wasm-instruction-limit): %w", b.limits.instructionLimit, err)
+
+	switch msg := err.Error(); {
+	case strings.Contains(msg, wasmtimeInterruptTrapText):
+		return timeLimit()
+	case strings.Contains(msg, wasmtimeOutOfFuelTrapText):
+		return fuelLimit()
 	}
 	return nil
 }
+
+// wasmtime's rendering of the two trap codes configureStore can produce. These
+// are the strings wasmtime_error_message writes for WASMTIME_TRAP_CODE_INTERRUPT
+// and WASMTIME_TRAP_CODE_OUT_OF_FUEL; they are asserted against a real
+// interrupt in TestComponentPathResourceLimitClassification rather than taken
+// on trust, because they are upstream's wording and not part of any API
+// contract.
+const (
+	wasmtimeInterruptTrapText = "wasm trap: interrupt"
+	wasmtimeOutOfFuelTrapText = "all fuel consumed by WebAssembly"
+)
 
 // Execute compiles, instantiates, and runs a core WASM module via wasmtime.
 //
@@ -358,9 +421,22 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Detect Component Model binaries and dispatch to the component execution path.
 	if isComponentWasm(wasmBytes) {
 		// Try native component model via CGo first.
-		result, cgoErr := b.ExecuteComponentCGo(wasmBytes, entryPoint, []byte(input), OutBufSize)
+		result, cgoErr := b.ExecuteComponentCGo(ctx, wasmBytes, entryPoint, []byte(input), OutBufSize)
 		if cgoErr == nil {
 			return result, nil
+		}
+		// A guest that exhausted its execution budget must not be handed a
+		// second one. Falling through to decomposition here did exactly that:
+		// a component with a 2s budget was interrupted on the native path and
+		// then started again from scratch on the decomposition path, so the
+		// effective bound was a multiple of the configured one -- and the
+		// error the caller finally saw was decomposition's, which reads as a
+		// guest defect rather than the host stopping a runaway.
+		//
+		// Only for limit traps. Every other native-path failure is still a
+		// reason to try decomposition, which is the whole point of having it.
+		if isExecutionLimit(cgoErr) {
+			return nil, cgoErr
 		}
 		// Say why the native path was not taken. This used to be
 		// `if result, err := ...; err == nil`, discarding the error entirely,

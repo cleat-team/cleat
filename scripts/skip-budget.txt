@@ -95,7 +95,18 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # increments are independent and additive. If the guard reports 373, that is the
 # confirmation. If it reports something else, that number is the real one and
 # this note is what needs correcting -- do not widen it to silence a failure.
-test-go/engine	373	# 359 measured on develop, +2 for 3.10, +12 for 3.20's six three-dialect tests
+#
+# 373 -> 374: TestPythonComponentExecutionFence (IMPROVEMENT-PLAN 3.31). It
+# builds a Python component that never returns and asserts the configured budget
+# is what stops it, so it needs componentize-py, which this job does not install
+# -- the "nobody asked" kind of skip. Additive with 3.10's and 3.20's: different
+# workstreams, different tests, none of them stopped anything running.
+#
+# It is not a free skip. e2e-cross-language does install componentize-py and
+# declares python in CLEAT_REQUIRE_TOOLCHAINS, where this test Fatals rather
+# than skips -- so the component-path fence is verified in exactly one job, and
+# that job's budget is 0.
+test-go/engine	374	# 359 measured on develop, +2 for 3.10, +12 for 3.20, +1 for the fence test
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -163,7 +174,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	373	# same as test-go/engine, and for the same reason; see the note there
+cluster	374	# same as test-go/engine, and for the same reason; see the note there
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is
