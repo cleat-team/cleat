@@ -120,12 +120,13 @@ func adminGenerationMismatch(action, workflowID string, stored, requested int64)
 // because another writer took the step number first.
 //
 // It matters because the alternative is silent: every dialect's append is an
-// upsert that leaves an existing row alone (PostgreSQL's ON CONFLICT ... WHERE
-// response = '' AND error IS NULL is the clearest case), so a collision would
-// otherwise commit the status change with no audit record and no error. The
-// whole force-resolve is rolled back instead. On the workflows this operation
-// is actually used on -- ones whose worker is gone -- there is no concurrent
-// writer and this never fires.
+// upsert that leaves an existing row alone -- PostgreSQL's ON CONFLICT clause,
+// which updates only where the stored response is the empty string and error
+// IS NULL, is the clearest case -- so a collision would otherwise commit the
+// status change with no audit record and no error. The whole force-resolve is
+// rolled back instead. On the workflows this operation is actually used on --
+// ones whose worker is gone -- there is no concurrent writer and this never
+// fires.
 func adminAuditCollision(action, workflowID string, step int) error {
 	return fmt.Errorf("admin %s: audit event for workflow %s step %d was displaced by a concurrent writer; "+
 		"the force-resolve was rolled back rather than applied without an audit record",

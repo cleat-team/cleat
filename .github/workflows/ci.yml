@@ -280,6 +280,19 @@ jobs:
             path: ./...
           - name: engine
             path: ./engine/...
+            # -p 1: ./engine/... is two packages, engine and engine/testutil,
+            # and `go test` runs packages in parallel by default. Both point at
+            # the one database this job provides, and testutil's own tests call
+            # CleanupPostgresTestData -- an unqualified DELETE FROM eleven
+            # tables including workflow_defs and workflow_instances -- so in
+            # parallel they delete each other's fixtures mid-test. The cluster
+            # job below already runs this same path with -p 1 for exactly this
+            # reason; this entry did not, and the failures it produces are
+            # timing-dependent (a workflow that vanishes between two statements,
+            # a foreign key to a definition deleted since it was deployed) and
+            # so read as flakes rather than as one cause. See IMPROVEMENT-PLAN
+            # 2.60d, which is the underlying fix.
+            flags: -p 1
           - name: wasm
             path: ./wasm/... ./wasmrw/...
           - name: internal
@@ -356,7 +369,7 @@ jobs:
           set -o pipefail
           # Unquoted on purpose: some matrix entries list several package patterns
           # and rely on word splitting. Values are controlled by this file only.
-          go test -race -count=1 -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
+          go test -race -count=1 ${{ matrix.package.flags }} -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
 
       # A warning here was not enough. This job spun up a Postgres service it
       # could not reach, skipped every Postgres-backed test, emitted exactly
