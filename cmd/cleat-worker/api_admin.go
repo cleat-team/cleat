@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -34,7 +35,7 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 
 	id := parts[0]
 
-	var action func(http.ResponseWriter, *http.Request, string)
+	var action func(http.ResponseWriter, *http.Request, string, engine.WorkflowStore)
 	switch {
 	case len(parts) == 2 && parts[1] == "force-complete" && r.Method == http.MethodPost:
 		action = s.handleAdminForceComplete
@@ -49,14 +50,25 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 
 	// Ownership is checked once, here, rather than in each handler: a handler
 	// added later would otherwise inherit the gap by omission.
-	if !s.callerOwnsTarget(w, r, id) {
+	//
+	// The store it checked against is handed to the handler rather than
+	// discarded. The handlers used to check ownership with the caller's
+	// tenant-scoped store and then apply the operation to s.store, the
+	// process-wide one -- so a force-resolve ran against the default tenant's
+	// scope no matter who asked. That was invisible while the store methods
+	// were stubs: they returned "not implemented yet" from whichever store
+	// reached them.
+	st, ok := s.callerOwnsTarget(w, r, id)
+	if !ok {
 		return
 	}
-	action(w, r, id)
+	action(w, r, id, st)
 }
 
 // callerOwnsTarget reports whether the caller's tenant owns workflow id, and
-// writes the response itself when the answer is no.
+// writes the response itself when the answer is no. On success it returns the
+// tenant-scoped store the check was made against, which is the store the
+// operation must then be applied to.
 //
 // This is the enforcement point for the admin API. The engine.WorkflowStore
 // admin methods (AdminForceComplete / AdminForceFail / AdminReReplay) take no
@@ -67,10 +79,10 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 //
 // It answers 404, never 403: 403 would confirm that the workflow exists, which
 // is itself information the caller is not entitled to.
-func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id string) bool {
+func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id string) (engine.WorkflowStore, bool) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
-		return false
+		return nil, false
 	}
 	caller, ok := auth.TenantIDFromContext(r.Context())
 	if !ok {
@@ -78,22 +90,22 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 		// (--require-auth=false), so there are no tenants to keep apart and
 		// nothing to compare against. The operator has chosen to trust the
 		// network; this check cannot substitute for that decision.
-		return true
+		return st, true
 	}
 
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
-		return false
+		return nil, false
 	}
 	if wf == nil || wf.TenantID != caller.String() {
 		// Same response for "does not exist" and "belongs to someone else",
 		// deliberately: distinguishing them turns this endpoint into an oracle
 		// for which workflow IDs are real.
 		s.writeError(w, 404, "not found")
-		return false
+		return nil, false
 	}
-	return true
+	return st, true
 }
 
 // operatorFromContext extracts the operator identity from the request context.
@@ -104,7 +116,7 @@ func operatorFromContext(r *http.Request) string {
 	return "unknown"
 }
 
-func (s *apiServer) handleAdminForceComplete(w http.ResponseWriter, r *http.Request, id string) {
+func (s *apiServer) handleAdminForceComplete(w http.ResponseWriter, r *http.Request, id string, st engine.WorkflowStore) {
 	if r.Header.Get("X-Confirm") != "force-complete" {
 		s.writeError(w, 400, "X-Confirm header must be 'force-complete'")
 		return
@@ -123,7 +135,7 @@ func (s *apiServer) handleAdminForceComplete(w http.ResponseWriter, r *http.Requ
 	}
 
 	op := operatorFromContext(r)
-	if err := engine.ForceComplete(r.Context(), s.store, id, req.Generation, op, req.Result); err != nil {
+	if err := engine.ForceComplete(r.Context(), st, id, req.Generation, op, req.Result); err != nil {
 		s.handleAdminOpError(w, err)
 		return
 	}
@@ -131,7 +143,7 @@ func (s *apiServer) handleAdminForceComplete(w http.ResponseWriter, r *http.Requ
 	s.writeJSON(w, 200, map[string]string{"status": "completed"})
 }
 
-func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request, id string) {
+func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request, id string, st engine.WorkflowStore) {
 	if r.Header.Get("X-Confirm") != "force-fail" {
 		s.writeError(w, 400, "X-Confirm header must be 'force-fail'")
 		return
@@ -151,7 +163,7 @@ func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request,
 	}
 
 	op := operatorFromContext(r)
-	if err := engine.ForceFail(r.Context(), s.store, id, req.Generation, op, req.ErrorMsg, req.ErrorCode); err != nil {
+	if err := engine.ForceFail(r.Context(), st, id, req.Generation, op, req.ErrorMsg, req.ErrorCode); err != nil {
 		s.handleAdminOpError(w, err)
 		return
 	}
@@ -159,7 +171,7 @@ func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request,
 	s.writeJSON(w, 200, map[string]string{"status": "failed"})
 }
 
-func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, id string) {
+func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, id string, st engine.WorkflowStore) {
 	if r.Header.Get("X-Confirm") != "re-replay" {
 		s.writeError(w, 400, "X-Confirm header must be 're-replay'")
 		return
@@ -177,7 +189,7 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 	}
 
 	op := operatorFromContext(r)
-	if err := engine.ReReplay(r.Context(), s.store, id, req.Generation, op); err != nil {
+	if err := engine.ReReplay(r.Context(), st, id, req.Generation, op); err != nil {
 		s.handleAdminOpError(w, err)
 		return
 	}
@@ -186,13 +198,24 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 }
 
 // handleAdminOpError maps engine admin operation errors to HTTP status codes.
+//
+// 501 is separated from 500 deliberately. Every one of these operations was a
+// stub returning "not implemented yet", and the caller was told 500 -- the
+// same answer as a database failure, for an operation that had never existed.
+// force-complete and force-fail are real now; re-replay still is not, and says
+// so in the status line rather than in prose inside a 500 body.
 func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
 	msg := err.Error()
 	switch {
+	case errors.Is(err, engine.ErrAdminOpNotImplemented):
+		s.writeError(w, 501, msg)
 	case strings.Contains(msg, "generation mismatch"):
 		s.writeJSON(w, 409, map[string]string{"error": msg, "detail": "generation_mismatch"})
 	case strings.Contains(msg, "not found"):
 		s.writeError(w, 404, msg)
+	case strings.Contains(msg, "must be valid JSON"), strings.Contains(msg, "is required"),
+		strings.Contains(msg, "must be >= 0"):
+		s.writeError(w, 400, msg)
 	default:
 		s.writeError(w, 500, msg)
 	}

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 )
@@ -18,6 +19,17 @@ func ForceComplete(ctx context.Context, store WorkflowStore, workflowID string, 
 	}
 	if operator == "" {
 		operator = "unknown"
+	}
+	// The result column is JSON on all three dialects -- JSONB on PostgreSQL,
+	// JSON on MySQL, NVARCHAR(MAX) under an ISJSON check constraint on SQL
+	// Server. An operator-supplied string that is not JSON is a bad request,
+	// and rejecting it here gets that answer instead of three different
+	// driver-level parse errors reported as a 500.
+	if result == "" {
+		result = "null"
+	}
+	if !json.Valid([]byte(result)) {
+		return fmt.Errorf("force-complete: result must be valid JSON")
 	}
 
 	if err := store.AdminForceComplete(ctx, workflowID, generation, result, operator); err != nil {
