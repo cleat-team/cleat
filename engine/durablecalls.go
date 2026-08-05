@@ -77,7 +77,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "call", service, operation)
 	defer eventSpan.End()
 	callStart := time.Now()
-	resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
+	resp, err := s.callService(callCtx, service, operation, requestJSON, step)
 	callElapsed := time.Since(callStart)
 
 	var callErr string
@@ -225,8 +225,12 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	var lastErr error
 	exhausted := true
 
+	// One step for every attempt, so every attempt carries the same idempotency
+	// key. That is the intent: a retry of a call that may already have been
+	// performed is exactly the case a key exists to collapse.
+	retryStep := s.stepCount
 	for attempt := int64(1); attempt <= maxAttempts; attempt++ {
-		resp, callErr := s.engine.caller.Call(ctx, service, operation, requestJSON)
+		resp, callErr := s.callService(ctx, service, operation, requestJSON, retryStep)
 
 		if callErr == nil {
 			// Success — record one event and return.
@@ -395,6 +399,11 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 	}
 	s.recordEvent(rec)
 
+	// Capture the step before the goroutine starts. Reading s.stepCount from
+	// inside it would race with the session advancing, and would key the call to
+	// whatever step happened to be current when the goroutine was scheduled.
+	sendStep := rec.Step
+
 	// Execute the fire-and-forget call through the caller.
 	// Wrap in a timeout context to bound goroutine lifetime in case
 	// the external Call blocks indefinitely.
@@ -405,7 +414,7 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 			}
 			callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
-			_, _ = s.engine.caller.Call(callCtx, service, operation, requestJSON)
+			_, _ = s.callService(callCtx, service, operation, requestJSON, sendStep)
 		}()
 	}
 	return 0
@@ -432,6 +441,9 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 	}
 	s.recordEvent(rec)
 
+	// As in DurableSend: capture before the goroutine, not inside it.
+	scheduleStep := rec.Step
+
 	// Schedule the call. For now, run in a goroutine after the delay.
 	// Wrap the call in a timeout context to bound goroutine lifetime
 	// in case the external Call blocks indefinitely.
@@ -443,7 +455,7 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 			case <-time.After(time.Duration(delayMs) * time.Millisecond):
 				callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 				defer cancel()
-				_, _ = s.engine.caller.Call(callCtx, service, operation, requestJSON)
+				_, _ = s.callService(callCtx, service, operation, requestJSON, scheduleStep)
 			}
 		}()
 	}

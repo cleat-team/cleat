@@ -621,6 +621,81 @@ it returns. Not attempted here.
 
 ### 1.4 Crash-recovery: the detector works, nothing writes what it detects (~2–3 sessions)
 
+> **Blocker found and fixed first, 2026-08-04 — ordinary event writes were being
+> discarded.** Before wiring intent writes into the call path it is worth knowing that
+> until `ddac7d1` the path's *ordinary* writes did not reach the database at all on the
+> connection cleat ships.
+>
+> `flushEvent` wrote through `e.db` directly and its quota path opened an unscoped
+> transaction; neither set `cleat.tenant_id`. `event_history`'s RLS policy is
+> `tenant_id = assert_tenant_set()`, which raises on the unset setting, so as `cleat_app`
+> — unprivileged, `NOBYPASSRLS`, mandatory since `c26c332` — every insert was rejected and
+> `engine/lifecycle.go:179` logged it and continued. A worker ran three durable calls,
+> failed three flushes, and finished with status `done`, a result, and **zero rows in
+> `event_history`**.
+>
+> Not total, which is why it survived: `adaptive_flush.go` already set the context with a
+> `WITH cfg AS (SELECT set_config(...))` CTE, so events persisted once a workflow's rate
+> pushed the flusher into batch mode, and not below it. And no test could see it, because
+> every database test in `engine/` connects as the owner, which on PostgreSQL is a
+> superuser and exempt from RLS — §1.10's shape applied to a code path instead of a policy.
+>
+> **This reorders the phases.** B–F are all about making a crash *observable*. A workflow
+> with no persisted events has nothing to replay from, so a crash re-executed every side
+> effect it had already performed — a larger contract violation than the one §1.4 exists to
+> fix, sitting underneath it. Regression tests in `engine/flush_rls_test.go`, with an
+> owner-connection control.
+>
+> **Found by building the §2.4 harness, not by reading `flush.go`.** The plan's own
+> instruction — do not start the intent work before the crash harness exists — turned out
+> to be right for a reason it did not anticipate.
+>
+> **Measured, three ways.** `tests/crash` kills a worker during the third of three durable
+> calls and counts what the external service was asked to *do* — not what it received:
+>
+> | | Reserve | Charge | Ship | events durable at crash |
+> |---|---|---|---|---|
+> | fix reverted | **2** | **2** | 2 | **0** |
+> | with the flush fix | 1 | 1 | **2** | 2 |
+> | + idempotency keys (phase B) | 1 | 1 | **1** | 2 |
+>
+> Row one is what shipped: a crash re-executed two charges that had **already completed
+> successfully**. Row two is the documented at-least-once contract — only the interrupted
+> call is retried. Row three is phase B: the duplicate request is still *sent*, and the
+> service does not act on it twice.
+>
+> This is the reason the harness uses three calls rather than one: with a single call every
+> row reads "2" and the cases are indistinguishable.
+
+**Phase B — idempotency keys: ✅ done.**
+
+`DurableCallIdempotencyKey` (`engine/idempotency.go`) derives
+`base32(sha256(workflowID || 0x00 || runID || 0x00 || step))`. Every input is deterministic
+on replay, so a resumed workflow derives the same key the original run used. All five
+durable-call sites route through one `callService` helper — deriving the key per call site
+is how the step number and the recorded event drift apart.
+
+**Deviation from `docs/durable-call-intent-design.md` §4, deliberately.** The design adds
+the key as a parameter to `ServiceCaller.Call`, and names the cost: *"a breaking change for
+external callers and plugin authors. That is the main expense of this tier."* Implemented
+instead as an **optional** `IdempotentCaller` interface: same mechanism, no existing
+implementation stops compiling. The trade is that a caller which could honour keys but has
+not been updated silently does not — so `CallerHonoursIdempotencyKeys` makes that
+detectable, and the crash test asserts the service actually received keys before trusting
+its result. If the interface is ever collapsed into `ServiceCaller`, nothing here forecloses
+it.
+
+Tests: key stability **across a real replay** (run to completion, truncate the history to
+two events as a crash would leave it, resume, require the resumed steps' keys to match the
+original run's) — proven to fail by making the derivation non-deterministic. Plus retry
+attempts sharing one key, per-step/run/workflow distinctness, the NUL-separator ambiguity
+case, and the fallback for plain callers.
+
+**Cross-stream:** `cmd/cleat-worker/setup.go` is WS-3's. `dbServiceCaller` now implements
+`IdempotentCaller` and sends the `Idempotency-Key` header, because the engine-side mechanism
+is inert without a caller that implements it — and shipping a mechanism nothing calls is the
+exact §1.4 shape this phase exists to avoid. Additive: `Call` is unchanged in behaviour.
+
 > **Sharpened 2026-08-02 by empirical test, not grep.** The original framing here — "the
 > whole feature is dead" — was too coarse. The *read* side is live and correct: a
 > `pendingSentinel` in history is caught at `engine/durablecalls.go:150` and reported to the
@@ -1088,7 +1163,7 @@ This is the part that prevents recurrence, and the highest-value work in the pla
 | 2.1 | **Golden path.** Clean container, no repo knowledge, execute the README verbatim. | README drift, flag-order bugs, undocumented schema bootstrap, missing `--api-addr`, wrong endpoints — all 8 golden-path failures found today |
 | 2.2 | **Two-worker race.** Real Postgres. Claim, stall worker A (SIGSTOP), let the reaper fire, let B claim, resume A. Assert event history intact, no duplicate side effects, no stale parent result. | 1.1, 1.2, 1.6 |
 | 2.3 | **Cancellation e2e.** 🔶 **Partly done** — `engine/cancellation_e2e_test.go` covers both *pre-call* paths (`freshCall` and the guest `h.PollCancellation()`) against a real Postgres and a real WASM module, with controls, each proven to fail. **Still open: cancelling an already-in-flight call** — the heartbeat path at `engine/heartbeats.go:58`, which is the "stops within N seconds" half. See §1.3. | 1.3 |
-| 2.4 | **Crash recovery.** SIGKILL the worker mid-`DurableCall`, restart, assert the documented semantics (exactly-once vs at-least-once — pick one and assert *that*). | 1.4 |
+| 2.4 | **Crash recovery.** ✅ **Done** — `tests/crash`. A real `cleat-worker` subprocess on the shipped two-DSN configuration, SIGKILLed with a call in flight, against a real PostgreSQL with the external service counting its own invocations. Three calls, so the counts discriminate: `1/1/2` (documented at-least-once) vs `2/2/2` (nothing durable). Measured both ways — see §1.4. Includes a clean-run control and a no-crash durability test. | 1.4 |
 | 2.5 | **Resource exhaustion.** ✅ **Done** — `tests/exhaustion`, wired into the cluster job. See §2.29. Per-backend coverage is still wasmtime-only, matching what deployments run. | 1.5 |
 | 2.6 | **Tenant isolation.** Two tenants; assert A cannot read, list, cancel, or admin-act on B's workflows through the HTTP API. Run against all three backends. | 1.7 |
 | 2.7 | **Deploy manifests.** Flag contract ✅ **done**, see §2.27. Actually *starting* them and asserting the worker reaches ready still needs a cluster — open. | `--namespace`/`--tenant-id` crash-loop — confirmed in `k8s/` and `charts/cleat/`, **not** in `docker-compose.cluster.yml` |

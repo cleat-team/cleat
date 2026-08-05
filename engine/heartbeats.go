@@ -34,8 +34,12 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 	callCtx, cancelCall := context.WithCancel(ctx)
 	defer cancelCall()
 
+	// Captured before the goroutine: reading s.stepCount from inside it races
+	// with the session advancing.
+	callStep := s.stepCount
+
 	go func() {
-		resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
+		resp, err := s.callService(callCtx, service, operation, requestJSON, callStep)
 		resultCh <- callResult{resp: resp, err: err}
 	}()
 

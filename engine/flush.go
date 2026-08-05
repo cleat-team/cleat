@@ -45,6 +45,34 @@ const insertEventSQL = `
 		$30, NOW(), $31)
 	ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL`
 
+// setRLSOnTx sets the transaction-local tenant context that the row-level
+// security policies require.
+//
+// event_history's policy is `tenant_id = assert_tenant_set()`, and
+// assert_tenant_set() raises if cleat.tenant_id is unset. Until this existed,
+// no flush path set it: flushEvent wrote through e.db directly and the quota
+// path opened a transaction without ever scoping it. On the owner connection
+// that is invisible, because a superuser is exempt from RLS -- and every
+// database test in this package connects as the owner. On the cleat_app
+// connection the worker actually serves traffic on, every insert was rejected,
+// and engine/lifecycle.go logged the rejection and carried on. See
+// TestEventFlushPersistsUnderRLS.
+//
+// Transaction-local (set_config's third argument is true) rather than session
+// level: e.db is a pool, and a session-scoped setting would outlive the
+// statement and leak one workflow's tenant onto the next connection borrower.
+//
+// The adaptive flusher already did this, with a `WITH cfg AS (SELECT
+// set_config(...))` CTE joined into its FROM clause. That is why the defect was
+// intermittent rather than total: once a workflow's event rate pushed the
+// flusher into batch mode its events persisted, and below that threshold --
+// which is where most workflows live -- they did not. Only the two paths that
+// bypassed the adaptive flusher were affected.
+func setRLSOnFlushTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	_, err := tx.ExecContext(ctx, "SELECT set_config('cleat.tenant_id', $1, true)", tenantID)
+	return err
+}
+
 // flushEvent persists a single event to event_history. Each step is one INSERT
 // that auto-commits; no explicit transaction is needed. The checksum chain is
 // tracked in-memory (execSession.lastChecksum) to avoid a DB round-trip.
@@ -141,6 +169,11 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			return fmt.Errorf("flush event (quota): begin tx: %w", err)
 		}
 		defer tx.Rollback()
+		if e.tenantID != "" {
+			if err := setRLSOnFlushTx(ctx, tx, e.tenantID); err != nil {
+				return fmt.Errorf("flush event (quota): set tenant context: %w", err)
+			}
+		}
 		var currentCount int
 		if err := tx.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = $1`, workflowID).Scan(&currentCount); err != nil {
 			return fmt.Errorf("flush event (quota): %w", err)
@@ -163,7 +196,45 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		return tx.Commit()
 	}
 
-	// Fast path: single INSERT auto-commits. No explicit BEGIN/COMMIT needed.
+	args := []any{workflowID, rec.Step, rec.EventType,
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
+		nullStr(rec.SignalName), nullStr(sigPayload),
+		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
+		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
+		payloadArg, checksum, e.tenantID}
+
+	// Tenanted path: the insert must carry the RLS context, which is
+	// transaction-scoped, so it needs an explicit transaction. That costs two
+	// extra round trips per event versus the auto-commit insert below. It buys
+	// the insert actually happening: without it every flush on an RLS-enforced
+	// connection is rejected and silently dropped.
+	//
+	// A CTE would keep this to one round trip, as adaptive_flush.go does. Not
+	// used here because that form requires INSERT ... SELECT, and this
+	// statement's 31 positional parameters would each need an explicit cast to
+	// keep Postgres's type inference happy -- a lot of surface area to get
+	// subtly wrong on the path that writes durability records. The batch
+	// flushers are where the volume is, and they amortise the transaction over
+	// a whole batch.
+	if e.tenantID != "" {
+		tx, err := e.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("flush event: begin tx: %w", err)
+		}
+		defer tx.Rollback()
+		if err := setRLSOnFlushTx(ctx, tx, e.tenantID); err != nil {
+			return fmt.Errorf("flush event: set tenant context: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, insertEventSQL, args...); err != nil {
+			return fmt.Errorf("flush event: %w", err)
+		}
+		return tx.Commit()
+	}
+
+	// Untenanted path: single INSERT auto-commits. No explicit BEGIN/COMMIT.
 	_, err := e.db.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
 		nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
