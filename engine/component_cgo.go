@@ -553,8 +553,19 @@ func goComponentCallback(
 // ---------------------------------------------------------------------------
 // durable-call interface
 // ---------------------------------------------------------------------------
+// ExecuteComponentCGo runs a Component Model guest on wasmtime's own component
+// runtime.
+//
+// ctx carries the execution deadline. It is a parameter rather than
+// context.Background() because passing Background here silently downgraded the
+// execution fence for every component guest: configureStore takes the tighter
+// of ctx's deadline and the backend's configured executionTimeout, so with no
+// ctx deadline to reconcile against, a workflow configured with a 2s budget got
+// the backend-wide 30s default instead. Measured before the fix, on a Python
+// component that never returns: 2s budget, interrupted after 32.9s. The fence
+// fired -- on the wrong deadline. See IMPROVEMENT-PLAN 3.31.
 func (b *wasmtimeBackend) ExecuteComponentCGo(
-	wasmBytes []byte, entryPoint string, input []byte, outBufSz uint32,
+	ctx context.Context, wasmBytes []byte, entryPoint string, input []byte, outBufSz uint32,
 ) (*ExecResult, error) {
 	component, err := componentCompile(b.engine, wasmBytes)
 	if err != nil {
@@ -570,7 +581,8 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
-	if _, err := b.configureStore(context.Background(), store); err != nil {
+	execTimeout, err := b.configureStore(ctx, store)
+	if err != nil {
 		return nil, err
 	}
 	wasiConfig := wasmtime.NewWasiConfig()
@@ -612,6 +624,14 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 
 	resultStr, callErr := componentCall(fn, store, string(input))
 	if callErr != nil {
+		// Name the limit that stopped it, the same way the core-module and
+		// decomposition paths do. Without this an exhausted budget arrived as
+		// a bare `wasm trap: interrupt` wrapped in a page of guest backtrace,
+		// which reads like a guest crash rather than the host enforcing a
+		// bound it was configured with.
+		if limitErr := b.resourceLimitError(callErr, execTimeout); limitErr != nil {
+			return nil, fmt.Errorf("host: component export %q: %w", entryPoint, limitErr)
+		}
 		return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr)
 	}
 
