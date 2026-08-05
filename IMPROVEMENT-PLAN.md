@@ -5242,6 +5242,50 @@ defer work there; `runDefers` runs them on a fresh module with no handler, where
 panics and is swallowed. Whatever is decided should make those two agree, because today
 whether your defer can call a service depends on which way the workflow failed.
 
+### 3.34 A concurrency key's TTL means three different things — 🔴 **OPEN, for WS-1** (found by WS-3, 2026-08-05)
+
+Found by chasing an intermittent, and the intermittent is the least of it.
+
+**Sub-second TTLs silently become zero on two of three dialects.** PostgreSQL
+(`engine/db.go`) and SQL Server (`engine/mssql_signals_promises.go`) both build the expiry
+from `int(ttl.Seconds())`, which truncates. Measured, not read:
+
+```
+ttl=1ns    -> interval "0 seconds"
+ttl=500ms  -> interval "0 seconds"
+ttl=999ms  -> interval "0 seconds"
+ttl=1s     -> interval "1 seconds"
+```
+
+So `AcquireConcurrencyKey(ctx, key, wf, 500*time.Millisecond)` acquires a key that is already
+expired, and the next caller takes it. For a mutual-exclusion primitive that is the failure
+that matters: two workflows holding the same key at once, with nothing logged.
+
+**And the three dialects disagree about whose clock decides:**
+
+| dialect | expiry | clock |
+|---|---|---|
+| PostgreSQL | `now() + '<int seconds>'` | database |
+| SQL Server | `int(ttl.Seconds())` | database |
+| MySQL (`engine/mysql_ops.go`) | `time.Now().Add(ttl)` | **application** |
+
+MySQL keeps sub-second precision, which is better, and computes on the host clock, which
+makes it the one dialect where app/database clock skew changes whether a lock is held. Two
+behaviours across three backends, in a locking primitive — the shape §1.1 and §2.60 both had.
+
+**The intermittent that led here**, recorded because it has a name this time:
+`TestAcquireConcurrencyKey_Expired` failed once in a full-suite run and passed in the three
+that followed, and passes individually on all three dialects. It acquires with a 1 ns TTL —
+which is 0 seconds on two dialects and 1 ns on the third — then sleeps 10 ms and asserts the
+key can be re-acquired. It is asserting behaviour that differs per backend, using a sleep, so
+it is the same "races for a precondition instead of stating it" shape as the two gates fixed
+in #329. Fixing the truncation is what makes the test statable.
+
+**Not fixed here.** `engine/db.go`, `engine/mysql_ops.go` and `engine/mssql_signals_promises.go`
+are WS-1's, and the fix is a decision about the primitive rather than a patch: whether TTLs are
+sub-second at all, and whether expiry belongs on the database clock (defensible, and what two
+dialects do) or the application's. Whichever way it goes, all three should agree.
+
 ### 3.33 gosec's 283 findings, triaged — 🔶 **2 fixed, 281 classified** (WS-3, 2026-08-05)
 
 `PARALLEL-WORKSTREAMS.md` calls gosec "unreviewed security findings in a codebase whose last
