@@ -11,10 +11,11 @@ linters:
     - gosimple
     # Enabled 2026-08-05 (WS-3). 16 findings, 13 fixed and 3 suppressed.
     - staticcheck
+    # Enabled 2026-08-05 (WS-3). 32 findings, all fixed with `unconvert -apply`.
+    - unconvert
   disable:
     - errcheck
     - unused
-    - unconvert
     - gocyclo
     - gosec
   # The disables above are a backlog, not a policy. This note used to read
@@ -87,6 +88,20 @@ linters:
   # //nolint'd at the site with the reasoning, including one flagged for WS-1:
   # go-mssqldb does implement StmtExecContext, so applyTenantSessionContext
   # could propagate ctx, which it currently does not.
+  #
+  # unconvert, 2026-08-05 (WS-3): 32, not the 23 recorded -- eight of the extra
+  # were created hours earlier by staticcheck's SA4016 fix in the same file, so
+  # the two linters disagreed about the same lines until both were run. Applied
+  # with `unconvert -apply ./...` rather than by hand; the only judgement call
+  # was reverting its one edit to a _test.go file, since this config excludes
+  # test files and the change should be exactly what the linter enforces.
+  #
+  # unused, 2026-08-05 (WS-3): MEASURED AT 30 AND DELIBERATELY NOT ENABLED.
+  # It is the same U1000 analysis that scripts/check-test-only-code.sh already
+  # runs against its own 59-entry baseline. Enabling it here would give one
+  # class of finding two mechanisms with two baselines, which is the shape that
+  # let the routing tables in 2.72 drift apart. If dead code should be enforced
+  # by golangci-lint, the move is to retire the script, not to run both.
   #
   # THE WHOLE TABLE WAS RE-MEASURED THE SAME DAY, and it had moved a lot in
   # 24 hours -- which is the argument for re-measuring rather than a curiosity:

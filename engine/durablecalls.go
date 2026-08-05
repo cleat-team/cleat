@@ -375,7 +375,7 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 				}
 
 				written, _ := s.writeResult(ctx, m, deferIDPtr, rec.DeferID, deferIDMaxLen)
-				return packSimpleResult(0, uint32(written))
+				return packSimpleResult(0, written)
 			}
 		}
 		s.exitReplay()
@@ -396,7 +396,7 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 	s.mu.Unlock()
 
 	written, _ := s.writeResult(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
-	return packSimpleResult(0, uint32(written))
+	return packSimpleResult(0, written)
 }
 
 func (s *execSession) DurableLog(ctx context.Context, m api.Module, message string) int64 {

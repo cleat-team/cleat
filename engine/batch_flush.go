@@ -131,7 +131,7 @@ func (bf *BatchFlusher) PrepareEntry(workflowID string, rec EventRecord, checksu
 
 	return batchEntry{
 		workflowID: workflowID,
-		step:       int(rec.Step),
+		step:       rec.Step,
 		done:       nil, // caller must set before Submit
 		params:     params,
 	}

@@ -615,7 +615,7 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	cbRegistry.store = store
 	cbRegistry.storeID = uint64(instance.store_id)
 	cbRegistry.Unlock()
-	C.save_first_memory_data(C.store_context(unsafe.Pointer(store.Context())), C.uint64_t(instance.store_id))
+	C.save_first_memory_data(C.store_context(unsafe.Pointer(store.Context())), instance.store_id)
 
 	fn, err := componentGetFunc(instance, store, entryPoint)
 	if err != nil {
