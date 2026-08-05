@@ -4207,37 +4207,56 @@ with a permissive predicate that fails with
 is now asserted rather than assumed, so a *new* divergence fails the test instead of being
 tolerated silently. Pointing `engine/testutil/` at the real migration remains the real fix.
 
-#### Where the switch stands, 2026-08-05 — written, one failure left, and it moves
+#### Where the switch stands, 2026-08-05 — written, and the blocker is now named
 
-Branch `fix/mssql-test-schema-real-2`, pushed but **not ready**. `engine/testutil` builds the
-MSSQL schema from `migrations/mssql/{001,010,011,020}.sql`, fingerprinted so it applies once
-per database — 001 is not re-appliable, because its own security policies bind
-`fn_tenant_filter` and its `CREATE OR ALTER FUNCTION` then fails on the second call. A database
-built by the old hand-written schema is **refused with instructions** rather than migrated in
-place: every `CREATE TABLE` in the shipped file is guarded by `IF NOT EXISTS`, so the old
-shapes would survive while the constraints and policies were applied over them, and that
-half-and-half state is what hung the first attempt at this switch.
+Branch `fix/mssql-test-schema-real-2`, draft PR #333. `engine/testutil` builds the MSSQL schema
+from `migrations/mssql/{001,010,011,020}.sql`, fingerprinted so it applies once per database —
+001 is not re-appliable, because its own security policies bind `fn_tenant_filter` and its
+`CREATE OR ALTER FUNCTION` then fails on the second call.
 
-**What the switch bought on the way**, all merged separately: §3.16, §3.17, §3.18 and §3.19 —
-four production defects the hand-written schema's missing constraints had hidden. The failure
-count went 95 → 29 → 20 → **1**.
+**What the switch bought on the way**, all merged: §3.16, §3.17, §3.18, §3.19 — four production
+defects the hand-written schema's missing constraints had hidden.
 
-**The one that is left moves between tests.** Under the shipped schema the full suite fails a
-single MSSQL subtest with `ClaimWorkflow returned nil` — `TestClaimWorkflow/mssql` on one run,
-`TestFailWorkflow/mssql` on the next. Both pass in isolation.
+**Correction to the previous note in this section.** It said a single failure "moved" between
+`TestClaimWorkflow/mssql` and `TestFailWorkflow/mssql` and that the trigger was unexplained.
+The trigger is now explained and it was measurement error: those runs were against a database
+**poisoned by an earlier version of `mssql_rls_enforcement_test.go`**, which installed the
+seven policies and dropped them on cleanup. That was correct while the test schema had none and
+became destructive the moment the schema provided them — and because the fingerprint says "these
+files have been applied", nothing ever reinstalled them. A database in that state runs every
+later test without a backstop, forever. Two guards now exist: that file asserts the policies
+instead of installing them, and `applyMSSQLSchemaFile` fails loudly if the fingerprint matches
+while the policies are gone, which is the state that cost an hour to recognise.
 
-- **Established:** it needs the full suite; the symptom is always a claim finding nothing; it
-  appeared only once the policies were live.
-- **Suspected, and with evidence against it:** that `mssql_rls_enforcement_test.go` is the
-  trigger. That file installs the seven policies and drops them on cleanup — sensible when the
-  schema lacked them, and now dropping what the schema provides, which would give other tests a
-  window on a different database. But pairing it with `TestClaimWorkflow` did **not** reproduce
-  the failure. So it is a hypothesis, not a diagnosis.
+**The real blocker, which is exactly what this residual predicted.** With the policies genuinely
+live, a fresh database gives **141** failures, and they are one cause:
 
-The first thing to try is making that file *assert* the policies rather than install them, and
-seeing whether the failure survives. Its
-`mssqlPolicyTablesMissingFromTestSchema` is already updated to the empty set — under the switch
-nothing is missing — kept as a set rather than deleted so a future divergence still fails there.
+```
+setupTestData: CreateSchedule: mssql: Violation of PRIMARY KEY constraint 'pk_workflow_schedules'
+store A expected 3 active instances, got 6
+```
+
+`CleanupMSSQLTestData` deletes on a plain pool with **no session context**, so the filter
+predicate hides every row it is trying to delete and it removes nothing. Rows accumulate across
+tests: primary-key collisions in fixtures, and counts that are multiples of what the test
+inserted. The residual's own sentence — *"turning them on suite-wide fails every test that
+builds a store on a plain pool — that is the point"* — describes this precisely.
+
+**The decision that unblocks it** is what to do about administrative access under RLS, and it
+is a real choice rather than a patch:
+
+- have the test cleanup toggle the policies (`ALTER SECURITY POLICY … WITH (STATE = OFF)`)
+  around its deletes — supported, but global state that only works because `./engine/...` runs
+  with `-p 1`;
+- give `fn_tenant_filter` an escape hatch — a sentinel session-context value that means
+  "administrative" — which changes the *shipped* predicate and therefore what production
+  enforces;
+- have every raw-SQL fixture and cleanup set a session context, which is the honest answer and
+  the largest, since it means every such site learns which tenant it is acting as.
+
+PostgreSQL sidesteps this because cleanup runs as the owning superuser, which RLS exempts;
+SQL Server has no equivalent exemption, which is why the same suite shape works there and not
+here.
 
 **One exception, as of 2026-08-04.** `cmd/cleat-worker/tenant_isolation_mssql_test.go` was
 written and shipped skipped against this item; unskipping it was the recorded acceptance

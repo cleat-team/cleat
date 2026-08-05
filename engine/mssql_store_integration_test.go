@@ -2384,8 +2384,21 @@ func TestMSSQLIntegration_ResolveTenantFromAPIKey(t *testing.T) {
 	store, db := setupMSSQLIntegrationTest(t)
 	ctx := context.Background()
 
-	// Insert a tenant API key.
+	// The tenant first, then its key.
+	//
+	// The shipped schema has fk_api_keys_tenant, so an API key for a tenant
+	// that does not exist cannot be inserted -- which is the right constraint
+	// and is how a real deployment works. This test used to insert only the
+	// key, and passed because engine/testutil's hand-written MSSQL schema
+	// declared no such foreign key (IMPROVEMENT-PLAN 1.9, 2.71).
 	tenantUUID := uuid.New()
+	if _, err := db.ExecContext(ctx, `
+		IF NOT EXISTS (SELECT 1 FROM admin.tenants WHERE tenant_id = @p1)
+		INSERT INTO admin.tenants (tenant_id, name) VALUES (@p1, @p2)
+	`, tenantUUID.String(), "tenant-"+tenantUUID.String()); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+
 	keyHash := sha256Of("my-api-key")
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO tenant_api_keys (key_hash, tenant_id, description)

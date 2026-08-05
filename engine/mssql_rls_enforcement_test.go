@@ -28,6 +28,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -58,12 +59,20 @@ var (
 // reason it was written as a set rather than a tolerance.
 var mssqlPolicyTablesMissingFromTestSchema = []string{}
 
-// enableMSSQLTenantPolicies applies the real fn_tenant_filter and the real
-// security policies to the test database, and removes them again on cleanup.
+// enableMSSQLTenantPolicies asserts that the real fn_tenant_filter and the real
+// security policies are present, and leaves them alone.
 //
-// The database is shared by the whole test binary, so leaving a filter
-// predicate behind would blank every MSSQL test that runs afterwards. Tests
-// using this must not call t.Parallel().
+// It used to install them and drop them again on cleanup, which was right when
+// engine/testutil hand-wrote a schema that had none. Now that the test schema
+// IS migrations/mssql/*.sql (2.71), the policies are there from the start and
+// this function installing its own copies means dropping the schema's -- so
+// every MSSQL test that ran after this one was running against a database
+// missing the seven policies, which is precisely the state this file exists to
+// prevent.
+//
+// Asserting rather than installing also makes the test stronger: it now fails
+// if the shipped schema stops carrying a policy, instead of quietly supplying
+// one of its own.
 func enableMSSQLTenantPolicies(t *testing.T, db *sql.DB) {
 	t.Helper()
 
@@ -78,24 +87,9 @@ func enableMSSQLTenantPolicies(t *testing.T, db *sql.DB) {
 	if len(policies) == 0 {
 		t.Fatalf("could not find any CREATE SECURITY POLICY in %s", path)
 	}
-
-	// Drop first, the same way the migration's own idempotent block does.
-	// A policy left behind by an earlier interrupted run both blanks every
-	// other MSSQL test and blocks the CREATE OR ALTER below, since a
-	// schemabound function cannot be altered while a policy references it.
-	for _, m := range policies {
-		if _, err := db.Exec("IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'" +
-			strings.TrimPrefix(m[1], "dbo.") + "') DROP SECURITY POLICY " + m[1]); err != nil {
-			t.Fatalf("drop pre-existing %s: %v", m[1], err)
-		}
-	}
-
-	fn := mssqlFilterFnRe.FindString(src)
-	if fn == "" {
-		t.Fatalf("could not find dbo.fn_tenant_filter in %s -- the migration changed shape and this test no longer applies the shipped predicate", path)
-	}
-	if _, err := db.Exec(fn); err != nil {
-		t.Fatalf("create fn_tenant_filter: %v", err)
+	if fn := mssqlFilterFnRe.FindString(src); fn == "" {
+		t.Fatalf("could not find dbo.fn_tenant_filter in %s -- the migration changed shape "+
+			"and this test no longer describes the shipped predicate", path)
 	}
 
 	existing := map[string]bool{}
@@ -120,30 +114,35 @@ func enableMSSQLTenantPolicies(t *testing.T, db *sql.DB) {
 			missing = append(missing, table)
 			continue
 		}
-		if _, err := db.Exec(m[0]); err != nil {
-			t.Fatalf("create %s on %s: %v", policyName, table, err)
+		// The schema is expected to have installed it. Enabled, not merely
+		// present: a policy with STATE = OFF filters nothing, and this file
+		// exists to prove filtering happens.
+		var enabled bool
+		err := db.QueryRow(`SELECT is_enabled FROM sys.security_policies WHERE name = @p1`,
+			strings.TrimPrefix(policyName, "dbo.")).Scan(&enabled)
+		if errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("%s is absent from the test database. engine/testutil builds the MSSQL "+
+				"schema from migrations/mssql/*.sql, so the shipped policy should be here "+
+				"already -- either the migration stopped creating it, or something dropped "+
+				"it (IMPROVEMENT-PLAN 2.71).", policyName)
+		}
+		if err != nil {
+			t.Fatalf("look up %s: %v", policyName, err)
+		}
+		if !enabled {
+			t.Fatalf("%s exists but is disabled, so it filters nothing", policyName)
 		}
 		applied = append(applied, policyName)
 	}
 
-	t.Cleanup(func() {
-		for _, p := range applied {
-			if _, err := db.Exec("DROP SECURITY POLICY " + p); err != nil {
-				// Loud: leaving a filter predicate in place would make every
-				// later MSSQL test in this binary see zero rows.
-				t.Errorf("DROP SECURITY POLICY %s: %v -- the shared test database still has RLS enabled", p, err)
-			}
-		}
-	})
-
 	sort.Strings(missing)
 	if strings.Join(missing, ",") != strings.Join(mssqlPolicyTablesMissingFromTestSchema, ",") {
 		t.Errorf("tenant-scoped tables absent from the test schema = %v, expected exactly %v -- "+
-			"the tested schema and the shipped schema have drifted further apart (IMPROVEMENT-PLAN.md 1.9, 2.71)",
+			"the tested schema and the shipped schema have drifted (IMPROVEMENT-PLAN.md 1.9, 2.71)",
 			missing, mssqlPolicyTablesMissingFromTestSchema)
 	}
 	if len(applied) == 0 {
-		t.Fatal("no security policies were applied, so this test cannot observe enforcement")
+		t.Fatal("no security policies were found, so this test cannot observe enforcement")
 	}
 }
 

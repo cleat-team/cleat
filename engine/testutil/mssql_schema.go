@@ -717,6 +717,7 @@ func applyMSSQLSchemaFile(t *testing.T, db *sql.DB) {
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256(combined))
 	var applied string
 	if err := db.QueryRow(`SELECT fingerprint FROM cleat_test_schema WHERE id = 1`).Scan(&applied); err == nil && applied == fingerprint {
+		requireMSSQLPoliciesIntact(t, db)
 		return
 	}
 
@@ -752,6 +753,40 @@ func applyMSSQLSchemaFile(t *testing.T, db *sql.DB) {
 		WHEN NOT MATCHED THEN INSERT (id, fingerprint) VALUES (s.id, s.fingerprint);`, fingerprint); err != nil {
 		t.Fatalf("apply mssql schema: record fingerprint: %v", err)
 	}
+}
+
+// requireMSSQLPoliciesIntact checks, on every setup, that the security policies
+// the schema installed are still there.
+//
+// The fingerprint says "these files have been applied to this database", and
+// once it matches nothing re-applies them -- so a database that lost its
+// policies to something else can never heal itself, and every later run sees a
+// schema that is missing the one thing 2.71 is about. That is not
+// hypothetical: an earlier version of mssql_rls_enforcement_test.go dropped the
+// policies on cleanup, which was correct when it installed its own and became
+// destructive once the schema provided them, and the databases it had already
+// been run against stayed broken afterwards. Cost an hour to see, because the
+// symptom was a test reporting a missing policy long after the run that removed
+// it.
+//
+// Cheap enough to do every time: one COUNT against a catalogue view.
+func requireMSSQLPoliciesIntact(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var policies int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sys.security_policies`).Scan(&policies); err != nil {
+		t.Fatalf("check security policies: %v", err)
+	}
+	if policies > 0 {
+		return
+	}
+	var dbName string
+	_ = db.QueryRow(`SELECT DB_NAME()`).Scan(&dbName)
+	t.Fatalf("the SQL Server test database %q has the shipped schema recorded but no security "+
+		"policies, so something dropped them and the fingerprint stops them being "+
+		"reinstalled (IMPROVEMENT-PLAN 2.71).\n\n"+
+		"Every tenant-scoped test in this binary would run without a backstop.\n\n"+
+		"Drop it once and re-run:\n\n"+
+		"    DROP DATABASE %s; CREATE DATABASE %s;\n", dbName, dbName, dbName)
 }
 
 // requireNoHandWrittenMSSQLSchema refuses to apply the shipped schema on top of
