@@ -1,44 +1,42 @@
-//go:build cgo && wasmtime_component_cgo
+//go:build cgo
 
-// This file (plus component_callbacks.go and cgo_test_helpers.go) calls
-// the wasmtime Component Model C API directly via cgo, using types like
+// This file (plus component_callbacks.go and cgo_test_helpers.go) calls the
+// wasmtime Component Model C API directly via cgo, using types like
 // wasmtime_component_val_t that github.com/bytecodealliance/wasmtime-go/v44
-// does not expose through its Go bindings. That means these files need a
-// `-I` to wasmtime's C headers (wasmtime.h, wasmtime/component/*.h), and cgo
-// has no portable way to derive that path automatically -- `${SRCDIR}` in a
-// #cgo directive only expands to *this* file's own directory, not to an
-// imported module's directory, and the wasmtime-go module itself doesn't
-// live at a fixed location (module cache path depends on GOPATH/GOMODCACHE,
-// which vary per machine/CI runner).
+// does not expose through its Go bindings -- the module ships exactly one
+// component-related Go file, config_feat_component_model.go, and it is a
+// config flag.
 //
-// So this native fast path is opt-in, gated behind the wasmtime_component_cgo
-// build tag, and NOT part of a plain `go build ./...` (with or without
-// CGO_ENABLED=1). Without the tag, ExecuteComponentCGo resolves to the stub
-// in component_cgo_stub.go, which always returns an error; callers (see
-// backend_wasmtime.go's Execute) already treat that as "fast path
-// unavailable" and fall back to the pure wasmtime-go ExecuteComponent path,
-// so component-model WASM still runs correctly by default -- just without
-// this optimization.
+// So these files need a `-I` to wasmtime's C headers, and cgo has no way to
+// point one at another module: `${SRCDIR}` in a #cgo directive expands to
+// *this* file's own directory, never to an imported module's, and the module
+// cache path varies with GOMODCACHE. That is why the headers are vendored at
+// engine/wasmtimeinc (see its README) -- vendoring is what makes the -I below
+// expressible, and it is the whole reason this path can be a plain `cgo`
+// build rather than an opt-in tag.
 //
-// To build with the fast path enabled:
+// It used to be an opt-in tag, wasmtime_component_cgo, and that was the
+// defect: no build, CI job, Makefile or Dockerfile set it, so every build got
+// the stub, and every Component Model guest -- which in practice means every
+// Python workflow -- fell through to the hand-rolled decomposition path in
+// backend_wasmtime.go, where componentize-py output stops at `undefined
+// element: out of bounds table access` instantiating instance 52. The code
+// here was correct the whole time; nothing compiled it. Same shape as §1.5,
+// where a working execution fence reached no deployment for weeks because it
+// sat behind a build tag the shipped image did not set. See IMPROVEMENT-PLAN
+// §2.72 and §1.5/§2.28.
 //
-//	WTDIR=$(go list -m -f '{{.Dir}}' github.com/bytecodealliance/wasmtime-go/v44)
-//	CGO_CFLAGS="-I${WTDIR}/build/include" \
-//	  go build -tags wasmtime_component_cgo ./...
-//
-// (No extra CGO_LDFLAGS is needed: wasmtime-go's own ffi.go already declares
+// No extra CGO_LDFLAGS is needed: wasmtime-go's own ffi.go already declares
 // `#cgo LDFLAGS: -L${SRCDIR}/build/<platform> -lwasmtime ...`, and cgo LDFLAGS
-// from every cgo-using package in the import graph are combined at final
-// link time, so linking against libwasmtime "just works" once wasmtime-go
-// itself is imported.)
-//
-// The vendored wasmtime-go v44 module already bundles a wasmtime C library
-// build recent enough to satisfy every symbol these files use (verified by
-// building successfully against it) -- there is no need for a newer/separate
-// wasmtime C API install.
+// from every cgo-using package in the import graph are combined at final link
+// time, so linking against libwasmtime "just works" once wasmtime-go itself is
+// imported. That is also why wasmtime_headers_test.go exists: the headers here
+// must describe the same library that link step pulls in, so they are diffed
+// against the module on every test run rather than trusted to stay in step.
 
 package engine
 
+// #cgo CFLAGS: -I${SRCDIR}/wasmtimeinc
 // #include <wasmtime.h>
 // #include <wasmtime/component/component.h>
 // #include <wasmtime/component/linker.h>

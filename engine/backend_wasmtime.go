@@ -362,16 +362,22 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		if cgoErr == nil {
 			return result, nil
 		}
-		// Say why the fast path was not taken. This used to be
+		// Say why the native path was not taken. This used to be
 		// `if result, err := ...; err == nil`, discarding the error entirely,
 		// so a native-path failure surfaced only as whatever the fallback below
 		// happened to report -- typically an unresolved-import error from
 		// decomposition, which reads like "wasmtime cannot run this component"
-		// when the real cause was something else. Two examples, both observed:
-		// the CGo path is stubbed out unless the wasmtime_component_cgo build
-		// tag is set (no build sets it), and its export lookup resolves only
-		// top-level names, so a component exporting through an interface
-		// instance reports the export as missing.
+		// when the real cause was something else.
+		//
+		// The example that mattered: until 2026-08-05 the native path was
+		// compiled out entirely unless the wasmtime_component_cgo tag was set,
+		// and no build set it. Every component therefore reached decomposition,
+		// and decomposition's failure was read for months as wasmtime's verdict
+		// on Component Model guests. It was not; the native path runs them.
+		// The remaining known limit is real though: the export lookup resolves
+		// only top-level names (componentGetFunc passes a nil parent export
+		// index), so a component exporting through an interface instance still
+		// reports its export as missing and lands here.
 		//
 		// Logged rather than returned: the fallback may still succeed, and
 		// turning a recoverable miss into a hard failure would change

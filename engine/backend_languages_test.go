@@ -14,7 +14,7 @@ import (
 // fails in, the fix is to justify the edit in the comment on WasmtimeLanguages
 // and update this list -- not to loosen the assertion.
 func TestWasmtimeLanguages(t *testing.T) {
-	want := []string{"go", "assemblyscript", "java", "rust"}
+	want := []string{"go", "assemblyscript", "java", "rust", "python"}
 	if !reflect.DeepEqual(WasmtimeLanguages, want) {
 		t.Errorf("WasmtimeLanguages = %v, want %v", WasmtimeLanguages, want)
 	}
@@ -31,7 +31,11 @@ func TestRunsOnWasmtimeAgreesWithTheList(t *testing.T) {
 			t.Errorf("RunsOnWasmtime(%q) = false but it is in WasmtimeLanguages", lang)
 		}
 	}
-	for _, lang := range []string{"python", "ruby", "", "GO"} {
+	// "python" was in this list until 2026-08-05 and has moved to the positive
+	// direction above. What is left is deliberately not a language cleat has
+	// any intention of supporting: the negative case has to be a language that
+	// is genuinely absent, or it stops testing the fallback at all.
+	for _, lang := range []string{"ruby", "", "GO"} {
 		if RunsOnWasmtime(lang) {
 			t.Errorf("RunsOnWasmtime(%q) = true but it is not in WasmtimeLanguages", lang)
 		}
@@ -62,12 +66,22 @@ func TestWithBackendsRegistersEvery(t *testing.T) {
 // backendForWasm returning nil is what sends a guest to the wazero Runtime; if
 // it ever returned a backend for an unregistered language, an unsupported guest
 // would run somewhere nobody verified.
+//
+// It registers an explicit subset rather than WasmtimeLanguages. It used to
+// pass the whole list and rely on python being absent from it, which stopped
+// testing anything on 2026-08-05 when python was added -- the assertion would
+// have inverted silently into "a registered language falls back", which is the
+// opposite claim. The subset states what is registered, so the negative case
+// cannot be dissolved by an unrelated edit to the routing list.
 func TestBackendForWasmFallsBackForUnregistered(t *testing.T) {
 	e := &Engine{}
-	WithBackends(WasmtimeLanguages, nil)(e)
+	WithBackends([]string{"go", "assemblyscript", "java", "rust"}, nil)(e)
 
-	// A component-model header detects as "python", which is not registered.
+	// A component-model header detects as "python", which the subset omits.
 	pythonish := []byte{0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00}
+	if _, ok := e.backends["python"]; ok {
+		t.Fatal("python is registered; this test needs a language that is not")
+	}
 	if b := e.backendForWasm(pythonish); b != nil {
 		t.Errorf("backendForWasm returned %v for python; unregistered languages must fall back", b)
 	}
