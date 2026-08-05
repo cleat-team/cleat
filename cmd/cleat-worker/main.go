@@ -1054,7 +1054,23 @@ func main() {
 	if *pprofAddr != "" {
 		go func() {
 			logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
-			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+			// An explicit Server rather than http.ListenAndServe, for the
+			// ReadHeaderTimeout (gosec G114/G112): the convenience function
+			// cannot set one, so a client that opens a connection and sends
+			// headers slowly pins a goroutine forever.
+			//
+			// Handler stays nil, i.e. DefaultServeMux, which is where the
+			// blank net/http/pprof import registers /debug/pprof. That is
+			// deliberate and is why this is on its own opt-in address
+			// (--pprof-addr, empty by default) rather than on the API port:
+			// the API server above is built with its own mux, so profiling
+			// endpoints are not reachable there. Worth keeping that way --
+			// a heap profile from this process contains workflow payloads.
+			pprofSrv := &http.Server{
+				Addr:              *pprofAddr,
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			if err := pprofSrv.ListenAndServe(); err != nil {
 				logger.ErrorContext(context.Background(), "pprof server error", "worker_id", workerID, "error", err)
 			}
 		}()
