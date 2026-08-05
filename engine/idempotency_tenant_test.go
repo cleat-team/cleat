@@ -49,19 +49,38 @@ func TestIdempotencyKeyIsScopedToTenant(t *testing.T) {
 			storeA, teardown := tb.SetupForTenant(t, tenantA)
 			defer teardown()
 			ctx := context.Background()
-			setupTestData(t, storeA)
-			truncateAll(t, storeA)
 
 			storeB, teardownB := tb.SetupForTenant(t, tenantB)
 			defer teardownB()
 
-			const defName = "idem-tenant-def"
-			for _, st := range []WorkflowStore{storeA, storeB} {
+			// One definition per tenant, with different names, because
+			// workflow_defs' primary key is (name, version) on all three
+			// dialects with no tenant in it -- so two tenants deploying the
+			// same def name collide in a way that has nothing to do with what
+			// this test is about. (That collision is real and is recorded
+			// separately as IMPROVEMENT-PLAN 3.12.)
+			//
+			// This test also does not call setupTestData/truncateAll. Those
+			// insert under DefaultTenantUUID, and storeA here is a genuinely
+			// RLS-enforcing PostgreSQL connection scoped to tenant A, which
+			// rejects the write:
+			//
+			//	new row violates row-level security policy for table
+			//	"workflow_instances" (42501)
+			//
+			// -- so the postgres arm used to fail during setup, one layer
+			// above the property under test, and could not have observed the
+			// idempotency defect either way.
+			defNameFor := map[string]string{
+				tenantA: "idem-tenant-def-a",
+				tenantB: "idem-tenant-def-b",
+			}
+			for tenant, st := range map[string]WorkflowStore{tenantA: storeA, tenantB: storeB} {
 				if err := st.DeployWorkflowDef(ctx, &WorkflowDef{
-					Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
+					Name: defNameFor[tenant], Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
 					ABIVersion: 1, MinVersion: 1,
 				}); err != nil {
-					t.Fatalf("DeployWorkflowDef: %v", err)
+					t.Fatalf("DeployWorkflowDef(%s): %v", tenant, err)
 				}
 			}
 
@@ -69,7 +88,7 @@ func TestIdempotencyKeyIsScopedToTenant(t *testing.T) {
 			key := fmt.Sprintf("order-%d", time.Now().UnixNano())
 
 			idA := fmt.Sprintf("idem-a-%d", time.Now().UnixNano())
-			gotA, existedA, err := storeA.StartNewRun(ctx, idA, defName, 1,
+			gotA, existedA, err := storeA.StartNewRun(ctx, idA, defNameFor[tenantA], 1,
 				json.RawMessage(`{"tenant":"A"}`), key, tenantA, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun(A): %v", err)
@@ -79,7 +98,7 @@ func TestIdempotencyKeyIsScopedToTenant(t *testing.T) {
 			}
 
 			idB := fmt.Sprintf("idem-b-%d", time.Now().UnixNano())
-			gotB, existedB, err := storeB.StartNewRun(ctx, idB, defName, 1,
+			gotB, existedB, err := storeB.StartNewRun(ctx, idB, defNameFor[tenantB], 1,
 				json.RawMessage(`{"tenant":"B"}`), key, tenantB, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun(B): %v", err)
@@ -94,7 +113,15 @@ func TestIdempotencyKeyIsScopedToTenant(t *testing.T) {
 					"a cross-tenant information leak on a user-supplied value", gotA, key)
 			}
 
-			// B must have a workflow of its own, and it must be B's.
+			// B must have a workflow of its own, and it must be the one B
+			// started.
+			//
+			// Identified by the input payload rather than by
+			// WorkflowInstance.TenantID: only the MySQL store selects
+			// tenant_id into that field. PostgreSQL leaves it to RLS and SQL
+			// Server filters in SQL, so on those two the field comes back ""
+			// for every workflow and an assertion on it passes or fails for
+			// reasons that have nothing to do with tenancy.
 			wfB, err := storeB.GetWorkflowByID(ctx, gotB)
 			if err != nil {
 				t.Fatalf("GetWorkflowByID(B): %v", err)
@@ -102,8 +129,26 @@ func TestIdempotencyKeyIsScopedToTenant(t *testing.T) {
 			if wfB == nil {
 				t.Fatalf("tenant B has no workflow after StartNewRun returned %q", gotB)
 			}
-			if wfB.TenantID != tenantB {
-				t.Errorf("the workflow tenant B was given belongs to tenant %q", wfB.TenantID)
+			// Decoded rather than string-compared: PostgreSQL stores input as
+			// JSONB and hands it back reformatted ({"tenant": "B"}).
+			var inputB struct {
+				Tenant string `json:"tenant"`
+			}
+			if err := json.Unmarshal(wfB.Input, &inputB); err != nil {
+				t.Fatalf("decode tenant B's workflow input %s: %v", wfB.Input, err)
+			}
+			if inputB.Tenant != "B" {
+				t.Errorf("the workflow tenant B was given carries input %s, not B's own", wfB.Input)
+			}
+
+			// And neither tenant can read the other's workflow at all --
+			// which is what makes the two IDs above genuinely separate rather
+			// than two names for one shared row.
+			if wf, err := storeA.GetWorkflowByID(ctx, gotB); err == nil && wf != nil {
+				t.Errorf("tenant A can read tenant B's workflow %q", gotB)
+			}
+			if wf, err := storeB.GetWorkflowByID(ctx, gotA); err == nil && wf != nil {
+				t.Errorf("tenant B can read tenant A's workflow %q", gotA)
 			}
 		})
 	}

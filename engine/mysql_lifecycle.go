@@ -374,12 +374,22 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 	if idempotencyKey != "" {
 		keyHash := sha256.Sum256([]byte(idempotencyKey))
 
-		// Check for existing idempotency key.
+		// Check for existing idempotency key, within this tenant.
+		//
+		// The tenant filter is not defence in depth: idempotency_keys was
+		// keyed by key_hash alone, so an Idempotency-Key was global across
+		// every tenant in the deployment. Two customers both choosing
+		// "order-123" collided, and the second was handed the first's
+		// workflow ID with alreadyExisted = true while its own workflow was
+		// never started. The key is a client-supplied request header, so that
+		// is the expected outcome of ordinary naming rather than an attack.
+		// migrations/mysql/010_idempotency_keys_tenant_id.sql,
+		// IMPROVEMENT-PLAN 3.10.
 		var existingWfID string
 		err := s.db.QueryRowContext(ctx,
 			`SELECT workflow_id FROM idempotency_keys
-			 WHERE key_hash = ? AND expires_at > NOW(6)`,
-			keyHash[:]).Scan(&existingWfID)
+			 WHERE key_hash = ? AND tenant_id = ? AND expires_at > NOW(6)`,
+			keyHash[:], tenantID).Scan(&existingWfID)
 		if err == nil {
 			return existingWfID, true, nil
 		}
@@ -397,9 +407,9 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		// two requests arrive with the same key simultaneously.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		res, err := tx.ExecContext(ctx,
-			`INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at)
-			 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND))`,
-			keyHash[:], runID, ttlSeconds)
+			`INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
+			 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?)`,
+			keyHash[:], runID, ttlSeconds, tenantID)
 		if err != nil {
 			return "", false, err
 		}
@@ -410,8 +420,8 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 			tx.Rollback()
 			err := s.db.QueryRowContext(ctx,
 				`SELECT workflow_id FROM idempotency_keys
-				 WHERE key_hash = ? AND expires_at > NOW(6)`,
-				keyHash[:]).Scan(&existingWfID)
+				 WHERE key_hash = ? AND tenant_id = ? AND expires_at > NOW(6)`,
+				keyHash[:], tenantID).Scan(&existingWfID)
 			if err != nil {
 				return "", false, err
 			}

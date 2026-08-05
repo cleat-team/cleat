@@ -4382,7 +4382,7 @@ its own right, because it forces a line-by-line read of code nobody has looked a
 
 ## Phase 3 items — round 2 (2026-08-05)
 
-### 3.10 Idempotency keys are global across tenants — 🔴 **OPEN** (all three dialects)
+### 3.10 Idempotency keys are global across tenants — ✅ **FIXED** (WS-1, 2026-08-05)
 
 Found while auditing the ~89 unaudited `MySQLStore` `s.tenantID` call sites (§1.7 / §2.12).
 The audit's premise is that MySQL has no RLS, so a missing Go-level tenant filter is an
@@ -4426,6 +4426,67 @@ This is the one tenancy defect in the set that all three backends share equally.
 A failing three-dialect test is on `bugfix/mysql-tenant-scoping-audit`
 (`engine/idempotency_tenant_test.go`), committed without a PR because it is red by design.
 
+#### Resolution — the column, and what the existing test could not see
+
+Fixed as recommended: `migrations/{postgres,mysql,mssql}/010_idempotency_keys_tenant_id.sql`
+adds `tenant_id` defaulting to `DefaultTenantUUID` and widens the primary key to
+`(key_hash, tenant_id)`; the three `StartNewRun` idempotency paths carry
+`AND tenant_id = ?` on both lookups and the tenant on the insert. The hash is unchanged, so
+keys written before the upgrade still match.
+
+**The failing test was failing for the wrong reason on PostgreSQL.** As committed on
+`bugfix/mysql-tenant-scoping-audit` it called `setupTestData`, which inserts under
+`DefaultTenantUUID`, against a store scoped to tenant A — and `PostgresBackend.SetupForTenant`
+returns a genuinely RLS-enforcing connection, which rejected the write:
+
+```
+setupTestData: StartNewRun ready: start new run: pq: new row violates
+row-level security policy for table "workflow_instances" (42501)
+```
+
+So the postgres arm died in setup, one layer above the property, and the "measured on
+postgres, mysql and mssql" line above was true of the *defect* but not of that test: only its
+MySQL and SQL Server arms had ever reached the assertion. Dropping the two fixture calls (the
+test deploys its own definitions) makes all three arms reproduce it. Two further corrections
+the fix surfaced:
+
+- The test asserted on `WorkflowInstance.TenantID`. Only `MySQLStore` selects `tenant_id`
+  into that field; `PostgresStore` leaves it to RLS and `MSSQLStore` filters in SQL, so on
+  those two it is `""` for every workflow and the assertion passed or failed for reasons
+  unrelated to tenancy. It now identifies B's workflow by its input payload and adds the
+  assertion that actually matters — neither store can read the other tenant's workflow at all.
+- Both tenants deployed a definition of the same name, which collides on a primary key that
+  has no tenant in it. Recorded separately as §3.12.
+
+**Proof it can fail** (removing the fix and re-running, on all three dialects at once):
+with the `AND tenant_id = ?` deleted from the three lookups, every arm reports
+`tenant B's first use of its own idempotency key reported already-existing` and
+`tenant B was handed tenant A's workflow ID`. With the migration dropped instead,
+`migration.TestIdempotencyTenantMigrationPreservesExistingKeys` reports
+`column "tenant_id" does not exist (42703)` / `Invalid column name 'tenant_id'`.
+
+**The upgrade path is tested, not asserted.** `migration/idempotency_tenant_test.go` drives the
+real `Runner` over the real files — 001 alone, then 001 + 010 — against a scratch database
+with a pre-upgrade key already in it, and checks that the key survives, lands on the default
+tenant, no longer blocks a second tenant, and still deduplicates within one. That is the
+whole difference between the two candidate fixes, so it is the thing worth a test.
+It runs on PostgreSQL and SQL Server; **its MySQL arm is skipped**, because the Runner cannot
+parse `migrations/mysql/001_schema.sql` at all — §3.13, found by this test.
+
+**A skipped 010 is loud, not silent.** Migration versions 6–15 were used by the numbering
+`eb6b082` folded into 001, so a develop-tracking database migrated before that commit may
+already have version 10 recorded and would skip this file. `StartNewRun` then names a column
+that does not exist and every idempotent start errors, rather than quietly mis-scoping.
+
+**Residual: PostgreSQL has no RLS policy on this table.** The seven policies in 001 cover the
+tenant-scoped tables; `idempotency_keys` was not among them because it had no tenant column to
+filter on. It has one now, so a policy is possible — but every access path would have to set
+`cleat.tenant_id` first, and three do not: the pre-transaction lookup, the insert (which runs
+before `setRLSOnTx`), and `cmd/cleat-worker/setup.go`'s expiry sweep, which has no tenant
+context at all. Fail-closed policies would turn all three into errors. That is a separate
+change to the transaction structure, not a line in a migration, and it is left open here
+rather than half-done.
+
 ### 3.11 Four unscoped MySQL queries — 🔴 **OPEN**
 
 From the same audit: 109 statements in the MySQL store touch tenant-scoped tables, 16 carry
@@ -4445,6 +4506,84 @@ The four that survive that reading:
 None has a database backstop on MySQL (§1.7: zero RLS policies). Severity is bounded by the
 HTTP layer's per-tenant scoping since §1.7, which is defence in depth working — but that is
 the only thing standing between these and a leak.
+
+### 3.12 One tenant's deploy silently replaces another's workflow code — 🔴 **OPEN** (all three dialects)
+
+Found while fixing §3.10: the two-tenant test could not deploy a definition of the same name
+from both stores, and the reason it could not turned out to be worse than the inconvenience.
+
+`workflow_defs`' primary key is `(name, version)` on every dialect — `PRIMARY KEY (name,
+version)` (postgres, mysql), `CONSTRAINT pk_workflow_defs PRIMARY KEY (name, version)`
+(mssql) — with no tenant in it, and definition names are chosen by whoever deploys. All three
+`DeployWorkflowDef` implementations upsert on that key (`ON CONFLICT (name, version) DO
+UPDATE`, `ON DUPLICATE KEY UPDATE`, `MERGE ... WHEN MATCHED THEN UPDATE`), so the second
+tenant to deploy a given name does not collide — it **overwrites**.
+
+Measured on postgres, mysql and mssql, with a per-tenant store apiece (the harness §1.7 and
+§2.71 use, including PostgreSQL's genuinely RLS-enforcing connection). Tenant A deploys
+`shared-def-name` v1, tenant B deploys its own v1 of the same name, then A reads its
+definition back:
+
+```
+postgres  B deploy err = <nil>   A reads back: wasm_bytes = [1 2 3 4]   (B's bytes)
+mysql     B deploy err = <nil>   A reads back: wasm_bytes = [1 2 3 4]   (B's bytes)
+mssql     B deploy err = <nil>   A reads back: wasm_bytes = [1 2 3 4]   (B's bytes)
+```
+
+So this is not an information leak, it is code replacement: tenant B decides what tenant A's
+workflows execute, by picking a name. Two things make it reachable rather than theoretical:
+
+- **`PostgresStore.DeployWorkflowDef` hardcodes the default tenant.**
+  `store_deployment.go:161` is a literal `tenantID := "00000000-0000-0000-0000-000000000000"`,
+  ignoring `s.tenantID` — so on PostgreSQL every definition every tenant deploys is written as
+  the default tenant's. `MSSQLStore`'s `MERGE` does not name `tenant_id` in its INSERT column
+  list at all and takes the column default, which is the same value. Only `MySQLStore` passes
+  `s.tenantID`.
+- **The RLS policy on this table admits the default tenant by design**:
+  `tenant_id = cleat.assert_tenant_set() OR tenant_id = '00000000-…'`, presumably for shared
+  definitions. Combined with the line above, every definition is a shared definition.
+
+Not investigated here: whether the HTTP layer's §1.7 ownership checks constrain which names a
+tenant may deploy. That bounds the severity and does not change the store-level finding.
+
+The fix is not only a wider primary key: `(name, version, tenant_id)` without correcting the
+two writers above would put every definition in one tenant anyway. Expect a migration in
+WS-1's range, the two writer fixes, and a decision about what "shared definition" should mean
+now that it is the accidental default.
+
+### 3.13 No cleat-worker can bootstrap a MySQL schema — 🔴 **OPEN**
+
+Found by §3.10's migration test, which could not build a "before" state for MySQL.
+
+`migration.Runner` splits MySQL files on every `;` (`splitSQL`, `runner.go:415`) with no
+regard for what the semicolon is inside. Line 7 of `migrations/mysql/001_schema.sql` is
+
+```
+-- CREATE INDEX has no IF NOT EXISTS in MySQL 8.0; re-runs error harmlessly.
+```
+
+so the runner sends `re-runs error harmlessly.` as a statement:
+
+```
+migration 001_schema.sql: execute: Error 1064 (42000): You have an error in your
+SQL syntax; ... near 're-runs error harmlessly.
+```
+
+`cmd/cleat-worker/main.go:561` runs this Runner at boot and `os.Exit(1)`s on failure, so a
+worker pointed at a MySQL database that has not already been schema'd by some other means
+cannot start — the same shape as §1.11, on the other dialect. It has been invisible because
+every MySQL test path in the repo builds its schema from `engine/testutil`'s Go copy instead,
+which is exactly the divergence §1.9 is about: **the shipped schema is still not the tested
+schema on MySQL.**
+
+`003_procedures.sql` is very likely unapplicable too, for a second reason: it uses
+`DELIMITER //`, which is a client directive rather than a server statement, and its procedure
+bodies contain semicolons that `splitSQL` would cut. Not yet confirmed — 001 fails first.
+
+The fix is comment- and string-aware splitting (or `multiStatements=true` and no splitting at
+all), plus running the real files against a scratch MySQL database in CI so this cannot
+recur. `migration/idempotency_tenant_test.go`'s MySQL arm is skipped pointing here, and that
+skip is the acceptance test for this item.
 
 
 ## Phase 3 — Put falsification in the loop

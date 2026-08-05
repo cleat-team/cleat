@@ -76,7 +76,24 @@ test-go/engine	359	# observed on the runner: 3094 pass, 357 skip at budget 353, 
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
-test-go/support	2	# measured: TestRunMigrations_{ExecInTxError,InsertRecordError}
+test-go/support	4	# measured: TestRunMigrations_{ExecInTxError,InsertRecordError}, plus the two below
+# 2 -> 4: TestIdempotencyTenantMigrationPreservesExistingKeys drives the real
+# Runner over the real migration files (3.10's upgrade path) and has one
+# subtest per dialect. Two of the three skip here:
+#
+#   /mysql -- blocked on 3.13, not on infrastructure. The Runner cannot apply
+#     migrations/mysql/001_schema.sql at all: splitSQL cuts the file on a ';'
+#     inside a comment, so there is no pre-upgrade state to migrate from. This
+#     job would skip it anyway for want of a MySQL service, but it would skip
+#     against a live MySQL 8.4 too. Unskipping it is the acceptance test for
+#     3.13, same treatment as the two entries above.
+#   /mssql -- this job configures PostgreSQL only, so SQL Server is "nobody
+#     asked". It passes against a live SQL Server 2022. Wiring one in takes
+#     this back to 3.
+#
+# /postgres is absent from that list because CLEAT_TEST_DB is set here, so it
+# runs -- which is the arm that matters, since 3.10's upgrade decision is about
+# rows that already exist.
 # 4 -> 5: TestTenantIsolationOverHTTP_MSSQL skips unconditionally, blocked on
 # 2.71 -- MSSQLStoreFactory's per-tenant sp_set_session_context is cleared when
 # a pooled connection is recycled, so with the real schema every tenant-scoped
