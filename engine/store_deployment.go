@@ -34,9 +34,34 @@ func (s *PostgresStore) LoadWASM(ctx context.Context, defName string, defVersion
 // GetWASMLength returns the byte length of the stored WASM binary.
 
 func (s *PostgresStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
+	// In an RLS transaction, like LoadWASM above, rather than on a bare
+	// connection.
+	//
+	// This ran on s.db with no cleat.tenant_id set, so on the role the engine
+	// is meant to run as (migrations/postgres/005_app_role.sql, 1.10) the
+	// policy on workflow_defs could not be evaluated and the call failed with
+	//
+	//	pq: invalid input syntax for type uuid: "" (22P02)
+	//
+	// every time. That is not a leak but it is not harmless either: the one
+	// caller is Worker.loadWASM, which uses the length as a cache-freshness
+	// check on every cache hit, and treats an error as "keep serving the
+	// cache". So on PostgreSQL a redeployed definition was never picked up by
+	// a worker with a warm cache -- the staleness check could not fire.
+	// IMPROVEMENT-PLAN 3.11.
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get wasm length: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var length int64
-	err := s.db.QueryRowContext(ctx, `SELECT length(wasm_bytes) FROM workflow_defs WHERE name = $1 AND version = $2`, defName, defVersion).Scan(&length)
-	return length, err
+	if err := tx.QueryRowContext(ctx,
+		`SELECT length(wasm_bytes) FROM workflow_defs WHERE name = $1 AND version = $2`,
+		defName, defVersion).Scan(&length); err != nil {
+		return 0, err
+	}
+	return length, tx.Commit()
 }
 
 // TraceWorkflow sets the W3C trace_id on a workflow instance.

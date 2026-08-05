@@ -345,10 +345,11 @@ func (s *MSSQLStore) deleteExpiredEventsOnce(ctx context.Context, olderThan time
 				WHERE status IN ('done', 'failed')
 				  AND completed_at IS NOT NULL
 				  AND completed_at < @p1
+				  AND tenant_id = @p2
 				ORDER BY id
 				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
 			)
-		`, olderThan)
+		`, olderThan, s.tenantID)
 		if err != nil {
 			tx.Rollback()
 			return totalDeleted, fmt.Errorf("delete expired events: %w", err)

@@ -274,6 +274,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 	}
 
 	migrateMySQLIdempotencyTenantID(t, db)
+	migrateMySQLEventIntentAt(t, db)
 
 	// Indexes. These used to live in SetupFullSchema, which meant the schema you
 	// got depended on which entry point the test called: SetupMySQLFullSchema
@@ -290,6 +291,36 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 	execIgnoreDupKey(t, db, `CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
 	execIgnoreDupKey(t, db, `CREATE INDEX idx_idempotency_keys_expires ON idempotency_keys(expires_at)`)
 	execIgnoreDupKey(t, db, `CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
+}
+
+// migrateMySQLEventIntentAt adds event_history.intent_at to an already-existing
+// test database.
+//
+// The CREATE TABLE above declares it, which covers a database built from
+// scratch and nothing else: it is IF NOT EXISTS against a shared, long-lived
+// test database, so a table created before 1.4 phase D keeps its old shape and
+// every LoadEventHistory fails with
+//
+//	Error 1054 (42S22): Unknown column 'intent_at' in 'field list'
+//
+// CI does not see this because its databases are new every run; a developer's
+// is not. Same reason migrateMySQLIdempotencyTenantID exists, and the same
+// failure mode IMPROVEMENT-PLAN 2.60b describes.
+func migrateMySQLEventIntentAt(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	var haveColumn int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'event_history'
+		  AND COLUMN_NAME = 'intent_at'`).Scan(&haveColumn); err != nil {
+		t.Fatalf("setup MySQL full schema: check event_history.intent_at: %v", err)
+	}
+	if haveColumn == 0 {
+		if _, err := db.Exec(`ALTER TABLE event_history
+			ADD COLUMN intent_at TIMESTAMP(6) NULL DEFAULT NULL`); err != nil {
+			t.Fatalf("setup MySQL full schema: add event_history.intent_at: %v", err)
+		}
+	}
 }
 
 // migrateMySQLIdempotencyTenantID brings an already-existing test database up

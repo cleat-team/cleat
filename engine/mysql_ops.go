@@ -595,7 +595,15 @@ func (s *MySQLStore) LoadWASM(ctx context.Context, defName string, defVersion in
 // GetWASMLength returns the byte length of the stored WASM binary.
 func (s *MySQLStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
 	var length int64
-	err := s.db.QueryRowContext(ctx, `SELECT LENGTH(wasm_bytes) FROM workflow_defs WHERE name = ? AND version = ?`, defName, defVersion).Scan(&length)
+	// Scoped by tenant: definition names are chosen by whoever deploys, so
+	// two customers both calling something "order-processor" is ordinary, and
+	// the size of one's compiled WASM is not the other's to read. MySQL has no
+	// row-level security, so this predicate is the whole of the isolation.
+	// IMPROVEMENT-PLAN 3.11. (ListVersions, immediately below, has always
+	// carried it -- this statement was the odd one out.)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT LENGTH(wasm_bytes) FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?`,
+		defName, defVersion, s.tenantID).Scan(&length)
 	return length, err
 }
 
@@ -1028,8 +1036,12 @@ func percentile(sorted []int64, p float64) int64 {
 // QueueDepth returns the count of ready workflows in the store's task queues.
 func (s *MySQLStore) QueueDepth(ctx context.Context) (int64, error) {
 	clause, args := s.taskQueueClause()
+	// QueueDepth drives autoscaling and the dashboard's backlog figure.
+	// Unscoped it counted every tenant's ready workflows, so one tenant's
+	// burst read as everyone's. IMPROVEMENT-PLAN 3.11.
 	query := `SELECT COUNT(*) FROM workflow_instances WHERE status = 'ready' AND task_queue IN (` +
-		clause + `)`
+		clause + `) AND tenant_id = ?`
+	args = append(args, s.tenantID)
 
 	var count int64
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&count)
@@ -1097,10 +1109,11 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 				WHERE status IN ('done', 'failed')
 				  AND completed_at IS NOT NULL
 				  AND completed_at < ?
+				  AND tenant_id = ?
 				ORDER BY completed_at
 				LIMIT 10000
 			) AS w ON e.workflow_id = w.id
-		`, olderThan)
+		`, olderThan, s.tenantID)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("DeleteExpiredEvents: %w", err)
 		}

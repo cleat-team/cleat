@@ -447,7 +447,8 @@ func (s *MySQLStore) PollCancellation(ctx context.Context, workflowID string) (b
 func (s *MySQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
 	var raw sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT allowed_signals FROM workflow_instances WHERE id = ?`, workflowID).Scan(&raw)
+		`SELECT allowed_signals FROM workflow_instances WHERE id = ? AND tenant_id = ?`,
+		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

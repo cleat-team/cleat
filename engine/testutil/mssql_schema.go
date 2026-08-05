@@ -68,7 +68,12 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
              compacted_at DATETIMEOFFSET,
              compaction_step INTEGER,
              plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             tenant_id UNIQUEIDENTIFIER,
+             -- NOT NULL DEFAULT, as migrations/mssql/001_schema.sql declares
+             -- it. Left nullable here, a fixture that inserted a row without
+             -- naming tenant_id got NULL where a real database gives the
+             -- default tenant -- so every tenant-scoped predicate missed it.
+             -- IMPROVEMENT-PLAN 3.11; the same drift class as 1.9.
+             tenant_id UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
              priority INTEGER NOT NULL DEFAULT 0,
              generation BIGINT NOT NULL DEFAULT 0,
              FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
@@ -282,6 +287,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 
 	migrateMSSQLIdempotencyTenantID(t, db)
 	migrateMSSQLWorkflowDefsTenantID(t, db)
+	migrateMSSQLEventIntentAt(t, db)
+	migrateMSSQLInstancesTenantID(t, db)
 
 	// Indexes. These used to live in SetupFullSchema, so the schema you got
 	// depended on which entry point the test called. Both now route here.
@@ -304,6 +311,66 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
 	execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_mem_samples_def' AND object_id = OBJECT_ID('workflow_memory_samples'))
 		CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
+}
+
+// migrateMSSQLInstancesTenantID brings an already-existing test database up to
+// the `tenant_id UNIQUEIDENTIFIER NOT NULL DEFAULT '000…'` that
+// migrations/mssql/001_schema.sql declares for workflow_instances.
+//
+// Only workflow_instances is corrected here, because that is the table
+// IMPROVEMENT-PLAN 3.11's tenant predicates read. Five other tables in this
+// file still declare tenant_id nullable where the shipped schema does not
+// (event_history, workflow_signals, workflow_schedules, concurrency_keys,
+// workflow_defs' neighbours); aligning them belongs with the 2.71 residual,
+// which is about this same file disagreeing with what ships.
+func migrateMSSQLInstancesTenantID(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	if _, err := db.Exec(`UPDATE dbo.workflow_instances
+		SET tenant_id = '00000000-0000-0000-0000-000000000000'
+		WHERE tenant_id IS NULL`); err != nil {
+		t.Fatalf("setup MSSQL full schema: backfill workflow_instances.tenant_id: %v", err)
+	}
+	if _, err := db.Exec(`
+		IF EXISTS (
+		    SELECT 1 FROM sys.columns
+		    WHERE object_id = OBJECT_ID(N'dbo.workflow_instances')
+		      AND name = N'tenant_id' AND is_nullable = 1
+		)
+		    ALTER TABLE dbo.workflow_instances ALTER COLUMN tenant_id UNIQUEIDENTIFIER NOT NULL`); err != nil {
+		t.Fatalf("setup MSSQL full schema: workflow_instances.tenant_id NOT NULL: %v", err)
+	}
+	if _, err := db.Exec(`
+		IF NOT EXISTS (
+		    SELECT 1 FROM sys.default_constraints
+		    WHERE parent_object_id = OBJECT_ID(N'dbo.workflow_instances')
+		      AND parent_column_id = (
+		          SELECT column_id FROM sys.columns
+		          WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'tenant_id'
+		      )
+		)
+		    ALTER TABLE dbo.workflow_instances
+		        ADD CONSTRAINT df_workflow_instances_tenant_id
+		        DEFAULT '00000000-0000-0000-0000-000000000000' FOR tenant_id`); err != nil {
+		t.Fatalf("setup MSSQL full schema: workflow_instances.tenant_id default: %v", err)
+	}
+}
+
+// migrateMSSQLEventIntentAt adds event_history.intent_at to an already-existing
+// test database, for the reason in migrateMySQLEventIntentAt: the CREATE TABLE
+// is guarded on sys.tables, so a table built before 1.4 phase D never gains the
+// column and every LoadEventHistory fails on it.
+func migrateMSSQLEventIntentAt(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`
+		IF NOT EXISTS (
+		    SELECT 1 FROM sys.columns
+		    WHERE object_id = OBJECT_ID(N'dbo.event_history')
+		      AND name = N'intent_at'
+		)
+		    ALTER TABLE dbo.event_history ADD intent_at DATETIMEOFFSET NULL`); err != nil {
+		t.Fatalf("setup MSSQL full schema: add event_history.intent_at: %v", err)
+	}
 }
 
 // migrateMSSQLIdempotencyTenantID brings an already-existing test database up
