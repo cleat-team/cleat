@@ -19,8 +19,8 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 					return 0
 				}
 				written, _ := s.writeResult(ctx, m, sigNamePtr, rec.SignalName, sigNameMaxLen)
-				_, _ = s.writeResult(ctx, m, payloadPtr, rec.SignalPayload, payloadMaxLen)
-				return packAwaitSignalsResult(written, uint32(len(rec.SignalPayload)), false, 0)
+				payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, rec.SignalPayload, payloadMaxLen)
+				return packAwaitSignalsResult(written, payloadWritten, false, 0)
 			}
 			if rec.EventType == EventTypeAwaitSignals {
 				if !s.advanceReplayStep(ctx, &rec) {
@@ -34,8 +34,8 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 							return 0
 						}
 						written, _ := s.writeResult(ctx, m, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
-						_, _ = s.writeResult(ctx, m, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
-						return packAwaitSignalsResult(written, uint32(len(nextRec.SignalPayload)), false, 0)
+						payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
+						return packAwaitSignalsResult(written, payloadWritten, false, 0)
 					}
 				}
 				// No signal_received in history. The signal may have
@@ -60,8 +60,8 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 							}
 							s.recordEvent(sigRec)
 							written, _ := s.writeResult(ctx, m, sigNamePtr, name, sigNameMaxLen)
-							_, _ = s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
-							return packAwaitSignalsResult(written, uint32(len(payload)), false, 0)
+							payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
+							return packAwaitSignalsResult(written, payloadWritten, false, 0)
 						}
 					}
 				}
@@ -89,8 +89,8 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				s.recordEvent(rec)
 
 				written, _ := s.writeResult(ctx, m, sigNamePtr, name, sigNameMaxLen)
-				_, _ = s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
-				return packAwaitSignalsResult(written, uint32(len(payload)), false, 0)
+				payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
+				return packAwaitSignalsResult(written, payloadWritten, false, 0)
 			}
 		}
 	}
