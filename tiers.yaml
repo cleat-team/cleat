@@ -1,0 +1,259 @@
+# tiers.yaml — what cleat claims to support.
+#
+# This file is the source of truth for support status. Docs are downstream of it:
+# do not claim support in prose that this file does not grant.
+#
+# It exists because every previous attempt to record status in prose rotted within days.
+# `docs/review-status.md` declares the project production-ready off a stale audit;
+# `README.md` has claimed backend parity that was not true; `IMPROVEMENT-PLAN.md` has
+# carried a fixed heading over unfixed prose for four sessions running. Status has to be
+# a property CI checks, not a sentence someone wrote.
+#
+# ---------------------------------------------------------------------------
+# STATUS: DRAFT. The tier assignments below are a proposal, not a decision.
+# They are grounded in the measurement recorded in `baseline`, but four of them are
+# genuine product calls and are marked `decision: OWNER`. Nothing enforces this file
+# until `scripts/tier-gate.sh` is wired into CI.
+# ---------------------------------------------------------------------------
+
+meta:
+  drafted: 2026-08-06
+  # Re-derive everything in `baseline` with:
+  #   scripts/tier-gate.sh --measure
+  baseline:
+    measured: 2026-08-06
+    command: >-
+      CLEAT_TEST_POSTGRES=... CLEAT_TEST_MYSQL=... CLEAT_TEST_MSSQL=...
+      go test -count=1 -p 1 ./...
+    result: 52 packages pass, 3 fail, 24 have no test files
+    engine_package: 3846 tests, 3842 pass, 0 fail, 4 skip, 60s
+    # The same engine command with no CLEAT_TEST_* set: 2544 tests, 166 skip, 16s,
+    # and it also printed `ok`. That delta is why this file exists.
+    failing:
+      - package: examples/dag
+        cause: code defect — AwaitAnyChild called outside a workflow context
+        item: IMPROVEMENT-PLAN.md §3.14
+        kind: real
+      - package: tests/exhaustion
+        cause: cluster compose stack not running; DSN expects user `cleat`
+        kind: environmental
+      - package: tests/plugin-harness
+        cause: Java/Gradle toolchain absent
+        kind: environmental
+    # One real code failure in the entire tree. The core is not broken; it was
+    # unprovable, which is a different problem with a different fix.
+
+# ---------------------------------------------------------------------------
+
+tier1:
+  name: core
+  contract: |
+    Must pass. A skip is a failure. If anything here is not green on every backend and
+    dialect named below, that is a release blocker. No known-failure list — tier 1 has
+    no known failures by definition.
+  rules:
+    skips_allowed: false
+    known_failures_allowed: false
+    dialects_must_connect: true   # assert the connection, do not infer it from `ok`
+
+  # The only permitted exception to skips_allowed, and it is not a test.
+  # TestHelperProcess is the standard Go idiom where a test re-invokes its own binary
+  # as a subprocess; the outer invocation always skips. Every entry here must be a
+  # non-test, not merely an inconvenient test. The gate still prints them.
+  # Do NOT add a genuine test here to make the gate pass -- demote it to tier 2 instead.
+  skip_allowlist:
+    - TestHelperProcess
+
+  language: go
+  backend: wasmtime          # CGO required; see CLAUDE.md on why CGO_ENABLED=0 invalidates a run
+  dialects: [postgres, mysql, mssql]
+  # D1, DECIDED 2026-08-06. The rule: multi-tenancy requires database-enforced RLS.
+  # PostgreSQL and SQL Server have it; MySQL has no row-level security feature at all
+  # (CREATE POLICY is a syntax error on 8.4). A view + stored-function + WITH CHECK OPTION
+  # emulation was prototyped and works, but costs 6.1x on full scans versus SQL Server's
+  # +20% for native RLS -- see IMPROVEMENT-PLAN.md 1.7 for the measurement. Emulating a
+  # missing engine feature at 6x is a worse product than stating which engines have it.
+  tenancy:
+    multi_tenant: [postgres, mssql]   # mssql PENDING #333, see blockers below
+    single_tenant: [postgres, mysql, mssql]
+  blockers:
+    - "mssql multi-tenant is tier 1 ONLY once #333 lands: the test schema currently
+       defines none of the seven security policies, so ~220 MSSQL tests run with no
+       backstop and cannot observe isolation working or failing. #345 (the cleat_admin
+       principal) merges first; #333 is stacked on it at 9 remaining failures."
+
+  # Packages in the root module.
+  packages:
+    - ./engine/...
+    - ./wasm/...
+    - ./wasmrw/...
+    - ./plugin/...
+    - ./auth/...
+    - ./internal/...
+    - ./cmd/...
+    - ./pluginapi/...
+    - ./tests/integrity/...
+    - ./tests/upgrade/...
+    - ./tests/crash/...
+
+  # Separate Go modules. `cleat/` has its own go.mod (with a replace directive), so
+  # `go test ./cleat/...` from the repo root fails with "main module does not contain
+  # package" -- it must run from inside the module. ci.yml's matrix already does this
+  # via a `dir:` entry, and its comment records that the entry silently failed at setup
+  # for its entire existence, masked by a missing pipefail. The first draft of this file
+  # made the same mistake: it listed ./cleat/... as a root package, and the gate then
+  # exited non-zero with zero failing tests, which is how it was caught.
+  modules:
+    - dir: cleat
+      path: ./...
+  # Measured green on three dialects 2026-08-06: root packages 5901 pass / 0 fail;
+  # cleat module 8 packages ok.
+
+tier2:
+  name: frontier
+  contract: |
+    Must run. May fail, against `known_failures` below — a list that can only shrink
+    without a written justification in the PR. Anything here is honestly describable as
+    "works, with known gaps, and here is the plan"; nothing here may be described as
+    production-ready.
+  rules:
+    skips_allowed: true        # only for genuine environmental preconditions
+    known_failures_allowed: true
+
+  components:
+    - id: multi-tenancy-mssql
+      why: |
+        Promoting to tier 1 — tracked here only until #333 lands. SQL Server has real RLS
+        (seven CREATE SECURITY POLICY statements over a TVF keyed on SESSION_CONTEXT), it
+        fails closed (no session context reads as empty, not as everything), and `sa` gets
+        no owner exemption. #345 adds the administrative principal; #333 builds the test
+        schema from the shipped migrations so the tests actually run under the policies.
+      open_items: ["§2.71 residual (#333, 9 failures)", "§3.12 residual"]
+
+    - id: multi-tenancy-mysql
+      status: NOT SUPPORTED — single-tenant only    # D1, decided 2026-08-06
+      why: |
+        MySQL has no row-level security feature, so isolation would be application-layer
+        only, with no database backstop behind a missed `tenant_id` filter. The emulation
+        that does exist costs 6.1x on scans (measured; see IMPROVEMENT-PLAN.md §1.7).
+        This is a documented product boundary, not an open engineering item — README and
+        docs/reference/multi-tenancy.md must say so plainly.
+
+    - id: sdk-rust
+      why: Complete SDK, 6401 LOC, and the only non-Go language with cross-language tests.
+      open_items: ["tests/cross-language covers only Go↔Rust"]
+
+    - id: sdk-python
+      decision: OWNER          # D2 -- recommend PROMOTE TO TIER 1, evidence below
+      why: |
+        Runs on wasmtime since #296 (the native component path is no longer behind a build
+        tag). The remaining objection was that it could not be verified on the macOS dev
+        machines -- componentize-py dies there on EXC_GUARD / GUARD_TYPE_MACH_PORT, a Darwin
+        kernel guard with no Linux equivalent -- which collided with tier 1's no-skip rule.
+
+        That objection is now answered. scripts/docker/python-toolchain.Dockerfile runs the
+        toolchain in a Linux container, and measured 2026-08-06 on an arm64 Mac, all three
+        real Python tests PASS rather than skip:
+
+          TestRunBuild_PythonTarget_WasmRoundtrip   PASS   (cmd/cleat)
+          TestPythonWasmEndToEnd                    PASS   (engine, 2.43s)
+          TestPythonComponentExecutionFence         PASS   (engine, 3.57s)
+
+        The e2e builds an 18.3 MB component, registers wasmtime for
+        [go assemblyscript java rust python], executes it and produces events. Note the
+        toolchain has TWO prerequisites checked independently: componentize-py and
+        wasm-tools. Installing only the first leaves the engine tests skipping with a
+        different message, which is how this was nearly missed.
+
+        Requires Docker Desktop, not colima -- colima cannot bind-mount /Users/Shared, so
+        the mount is silently empty and go.mod is not found.
+      open_items:
+        - "§3.31 residual — decomposition path has never once succeeded"
+        - "TestComponentPythonBinary still skips, but on a hardcoded /tmp/test_python.wasm
+           fixture path, not a toolchain gap — a test-design bug worth fixing separately"
+
+    - id: plugins
+      why: 21 built-in, all with unit tests; 10 covered by the integration harness.
+      open_items:
+        - "secrets stored and returned in plaintext via CRUD endpoints"
+        - "no retry/backoff on outbound HTTP in the alerting plugins"
+        - "kafkaconnect.produce() no-ops and reports success when unconfigured"
+        - "multi-DB harness job runs a t.Skip while starting three databases"
+
+    - id: admin-dashboard
+      decision: OWNER          # D3
+      why: |
+        Wired to a real API and reasonably tested at the lib layer, but `web/src/lib/api.ts`
+        never sends an Authorization header. Against a correctly-secured worker it 401s on
+        every call; against --require-auth=false it is an ungated admin surface. Establish
+        which before assigning a tier.
+
+    - id: backend-wazero
+      why: |
+        The CGO-less fallback and nothing else (settled 2026-08-05). Cannot be fenced for a
+        compute-bound guest — measured three ways, all failing. Never the backend of record.
+
+    - id: cluster-and-scale
+      why: tests/cluster, tests/scale, tests/soak, tests/exhaustion — need compose stacks.
+      open_items: ["tests/exhaustion fails hard rather than skipping when the stack is absent"]
+
+  known_failures:
+    # Every entry needs an item reference and an owner. This list may only shrink.
+    - package: examples/dag
+      item: "§3.14"
+      note: 6 tests; AwaitAnyChild called outside a workflow context. Small; fix or park.
+
+tier3:
+  name: parked
+  contract: |
+    Not built, not shipped, not claimed. Excluded from the default build, or deleted.
+    Parking is not a judgement about value — it is a statement that nobody is currently
+    proving it works, so nothing may depend on it or advertise it.
+  rules:
+    in_default_build: false
+    may_appear_in_docs_as_supported: false
+
+  components:
+    - id: sdk-java
+      decision: OWNER          # D4
+      why: |
+        Complete SDK (7492 LOC) with no Go-side cross-language e2e comparable to Python's or
+        AssemblyScript's, and its harness test currently fails on toolchain setup. The plan's
+        own "What this does not cover" section already flags it as unverified.
+
+    - id: sdk-assemblyscript
+      decision: OWNER          # D4
+      why: |
+        Near-complete, but its WASM execution test degrades a runtime trap to a skip, so a
+        regression there is invisible. One deferred feature (isReplaying hardcoded false).
+
+    - id: component-decomposition-path
+      why: |
+        Wired, reached, and has never once successfully executed a workflow. §3.31's
+        recommendation is to fix componentGetFunc's nil parent export index and then delete
+        this path, rather than write a test for it.
+
+    - id: formal-specs
+      why: |
+        specs/CleatClaim.tla uses `=====` as a decorative separator, which is TLA+'s module
+        terminator — the first is at line 53 of 495, so 89% of the spec is outside the module.
+        No .cfg files exist and TLC never runs in CI. Either fix and run them, or move them to
+        docs/ as design notes.
+
+    - id: comparative-benchmarks
+      why: |
+        benchmarks/COMPARISON.md is entirely TBD; the Temporal and DBOS harnesses are written
+        but have never been run. Real numbers would be an asset — until then this is a claim
+        with nothing behind it.
+
+# ---------------------------------------------------------------------------
+# Decisions this file is waiting on. Each changes what the gate enforces.
+#
+#   D1  Is multi-tenancy on MySQL a supported configuration, or is MySQL documented as
+#       single-tenant-only? This is §1.7's open question. Drafted here as tier 2.
+#   D2  Is Python tier 1 or tier 2? It executes on wasmtime, but only Linux CI can prove it.
+#   D3  Is the dashboard shipping against an authenticated worker or not? Determines whether
+#       it is tier 2 with a known gap or tier 3 until it authenticates.
+#   D4  Java and AssemblyScript: park, or invest to tier 2? Parking is reversible and is the
+#       honest position while their tests degrade failures into skips.
+# ---------------------------------------------------------------------------

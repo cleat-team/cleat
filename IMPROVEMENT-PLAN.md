@@ -956,11 +956,24 @@ unlimited, and `cmd/cleat-worker/main.go:704` prefers wasmtime whenever CGO is a
   backend-agnostic.
 - Test: resource-exhaustion (see 2.5).
 
-### 1.6 Generation not bumped on reap or terminate (~0.5 session)
+### 1.6 Generation not bumped on reap or terminate — ✅ **FIXED** (marker added 2026-08-06)
 
 `ReapStaleInstances` (`engine/store_lifecycle.go:615-633`) and `TerminateWorkflow`
 (`engine/db.go:1056-1076`) clear `assigned_to` but leave `generation`. Weakens the token to
 defence-in-depth-in-name-only. Bump it in both.
+
+**Status added 2026-08-06 — the work was done, the marker never was.** This heading read as
+open planned work ("~0.5 session") long after it shipped, which is the inverse of the stale-✅
+problem and just as misleading: an auditing agent reported it as "status genuinely
+indeterminate from the document alone". Verified against the tree on 2026-08-06 — both paths
+bump `generation` on all three dialects:
+
+- terminate: `engine/db.go:1086`, `engine/mysql_ops.go:1177`, `engine/mssql_operations.go:192`
+- reap: `engine/store_lifecycle.go:732`, `engine/mysql_lifecycle.go:721`,
+  `engine/mssql_operations.go:35`
+
+Re-derive with `grep -rn "generation = generation + 1" engine/*.go | grep -v test` (18 sites,
+including `store_admin.go`'s six from §3.20's force-resolve).
 
 ### 1.7 Tenant isolation not enforced at the HTTP layer — 🔶 **CORE FIXED 2026-08-04**
 
@@ -1056,6 +1069,34 @@ connecting role is subject to RLS before asserting anything about tenants.
   syntax error on 8.4). Its isolation has to come from the application layer or from
   per-tenant databases, which is what `buildTenantDSN`/`NewMySQLStoreFactory` already gesture
   at. Decide which before writing anything.
+
+  > **DECIDED, 2026-08-06 — the rule is "multi-tenancy requires database-enforced RLS."**
+  > PostgreSQL and SQL Server qualify and are supported multi-tenant. **MySQL is documented
+  > single-tenant-only.** This closes §1.7's residual as a product decision rather than
+  > leaving it as open engineering.
+  >
+  > A mechanism for MySQL does exist and was prototyped before deciding, so the decision is
+  > against a measured alternative rather than an assumed one. MySQL refuses a user variable
+  > in a view (`ERROR 1351: View's SELECT contains a variable or parameter`), but a view over
+  > a stored function that reads the session variable works, and `WITH CASCADED CHECK OPTION`
+  > enforces the write side. Measured on MySQL 8.4, 50k rows, all four properties held:
+  >
+  >   * SELECT isolation — each tenant sees only its own rows
+  >   * cross-tenant INSERT — refused, `ERROR 1369: CHECK OPTION failed`
+  >   * UPDATE reassigning `tenant_id` — refused, same error
+  >   * DELETE of another tenant's row — 0 rows affected
+  >
+  > Renaming the physical tables and giving the views the original names would even leave the
+  > existing SQL untouched. **The cost is what kills it: 200 full scans took 0.368 s against
+  > the table and 2.238 s through the view — 6.1×**, because the stored function is evaluated
+  > per row and cannot be hoisted (it reads session state, so it is not deterministic). For
+  > comparison, SQL Server's native predicate costs **+20%** on the same shape of query
+  > (§3.37). Paying 6× on every scan to emulate a feature the engine does not have is a worse
+  > product than saying plainly which engines support the feature.
+  >
+  > Re-derive: the probe is not checked in — it was a scratch database, dropped after
+  > measuring. The mechanism is four statements (function, view, `WITH CHECK OPTION`, session
+  > variable) and takes about ten minutes to rebuild if anyone wants to challenge the number.
 
   Corollary worth stating: because MSSQL RLS reads as empty rather than erroring when no
   tenant is set, a missing session context on that backend is invisible in exactly the way a
@@ -4229,6 +4270,17 @@ fallback's error.
   is one of the six suites this plan records as run by no CI job, so there is no signal to
   regress against. Wire that up first; the routing change is then one line in
   `wasmtimeLanguages`.
+> **CORRECTION, 2026-08-06.** Points (1) and (2) in the bullet below are **no longer true**
+> and have not been since #296: the wasmtime headers were vendored into
+> `engine/wasmtimeinc` so the build tag could be dropped, and `engine/component_cgo.go` now
+> carries only `//go:build cgo`. `grep -rn wasmtime_component_cgo` finds the string nowhere
+> outside past-tense narrative, and `engine/engine.go:341` lists python in
+> `WasmtimeLanguages`. Only point (3), `componentGetFunc`'s nil parent export index, is still
+> open — see §3.31. **This paragraph is why the correction is here rather than a deletion:**
+> it sat unchanged under a heading marked fixed and misled three sessions into reading the
+> decomposition fallback's error as the state of Python-on-wasmtime, then a fourth on
+> 2026-08-06 into reporting a working feature as broken.
+
 - **Python is closer than it looks, and blocked by three separate things.** With the native
   component path enabled, the component *compiles and links* on wasmtime. Its failures are
   (1) `engine/component_cgo.go` sits behind the `wasmtime_component_cgo` build tag, which
@@ -4453,6 +4505,22 @@ Two candidates remain for whoever wants to revisit, and neither is urgent:
 
 Adding `"python"` to `engine.WasmtimeLanguages` is the whole of the switch when one of those
 lands; `engine/python_wasm_e2e_test.go` reads that list, so it moves over with no edit.
+
+> **CORRECTION, 2026-08-06 — this landed.** #296 vendored the headers into
+> `engine/wasmtimeinc` and dropped the tag, so the build-tag and `CGO_CFLAGS` halves of the
+> second bullet are done; `componentGetFunc`'s nested-export bug is what remains (§3.31).
+> `"python"` **is** in `engine.WasmtimeLanguages` (`engine/engine.go:341`) and has been since
+> #296. See the longer correction at §1.5 for why this is annotated rather than deleted.
+>
+> Separately, and found on 2026-08-06: the reason Python skipped on developer machines was
+> never this code path at all. `componentize-py` cannot run on macOS — its embedded wasmtime
+> installs a mach exception handler into a guarded port and the process dies with
+> `EXC_GUARD / GUARD_TYPE_MACH_PORT`, a Darwin kernel guard with no Linux equivalent. The
+> Linux CI runners were always fine. `scripts/docker/python-toolchain.Dockerfile` removes the
+> asymmetry by running the toolchain in a container, which is how
+> `TestRunBuild_PythonTarget_WasmRoundtrip` was made to execute for the first time on a Mac.
+> Note that the engine's Python tests need **`wasm-tools` as well**, checked separately, so
+> installing `componentize-py` alone leaves them skipping with a different message.
 
 ---
 
@@ -5574,7 +5642,13 @@ behaviour through a 10 ms sleep. These tests read the stored expiry back and do 
 against the database's own clock, and check exclusion by having a *second* workflow contend —
 neither needs a race to be observable.
 
-### 3.35 Re-acquiring a concurrency key you already hold answers differently per dialect — 🔴 **OPEN**
+### 3.39 Re-acquiring a concurrency key you already hold answers differently per dialect — 🔴 **OPEN**
+
+> **Renumbered from §3.35 on 2026-08-06.** `§3.35` had been allocated twice — to this item and
+> to WS-3's defer design, which is the one that keeps the number because two other passages
+> cite it by section. WS-1 had already used §3.37 and §3.38, so this moved to §3.39. Anything
+> written before 2026-08-06 that cites "§3.35" for concurrency-key re-entrancy means this
+> section.
 
 Found while writing §3.34's exclusion test, by contending a key against itself and getting
 disagreement:
@@ -5636,6 +5710,14 @@ truncated length is a memory-safety-adjacent bug rather than a style point. Revi
 session on its own and should not be folded into a lint sweep — but "229 integer conversions in
 the WASM boundary layer, unreviewed" is a more useful thing to carry forward than "283 gosec
 findings".
+
+### 3.20 `AdminForceComplete` / `AdminForceFail` were stubs — ✅ **FIXED** (WS-2, 2026-08-05, #297)
+
+> Recovered heading, added 2026-08-06. This section's body had been appended into §3.33's
+> body with no heading of its own, so `§3.20` could not be found by section number even
+> though three other places cite it — including WS-2's status doc and the round-2 sequencing
+> table, which named it as WS-2's "start here" item. The content below was always here; only
+> the heading was missing.
 
 `AdminForceComplete` and `AdminForceFail` returned `"admin force-complete: not implemented
 yet"` on all three dialects. `cmd/cleat-worker/api_admin.go` routed
