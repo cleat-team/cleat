@@ -51,6 +51,25 @@ func packSleepResult(status byte, durationMs int64) int64 {
 	return int64(uint64(status)<<56 | uint64(durationMs)&0x00FFFFFFFFFFFFFF)
 }
 
+// packAwaitSignalsResult packs the await-signals result word:
+//
+//	bits 48-63  signal name length
+//	bits 32-47  payload length
+//	bits 16-31  timed-out flag
+//	bits  0-15  error code
+//
+// Both lengths are 16-bit fields and nothing here masks them, so a payload of
+// more than 65535 bytes does not merely truncate: `payloadLen << 32` runs into
+// the signal-name field above it and corrupts that too. The guest-side decoders
+// mask on the way out (`(r >> 32) & 0xFFFF`), so it surfaces as a plausible
+// wrong length rather than an error.
+//
+// Reachable, because payloadMaxLen is chosen by the guest: a guest offering a
+// 128 KiB buffer for a 128 KiB payload gets a corrupted result word. Not fixed
+// here because the honest fix is an ABI decision -- widen the fields, or return
+// an error code for a payload the word cannot describe -- and masking would
+// just move the lie. Callers pass the number of bytes actually written, which
+// keeps the common case correct and bounds this to buffers above 64 KiB.
 func packAwaitSignalsResult(sigNameLen, payloadLen uint32, timedOut bool, errCode uint32) int64 {
 	toFlag := uint32(0)
 	if timedOut {
