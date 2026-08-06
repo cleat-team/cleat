@@ -581,8 +581,17 @@ func migrateMSSQLWorkflowDefsTenantID(t *testing.T, db *sql.DB) {
 
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.
 // Uses DELETE with table existence checks. Order respects FK constraints.
+//
+// Deletes through an administrative connection, because on a database built
+// from the shipped migrations the tenant filter predicate applies to every
+// principal -- sa included. A plain pool with no session context matches no
+// rows at all, so every DELETE here removed nothing and reported no error, and
+// the rows stayed to collide with the next test's fixtures. That was §2.71's
+// blocker; MSSQLAdminDB returns db unchanged when the database has no policies,
+// so this is a no-op on the hand-written schema.
 func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 	t.Helper()
+	db = MSSQLAdminDB(t, db)
 
 	// Order matters due to FK constraints — delete child tables first.
 	tables := []string{
@@ -678,6 +687,11 @@ func mssqlSchemaFiles() []string {
 		filepath.Join(dir, "001_schema.sql"),
 		filepath.Join(dir, "010_idempotency_keys_tenant_id.sql"),
 		filepath.Join(dir, "011_json_scalar_payloads.sql"),
+		// 012 is not optional here. It creates cleat_admin, and without it a
+		// database gets the seven policies and no principal exempt from them,
+		// which is precisely the state teardown cannot work in. Leaving it out
+		// is caught loudly by requireMSSQLAdminRole rather than silently.
+		filepath.Join(dir, "012_admin_role.sql"),
 		filepath.Join(dir, "020_event_intent.sql"),
 	}
 }

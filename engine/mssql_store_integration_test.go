@@ -34,6 +34,7 @@ func setupMSSQLIntegrationTest(t *testing.T) (*MSSQLStore, *sql.DB) {
 		t.Skip("Skipping MSSQL integration test in short mode")
 	}
 
+	dsn := os.Getenv("CLEAT_TEST_MSSQL")
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 	// The stored procedures are part of the schema these tests exercise --
@@ -46,13 +47,35 @@ func setupMSSQLIntegrationTest(t *testing.T) (*MSSQLStore, *sql.DB) {
 	applyMSSQLProcedures(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 
-	store := NewMSSQLStore(db, "default")
+	// Built the way production builds it. NewMSSQLStore(db, ...) on a plain
+	// pool has no sp_set_session_context on any of its connections, so under
+	// the shipped schema's security policies every tenant-scoped read matches
+	// nothing -- the store cannot see rows it just wrote. Every non-test caller
+	// goes through the factory instead (cmd/cleat-worker, cmd/cleat-bench,
+	// cmd/deploy-workflow), and OpenStore is what wraps the connector.
+	//
+	// This is the §1.3 shape: the tests were exercising a construction nothing
+	// ships, and it passed only because the hand-written test schema had no
+	// policies to enforce.
+	ws, closer, err := NewMSSQLStoreFactory(dsn).OpenStore(
+		context.Background(), DefaultTenantUUID, "default")
+	if err != nil {
+		t.Fatalf("open a tenant-scoped store: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	store, ok := ws.(*MSSQLStore)
+	if !ok {
+		t.Fatalf("OpenStore returned %T, want *MSSQLStore", ws)
+	}
 
 	t.Cleanup(func() {
 		testutil.CleanupMSSQLTestData(t, db)
 	})
 
-	return store, db
+	// Assertions in these tests read tables directly with raw SQL, and those
+	// reads are subject to the same policies. They are checking what the store
+	// did, across whatever tenant it did it as, which is administrative work.
+	return store, testutil.MSSQLAdminDB(t, db)
 }
 
 // deployWorkflowDef is a helper that inserts a workflow_def row via the store.
