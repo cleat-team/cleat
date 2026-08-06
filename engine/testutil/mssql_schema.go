@@ -275,17 +275,15 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		}
 	}
 
-	// tenant_api_keys (needed by ResolveTenantFromAPIKey)
-	if _, err := db.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'tenant_api_keys' AND schema_name(schema_id) = 'dbo')
-	         CREATE TABLE tenant_api_keys (
-	             key_hash VARBINARY(32) NOT NULL PRIMARY KEY,
-	             tenant_id UNIQUEIDENTIFIER NOT NULL,
-	             description NVARCHAR(255),
-	             created_at DATETIME2 DEFAULT SYSUTCDATETIME(),
-	             revoked_at DATETIME2 NULL
-	         )`); err != nil {
-		t.Logf("setup MSSQL full schema: tenant_api_keys warning: %v", err)
-	}
+	// dbo.tenant_api_keys was created here, commented "needed by
+	// ResolveTenantFromAPIKey". That was true and is the reason the defect was
+	// invisible: the store read `tenant_api_keys` unqualified, which resolves
+	// to dbo, and this block created exactly the table that broken read wanted.
+	// So the tests had their own private copy of a table production never
+	// writes, and no test could observe that API-key resolution on SQL Server
+	// could not work. The store now reads admin.tenant_api_keys, which the
+	// shipped schema creates, so recreating the dbo table here would only
+	// restore the duplicate migration 013 drops.
 	// Migration: add columns that may be missing from older test databases.
 	migrations := []string{
 		`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE name = 'event_count' AND object_id = OBJECT_ID('workflow_instances'))
@@ -692,6 +690,13 @@ func mssqlSchemaFiles() []string {
 		// which is precisely the state teardown cannot work in. Leaving it out
 		// is caught loudly by requireMSSQLAdminRole rather than silently.
 		filepath.Join(dir, "012_admin_role.sql"),
+		// 013 drops the duplicate dbo.tenants / dbo.tenant_api_keys pair and
+		// moves idx_api_keys_hash onto admin.tenant_api_keys. A database built
+		// from the current 001 never has the dbo pair, so the DROPs are
+		// no-ops here and the index guard is what does the work -- but this
+		// list must still carry it, or a long-lived test database created
+		// before that change keeps both pairs and stops matching production.
+		filepath.Join(dir, "013_drop_duplicate_tenant_tables.sql"),
 		filepath.Join(dir, "020_event_intent.sql"),
 	}
 }
