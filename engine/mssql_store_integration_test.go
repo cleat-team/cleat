@@ -2414,10 +2414,18 @@ func TestMSSQLIntegration_ResolveTenantFromAPIKey(t *testing.T) {
 	// and is how a real deployment works. This test used to insert only the
 	// key, and passed because engine/testutil's hand-written MSSQL schema
 	// declared no such foreign key (IMPROVEMENT-PLAN 1.9, 2.71).
+	//
+	// dbo.tenants, not admin.tenants. The shipped schema defines BOTH pairs --
+	// admin.tenants/admin.tenant_api_keys and dbo.tenants/dbo.tenant_api_keys --
+	// and ResolveTenantFromAPIKey (engine/mssql_deployment.go:111) queries
+	// `tenant_api_keys` unqualified, which resolves to dbo for a dbo-default
+	// principal. Seeding admin.tenants therefore satisfied nothing: the insert
+	// below hits dbo.tenant_api_keys, whose fk_api_keys_tenant references
+	// dbo.tenants (001_schema.sql:343-344).
 	tenantUUID := uuid.New()
 	if _, err := db.ExecContext(ctx, `
-		IF NOT EXISTS (SELECT 1 FROM admin.tenants WHERE tenant_id = @p1)
-		INSERT INTO admin.tenants (tenant_id, name) VALUES (@p1, @p2)
+		IF NOT EXISTS (SELECT 1 FROM dbo.tenants WHERE tenant_id = @p1)
+		INSERT INTO dbo.tenants (tenant_id, name) VALUES (@p1, @p2)
 	`, tenantUUID.String(), "tenant-"+tenantUUID.String()); err != nil {
 		t.Fatalf("insert tenant: %v", err)
 	}

@@ -144,6 +144,33 @@ func (b *MSSQLBackend) Enabled() bool {
 	return os.Getenv("CLEAT_TEST_MSSQL") != ""
 }
 
+// openMSSQLTenantStore builds an MSSQLStore the way production builds one.
+//
+// NewMSSQLStore(db) on a plain pool sets sp_set_session_context on none of its
+// connections, so under the shipped security policies every tenant-scoped read
+// matches nothing and the store cannot see rows it just wrote. Every non-test
+// caller goes through the factory (cmd/cleat-worker, cmd/cleat-bench,
+// cmd/deploy-workflow); OpenStore is what wraps the connector.
+//
+// SetupForTenant previously assigned store.tenantID directly, which set the Go
+// field without ever setting the session context -- so the store filtered as
+// the default tenant while believing it was another one. That is the §1.3
+// shape: a scope that exists in the process and not in the database.
+func openMSSQLTenantStore(t *testing.T, tenantID string) *MSSQLStore {
+	t.Helper()
+	ws, closer, err := NewMSSQLStoreFactory(os.Getenv("CLEAT_TEST_MSSQL")).OpenStore(
+		context.Background(), tenantID, "default")
+	if err != nil {
+		t.Fatalf("open a tenant-scoped MSSQL store for %s: %v", tenantID, err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	store, ok := ws.(*MSSQLStore)
+	if !ok {
+		t.Fatalf("OpenStore returned %T, want *MSSQLStore", ws)
+	}
+	return store
+}
+
 func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	t.Helper()
 	if !b.Enabled() {
@@ -153,7 +180,7 @@ func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	testutil.SetupMSSQLFullSchema(t, db)
 	applyMSSQLProcedures(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
-	store := NewMSSQLStore(db)
+	store := openMSSQLTenantStore(t, DefaultTenantUUID)
 	teardown := func() {
 		testutil.CleanupMSSQLTestData(t, db)
 		db.Close()
@@ -169,8 +196,7 @@ func (b *MSSQLBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowSt
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
-	store := NewMSSQLStore(db)
-	store.tenantID = tenantID
+	store := openMSSQLTenantStore(t, tenantID)
 	teardown := func() {
 		testutil.CleanupMSSQLTestData(t, db)
 		db.Close()

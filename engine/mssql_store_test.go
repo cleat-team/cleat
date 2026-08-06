@@ -264,6 +264,18 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	nonDefaultTenant := "11111111-1111-1111-1111-111111111111"
 	store := NewMSSQLStore(db, "default")
 
+	// The assertions below read workflow_instances directly to check what
+	// StartNewRun stored. That read is subject to the shipped security
+	// policies, and the rows it is looking for belong to nonDefaultTenant --
+	// so on the plain connection it finds nothing and the test fails as
+	// "query tenant_id: sql: no rows in result set", which reads like
+	// StartNewRun not having written anything.
+	//
+	// It did write. This test is deliberately cross-tenant: it passes a tenant
+	// as an argument to check the argument is honoured, so verifying it is
+	// administrative work by definition and needs the admin connection.
+	adminDB := testutil.MSSQLAdminDB(t, db)
+
 	// --- Non-idempotent path ---
 	runID := uuid.New().String()
 	id, isDup, err := store.StartNewRun(context.Background(), runID,
@@ -280,7 +292,7 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 
 	// Verify tenant_id was stored correctly.
 	var storedTenant sql.NullString
-	err = db.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, runID).Scan(&storedTenant)
+	err = adminDB.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, runID).Scan(&storedTenant)
 	if err != nil {
 		t.Fatalf("query tenant_id (no idemkey): %v", err)
 	}
@@ -306,7 +318,7 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	}
 
 	// Verify tenant_id was stored correctly.
-	err = db.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, idemRunID).Scan(&storedTenant)
+	err = adminDB.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, idemRunID).Scan(&storedTenant)
 	if err != nil {
 		t.Fatalf("query tenant_id (idemkey): %v", err)
 	}
