@@ -1075,6 +1075,52 @@ func (w *Worker) getLoopCtx(name string) context.Context {
 	return w.ctx
 }
 
+// initLoopCtx creates a cancellable per-loop context and registers the loop
+// for watchdog monitoring. The done channel is closed by launchLoop when the
+// goroutine exits.
+//
+// The map write is under loopMu, which it was not when this was a closure
+// inside Run. That was not academic: Run initialises nine loops, launches them,
+// and *then* calls this again for the watchdog -- so an unlocked write ran
+// while nine goroutines were already up, and getLoopCtx reads the same map
+// under the lock. A worker died of it in the cluster job:
+//
+//	fatal error: concurrent map read and map write
+//	main.(*Worker).getLoopCtx        setup.go:1070
+//	main.(*Worker).reaperLoop        setup.go:1868
+//
+// "concurrent map read and map write" is a runtime fatal, not a panic, so
+// withPanicRecovery cannot catch it and the process dies -- which is what
+// crash-looped cleat-worker-3.
+//
+// A method rather than a closure so it can be called from a test that runs it
+// against a live reader under -race.
+func (w *Worker) initLoopCtx(name string) {
+	ctx, cancel := context.WithCancel(w.ctx)
+	lc := &loopContext{
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	w.loopMu.Lock()
+	w.loopCtxMap[name] = lc
+	w.loopMu.Unlock()
+	w.healthTracker.registerLoop(name)
+}
+
+// registerLoopFunc records a loop's restart function under loopMu.
+//
+// Same reasoning as initLoopCtx: these assignments interleave with launchLoop
+// calls, so by the time the later ones run several goroutines exist. restartLoop
+// reads loopFuncs under the lock, and it is only reached from the watchdog --
+// which starts last -- so this half was not yet reachable in practice. It is
+// the same latent shape and costs one helper to close.
+func (w *Worker) registerLoopFunc(name string, fn func()) {
+	w.loopMu.Lock()
+	w.loopFuncs[name] = fn
+	w.loopMu.Unlock()
+}
+
 // launchLoop starts a background loop goroutine and ensures the per-loop
 // done channel is closed when the goroutine exits. This makes the initial
 // launch consistent with the restart path (restartLoop), eliminating the
@@ -1103,18 +1149,7 @@ func (w *Worker) Run() {
 	w.loopFuncs = make(map[string]func())
 	w.loopCtxMap = make(map[string]*loopContext)
 
-	// initLoopCtx creates a cancellable per-loop context and registers the
-	// loop for watchdog monitoring. The done channel is closed by launchLoop
-	// when the goroutine exits.
-	initLoopCtx := func(name string) {
-		ctx, cancel := context.WithCancel(w.ctx)
-		w.loopCtxMap[name] = &loopContext{
-			ctx:    ctx,
-			cancel: cancel,
-			done:   make(chan struct{}),
-		}
-		w.healthTracker.registerLoop(name)
-	}
+	initLoopCtx := w.initLoopCtx
 	initLoopCtx("heartbeat")
 	initLoopCtx("reaper")
 	initLoopCtx("concurrency_key_reaper")
@@ -1127,45 +1162,45 @@ func (w *Worker) Run() {
 	initLoopCtx("update_dispatch")
 
 	// Background heartbeat goroutine.
-	w.loopFuncs["heartbeat"] = w.heartbeatLoop
+	w.registerLoopFunc("heartbeat", w.heartbeatLoop)
 	w.launchLoop("heartbeat", w.heartbeatLoop)
 
 	// Background zombie reaper goroutine.
-	w.loopFuncs["reaper"] = w.reaperLoop
+	w.registerLoopFunc("reaper", w.reaperLoop)
 	w.launchLoop("reaper", w.reaperLoop)
 
 	// Background concurrency key reaper goroutine (Feature 5).
-	w.loopFuncs["concurrency_key_reaper"] = w.concurrencyKeyReaperLoop
+	w.registerLoopFunc("concurrency_key_reaper", w.concurrencyKeyReaperLoop)
 	w.launchLoop("concurrency_key_reaper", w.concurrencyKeyReaperLoop)
 
 	// Dispatch loop.
-	w.loopFuncs["dispatch"] = w.dispatchLoop
+	w.registerLoopFunc("dispatch", w.dispatchLoop)
 	w.launchLoop("dispatch", w.dispatchLoop)
 
 	// Cron schedule loop.
-	w.loopFuncs["schedule"] = w.scheduleLoop
+	w.registerLoopFunc("schedule", w.scheduleLoop)
 	w.launchLoop("schedule", w.scheduleLoop)
 
 	// Memory estimate reload loop.
-	w.loopFuncs["memory_reload"] = w.memoryReloadLoop
+	w.registerLoopFunc("memory_reload", w.memoryReloadLoop)
 	w.launchLoop("memory_reload", w.memoryReloadLoop)
 
 	// Memory sample cleanup loop.
-	w.loopFuncs["memory_cleanup"] = func() { w.memoryCleanupLoop(w.memorySampleRetention) }
+	w.registerLoopFunc("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })
 	w.launchLoop("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })
 
 	// Retention loop.
-	w.loopFuncs["retention"] = func() { w.retentionLoop(w.retentionDays) }
+	w.registerLoopFunc("retention", func() { w.retentionLoop(w.retentionDays) })
 	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays) })
 
 	// Update dispatch loop (Feature 3: Update Handler).
-	w.loopFuncs["update_dispatch"] = func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) }
+	w.registerLoopFunc("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })
 	w.launchLoop("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })
 
 	// Watchdog loop for background loop health monitoring.
 	if w.healthCheckInterval > 0 {
 		initLoopCtx("watchdog")
-		w.loopFuncs["watchdog"] = w.watchdogLoop
+		w.registerLoopFunc("watchdog", w.watchdogLoop)
 		w.launchLoop("watchdog", w.watchdogLoop)
 	}
 
