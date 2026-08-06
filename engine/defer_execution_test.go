@@ -64,6 +64,71 @@ func newDeferTestEngine(t *testing.T) *Engine {
 	return NewEngine(rt, &mockCaller{})
 }
 
+// newDeferTestEngineOnWasmtime builds an engine that routes defers to the
+// wasmtime backend, which is what RunDefer now does whenever a backend serves
+// the guest's language (IMPROVEMENT-PLAN 3.32).
+//
+// The two constructors exist because they exercise genuinely different code:
+// newDeferTestEngine's engine has no backends, so RunDefer falls back to the
+// wazero Runtime -- the CGO-less path. Testing only one of them would leave the
+// path that actually ships uncovered, which is how defers came to run somewhere
+// nobody had checked in the first place.
+func newDeferTestEngineOnWasmtime(t *testing.T) *Engine {
+	t.Helper()
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	return NewEngine(rt, &mockCaller{}, WithBackends(WasmtimeLanguages, wt))
+}
+
+// TestRunDefer_ExecutesTheBodyOnWasmtime is the same four cases as
+// TestRunDefer_ExecutesTheBody and the two beneath it, run through the routed
+// path rather than the fallback.
+//
+// A defer body reaching a different backend must still execute, still surface
+// its trap, and still report a missing or mis-declared export -- the fence is
+// not worth acquiring at the cost of defers silently not running.
+func TestRunDefer_ExecutesTheBodyOnWasmtime(t *testing.T) {
+	wasmBytes := deferTestModule(t)
+
+	t.Run("clean return", func(t *testing.T) {
+		e := newDeferTestEngineOnWasmtime(t)
+		if _, err := e.RunDefer(context.Background(), wasmBytes, "cleat_defer_defer-1", nil); err != nil {
+			t.Errorf("RunDefer on a body that returns 0: %v", err)
+		}
+	})
+
+	t.Run("trap propagates", func(t *testing.T) {
+		e := newDeferTestEngineOnWasmtime(t)
+		_, err := e.RunDefer(context.Background(), wasmBytes, "cleat_defer_defer-2", nil)
+		if err == nil {
+			t.Fatal("RunDefer on a body containing `unreachable` returned no error, " +
+				"so the body never executed on the routed path")
+		}
+	})
+
+	t.Run("missing export is reported", func(t *testing.T) {
+		e := newDeferTestEngineOnWasmtime(t)
+		if _, err := e.RunDefer(context.Background(), wasmBytes, "cleat_defer_nonexistent", nil); err == nil {
+			t.Fatal("RunDefer on an export that does not exist returned no error")
+		}
+	})
+
+	t.Run("wrong signature is reported", func(t *testing.T) {
+		e := newDeferTestEngineOnWasmtime(t)
+		if _, err := e.RunDefer(context.Background(), wasmBytes, "cleat_defer_defer-3", nil); err == nil {
+			t.Fatal("RunDefer on an export with the wrong signature returned no error")
+		}
+	})
+}
+
 // TestRunDefer_ExecutesTheBody asserts the two outcomes that distinguish "the
 // defer ran" from "nothing happened", which is the distinction every existing
 // test was structurally unable to draw.

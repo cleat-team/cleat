@@ -10,49 +10,38 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
-// TestDefersRunOnTheFencedBackend records a second execution path that has no
-// execution limit at all.
+// TestDefersRunOnTheFencedBackend asserts that a deferred callback is subject
+// to the same execution limit as the workflow that registered it.
 //
-// A workflow's guest code runs on whichever backend WasmtimeLanguages routes it
-// to, and is bounded there by epoch interruption. Its *deferred callbacks* are
-// ordinary guest code too -- a defer body can loop exactly like a workflow body
-// can -- but they never reach a backend. Engine.RunDefer does not consult
-// backendForWasm: it reaches straight for e.rt, the wazero Runtime, and when
-// that is nil, which is precisely the case when wasmtime is handling execution,
-// it builds a fresh wazero Runtime for the defer.
+// A defer body is ordinary guest code -- it can loop exactly like a workflow
+// body can. Until 2026-08-05 it was not bounded at all: Engine.RunDefer never
+// consulted backendForWasm, reaching straight for the wazero Runtime and, when
+// that was nil (exactly the case when wasmtime is handling execution), building
+// a fresh wazero one for the defer. So every defer in cleat ran on wazero
+// whatever the routing table said, and wazero cannot be bounded for a guest
+// that never calls into the host -- three mechanisms measured and rejected in
+// IMPROVEMENT-PLAN 3.32. A defer that looped held its worker slot until the
+// process died.
 //
-// So every defer in cleat runs on wazero whatever the routing table says, and
-// wazero only observes context cancellation when the guest calls back into the
-// host (IMPROVEMENT-PLAN 2.28). A defer that loops without doing so is not
-// stopped: it holds its worker slot until the process dies.
+// This test was written while that was true, skipped, and recorded as 3.32's
+// acceptance criterion. It is unskipped now. Against a 1s budget it went from
+// still running after 20s to returning in 1.00s.
 //
-// Measured, not read. With this test unskipped, against a 1s wasmtime budget:
+// Getting it right took one correction worth keeping, because it is the failure
+// mode this repo keeps hitting. The first version declared the defer export
+// with no parameters, and it *passed* -- in 0.01s, with the fix reverted,
+// having never executed the guest at all. The export was rejected with
+// "expected 0 params, but passed 4", and runDefers logs defer failures without
+// propagating them, so a test that ran nothing was indistinguishable from one
+// that proved something. The signature below is the one CallExport calls.
 //
-//	defer_backend_test.go: a deferred callback that never returns was still
-//	running after 20s with a 1s execution budget
-//
-// Getting there took one correction worth keeping, because it is the failure
-// mode this repo keeps hitting. The first version of this test declared the
-// defer export with no parameters, and it *passed* -- in 0.01s, with the fix
-// reverted, having never executed the guest at all. The export was rejected
-// with "expected 0 params, but passed 4", and runDefers logs defer failures
-// without propagating them, so a test that ran nothing was indistinguishable
-// from a test that proved something. The signature below is the one CallExport
-// actually calls.
-//
-// Skipped rather than left red, and rather than deleted, which is the treatment
-// TestPythonWasmEndToEnd had for the same reason: a red develop helps nobody,
-// and deleting this would lose the only thing that demonstrates the gap.
-// Unskipping it is the acceptance test for 3.32.
-//
-// It is recorded rather than fixed because it is not a one-line change. Defers
-// execute with no HostHandler in ctx today, so routing them to a backend
-// changes what a defer body is allowed to do -- a defer that calls a service is
-// plausible cleanup, and that question wants deciding rather than falling out
-// of a routing change.
+// What this does NOT assert: that a defer can make host calls. It still
+// cannot, because defers run with no HostHandler in ctx -- which is a defect
+// in the current implementation rather than a property of defers.
+// IMPROVEMENT-PLAN 3.35 is the design that fixes it, by running defers in a
+// replayed instance with a live session. This test is about the bound, and
+// deliberately asserts nothing about the semantics that design will change.
 func TestDefersRunOnTheFencedBackend(t *testing.T) {
-	t.Skip("known: defers always run on wazero, unfenced; see IMPROVEMENT-PLAN 3.32 -- unskipping this is the acceptance test")
-
 	// A module exporting a defer body that spins. Built from WAT rather than a
 	// checked-in fixture so it cannot drift, and so what it does is legible:
 	// an empty infinite loop, no host calls, nothing for a
