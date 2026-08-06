@@ -5279,6 +5279,115 @@ defer work there; `runDefers` runs them on a fresh module with no handler, where
 panics and is swallowed. Whatever is decided should make those two agree, because today
 whether your defer can call a service depends on which way the workflow failed.
 
+### 3.35 What `defer` is supposed to be — 📐 **DESIGN, not yet implemented** (WS-3, 2026-08-05)
+
+Written because §3.32 fenced the defer path and the fence made an uncomfortable question
+visible: *bounded doing what, exactly?* The implementation turned out to be much further from
+the intent than the fence discussion suggested, and the intent had never been written down.
+
+**The intent, as stated by the author:** a defer in a durable execution system is a destructor.
+Two properties, both load-bearing: it is **guaranteed to run**, and it has **access to the full
+context of the workflow** so it can do the cleanup it exists to do. Releasing a lock,
+compensating a saga step and notifying a service are all "cleanup" only if the cleanup code can
+see what was acquired, what was done, and to whom.
+
+#### What the implementation does instead
+
+Three findings, each verified against the tree rather than inferred.
+
+1. **In the embedded (in-process Go) runner, defer closures never run.** `DurableDeferFunc(fn)`
+   appends to `cleat/embedded/runner.go`'s `deferFuncs []func()` at line 508, and that field has
+   **no reader anywhere in non-test code**. The caller gets a defer ID and no cleanup. Not a
+   degraded path — an absent one.
+2. **In WASM, a defer cannot have context by construction.** `RunDefer` compiles the module and
+   instantiates it *fresh*: new linear memory, so the workflow body never ran in it and nothing
+   it captured exists; no `HostHandler` in ctx, so no durable calls, no lock release, no
+   notification; and `nil` input.
+3. **The four call sites disagree.** Only `executor.go:643` invokes defers on the live instance
+   with the session. `executor.go:355` runs `invokeDefersOnTrap` *and* `runDefers`
+   unconditionally — the comment says "fall back" but there is no conditional, so each defer
+   body executes **twice**. The success path runs them from `cmd/cleat-worker` *after*
+   `FinalizeWorkflowSegment`, by which point the instance is gone.
+
+So today: "full context" holds on one error path, "guaranteed to run" holds nowhere, and on the
+common paths a defer can only execute code that depends on nothing.
+
+#### The insight that makes this tractable
+
+A fresh instance is **not** the problem. In a durable execution engine the workflow's state
+*is* its event history; a resumed workflow always starts from a fresh instance and reconstructs
+itself by replay. A defer running in a new instance is therefore ordinary, provided it runs in a
+**replayed** instance rather than a virgin one.
+
+And replay gives the hard part away for free: **replay re-runs the workflow body, so it
+re-registers the defer closures on the way through.** `DurableDeferFunc(fn)` starts working not
+because anything resurrects a closure, but because the closure is *rebuilt* — the same way every
+other piece of guest state is.
+
+The machinery is already there and already deterministic. `DurableDefer` is replay-matched
+(`engine/durablecalls.go:368`): on replay it returns the **recorded** `DeferID` rather than
+minting a new one, so IDs are stable across replays, and registration is a durable event
+(`EventTypeDefer`) that survives a crash. `TestDurableDeferReplayMatch` and
+`TestDurableDeferReplayPastEnd` already pin that behaviour. Nothing connects it to execution.
+
+#### Proposed design: a defer is a replayed continuation, not a callback
+
+Run defers as a **second execution phase of the same workflow**:
+
+1. Instantiate fresh and **replay the recorded history** to the terminal step. Guest state is
+   reconstructed exactly as it is for any resumption; defer closures re-register as a
+   side effect; recorded durable calls return their recorded results and do not re-fire.
+2. Invoke `cleat_defer_<id>` in **LIFO order**, with the live `execSession` in ctx. Host calls
+   now work, because there is a session — the defer can release the lock it took.
+3. Record the defer's own host calls as **new events after the workflow's terminal step**, in a
+   distinguishable phase, so a retried defer replays deterministically like anything else.
+
+This gets all three properties at once, and each from a mechanism that already exists: full
+context from replay, host access from the session, and the execution fence for free, because
+step 1–3 is an ordinary backend execution rather than a bespoke path.
+
+**Guaranteed-to-run then becomes a durability question, not an execution one.** Registration is
+already durable. If the defer phase is recorded as its own unit of work, a worker that dies
+mid-defer leaves a resumable record and the reaper re-runs it — the same shape as §1.4's
+crash-recovery and §3.20's force-resolve. That is the only way "guaranteed" can be true across a
+`kill -9`: no in-process callback survives one, in any language.
+
+#### Decisions this needs, with recommendations
+
+These are the author's to make; the design changes shape depending on them.
+
+| decision | options | recommendation |
+|---|---|---|
+| At-most-once or exactly-once? | best-effort, or retried until success | **Exactly-once**, retried. "Guaranteed" is the stated intent, and it is what makes defer worth more than a `finally` block. |
+| Does a failing defer fail the workflow? | yes / no / record-and-continue | **Record and continue**, but surface it — a failed cleanup must be visible, which is what §3.32's logging fix started. |
+| When do defers run? | on failure only / success too / cancellation and termination too | **All terminal transitions.** A destructor that skips the success path is not a destructor. |
+| What may a defer body do? | anything / no new defers, no children, no continue-as-new | **Restricted**: no registering defers, no `continue_as_new`. Child workflows are arguable. |
+| Replay cost | full replay per defer phase / reuse compaction | **Reuse compaction state** (`buildFullHistoryFromCompaction` already exists) — otherwise a long workflow pays its whole history again to release one lock. |
+| Timeout | workflow budget / own budget | **Its own budget.** The workflow's remaining budget is often zero exactly when defers matter. |
+
+#### Cost, and what it touches
+
+The replay is the cost: reconstructing state means re-executing the workflow body. Compaction
+bounds it, and the alternative — persisting guest memory — is far worse. Everything else is
+wiring: `engine/executor.go` (phase), `engine/durablecalls.go` (step numbering for defer-phase
+events), `cmd/cleat-worker/setup.go` (stop running defers post-finalization), and a migration if
+the defer phase gets its own durable state. **Migration range 030–039 is unused and reserved for
+WS-3.**
+
+Cross-stream: the exactly-once half overlaps §1.4 (WS-2). Worth agreeing the record shape once
+rather than inventing a second one.
+
+#### What to do in the meantime
+
+§3.32's fence is orthogonal and stands on its own: an unbounded defer should not hold a worker
+slot under any semantics. It should land with **neutral framing** — it bounds today's
+implementation and says nothing about what a defer may do — rather than describing "defers
+cannot make host calls" as a contract, which is an accident of the current implementation and
+is exactly what this design reverses.
+
+The embedded runner's dropped closures (finding 1) should be fixed regardless of which way this
+goes: today that API silently does nothing.
+
 ### 3.34 A concurrency key's TTL means three different things — ✅ **FIXED** (WS-1, 2026-08-05; found by WS-3)
 
 Found by chasing an intermittent, and the intermittent is the least of it.
