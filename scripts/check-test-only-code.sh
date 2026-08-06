@@ -60,6 +60,18 @@ STATICCHECK="honnef.co/go/tools/cmd/staticcheck@2025.1.1"
 #
 # LC_ALL=C pins the collation, which otherwise differs between a developer's
 # locale and the runner's.
+#
+# KNOWN BLIND SPOT: CGO_ENABLED=0 is forced by the cross-compile, and it hides
+# every file behind `//go:build cgo` -- which is the whole wasmtime backend
+# (engine/backend_wasmtime.go, engine/wasmtime_*.go). A helper whose only
+# caller lives there is reported as unused, and it is not: the scan simply
+# cannot see the call. `contextWithRawMemBuf` and `guestErrorText` are in the
+# baseline for exactly that reason, not because they are test-only.
+#
+# So before concluding that a finding is dead code, check whether its callers
+# are cgo-gated. Deleting one of these on the strength of this guard would
+# remove live code from the primary backend -- the same trap CLAUDE.md
+# describes for building and testing with CGO off.
 TOOLDIR="$(mktemp -d)"
 trap 'rm -rf "$TOOLDIR"' EXIT
 
