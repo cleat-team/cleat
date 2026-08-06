@@ -88,6 +88,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -166,6 +167,10 @@ func (r *Runner) ExecuteWorkflow(ctx context.Context, name, inputJSON string) (s
 	}
 
 	err := fn(wfCtx)
+	// Defers run after the body and before the output is read, which is the
+	// order Go's own defer uses -- a defer may adjust what the workflow
+	// returns, and in this runner it is a plain closure that can.
+	exec.runDeferFuncs()
 	return wfCtx.Output, err
 }
 
@@ -507,6 +512,48 @@ func (e *execution) durableDeferFunc(fn func()) (string, error) {
 	id := fmt.Sprintf("def-fn-%d", e.deferCount)
 	e.deferFuncs = append(e.deferFuncs, fn)
 	return id, nil
+}
+
+// runDeferFuncs invokes the closures registered by DurableDeferFunc, most
+// recent first.
+//
+// Until 2026-08-05 nothing did. durableDeferFunc appended to e.deferFuncs and
+// that field had no reader anywhere in non-test code, so every closure passed
+// to DurableDeferFunc was collected and dropped: the caller got a defer ID back
+// and no cleanup, silently. This runner is documented for "integration testing
+// and simple single-binary deployments", so the failure mode was a test suite
+// reporting that cleanup worked when it had never been invoked.
+//
+// LIFO, matching Go's defer, which is the model the API is named after -- and
+// the order matters for cleanup, since resources are released in the reverse of
+// the order they were acquired.
+//
+// A panicking defer is logged and the rest still run. That differs from Go,
+// where a panic in a defer propagates, and it is deliberate: cleanup is
+// best-effort here, and one failed release should not strand the others. It is
+// also what the WASM path does (engine/flush.go's runDefers), so the two agree.
+//
+// This runner executes Go closures with their lexical context intact, so it
+// already has the "full context" half of what a defer is for. What it lacked
+// was the other half: running at all. The WASM path has the opposite problem
+// and IMPROVEMENT-PLAN 3.35 is the design for it.
+func (e *execution) runDeferFuncs() {
+	e.mu.Lock()
+	fns := e.deferFuncs
+	e.deferFuncs = nil
+	e.mu.Unlock()
+
+	for i := len(fns) - 1; i >= 0; i-- {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Warn("embedded: defer panicked",
+						"workflow_id", e.wfID, "run_id", e.wfRunID, "index", i, "panic", r)
+				}
+			}()
+			fns[i]()
+		}()
+	}
 }
 
 func (e *execution) durableLog(message string) {
