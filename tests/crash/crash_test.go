@@ -332,25 +332,34 @@ func TestCrashWithWriteAheadIntentDoesNotRepeatTheCall(t *testing.T) {
 			"should have skipped them", reserve, charge)
 	}
 
-	// The ambiguity must survive into the database. It did not: the generated
-	// wrapper built {"error":""..."" } -- doubled quotes, invalid JSON -- and
-	// FinalizeWorkflowSegment replaced the lot with {}, so a workflow that
-	// could not know the outcome of a charge was stored as a clean success
-	// with no trace of why. See IMPROVEMENT-PLAN 3.22.
+	// The ambiguity must survive into the database, and it must arrive as a
+	// failure. Three separate defects used to stand between here and that, all
+	// IMPROVEMENT-PLAN 3.22: the generated wrapper built invalid JSON,
+	// FinalizeWorkflowSegment silently replaced it with {}, and the wasmtime
+	// backend reported a guest that said it had failed as a success. The
+	// workflow was stored `done` with an empty result -- a clean success for a
+	// charge that may or may not have happened.
 	result := workflowResult(t, db, wfID)
-	if !strings.Contains(result, "AMBIGUOUS") {
-		t.Errorf("stored result is %q, which does not mention the ambiguity.\n\n"+
-			"The engine detected it, the guest reported it, and it has to reach an operator "+
-			"somewhere -- result, error_msg or the log. A recovery that silently drops the one "+
-			"fact the workflow could not determine is indistinguishable from one that succeeded."+
-			"\n--- worker log ---\n%s", result, second.output())
-	}
-
-	// The status is still `done` rather than `failed`, which is 3.22 step 3 and
-	// is 1.4 phase E's job: an error that crosses the ABI as a string inside a
-	// success result is one the worker cannot act on. Recorded, not asserted --
-	// asserting today's wrong answer would pin it in place.
 	t.Logf("terminal state: status=%q error_msg=%q result=%q", status, errMsg, result)
+
+	if status != "failed" {
+		t.Errorf("status is %q, want \"failed\".\n\n"+
+			"The workflow could not determine whether a charge happened. Ending it in a "+
+			"success state is the one outcome that guarantees nobody looks."+
+			"\n--- worker log ---\n%s", status, second.output())
+	}
+	if !strings.Contains(errMsg, "AMBIGUOUS") {
+		t.Errorf("error_msg is %q, which does not mention the ambiguity.\n\n"+
+			"The engine detected it and the guest reported it; the one fact the workflow "+
+			"could not determine has to reach an operator, and error_msg is where an "+
+			"operator looks for why a workflow failed."+
+			"\n--- worker log ---\n%s", errMsg, second.output())
+	}
+	// Named because it is the only part of the message an operator can act on:
+	// the ambiguity is about one specific call to one specific service.
+	if !strings.Contains(errMsg, "payments.Ship") {
+		t.Errorf("error_msg does not name the call whose outcome is unknown: %q", errMsg)
+	}
 }
 
 // workflowResult reads the stored result column.

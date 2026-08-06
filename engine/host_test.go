@@ -268,49 +268,43 @@ func TestEngineReplayDivergence(t *testing.T) {
 		t.Skip("WASM execution returned empty history; cannot test divergence (pre-existing environment issue)")
 	}
 
-	t.Run("event_type_mismatch_enriched", func(t *testing.T) {
-		hist := make([]EventRecord, len(history))
-		copy(hist, history)
-		if len(hist) > 0 {
-			hist[0].EventType = "sleep"
-		}
-		caller := &mockCaller{}
-		engine := NewEngine(rt, caller, WithBackend("go", backend))
-		result, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, hist)
-		if err != nil {
-			t.Logf("Replay error (expected): %v", err)
-		}
-		if result == "" {
-			t.Error("expected divergence error result, got empty")
-		}
-		for _, label := range []string{"actual request:", "expected request:"} {
-			if !strings.Contains(result, label) {
-				t.Errorf("result missing %q: %s", label, result)
-			}
-		}
-	})
+	// These read the enriched divergence detail off the *error*, not off the
+	// result. They used to read it off the result, and tolerated an error with
+	// a t.Logf("expected if divergence bails out") -- because a Go guest that
+	// returned an error was handed back as a success whose result happened to
+	// contain the message. IMPROVEMENT-PLAN 3.22 fixed that, so a divergence is
+	// now the failure it always described itself as. The substance is
+	// unchanged: the same two labels, in the same message, still have to reach
+	// whoever is debugging the workflow.
+	for _, tc := range []struct {
+		name   string
+		mutate func(*EventRecord)
+	}{
+		{"event_type_mismatch_enriched", func(r *EventRecord) { r.EventType = "sleep" }},
+		{"service_mismatch_enriched", func(r *EventRecord) { r.Service = "different_service" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hist := make([]EventRecord, len(history))
+			copy(hist, history)
+			tc.mutate(&hist[0])
 
-	t.Run("service_mismatch_enriched", func(t *testing.T) {
-		hist := make([]EventRecord, len(history))
-		copy(hist, history)
-		if len(hist) > 0 {
-			hist[0].Service = "different_service"
-		}
-		caller := &mockCaller{}
-		engine := NewEngine(rt, caller, WithBackend("go", backend))
-		result, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, hist)
-		if err != nil {
-			t.Logf("Replay error (expected if divergence bails out): %v", err)
-		}
-		if result == "" {
-			t.Error("expected divergence error result, got empty")
-		}
-		for _, label := range []string{"actual request:", "expected request:"} {
-			if !strings.Contains(result, label) {
-				t.Errorf("result missing %q: %s", label, result)
+			caller := &mockCaller{}
+			engine := NewEngine(rt, caller, WithBackend("go", backend))
+			result, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, hist)
+			if err == nil {
+				t.Fatalf("Replay of a diverging history succeeded, result = %q; a divergence is "+
+					"a bug in the workflow code and running the same call again reproduces it", result)
 			}
-		}
-	})
+			for _, label := range []string{"actual request:", "expected request:"} {
+				if !strings.Contains(err.Error(), label) {
+					t.Errorf("divergence error missing %q: %v", label, err)
+				}
+			}
+			if result != "" {
+				t.Errorf("Replay returned both an error and the result %q", result)
+			}
+		})
+	}
 }
 
 func TestEngineExecuteCancelOrder(t *testing.T) {

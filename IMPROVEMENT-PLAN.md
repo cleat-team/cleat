@@ -900,10 +900,26 @@ Both fail on all three dialects.
 
 **Still open in phase E:** the typed error. The design asks for a structured value carrying
 step, service, operation and key; today the detail is a formatted string inside the workflow
-result. That is §3.22 step 3, and it needs an ABI change (`wasm/` and the SDKs are WS-3's).
-Note the design's claim that "`ErrAmbiguous` already exists as error code 5" does not hold in
-this tree: `engine/callerrors.go` deliberately declares only the three codes the engine can
-select, and says why.
+result. That is §3.22 step 3.
+
+Three different things are called "ErrAmbiguous", and keeping them apart is what says how much
+of this needs an ABI change — which is less than this entry previously claimed.
+
+1. **`engine.ErrorCode.ErrAmbiguous`, value 5** (`engine/errors.go`). Host-side, stored in the
+   `error_code` column, present since the first commit. `NewAmbiguousError` is declared and
+   called from nothing but its own test.
+2. **`cleat.CallErrorCode`**, the guest ABI enum. Has no ambiguous member; 5 there is
+   `CallErrorPermissionDenied`. This is what a workflow author's `switch e.Code` reads, and an
+   ambiguous call arrives as `[0]`, Unknown. Adding a member is possible — the wire field is 32
+   bits and 6 is free — but every SDK carries its own copy (`python-sdk/cleat_sdk/host_calls.py`
+   has a literal `{0..5}` dict), and those are WS-3's.
+3. **`engine/callerrors.go`**, which redeclares only the three of the guest enum the engine can
+   actually select.
+
+An earlier revision of this entry said the design's "`ErrAmbiguous` already exists as error
+code 5" does not hold in this tree. **That was wrong** — it holds exactly, for (1). The claim
+was checked against (3), a different enum. What is true is narrower: the code exists, and
+nothing populates it, because the ambiguity never reaches the host as a failure at all.
 
 **Still open in the phase:** E (the resolution hook and a typed `ErrAmbiguous` carrying step,
 service, operation and key — today ambiguity is reported inside the workflow result *string*)
@@ -5678,28 +5694,53 @@ Two things that are **not** defects and are recorded so the next sweep does not 
   module path reached through a symlink. From `/Users/Shared/localssd/rcownie/cleat` the same
   suite passes. Worth knowing before someone spends a session on a phantom regression.
 
-### 3.22 An ambiguous call is erased, not reported — 🔶 **MOSTLY FIXED** (WS-2, 2026-08-05)
+### 3.22 An ambiguous call is erased, not reported — ✅ **FIXED** (WS-2, 2026-08-05)
 
 Found by building §1.4's T3 crash scenario. Not an intent-path defect: intent is only what made
 it visible, by producing the first workflow in this repo that *should* end in failure after a
 crash.
 
-> **Correction, same day.** This entry first said the mechanism was "a second `cleat_complete`
-> with status 0 overwrites the first with status 1". That was inferred from two probe lines and
-> is **wrong**. Instrumenting `Engine.Replay`'s own boundary showed **one** execution returning
-> `err == nil` with a 233-byte result — not two competing completions. The real chain is below,
-> and it is worse: nothing overwrites anything, the information is dropped twice.
+> **Correction, and then a correction of the correction — 2026-08-05.**
+>
+> This entry first said the mechanism was "a second `cleat_complete` with status 0 overwrites
+> the first with status 1", inferred from two probe lines. It was then retracted as wrong,
+> because instrumenting `Engine.Replay`'s boundary showed **one** execution returning
+> `err == nil` with a 233-byte result rather than two competing completions.
+>
+> **The retraction was the error.** That observation is exactly what the original hypothesis
+> predicts: one execution, `err == nil`, and the 233 bytes *are* the `{"error":…}` payload.
+> A single instrumented boundary could not distinguish the two accounts, and it was read as
+> though it could. There are two `cleat_complete` calls, and the second does win — not by
+> overwriting a variable, but by winning a precedence check. See step 3 below, now read off the
+> generator and the backend rather than inferred from probes.
 
 **What actually happens**, end to end, each step measured:
 
 1. The engine detects the pending intent row and returns
    `[AMBIGUOUS] call outcome unknown at step 2 …` to the guest with `errCode = 1`. Correct.
 2. The guest's adapter maps that to a `cleat.CallError`; the fixture returns it. Correct.
-3. The generated wrapper turns the returned error into a **JSON result string**, not a Go
-   error. `Engine.Replay` therefore returns `err == nil`. This is documented — §1.4 already
-   warns "ambiguity and replay divergence are reported inside the workflow result string, not
-   as a Go error from `Engine.Replay`" — but the worker does not check the result, so it takes
-   the success path.
+3. **The guest reports the failure correctly and the host then discards the report.** The
+   generated `cleatDispatch` error branch calls `cleatCompleteImport(1, errPtr, errLen)`
+   (`wasm/exports.go:560`) — status 1, the failure — and *then returns the same error as its
+   `[]byte` result*. Generated `main()` (`wasm/build.go:174`) unconditionally re-reports that
+   return value:
+
+   ```go
+   result := cleatDispatch(entryName, args)
+   resultPtr, resultLen := stringPtr(string(result))
+   cleatCompleteImport(0, resultPtr, resultLen)   // no branch on whether it failed
+   ```
+
+   The host binding keeps both, correctly, in separate variables
+   (`engine/wasmtime_hostfuncs.go:70-75`). `engine/backend_wasmtime.go:582` then checks
+   `completeResult` **first**, so the status-0 report wins and `Execute` returns a success.
+   `Engine.Replay` returns `err == nil`, and the worker takes the success path.
+
+   Two things make this a defect rather than a design choice. The same file gets it right 100
+   lines later: `backend_wasmtime.go:684`, the non-Go direct-export path, returns
+   `fmt.Errorf("host: export %q failed: %s", …)`. So does wazero (`engine/runtime.go:531`).
+   **Go-on-wasmtime — the primary backend for the primary language — is the one path that
+   collapses the distinction**, and it is the path every Go workflow in production takes.
 4. **That JSON is malformed.** `wasm/exports.go:579` emits
    `[]byte("{\"error\":\"" + encodeJSONString(__e.Error()) + "\"}")` while
    `encodeJSONString` **already wraps its argument in quotes** (`exports.go:229-241`, and its
@@ -5731,32 +5772,58 @@ The adjacent unmarshal-error emission had the same class of defect by a differen
 (raw concatenation of `err.Error()` with no escaping at all, and a `json.Unmarshal` error
 routinely contains quotes), so both are fixed together.
 
-The stored result for the crash scenario is now, verified end to end:
-
-```json
-{"error": "durable call payments.Ship: [0] [AMBIGUOUS] call outcome unknown at step 2: the
-external call to payments.Ship was dispatched but the response was not recorded before a
-crash. Check the external service before retrying."}
-```
-
-`TestCrashWithWriteAheadIntentDoesNotRepeatTheCall` asserts the result mentions the ambiguity,
-and `wasm/error_json_test.go` executes the emitted expressions rather than pattern-matching the
-emitted text — the defect was in what the code *evaluated to*. Restoring the doubled quotes
-fails both, the second with `stored result is "{}"`.
+`wasm/error_json_test.go` executes the emitted expressions rather than pattern-matching the
+emitted text — the defect was in what the code *evaluated to*. That is now this fix's only
+cover, and deliberately so: once step 3 landed, the crash path stopped depending on the
+emission at all (the failure is carried by `completeErr`, and the `{"error":…}` bytes it used
+to ride on are discarded). A test that had to go through a crash to observe a JSON-encoding
+defect was the wrong instrument anyway.
 
 **Cross-stream:** `wasm/` is WS-3's. Two lines, in the error-encoding path rather than the
 component work they are in the middle of.
 
-**Still open (step 3), and it is §1.4 phase E.** An error that crosses the boundary as a string
-inside a success result is one the worker cannot act on. Phase E's typed `ErrAmbiguous` is the
-real answer, and this is the concrete argument for prioritising it.
+**Fixed (step 3).** `engine/backend_wasmtime.go` checks `completeErr` before `completeResult`,
+and returns it as an error rather than as a result — which is what the direct-export branch 100
+lines below it (every non-Go guest) and the wazero backend (`runtime.go:531`) already did.
+**No ABI change was needed**, contrary to what this entry claimed for a day: the wire format was
+never involved. Both completions already crossed it, in the right order, with the right status
+bits. The host was choosing the wrong one.
 
-**What is left is step 3 alone**, and it is phase E's remaining half. The ambiguity now
-reaches an operator — it is in the result column, in valid JSON, and an unstorable result is
-logged rather than dropped — but the workflow is still recorded `done`, because an error that
-crosses the ABI as a string inside a success result is one the worker cannot act on. The crash
-test records that status rather than asserting it: asserting today's answer would pin it in
-place.
+Measured on `TestCrashWithWriteAheadIntentDoesNotRepeatTheCall`, before and after:
+
+```
+before   status="done"    error_msg=""
+                          result={"error": "durable call payments.Ship: [0] [AMBIGUOUS] …"}
+after    status="failed"  error_msg="… host: export "three_charges" failed: durable call
+                                     payments.Ship: [0] [AMBIGUOUS] call outcome unknown at
+                                     step 2: … Check the external service before retrying."
+                          result=""
+```
+
+`guestErrorText` (`engine/guest_error.go`) decodes what the guest encoded: every Go guest passes
+its message through `encodeJSONString` before `cleat_complete`, so the raw bytes are a quoted,
+escaped JSON literal, and formatting that into `error_msg` verbatim leaves the escapes in front
+of the operator. The `_start` panic recovery writes a plain Go string into the same variable, so
+the pass-through fallback is load-bearing rather than defensive.
+
+**The blast radius was the point, not a side effect.** This was never specific to ambiguity:
+*every* Go workflow that returned an error was being stored `done`. Two existing tests asserted
+that behaviour and were rewritten to assert the failure instead — `TestEngineReplayDivergence`
+(which had tolerated the error with a `t.Logf("expected if divergence bails out")`) and
+`TestCancellationEndToEnd`. Neither lost an assertion; the substance moved from `result` to
+`err`. A cancelled workflow and a diverging replay now end `failed` rather than `done`.
+
+Traps were never affected and still are not: fuel and epoch exhaustion reach the resource-limit
+check, because a trapped guest never reaches `cleat_complete` at all. It was specifically the
+guest that stopped cleanly and *said* it had failed that was not believed.
+
+**Regression cover.** `TestGuestReturnedErrorIsAFailureNotAResult` runs `basic.PlaceOrder` with
+an empty cart — a workflow that returns an error before touching a durable call, so no service,
+database or crash is involved in reproducing it. Restoring the old precedence fails it with
+`result = {"error":"cart is empty"}` and a nil error, which is the defect stated exactly.
+
+**Cross-stream:** `engine/backend_wasmtime.go` is WS-3's. The change is a swapped precedence
+and a comment; neither in-flight WS-3 branch touches the file.
 
 Phase E's *resolver* half has since landed, which shrinks how often this matters: an ambiguity
 a resolver can settle never reaches the workflow as an error at all.
@@ -5843,3 +5910,50 @@ Untrack, extend `.gitignore`. This is also why line-counting tools report nonsen
 - The Java SDK, which has no Go-side cross-language e2e test comparable to Python's
   (`engine/python_wasm_e2e_test.go`) or AssemblyScript's — verify independently before
   treating it as a production target.
+
+---
+
+### 3.23 A guest that returned an error is reported as a "wasm trap" — 🔴 **OPEN** (WS-2, found 2026-08-05)
+
+`resolveWasmTrap` (`engine/dwarf_trap.go:19`) prefixes `wasm trap: ` onto **any** non-empty
+message reaching `executor.go:151`, and `executor.go` wraps that again. An operator whose
+workflow simply returned an error now reads:
+
+```
+host: workflow <id>: execution failed: wasm trap: host: export "three_charges" failed: <their error>
+```
+
+Two `host:` prefixes and a claim of a trap where there was none — the guest stopped cleanly and
+*said* it had failed. The label sends a reader looking for a memory fault instead of at their
+own error text.
+
+**This was latent until §3.22.** Before it, a guest-returned error never reached this path — it
+was returned as a success — so everything arriving here genuinely was a trap and the
+unconditional prefix was right. §3.22 introduced a second class of error to a function that
+labels all of them the same, so this is that change's debt, not a pre-existing defect.
+
+Not fixed there because the fix belongs in `engine/executor.go`, which is WS-3's *and* is
+touched by their in-flight `fix/ws3-defers-on-fenced-backend`. `engine/dwarf_trap.go` is
+unowned, but `resolveWasmTrap` takes a `string`, so the "is this actually a trap" question can
+only be asked at the executor call site. Shape: a sentinel error type from the backend, checked
+with `errors.As` before the trap envelope is applied.
+
+### 3.24 An ambiguous outcome is classified `unknown` — 🔴 **OPEN** (WS-2, found 2026-08-05)
+
+`engine.ErrAmbiguous` (`engine/errors.go:30`) has existed since the first commit and
+`NewAmbiguousError` is called by nothing but its own test. A workflow that ends because it could
+not determine whether a charge happened is stored with `error_code = 'unknown'` — the same value
+as every other engine-produced failure — so nothing can query for the one class that needs a
+human to go and look at the external service.
+
+Unblocked by §3.22 and cheap: `cmd/cleat-worker/setup.go:1703-1707` already does
+`errors.As(err, &ce); errorCode = ce.Code.String()`. What is missing is the engine wrapping the
+ambiguous failure as `*CleatError{Code: ErrAmbiguous}` on its way out, so the existing path
+carries it. That is also the shape §2.35's residual wants, and it needs no ABI change.
+
+Separate and genuinely blocked on the SDKs: a guest-visible `CallErrorAmbiguous`. The guest
+enum (`cleat.CallErrorCode`) has no ambiguous member, so a workflow author's `switch e.Code`
+sees `[0]`, Unknown. Value 6 is free and the wire field is 32 bits, but every SDK carries its
+own copy of the enum — `python-sdk/cleat_sdk/host_calls.py` has a literal `{0..5}` dict — and
+those are WS-3's. Worth doing; not what stands between an ambiguous crash and an operator being
+told about it.
