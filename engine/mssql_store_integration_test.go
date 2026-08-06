@@ -2415,29 +2415,45 @@ func TestMSSQLIntegration_ResolveTenantFromAPIKey(t *testing.T) {
 	// key, and passed because engine/testutil's hand-written MSSQL schema
 	// declared no such foreign key (IMPROVEMENT-PLAN 1.9, 2.71).
 	//
-	// dbo.tenants, not admin.tenants. The shipped schema defines BOTH pairs --
-	// admin.tenants/admin.tenant_api_keys and dbo.tenants/dbo.tenant_api_keys --
-	// and ResolveTenantFromAPIKey (engine/mssql_deployment.go:111) queries
-	// `tenant_api_keys` unqualified, which resolves to dbo for a dbo-default
-	// principal. Seeding admin.tenants therefore satisfied nothing: the insert
-	// below hits dbo.tenant_api_keys, whose fk_api_keys_tenant references
-	// dbo.tenants (001_schema.sql:343-344).
+	// admin.*, qualified, on both statements. The shipped schema creates two
+	// pairs -- admin.tenants/admin.tenant_api_keys and the dbo.* duplicates --
+	// and an unqualified name resolves to dbo. auth.TenantStore, the only
+	// writer in the tree, writes admin.*, so admin.* is where keys actually
+	// live and dbo.* is a table nothing populates. ResolveTenantFromAPIKey
+	// read the unqualified name until this change, which is why API-key tenant
+	// resolution could not succeed on SQL Server at all.
 	tenantUUID := uuid.New()
 	if _, err := db.ExecContext(ctx, `
-		IF NOT EXISTS (SELECT 1 FROM dbo.tenants WHERE tenant_id = @p1)
-		INSERT INTO dbo.tenants (tenant_id, name) VALUES (@p1, @p2)
+		IF NOT EXISTS (SELECT 1 FROM admin.tenants WHERE tenant_id = @p1)
+		INSERT INTO admin.tenants (tenant_id, name) VALUES (@p1, @p2)
 	`, tenantUUID.String(), "tenant-"+tenantUUID.String()); err != nil {
 		t.Fatalf("insert tenant: %v", err)
 	}
 
-	keyHash := sha256Of("my-api-key")
+	// The key material is per-run. A fixed hash leaks across runs:
+	// CleanupMSSQLTestData does not touch admin.tenant_api_keys, so a row from
+	// an earlier run survives, and since key_hash is not unique the lookup
+	// returns whichever tenant got there first. That surfaced as
+	// "tenant UUID = <some other run's uuid>" -- a resolution that succeeded
+	// and answered with stale data, which is worse than failing.
+	keyHash := sha256Of("my-api-key-" + tenantUUID.String())
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO tenant_api_keys (key_hash, tenant_id, description)
+		INSERT INTO admin.tenant_api_keys (key_hash, tenant_id, description)
 		VALUES (@p1, @p2, 'test-key')
 	`, keyHash, tenantUUID.String())
 	if err != nil {
 		t.Fatalf("insert tenant_api_key: %v", err)
 	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM admin.tenant_api_keys WHERE key_hash = @p1`, keyHash); err != nil {
+			t.Errorf("clean up tenant_api_key: %v", err)
+		}
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM admin.tenants WHERE tenant_id = @p1`, tenantUUID.String()); err != nil {
+			t.Errorf("clean up tenant: %v", err)
+		}
+	})
 
 	got, err := store.ResolveTenantFromAPIKey(ctx, keyHash)
 	if err != nil {

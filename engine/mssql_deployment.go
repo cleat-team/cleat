@@ -105,10 +105,24 @@ func (s *MSSQLStore) TraceWorkflow(ctx context.Context, workflowID, traceID stri
 // ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.
 // Uses CONVERT(NVARCHAR(36), tenant_id) to avoid byte-swapping issues with
 // MSSQL UNIQUEIDENTIFIER mixed-endian storage.
+// admin.tenant_api_keys, qualified. This read was unqualified, which resolves
+// against the connecting principal's default schema and so landed on
+// dbo.tenant_api_keys -- a table migrations/mssql/001_schema.sql creates and
+// no production code ever writes. The only writer is auth.TenantStore, which
+// writes admin.tenant_api_keys, so on SQL Server this lookup queried a table
+// that was always empty and API-key tenant resolution could not succeed.
+//
+// PostgreSQL names it admin.tenant_api_keys (engine/store_deployment.go:90);
+// MySQL's unqualified name is correct there, because MySQL puts each tenant in
+// its own database rather than a schema.
+//
+// The dbo.tenants / dbo.tenant_api_keys pair is duplicate schema and should be
+// dropped in a migration -- not done here, because a DROP needs to know what
+// an existing deployment has put in them.
 func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	var tenantIDStr string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT CONVERT(NVARCHAR(36), tenant_id) FROM tenant_api_keys
+		`SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys
 		 WHERE key_hash = @p1 AND revoked_at IS NULL`, keyHash).Scan(&tenantIDStr)
 	if err != nil {
 		return uuid.Nil, err
