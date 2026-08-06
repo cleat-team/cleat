@@ -5427,6 +5427,61 @@ is exactly what this design reverses.
 The embedded runner's dropped closures (finding 1) should be fixed regardless of which way this
 goes: today that API silently does nothing.
 
+### 3.36 errcheck's 283 findings, triaged — 🔶 **1 real defect found, handed to WS-1** (WS-3, 2026-08-05)
+
+The companion to §3.33. `PARALLEL-WORKSTREAMS.md` singles errcheck out as **"the class that
+produced §1.2 and §2.50"** — both real defects, both literally a discarded error return — so
+the question is not whether 283 is a lot but which of them are that class again.
+
+| discarded call | n | verdict |
+|---|---|---|
+| `tx.Rollback` | 152 | **54% of the total.** `defer tx.Rollback()` after a commit returns `ErrTxDone` by design. The idiom, not a finding |
+| `(*json.Encoder).Encode` | 22 | HTTP response writes. A failed write usually means the client left; worth a debug log, not an error |
+| `p.db.Exec` | 18 | **database writes, discarded** — plugins/eventtriggers (7), scheduledbackup (6), webhookingest (5) |
+| `s.ClearStickyWorker` | 14 | see below |
+| `json.Unmarshal` | 14 | proceeding on zero values after a parse failure; worth a pass of its own |
+| `fs.Parse` | 13 | `flag.ExitOnError` already exits. Noise |
+| `s.ReleaseWorkflowConcurrencyKeys` | 12 | **see below — this is the real one** |
+| `w.Write`, `srv.Shutdown`, `db.Exec`, `Row.Scan`, and ~20 others | 38 | long tail; the `Row.Scan` and `ExecContext` members belong with the write group |
+
+**The finding: a failed lock release is invisible on every path but one.**
+
+`ReleaseWorkflowConcurrencyKeys` releases a workflow's concurrency keys — its locks — after a
+terminal transition, and `ClearStickyWorker` clears its worker affinity. Neither logs
+internally on any dialect; both return an error. The callers do three different things:
+
+| caller | treatment |
+|---|---|
+| `engine/db.go:1097` (Postgres) | checked, logged at warn ✅ |
+| `engine/store_lifecycle.go:268-269, 335-336, 393-395` (Postgres) | `_ =`, silent |
+| `engine/mysql_lifecycle.go:271-272, 326-327, 518-519, …` | bare call, silent |
+| `engine/mssql_lifecycle.go:334-335, 398-399, 455-456, …` | bare call, silent |
+
+So the same cleanup gets three treatments, and on MySQL and SQL Server a lock that fails to
+release does so **without a word**. A concurrency key exists to stop two workflows running at
+once; one that is never released blocks its successors until the TTL expires — and §3.34 has
+just finished showing what TTL arithmetic on these keys was doing. This is §2.50's shape
+exactly ("parent close policy fails silently on all three dialects"), one call over.
+
+**Suggested fix, and why it is small:** each dialect repeats the same three-line block
+(`ClearStickyWorker`, `ReleaseWorkflowConcurrencyKeys`, `enforceParentClosePolicy`) at four to
+five sites. Collapsing it into one `bestEffortTerminalCleanup(ctx, workflowID)` per store fixes
+every site at once, logs consistently, and makes the three dialects structurally identical —
+which is the property §1.1 and §2.60 both wished for. `enforceParentClosePolicy` already
+returns nothing and logs internally after §2.50, so only the two error-returning calls need
+handling.
+
+**Handed to WS-1** rather than patched here: `engine/mysql_*.go` and `engine/mssql_*.go` are
+theirs and had three commits land in them today. Same treatment as §3.34, which they picked up
+within the hour.
+
+**Why errcheck still should not be enabled yet.** 152 `tx.Rollback` findings would have to be
+suppressed first, and blanket-suppressing the single most common shape in the codebase to turn
+on a linter is how a guard becomes decoration. The honest sequence is: exclude `tx.Rollback` by
+rule (errcheck supports an exclude list), fix the ~30 write-and-lock findings, then enable and
+see what is left. That is a session, and it is a session with a known payoff, which is more
+than could be said before this table existed.
+
 ### 3.34 A concurrency key's TTL means three different things — ✅ **FIXED** (WS-1, 2026-08-05; found by WS-3)
 
 Found by chasing an intermittent, and the intermittent is the least of it.
