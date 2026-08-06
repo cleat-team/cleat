@@ -121,8 +121,12 @@ func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reason
 		cancelled, reason, err := s.engine.signalStore.PollCancellation(ctx, s.engine.workflowID)
 		if err == nil && cancelled {
 
-			_, _ = s.writeResult(ctx, m, reasonPtr, reason, reasonMaxLen)
-			return int64(uint64(len(reason))<<32 | 1) // cancelled=true
+			// The written count, not len(reason): writeResult truncates to
+			// reasonMaxLen, and reporting the untruncated length tells the
+			// guest to read past what was written. Same defect as the signal
+			// payload one call up, and the same fix.
+			reasonWritten, _ := s.writeResult(ctx, m, reasonPtr, reason, reasonMaxLen)
+			return int64(uint64(reasonWritten)<<32 | 1) // cancelled=true
 		}
 	}
 	return 0
