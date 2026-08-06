@@ -655,8 +655,50 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 // This is called by the worker on workflow exit (after the main entry point
 // returns) to run registered defer callbacks in LIFO order.
 func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName string, input json.RawMessage) (string, error) {
-	// Use the engine's Runtime, or create a temporary one when the wasmtime
-	// backend handles main execution (e.rt is nil in that case).
+	// Run the defer on the same backend the workflow itself runs on, so the
+	// execution fence applies to it.
+	//
+	// This function used to reach straight for e.rt -- the wazero Runtime --
+	// and, when that was nil (which is exactly the case when wasmtime is
+	// handling execution), build a *fresh wazero Runtime* for the defer. So
+	// every deferred callback in cleat ran on wazero whatever the routing table
+	// said, and wazero cannot be bounded for a guest that never calls into the
+	// host: not by WithCloseOnContextDone, which breaks all execution; not by
+	// fuel, which only decrements on function entry; and not by closing the
+	// module, which has no effect on a tight loop. All three measured, see
+	// IMPROVEMENT-PLAN 3.32. A defer that loops held its worker slot until the
+	// process died.
+	//
+	// The handler is whatever ctx carries, which today is nothing: no caller
+	// puts one there, so a defer that makes a host call fails. It already
+	// failed before this change -- by panicking on an unchecked type assertion
+	// and being swallowed -- and now arrives as a recovered error that
+	// runDefers logs.
+	//
+	// Read that as a description of the current implementation, NOT as a rule
+	// about what a defer may do. It is neither: a defer is meant to be a
+	// destructor, with the workflow context needed to actually clean up, and
+	// the design for that is IMPROVEMENT-PLAN 3.35 -- run defers in a
+	// *replayed* instance with a live session, so state is reconstructed the
+	// way it is for any resumption. This change is only the fence, and is
+	// deliberately silent on the semantics rather than fixing them here.
+	//
+	// PerExecution, not the backend itself: Execute stores the handler on the
+	// backend struct, so calling it on the shared root would race a concurrent
+	// workflow execution. executeWithBackend takes the same precaution.
+	if backend := e.backendForWasm(wasmBytes); backend != nil {
+		res, err := backend.PerExecution().Execute(ctx, wasmBytes, deferName, input, handlerFromContextOrNil(ctx))
+		if err != nil {
+			return "", err
+		}
+		if res == nil {
+			return "", nil
+		}
+		return res.Result, nil
+	}
+
+	// No backend for this guest: the CGO-less build, where wazero is the only
+	// runtime there is. Unfenced, and unavoidably so.
 	rt := e.rt
 	if rt == nil {
 		var err error

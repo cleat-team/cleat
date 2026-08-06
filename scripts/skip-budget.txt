@@ -229,16 +229,15 @@ test-go/support	7	# measured: skipped=7 passed=259 with PostgreSQL only
 # Note what did NOT move: TestTenantIsolationOverHTTP_Postgres is absent from
 # this list because CLEAT_TEST_DB is set for this job, so the database-backed
 # tenant isolation test actually runs in CI rather than evaporating.
-# 6 -> 7: TestDefersRunOnTheFencedBackend skips unconditionally, and it is the
-# uncomfortable kind -- not "nobody asked for a resource" but "this is broken
-# and recorded". Every deferred callback runs on wazero regardless of routing,
-# because Engine.RunDefer never consults backendForWasm, and wazero does not
-# fire the execution fence. The test demonstrates it (a defer that never
-# returns is still running 20s into a 1s budget) and is skipped rather than
-# left red or deleted, the same treatment TestPythonWasmEndToEnd had.
-# Unskipping it is the acceptance test for IMPROVEMENT-PLAN 3.32. Drop back to
-# 6 when it goes.
-test-go/commands	7	# measured: TestAPIMetrics, TestHelperProcess, TestRunBuild_PythonTarget_WasmRoundtrip, TestTenantIsolationOverHTTP_{MSSQL,MySQL}, plus the note above
+# 6 -> 7 -> 6. The 7 was TestDefersRunOnTheFencedBackend, skipped as
+# known-broken: every deferred callback ran on wazero regardless of routing,
+# because Engine.RunDefer never consulted backendForWasm, and wazero does not
+# fire the execution fence. That entry said "unskipping it is the acceptance
+# test for IMPROVEMENT-PLAN 3.32", and that is what happened -- RunDefer now
+# routes to the backend, and the test returns in 1.00s against its 1s budget
+# where it previously ran past 20s. Back to a real 6: if defers stop being
+# fenced, this job goes red rather than quietly skipping.
+test-go/commands	6	# measured: TestAPIMetrics, TestHelperProcess, TestRunBuild_PythonTarget_WasmRoundtrip, TestTenantIsolationOverHTTP_{MSSQL,MySQL}
 # 0 and it should stay 0: this job needs nothing but a Go toolchain, so a skip
 # here can only mean the test stopped running.
 test-go/manifests	0	# measured: 3 subtests pass, 0 skip

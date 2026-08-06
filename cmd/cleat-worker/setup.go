@@ -455,23 +455,23 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 	rt.Metrics = w.Metrics
 	defer rt.Close(w.ctx)
 
-	// No backends registered, and registering them here would change nothing:
-	// Engine.RunDefer does not consult backendForWasm at all. It reaches
-	// straight for e.rt, the wazero Runtime, and when that is nil -- which is
-	// exactly the case when wasmtime is handling execution -- it builds a
-	// fresh wazero Runtime for the defer.
+	// Register the same backends the workflow itself ran on, so its defers are
+	// fenced the same way it was.
 	//
-	// So every deferred callback in cleat runs on wazero, on every path,
-	// whatever the routing table says, and wazero is where the execution fence
-	// does not fire (IMPROVEMENT-PLAN 2.28). Demonstrated, not read:
-	// TestDefersRunOnTheFencedBackend runs a defer export that never returns
-	// under a 1s budget and it is still running 20s later.
+	// This line was added and then reverted once, and the sequence is worth
+	// keeping: on its own it changed nothing, because Engine.RunDefer did not
+	// consult backendForWasm at all -- it reached straight for the wazero
+	// Runtime. Registering backends for a lookup nobody performed would have
+	// read like a fix without being one, so it came back out
+	// (IMPROVEMENT-PLAN 3.32). RunDefer now performs that lookup, which is what
+	// makes this line do something.
 	//
-	// Left as-is deliberately. Routing defers through a backend is not a
-	// one-line change -- defers today execute with no HostHandler in ctx, so
-	// what a defer body is allowed to do is an open question, not a detail.
-	// See IMPROVEMENT-PLAN 3.32.
-	eng := engine.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL})
+	// When the wasmtime backend is unavailable -- the CGO-less build --
+	// w.wasmtimeBackend is a nil interface, backendForWasm returns nil, and
+	// RunDefer falls back to rt below, which is the pre-existing behaviour.
+	eng := engine.NewEngine(rt,
+		&dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL},
+		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend))
 	eng.Metrics = w.Metrics
 
 	// Collect defer IDs sorted by step number for LIFO ordering.

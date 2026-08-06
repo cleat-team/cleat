@@ -20,6 +20,18 @@ func handlerFromContext(ctx context.Context) HostHandler {
 	return ctx.Value(handlerContextKey{}).(HostHandler)
 }
 
+// handlerFromContextOrNil is handlerFromContext for callers that can be given a
+// context without one.
+//
+// handlerFromContext asserts unchecked, which is right inside a host function:
+// reaching one without a session is a bug, and a panic is the honest report.
+// RunDefer is not that -- defers legitimately run with no session today (see
+// IMPROVEMENT-PLAN 3.32), so it needs to ask rather than assume.
+func handlerFromContextOrNil(ctx context.Context) HostHandler {
+	h, _ := ctx.Value(handlerContextKey{}).(HostHandler)
+	return h
+}
+
 // HostHandler is the per-execution session interface. Each method corresponds
 // to one host function import from //go:wasmimport env <name>.
 type HostHandler interface {

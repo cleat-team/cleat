@@ -5193,7 +5193,7 @@ than verified") resolves by deletion rather than by a test. Writing a fence test
 would be work spent on code that is on its way out — which is worth saying explicitly, because
 "add the missing test" is the reflex the rest of this document encourages.
 
-### 3.32 Every deferred callback runs on wazero, unfenced — 🔴 **OPEN** (found by WS-3, 2026-08-05)
+### 3.32 Every deferred callback runs on wazero, unfenced — ✅ **FIXED** (WS-3, 2026-08-05)
 
 `Engine.RunDefer` does not consult `backendForWasm`. It reaches straight for `e.rt`, the
 wazero Runtime, and when that is nil — which is exactly the case when wasmtime is handling
@@ -5278,6 +5278,45 @@ runs defers on the **live module with the session's handler present**, so host c
 defer work there; `runDefers` runs them on a fresh module with no handler, where the same call
 panics and is swallowed. Whatever is decided should make those two agree, because today
 whether your defer can call a service depends on which way the workflow failed.
+
+#### 3.32 resolution — option 1, the fence without the contract (2026-08-05)
+
+`Engine.RunDefer` now asks `backendForWasm` and, when a backend serves the guest, runs the
+defer through it. That is the whole fix; the analysis above is what made it a one-screen
+change rather than a guess.
+
+**Measured on the acceptance test this item named:** against a 1s budget,
+`TestDefersRunOnTheFencedBackend` went from *still running after 20s* to returning in
+**1.00s**. It is unskipped, and `test-go/commands` drops 7 → 6.
+
+**The handler question is left open on purpose, and §3.35 is where it is answered.** Defers
+still run with no `HostHandler`, exactly as before, so a defer that makes a host call still
+fails. What changed is only *how*: it used to panic on an unchecked type assertion and be
+swallowed; it now arrives as a recovered error that `runDefers` logs. That is a statement about
+today's implementation and not a rule — a defer is meant to be a destructor with the context to
+clean up, and §3.35 designs that. Verified rather than assumed — a defer body calling
+`cleat_workflow_id` with a nil handler returns
+
+```
+host: wasmtime panic in "cleat_defer_defer-1": runtime error: invalid memory address or nil pointer dereference
+```
+
+which is recovered by the `fn.Call` guard, not a process kill. That is what made option 1
+viable: the 54-method rejecting handler and the live-session route are both still open, and
+both are now decisions about *what a defer may do* rather than prerequisites for bounding it.
+
+**Two details worth keeping:**
+
+- `PerExecution()`, not the backend itself. `Execute` stores the handler on the backend
+  struct, so calling it on the shared root would race a concurrent workflow.
+  `executeWithBackend` already took this precaution; RunDefer had to as well.
+- `cmd/cleat-worker`'s `runDefers` registers backends again. That line was added and reverted
+  once — on its own it changed nothing, because RunDefer performed no lookup, and shipping it
+  would have read as a fix without being one. It does something now.
+
+**Still true, and still 3.32's open tail:** `RunDeferCompiled` takes a pre-compiled wazero
+module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
+the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
 ### 3.35 What `defer` is supposed to be — 📐 **DESIGN, not yet implemented** (WS-3, 2026-08-05)
 
