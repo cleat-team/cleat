@@ -193,7 +193,7 @@ test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
 # 6 -> 7: TestMSSQLPayloadConstraintsAcceptJSONScalars (3.18), which applies the
 # real migrations to a scratch database and needs a live SQL Server. Runs for
 # real in multi-db-ci.yml's test-mssql job, which has one.
-test-go/support	7	# measured: skipped=7 passed=259 with PostgreSQL only
+test-go/support	11	# was 7; +4 for 3.37's MSSQL-gated admin-role tests in ./migration/
 # The four in ./migration/ are all "this job configures PostgreSQL only":
 #
 #   TestIdempotencyTenantMigrationPreservesExistingKeys/{mysql,mssql}
