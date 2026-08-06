@@ -577,11 +577,39 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 				return &ExecResult{Suspended: true}, nil
 			}
 
+			// completeErr is checked before completeResult, and returned as an
+			// error rather than as a result.
+			//
+			// A failing Go guest reports itself twice. cleatDispatch's error
+			// branch calls cleat_complete(1, err) (wasm/exports.go) and *then*
+			// returns the same error as its []byte result; the generated
+			// main() re-reports that return value with cleat_complete(0, ...)
+			// unconditionally, having no way to tell that the dispatch failed
+			// (wasm/build.go). Both reports arrive here, in the two variables
+			// registerCleatComplete correctly keeps them apart in -- and
+			// preferring completeResult threw the status bit away. Every Go
+			// workflow that returned an error was handed back as a success, so
+			// the worker took the success path and stored status='done' with
+			// the error text sitting in the result column.
+			//
+			// The order is not a new convention: it is what the two paths that
+			// already get this right do. The direct-export branch below (every
+			// non-Go guest) and the wazero backend (runtime.go) both surface
+			// completeErr as a Go error. This branch -- Go on wasmtime, the
+			// primary language on the primary backend -- was the one that did
+			// not.
+			//
+			// Traps were never affected: fuel and epoch exhaustion reach the
+			// resource-limit check below, because a trapped guest never gets to
+			// call cleat_complete at all. It was specifically the guest that
+			// stopped cleanly and *said* it had failed that was not believed.
+			//
+			// See IMPROVEMENT-PLAN.md 3.22.
+			if completeErr != "" {
+				return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, guestErrorText(completeErr))
+			}
 			if completeResult != "" {
 				return &ExecResult{Result: completeResult, Suspended: false}, nil
-			}
-			if completeErr != "" {
-				return &ExecResult{Result: completeErr, Suspended: false}, nil
 			}
 			// Neither cleat_complete outcome was recorded. Normally that
 			// means the module hasn't reached cleat_complete yet but is

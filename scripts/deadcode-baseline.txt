@@ -22,6 +22,7 @@ engine	func Dialect.timestampDiffExpr
 engine	func Dialect.workflowInstanceColumnsExtra
 engine	func contextWithRawMemBuf
 engine	func eventStreamToJSON
+engine	func guestErrorText
 engine	func isDeadlockError
 engine	func isDuplicateKeyError
 engine	func isLockWaitTimeout

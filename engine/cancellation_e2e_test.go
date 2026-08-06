@@ -101,12 +101,11 @@ func TestCancellationEndToEnd(t *testing.T) {
 
 	input := []byte(`{"userID":"user-1","cart":[{"sku":"ABC-123","quantity":1}]}`)
 	result, _, _, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
-	if err != nil {
-		t.Fatalf("Execute place_order: %v", err)
-	}
 
 	// The side-effect assertion. place_order makes seven durable calls when it
-	// runs to completion; a cancelled workflow must make none.
+	// runs to completion; a cancelled workflow must make none. Checked before
+	// the outcome assertions: if cancellation stopped reaching the guest, the
+	// side effects are the failure worth reading first.
 	if len(caller.calls) != 0 {
 		ops := make([]string, 0, len(caller.calls))
 		for _, c := range caller.calls {
@@ -116,8 +115,19 @@ func TestCancellationEndToEnd(t *testing.T) {
 			len(caller.calls), strings.Join(ops, ", "))
 	}
 
-	if !strings.Contains(result, "cancelled") {
-		t.Errorf("result does not report cancellation: %q", result)
+	// Cancellation arrives as an error, not as a result that mentions the word.
+	// This used to assert the latter, because a Go guest returning an error was
+	// reported to the caller as a success carrying the message -- so a
+	// cancelled workflow was stored with status='done'. See
+	// IMPROVEMENT-PLAN 3.22.
+	if err == nil {
+		t.Fatalf("Execute of a cancelled workflow succeeded, result = %q", result)
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("error does not report cancellation: %v", err)
+	}
+	if result != "" {
+		t.Errorf("Execute returned both an error and the result %q", result)
 	}
 }
 
