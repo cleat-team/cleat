@@ -960,7 +960,7 @@ func TestMSSQLStore_GetActiveInstanceCountsByVersion_BeginTxError(t *testing.T) 
 func TestMSSQLStore_ResolveTenantFromAPIKey(t *testing.T) {
 	expectedUUID := uuid.New()
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM tenant_api_keys", data: [][]driver.Value{{expectedUUID.String()}}},
+		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{{expectedUUID.String()}}},
 	}, nil)
 	defer db.Close()
 
@@ -976,7 +976,7 @@ func TestMSSQLStore_ResolveTenantFromAPIKey(t *testing.T) {
 
 func TestMSSQLStore_ResolveTenantFromAPIKey_Unknown(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM tenant_api_keys", data: [][]driver.Value{}},
+		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{}},
 	}, nil)
 	defer db.Close()
 
@@ -992,7 +992,7 @@ func TestMSSQLStore_ResolveTenantFromAPIKey_Unknown(t *testing.T) {
 
 func TestMSSQLStore_ResolveTenantFromAPIKey_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM tenant_api_keys", err: errors.New("connection lost")},
+		{match: "FROM admin.tenant_api_keys", err: errors.New("connection lost")},
 	}, nil)
 	defer db.Close()
 
@@ -1000,6 +1000,16 @@ func TestMSSQLStore_ResolveTenantFromAPIKey_QueryError(t *testing.T) {
 	got, err := store.ResolveTenantFromAPIKey(context.Background(), []byte("any-key"))
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	// Name the injected error rather than accepting any error. `err != nil`
+	// alone cannot tell "the query failed as the mock was told to make it fail"
+	// from "the mock never matched the query, so the store found no rows" --
+	// and the second is what was happening: the match string said
+	// `FROM tenant_api_keys` while the query says `FROM admin.tenant_api_keys`,
+	// so this test passed for three commits without the mock ever firing.
+	if !strings.Contains(err.Error(), "connection lost") {
+		t.Errorf("error = %v, want it to carry the injected \"connection lost\" -- "+
+			"a different error means the mock did not match the query", err)
 	}
 	if got != uuid.Nil {
 		t.Errorf("expected uuid.Nil on error, got %v", got)

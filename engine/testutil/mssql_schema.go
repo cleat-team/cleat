@@ -458,8 +458,15 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 	db = MSSQLAdminDB(t, db)
 
 	// Order matters due to FK constraints — delete child tables first.
+	//
+	// Entries may be schema-qualified, and tenant_api_keys has to be: this
+	// branch drops the duplicate dbo pair, so the only such table left is
+	// admin.tenant_api_keys. Unqualified, the DELETE resolved against the
+	// connecting principal's default schema and failed with "Invalid object
+	// name" -- while the existence check above it passed, because sys.tables is
+	// keyed on name alone and happily found the admin one.
 	tables := []string{
-		"tenant_api_keys",
+		"admin.tenant_api_keys",
 		"workflow_update_requests",
 		"workflow_promises",
 		"workflow_signals",
@@ -475,14 +482,23 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 	}
 
 	for _, table := range tables {
+		// Split "admin.tenant_api_keys" so the existence check can match on
+		// schema as well as name. Checking on name alone is what let the
+		// unqualified entry look present and then fail to delete.
+		schema, name := "dbo", table
+		if i := strings.IndexByte(table, '.'); i >= 0 {
+			schema, name = table[:i], table[i+1:]
+		}
 		var exists int
-		err := db.QueryRow("SELECT COUNT(1) FROM sys.tables WHERE name = @p1", table).Scan(&exists)
+		err := db.QueryRow(`SELECT COUNT(1) FROM sys.tables t
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = @p1 AND t.name = @p2`, schema, name).Scan(&exists)
 		if err != nil {
 			t.Logf("cleanup: check table %s: %v", table, err)
 			continue
 		}
 		if exists > 0 {
-			if _, err := db.Exec(fmt.Sprintf("DELETE FROM [%s]", table)); err != nil {
+			if _, err := db.Exec(fmt.Sprintf("DELETE FROM [%s].[%s]", schema, name)); err != nil {
 				t.Logf("cleanup: delete from %s: %v", table, err)
 			}
 		}
