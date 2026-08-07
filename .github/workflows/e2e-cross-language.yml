@@ -16,12 +16,17 @@
 #     removed, both pass.
 #   - Each Go test handles its own WASM compilation; the CI only provides
 #     the toolchains and dependencies, avoiding redundant double-builds.
+#   - The push trigger covers main and develop only. It carried "feature/**"
+#     until 2026-08-07, which ran the whole job a second time on every push to
+#     a feature branch that already had a PR open -- the pull_request trigger
+#     covers those. `Cross-Language WASM E2E` became a required check on
+#     2026-08-06, so the duplicate was the more expensive of the two.
 # ---------------------------------------------------------------------------
 name: Cross-Language E2E
 
 on:
   push:
-    branches: [main, develop, "feature/**"]
+    branches: [main, develop]
   pull_request:
     branches: [main, develop]
 
