@@ -38,16 +38,22 @@
 # support; it was fixed in #374 before these became required, because a required
 # check that fails on a slow runner teaches everyone to re-run it.
 #
-# OPEN, and not changed here: the push trigger below still carries "feature/**",
-# so every push to a feature branch with a PR open runs all three jobs twice --
-# the pull_request trigger already covers them, and the concurrency group keys on
-# github.ref, which differs between the two events and so does not dedupe them.
-# The identical trigger was removed from e2e-cross-language.yml in #372 on the
-# grounds that the duplicate cost more than the pre-PR signal was worth. The same
-# argument now applies here with more force, since these jobs block a merge. It
-# is left alone deliberately rather than by oversight: dropping it trades away
-# pre-PR signal on feature branches, which is a call for the owner and not a
-# side effect of making the jobs required.
+# The push trigger covers main and develop only. It carried "feature/**" until
+# 2026-08-07, which ran all three jobs a second time on every push to a feature
+# branch that already had a PR open -- the pull_request trigger covers those, and
+# the concurrency group keys on github.ref, which differs between the two events
+# and so does not dedupe them. Measured before the change: 17 of the last 200
+# runs were feature-branch pushes, at 200s + 216s + 95s of runner time apiece,
+# each with its own MySQL and SQL Server service containers. Re-derive:
+#
+#   gh run list --workflow=multi-db-ci.yml --limit 200 --json event,headBranch \
+#     --jq '[.[] | select(.event=="push" and (.headBranch|startswith("feature/")))] | length'
+#
+# The cost this trades away is pre-PR signal on a feature branch with no PR open
+# yet -- accepted by the owner on 2026-08-07, on the same grounds as #372, which
+# removed the identical trigger from e2e-cross-language.yml. The grounds are
+# stronger here: two of these jobs now block a merge, so the run that matters is
+# the pull_request one.
 #
 # `Plugin Migrations`, the third job here, is deliberately NOT required -- see
 # the note above that job.
@@ -63,7 +69,7 @@ name: Multi-DB CI
 
 on:
   push:
-    branches: [main, develop, "feature/**"]
+    branches: [main, develop]
   pull_request:
     branches: [main, develop]
 
