@@ -1,0 +1,160 @@
+# ---------------------------------------------------------------------------
+# Tier 2 Gate
+#
+# Runs scripts/tier2-gate.sh, which enforces tiers.yaml's tier-2 contract:
+# "Must run. May fail, against known_failures -- a list that can only shrink."
+#
+# Until 2026-08-07 nothing ran tier 2 at all:
+#
+#   grep -rn "tier2" .github/workflows/   ->  only comments inside tier1-gate.yml
+#
+# Its components were prose -- id, why, open_items -- with no packages field, so there
+# was nothing a script could execute. WORKSTREAM.md sets out three states and says the
+# point is "to be able to say which is which and have it be true"; tier 1 became true on
+# 2026-08-07, and this is the same move for tier 2.
+#
+# ---------------------------------------------------------------------------
+# Why this is NOT modelled on tier1-gate.yml's strictness, and why that is correct:
+#
+# Tier 1 forbids known failures, so its gate fails on any failure at all. Tier 2 permits
+# them against a list, so this gate asks three different questions -- did every declared
+# pattern run anything, is every failure already known, and does every known failure
+# still fail. That third one is what makes "can only shrink" real rather than
+# aspirational: an entry that starts passing fails the gate until it is deleted, because
+# a stale entry is a false statement in the manifest that hides the next regression in
+# the same test.
+#
+# All three were falsified before this shipped, on ./examples/... :
+#   delete a known_failure entry  -> "NEW failures, not in tier2.known_failures"
+#   list a test that passes       -> "stale ... (now passes)"
+#   declare ./monitoring/...      -> "declared patterns that ran ZERO tests"
+#
+# ---------------------------------------------------------------------------
+# Why tier 2 MAY take toolchain dependencies that D5 forbade tier 1:
+#
+# D5 kept Rust, Node, a JDK and Gradle out of the tier-1 job because tier 1's contract
+# ("must pass; a skip is a failure; that is a release blocker") turns every registry it
+# touches into a release blocker -- and on 2026-08-06 alone, Maven Central answered 429
+# and 403 on unrelated PRs. Tier 2's contract does not: it may fail. So the risk that was
+# disqualifying at tier 1 is acceptable here. That is the reason a tier-2 job is a
+# different proposition from the one D5 rejected, rather than a reversal of it.
+#
+# This first cut still only covers the Go surface. tests/cross-language and
+# tests/plugin-harness pass locally but need the full Rust+Java+AssemblyScript toolchain
+# in the job, and are named in tiers.yaml as the next step.
+# ---------------------------------------------------------------------------
+name: Tier 2 Gate
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tier2:
+    name: Tier 2 Gate
+    runs-on: ubuntu-latest
+    # The gate ran 1567 tests in six patterns plus one module when this was written,
+    # with -p 1, in well under two minutes of test time locally. 30 is generous; a gate
+    # that times out is indistinguishable from one that fails.
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cleat
+          POSTGRES_PASSWORD: cleat
+          POSTGRES_DB: cleat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: cleat
+          MYSQL_DATABASE: cleat
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      # mssql/server:2022, deliberately not the azure-sql-edge image used in local
+      # sandboxes. Measured 2026-08-07 against edge: plugins/kvstore and
+      # plugins/featureflags fail their MultiBackend tests with
+      #   tls: failed to parse certificate from server: x509: negative serial number
+      # which is Go 1.26 enforcing RFC 5280 against that image's self-signed cert, not a
+      # cleat defect. The tier-1 gate already runs green against server:2022, so this
+      # picks the image that is known to work rather than importing a local artifact.
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
+
+    env:
+      # Explicit, not inherited. CGO_ENABLED=0 removes NewWasmtimeBackend (//go:build
+      # cgo) and silently runs on wazero -- and tier 2 names wazero as a component in its
+      # own right, so a run that lands there by accident measures the wrong thing. The
+      # gate checks this too; pinning it means the check never has to fire.
+      CGO_ENABLED: "1"
+
+      # Both PostgreSQL names -- the tree carries two conventions for the same DSN and
+      # setting only one silently skips everything keyed on the other.
+      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
+      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
+      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Create the cleat database on SQL Server
+        run: |
+          docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server:2022-latest')" \
+            /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
+            -Q "IF DB_ID('cleat') IS NULL CREATE DATABASE cleat"
+
+      # No continue-on-error. The gate's own exit status is this job's exit status. Tier 2
+      # tolerating known failures is expressed in tiers.yaml, where it is reviewable --
+      # not here, where it would silently tolerate everything.
+      - name: Tier 2 gate
+        run: scripts/tier2-gate.sh
+
+      - name: Upload the tier-2 log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier2-gate-${{ github.sha }}
+          path: |
+            tier2-gate.log
+            tier2-gate.json
+          retention-days: 30

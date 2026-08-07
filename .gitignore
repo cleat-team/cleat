@@ -112,3 +112,8 @@ examples/*/build/
 # root by the workflow steps that check skip budgets.
 *-report.json
 tier-gate.log
+
+# scripts/tier2-gate.sh output
+tier2-gate.log
+tier2-gate.json
+.tier2-verdict
