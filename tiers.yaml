@@ -393,11 +393,79 @@ tier2:
       why: tests/cluster, tests/scale, tests/soak, tests/exhaustion — need compose stacks.
       open_items: ["tests/exhaustion fails hard rather than skipping when the stack is absent"]
 
+  # What the gate runs. Read by scripts/tier2-gate.sh; the components above are prose and
+  # nothing could execute them, which is why tier 2 spent its whole life as a claim.
+  #
+  # Deliberately NOT here:
+  #   ./monitoring/...   monitoring/prometheus is the only Go package under it and has no
+  #                      _test.go file at all (measured 2026-08-07). Listing it would make
+  #                      the gate permanently red on "ran zero tests" for a condition
+  #                      nobody is about to change. It is named here so the absence is on
+  #                      the record rather than achieved by omission.
+  #   ./benchmarks/...   tier 3 (comparative-benchmarks).
+  #   ./tests/exhaustion/...   Hard-FAILS rather than skipping when the compose stack is
+  #                            absent, and it hardcodes postgres://cleat:cleat@localhost:5432
+  #                            independent of CLEAT_TEST_DB. That is its own open item
+  #                            (see cluster-and-scale above), and it has to be fixed before
+  #                            the suite can be gated rather than tracked as a tolerated
+  #                            failure forever.
+  #   ./tests/soak/...         Behind `//go:build soak_test`, so `go test ./tests/...`
+  #                            reports "matched no packages" -- not "no test files".
+  #                            Measured 2026-08-07: with `-tags soak_test SOAK_DURATION=15s`
+  #                            it passes (7222/7222 workflows). Gating it needs a tag and a
+  #                            duration, which is a workflow decision, not a manifest one.
+  #   ./tests/cross-language/  Pass locally but need the full Rust+Java+AssemblyScript
+  #   ./tests/plugin-harness/  toolchain in the job. Deferred to the next PR so this one
+  #                            ships a gate that has been run end to end.
+  packages:
+    - ./plugins/...
+    - ./examples/...
+    - ./migration/...
+    - ./tests/manifests/...
+    - ./tests/cluster/...
+    - ./tests/scale/...
+
+  # Separate Go modules, tested from inside their own directory -- `go test ./cleat/...`
+  # from the root fails with "main module does not contain package".
+  #
+  # Deliberately NOT here:
+  #   wasm-demo   Measured 2026-08-07: it does not compile. WorkflowInstance, Worker and
+  #               main are each declared twice in package `worker`, across
+  #               worker/versioned_loader.go and worker/failover_worker.go, both last
+  #               touched by c26c332 (2026-08-02). It has no _test.go files anywhere, and
+  #               no workflow references it -- scripts/ci-check.sh builds it and nothing
+  #               invokes that script. Listing it would make the gate red on a broken
+  #               build with no tests behind it. It needs a fix or a deletion, not a tier.
+  modules:
+    - dir: cleat/backendkit
+      why: >-
+        Has its own go.mod, so the `dir: cleat, path: ./...` entry in ci.yml's test-go
+        matrix does not descend into it. Measured 2026-08-07: builds and passes, and no
+        workflow references it at all.
+
   known_failures:
-    # Every entry needs an item reference and an owner. This list may only shrink.
-    - package: examples/dag
-      item: "§3.14"
-      note: 6 tests; AwaitAnyChild called outside a workflow context. Small; fix or park.
+    # "importpath::TestName", one per line, matched exactly against `go test -json`.
+    # Flat strings rather than nested package/tests blocks so the gate can read this with
+    # awk: pyyaml is not installed on the runners, and a gate that cannot parse its own
+    # manifest is worse than a manifest that repeats a prefix.
+    #
+    # THIS LIST MAY ONLY SHRINK. Adding to it needs a written justification in the PR
+    # (tier2.contract). scripts/tier2-gate.sh enforces both directions -- a failure not
+    # listed here fails the gate, and an entry here that no longer fails ALSO fails the
+    # gate, because a stale entry is a false statement that hides the next regression in
+    # the same test.
+    #
+    # §3.14 -- owner: unassigned. Measured 2026-08-07: all six fail with
+    #   "durable: AwaitAnyChild can only be called from within a workflow function
+    #    (the HostCalls runtime was not initialized)"
+    # The package's other 8 tests pass; these 6 are the ones that drive Pipeline/Execute
+    # through cleattest.NewTestEnv(). Small; fix or park.
+    - "examples/dag::TestPipelineWithDurableTest"
+    - "examples/dag::TestPipelineTaskError"
+    - "examples/dag::TestDAGExecuteDiamond"
+    - "examples/dag::TestDAGExecuteLinearChain"
+    - "examples/dag::TestDAGExecuteDisconnectedNodes"
+    - "examples/dag::TestDAGExecuteMaxParallelism"
 
 tier3:
   name: parked
