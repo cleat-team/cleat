@@ -414,9 +414,16 @@ tier2:
   #                            Measured 2026-08-07: with `-tags soak_test SOAK_DURATION=15s`
   #                            it passes (7222/7222 workflows). Gating it needs a tag and a
   #                            duration, which is a workflow decision, not a manifest one.
-  #   ./tests/cross-language/  Pass locally but need the full Rust+Java+AssemblyScript
-  #   ./tests/plugin-harness/  toolchain in the job. Deferred to the next PR so this one
-  #                            ships a gate that has been run end to end.
+  #   ./tests/cross-language/  Covered by `gated_by` below instead, and deliberately so.
+  #   ./tests/plugin-harness/  #368 said these were "deferred to the next PR" because they
+  #                            need the Rust+Java+AssemblyScript toolchain. That was wrong
+  #                            about the reason: dedicated jobs already run both, with a
+  #                            skip budget of ZERO. Pulling them in here would be a
+  #                            downgrade -- tier2.rules.skips_allowed is true, so this gate
+  #                            tolerates a skip that check-skip-budget.sh fails on -- plus
+  #                            about five minutes of duplicated toolchain install per run.
+  #                            The gap was never that they do not run. It was that nothing
+  #                            blocked on the result.
   packages:
     - ./plugins/...
     - ./examples/...
@@ -424,6 +431,63 @@ tier2:
     - ./tests/manifests/...
     - ./tests/cluster/...
     - ./tests/scale/...
+
+  # Tier-2 suites gated by a dedicated job rather than by scripts/tier2-gate.sh, because
+  # that job already enforces something STRICTER than this gate would.
+  #
+  # Both entries below run under `scripts/check-skip-budget.sh <name> <report.json>` with a
+  # budget of 0, and e2e-cross-language.yml additionally sets
+  # CLEAT_REQUIRE_TOOLCHAINS=rust,python,java,assemblyscript so an absent toolchain is a
+  # Fatal rather than a skip. tier2.rules.skips_allowed is true, so routing these through
+  # tier2-gate.sh would permit skips that their own jobs currently fail on.
+  #
+  # These jobs have run green on develop on every commit measured 2026-08-07 (93722c1,
+  # 59a55b7, a21de13, fcf82e0, 422ad6a) and were made required status checks on the same
+  # day. Re-derive both halves:
+  #
+  #   gh run list --workflow=e2e-cross-language.yml --branch develop --limit 6 \
+  #     --json conclusion,headSha --jq '.[]|"\(.conclusion) \(.headSha[0:7])"'
+  #   gh api repos/cleat-team/cleat/branches/develop/protection/required_status_checks \
+  #     --jq '.contexts[]'
+  #
+  # scripts/tier2-gate.sh asserts that every `job:` named here still exists in some file
+  # under .github/workflows/. That is the anti-rot check: a renamed job would otherwise
+  # leave this mapping claiming coverage that no longer exists, and a required context
+  # that nothing reports blocks every pull request while looking like a slow check.
+  # It cannot check that the job is still *required* -- that lives in branch protection,
+  # not in the tree -- so the command above is the manual half.
+  gated_by:
+    - suite: ./tests/cross-language/...
+      job: "Cross-Language WASM E2E"
+      workflow: .github/workflows/e2e-cross-language.yml
+      why: >-
+        Seven Go<->Rust cross-replay tests: execute under one runtime, replay the recorded
+        history under the other, and detect divergence across the boundary. Needs cargo
+        plus wasm32-unknown-unknown, which this job installs and tier2-gate.yml does not.
+    - suite: ./tests/plugin-harness/...
+      job: "Layer 1 — SDK (cleattest)"
+      workflow: .github/workflows/plugin-harness-ci.yml
+    - suite: ./tests/plugin-harness/...
+      job: "Layer 2 — WASM Integration"
+      workflow: .github/workflows/plugin-harness-ci.yml
+      why: >-
+        The Go, Rust, AssemblyScript and Python guest plugins. Its skip budget is what
+        keeps a missing toolchain from reading as a pass.
+    - suite: ./tests/plugin-harness/...
+      job: "Layer 3 — Multi-DB"
+      workflow: .github/workflows/plugin-harness-ci.yml
+      why: >-
+        Runs TestPluginCalls_MultiDB, which is the ONLY test under ./tests/... that touches
+        MySQL or SQL Server. Measured 2026-08-07: it carries an unconditional t.Skip for a
+        wazero v1.11.1 nil-Sys-context panic, so that coverage is currently absent behind a
+        green ok. Gating the job does not fix that -- see the open item on backend-wazero --
+        but it stops the next regression here from being invisible too.
+    - suite: ./tests/plugin-harness/...
+      job: "Blobstore S3 Round-Trip"
+      workflow: .github/workflows/plugin-harness-ci.yml
+      why: >-
+        Self-contained; brings up postgres and minio as service containers. Note the minio
+        image is pinned to :latest, which is a real fragility now that this gates merges.
 
   # Separate Go modules, tested from inside their own directory -- `go test ./cleat/...`
   # from the root fails with "main module does not contain package".
