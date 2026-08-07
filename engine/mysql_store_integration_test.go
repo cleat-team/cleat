@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,46 @@ func mysqlIntegrationStore(t *testing.T) (*MySQLStore, func()) {
 		cleanupMySQLTestTables(t, store)
 		db.Close()
 	}
+}
+
+// mysqlTestBaseDSN returns CLEAT_TEST_MYSQL with the database name stripped,
+// which is the shape MySQLStoreFactory wants: it appends a per-tenant database
+// to it, so the base must carry the address and parameters and no path.
+//
+// Tests used to hardcode "root:cleat@tcp(127.0.0.1:3306)/" here, after
+// checking that CLEAT_TEST_MYSQL was set. That is not a shortcut, it is a test
+// that demands a configuration and then ignores it: it passes wherever MySQL
+// happens to sit on 127.0.0.1:3306, which is true of a developer's laptop and
+// of the CI service container, and false of anything else. Pointed at a MySQL
+// on another host or port -- which is how scripts/tier-gate.sh runs, from
+// inside the Linux container the Python toolchain requires -- it failed with
+//
+//	ping tenant db cleat_00000000_...: dial tcp 127.0.0.1:3306: connect: connection refused
+//
+// while the configured server was up and every other MySQL test passed
+// against it.
+//
+// This is the inverse of MySQLStoreFactory.buildTenantDSN and duplicates
+// cmd/cleat-worker's mysqlBaseDSN, which is in package main and cannot be
+// imported here. The duplication is worth a note rather than a fix in a test
+// change: the pair belongs next to buildTenantDSN in engine/mysql_store.go,
+// where the round trip could be property-tested.
+func mysqlTestBaseDSN(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("CLEAT_TEST_MYSQL")
+	if dsn == "" {
+		t.Fatal("mysqlTestBaseDSN called without CLEAT_TEST_MYSQL set")
+	}
+	slash := strings.LastIndex(dsn, "/")
+	if slash < 0 {
+		return dsn
+	}
+	afterSlash := dsn[slash+1:]
+	q := strings.IndexByte(afterSlash, '?')
+	if q < 0 {
+		return dsn[:slash+1]
+	}
+	return dsn[:slash+1] + afterSlash[q:]
 }
 
 // cleanupMySQLTestTables removes all data from dynamic tables so each test
@@ -130,8 +171,7 @@ func TestMySQLIntegration_FactoryOpenStore(t *testing.T) {
 	s, teardown := mysqlIntegrationStore(t)
 	defer teardown()
 
-	dsn := "root:cleat@tcp(127.0.0.1:3306)/?tls=false&parseTime=true&multiStatements=true"
-	factory := NewMySQLStoreFactory(s.db, dsn)
+	factory := NewMySQLStoreFactory(s.db, mysqlTestBaseDSN(t))
 	if factory == nil {
 		t.Fatal("NewMySQLStoreFactory returned nil")
 	}
