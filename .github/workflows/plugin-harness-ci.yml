@@ -86,6 +86,39 @@ jobs:
           pip install --upgrade pip
           pip install componentize-py
           pip install -e python-sdk
+      # TestPluginCalls_Wasm_Java runs a Gradle build of
+      # tests/plugin-harness/testdata/javaworkflow, and this job had no Java
+      # setup at all -- it ran against whatever JDK and Gradle the runner image
+      # happened to ship, with no dependency cache. So every run resolved
+      # org.teavm:* from Maven Central cold, and on 2026-08-06 Maven Central
+      # answered 403 Forbidden and failed the job. Nothing in the repo had
+      # changed; three concurrent PRs were enough to trip the rate limit.
+      #
+      # gradle/actions/setup-gradle restores ~/.gradle/caches, where resolved
+      # artifacts live, and ~/.gradle/wrapper/dists. Both matter here:
+      # tests/plugin-harness/testdata/javaworkflow ships a gradlew pinned to
+      # 7.6.4 and cmd/cleat/build_java.go prefers the wrapper over system
+      # gradle, so a cold run downloaded the Gradle distribution as well as
+      # every TeaVM artifact. A warm run makes neither request.
+      #
+      # Note its default: it writes the cache only from the default branch and
+      # reads it elsewhere, so PR runs are served by develop's cache rather
+      # than each seeding its own.
+      #
+      # This does not make a cold run immune -- a cache miss still resolves
+      # from Maven Central, and Gradle does not retry a 403. It removes the
+      # request from the common path rather than making the uncommon path
+      # robust. The every-run cold fetch was the part worth fixing first.
+      #
+      # Java 17 to match the other four jobs that build this SDK, rather than
+      # inheriting the runner image's default, which can change without us.
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
       # -json into a report, and a skip budget over it. Without that, this step
       # ran `go test` with no -v, so a skipped language and a passing one looked
       # identical in the log -- which is how TestPluginCalls_Wasm_Go sat
