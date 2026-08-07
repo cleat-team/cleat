@@ -33,8 +33,8 @@ Before taking cleat public, we benchmarked it against 20 highly-rated open-sourc
 | **CI/CD** | CodeQL scanning (codeql.yml) | Done |
 | **CI/CD** | DCO check (dco-check.yml) | Done |
 | **CI/CD** | Semantic PR title check (semantic-pull-request.yml) | Done |
-| **CI/CD** | Auto-labeler (labeler.yml + labeler.yml config) | Done |
-| **CI/CD** | Release notes check (release-notes-check.yml) | Done |
+| **CI/CD** | Auto-labeler (labeler.yml + labeler.yml config) | Removed 2026-08-06 (#366) — v4 config under a v5 action; never applied a label |
+| **CI/CD** | Release notes check (release-notes-check.yml) | Removed 2026-08-07 — keyed on labels nothing could apply; never gated a PR (IMPROVEMENT-PLAN §1.12a) |
 | **CI/CD** | Ecosystem CI (ecosystem-ci.yml — tests Python/Rust/Java/AS SDKs on core changes) | Done |
 | **CI/CD** | Stale issue/PR management (stale.yml) | Done |
 | **CI/CD** | GoReleaser-based release workflow (release.yml + .goreleaser.yml) | Done |

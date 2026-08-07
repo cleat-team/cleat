@@ -104,6 +104,10 @@ jobs:
       # inside a `script:`/`run:` scalar ended it early, so neither check had
       # ever actually run on any PR. This step catches the next one, from a
       # workflow that does parse.
+      #
+      # (release-notes-check.yml was deleted on 2026-08-07 -- parsing turned
+      # out to be only the first of four reasons it gated nothing. The guard
+      # below is unaffected; it walks whatever files are present.)
       - name: Workflow files parse
         run: |
           set -euo pipefail

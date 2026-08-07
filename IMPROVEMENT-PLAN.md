@@ -1281,6 +1281,45 @@ job now parses every file under `.github/workflows/` and fails on any that does 
 has no `jobs:` key. Falsified against the two files as they stood at `4de8f69`: the guard
 reports both.
 
+**Correction, 2026-08-07.** "and had neither" was right; "fixed in `HEAD`" was right only for
+`ai-pr-review.yml`. Making `release-notes-check.yml` *parse* did not make it a gate — it went
+on doing nothing for three further reasons, none of them syntactic, and it has now been
+deleted rather than repaired a second time. See §1.12a.
+
+---
+
+### 1.12a The release-notes gate did nothing after it parsed either — deleted 2026-08-07
+
+Parsing was the first of four reasons `release-notes-check.yml` never gated anything. The
+other three each sufficed alone:
+
+- **Its trigger label could not exist.** The job did nothing unless the PR carried a label
+  named `[FEATURE]` or `[BUGFIX]`. Neither is among the repository's twelve labels, and no
+  PR has ever carried any label at all:
+
+      gh label list --limit 100
+      gh pr list --state all --limit 200 --json number,labels \
+        --jq '[.[] | select(.labels | length > 0)] | length'    # 0, 2026-08-07
+
+- **Nothing could ever have applied them.** The auto-labeler removed in PR #366 (`a21de13`,
+  itself never having applied a label) defined only `area/*` names —
+  `git show a21de13^:.github/labeler.yml`. No workflow, template or human convention in this
+  repository has ever produced a `[FEATURE]` label.
+
+- **It read labels; the PR template asks for a checkbox.** `.github/PULL_REQUEST_TEMPLATE.md`
+  offers a `[FEATURE]` tickbox under "Change type". Ticking it edits the PR *body*, which the
+  label query at the top of the job never reads. So even full compliance with the template
+  could not arm the check.
+
+And the job carried `continue-on-error: true`, so the `exit 1` at the end was unreachable as
+an outcome regardless.
+
+The Release notes section of the PR template is kept — it is useful guidance, and it is now
+honestly unenforced rather than appearing to be a gate. Enforcing it would mean keying on
+something that exists, the natural candidate being the branch prefix that
+`Validate branch name` already requires; that is a policy change, not a repair, and is not
+made here.
+
 ---
 
 ### 1.13 Multi-DB CI was green without ever connecting to PostgreSQL — fixed in `HEAD`
