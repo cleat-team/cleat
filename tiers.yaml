@@ -489,6 +489,52 @@ tier2:
         Self-contained; brings up postgres and minio as service containers. Note the minio
         image is pinned to :latest, which is a real fragility now that this gates merges.
 
+    # The three non-Go SDKs. These are tier-2 COMPONENTS (sdk-rust, sdk-java,
+    # sdk-assemblyscript above) rather than Go packages, so tier2-gate.sh cannot run them
+    # -- it drives `go test -json` and these need cargo, gradle and npm.
+    #
+    # Every one of them was already tested on every pull request and none of it gated.
+    # Measured 2026-08-07: the only required check touching Rust, Java or AssemblyScript
+    # was `Build`, and Build only BUILDS them -- it never runs cargo test, gradle test or
+    # npm test. So a PR could merge to develop with any SDK's tests red.
+    #
+    # Green on develop across the eight consecutive commits measured that day (416a1a4,
+    # 93722c1, 59a55b7, a21de13, fcf82e0, 422ad6a, a04a4fe, 47bb6b6), so requiring them
+    # adds no new failure mode -- it only stops merging past one. Re-derive:
+    #
+    #   gh run list --workflow=ci.yml --branch develop --limit 8 \
+    #     --json databaseId --jq '.[].databaseId' | while read r; do
+    #       gh run view "$r" --json jobs --jq '[.jobs[]
+    #         |select(.name=="Test Rust" or .name=="Java Tests" or .name=="AssemblyScript Tests")
+    #         |"\(.name)=\(.conclusion)"]|join("  ")'; done
+    - suite: crates/cleat-sdk, crates/cleat-macro
+      job: "Test Rust"
+      workflow: .github/workflows/ci.yml
+      why: >-
+        cargo test for both crates plus the wasm32-wasip1 release build. Note it does NOT
+        cover crates/cleat-test, which is why an absurd_extreme_comparisons defect sat in
+        that crate unlinted -- see the open item on sdk-rust.
+    - suite: crates/cleat-java
+      job: "Java Tests"
+      workflow: .github/workflows/ci.yml
+      why: gradle test. Measured 2026-08-07 - 280 tests, 0 failures, 0 skipped.
+    - suite: packages/cleat-as
+      job: "AssemblyScript Tests"
+      workflow: .github/workflows/ci.yml
+
+    # NOT gated, and deliberately named rather than silently omitted:
+    #
+    #   ecosystem-ci.yml's "Rust SDK Integration" and "Java SDK Integration" duplicate
+    #   what ci.yml's "Test Rust" and "Java Tests" already run. Requiring both would
+    #   double the registry exposure for the same signal, and D5's whole argument is
+    #   about how much registry surface a blocking check should have.
+    #
+    #   "AssemblyScript WASM Build" (ci.yml) and "AssemblyScript SDK Integration"
+    #   (ecosystem-ci.yml) both carried continue-on-error until 2026-08-07. It was
+    #   removed -- measured, every step in both was already passing -- so they can now
+    #   fail. They are left unrequired for the same duplicate-coverage reason: they
+    #   should be able to fail visibly first, and be promoted only if that proves useful.
+
   # Separate Go modules, tested from inside their own directory -- `go test ./cleat/...`
   # from the root fails with "main module does not contain package".
   #

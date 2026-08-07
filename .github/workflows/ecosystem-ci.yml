@@ -60,7 +60,10 @@ jobs:
 
   assemblyscript-sdk:
     name: AssemblyScript SDK Integration
-    continue-on-error: true
+    # continue-on-error removed 2026-08-07, for the same reason as ci.yml's
+    # AssemblyScript WASM Build: measured on develop, its only substantive step
+    # ("Test AS SDK") reported success. The flag was forgiving a job that had nothing
+    # to forgive.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
