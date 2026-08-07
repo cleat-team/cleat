@@ -50,6 +50,31 @@ The DCO confirms you have the right to submit the contribution under the
 project's license. Unlike the CLA, it does not grant re-licensing rights —
 that's what the CLA is for.
 
+**This is enforced.** `DCO Check` is a required status check, and since
+2026-08-07 it can actually fail — it reads the commits your pull request adds
+and exits non-zero if any of them lacks the trailer. Before that date it
+printed a warning and passed regardless, which is why most of the history
+behind you is unsigned. It only ever looks at `base..head`, so that history
+is not your problem; your own commits are.
+
+To stop having to remember the flag, install the repo's hooks once per clone:
+
+```
+git config core.hooksPath .githooks
+```
+
+`.githooks/prepare-commit-msg` then appends the trailer from your
+`user.name` and `user.email` on every commit. It is idempotent, so it
+composes with `--signoff`, `--amend` and `git rebase --signoff` rather than
+signing anything twice.
+
+If a branch is already unsigned:
+
+```
+git rebase --signoff origin/develop   # sign every commit the branch adds
+git push --force-with-lease
+```
+
 ## Prerequisites
 
 To build and test cleat you will need:
