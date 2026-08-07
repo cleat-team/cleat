@@ -8,9 +8,13 @@
 # compilation-to-execution pipeline for each non-Go language.
 #
 # Key design decisions:
-#   - Rust and Python are first-class: build/execute failures block the CI.
-#   - AssemblyScript and Java are best-effort: their Go tests skip gracefully
-#     when the toolchain is unavailable or execution fails.
+#   - Rust, Python and Java are first-class: build/execute failures block the
+#     CI. Java joined them 2026-08-06 -- this job had always installed Java 17
+#     and Gradle, but its Go test degraded every failure to a skip, so the
+#     "best-effort" label described the test's behaviour rather than any
+#     property of the SDK. With the skips removed the test passes.
+#   - AssemblyScript is still best-effort: its Go test skips gracefully when
+#     the toolchain is unavailable or execution fails.
 #   - Each Go test handles its own WASM compilation; the CI only provides
 #     the toolchains and dependencies, avoiding redundant double-builds.
 # ---------------------------------------------------------------------------
@@ -45,7 +49,14 @@ env:
   # which is exactly how DURABLE_TEST_DB was renamed with nothing noticing
   # (IMPROVEMENT-PLAN.md 2.9). A CLEAT_REQUIRE_* variable reads as
   # load-bearing and greps to its consumers.
-  CLEAT_REQUIRE_TOOLCHAINS: "rust,python"
+  # java joins rust and python 2026-08-06. This job has installed Java 17 and
+  # Gradle since it was written and runs TestJava* in the -run regex below, so
+  # it was already paying for the toolchain -- but engine/java_workflow_e2e_test
+  # skipped on a missing one unconditionally, and that skip is invisible here
+  # (the step's output is -v text, not the -json a skip budget reads). Java is
+  # therefore listed for the same reason as the other two: in this job a missing
+  # JDK is a failed setup step, not an absent prerequisite.
+  CLEAT_REQUIRE_TOOLCHAINS: "rust,python,java"
 
 permissions:
   contents: read

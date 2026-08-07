@@ -32,11 +32,22 @@ func buildJavaWasm(t *testing.T) string {
 	if _, err := os.Stat(filepath.Join(javaDir, "gradlew")); err == nil {
 		hasGradle = true
 	}
+	// Same policy as buildRustWasm: a job that declares it provides the
+	// toolchain must fail when the toolchain is missing, because that means its
+	// own setup step failed silently. e2e-cross-language.yml runs
+	// -run "...|TestJava" with Java 17 and Gradle installed, so for that job the
+	// absence of either is a broken runner, not an absent prerequisite.
 	if !hasGradle {
-		t.Skip("gradle/gradlew not found -- skipping Java WASM integration test")
+		if toolchainRequired("java") {
+			t.Fatalf("gradle/gradlew not found, but %s declares java, so this job installs Java + Gradle -- its setup step must have failed silently", requireToolchainEnv)
+		}
+		t.Skip("gradle/gradlew not found -- skipping Java WASM integration test (only e2e-cross-language.yml provisions Java for this test)")
 	}
 	if _, err := exec.LookPath("java"); err != nil {
-		t.Skip("java not installed -- skipping Java WASM integration test")
+		if toolchainRequired("java") {
+			t.Fatalf("java not installed, but %s declares java, so this job installs it -- its setup step must have failed silently: %v", requireToolchainEnv, err)
+		}
+		t.Skip("java not installed -- skipping Java WASM integration test (only e2e-cross-language.yml provisions Java for this test)")
 	}
 
 	// Use the Gradle wrapper if the project provides one.
@@ -45,18 +56,21 @@ func buildJavaWasm(t *testing.T) string {
 		gradleBin = filepath.Join(javaDir, "gradlew")
 	}
 
-	cmd := exec.Command(gradleBin, "wasm", "--no-daemon")
+	// generateWasm, not wasm. The TeaVM Gradle plugin has never registered a
+	// task called `wasm` -- `gradle tasks --all` lists generateWasm under "TeaVM
+	// tasks" -- so this invocation failed with "Task 'wasm' not found" on every
+	// machine that had the toolchain installed. Because the failure was then
+	// degraded to a skip, the test reported the same thing whether Java worked
+	// or not, and the SDK was assessed as unverified on that evidence.
+	cmd := exec.Command(gradleBin, "generateWasm", "--no-daemon")
 	cmd.Dir = javaDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// Best-effort: skip on build failure rather than failing the CI.
-		t.Skipf("gradle wasm failed (best-effort, skipping):\n%s\n%v",
-			string(out), err)
+		t.Fatalf("gradle generateWasm failed:\n%s\n%v", string(out), err)
 	}
 
 	if _, err := os.Stat(wasmPath); os.IsNotExist(err) {
-		t.Skipf("gradle wasm completed but WASM not found at %s (best-effort, skipping)",
-			wasmPath)
+		t.Fatalf("gradle generateWasm completed but WASM not found at %s", wasmPath)
 	}
 
 	t.Logf("Java WASM built: %s", wasmPath)
@@ -81,7 +95,7 @@ func TestJavaWorkflowExecute(t *testing.T) {
 	ctx := context.Background()
 	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
-		t.Skipf("NewRuntime failed (best-effort, skipping): %v", err)
+		t.Fatalf("NewRuntime: %v", err)
 	}
 	defer rt.Close(ctx)
 
@@ -93,7 +107,7 @@ func TestJavaWorkflowExecute(t *testing.T) {
 	input := []byte(`{"from":"accountA","to":"accountB","amount":100,"currency":"USD"}`)
 	result, history, suspended, deferrals, queryState, err := engine.Execute(ctx, wasmBytes, "transfer_money", input)
 	if err != nil {
-		t.Skipf("Execute Java workflow failed (best-effort, skipping): %v", err)
+		t.Fatalf("Execute Java workflow: %v", err)
 	}
 	if suspended != nil {
 		t.Errorf("unexpected workflow suspension: %v", suspended.Reason)
@@ -107,9 +121,15 @@ func TestJavaWorkflowExecute(t *testing.T) {
 
 	// The saga should have made two external calls:
 	//  accounts.Withdraw -> accounts.Deposit
+	// Select the calls, rather than deselecting durable_log. The saga registers
+	// a compensation before it withdraws, so history[0] is a `defer` with no
+	// Service or Op -- under an exclusion filter it landed in callHistory and
+	// shifted every index by one, which read as "step 0: expected
+	// accounts.Withdraw, got .". Naming the event type this test is about means
+	// a new event kind cannot silently rejoin the list.
 	var callHistory []EventRecord
 	for _, rec := range history {
-		if rec.EventType != EventTypeDurableLog {
+		if rec.EventType == EventTypeCall {
 			callHistory = append(callHistory, rec)
 		}
 	}

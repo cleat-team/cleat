@@ -421,7 +421,13 @@ jobs:
   test-java:
     name: Java Tests
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # No continue-on-error. It was here, so this job could not fail the build,
+    # and nobody had reason to look at it: measured 2026-08-06 on a clean
+    # checkout, `gradle test` in crates/cleat-java runs 280 tests with 0
+    # failures and 0 skips, so the exemption was protecting nothing. Re-derive:
+    #   cd crates/cleat-java && gradle test --no-daemon
+    #   grep -ho 'tests="[0-9]*"' build/test-results/test/*.xml |
+    #     awk -F'"' '{s+=$2} END{print s}'
     steps:
       - uses: actions/checkout@v4
 
@@ -672,9 +678,13 @@ jobs:
           npm ci
           npm run build
 
+      # `|| echo "non-blocking"` used to swallow the exit status here, which
+      # made this step incapable of reporting anything but success. The Java
+      # build is not flaky -- it is the same `gradle build` the Java Tests job
+      # runs green -- so the escape hatch only served to hide a real break.
       - name: Build Java
         working-directory: crates/cleat-java
-        run: gradle build || echo "[!] Java build failed (non-blocking)"
+        run: gradle build
 
       - name: Install Python SDK
         working-directory: python-sdk
