@@ -18,7 +18,7 @@ cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
 cmd/cleat-worker	newSignalAuthStore	1
 engine	RegisterBackend	4
-engine	TestAssemblyScriptWorkflowExecute	3
+engine	TestAssemblyScriptWorkflowExecute	1
 engine	TestCascadeDelete	2
 engine	TestEngineExecute	1
 engine	TestEngineExecuteCancelOrder	1
@@ -65,7 +65,7 @@ engine	TestTenantIsolation_Schedules	1
 engine	TestTenantIsolation_Signals	1
 engine	TestUnauthenticatedQueryRejection	2
 engine	bootstrapScratchDB	1
-engine	buildAssemblyScriptWasm	4
+engine	buildAssemblyScriptWasm	1
 engine	buildFixtureWasm	1
 engine	buildJavaWasm	2
 engine	buildRustWasm	2
