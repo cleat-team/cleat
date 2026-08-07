@@ -461,7 +461,13 @@ jobs:
   # -------------------------------------------------------------------------
   test-assemblyscript:
     name: AssemblyScript Tests
-    continue-on-error: true
+    # No continue-on-error. Measured 2026-08-06 on a clean checkout, `npm test`
+    # in packages/cleat-as runs 106 assertions across three spec files, 106
+    # passing -- so the exemption was protecting nothing, and meanwhile the one
+    # job that could report an AssemblyScript regression could not fail. Note
+    # `npm ci` has to run first: as-pect is a devDependency and `asp` is not on
+    # PATH without it, which is why this cannot be reproduced by running npm
+    # test alone in a checkout.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

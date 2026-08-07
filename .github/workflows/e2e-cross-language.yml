@@ -8,13 +8,12 @@
 # compilation-to-execution pipeline for each non-Go language.
 #
 # Key design decisions:
-#   - Rust, Python and Java are first-class: build/execute failures block the
-#     CI. Java joined them 2026-08-06 -- this job had always installed Java 17
-#     and Gradle, but its Go test degraded every failure to a skip, so the
-#     "best-effort" label described the test's behaviour rather than any
-#     property of the SDK. With the skips removed the test passes.
-#   - AssemblyScript is still best-effort: its Go test skips gracefully when
-#     the toolchain is unavailable or execution fails.
+#   - All four are first-class: build/execute failures block the CI. Java and
+#     AssemblyScript joined Rust and Python on 2026-08-06. This job had always
+#     installed Node, Java 17 and Gradle and always ran their tests -- but both
+#     Go tests degraded every failure into a skip, so "best-effort" described
+#     the tests' behaviour rather than any property of the SDKs. With the skips
+#     removed, both pass.
 #   - Each Go test handles its own WASM compilation; the CI only provides
 #     the toolchains and dependencies, avoiding redundant double-builds.
 # ---------------------------------------------------------------------------
@@ -49,14 +48,16 @@ env:
   # which is exactly how DURABLE_TEST_DB was renamed with nothing noticing
   # (IMPROVEMENT-PLAN.md 2.9). A CLEAT_REQUIRE_* variable reads as
   # load-bearing and greps to its consumers.
-  # java joins rust and python 2026-08-06. This job has installed Java 17 and
-  # Gradle since it was written and runs TestJava* in the -run regex below, so
-  # it was already paying for the toolchain -- but engine/java_workflow_e2e_test
-  # skipped on a missing one unconditionally, and that skip is invisible here
-  # (the step's output is -v text, not the -json a skip budget reads). Java is
-  # therefore listed for the same reason as the other two: in this job a missing
-  # JDK is a failed setup step, not an absent prerequisite.
-  CLEAT_REQUIRE_TOOLCHAINS: "rust,python,java"
+  # java and assemblyscript joined rust and python on 2026-08-06, and for the
+  # same reason in both cases. This job has installed Java 17, Gradle and Node
+  # since it was written, and runs TestJava* and TestAssemblyScript* in the -run
+  # regex below -- so it was already paying for both toolchains. But
+  # engine/java_workflow_e2e_test.go and engine/as_workflow_e2e_test.go each
+  # skipped on a missing one unconditionally, and that skip is invisible here:
+  # this step's output is -v text, not the -json a skip budget reads. So in this
+  # job a missing JDK or a missing Node is a failed setup step, not an absent
+  # prerequisite, and must read as a failure.
+  CLEAT_REQUIRE_TOOLCHAINS: "rust,python,java,assemblyscript"
 
 permissions:
   contents: read

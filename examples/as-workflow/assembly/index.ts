@@ -135,8 +135,12 @@ export function place_order(h: HostCalls, input: string): string {
   if (reserveResult.isError) {
     return '{"error":"inventory reserve failed"}';
   }
-  let reservationID: string = extractStringField(reserveResult.response, "reservationID");
-  let totalCents: i64 = extractI64Field(reserveResult.response, "totalCents");
+  // snake_case, because these read a *service response*, not this workflow's own
+  // input. The services return reservation_id / total_cents / charge_id, and this
+  // file already emits snake_case when it builds requests. Reading camelCase here
+  // silently returned "" and 0 -- every step ran, none of them received anything.
+  let reservationID: string = extractStringField(reserveResult.response, "reservation_id");
+  let totalCents: i64 = extractI64Field(reserveResult.response, "total_cents");
 
   // --- Step 2: Charge payment ----------------------------------------------
 
@@ -147,7 +151,7 @@ export function place_order(h: HostCalls, input: string): string {
     h.cleatCall("inventory", "Release", '{"reservation_id":"' + reservationID + '"}');
     return '{"error":"payment failed"}';
   }
-  let chargeID: string = extractStringField(chargeResult.response, "chargeID");
+  let chargeID: string = extractStringField(chargeResult.response, "charge_id");
 
   // --- Step 3: Create shipment --------------------------------------------
 
