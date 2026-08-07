@@ -13,6 +13,51 @@
 #   CLEAT_TEST_POSTGRES — PostgreSQL connection string (fallback CLEAT_TEST_DB)
 #   CLEAT_TEST_MYSQL    — MySQL connection string
 #   CLEAT_TEST_MSSQL    — SQL Server connection string
+#
+# `Test MySQL` and `Test SQL Server` became required status checks on develop on
+# 2026-08-07. Re-derive:
+#
+#   gh api repos/cleat-team/cleat/branches/develop/protection/required_status_checks \
+#     --jq '.contexts[]' | grep -E 'MySQL|SQL Server'
+#
+# They had run on every PR since they were written and gated none of them. That
+# is not the same as MySQL and SQL Server being unmeasured -- `Tier 1 Gate` and
+# `Tier 2 Gate` are required and both run all three dialects -- but a failure
+# named `Test SQL Server` says what broke, and the same failure inside a tier
+# gate says a tier is red. This workflow's history at the time: 51 success,
+# 2 failure, 7 cancelled over the last 60 runs. Neither failure was
+# infrastructure -- one was a work-in-progress fix branch, the other is the
+# timing assertion described below. Re-derive:
+#
+#   gh run list --workflow=multi-db-ci.yml --limit 60 \
+#     --json conclusion,status --jq '[.[] | select(.status=="completed")] |
+#     group_by(.conclusion) | map({conclusion: .[0].conclusion, n: length})'
+#
+# That second failure was a wall-clock-dependent assertion in
+# TestConcurrencyKeyTTLKeepsSubSecondPrecision, not a defect in SQL Server
+# support; it was fixed in #374 before these became required, because a required
+# check that fails on a slow runner teaches everyone to re-run it.
+#
+# OPEN, and not changed here: the push trigger below still carries "feature/**",
+# so every push to a feature branch with a PR open runs all three jobs twice --
+# the pull_request trigger already covers them, and the concurrency group keys on
+# github.ref, which differs between the two events and so does not dedupe them.
+# The identical trigger was removed from e2e-cross-language.yml in #372 on the
+# grounds that the duplicate cost more than the pre-PR signal was worth. The same
+# argument now applies here with more force, since these jobs block a merge. It
+# is left alone deliberately rather than by oversight: dropping it trades away
+# pre-PR signal on feature branches, which is a call for the owner and not a
+# side effect of making the jobs required.
+#
+# `Plugin Migrations`, the third job here, is deliberately NOT required -- see
+# the note above that job.
+#
+# Both jobs Fatal rather than skip when their database is unreachable
+# (engine/testutil's MySQLTestDB and MSSQLTestDB ping and t.Fatalf), so a
+# service container that fails to come up reads as a failure and not as a green
+# that measured nothing. That is the property that makes requiring them worth
+# anything; if either helper is ever changed to skip on a failed ping, these
+# should stop being required on the same day.
 # ---------------------------------------------------------------------------
 name: Multi-DB CI
 
@@ -198,6 +243,18 @@ jobs:
   #
   # Unlike the per-backend jobs above (test-mysql, test-mssql), this job
   # does NOT run the full WorkflowStore suite — only plugin migration tests.
+  #
+  # Not a required status check, and the two above are, as of 2026-08-07. The
+  # asymmetry is deliberate. Both of this job's steps are already gated
+  # elsewhere on all three dialects: TestPluginMigrations lives in ./engine/,
+  # a tier-1 package that the required `Tier 2 Gate`'s sibling `Tier 1 Gate`
+  # sweeps with all three DSNs set and no matching entry in tiers.yaml's
+  # exclude_tests, and ./plugins/... is a tier-2 package under `Tier 2 Gate`.
+  # Requiring this job would gate the same assertions a second time.
+  #
+  # What test-mysql and test-mssql add over the tier gates is different: they run
+  # with only ONE dialect's DSN set, which is the configuration a single-backend
+  # deployment actually has. This job sets all three, exactly as the gates do.
   # -------------------------------------------------------------------------
   test-plugin-migrations:
     name: Plugin Migrations
