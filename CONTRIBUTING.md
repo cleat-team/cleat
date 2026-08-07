@@ -486,18 +486,18 @@ regressions before they reach production users.
 
 ## Finding work
 
-Good first issues are tagged `good-first-issue` and `help-wanted` in the
-[GitHub issue tracker](https://github.com/cleat-team/cleat/issues). The project
-uses these labels:
+The [issue tracker](https://github.com/cleat-team/cleat/issues) uses GitHub's
+default label set. The two worth filtering on:
 
-- `good-first-issue` — Well-scoped tasks with clear acceptance criteria,
-  suitable for newcomers to the codebase.
-- `help-wanted` — Contributions wanted but may require more context.
-- `area/sdk` — SDK-specific issues (Go, Rust, AssemblyScript, Java, Python).
-- `area/wasm` — WASM compilation, transformer pipeline.
-- `area/worker` — Worker daemon, polling, execution loop.
-- `area/ui` — Svelte web UI.
-- `area/docs` — Documentation improvements.
+- [`good first issue`](https://github.com/cleat-team/cleat/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+  — well-scoped tasks with clear acceptance criteria, suitable for newcomers.
+- [`help wanted`](https://github.com/cleat-team/cleat/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
+  — contributions wanted, but may need more context to pick up.
+
+Note the spaces: the names are `good first issue` and `help wanted`. Until
+2026-08-07 this section advertised them hyphenated, along with five `area/*`
+labels. None of those seven existed, so anyone who followed this list got an
+empty result page. Re-derive the real set with `gh label list`.
 
 Check the [Discussions](https://github.com/cleat-team/cleat/discussions) page for
 RFCs and design proposals that need implementation.
