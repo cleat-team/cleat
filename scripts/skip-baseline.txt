@@ -78,6 +78,9 @@ engine/testutil	MySQLTestDB	1
 engine/testutil	TestDB	4
 internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
 migration	TestIdempotencyTenantMigrationPreservesExistingKeys	1
+migration	mssqlCredentials	2
+migration	mssqlDSNAs	1
+migration	mssqlDSNAsSA	1
 migration	newMSSQLScratchDB	1
 migration	newMySQLScratchDB	1
 migration	newScratchDB	1

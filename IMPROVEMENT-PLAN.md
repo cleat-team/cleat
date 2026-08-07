@@ -5670,6 +5670,103 @@ what the primitive means, not a patch. The choice is between "re-entrant, and do
 "never re-entrant, and return false consistently". §3.34's test deliberately contends with a
 *second* workflow so that it asks about mutual exclusion rather than about this.
 
+### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
+
+> Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
+> WS-1's concurrency-key item above. Skipping to 3.37 rather than adding to that.
+
+SQL Server applies a security policy to **every** principal. Not "every principal except the
+owner", the way PostgreSQL exempts a superuser — every one, sysadmin and `dbo` included.
+Measured, not read: connected as `sa` with no session context, a table holding three rows reads
+as empty.
+
+So there was no connection that could see across tenants. Not for a support query, not for a
+cross-tenant backfill, and not for test teardown — which is where it surfaced, as §2.71's
+blocker. `CleanupMSSQLTestData` issues `DELETE` on a plain pool, the filter predicate hides
+every row it means to delete, and it removes nothing **and reports no error**, so teardown
+believes it ran. Rows accumulate until a later fixture collides on a primary key. That is the
+141-failure signature recorded in §2.71's residual.
+
+PostgreSQL never hit this, and not because its policies are weaker. `005_app_role.sql` spends
+its entire header arguing the *opposite* case — keeping `cleat_app` `NOSUPERUSER`,
+`NOBYPASSRLS` and owning nothing, so the application is subject to the policies
+unconditionally. That design has two halves. SQL Server inherits the restricted half for free
+and cannot inherit the privileged half at all, because the predicate is the only place an
+exemption can live there.
+
+**Fix:** `migrations/mssql/012_admin_role.sql` creates an empty `cleat_admin` database role and
+adds `OR IS_ROLEMEMBER(N'cleat_admin') = 1` to `fn_tenant_filter`.
+
+**Why role membership and not a sentinel session-context value.** A magic `tenant_id` would be
+assumable by anything that can call `sp_set_session_context` — which is the application itself,
+on every connection it opens. One bad code path or one injected value and tenancy is off. Role
+membership is granted once by a DBA and cannot be assumed by a connection at runtime.
+
+Three properties make it hard to acquire by accident, all verified against SQL Server 2022:
+
+| property | consequence |
+|---|---|
+| the role ships with **no members** | applying 012 changes nothing until a deployment grants it |
+| `db_owner` does not confer it — `sa` reads `IS_ROLEMEMBER = 0` and stays filtered | "the app connects as sa" does not silently lose isolation |
+| `dbo` **cannot** be added — SQL Server refuses with *"Cannot use the special principal 'dbo'"* | membership requires a user someone created on purpose |
+
+The second is the one that decided the design. Had `sa` been exempt, this migration would have
+disabled tenant isolation for the default deployment the moment it applied, which is worse than
+the gap it closes.
+
+**Cost, measured rather than asserted** (50k rows, 300 queries, two interleaved rounds):
+
+| predicate | point lookup | full scan |
+|---|---|---|
+| session context only | ~340 µs | 3.38 / 3.40 ms |
+| **+ `IS_ROLEMEMBER` (shipped)** | ~350 µs | 4.06 / 4.10 ms — **+20%** |
+| role checked first | ~350 µs | 4.49 / 4.52 ms — +33% |
+| role in a scalar subquery | ~350 µs | 8.96 / 9.07 ms — +166% |
+
+`IS_ROLEMEMBER` is evidently not folded to a per-query constant; the cost tracks rows scanned
+(~14 ns/row). Point lookups — the store's dominant access pattern, by workflow ID — show no
+measurable difference. The 20% lands on full scans of tenant-filtered tables, i.e. an
+unqualified `ListWorkflows`. Two rewrites were tried and both were worse, so the form shipped
+is the cheapest of the three; nobody needs to re-measure this. Accepted because the alternative
+is having no administrative path at all.
+
+**Tests:** `migration/mssql_admin_role_test.go`, four of them, against a scratch database
+migrated by the real Runner. Only one asserts the new capability; the other three assert that
+nothing else moved, and they pass with or without the fix **by design** — they are guards, not
+regression tests. Falsification check: with the `OR` clause removed, exactly
+`TestMSSQLAdminRoleSeesAndDeletesAcrossTenants` goes red (`saw 0 rows across two tenants, want
+3`) and the three guards stay green.
+
+**This unblocks §2.71 but does not complete it.** The schema switch still needs
+`CleanupMSSQLTestData` to take an admin connection, and the harness needs to create the login —
+which should fail closed the way `005_app_role.sql` does, shipping no credential. Draft #333
+stays draft until that lands.
+
+### 3.38 `TestAdminForceResolve_*` failed once after an all-dialect run — 🔶 **OBSERVED, not reproduced** (WS-1, 2026-08-06)
+
+Recorded because it cost twenty minutes to rule out of §3.37 and would cost the next person the
+same. Three tests failed in a PostgreSQL-only run of `./engine/...`:
+
+```
+TestAdminForceResolve_AuditCollisionRollsBack
+TestAdminForceResolve_RefusesAnotherTenant
+TestAdminForceResolve_RefusesAnotherTenant/postgres
+```
+
+It is **not** a code defect in anything on this branch — the same command gives 0 failures both
+on clean `develop` and with §3.37's changes applied. The one failing run is distinguished only
+by what preceded it: a full three-dialect `go test ./engine/ ./migration/ ./cmd/cleat-worker/`
+against the same shared `cleat` database.
+
+So the hypothesis is cross-run state in the shared database rather than test ordering within a
+run. Stated as a hypothesis on purpose: one failing observation against two passing ones does
+not establish a mechanism, and the failure was not captured under a debugger. What it does
+establish is that these tests are not independent of what ran before them, which for an
+admin/tenant test is worth knowing on its own.
+
+Anyone who sees this in CI should suspect the preceding job's residue before suspecting their
+diff.
+
 ### 3.33 gosec's 283 findings, triaged — 🔶 **2 fixed, 281 classified** (WS-3, 2026-08-05)
 
 `PARALLEL-WORKSTREAMS.md` calls gosec "unreviewed security findings in a codebase whose last
