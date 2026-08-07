@@ -74,6 +74,39 @@ for d in $DIALECTS; do
   done
 done
 
+# --- 2b. Every tier-1 guest language must have its toolchain ------------------------
+# Same principle as the dialects. A guest language whose compiler is absent does not
+# fail: its tests skip, and the suite still prints ok. Python is the case that forced
+# this -- engine/python_wasm_e2e_test.go and cmd/cleat's build round-trip both skip on a
+# missing componentize-py, and there are TWO prerequisites checked independently
+# (componentize-py and wasm-tools), so installing only the first leaves the engine tests
+# skipping with a different message.
+LANGS=$(awk '/^tier1:/{t=1} t&&/^  languages:/{gsub(/.*\[|\].*/,""); gsub(/,/," "); print; exit}' "$TIERS")
+[ -n "$LANGS" ] || { echo "tier-gate: could not read tier1.languages from $TIERS" >&2; exit 2; }
+note "tier 1 languages: $LANGS"
+
+for l in $LANGS; do
+  case "$l" in
+    # Nothing to check: the Go toolchain is what runs this script's `go test`.
+    go) note "  go: the test runner's own toolchain" ;;
+    python)
+      for tool in componentize-py wasm-tools; do
+        if command -v "$tool" >/dev/null 2>&1; then
+          note "  python: $tool found"
+        else
+          fail "python is tier 1 but $tool is not on PATH -- its tests would skip and this gate would still print ok.
+       On macOS componentize-py cannot run natively (it dies on EXC_GUARD /
+       GUARD_TYPE_MACH_PORT, a Darwin kernel guard). Use the Linux container:
+         docker build -f scripts/docker/python-toolchain.Dockerfile -t cleat-py .
+       and run this gate inside it. Requires Docker Desktop, not colima -- colima
+       cannot bind-mount /Users/Shared, so the mount is silently empty."
+        fi
+      done
+      ;;
+    *) fail "no toolchain precondition known for tier-1 language '$l' -- add one here rather than letting it skip" ;;
+  esac
+done
+
 if [ "$FAILED" = "1" ] && [ "$MEASURE" = "0" ]; then
   echo "tier-gate: refusing to run -- the preconditions above make a green result meaningless." >&2
   exit 1

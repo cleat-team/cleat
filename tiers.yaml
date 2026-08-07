@@ -64,7 +64,27 @@ tier1:
   skip_allowlist:
     - TestHelperProcess
 
-  language: go
+  # D2, DECIDED 2026-08-06: python joins go at tier 1.
+  #
+  # The objection was never that Python did not work -- it was that nothing could prove
+  # it did. Both halves of that are now answered:
+  #
+  #   * Execution. e2e-cross-language.yml declares python in CLEAT_REQUIRE_TOOLCHAINS,
+  #     so TestPythonWasmEndToEnd and TestPythonComponentExecutionFence Fatal rather than
+  #     skip there, under pipefail. That job is blocking. Measured locally in the Linux
+  #     container 2026-08-06: all three real Python tests PASS, building an 18.3 MB
+  #     component and executing it on wasmtime.
+  #   * The SDK's own suite. test-python carried continue-on-error, so 442 tests across
+  #     3.10/3.11/3.12 were advisory. Removed in #348, on the measurement that the suite
+  #     is 442 pass / 1 skip and the one skip is componentize-py, which that job installs.
+  #
+  # A tier-1 language must have a toolchain precondition in scripts/tier-gate.sh, for the
+  # same reason a tier-1 dialect must have a DSN check: absent, its tests skip and the run
+  # still prints ok. Python's is componentize-py AND wasm-tools, checked independently.
+  #
+  # Consequence, and it is real: this gate can no longer pass natively on macOS, because
+  # componentize-py dies there on a Darwin kernel guard. Run it in the container.
+  languages: [go, python]
   backend: wasmtime          # CGO required; see CLAUDE.md on why CGO_ENABLED=0 invalidates a run
   dialects: [postgres, mysql, mssql]
   # D1, DECIDED 2026-08-06. The rule: multi-tenancy requires database-enforced RLS.
@@ -143,34 +163,74 @@ tier2:
       why: Complete SDK, 6401 LOC, and the only non-Go language with cross-language tests.
       open_items: ["tests/cross-language covers only Go↔Rust"]
 
-    - id: sdk-python
-      decision: OWNER          # D2 -- recommend PROMOTE TO TIER 1, evidence below
+    # sdk-python was here. D2 promoted it to tier 1 on 2026-08-06 -- see the block above
+    # tier1.languages for the evidence. These two open items travel with it and are the
+    # reason its promotion is to tier 1 with named gaps rather than a clean bill:
+    #   * §3.31 residual — the component *decomposition* path has never once succeeded.
+    #     Python executes via the native component path; decomposition is a separate,
+    #     parked code path (see tier 3).
+    #   * wasm/component_test.go's TestComponentPythonBinary skips on a hardcoded
+    #     /tmp/test_python.wasm, so it has never run anywhere but the machine it was
+    #     written on, and it asserts exactly 14 modules and a ~12 MB first module --
+    #     properties of one componentize-py version. Rebuild it from the real toolchain
+    #     in a job that has one, or delete it as superseded by TestPythonWasmEndToEnd.
+    #     It is a test-design bug, not a toolchain gap, and not a tier-1 blocker.
+
+    - id: sdk-java
+      decision: OWNER          # D4 -- promoted from tier 3 on measurement; see #347
       why: |
-        Runs on wasmtime since #296 (the native component path is no longer behind a build
-        tag). The remaining objection was that it could not be verified on the macOS dev
-        machines -- componentize-py dies there on EXC_GUARD / GUARD_TYPE_MACH_PORT, a Darwin
-        kernel guard with no Linux equivalent -- which collided with tier 1's no-skip rule.
+        Moved up from tier 3 on 2026-08-06. The tier-3 assessment said its harness test
+        "fails on toolchain setup", and that was wrong in an instructive way: the test ran
+        `gradle wasm`, and the TeaVM plugin has never registered a task by that name. The
+        failure was degraded to t.Skipf, along with "WASM not found", "NewRuntime failed"
+        and "Execute failed" -- so the test reported the same thing whether Java worked,
+        was absent, or was broken. Java was parked on the output of a test that could not
+        distinguish those cases.
 
-        That objection is now answered. scripts/docker/python-toolchain.Dockerfile runs the
-        toolchain in a Linux container, and measured 2026-08-06 on an arm64 Mac, all three
-        real Python tests PASS rather than skip:
+        Measured once it could fail (#347): TeaVM compiles examples/saga-java-port to a
+        324 KB module, wasmtime executes it, and the history is
+        accounts.Withdraw -> accounts.Deposit with status completed and the release_funds
+        compensation registered. crates/cleat-java's own suite is 280 tests, 0 failures,
+        0 skips. e2e-cross-language.yml had been installing Java 17 and Gradle and running
+        TestJava* all along -- the toolchain was paid for; only the test was blindfolded.
 
-          TestRunBuild_PythonTarget_WasmRoundtrip   PASS   (cmd/cleat)
-          TestPythonWasmEndToEnd                    PASS   (engine, 2.43s)
-          TestPythonComponentExecutionFence         PASS   (engine, 3.57s)
-
-        The e2e builds an 18.3 MB component, registers wasmtime for
-        [go assemblyscript java rust python], executes it and produces events. Note the
-        toolchain has TWO prerequisites checked independently: componentize-py and
-        wasm-tools. Installing only the first leaves the engine tests skipping with a
-        different message, which is how this was nearly missed.
-
-        Requires Docker Desktop, not colima -- colima cannot bind-mount /Users/Shared, so
-        the mount is silently empty and go.mod is not found.
+        Tier 2 and not tier 1, deliberately. One day's evidence promotes a component out
+        of "nobody is proving this works"; it does not establish the record tier 1 asks
+        for. Revisit after the open items below.
       open_items:
-        - "§3.31 residual — decomposition path has never once succeeded"
-        - "TestComponentPythonBinary still skips, but on a hardcoded /tmp/test_python.wasm
-           fixture path, not a toolchain gap — a test-design bug worth fixing separately"
+        - "no cross-language replay coverage — tests/cross-language is Go↔Rust only,
+           so nothing checks that a Java guest replays a history the Go host recorded"
+        - "the workflow result comes back double-encoded (a JSON string containing JSON)
+           where Go and Rust return an object; compare the three before calling it a bug"
+        - "examples/saga-java-port/ISSUES.md lists 13 findings, 4 of them MINOR
+           SDK gaps still open: no saga abstraction, JsonHelper.parse only supports
+           String.class, no getQueryState, durableDefer takes a description not a closure"
+
+    - id: sdk-assemblyscript
+      decision: OWNER          # D4 -- see open_items; same shape as Java was
+      why: |
+        Moved up from tier 3 on 2026-08-06, on the same kind of measurement and with the
+        same caveat as Java. Measured that day: TestAssemblyScriptWorkflowExecute PASSES
+        on wasmtime -- inventory.Reserve -> payments.Charge -> shipping.CreateShipment ->
+        notifications.SendEmail, four calls in order -- and the SDK's own as-pect suite is
+        106/106 across three spec files.
+
+        It is at tier 2 rather than tier 1 because its e2e test has the same six
+        best-effort t.Skipf sites Java's had, so a regression there is still invisible,
+        and because of the data-plane hole below. It has NOT yet had #347's treatment.
+      open_items:
+        - "6 best-effort skip sites in engine/as_workflow_e2e_test.go degrade a runtime
+           trap, a build failure and an execute failure into skips — apply #347's fix"
+        - "REAL DEFECT, found 2026-08-06: the e2e passes while no data flows between
+           steps. The result is {\"status\":\"shipped\",\"reservation_id\":\"\"} because
+           examples/as-workflow extracts reservationID/totalCents/chargeID (camelCase)
+           while the mock returns reservation_id/total_cents/charge_id. payments.Charge is
+           therefore called with amount 0. The test asserts only 'result non-empty' and
+           the call sequence, so it cannot see this."
+        - "isReplaying() is hardcoded `return false` with a TODO — a workflow that
+           branches on it gets the wrong answer during replay"
+        - "ci.yml's AssemblyScript Tests job carries continue-on-error, so its 106
+           passing tests cannot fail the build either"
 
     - id: plugins
       why: 21 built-in, all with unit tests; 10 covered by the integration harness.
@@ -214,18 +274,17 @@ tier3:
     may_appear_in_docs_as_supported: false
 
   components:
-    - id: sdk-java
-      decision: OWNER          # D4
-      why: |
-        Complete SDK (7492 LOC) with no Go-side cross-language e2e comparable to Python's or
-        AssemblyScript's, and its harness test currently fails on toolchain setup. The plan's
-        own "What this does not cover" section already flags it as unverified.
-
-    - id: sdk-assemblyscript
-      decision: OWNER          # D4
-      why: |
-        Near-complete, but its WASM execution test degrades a runtime trap to a skip, so a
-        regression there is invisible. One deferred feature (isReplaying hardcoded false).
+    # sdk-java and sdk-assemblyscript were here. Both moved to tier 2 on 2026-08-06.
+    #
+    # Worth recording why they were ever here, because the mistake is repeatable: both
+    # were parked on the output of their own e2e tests, and both of those tests degraded
+    # every failure into a skip. Java's additionally invoked a Gradle task that has never
+    # existed. A test that cannot fail cannot support a parking decision either -- it
+    # reports the same thing about a working SDK and a broken one. Neither SDK changed;
+    # only what we could see about them did.
+    #
+    # The general lesson for this file: before parking anything, check whether the
+    # evidence for parking it came from a check capable of returning a different answer.
 
     - id: component-decomposition-path
       why: |
@@ -247,13 +306,31 @@ tier3:
         with nothing behind it.
 
 # ---------------------------------------------------------------------------
-# Decisions this file is waiting on. Each changes what the gate enforces.
+# Decisions. Each changes what the gate enforces.
 #
-#   D1  Is multi-tenancy on MySQL a supported configuration, or is MySQL documented as
-#       single-tenant-only? This is §1.7's open question. Drafted here as tier 2.
-#   D2  Is Python tier 1 or tier 2? It executes on wasmtime, but only Linux CI can prove it.
-#   D3  Is the dashboard shipping against an authenticated worker or not? Determines whether
-#       it is tier 2 with a known gap or tier 3 until it authenticates.
-#   D4  Java and AssemblyScript: park, or invest to tier 2? Parking is reversible and is the
-#       honest position while their tests degrade failures into skips.
+#   D1  DECIDED 2026-08-06. Multi-tenancy requires database-enforced RLS. PostgreSQL and
+#       SQL Server have it; MySQL is documented single-tenant-only. See tier1.tenancy.
+#   D2  DECIDED 2026-08-06. Python is tier 1, with a toolchain precondition in the gate.
+#       See the block above tier1.languages.
+#   D4  DECIDED 2026-08-06. Java and AssemblyScript are tier 2, not parked. Both were
+#       parked on the output of tests that could not fail; see the note in tier 3.
+#
+# STILL OPEN:
+#
+#   D3  Is the dashboard shipping against an authenticated worker or not? Determines
+#       whether it is tier 2 with a known gap or tier 3 until it authenticates.
+#
+#       Concretely: web/src/lib/api.ts sends Content-Type and nothing else -- there is no
+#       Authorization header anywhere in it. cleat-worker defaults --require-auth=true.
+#       So exactly one of these is true today, and they need different work:
+#         (a) the dashboard is pointed at a worker with --require-auth=false, in which
+#             case it is an unauthenticated admin surface -- every route, no credential;
+#         (b) it is pointed at a correctly-secured worker, in which case it 401s on every
+#             call and is non-functional.
+#       Nobody has to guess which was intended, but somebody has to say which is shipping.
+#       If the answer is "it should authenticate", that is a feature to build (where does
+#       the API key come from? a login flow? an operator-pasted token?) and the dashboard
+#       is tier 3 until it exists. If the answer is "local dev only, never exposed", that
+#       is a documented boundary and it can be tier 2 -- but then the docs and the
+#       deployment manifests have to stop implying otherwise.
 # ---------------------------------------------------------------------------
