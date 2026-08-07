@@ -197,10 +197,55 @@ jobs:
           fi
           echo "OK: all Go files are gofmt-clean."
 
+      # --timeout, because golangci-lint's default is one minute and this job
+      # has been finishing inside it only by virtue of a warm build cache.
+      #
+      # Measured 2026-08-06. On develop the whole job -- checkout, setup-go,
+      # gofmt, `go install`, and the run -- takes 75s, because
+      # actions/setup-go restores GOCACHE and golangci-lint re-analyses almost
+      # nothing. On a cold cache, on this runner, it does not finish:
+      #
+      #   level=error msg="Timeout exceeded: try increasing it by passing --timeout option"
+      #   ##[error]Process completed with exit code 4.
+      #
+      # "On this runner" is load-bearing and was checked rather than assumed.
+      # The same cold run on an M-series Mac takes 16s:
+      #
+      #   GOCACHE=$(mktemp -d) CGO_ENABLED=0 GOTOOLCHAIN=local \
+      #     golangci-lint run ./...        # 16s, exit 0
+      #
+      # So the margin is a property of ubuntu-latest, not of the tree, and no
+      # local run can tell you whether this job is close to its limit. That is
+      # itself the argument for not leaving the limit at the default.
+      #
+      # The way it surfaced is the reason this is worth fixing rather than
+      # working around. PR #325 bumps
+      # actions/setup-go from v5 to v7, and v7 computes a different cache key,
+      # so it cannot read what v5 wrote. Same runner, same Go 1.25.12, same
+      # `cache: true`:
+      #
+      #   v5:  Cache hit for: setup-go-Linux-x64-ubuntu24-go-1.25.12-f850121d...
+      #   v7:  Cache is not found
+      #
+      # GitHub Actions only writes a cache from the default branch, so a PR run
+      # cannot seed the v7 key -- and lint-go is a required check, so the bump
+      # cannot land to seed it either. The bump was therefore permanently
+      # unmergeable, failing on a check that says nothing about its diff, and
+      # the failure reads exactly like a flake: re-running produced the same
+      # error twice, which is the only reason it was not treated as one.
+      #
+      # 5m is chosen against the observed cold run rather than as a round
+      # number: it exceeded 60s and the step as a whole ran 112s including
+      # `go install`, so 5m leaves room for a slower runner without being so
+      # large that a genuinely hung lint sits there for the job's full budget.
+      #
+      # The deeper point is that a lint gate whose pass depends on a cache hit
+      # is one eviction away from a red build on an unchanged tree. The timeout
+      # should bound the analysis, not the cache.
       - name: golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.7
-          golangci-lint run ./...
+          golangci-lint run --timeout=5m ./...
 
   # -------------------------------------------------------------------------
   # Vulnerability check (govulncheck)
