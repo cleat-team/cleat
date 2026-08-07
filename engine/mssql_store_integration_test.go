@@ -2679,10 +2679,36 @@ func TestMSSQLIntegration_GetWorkflowByID_TenantScoped(t *testing.T) {
 		t.Fatalf("insert wfB: %v", err)
 	}
 
-	// With default store (no tenant), GetWorkflowByID should NOT find wfA
-	// since wfA belongs to tenantA (tenant-scoped filtering).
-	storeDefault := store.WithTenant(DefaultTenantUUID)
-	wfResult, err := storeDefault.GetWorkflowByID(ctx, wfA)
+	// One store per tenant, each opened from the factory -- not store.WithTenant.
+	//
+	// WithTenant copies the struct and overwrites the tenantID field, which
+	// changes the `AND tenant_id = @p2` parameter and nothing else. The pool it
+	// keeps is still the one whose connector set sp_set_session_context to the
+	// tenant it was opened for, so on a database built from the shipped
+	// migrations the security policy filters out every row belonging to the
+	// tenant the caller just asked for. GetWorkflowByID is not in a
+	// transaction, so nothing re-establishes the context either -- the store
+	// methods that go through beginTxWithContext do, which is why this shows up
+	// on some methods and not others.
+	//
+	// It has no production caller on this backend: cmd/cleat's two uses are
+	// NewPostgresStore(db).WithTenant(...), and everything that reaches SQL
+	// Server opens a store per tenant from MSSQLStoreFactory. So this test was
+	// the only thing asserting that WithTenant works here, and it was asserting
+	// it about a construction nothing ships.
+	storeFor := func(tenantID string) WorkflowStore {
+		t.Helper()
+		ws, closer, err := NewMSSQLStoreFactory(os.Getenv("CLEAT_TEST_MSSQL")).
+			OpenStore(ctx, tenantID, "default")
+		if err != nil {
+			t.Fatalf("open a store for tenant %s: %v", tenantID, err)
+		}
+		t.Cleanup(func() { _ = closer.Close() })
+		return ws
+	}
+
+	// The default tenant must NOT see tenantA's workflow.
+	wfResult, err := storeFor(DefaultTenantUUID).GetWorkflowByID(ctx, wfA)
 	if err != nil {
 		t.Fatalf("GetWorkflowByID default tenant: %v", err)
 	}
@@ -2690,9 +2716,8 @@ func TestMSSQLIntegration_GetWorkflowByID_TenantScoped(t *testing.T) {
 		t.Fatal("expected default tenant NOT to see tenantA's workflow")
 	}
 
-	// With tenant A tenant, GetWorkflowByID should find wfA.
-	storeA := store.WithTenant(tenantA)
-	wfAResult, err := storeA.GetWorkflowByID(ctx, wfA)
+	// Tenant A must.
+	wfAResult, err := storeFor(tenantA).GetWorkflowByID(ctx, wfA)
 	if err != nil {
 		t.Fatalf("GetWorkflowByID tenantA: %v", err)
 	}

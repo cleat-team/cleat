@@ -408,8 +408,27 @@ func TestCascadeDelete(t *testing.T) {
 
 			addCascadeFKs(t, db, d.dialect)
 
+			// The privileged handle, for the DELETE that is meant to cascade
+			// and for the counts that check it did. db stays as it is for the
+			// DDL above and below, which needs ALTER rather than DML rights.
+			//
+			// This test is the clearest case for the distinction. The DELETE
+			// ran on db, and on a SQL Server built from the shipped migrations
+			// db is subject to the tenant filter -- so it matched no rows and
+			// nothing cascaded. Three of the five child tables then reported a
+			// surviving row. The other two, event_history and workflow_signals,
+			// reported 0 and *passed*: their rows were still there too, and the
+			// same policy that stopped the DELETE hid them from the count.
+			// Getting a green from two assertions whose subject the test could
+			// no longer see is the failure mode this handle exists to remove.
+			verify := testutil.AdminDB(t, db, d.dialect)
+
 			// Insert a workflow def so workflow_instances FK is satisfied.
-			db.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
+			// The DELETE is what makes a re-run possible, so it goes through
+			// verify: on db it would match nothing on SQL Server and the
+			// INSERT below would fail on the primary key the second time this
+			// test ever ran against a database.
+			verify.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
 			var emptyBlob string
 			switch d.dialect {
 			case testutil.DialectMSSQL:
@@ -431,9 +450,20 @@ func TestCascadeDelete(t *testing.T) {
 			insertChildRows(t, db, d.dialect, wfID)
 
 			// Delete the workflow instance - cascade should clean up children.
-			_, err = db.Exec(`DELETE FROM workflow_instances WHERE id = '` + wfID + `'`)
+			res, err := verify.Exec(`DELETE FROM workflow_instances WHERE id = '` + wfID + `'`)
 			if err != nil {
 				t.Fatalf("delete workflow_instances: %v", err)
+			}
+			// Assert the parent actually went. Without this the whole test can
+			// pass on a DELETE that matched nothing, provided the counts below
+			// are equally blind -- which is exactly what happened on SQL
+			// Server.
+			if n, err := res.RowsAffected(); err != nil {
+				t.Fatalf("rows affected by the parent delete: %v", err)
+			} else if n != 1 {
+				t.Fatalf("deleting workflow_instances %q affected %d rows, want 1 -- "+
+					"nothing was deleted, so nothing could cascade and the child "+
+					"counts below say nothing about ON DELETE CASCADE", wfID, n)
 			}
 
 			// Verify all child rows are gone.
@@ -451,7 +481,7 @@ func TestCascadeDelete(t *testing.T) {
 				case testutil.DialectMSSQL:
 					query = `SELECT COUNT(*) FROM [` + table + `] WHERE workflow_id = '` + wfID + `'`
 				}
-				if err := db.QueryRow(query).Scan(&count); err != nil {
+				if err := verify.QueryRow(query).Scan(&count); err != nil {
 					t.Errorf("count %s: %v", table, err)
 				}
 				if count != 0 {
@@ -463,9 +493,9 @@ func TestCascadeDelete(t *testing.T) {
 			removeCascadeFKs(t, db, d.dialect)
 
 			// Clean up workflow_defs.
-			db.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
+			verify.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
 
-			testutil.CleanupTestData(t, db, d.dialect, "cascade-test-%")
+			testutil.CleanupTestData(t, verify, d.dialect, "cascade-test-%")
 			db.Close()
 		})
 	}

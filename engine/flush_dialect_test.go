@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"os"
 	"strings"
 	"testing"
 
@@ -88,7 +89,7 @@ func requireFlushPersists(t *testing.T, db *sql.DB, dialect testutil.Dialect, wf
 	eng := NewEngine(nil, nil,
 		WithWorkflowID(wfID),
 		WithTenantID(DefaultTenantUUID),
-		WithWorkflowStore(storeFor(dialect, db)),
+		WithWorkflowStore(storeFor(t, dialect, db)),
 		WithDB(db))
 
 	rec := EventRecord{
@@ -110,8 +111,12 @@ func requireFlushPersists(t *testing.T, db *sql.DB, dialect testutil.Dialect, wf
 			"segment on this dialect.", dialect, err)
 	}
 
+	// Read back on the privileged handle, not on db. db is what the engine
+	// writes through, and on SQL Server it is subject to the security policies
+	// -- so this count came back 0 for a flush that had in fact succeeded. See
+	// testutil.AdminDB for why the PostgreSQL arm never noticed.
 	var n int
-	if err := db.QueryRow(countEventsSQL(dialect), wfID).Scan(&n); err != nil {
+	if err := testutil.AdminDB(t, db, dialect).QueryRow(countEventsSQL(dialect), wfID).Scan(&n); err != nil {
 		t.Fatalf("counting events on %s: %v", dialect, err)
 	}
 	if n != 1 {
@@ -212,16 +217,37 @@ func isDuplicateKey(err error) bool {
 // storeFor builds the store the worker would have built for this dialect. The
 // tenant matches the engine's, as it does in the worker: both come from the
 // claimed workflow's tenant_id.
-func storeFor(dialect testutil.Dialect, db *sql.DB) WorkflowStore {
+//
+// SQL Server goes through the factory, and that is not a stylistic difference.
+// NewMSSQLStore(db) sets a tenantID field and nothing else, so every read it
+// does outside a transaction -- PollSignal, GetWorkflowByID,
+// GetAllowedSignalCallers -- runs on a connection with no
+// sp_set_session_context, and on a database built from the shipped migrations
+// the security policies return nothing to it. The store cannot see rows it
+// just wrote. Nothing outside tests constructs it that way: cmd/cleat-worker,
+// cmd/cleat-bench and cmd/deploy-workflow all call
+// MSSQLStoreFactory.OpenStore, which wraps the connector so every connection
+// in the pool carries the tenant.
+//
+// So the doc comment above was true of two dialects out of three, and
+// TestSignalPayloadRoundTripsOnEveryDialect failed all six of its SQL Server
+// cases with "signal not found" on signals that had been delivered
+// successfully.
+func storeFor(t *testing.T, dialect testutil.Dialect, db *sql.DB) WorkflowStore {
+	t.Helper()
 	switch dialect {
 	case testutil.DialectMySQL:
 		s := NewMySQLStore(db)
 		s.tenantID = DefaultTenantUUID
 		return s
 	case testutil.DialectMSSQL:
-		s := NewMSSQLStore(db)
-		s.tenantID = DefaultTenantUUID
-		return s
+		ws, closer, err := NewMSSQLStoreFactory(os.Getenv("CLEAT_TEST_MSSQL")).
+			OpenStore(context.Background(), DefaultTenantUUID, "default")
+		if err != nil {
+			t.Fatalf("open a tenant-scoped SQL Server store: %v", err)
+		}
+		t.Cleanup(func() { _ = closer.Close() })
+		return ws
 	default:
 		s := NewPostgresStore(db)
 		s.tenantID = DefaultTenantUUID
@@ -250,7 +276,7 @@ func TestPerStepFlushDoesNotDoubleCountEvents(t *testing.T) {
 		t.Helper()
 		seedWorkflowInstance(t, db, dialect, wfID)
 
-		store := storeFor(dialect, db)
+		store := storeFor(t, dialect, db)
 		flusher, ok := store.(perStepEventFlusher)
 		if !ok {
 			t.Fatalf("%s store does not implement perStepEventFlusher, so the "+
@@ -282,9 +308,10 @@ func TestPerStepFlushDoesNotDoubleCountEvents(t *testing.T) {
 			t.Errorf("event_count is %d after the finalize append on %s, want 1", got, dialect)
 		}
 
-		// And the row is still there exactly once.
+		// And the row is still there exactly once. Privileged handle, for the
+		// reason spelled out in testutil.AdminDB.
 		var n int
-		if err := db.QueryRow(countEventsSQL(dialect), wfID).Scan(&n); err != nil {
+		if err := testutil.AdminDB(t, db, dialect).QueryRow(countEventsSQL(dialect), wfID).Scan(&n); err != nil {
 			t.Fatalf("counting events on %s: %v", dialect, err)
 		}
 		if n != 1 {
@@ -314,7 +341,7 @@ func eventCountOf(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID strin
 		q = `SELECT event_count FROM workflow_instances WHERE id = @p1`
 	}
 	var n int64
-	if err := db.QueryRow(q, wfID).Scan(&n); err != nil {
+	if err := testutil.AdminDB(t, db, dialect).QueryRow(q, wfID).Scan(&n); err != nil {
 		t.Fatalf("reading event_count on %s: %v", dialect, err)
 	}
 	return n

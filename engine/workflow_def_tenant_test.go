@@ -21,8 +21,6 @@ import (
 	"bytes"
 	"context"
 	"testing"
-
-	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // readDefTenantID reads workflow_defs.tenant_id straight out of the database,
@@ -35,31 +33,29 @@ import (
 // empty result.
 func readDefTenantID(t *testing.T, backend StoreBackend, name string, version int) string {
 	t.Helper()
-	var owner string
+	// The handle comes from adminDBFor rather than from a switch of its own.
+	// The point of this test is to read a row belonging to *another* tenant --
+	// that is what "recorded the deploying tenant" means -- so a handle subject
+	// to the tenant fence cannot answer it. SQL Server's was, and the test
+	// failed with "sql: no rows in result set" on a definition that had
+	// deployed successfully.
+	db := adminDBFor(t, backend)
+
+	var q string
 	switch backend.Name() {
 	case "postgres":
-		db := testutil.TestDB(t, testutil.DialectPostgres)
-		if err := db.QueryRow(
-			`SELECT tenant_id::text FROM workflow_defs WHERE name = $1 AND version = $2`,
-			name, version).Scan(&owner); err != nil {
-			t.Fatalf("read workflow_defs.tenant_id: %v", err)
-		}
+		q = `SELECT tenant_id::text FROM workflow_defs WHERE name = $1 AND version = $2`
 	case "mysql":
-		db := testutil.MySQLTestDB(t)
-		if err := db.QueryRow(
-			`SELECT tenant_id FROM workflow_defs WHERE name = ? AND version = ?`,
-			name, version).Scan(&owner); err != nil {
-			t.Fatalf("read workflow_defs.tenant_id: %v", err)
-		}
+		q = `SELECT tenant_id FROM workflow_defs WHERE name = ? AND version = ?`
 	case "mssql":
-		db := testutil.MSSQLTestDB(t)
-		if err := db.QueryRow(
-			`SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM workflow_defs WHERE name = @p1 AND version = @p2`,
-			name, version).Scan(&owner); err != nil {
-			t.Fatalf("read workflow_defs.tenant_id: %v", err)
-		}
+		q = `SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM workflow_defs WHERE name = @p1 AND version = @p2`
 	default:
 		t.Fatalf("readDefTenantID: unknown backend %q", backend.Name())
+	}
+
+	var owner string
+	if err := db.QueryRow(q, name, version).Scan(&owner); err != nil {
+		t.Fatalf("read workflow_defs.tenant_id: %v", err)
 	}
 	return owner
 }

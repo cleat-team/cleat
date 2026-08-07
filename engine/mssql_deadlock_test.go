@@ -137,7 +137,19 @@ func TestMSSQLDeadlock_ClassifiedFromTheRealDriverError(t *testing.T) {
 	defer db.Close()
 	testutil.SetupMSSQLFullSchema(t, db)
 
-	err := provokeMSSQLDeadlock(t, db)
+	// The deadlock has to be provoked on a handle that can actually lock the
+	// rows. A plain pool is subject to the security policies on a database
+	// built from the shipped migrations, so both UPDATEs below matched nothing,
+	// took no row locks, and the two transactions committed happily side by
+	// side -- the test then failed with "no transaction was chosen as a
+	// deadlock victim", which is a truthful report of a fixture that could not
+	// do its job.
+	//
+	// Note what would have happened without that Fatal: no deadlock, no error,
+	// and a test named for classifying a real 1205 that never saw one. The
+	// assertion earning its keep is the reason the fixture's failure was
+	// visible at all.
+	err := provokeMSSQLDeadlock(t, testutil.MSSQLAdminDB(t, db))
 	if err == nil {
 		t.Fatal("no transaction was chosen as a deadlock victim -- the test did not provoke a deadlock, " +
 			"so it proves nothing about the classifier")

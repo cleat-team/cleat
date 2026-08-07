@@ -112,6 +112,42 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 	return pool
 }
 
+// AdminDB returns the handle a test should use when it needs to see or change
+// rows without regard to which tenant owns them -- seeding a fixture for
+// another tenant, reading a row back to check what the code under test wrote,
+// or deleting one at teardown.
+//
+// It exists because the three dialects give a test wildly different privileges
+// by default, and only one of them says so out loud:
+//
+//	PostgreSQL  the test role is a superuser, and a superuser bypasses RLS
+//	            unconditionally. Every raw read-back in the suite already runs
+//	            exempt from the policies, silently.
+//	MySQL       has no row-level security. Tenancy is a separate database.
+//	SQL Server  applies its security policies to every principal, sa and dbo
+//	            included, so the same read-back returns nothing at all.
+//
+// So a dialect-generic test that wrote through a store and then read the row
+// back on its own connection was doing two different things: on PostgreSQL it
+// bypassed the fence, and on SQL Server it hit it. Under the hand-written test
+// schema that never showed, because that schema had no policies. Built from the
+// shipped migrations it shows immediately -- and in both directions. In
+// TestCascadeDelete the unscoped DELETE matched no rows, so nothing cascaded;
+// three of the five child-table assertions then failed, and the other two
+// *passed*, because their rows were still there and the same policy hid them
+// from the count.
+//
+// Returning db unchanged for the two dialects that need nothing keeps the call
+// sites free of dialect switches, and keeps the asymmetry documented in one
+// place rather than restated at each of them.
+func AdminDB(t *testing.T, db *sql.DB, dialect Dialect) *sql.DB {
+	t.Helper()
+	if dialect == DialectMSSQL {
+		return MSSQLAdminDB(t, db)
+	}
+	return db
+}
+
 // requireMSSQLAdminRole fails loudly when the database enforces RLS but has not
 // had migration 012 applied. Falling back to the plain pool here is what would
 // make teardown silently no-op again.

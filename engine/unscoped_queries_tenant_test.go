@@ -16,9 +16,11 @@ package engine
 //   - PostgresStore.GetWASMLength and GetAllowedSignalCallers use s.db
 //     directly, with no transaction and therefore no cleat.tenant_id.
 //   - MSSQLStore sets its session context per connection, so its security
-//     policies apply -- in production. The test schema defines none of them
-//     (2.71 residual), which is why these assertions are the only thing
-//     checking SQL Server here.
+//     policies apply. Since 2.71 the test schema is built from the shipped
+//     migrations and defines all seven of them, so what runs here is now the
+//     same arrangement production runs; before that the test schema had no
+//     policies and the Go-level filter was the only thing these assertions
+//     could see.
 //
 // Running every dialect means the test says which of those is true today
 // rather than assuming, and the Go-level filter is what makes all three agree.
@@ -30,8 +32,6 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 const (
@@ -52,17 +52,13 @@ func twoTenantStores(t *testing.T, backend StoreBackend) (a, b WorkflowStore, ad
 	storeB, teardownB := tb.SetupForTenant(t, unscopedTenantB)
 	t.Cleanup(teardownB)
 
-	switch backend.Name() {
-	case "postgres":
-		admin = testutil.TestDB(t, testutil.DialectPostgres)
-	case "mysql":
-		admin = testutil.MySQLTestDB(t)
-	case "mssql":
-		admin = testutil.MSSQLTestDB(t)
-	default:
-		t.Fatalf("twoTenantStores: unknown backend %q", backend.Name())
-	}
-	return storeA, storeB, admin
+	// Named admin and, since adminDBFor, actually is one on every dialect. It
+	// used to be a plain MSSQLTestDB pool here, and on the shipped schema a
+	// plain pool is subject to the security policies -- so the fixture UPDATE
+	// in setAllowedSignals matched no rows and reported no error, and the test
+	// failed one assertion later with "tenant B cannot read its own allowed
+	// callers".
+	return storeA, storeB, adminDBFor(t, backend)
 }
 
 // seedReadyRuns deploys a definition for one tenant and starts n ready
