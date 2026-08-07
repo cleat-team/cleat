@@ -74,6 +74,43 @@ for d in $DIALECTS; do
   done
 done
 
+# --- 2a2. Packages that need a database the dialect DSNs do not name ----------------
+# tests/crash is in tier1.packages and does not use any CLEAT_TEST_* DSN. It reads
+# CLEAT_CRASH_DB and, when that is unset, defaults to port 5433 -- deliberately not
+# 5432, because PARALLEL-WORKSTREAMS.md assigns this suite its own instance so its
+# crash-and-recover cycles cannot disturb another workstream's fixtures.
+#
+# Its five tests then Fatal rather than skip when that instance is unreachable, which
+# is the right behaviour and is exactly why this check belongs here. Without it the
+# gate does what it does for no other precondition: it runs the whole suite, spends
+# several minutes, and reports
+#
+#   tier-gate: FAIL: tier 1 has 7 failing test(s)
+#
+# where five of the seven mean "nobody configured this" and two are real. Measured
+# 2026-08-06 from inside the Python toolchain container: with CLEAT_CRASH_DB set,
+# `go test ./tests/crash/...` is ok in 73.9s and the count drops to 2.
+#
+# A precondition the gate discovers 6605 tests in is not a precondition, it is a
+# failure mode -- and the failures it produces are indistinguishable from real ones
+# in the summary line, which is the specific thing this script exists to prevent.
+#
+# Guarded on the package actually being listed, so removing ./tests/crash/... from
+# tiers.yaml removes this requirement with it rather than leaving a check for a
+# suite that no longer runs.
+if awk '/^tier1:/{t=1} t&&/^  packages:/{p=1;next} p&&/^    - /{print;next} p{exit}' "$TIERS" \
+     | grep -q '\./tests/crash/'; then
+  if [ -z "${CLEAT_CRASH_DB:-}" ]; then
+    fail "CLEAT_CRASH_DB is unset -- ./tests/crash/... is a tier-1 package and does not use
+       the CLEAT_TEST_* DSNs. It defaults to port 5433 (PARALLEL-WORKSTREAMS.md gives this
+       suite its own instance) and its tests Fatal, not skip, when that is unreachable --
+       so leaving it unset produces five failures that mean 'nobody asked' and are
+       indistinguishable from real ones in this script's summary."
+  else
+    note "  crash suite: CLEAT_CRASH_DB is set"
+  fi
+fi
+
 # --- 2b. Every tier-1 guest language must have its toolchain ------------------------
 # Same principle as the dialects. A guest language whose compiler is absent does not
 # fail: its tests skip, and the suite still prints ok. Python is the case that forced
