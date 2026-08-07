@@ -68,6 +68,69 @@ tier1:
   skip_allowlist:
     - TestHelperProcess
 
+  # D5, DECIDED 2026-08-06: the tier-1 gate filters lower-tier tests out; it does not
+  # provision their toolchains.
+  #
+  # tier1.packages lists ./engine/..., ./wasm/... and ./cmd/..., and those packages also
+  # contain the Rust, Java and AssemblyScript integration tests -- tier 2 -- and
+  # TestComponentPythonBinary, which covers the parked component *decomposition* path,
+  # tier 3. `go test ./engine/...` sweeps all of them in, each skips for want of a
+  # toolchain, and tier 1 forbids skips. So the gate reported 14 non-allowlisted skips
+  # that no test fix could remove.
+  #
+  # The alternative was a runner carrying Rust, Node, a JDK, Gradle, componentize-py and
+  # wasm-tools together. Measured on the Cross-Language E2E job, which is the closest
+  # thing that exists: the setup actions themselves are nearly free (11s for all five,
+  # they are cached), but `cargo install wasm-tools` compiles from source and the
+  # toolchain install step runs 2m20s; the job totals 5m13s. The container route costs
+  # disk instead -- scripts/docker/python-toolchain.Dockerfile is already 1.4 GB with
+  # only Go, Python and wasm-tools in it.
+  #
+  # Those numbers are affordable. The reason not to is what tier 1 would then depend on.
+  # Its contract is "must pass; a skip is a failure; that is a release blocker", so
+  # provisioning makes crates.io, npm, Maven Central and PyPI release blockers. That is
+  # not hypothetical -- on 2026-08-06 alone, three CI failures had nothing to do with the
+  # diff that hit them: Maven Central answered 429 and failed a two-file change to a
+  # MySQL mock test; Maven Central answered 403 on the plugin harness; and
+  # actions/setup-go v7 changed its cache key, which made #325 fail a required lint check
+  # it could never pass. Each looked like a flake. Under a provisioned tier-1 gate each
+  # would have been a release blocker.
+  #
+  # And it is incoherent with the tier system: tier 1 declares languages [go, python], so
+  # requiring tier-2 toolchains to *run the tier-1 gate* makes tier 1 no more available
+  # than tier 2, which is the opposite of what tiering is for.
+  #
+  # Filtering has one real cost and it is the dangerous one: `go test -skip` removes a
+  # test with no `--- SKIP` line, so an excluded test is invisible rather than merely
+  # unrun. That is the "green result that measured nothing" shape CLAUDE.md opens with.
+  # scripts/tier-gate.sh therefore enumerates what each pattern matched, by name, on
+  # every run, and fails on a pattern that matches nothing -- so this list cannot rot
+  # into a place to hide a failing test.
+  #
+  # Anchored regexes, matched against `go test -list`. Each entry names its tier.
+  exclude_tests:
+    # tier 2 -- rust. engine/rust_workflow_test.go; needs cargo + wasm32-unknown-unknown.
+    - "^TestRustWorkflow"
+    # tier 2 -- java. engine/java_workflow_e2e_test.go; needs a JDK and Gradle.
+    - "^TestJavaWorkflowExecute$"
+    # tier 2 -- assemblyscript. engine/as_workflow_e2e_test.go and the npx-based
+    # transform/vet checks; all need node.
+    - "^TestAssemblyScriptWorkflowExecute$"
+    - "^TestASTransform$"
+    - "^TestVetAS$"
+    # tier 3 -- component decomposition. wasm/component_test.go. Not a language gap: it
+    # reads a hardcoded /tmp/test_python.wasm, so it has never run anywhere but the
+    # machine it was written on, and it asserts 14 modules and a ~12 MB first module --
+    # properties of one componentize-py version.
+    #
+    # Deliberately NOT deleted as "superseded by TestPythonWasmEndToEnd", which this
+    # file previously suggested and which is wrong: both ParseComponentBundle callers in
+    # the engine are on the decomposition fallback path, and the Python e2e takes the
+    # native component path, so it never reaches the parser. This is the only test that
+    # parses a real componentize-py bundle. Excluded because the path it covers is
+    # parked, not because the test is worthless.
+    - "^TestComponentPythonBinary$"
+
   # D2, DECIDED 2026-08-06: python joins go at tier 1.
   #
   # The objection was never that Python did not work -- it was that nothing could prove
