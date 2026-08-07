@@ -588,7 +588,15 @@ jobs:
   test-assemblyscript-wasm:
     name: AssemblyScript WASM Build
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # continue-on-error removed 2026-08-07. It was protecting nothing: measured on
+    # develop run 31193028xxx, every one of this job's steps -- Install SDK
+    # dependencies, Install example dependencies, Build example WASM, Verify WASM output
+    # exists and is non-empty, Inspect WASM exports -- reported success. A job that
+    # cannot fail while passing anyway is indistinguishable from one that is broken and
+    # forgiven, which is the whole reason nobody could tell what this repo tested.
+    #
+    #   gh run view <id> --json jobs \
+    #     --jq '.jobs[]|select(.name=="AssemblyScript WASM Build")|.steps[]|"\(.conclusion)\t\(.name)"'
     steps:
       - uses: actions/checkout@v4
 
