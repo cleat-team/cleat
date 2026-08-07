@@ -173,6 +173,10 @@ jobs:
         working-directory: crates/cleat-sdk
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Clippy (cleat-test)
+        working-directory: crates/cleat-test
+        run: cargo clippy --all-targets -- -D warnings
+
   # -------------------------------------------------------------------------
   # Lint Go (golangci-lint)
   # -------------------------------------------------------------------------
@@ -576,6 +580,16 @@ jobs:
 
       - name: Test cleat-sdk
         working-directory: crates/cleat-sdk
+        run: cargo test
+
+      # crates/cleat-test had no CI coverage of any kind before 2026-08-07 -- not this
+      # job, and no clippy step either -- despite carrying 57 passing tests. That is how
+      # an absurd_extreme_comparisons defect (`Duration::as_millis() <= 0`, where the
+      # return type is u128) survived in it: nothing in CI ever compiled the crate.
+      #
+      #   grep -rn "cleat-test" .github/workflows/
+      - name: Test cleat-test
+        working-directory: crates/cleat-test
         run: cargo test
 
       - name: Verify WASM compilation

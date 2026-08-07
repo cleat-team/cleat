@@ -695,7 +695,7 @@ impl TestEnv {
             }
         }
 
-        if timeout.as_millis() <= 0 {
+        if timeout.as_millis() == 0 {
             // Zero timeout = poll only
             return SignalResult {
                 name: String::new(),
