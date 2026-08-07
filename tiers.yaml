@@ -10,10 +10,14 @@
 # a property CI checks, not a sentence someone wrote.
 #
 # ---------------------------------------------------------------------------
-# STATUS: DRAFT. The tier assignments below are a proposal, not a decision.
-# They are grounded in the measurement recorded in `baseline`, but four of them are
-# genuine product calls and are marked `decision: OWNER`. Nothing enforces this file
-# until `scripts/tier-gate.sh` is wired into CI.
+# STATUS: the four product calls this file was drafted waiting on -- D1 through D4 --
+# were all decided by the owner on 2026-08-06 and are recorded at the bottom. Entries
+# settled that way carry `decision: DECIDED <date>`; entries with no `decision:` key were
+# assigned on measurement alone and need no product call.
+#
+# Nothing enforces this file until `scripts/tier-gate.sh` is wired into CI as a required
+# check. Until then a tier here is a claim about what we intend to hold ourselves to, not
+# a claim that anything is checking.
 # ---------------------------------------------------------------------------
 
 meta:
@@ -177,7 +181,7 @@ tier2:
     #     It is a test-design bug, not a toolchain gap, and not a tier-1 blocker.
 
     - id: sdk-java
-      decision: OWNER          # D4 -- promoted from tier 3 on measurement; see #347
+      decision: DECIDED 2026-08-06    # D4 -- promoted from tier 3 on measurement; see #347
       why: |
         Moved up from tier 3 on 2026-08-06. The tier-3 assessment said its harness test
         "fails on toolchain setup", and that was wrong in an instructive way: the test ran
@@ -207,7 +211,7 @@ tier2:
            String.class, no getQueryState, durableDefer takes a description not a closure"
 
     - id: sdk-assemblyscript
-      decision: OWNER          # D4 -- see open_items; same shape as Java was
+      decision: DECIDED 2026-08-06    # D4 -- see open_items; same shape as Java was
       why: |
         Moved up from tier 3 on 2026-08-06, on the same kind of measurement and with the
         same caveat as Java. Measured that day: TestAssemblyScriptWorkflowExecute PASSES
@@ -241,7 +245,7 @@ tier2:
         - "multi-DB harness job runs a t.Skip while starting three databases"
 
     - id: admin-dashboard
-      decision: OWNER          # D3 -- DECIDED 2026-08-06: the dashboard must authenticate
+      decision: DECIDED 2026-08-06    # D3 -- the dashboard must authenticate
       why: |
         Wired to a real API and reasonably tested at the lib layer, but `web/src/lib/api.ts`
         never sends an Authorization header -- it sets Content-Type and nothing else, at
