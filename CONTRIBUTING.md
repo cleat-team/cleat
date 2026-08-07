@@ -356,7 +356,7 @@ each gate must pass before the next begins.
 
 ### 1. Open the PR
 
-Open a pull request against the `main` branch from a branch that follows the
+Open a pull request against the `develop` branch from a branch that follows the
 [branch naming convention](#branch-naming). Use the PR template to describe
 your change. If you have not signed the CLA, a bot will comment on the pull
 request asking you to (see [How to sign](#how-to-sign-individuals)); there is
