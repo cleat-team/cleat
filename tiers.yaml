@@ -241,12 +241,37 @@ tier2:
         - "multi-DB harness job runs a t.Skip while starting three databases"
 
     - id: admin-dashboard
-      decision: OWNER          # D3
+      decision: OWNER          # D3 -- DECIDED 2026-08-06: the dashboard must authenticate
       why: |
         Wired to a real API and reasonably tested at the lib layer, but `web/src/lib/api.ts`
-        never sends an Authorization header. Against a correctly-secured worker it 401s on
-        every call; against --require-auth=false it is an ungated admin surface. Establish
-        which before assigning a tier.
+        never sends an Authorization header -- it sets Content-Type and nothing else, at
+        every one of its call sites. cleat-worker defaults --require-auth=true.
+
+        D3 is decided: the dashboard must authenticate. cleat runs on cloud instances and
+        the dashboard connects from somewhere else, so "local dev only, never exposed" was
+        never the shipping story -- which settles it. Two consequences follow, and the
+        second is the one that costs something:
+
+          * The "run it against --require-auth=false" configuration is not a supported
+            deployment. It is an ungated admin surface reachable from wherever the worker
+            is reachable, and no doc or manifest may present it as a way to use the
+            dashboard.
+          * Authentication is a feature that does not exist yet, not a header to add. The
+            open question is where the credential comes from -- an operator-pasted API
+            key held in the browser, or a real login flow -- and they are different
+            amounts of work. Until one is built and the dashboard sends it, this is a
+            component that cannot function against a correctly-configured worker.
+
+        Tier 2 with a named gap rather than tier 3, because the gap is now a tracked
+        feature with a decided direction rather than an open question about intent. It
+        does not move to tier 1 until it authenticates against a worker running the
+        default --require-auth=true.
+      open_items:
+        - "web/src/lib/api.ts sends no Authorization header at any call site"
+        - "no credential acquisition path exists — decide operator-pasted API key vs
+           login flow before building it; cross-origin is the normal case, so CORS on
+           the worker's API and token storage in the browser both need answering"
+        - "docs and deployment manifests still imply the dashboard works as shipped"
 
     - id: backend-wazero
       why: |
@@ -312,25 +337,13 @@ tier3:
 #       SQL Server have it; MySQL is documented single-tenant-only. See tier1.tenancy.
 #   D2  DECIDED 2026-08-06. Python is tier 1, with a toolchain precondition in the gate.
 #       See the block above tier1.languages.
+#   D3  DECIDED 2026-08-06. The dashboard must authenticate. cleat runs on cloud
+#       instances and the dashboard connects from elsewhere, so running it against
+#       --require-auth=false is not a supported deployment. See admin-dashboard above:
+#       this makes authentication a feature to build, not a header to add.
 #   D4  DECIDED 2026-08-06. Java and AssemblyScript are tier 2, not parked. Both were
 #       parked on the output of tests that could not fail; see the note in tier 3.
 #
-# STILL OPEN:
-#
-#   D3  Is the dashboard shipping against an authenticated worker or not? Determines
-#       whether it is tier 2 with a known gap or tier 3 until it authenticates.
-#
-#       Concretely: web/src/lib/api.ts sends Content-Type and nothing else -- there is no
-#       Authorization header anywhere in it. cleat-worker defaults --require-auth=true.
-#       So exactly one of these is true today, and they need different work:
-#         (a) the dashboard is pointed at a worker with --require-auth=false, in which
-#             case it is an unauthenticated admin surface -- every route, no credential;
-#         (b) it is pointed at a correctly-secured worker, in which case it 401s on every
-#             call and is non-functional.
-#       Nobody has to guess which was intended, but somebody has to say which is shipping.
-#       If the answer is "it should authenticate", that is a feature to build (where does
-#       the API key come from? a login flow? an operator-pasted token?) and the dashboard
-#       is tier 3 until it exists. If the answer is "local dev only, never exposed", that
-#       is a documented boundary and it can be tier 2 -- but then the docs and the
-#       deployment manifests have to stop implying otherwise.
+# All four decisions are settled. New ones go here with the same shape: what was
+# decided, on what date, and what it changes about what the gate enforces.
 # ---------------------------------------------------------------------------
