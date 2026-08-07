@@ -116,7 +116,7 @@ func TestMySQLStoreFactory(t *testing.T) {
 	defer db.Close()
 
 	// Use the connection without a database for the master.
-	factory := NewMySQLStoreFactory(db, "root:cleat@tcp(127.0.0.1:3306)/")
+	factory := NewMySQLStoreFactory(db, mysqlTestBaseDSN(t))
 	if factory == nil {
 		t.Fatal("NewMySQLStoreFactory returned nil")
 	}
