@@ -22,14 +22,23 @@ under different terms if needed.
 
 ### How to sign (individuals)
 
-Include the following statement in your first pull request description:
+Open your pull request as normal. If you have not signed, the CLA Assistant
+bot comments on it with a link to the agreement, and the `CLA Assistant` check
+stays red until you reply on the pull request with exactly:
 
 ```
-I hereby agree to the terms of the cleat Contributor License Agreement
-(docs/cla.md).
-
-Signed-off-by: Your Name <your.email@example.com>
+I have read the cleat Contributor License Agreement and I hereby sign the CLA
 ```
+
+Your signature is then recorded in `signatures/version1/cla.json` on the
+`cla-signatures` branch, against your GitHub username and the pull request you
+signed on. You sign once; later pull requests are checked against that file.
+If the check is stale for any reason, comment `recheck`.
+
+> Until 2026-08-07 signing meant pasting a sentence into the pull request
+> description. That established nothing — a description is editable after the
+> fact and is not carried into the repository by a squash merge, so there was
+> no record of who had agreed. The signature file is that record.
 
 ### Corporate contributors
 
@@ -324,8 +333,9 @@ each gate must pass before the next begins.
 
 Open a pull request against the `main` branch from a branch that follows the
 [branch naming convention](#branch-naming). Use the PR template to describe
-your change. If this is your first PR to cleat, include the CLA statement in
-the description (see [How to sign](#how-to-sign-individuals)).
+your change. If you have not signed the CLA, a bot will comment on the pull
+request asking you to (see [How to sign](#how-to-sign-individuals)); there is
+nothing to prepare in advance.
 
 Keep PRs small and focused. A single concern, a single PR.
 
@@ -338,7 +348,7 @@ CI runs automatically on every push. The following checks must all pass:
 | DCO | Every commit has a `Signed-off-by` line |
 | Semantic PR title | Title follows `type(scope): description` format |
 | Branch naming | Branch name follows `feature/`, `bugfix/`, `fix/`, `docs/`, `release/`, or `hotfix/` prefix convention |
-| CLA (first-time only) | First-time contributors have the ICLA statement in the PR description |
+| CLA Assistant | The author has signed the ICLA, recorded in `signatures/version1/cla.json` on the `cla-signatures` branch |
 | Lint | `go vet`, `golangci-lint`, `ruff`, `shellcheck`, `clippy` |
 | Test | Go (1.22/1.23/1.24 matrix), Python (3.10–3.12), Java, Rust, AssemblyScript |
 | Vulncheck | `govulncheck` for known vulnerabilities |
