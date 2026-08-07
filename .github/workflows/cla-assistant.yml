@@ -1,0 +1,118 @@
+# ---------------------------------------------------------------------------
+# CLA Assistant — records who has signed the cleat ICLA
+#
+# Replaces .github/workflows/cla-check.yml, which matched a regex against the
+# pull request description. That never established anything:
+#
+#   - the evidence was a PR description, which the author can edit at any time
+#     and which is not carried into the repository by a squash merge, so the
+#     project held no record of who had agreed to what;
+#   - the exemption was "has any merged PR", so it asked once and never again,
+#     including across new versions of docs/cla.md;
+#   - it had no bot exemption. dependabot was told it was a first-time
+#     contributor and asked to sign a copyright assignment, which it cannot do.
+#     It now passes only because it has merged PRs -- the check stopped asking
+#     rather than being satisfied;
+#   - it triggered on opened/synchronize/reopened but not `edited`, so a
+#     first-time contributor who did exactly what the failure message told them
+#     -- add the statement to the PR description -- got no re-run;
+#   - its search call had no error handling, so a secondary rate limit threw and
+#     reported as an unsigned CLA;
+#   - it printed `CLA statement found in PR description.` unconditionally, after
+#     core.setFailed, and warned that "the CLA statement appears to be present"
+#     on the branch where it was absent.
+#
+# This action instead asks the contributor to post a signing comment on the PR,
+# and commits their signature to a JSON file in this repository. The record
+# outlives the pull request, which is the point of having a CLA at all.
+#
+# ---------------------------------------------------------------------------
+# Signatures live on their own branch, and that is load-bearing rather than
+# tidy. The action pushes a commit for each signature. develop carries 20
+# required status checks with enforce_admins=true, so a direct push to it is
+# rejected -- pointing `branch` at develop would fail on the first signature.
+# Re-derive:
+#
+#   gh api repos/cleat-team/cleat/branches/develop/protection \
+#     --jq '{enforce_admins:.enforce_admins.enabled,
+#            required_checks:(.required_status_checks.contexts|length)}'
+#
+# `cla-signatures` is an orphan branch holding only the signature file. Do not
+# add protection to it, and do not merge it into develop.
+# ---------------------------------------------------------------------------
+name: CLA Assistant
+
+# pull_request_target, not pull_request, because the job needs a write token to
+# commit the signature and a fork's pull_request token is read-only.
+#
+# This is the safe use of that trigger: the job checks out no code -- there is
+# no actions/checkout here at all -- and runs only the action below. The unsafe
+# pattern is pull_request_target plus a checkout of the head ref, which would
+# run a fork's code with the base repo's write token.
+#
+# Note for whoever changes this file: pull_request_target always runs the
+# version of the workflow on the DEFAULT branch, so edits here have no effect
+# on their own pull request and take effect only once merged to develop.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    name: Contributor License Agreement
+    runs-on: ubuntu-latest
+    steps:
+      - name: CLA Assistant
+        # Only two things should wake this job: a pull_request_target event, or
+        # a comment that is one of the two magic strings. Without this guard it
+        # would re-run on every comment on every issue in the repository.
+        if: >-
+          github.event_name == 'pull_request_target' ||
+          github.event.comment.body == 'recheck' ||
+          github.event.comment.body == 'I have read the cleat Contributor License Agreement and I hereby sign the CLA'
+        uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/version1/cla.json
+          path-to-document: https://github.com/cleat-team/cleat/blob/develop/docs/cla.md
+          branch: cla-signatures
+
+          # Bots cannot hold copyright and cannot assign it, so asking them to
+          # sign is a category error -- this is the explicit version of the
+          # exemption dependabot previously acquired by accident, when it was
+          # told it was a first-time contributor and asked for a copyright
+          # assignment.
+          #
+          # rcownie is deliberately NOT here yet. The project owner is the party
+          # the ICLA grants rights TO, so an owner exemption is defensible and
+          # is probably where this ends up -- but adding it now would mean the
+          # first pull requests after this merges all pass by exemption, and
+          # nothing would ever write to signatures/version1/cla.json. A CLA
+          # system that silently never records a signature looks exactly like
+          # one that works. Leaving the owner out makes the next pull request
+          # exercise the signing path for real, against the branch protection
+          # constraint noted above, which is the only way to find out that the
+          # commit actually lands. Add rcownie here once a signature exists on
+          # the cla-signatures branch.
+          allowlist: dependabot[bot],github-actions[bot]
+
+          custom-pr-sign-comment: >-
+            I have read the cleat Contributor License Agreement and I hereby sign the CLA
+
+          # Default is true. Locking every pull request the moment it merges
+          # would end the ability to comment on merged work, which is a change
+          # to how the repository is used and nothing to do with the CLA.
+          lock-pullrequest-aftermerge: false
