@@ -32,7 +32,7 @@ engine	TestIntegrationNewEventTypesPersistenceRoundTrip	1
 engine	TestIntegrationReplayDivergence	1
 engine	TestIntegrationSignalAndResume	1
 engine	TestIntegrationWorkflowMaxDuration	1
-engine	TestJavaWorkflowExecute	3
+engine	TestJavaWorkflowExecute	1
 engine	TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint	1
 engine	TestMSSQLDeadlock_ClassifiedFromTheRealDriverError	2
 engine	TestMSSQLFactoryClose	2
@@ -67,7 +67,7 @@ engine	TestUnauthenticatedQueryRejection	2
 engine	bootstrapScratchDB	1
 engine	buildAssemblyScriptWasm	4
 engine	buildFixtureWasm	1
-engine	buildJavaWasm	4
+engine	buildJavaWasm	2
 engine	buildRustWasm	2
 engine	forEachBackend	1
 engine	mysqlIntegrationStore	2
