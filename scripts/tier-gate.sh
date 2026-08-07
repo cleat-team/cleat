@@ -97,9 +97,14 @@ for l in $LANGS; do
           fail "python is tier 1 but $tool is not on PATH -- its tests would skip and this gate would still print ok.
        On macOS componentize-py cannot run natively (it dies on EXC_GUARD /
        GUARD_TYPE_MACH_PORT, a Darwin kernel guard). Use the Linux container:
-         docker build -f scripts/docker/python-toolchain.Dockerfile -t cleat-py .
-       and run this gate inside it. Requires Docker Desktop, not colima -- colima
-       cannot bind-mount /Users/Shared, so the mount is silently empty."
+         docker build -f scripts/docker/python-toolchain.Dockerfile -t cleat-py-toolchain .
+         docker --context desktop-linux run --rm -v \"\$PWD\":/src -w /src -e CGO_ENABLED=1 \\
+           cleat-py-toolchain go test ./engine/ -run 'TestPython'
+       Docker Desktop, not colima. Colima cannot bind-mount these paths, and it
+       does not fail: -v \"\$PWD\":/src mounts an empty directory and the run dies
+       with 'go.mod file not found', which reads as a checkout problem. Mounting
+       the repo root under colima is worse still -- it succeeds and shows a
+       different tree. --context desktop-linux is the whole fix."
         fi
       done
       ;;

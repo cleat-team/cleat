@@ -14,7 +14,28 @@
 # so an arm64 container producing a component for an amd64 runner is fine.
 #
 # Build:  docker build -f scripts/docker/python-toolchain.Dockerfile -t cleat-py-toolchain .
-# Use:    docker run --rm -v "$PWD":/src -w /src cleat-py-toolchain go test ./cmd/cleat/ -run Python
+# Use:    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+#           cleat-py-toolchain go test ./engine/ -run 'TestPython'
+#
+# --context desktop-linux is not optional on a Mac that also has colima, and
+# getting it wrong does not look like a mount problem. Colima cannot bind-mount
+# these paths and says nothing: -v "$PWD":/src produces an *empty* directory, so
+# the run fails with
+#
+#   go: go.mod file not found in current directory or any parent directory
+#
+# which reads as a broken checkout. Mounting the repo root under colima is worse
+# -- it succeeds and serves a different tree entirely. Verified 2026-08-06:
+#
+#   docker run --rm -v "$PWD":/src alpine ls /src               # (nothing)
+#   docker --context desktop-linux run --rm -v "$PWD":/src alpine ls /src
+#     ABI.md  ARCHITECTURE.md  BRANCH-TRIAGE.md  CHANGELOG.md  CLAUDE.md ...
+#
+# CGO_ENABLED=1 for the same reason it is pinned everywhere else: without it
+# NewWasmtimeBackend is compiled out and the Python tests would run on wazero,
+# which is not what they are there to check. With it the run reports
+#
+#   wasmtime registered for [go assemblyscript java rust python]
 FROM golang:1.26-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
