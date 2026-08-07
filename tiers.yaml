@@ -219,22 +219,32 @@ tier2:
         notifications.SendEmail, four calls in order -- and the SDK's own as-pect suite is
         106/106 across three spec files.
 
-        It is at tier 2 rather than tier 1 because its e2e test has the same six
-        best-effort t.Skipf sites Java's had, so a regression there is still invisible,
-        and because of the data-plane hole below. It has NOT yet had #347's treatment.
+        It has since had #347's treatment (#350): the six best-effort t.Skipf sites are
+        failures, the one legitimate environmental skip goes through
+        toolchainRequired("assemblyscript"), the AssemblyScript Tests job no longer
+        carries continue-on-error, and it is first-class in e2e-cross-language.yml's
+        CLEAT_REQUIRE_TOOLCHAINS.
+
+        Making it able to fail found two real defects the same day, which is the argument
+        for tier 2 rather than tier 1 far better than any list of open items:
+
+          * No data flowed between the saga's steps. examples/as-workflow read
+            reservationID / totalCents / chargeID out of responses spelling them
+            reservation_id / total_cents / charge_id, so payments.Charge was invoked for
+            zero and the result carried an empty reservation_id. The test asserted only
+            "result non-empty" and the call sequence, so it passed throughout.
+          * The example could not be installed from a clean checkout at all.
+            package-lock.json recorded its two `file:` devDependencies in a form `npm ci`
+            refuses, and had for as long as the file has been in that shape. Invisible
+            because it reached a best-effort skip, and because node_modules is untracked
+            -- anyone who had ever run `npm install` there kept a working tree.
+
+        Both are fixed, and the e2e now asserts each value that has to survive a hop.
+        Tier 1 wants a record, not a good day; revisit after the open item below.
       open_items:
-        - "6 best-effort skip sites in engine/as_workflow_e2e_test.go degrade a runtime
-           trap, a build failure and an execute failure into skips — apply #347's fix"
-        - "REAL DEFECT, found 2026-08-06: the e2e passes while no data flows between
-           steps. The result is {\"status\":\"shipped\",\"reservation_id\":\"\"} because
-           examples/as-workflow extracts reservationID/totalCents/chargeID (camelCase)
-           while the mock returns reservation_id/total_cents/charge_id. payments.Charge is
-           therefore called with amount 0. The test asserts only 'result non-empty' and
-           the call sequence, so it cannot see this."
         - "isReplaying() is hardcoded `return false` with a TODO — a workflow that
-           branches on it gets the wrong answer during replay"
-        - "ci.yml's AssemblyScript Tests job carries continue-on-error, so its 106
-           passing tests cannot fail the build either"
+           branches on it gets the wrong answer during replay. Needs a host-side
+           cleat_is_replaying ABI entry, so it is not a test-side fix."
 
     - id: plugins
       why: 21 built-in, all with unit tests; 10 covered by the integration harness.
