@@ -23,12 +23,25 @@ package engine
 // NO SLEEPS. The intermittent that led WS-3 here was
 // TestAcquireConcurrencyKey_Expired, which acquires with a 1 ns TTL, sleeps
 // 10 ms and hopes -- asserting per-backend behaviour through a race. These
-// tests read the stored expiry back and do arithmetic on it, which is
-// deterministic, and check exclusion by acquiring twice, which needs no clock
-// at all.
+// tests read the stored expiry back and do arithmetic on it, and check
+// exclusion by acquiring twice, which needs no clock at all.
+//
+// "No sleeps" was not sufficient for determinism, and this file learned that
+// the expensive way. The read-back arithmetic still compared the remaining TTL
+// against a hardcoded fraction of it (ttl/2), which is a bound on how fast the
+// runner is -- so `Test SQL Server` went red on develop on 2026-08-07 with a
+// correct implementation and a slow round trip. The lower bound is now derived
+// from the elapsed time rather than guessed; see the comment on it below.
+//
+// And that elapsed time is read from the database's clock, not the host's, for
+// the same reason the expiry is: bracketing with time.Now() was tried first and
+// was still wrong by 1-2 ms on SQL Server. Every instant this file reasons about
+// now comes from one clock, which is the property the code under test is
+// supposed to have.
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -38,7 +51,11 @@ import (
 // readConcurrencyKeyExpiry returns how far in the future the stored expiry is,
 // measured against the database's own clock so the assertion does not depend on
 // the test host's.
-func readConcurrencyKeyExpiry(t *testing.T, backend StoreBackend, key string) time.Duration {
+// Takes the admin handle rather than opening one, because each of the three
+// adminDBFor branches opens a fresh *sql.DB and this is called in a loop:
+// opening per call ran PostgreSQL out of connections ("sorry, too many clients
+// already") under `go test -count=20`.
+func readConcurrencyKeyExpiry(t *testing.T, db *sql.DB, backend StoreBackend, key string) time.Duration {
 	t.Helper()
 	// Looked up by key_text, not by re-deriving the hash in SQL: HASHBYTES over
 	// an NVARCHAR parameter hashes UTF-16 and never matches the UTF-8 digest Go
@@ -59,12 +76,57 @@ func readConcurrencyKeyExpiry(t *testing.T, backend StoreBackend, key string) ti
 		t.Fatalf("readConcurrencyKeyExpiry: unknown backend %q", backend.Name())
 	}
 
-	db := adminDBFor(t, backend)
 	var secondsRemaining float64
 	if err := db.QueryRow(q, key).Scan(&secondsRemaining); err != nil {
 		t.Fatalf("read concurrency key expiry: %v", err)
 	}
 	return time.Duration(secondsRemaining * float64(time.Second))
+}
+
+// dbNowMicros reads the database's own clock as whole microseconds since the
+// Unix epoch.
+//
+// Only ever used to subtract one reading from another, and only readings from
+// the same database -- so the epoch, the column type and the session time zone
+// all cancel and none of them has to be got right.
+//
+// An integer rather than a time.Time, because scanning a timestamp column into
+// time.Time works on all three drivers only if the MySQL DSN carries
+// parseTime=true -- which the CI DSNs and testutil's default set, but a
+// developer's own CLEAT_TEST_MYSQL need not. A test that fails with
+// "unsupported Scan" on someone's laptop teaches them nothing about locks.
+//
+// An integer rather than float64 seconds, because the difference of two of
+// these is compared against a duration a few milliseconds long, and the epoch
+// is about 1.78e15 microseconds. In float64 seconds that value quantises to
+// roughly a quarter of a microsecond, and subtracting two of them cancels away
+// the significant digits: the SQL Server subtests failed by 17-100 ns against a
+// correct implementation, which is numerical noise wearing a bug's clothing.
+// Microseconds as int64 stay exact until well past the year 250000.
+func dbNowMicros(t *testing.T, db *sql.DB, backend StoreBackend) int64 {
+	t.Helper()
+	var q string
+	switch backend.Name() {
+	case "postgres":
+		// clock_timestamp(), not now(): now() is the *transaction* start time in
+		// PostgreSQL, so two readings inside one transaction would be identical
+		// and the elapsed time would measure as zero -- which would make the
+		// bound below stricter than reality rather than looser, i.e. flaky in
+		// the direction that fails a correct implementation.
+		q = `SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint`
+	case "mysql":
+		q = `SELECT TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', NOW(6))`
+	case "mssql":
+		q = `SELECT DATEDIFF_BIG(MICROSECOND, '1970-01-01', SYSUTCDATETIME())`
+	default:
+		t.Fatalf("dbNowMicros: unknown backend %q", backend.Name())
+	}
+
+	var micros int64
+	if err := db.QueryRow(q).Scan(&micros); err != nil {
+		t.Fatalf("read database clock: %v", err)
+	}
+	return micros
 }
 
 // TestConcurrencyKeyTTLKeepsSubSecondPrecision is the defect, on every dialect.
@@ -77,6 +139,10 @@ func TestConcurrencyKeyTTLKeepsSubSecondPrecision(t *testing.T) {
 			ctx := context.Background()
 			runID := seedWorkflowForLock(t, store)
 
+			// One admin handle for the whole dialect, reused by every subtest
+			// below. See readConcurrencyKeyExpiry.
+			adminDB := adminDBFor(t, backend)
+
 			for _, ttl := range []time.Duration{
 				500 * time.Millisecond,
 				999 * time.Millisecond,
@@ -86,6 +152,14 @@ func TestConcurrencyKeyTTLKeepsSubSecondPrecision(t *testing.T) {
 				ttl := ttl
 				t.Run(ttl.String(), func(t *testing.T) {
 					key := fmt.Sprintf("ttl-%s-%d", ttl, time.Now().UnixNano())
+
+					// Bracket the acquire and the read-back with two readings of
+					// the database's clock. Their difference is an upper bound on
+					// the database-side elapsed time between the stored expiry
+					// being computed and being read -- which is exactly the
+					// quantity that eats into `remaining`. See the lower-bound
+					// assertion below.
+					before := dbNowMicros(t, adminDB, backend)
 					acquired, err := store.AcquireConcurrencyKey(ctx, key, runID, ttl)
 					if err != nil {
 						t.Fatalf("AcquireConcurrencyKey: %v", err)
@@ -95,21 +169,53 @@ func TestConcurrencyKeyTTLKeepsSubSecondPrecision(t *testing.T) {
 					}
 					t.Cleanup(func() { _ = store.ReleaseConcurrencyKey(ctx, key) })
 
-					remaining := readConcurrencyKeyExpiry(t, backend, key)
+					remaining := readConcurrencyKeyExpiry(t, adminDB, backend, key)
+					dbElapsed := time.Duration(dbNowMicros(t, adminDB, backend)-before) * time.Microsecond
+
 					if remaining <= 0 {
 						t.Fatalf("a %s lock was stored already expired (%s remaining): "+
 							"the next caller takes it, and two workflows hold the same key",
 							ttl, remaining)
 					}
-					// Generous lower bound, exact upper bound: the round trip
-					// costs real time, so the remainder is slightly less than
-					// the TTL. It must never exceed it.
+					// Exact upper bound: the round trip costs real time, so the
+					// remainder is slightly less than the TTL. It must never
+					// exceed it.
 					if remaining > ttl {
 						t.Errorf("a %s lock expires in %s, which is longer than asked for", ttl, remaining)
 					}
-					if remaining < ttl/2 {
-						t.Errorf("a %s lock expires in %s -- the TTL was truncated, not merely "+
-							"reduced by the round trip", ttl, remaining)
+					// Exact lower bound, and it is exact rather than generous on
+					// purpose. This was `remaining < ttl/2`, which asserts that
+					// the read-back finished within 250 ms of the acquire for the
+					// 500 ms case -- a property of the runner, not of the code. It
+					// failed on `Test SQL Server` on develop on 2026-08-07
+					// (run 31145314648, "a 500ms lock expires in 202.46ms") with
+					// nothing wrong: the round trip took ~298 ms on a loaded
+					// runner, and the stored TTL was correct.
+					//
+					// `ttl - dbElapsed` needs no slack and no tuning. expires_at
+					// is db_now_at_acquire + ttl and `remaining` is measured
+					// against db_now_at_read, so remaining == ttl - (database
+					// elapsed between those two instants), and `dbElapsed`
+					// brackets that from outside. A correct implementation cannot
+					// violate it however slow the machine is; a truncating one
+					// violates it by the whole truncated remainder.
+					//
+					// Measured on the database's clock and not the host's, which
+					// is not a detail: bracketing with time.Now() instead failed
+					// here by 1-2 ms on SQL Server, because the container's clock
+					// and the host's do not advance at quite the same rate over a
+					// 10 ms window. That is small, but it is unbounded in the
+					// wrong direction -- it is drift, so it grows with whatever
+					// the machine is doing -- and this file exists because of a
+					// bug about exactly which clock owns an expiry.
+					//
+					// Both sub-second cases are caught by `remaining <= 0` above
+					// regardless, since truncation to whole seconds sends them to
+					// zero -- which is the defect this file was written for.
+					if remaining < ttl-dbElapsed {
+						t.Errorf("a %s lock expires in %s, and only %s of database time elapsed "+
+							"between storing it and reading it back -- the TTL was truncated, not "+
+							"merely reduced by the time in flight", ttl, remaining, dbElapsed)
 					}
 				})
 			}
