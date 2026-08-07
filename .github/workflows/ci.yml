@@ -141,8 +141,21 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
 
+      # CGO on. With CGO_ENABLED=0 this step analysed a build that is not the
+      # one we ship: `//go:build cgo` takes eight files out of ./engine/,
+      # including backend_wasmtime.go -- the backend of record -- and all four
+      # wasmtime_hostfuncs*.go, the ABI boundary CLAUDE.md names as the source
+      # of four real defects. backend_wasmtime_stub.go was vetted in its place.
+      #
+      #   comm -13 <(CGO_ENABLED=0 go list -f '{{$d:=.Dir}}{{range .GoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}' ./... | sort) \
+      #            <(CGO_ENABLED=1 go list -f '{{$d:=.Dir}}{{range .GoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}' ./... | sort)
+      #
+      # Verified 2026-08-07 by injecting `fmt.Sprintf("%d", "not-an-int")` into
+      # backend_wasmtime.go: CGO_ENABLED=0 vet reported nothing, CGO_ENABLED=1
+      # reported it. Vet is clean across ./... with CGO on, so this costs
+      # nothing to switch on.
       - name: Go vet
-        run: CGO_ENABLED=0 go vet ./...
+        run: CGO_ENABLED=1 go vet ./...
 
       - name: Ruff check
         continue-on-error: true
@@ -166,7 +179,12 @@ jobs:
   lint-go:
     runs-on: ubuntu-latest
     env:
-      CGO_ENABLED: "0"
+      # CGO on, for the reason given on the Go vet step above: at 0, the eight
+      # `//go:build cgo` files in ./engine/ are not part of the build, so
+      # golangci-lint never reads the wasmtime backend or its host functions.
+      # This is a required status check, and it was reporting on a build that
+      # does not ship.
+      CGO_ENABLED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v7
@@ -261,9 +279,17 @@ jobs:
         with:
           go-version: stable
 
+      # CGO on, as above. A vulnerability scan that excludes the CGo path is
+      # scanning something other than what ships -- and wasmtime is reached
+      # through CGo, so at 0 this never traced a call into it.
+      #
+      # Measured 2026-08-07 on ./engine/: CGO_ENABLED=0 and CGO_ENABLED=1 give
+      # identical output today, so this changes no current finding. It is
+      # preventive rather than a fix for a live miss, and worth saying so
+      # rather than implying it caught something.
       - name: govulncheck
         env:
-          CGO_ENABLED: "0"
+          CGO_ENABLED: "1"
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   # -------------------------------------------------------------------------
