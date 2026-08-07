@@ -391,7 +391,19 @@ jobs:
   test-python:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # No continue-on-error. With it, this job could not fail the build, so the
+    # Python SDK's own unit tests were advisory across all three versions -- and
+    # they are the only thing that tests the SDK's Python-side behaviour at all.
+    # The Cross-Language E2E job proves that a Python workflow compiles and
+    # executes on wasmtime; it does not run this suite.
+    #
+    # Measured 2026-08-06 on a clean checkout: 442 passed, 1 skipped. The one
+    # skip is tests/test_wasm_compilation.py's "componentize-py not installed",
+    # and this job installs componentize-py -- so on the runner it should be 443
+    # passed, 0 skipped. Re-derive (note: measured under 3.14, since that is
+    # what this machine has; the matrix below is 3.10-3.12):
+    #   python3 -m venv /tmp/v && /tmp/v/bin/pip install -q "./python-sdk[dev]"
+    #   cd python-sdk && /tmp/v/bin/python -m pytest -q -rs
     strategy:
       fail-fast: false
       matrix:
