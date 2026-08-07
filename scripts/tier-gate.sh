@@ -168,6 +168,60 @@ if [ "$NPKG" != "$NDECL" ]; then
   echo "tier-gate: extracted $NPKG package(s) but tiers.yaml declares $NDECL" >&2; exit 2
 fi
 
+# --- 3b. Lower-tier tests living in tier-1 packages ---------------------------------
+# D5. tier1.packages contains the Rust, Java and AssemblyScript integration tests and
+# the parked decomposition test; tier 1 forbids skips, and no test fix removes a skip
+# whose cause is an absent tier-2 toolchain. The decision was to filter rather than
+# provision -- see the long note above tier1.exclude_tests in tiers.yaml.
+#
+# `go test -skip` is the right tool and the dangerous one: unlike t.Skip it emits no
+# `--- SKIP` line, so an excluded test is invisible in the log rather than merely
+# unrun. An exclusion list that silently swallowed a failing test would be exactly the
+# "known failures" mechanism tier 1 forbids, wearing a different hat.
+#
+# Two things keep it honest, and both are below rather than in a comment:
+#   * every pattern is resolved to concrete test names with `go test -list` and printed
+#     on every run, so what was excluded is in the log next to what ran;
+#   * a pattern matching nothing is a hard failure, so an entry cannot rot into place
+#     after the test it names is renamed or deleted.
+EXCL=$(awk '/^tier1:/{t=1} t&&/^  exclude_tests:/{p=1;next} p&&/^    - /{sub(/^    - /,"");gsub(/"/,"");print;next} p&&/^    #/{next} p&&/^$/{next} p{exit}' "$TIERS")
+
+SKIP_RE=""
+if [ -n "$EXCL" ]; then
+  for pat in $EXCL; do
+    if [ -z "$SKIP_RE" ]; then SKIP_RE="$pat"; else SKIP_RE="$SKIP_RE|$pat"; fi
+  done
+  note "excluding lower-tier tests: $SKIP_RE"
+
+  # Resolve to names. -list does not run anything, so this is cheap and is the only
+  # thing that makes the exclusion auditable rather than blind.
+  # shellcheck disable=SC2086
+  MATCHED=$(cd "$REPO_ROOT" && go test -list "$SKIP_RE" $PKGS 2>/dev/null | grep -E '^Test' | sort)
+  NMATCH=$(printf '%s\n' "$MATCHED" | grep -c . || true)
+  if [ "$NMATCH" = "0" ]; then
+    fail "tier1.exclude_tests is non-empty but matches no test in tier1.packages.
+       Every pattern is stale: the tests were renamed or removed and the list was not.
+       Delete the entries rather than leaving a filter that hides nothing and says
+       nothing."
+  else
+    note "  $NMATCH test(s) excluded, by name:"
+    printf '%s\n' "$MATCHED" | while IFS= read -r n; do [ -n "$n" ] && note "    $n"; done
+  fi
+
+  # A pattern that matches nothing individually is just as stale as the whole list
+  # being stale, and is far easier to miss.
+  for pat in $EXCL; do
+    # shellcheck disable=SC2086
+    n=$(cd "$REPO_ROOT" && go test -list "$pat" $PKGS 2>/dev/null | grep -cE '^Test' || true)
+    [ "$n" = "0" ] && fail "tier1.exclude_tests pattern '$pat' matches no test -- stale entry"
+  done
+fi
+
+if [ "$FAILED" = "1" ] && [ "$MEASURE" = "0" ]; then
+  echo "tier-gate: refusing to run -- the exclusion list above is not describing this tree." >&2
+  exit 1
+fi
+
 # Keep the log. A gate that deletes its evidence on failure makes the CI operator
 # re-run the whole suite to find out what broke.
 LOG="${TIER_GATE_LOG:-$REPO_ROOT/tier-gate.log}"
@@ -177,8 +231,12 @@ LOG="${TIER_GATE_LOG:-$REPO_ROOT/tier-gate.log}"
 # DELETE FROM across eleven tables, so packages run concurrently against one database
 # delete each other's fixtures mid-test.
 note "running root module: $(echo "$PKGS" | tr '\n' ' ')"
+# SKIP_ARGS is empty when tier1.exclude_tests is empty, so the unfiltered run is the
+# default and the filter has to be asked for in the manifest.
+SKIP_ARGS=""
+[ -n "$SKIP_RE" ] && SKIP_ARGS="-skip $SKIP_RE"
 # shellcheck disable=SC2086
-(cd "$REPO_ROOT" && go test -count=1 -p 1 -v $PKGS) >> "$LOG" 2>&1
+(cd "$REPO_ROOT" && go test -count=1 -p 1 -v $SKIP_ARGS $PKGS) >> "$LOG" 2>&1
 TEST_RC=$?
 
 # Separate Go modules must be tested from inside their own directory; `go test
@@ -187,7 +245,8 @@ MODDIRS=$(awk '/^tier1:/{t=1} t&&/^  modules:/{p=1;next} p&&/^    - dir: /{sub(/
 for md in $MODDIRS; do
   [ -f "$REPO_ROOT/$md/go.mod" ] || { fail "tiers.yaml names module '$md' but $md/go.mod does not exist"; continue; }
   note "running module: $md"
-  (cd "$REPO_ROOT/$md" && go test -count=1 -p 1 -v ./...) >> "$LOG" 2>&1
+  # shellcheck disable=SC2086
+  (cd "$REPO_ROOT/$md" && go test -count=1 -p 1 -v $SKIP_ARGS ./...) >> "$LOG" 2>&1
   rc=$?
   [ "$rc" = "0" ] || TEST_RC=$rc
 done
