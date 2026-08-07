@@ -113,7 +113,7 @@ jobs:
       # Java 17 to match the other four jobs that build this SDK, rather than
       # inheriting the runner image's default, which can change without us.
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
