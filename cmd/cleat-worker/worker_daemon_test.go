@@ -1522,43 +1522,30 @@ func TestAPISchedulesList(t *testing.T) {
 	}
 }
 
-func TestAPIMetrics(t *testing.T) {
-	t.Skip("skipping: metrics now use prometheus/promauto; TestAPIMetrics_ZeroCounts covers basic endpoint")
-
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	w := httptest.NewRecorder()
-	handleMetrics(w, req)
-
-	resp := w.Result()
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	body := string(bodyBytes)
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("metrics returned status %d, want 200", resp.StatusCode)
-	}
-
-	contentType := resp.Header.Get("Content-Type")
-	if !strings.Contains(contentType, "text/plain") {
-		t.Errorf("expected text/plain content type, got %s", contentType)
-	}
-
-	// Verify some metric values appear in output.
-	checks := []string{
-		"cleat_workflows_active 3",
-		"cleat_workflows_completed_total 10",
-		"cleat_workflows_failed_total 1",
-		"cleat_workflows_claimed_total 100",
-		"cleat_calls_total 42",
-		"cleat_replay_duration_seconds_count 5",
-	}
-	for _, check := range checks {
-		if !strings.Contains(body, check) {
-			t.Errorf("metrics body missing: %q", check)
-		}
-	}
-}
-
+// TestAPIMetrics_ZeroCounts absorbed the two assertions worth keeping from
+// TestAPIMetrics, which was deleted here.
+//
+// That test had been `t.Skip("metrics now use prometheus/promauto;
+// TestAPIMetrics_ZeroCounts covers basic endpoint")` over a live body since the
+// switch to promauto, and the body could not be revived: it asserted literal
+// values -- "cleat_workflows_active 3", "cleat_calls_total 42" -- that came
+// from a hand-rolled metrics writer which no longer exists. Deleting it is
+// right. But the replacement it named was weaker than the thing it replaced,
+// and the skip said "covers" as though it were not, which is the shape that
+// makes a skip worse than a deletion: the coverage looks accounted for.
+//
+// Two of the deleted assertions were still true and are now here:
+//
+//	Content-Type   it checked text/plain and this did not. Measured:
+//	               "text/plain; version=0.0.4; charset=utf-8". A /metrics
+//	               endpoint that answers with the wrong content type is not
+//	               scrapeable, and nothing else checks it.
+//	a metric name  it checked six by name; this checked for the substring
+//	               "cleat_", which any error message mentioning a cleat_
+//	               metric would satisfy. Only one of the six survives the
+//	               promauto rewrite as a registered name under this fixture --
+//	               cleat_replay_duration_seconds, the one the fixture records
+//	               -- so that is the one asserted, by name.
 func TestAPIMetrics_ZeroCounts(t *testing.T) {
 	old := globalWorker
 	t.Cleanup(func() { globalWorker = old })
@@ -1577,8 +1564,14 @@ func TestAPIMetrics_ZeroCounts(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("metrics returned status %d, want 200", resp.StatusCode)
 	}
-	if !strings.Contains(body, "cleat_") {
-		t.Error("expected metric output")
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want it to contain text/plain -- Prometheus "+
+			"will not scrape an endpoint that answers otherwise", ct)
+	}
+	// By name, and as a registered metric rather than as a loose substring.
+	if !strings.Contains(body, "# TYPE cleat_replay_duration_seconds") {
+		t.Errorf("metrics body does not register cleat_replay_duration_seconds, "+
+			"which the fixture just recorded; body was:\n%s", body)
 	}
 }
 
