@@ -39,9 +39,12 @@
 # disqualifying at tier 1 is acceptable here. That is the reason a tier-2 job is a
 # different proposition from the one D5 rejected, rather than a reversal of it.
 #
-# This first cut still only covers the Go surface. tests/cross-language and
-# tests/plugin-harness pass locally but need the full Rust+Java+AssemblyScript toolchain
-# in the job, and are named in tiers.yaml as the next step.
+# This job covers the Go surface. tests/cross-language and tests/plugin-harness are
+# deliberately NOT here -- see tier2.gated_by in tiers.yaml. Dedicated jobs already run
+# both under a skip budget of ZERO, which is stricter than this gate can be, since
+# tier2.rules.skips_allowed is true. Those jobs were made required status checks on
+# 2026-08-07; the gap was never that the suites do not run, it was that nothing blocked
+# on the result.
 # ---------------------------------------------------------------------------
 name: Tier 2 Gate
 

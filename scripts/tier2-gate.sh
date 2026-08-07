@@ -94,6 +94,66 @@ KNOWN=$(awk '/^tier2:/{t=1} t&&/^  known_failures:/{p=1;next} p&&/^    - /{sub(/
 NKNOWN=$(printf '%s\n' "$KNOWN" | grep -c . || true)
 note "tier2.known_failures: $NKNOWN entr(ies)"
 
+# --- 2b. tier2.gated_by must still describe real jobs --------------------------------
+# Some tier-2 suites are gated by a dedicated workflow rather than by this script,
+# because that workflow enforces something stricter (a skip budget of 0). The mapping
+# lives in tiers.yaml so the coverage is auditable, and the risk of any such mapping is
+# that it rots: rename the job and the manifest goes on claiming coverage while the
+# required status check it names is never reported, which blocks every pull request and
+# looks exactly like a check that is merely slow.
+#
+# So assert the job name still exists in the workflow file the manifest names. This
+# cannot verify the job is still *required* -- that is branch-protection state, not in
+# the tree -- and saying so is the point rather than implying a stronger check.
+GATED=$(awk '/^tier2:/{t=1} t&&/^  gated_by:/{p=1;next}
+             p&&/^    - suite: /{s=$0; sub(/^    - suite: /,"",s); next}
+             p&&/^      job: /{j=$0; sub(/^      job: /,"",j); gsub(/"/,"",j); next}
+             p&&/^      workflow: /{w=$0; sub(/^      workflow: /,"",w); print j "\t" w; next}
+             p&&/^  [a-z_]+:/{exit} p{next}' "$TIERS")
+
+if [ -n "$GATED" ]; then
+  NG=$(printf '%s\n' "$GATED" | grep -c . || true)
+  note "tier2.gated_by: $NG suite(s) gated by a dedicated job"
+  while IFS=$'\t' read -r job wf; do
+    [ -n "$job" ] || continue
+    if [ ! -f "$REPO_ROOT/$wf" ]; then
+      fail "tier2.gated_by names workflow '$wf', which does not exist"
+    elif ! grep -qF "$job" "$REPO_ROOT/$wf"; then
+      fail "tier2.gated_by claims '$job' gates a suite, but no job by that name exists in
+       $wf. Either the job was renamed and the manifest was not, or the coverage is
+       gone. A required status check nobody reports blocks every pull request."
+    else
+      note "  gated by '$job' ($wf)"
+    fi
+  done <<< "$GATED"
+fi
+
+if [ "$FAILED" = "1" ] && [ "$MEASURE" = "0" ]; then
+  echo "tier2-gate: refusing to run -- tier2.gated_by is not describing this tree." >&2
+  exit 1
+fi
+
+# --- 2c. Report unset DSNs, but do not fail on them -----------------------------------
+# Tier 1 asserts its dialects connect and refuses to run otherwise. Tier 2 cannot: it
+# permits skips by contract, so an absent DSN is a legitimate reason for a test not to
+# run and turning that into a failure would misread the tier.
+#
+# But the asymmetry CLAUDE.md opens with still applies here, just more quietly. Measured
+# 2026-08-07 on the same tree, same command: with all DSNs set this gate reports
+# skip=7; with none set it reports skip=33 and still exits 0. Both print "tier 2 green".
+# So name what is unset, next to the skip count, rather than letting a reader infer that
+# a green run exercised three dialects when it exercised one.
+UNSET_DSNS=""
+for v in CLEAT_TEST_POSTGRES CLEAT_TEST_DB CLEAT_TEST_MYSQL CLEAT_TEST_MSSQL; do
+  [ -z "$(eval "echo \"\${$v:-}\"")" ] && UNSET_DSNS="$UNSET_DSNS $v"
+done
+if [ -n "$UNSET_DSNS" ]; then
+  note "NOTE: unset DSN(s):$UNSET_DSNS"
+  note "      Tier 2 permits skips, so this will not fail -- but tests keyed on those"
+  note "      dialects will skip and the run will still say green. Compare the skip"
+  note "      count below against a run with them set before trusting it."
+fi
+
 # --- 3. Run ---------------------------------------------------------------------------
 LOG="${TIER2_GATE_LOG:-$REPO_ROOT/tier2-gate.log}"
 JSON="${TIER2_GATE_JSON:-$REPO_ROOT/tier2-gate.json}"
