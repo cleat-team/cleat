@@ -831,6 +831,24 @@ jobs:
         with:
           go-version: stable
 
+      # The third job that sweeps ./engine/... unfiltered -- see "Run
+      # integration tests" below -- and therefore the third that builds a Java
+      # WASM component it has no interest in. The other two are multi-db-ci's
+      # test-mysql and test-mssql, where the reasoning is written out in full.
+      #
+      # Worth stating for this one specifically: it is a required check whose
+      # name is Cluster Integration Tests, so a Maven Central 429 fails the
+      # branch on something with no relationship to clusters, integration, or
+      # the diff. That is what makes the cache worth adding rather than
+      # shrugging at.
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
       # No host-binary build step here. It produced ./cleat-worker with
       # CGO_ENABLED=0 and nothing in this job ever ran it -- the cluster runs
       # containers. Worse, sitting directly above the image build it read as
