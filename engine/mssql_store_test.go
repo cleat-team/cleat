@@ -264,6 +264,18 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	nonDefaultTenant := "11111111-1111-1111-1111-111111111111"
 	store := NewMSSQLStore(db, "default")
 
+	// The assertions below read workflow_instances directly to check what
+	// StartNewRun stored. That read is subject to the shipped security
+	// policies, and the rows it is looking for belong to nonDefaultTenant --
+	// so on the plain connection it finds nothing and the test fails as
+	// "query tenant_id: sql: no rows in result set", which reads like
+	// StartNewRun not having written anything.
+	//
+	// It did write. This test is deliberately cross-tenant: it passes a tenant
+	// as an argument to check the argument is honoured, so verifying it is
+	// administrative work by definition and needs the admin connection.
+	adminDB := testutil.MSSQLAdminDB(t, db)
+
 	// --- Non-idempotent path ---
 	runID := uuid.New().String()
 	id, isDup, err := store.StartNewRun(context.Background(), runID,
@@ -280,7 +292,7 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 
 	// Verify tenant_id was stored correctly.
 	var storedTenant sql.NullString
-	err = db.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, runID).Scan(&storedTenant)
+	err = adminDB.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, runID).Scan(&storedTenant)
 	if err != nil {
 		t.Fatalf("query tenant_id (no idemkey): %v", err)
 	}
@@ -306,7 +318,7 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	}
 
 	// Verify tenant_id was stored correctly.
-	err = db.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, idemRunID).Scan(&storedTenant)
+	err = adminDB.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, idemRunID).Scan(&storedTenant)
 	if err != nil {
 		t.Fatalf("query tenant_id (idemkey): %v", err)
 	}
@@ -948,7 +960,7 @@ func TestMSSQLStore_GetActiveInstanceCountsByVersion_BeginTxError(t *testing.T) 
 func TestMSSQLStore_ResolveTenantFromAPIKey(t *testing.T) {
 	expectedUUID := uuid.New()
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM tenant_api_keys", data: [][]driver.Value{{expectedUUID.String()}}},
+		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{{expectedUUID.String()}}},
 	}, nil)
 	defer db.Close()
 
@@ -964,7 +976,7 @@ func TestMSSQLStore_ResolveTenantFromAPIKey(t *testing.T) {
 
 func TestMSSQLStore_ResolveTenantFromAPIKey_Unknown(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM tenant_api_keys", data: [][]driver.Value{}},
+		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{}},
 	}, nil)
 	defer db.Close()
 
@@ -980,7 +992,7 @@ func TestMSSQLStore_ResolveTenantFromAPIKey_Unknown(t *testing.T) {
 
 func TestMSSQLStore_ResolveTenantFromAPIKey_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM tenant_api_keys", err: errors.New("connection lost")},
+		{match: "FROM admin.tenant_api_keys", err: errors.New("connection lost")},
 	}, nil)
 	defer db.Close()
 
@@ -988,6 +1000,16 @@ func TestMSSQLStore_ResolveTenantFromAPIKey_QueryError(t *testing.T) {
 	got, err := store.ResolveTenantFromAPIKey(context.Background(), []byte("any-key"))
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	// Name the injected error rather than accepting any error. `err != nil`
+	// alone cannot tell "the query failed as the mock was told to make it fail"
+	// from "the mock never matched the query, so the store found no rows" --
+	// and the second is what was happening: the match string said
+	// `FROM tenant_api_keys` while the query says `FROM admin.tenant_api_keys`,
+	// so this test passed for three commits without the mock ever firing.
+	if !strings.Contains(err.Error(), "connection lost") {
+		t.Errorf("error = %v, want it to carry the injected \"connection lost\" -- "+
+			"a different error means the mock did not match the query", err)
 	}
 	if got != uuid.Nil {
 		t.Errorf("expected uuid.Nil on error, got %v", got)

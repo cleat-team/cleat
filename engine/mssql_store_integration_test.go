@@ -34,6 +34,7 @@ func setupMSSQLIntegrationTest(t *testing.T) (*MSSQLStore, *sql.DB) {
 		t.Skip("Skipping MSSQL integration test in short mode")
 	}
 
+	dsn := os.Getenv("CLEAT_TEST_MSSQL")
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 	// The stored procedures are part of the schema these tests exercise --
@@ -46,13 +47,35 @@ func setupMSSQLIntegrationTest(t *testing.T) (*MSSQLStore, *sql.DB) {
 	applyMSSQLProcedures(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 
-	store := NewMSSQLStore(db, "default")
+	// Built the way production builds it. NewMSSQLStore(db, ...) on a plain
+	// pool has no sp_set_session_context on any of its connections, so under
+	// the shipped schema's security policies every tenant-scoped read matches
+	// nothing -- the store cannot see rows it just wrote. Every non-test caller
+	// goes through the factory instead (cmd/cleat-worker, cmd/cleat-bench,
+	// cmd/deploy-workflow), and OpenStore is what wraps the connector.
+	//
+	// This is the §1.3 shape: the tests were exercising a construction nothing
+	// ships, and it passed only because the hand-written test schema had no
+	// policies to enforce.
+	ws, closer, err := NewMSSQLStoreFactory(dsn).OpenStore(
+		context.Background(), DefaultTenantUUID, "default")
+	if err != nil {
+		t.Fatalf("open a tenant-scoped store: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	store, ok := ws.(*MSSQLStore)
+	if !ok {
+		t.Fatalf("OpenStore returned %T, want *MSSQLStore", ws)
+	}
 
 	t.Cleanup(func() {
 		testutil.CleanupMSSQLTestData(t, db)
 	})
 
-	return store, db
+	// Assertions in these tests read tables directly with raw SQL, and those
+	// reads are subject to the same policies. They are checking what the store
+	// did, across whatever tenant it did it as, which is administrative work.
+	return store, testutil.MSSQLAdminDB(t, db)
 }
 
 // deployWorkflowDef is a helper that inserts a workflow_def row via the store.
@@ -2384,16 +2407,53 @@ func TestMSSQLIntegration_ResolveTenantFromAPIKey(t *testing.T) {
 	store, db := setupMSSQLIntegrationTest(t)
 	ctx := context.Background()
 
-	// Insert a tenant API key.
+	// The tenant first, then its key.
+	//
+	// The shipped schema has fk_api_keys_tenant, so an API key for a tenant
+	// that does not exist cannot be inserted -- which is the right constraint
+	// and is how a real deployment works. This test used to insert only the
+	// key, and passed because engine/testutil's hand-written MSSQL schema
+	// declared no such foreign key (IMPROVEMENT-PLAN 1.9, 2.71).
+	//
+	// admin.*, qualified, on both statements. The shipped schema creates two
+	// pairs -- admin.tenants/admin.tenant_api_keys and the dbo.* duplicates --
+	// and an unqualified name resolves to dbo. auth.TenantStore, the only
+	// writer in the tree, writes admin.*, so admin.* is where keys actually
+	// live and dbo.* is a table nothing populates. ResolveTenantFromAPIKey
+	// read the unqualified name until this change, which is why API-key tenant
+	// resolution could not succeed on SQL Server at all.
 	tenantUUID := uuid.New()
-	keyHash := sha256Of("my-api-key")
+	if _, err := db.ExecContext(ctx, `
+		IF NOT EXISTS (SELECT 1 FROM admin.tenants WHERE tenant_id = @p1)
+		INSERT INTO admin.tenants (tenant_id, name) VALUES (@p1, @p2)
+	`, tenantUUID.String(), "tenant-"+tenantUUID.String()); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+
+	// The key material is per-run. A fixed hash leaks across runs:
+	// CleanupMSSQLTestData does not touch admin.tenant_api_keys, so a row from
+	// an earlier run survives, and since key_hash is not unique the lookup
+	// returns whichever tenant got there first. That surfaced as
+	// "tenant UUID = <some other run's uuid>" -- a resolution that succeeded
+	// and answered with stale data, which is worse than failing.
+	keyHash := sha256Of("my-api-key-" + tenantUUID.String())
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO tenant_api_keys (key_hash, tenant_id, description)
+		INSERT INTO admin.tenant_api_keys (key_hash, tenant_id, description)
 		VALUES (@p1, @p2, 'test-key')
 	`, keyHash, tenantUUID.String())
 	if err != nil {
 		t.Fatalf("insert tenant_api_key: %v", err)
 	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM admin.tenant_api_keys WHERE key_hash = @p1`, keyHash); err != nil {
+			t.Errorf("clean up tenant_api_key: %v", err)
+		}
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM admin.tenants WHERE tenant_id = @p1`, tenantUUID.String()); err != nil {
+			t.Errorf("clean up tenant: %v", err)
+		}
+	})
 
 	got, err := store.ResolveTenantFromAPIKey(ctx, keyHash)
 	if err != nil {
@@ -2619,10 +2679,36 @@ func TestMSSQLIntegration_GetWorkflowByID_TenantScoped(t *testing.T) {
 		t.Fatalf("insert wfB: %v", err)
 	}
 
-	// With default store (no tenant), GetWorkflowByID should NOT find wfA
-	// since wfA belongs to tenantA (tenant-scoped filtering).
-	storeDefault := store.WithTenant(DefaultTenantUUID)
-	wfResult, err := storeDefault.GetWorkflowByID(ctx, wfA)
+	// One store per tenant, each opened from the factory -- not store.WithTenant.
+	//
+	// WithTenant copies the struct and overwrites the tenantID field, which
+	// changes the `AND tenant_id = @p2` parameter and nothing else. The pool it
+	// keeps is still the one whose connector set sp_set_session_context to the
+	// tenant it was opened for, so on a database built from the shipped
+	// migrations the security policy filters out every row belonging to the
+	// tenant the caller just asked for. GetWorkflowByID is not in a
+	// transaction, so nothing re-establishes the context either -- the store
+	// methods that go through beginTxWithContext do, which is why this shows up
+	// on some methods and not others.
+	//
+	// It has no production caller on this backend: cmd/cleat's two uses are
+	// NewPostgresStore(db).WithTenant(...), and everything that reaches SQL
+	// Server opens a store per tenant from MSSQLStoreFactory. So this test was
+	// the only thing asserting that WithTenant works here, and it was asserting
+	// it about a construction nothing ships.
+	storeFor := func(tenantID string) WorkflowStore {
+		t.Helper()
+		ws, closer, err := NewMSSQLStoreFactory(os.Getenv("CLEAT_TEST_MSSQL")).
+			OpenStore(ctx, tenantID, "default")
+		if err != nil {
+			t.Fatalf("open a store for tenant %s: %v", tenantID, err)
+		}
+		t.Cleanup(func() { _ = closer.Close() })
+		return ws
+	}
+
+	// The default tenant must NOT see tenantA's workflow.
+	wfResult, err := storeFor(DefaultTenantUUID).GetWorkflowByID(ctx, wfA)
 	if err != nil {
 		t.Fatalf("GetWorkflowByID default tenant: %v", err)
 	}
@@ -2630,9 +2716,8 @@ func TestMSSQLIntegration_GetWorkflowByID_TenantScoped(t *testing.T) {
 		t.Fatal("expected default tenant NOT to see tenantA's workflow")
 	}
 
-	// With tenant A tenant, GetWorkflowByID should find wfA.
-	storeA := store.WithTenant(tenantA)
-	wfAResult, err := storeA.GetWorkflowByID(ctx, wfA)
+	// Tenant A must.
+	wfAResult, err := storeFor(tenantA).GetWorkflowByID(ctx, wfA)
 	if err != nil {
 		t.Fatalf("GetWorkflowByID tenantA: %v", err)
 	}

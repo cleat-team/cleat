@@ -4,9 +4,26 @@
 
 -- ===========================================================================
 -- Create default tenant for existing data
+--
+-- admin.tenants, not dbo.tenants. 001_schema.sql used to create both pairs and
+-- this file seeded the dbo one, so on SQL Server the default tenant row has
+-- never existed in the table anything reads: auth.TenantStore writes admin.*,
+-- and migrations/postgres/002_defaults.sql seeds admin.tenants. The two
+-- dialects disagreed about which table this row belongs in, and SQL Server was
+-- the one that was wrong.
+--
+-- 013_drop_duplicate_tenant_tables.sql removes the dbo pair, so leaving this
+-- alone would have failed the whole migration run at 002 on a fresh database:
+--
+--   migration 002_defaults.sql: execute: mssql: Invalid object name 'dbo.tenants'
+--
+-- Note the ordering that makes this safe on an existing database too: 002 runs
+-- before 013, so dbo.tenants may still be present here -- but the row belongs
+-- in admin.tenants either way, and 013 carries across anything the dbo table
+-- picked up by hand before dropping it.
 -- ===========================================================================
-IF NOT EXISTS (SELECT 1 FROM dbo.tenants WHERE tenant_id = '00000000-0000-0000-0000-000000000000')
-    INSERT INTO dbo.tenants (tenant_id, name, display_name)
+IF NOT EXISTS (SELECT 1 FROM admin.tenants WHERE tenant_id = '00000000-0000-0000-0000-000000000000')
+    INSERT INTO admin.tenants (tenant_id, name, display_name)
     VALUES ('00000000-0000-0000-0000-000000000000', 'default', 'Default Tenant');
 
 -- ===========================================================================

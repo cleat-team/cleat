@@ -69,7 +69,7 @@ func TestSignalPayloadRoundTripsOnEveryDialect(t *testing.T) {
 			}
 			defer db.Close()
 
-			store := storeFor(d.dialect, db)
+			store := storeFor(t, d.dialect, db)
 			ctx := context.Background()
 
 			for i, tc := range cases {

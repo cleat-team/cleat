@@ -144,6 +144,33 @@ func (b *MSSQLBackend) Enabled() bool {
 	return os.Getenv("CLEAT_TEST_MSSQL") != ""
 }
 
+// openMSSQLTenantStore builds an MSSQLStore the way production builds one.
+//
+// NewMSSQLStore(db) on a plain pool sets sp_set_session_context on none of its
+// connections, so under the shipped security policies every tenant-scoped read
+// matches nothing and the store cannot see rows it just wrote. Every non-test
+// caller goes through the factory (cmd/cleat-worker, cmd/cleat-bench,
+// cmd/deploy-workflow); OpenStore is what wraps the connector.
+//
+// SetupForTenant previously assigned store.tenantID directly, which set the Go
+// field without ever setting the session context -- so the store filtered as
+// the default tenant while believing it was another one. That is the §1.3
+// shape: a scope that exists in the process and not in the database.
+func openMSSQLTenantStore(t *testing.T, tenantID string) *MSSQLStore {
+	t.Helper()
+	ws, closer, err := NewMSSQLStoreFactory(os.Getenv("CLEAT_TEST_MSSQL")).OpenStore(
+		context.Background(), tenantID, "default")
+	if err != nil {
+		t.Fatalf("open a tenant-scoped MSSQL store for %s: %v", tenantID, err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	store, ok := ws.(*MSSQLStore)
+	if !ok {
+		t.Fatalf("OpenStore returned %T, want *MSSQLStore", ws)
+	}
+	return store
+}
+
 func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	t.Helper()
 	if !b.Enabled() {
@@ -153,7 +180,7 @@ func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	testutil.SetupMSSQLFullSchema(t, db)
 	applyMSSQLProcedures(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
-	store := NewMSSQLStore(db)
+	store := openMSSQLTenantStore(t, DefaultTenantUUID)
 	teardown := func() {
 		testutil.CleanupMSSQLTestData(t, db)
 		db.Close()
@@ -169,8 +196,7 @@ func (b *MSSQLBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowSt
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
-	store := NewMSSQLStore(db)
-	store.tenantID = tenantID
+	store := openMSSQLTenantStore(t, tenantID)
 	teardown := func() {
 		testutil.CleanupMSSQLTestData(t, db)
 		db.Close()
@@ -382,8 +408,27 @@ func TestCascadeDelete(t *testing.T) {
 
 			addCascadeFKs(t, db, d.dialect)
 
+			// The privileged handle, for the DELETE that is meant to cascade
+			// and for the counts that check it did. db stays as it is for the
+			// DDL above and below, which needs ALTER rather than DML rights.
+			//
+			// This test is the clearest case for the distinction. The DELETE
+			// ran on db, and on a SQL Server built from the shipped migrations
+			// db is subject to the tenant filter -- so it matched no rows and
+			// nothing cascaded. Three of the five child tables then reported a
+			// surviving row. The other two, event_history and workflow_signals,
+			// reported 0 and *passed*: their rows were still there too, and the
+			// same policy that stopped the DELETE hid them from the count.
+			// Getting a green from two assertions whose subject the test could
+			// no longer see is the failure mode this handle exists to remove.
+			verify := testutil.AdminDB(t, db, d.dialect)
+
 			// Insert a workflow def so workflow_instances FK is satisfied.
-			db.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
+			// The DELETE is what makes a re-run possible, so it goes through
+			// verify: on db it would match nothing on SQL Server and the
+			// INSERT below would fail on the primary key the second time this
+			// test ever ran against a database.
+			verify.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
 			var emptyBlob string
 			switch d.dialect {
 			case testutil.DialectMSSQL:
@@ -405,9 +450,20 @@ func TestCascadeDelete(t *testing.T) {
 			insertChildRows(t, db, d.dialect, wfID)
 
 			// Delete the workflow instance - cascade should clean up children.
-			_, err = db.Exec(`DELETE FROM workflow_instances WHERE id = '` + wfID + `'`)
+			res, err := verify.Exec(`DELETE FROM workflow_instances WHERE id = '` + wfID + `'`)
 			if err != nil {
 				t.Fatalf("delete workflow_instances: %v", err)
+			}
+			// Assert the parent actually went. Without this the whole test can
+			// pass on a DELETE that matched nothing, provided the counts below
+			// are equally blind -- which is exactly what happened on SQL
+			// Server.
+			if n, err := res.RowsAffected(); err != nil {
+				t.Fatalf("rows affected by the parent delete: %v", err)
+			} else if n != 1 {
+				t.Fatalf("deleting workflow_instances %q affected %d rows, want 1 -- "+
+					"nothing was deleted, so nothing could cascade and the child "+
+					"counts below say nothing about ON DELETE CASCADE", wfID, n)
 			}
 
 			// Verify all child rows are gone.
@@ -425,7 +481,7 @@ func TestCascadeDelete(t *testing.T) {
 				case testutil.DialectMSSQL:
 					query = `SELECT COUNT(*) FROM [` + table + `] WHERE workflow_id = '` + wfID + `'`
 				}
-				if err := db.QueryRow(query).Scan(&count); err != nil {
+				if err := verify.QueryRow(query).Scan(&count); err != nil {
 					t.Errorf("count %s: %v", table, err)
 				}
 				if count != 0 {
@@ -437,9 +493,9 @@ func TestCascadeDelete(t *testing.T) {
 			removeCascadeFKs(t, db, d.dialect)
 
 			// Clean up workflow_defs.
-			db.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
+			verify.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
 
-			testutil.CleanupTestData(t, db, d.dialect, "cascade-test-%")
+			testutil.CleanupTestData(t, verify, d.dialect, "cascade-test-%")
 			db.Close()
 		})
 	}

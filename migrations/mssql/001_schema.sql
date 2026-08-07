@@ -315,36 +315,6 @@ CREATE TABLE dbo.workflow_update_requests (
 );
 
 -- ===========================================================================
--- Table: dbo.tenants
--- ===========================================================================
-IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.tenants') AND type = N'U')
-CREATE TABLE dbo.tenants (
-    tenant_id   UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID(),
-    name        NVARCHAR(255)    NOT NULL,
-    display_name NVARCHAR(MAX)   NOT NULL DEFAULT '',
-    created_at  DATETIMEOFFSET   NOT NULL DEFAULT SYSUTCDATETIME(),
-    suspended   BIT              NOT NULL DEFAULT 0,
-    CONSTRAINT pk_tenants PRIMARY KEY (tenant_id),
-    CONSTRAINT uq_tenants_name UNIQUE (name)
-);
-
--- ===========================================================================
--- Table: dbo.tenant_api_keys
--- ===========================================================================
-IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.tenant_api_keys') AND type = N'U')
-CREATE TABLE dbo.tenant_api_keys (
-    key_id      UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID(),
-    tenant_id   UNIQUEIDENTIFIER NOT NULL,
-    key_hash    VARBINARY(32)    NOT NULL,
-    description NVARCHAR(MAX)    NOT NULL DEFAULT '',
-    created_at  DATETIMEOFFSET   NOT NULL DEFAULT SYSUTCDATETIME(),
-    revoked_at  DATETIMEOFFSET   NULL,
-    CONSTRAINT pk_tenant_api_keys PRIMARY KEY (key_id),
-    CONSTRAINT fk_api_keys_tenant FOREIGN KEY (tenant_id)
-        REFERENCES dbo.tenants(tenant_id)
-);
-
--- ===========================================================================
 -- Table: dbo.workflow_memory_samples
 -- ===========================================================================
 IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.workflow_memory_samples') AND type = N'U')
@@ -490,9 +460,14 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_sticky' AN
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_update_requests_pending' AND object_id = OBJECT_ID(N'dbo.workflow_update_requests'))
     CREATE INDEX idx_update_requests_pending ON dbo.workflow_update_requests(workflow_id, status);
 
--- Tenant API key lookups (unrevoked only)
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_api_keys_hash' AND object_id = OBJECT_ID(N'dbo.tenant_api_keys'))
-    CREATE INDEX idx_api_keys_hash ON dbo.tenant_api_keys(key_hash) WHERE revoked_at IS NULL;
+-- Tenant API key lookups (unrevoked only).
+--
+-- On admin.tenant_api_keys, which is the table ResolveTenantFromAPIKey reads
+-- and auth.TenantStore writes. This index used to sit on dbo.tenant_api_keys,
+-- a duplicate table nothing wrote -- so the auth lookup, which runs on every
+-- authenticated request and filters on key_hash, had no index at all.
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_api_keys_hash' AND object_id = OBJECT_ID(N'admin.tenant_api_keys'))
+    CREATE INDEX idx_api_keys_hash ON admin.tenant_api_keys(key_hash) WHERE revoked_at IS NULL;
 
 -- Tenant + task-queue-scoped ready instance claims (includes priority)
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_tenant_queue_ready' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))

@@ -133,7 +133,15 @@ func readQueryStateColumn(t *testing.T, backend StoreBackend, workflowID string)
 	return raw.String
 }
 
-// adminDBFor returns a database handle for the dialect a backend speaks.
+// adminDBFor returns a database handle that can read and write rows whatever
+// tenant owns them -- the handle a test uses to check what the code under test
+// actually wrote.
+//
+// On PostgreSQL and MySQL a plain test pool already is one; on SQL Server it is
+// not, and that difference is the subject of testutil.AdminDB's comment. It was
+// wrong here for long enough to fail three tests at once, all with the same
+// symptom: a row written through a correctly scoped store, then read back as
+// absent.
 func adminDBFor(t *testing.T, backend StoreBackend) *sql.DB {
 	t.Helper()
 	switch backend.Name() {
@@ -142,7 +150,7 @@ func adminDBFor(t *testing.T, backend StoreBackend) *sql.DB {
 	case "mysql":
 		return testutil.MySQLTestDB(t)
 	case "mssql":
-		return testutil.MSSQLTestDB(t)
+		return testutil.MSSQLAdminDB(t, testutil.MSSQLTestDB(t))
 	}
 	t.Fatalf("adminDBFor: unknown backend %q", backend.Name())
 	return nil

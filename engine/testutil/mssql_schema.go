@@ -1,9 +1,13 @@
 package testutil
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -11,133 +15,7 @@ import (
 // These are the minimum tables required: workflow_defs, workflow_instances, event_history, workflow_signals.
 func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
-
-	statements := []string{
-		// workflow_defs.
-		//
-		// tenant_id is NOT NULL DEFAULT '000…', as
-		// migrations/mssql/001_schema.sql declares it. This said a bare
-		// "tenant_id UNIQUEIDENTIFIER", so a definition deployed against the
-		// test schema came back with a NULL owner where the shipped schema
-		// gives the default tenant -- the drift class of IMPROVEMENT-PLAN 1.9,
-		// found by 3.12's ownership test reading the column back.
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_defs')
-         CREATE TABLE workflow_defs (
-             name NVARCHAR(900) NOT NULL,
-             version INTEGER NOT NULL,
-             wasm_bytes VARBINARY(MAX) NOT NULL,
-             entry_points NVARCHAR(MAX) NOT NULL DEFAULT '[]',
-             min_version INTEGER NOT NULL DEFAULT 0,
-             abi_version INTEGER NOT NULL DEFAULT 1,
-             plugin_deps NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             deprecated BIT NOT NULL DEFAULT 0,
-             task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
-             max_history_length INTEGER NOT NULL DEFAULT 0,
-             dag_spec NVARCHAR(MAX) DEFAULT NULL,
-             tenant_id UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             PRIMARY KEY (name, version)
-         )`,
-
-		// workflow_instances
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_instances')
-         CREATE TABLE workflow_instances (
-             id NVARCHAR(900) NOT NULL PRIMARY KEY,
-             def_name NVARCHAR(900) NOT NULL,
-             def_version INTEGER NOT NULL,
-             status NVARCHAR(MAX) NOT NULL DEFAULT 'ready',
-             input NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             assigned_to NVARCHAR(MAX),
-             heartbeat_at DATETIMEOFFSET,
-             next_wake_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             completed_at DATETIMEOFFSET,
-             cancellation_requested BIT NOT NULL DEFAULT 0,
-             cancellation_reason NVARCHAR(MAX),
-             result NVARCHAR(MAX),
-             error_msg NVARCHAR(MAX),
-             error_code NVARCHAR(MAX),
-             error_op NVARCHAR(MAX),
-             parent_workflow_id NVARCHAR(MAX),
-             parent_close_policy NVARCHAR(MAX) DEFAULT 'ABANDON',
-             query_state NVARCHAR(MAX) DEFAULT '{}',
-             task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
-             trace_id NVARCHAR(MAX),
-             sticky_worker_id NVARCHAR(MAX),
-             compaction_state NVARCHAR(MAX),
-             compacted_at DATETIMEOFFSET,
-             compaction_step INTEGER,
-             plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             CONSTRAINT ck_workflow_instances_query_state CHECK (ISJSON(query_state) = 1),
-             -- NOT NULL DEFAULT, as migrations/mssql/001_schema.sql declares
-             -- it. Left nullable here, a fixture that inserted a row without
-             -- naming tenant_id got NULL where a real database gives the
-             -- default tenant -- so every tenant-scoped predicate missed it.
-             -- IMPROVEMENT-PLAN 3.11; the same drift class as 1.9.
-             tenant_id UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
-             priority INTEGER NOT NULL DEFAULT 0,
-             generation BIGINT NOT NULL DEFAULT 0,
-             FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
-         )`,
-
-		// event_history
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_history')
-         CREATE TABLE event_history (
-             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
-             step INTEGER NOT NULL,
-             event_type NVARCHAR(MAX) NOT NULL DEFAULT 'call',
-             service NVARCHAR(MAX),
-             operation NVARCHAR(MAX),
-             request NVARCHAR(MAX),
-             response NVARCHAR(MAX),
-             error NVARCHAR(MAX),
-             duration_ms BIGINT,
-             signal_names NVARCHAR(MAX),
-             timeout_ms BIGINT,
-             signal_name NVARCHAR(MAX),
-             signal_payload NVARCHAR(MAX),
-             defer_description NVARCHAR(MAX),
-             defer_id NVARCHAR(MAX),
-             child_name NVARCHAR(MAX),
-             child_input NVARCHAR(MAX),
-             run_id NVARCHAR(MAX),
-             new_input NVARCHAR(MAX),
-             plugin_name NVARCHAR(MAX),
-             plugin_func NVARCHAR(MAX),
-             plugin_input NVARCHAR(MAX),
-             plugin_output NVARCHAR(MAX),
-             plugin_error NVARCHAR(MAX),
-             promise_name NVARCHAR(MAX),
-             promise_id NVARCHAR(MAX),
-             promise_result NVARCHAR(MAX),
-             promise_error NVARCHAR(MAX),
-             payload NVARCHAR(MAX),
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             checksum NVARCHAR(MAX),
-             -- Write-ahead call intent (1.4 phase D). Must match
-             -- migrations/mssql/020_event_intent.sql.
-             intent_at DATETIMEOFFSET NULL,
-             tenant_id UNIQUEIDENTIFIER,
-             PRIMARY KEY (workflow_id, step)
-         )`,
-
-		// workflow_signals
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_signals')
-         CREATE TABLE workflow_signals (
-             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
-             signal_name NVARCHAR(900) NOT NULL,
-             payload NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             delivered_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             tenant_id UNIQUEIDENTIFIER,
-             PRIMARY KEY (workflow_id, signal_name)
-         )`,
-	}
-
-	for i, stmt := range statements {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("setup MSSQL minimal schema: statement %d: %v", i, err)
-		}
-	}
+	applyMSSQLSchemaFile(t, db)
 }
 
 // SetupMSSQLFullSchema creates all tables needed for full WorkflowStore testing.
@@ -263,17 +141,15 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		}
 	}
 
-	// tenant_api_keys (needed by ResolveTenantFromAPIKey)
-	if _, err := db.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'tenant_api_keys' AND schema_name(schema_id) = 'dbo')
-	         CREATE TABLE tenant_api_keys (
-	             key_hash VARBINARY(32) NOT NULL PRIMARY KEY,
-	             tenant_id UNIQUEIDENTIFIER NOT NULL,
-	             description NVARCHAR(255),
-	             created_at DATETIME2 DEFAULT SYSUTCDATETIME(),
-	             revoked_at DATETIME2 NULL
-	         )`); err != nil {
-		t.Logf("setup MSSQL full schema: tenant_api_keys warning: %v", err)
-	}
+	// dbo.tenant_api_keys was created here, commented "needed by
+	// ResolveTenantFromAPIKey". That was true and is the reason the defect was
+	// invisible: the store read `tenant_api_keys` unqualified, which resolves
+	// to dbo, and this block created exactly the table that broken read wanted.
+	// So the tests had their own private copy of a table production never
+	// writes, and no test could observe that API-key resolution on SQL Server
+	// could not work. The store now reads admin.tenant_api_keys, which the
+	// shipped schema creates, so recreating the dbo table here would only
+	// restore the duplicate migration 013 drops.
 	// Migration: add columns that may be missing from older test databases.
 	migrations := []string{
 		`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE name = 'event_count' AND object_id = OBJECT_ID('workflow_instances'))
@@ -569,12 +445,28 @@ func migrateMSSQLWorkflowDefsTenantID(t *testing.T, db *sql.DB) {
 
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.
 // Uses DELETE with table existence checks. Order respects FK constraints.
+//
+// Deletes through an administrative connection, because on a database built
+// from the shipped migrations the tenant filter predicate applies to every
+// principal -- sa included. A plain pool with no session context matches no
+// rows at all, so every DELETE here removed nothing and reported no error, and
+// the rows stayed to collide with the next test's fixtures. That was §2.71's
+// blocker; MSSQLAdminDB returns db unchanged when the database has no policies,
+// so this is a no-op on the hand-written schema.
 func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 	t.Helper()
+	db = MSSQLAdminDB(t, db)
 
 	// Order matters due to FK constraints — delete child tables first.
+	//
+	// Entries may be schema-qualified, and tenant_api_keys has to be: this
+	// branch drops the duplicate dbo pair, so the only such table left is
+	// admin.tenant_api_keys. Unqualified, the DELETE resolved against the
+	// connecting principal's default schema and failed with "Invalid object
+	// name" -- while the existence check above it passed, because sys.tables is
+	// keyed on name alone and happily found the admin one.
 	tables := []string{
-		"tenant_api_keys",
+		"admin.tenant_api_keys",
 		"workflow_update_requests",
 		"workflow_promises",
 		"workflow_signals",
@@ -590,14 +482,23 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 	}
 
 	for _, table := range tables {
+		// Split "admin.tenant_api_keys" so the existence check can match on
+		// schema as well as name. Checking on name alone is what let the
+		// unqualified entry look present and then fail to delete.
+		schema, name := "dbo", table
+		if i := strings.IndexByte(table, '.'); i >= 0 {
+			schema, name = table[:i], table[i+1:]
+		}
 		var exists int
-		err := db.QueryRow("SELECT COUNT(1) FROM sys.tables WHERE name = @p1", table).Scan(&exists)
+		err := db.QueryRow(`SELECT COUNT(1) FROM sys.tables t
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = @p1 AND t.name = @p2`, schema, name).Scan(&exists)
 		if err != nil {
 			t.Logf("cleanup: check table %s: %v", table, err)
 			continue
 		}
 		if exists > 0 {
-			if _, err := db.Exec(fmt.Sprintf("DELETE FROM [%s]", table)); err != nil {
+			if _, err := db.Exec(fmt.Sprintf("DELETE FROM [%s].[%s]", schema, name)); err != nil {
 				t.Logf("cleanup: delete from %s: %v", table, err)
 			}
 		}
@@ -633,4 +534,199 @@ func MSSQLTestDB(t *testing.T) *sql.DB {
 	})
 
 	return db
+}
+
+// mssqlSchemaFiles locates the real, shipped SQL Server schema migrations.
+//
+// Same reasoning as postgresSchemaFiles, and the same defects it prevents. This
+// package used to hand-write 334 lines of CREATE TABLE for SQL Server -- a
+// second definition of a schema that already exists in the repo -- and the two
+// had drifted in ways that hid production defects rather than merely being
+// untidy:
+//
+//	no CHECK on workflow_schedules.input      hid 3.16 (no schedule could be
+//	                                          created on SQL Server)
+//	no CHECK on workflow_instances.query_state hid 3.17 (no workflow could
+//	                                          complete on SQL Server)
+//	no CHECK on the payload columns           hid 3.18/3.19 (signals and update
+//	                                          requests rejected)
+//	nullable tenant_id where the shipped
+//	schema says NOT NULL                      hid the 3.11 fixtures
+//	none of the seven security policies       is 2.71 itself
+//
+// Reading the shipped files makes that class structurally impossible. The list
+// is explicit, in version order, for the reason postgresSchemaFiles gives: a
+// migration that adds or alters a column has to be added here.
+func mssqlSchemaFiles() []string {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("mssqlSchemaFiles: runtime.Caller failed")
+	}
+	dir := filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations", "mssql")
+	return []string{
+		filepath.Join(dir, "001_schema.sql"),
+		filepath.Join(dir, "010_idempotency_keys_tenant_id.sql"),
+		filepath.Join(dir, "011_json_scalar_payloads.sql"),
+		// 012 is not optional here. It creates cleat_admin, and without it a
+		// database gets the seven policies and no principal exempt from them,
+		// which is precisely the state teardown cannot work in. Leaving it out
+		// is caught loudly by requireMSSQLAdminRole rather than silently.
+		filepath.Join(dir, "012_admin_role.sql"),
+		// 013 drops the duplicate dbo.tenants / dbo.tenant_api_keys pair and
+		// moves idx_api_keys_hash onto admin.tenant_api_keys. A database built
+		// from the current 001 never has the dbo pair, so the DROPs are
+		// no-ops here and the index guard is what does the work -- but this
+		// list must still carry it, or a long-lived test database created
+		// before that change keeps both pairs and stops matching production.
+		filepath.Join(dir, "013_drop_duplicate_tenant_tables.sql"),
+		filepath.Join(dir, "020_event_intent.sql"),
+	}
+}
+
+// applyMSSQLSchemaFile applies the shipped schema, once per database.
+//
+// Once per database is not an optimisation. migrations/mssql/001_schema.sql is
+// NOT re-appliable, though its header says it is: the seven security policies
+// bind dbo.fn_tenant_filter, so the file's own CREATE OR ALTER FUNCTION fails
+// the second time with
+//
+//	Cannot ALTER 'dbo.fn_tenant_filter' because it is being referenced by
+//	object 'TenantFilter_Defs'
+//
+// The migration Runner never meets this, because it applies each file once and
+// records the version. A helper called from every Setup meets it on the second
+// test in the binary, so the fingerprint table is what makes this usable at all
+// -- exactly as it is for PostgreSQL.
+func applyMSSQLSchemaFile(t *testing.T, db *sql.DB) {
+	t.Helper()
+	paths := mssqlSchemaFiles()
+	files := make([][]byte, 0, len(paths))
+	var combined []byte
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		files = append(files, data)
+		combined = append(combined, data...)
+	}
+
+	if _, err := db.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'cleat_test_schema')
+		CREATE TABLE cleat_test_schema (id INT PRIMARY KEY, fingerprint NVARCHAR(128) NOT NULL)`); err != nil {
+		t.Fatalf("apply mssql schema: create fingerprint table: %v", err)
+	}
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256(combined))
+	var applied string
+	if err := db.QueryRow(`SELECT fingerprint FROM cleat_test_schema WHERE id = 1`).Scan(&applied); err == nil && applied == fingerprint {
+		requireMSSQLPoliciesIntact(t, db)
+		return
+	}
+
+	requireNoHandWrittenMSSQLSchema(t, db)
+
+	// GO is a client batch separator rather than a statement, so each file goes
+	// in batch by batch -- the same split migration.splitMSSQL performs.
+	for i, data := range files {
+		var batch []string
+		exec := func() {
+			stmt := strings.TrimSpace(strings.Join(batch, "\n"))
+			batch = nil
+			if stmt == "" {
+				return
+			}
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatalf("apply %s: %v\n\nbatch:\n%s", paths[i], err, stmt)
+			}
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.EqualFold(strings.TrimSpace(line), "GO") {
+				exec()
+				continue
+			}
+			batch = append(batch, line)
+		}
+		exec()
+	}
+
+	if _, err := db.Exec(`MERGE cleat_test_schema AS t
+		USING (SELECT 1 AS id, @p1 AS fingerprint) AS s ON t.id = s.id
+		WHEN MATCHED THEN UPDATE SET fingerprint = s.fingerprint
+		WHEN NOT MATCHED THEN INSERT (id, fingerprint) VALUES (s.id, s.fingerprint);`, fingerprint); err != nil {
+		t.Fatalf("apply mssql schema: record fingerprint: %v", err)
+	}
+}
+
+// requireMSSQLPoliciesIntact checks, on every setup, that the security policies
+// the schema installed are still there.
+//
+// The fingerprint says "these files have been applied to this database", and
+// once it matches nothing re-applies them -- so a database that lost its
+// policies to something else can never heal itself, and every later run sees a
+// schema that is missing the one thing 2.71 is about. That is not
+// hypothetical: an earlier version of mssql_rls_enforcement_test.go dropped the
+// policies on cleanup, which was correct when it installed its own and became
+// destructive once the schema provided them, and the databases it had already
+// been run against stayed broken afterwards. Cost an hour to see, because the
+// symptom was a test reporting a missing policy long after the run that removed
+// it.
+//
+// Cheap enough to do every time: one COUNT against a catalogue view.
+func requireMSSQLPoliciesIntact(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var policies int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sys.security_policies`).Scan(&policies); err != nil {
+		t.Fatalf("check security policies: %v", err)
+	}
+	if policies > 0 {
+		return
+	}
+	var dbName string
+	_ = db.QueryRow(`SELECT DB_NAME()`).Scan(&dbName)
+	t.Fatalf("the SQL Server test database %q has the shipped schema recorded but no security "+
+		"policies, so something dropped them and the fingerprint stops them being "+
+		"reinstalled (IMPROVEMENT-PLAN 2.71).\n\n"+
+		"Every tenant-scoped test in this binary would run without a backstop.\n\n"+
+		"Drop it once and re-run:\n\n"+
+		"    DROP DATABASE %s; CREATE DATABASE %s;\n", dbName, dbName, dbName)
+}
+
+// requireNoHandWrittenMSSQLSchema refuses to apply the shipped schema on top of
+// the hand-written one, and says how to fix it.
+//
+// The two are not compatible in place. Every CREATE TABLE in the shipped file
+// is guarded by IF NOT EXISTS, so a table that already exists in the old shape
+// keeps it -- and the constraints, defaults and security policies that follow
+// are then applied to a table that may not satisfy them. The result is a
+// database that is half one schema and half the other, which is worse than
+// either. Applying it that way is also what made an earlier attempt at this
+// switch hang against a long-lived local database.
+//
+// So: an existing cleat database with no fingerprint row and no security
+// policies was built by the schema this change removes, and has to be dropped.
+// One command, once. CI is unaffected -- its databases are new every run.
+func requireNoHandWrittenMSSQLSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var tables, policies int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sys.tables WHERE name IN
+		('workflow_instances', 'workflow_defs', 'event_history')`).Scan(&tables); err != nil {
+		t.Fatalf("inspect existing schema: %v", err)
+	}
+	if tables == 0 {
+		return // empty database: nothing to reconcile
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sys.security_policies`).Scan(&policies); err != nil {
+		t.Fatalf("inspect existing security policies: %v", err)
+	}
+	if policies > 0 {
+		return // already the shipped schema; the fingerprint just has not been recorded
+	}
+	var dbName string
+	_ = db.QueryRow(`SELECT DB_NAME()`).Scan(&dbName)
+	t.Fatalf("the SQL Server test database %q was built by the hand-written test schema, "+
+		"which this checkout no longer uses (IMPROVEMENT-PLAN 2.71).\n\n"+
+		"The shipped schema cannot be applied over it: every CREATE TABLE is guarded by "+
+		"IF NOT EXISTS, so the old table shapes would survive and the constraints and "+
+		"security policies would be applied to tables that do not satisfy them.\n\n"+
+		"Drop it once and re-run:\n\n"+
+		"    DROP DATABASE %s; CREATE DATABASE %s;\n", dbName, dbName, dbName)
 }

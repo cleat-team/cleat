@@ -970,11 +970,19 @@ func main() {
 			// it right. The default search_path does not include admin, so
 			// this always failed with 42P01 and the only trace was a warning:
 			// no startup key was ever generated on a fresh PostgreSQL
-			// deployment, while --require-auth defaults to true. MySQL and
-			// SQL Server keep the unqualified name; there the table is not in
-			// a separate schema.
+			// deployment, while --require-auth defaults to true.
+			//
+			// SQL Server is the same case, and the previous version of this
+			// comment had it wrong: it said "MySQL and SQL Server keep the
+			// unqualified name; there the table is not in a separate schema."
+			// True of MySQL, which puts each tenant in its own database. Not
+			// true of SQL Server -- migrations/mssql/001_schema.sql creates
+			// BOTH admin.tenant_api_keys and dbo.tenant_api_keys, an
+			// unqualified name resolves to dbo, and dbo is the one nothing
+			// writes. So this counted rows in an always-empty table and
+			// concluded a key needed generating on every start.
 			keyCountQuery := `SELECT COUNT(*) FROM tenant_api_keys`
-			if *driver == "postgres" {
+			if *driver == "postgres" || *driver == "mssql" {
 				keyCountQuery = `SELECT COUNT(*) FROM admin.tenant_api_keys`
 			}
 			var keyCount int

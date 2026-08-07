@@ -63,8 +63,29 @@ func TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint(t *testing.T) {
 		}
 	})
 
-	store := NewMSSQLStore(db)
 	ctx := context.Background()
+
+	// Built the way production builds it. NewMSSQLStore(db) on a plain pool
+	// puts sp_set_session_context on none of its connections, so under the
+	// shipped security policies the store cannot see the rows it just wrote --
+	// which surfaces here as "read input back: sql: no rows in result set",
+	// three subtests deep, looking nothing like a store-construction problem.
+	// Same §1.3 shape setupMSSQLIntegrationTest documents.
+	ws, closer, err := NewMSSQLStoreFactory(os.Getenv("CLEAT_TEST_MSSQL")).OpenStore(
+		ctx, DefaultTenantUUID, "default")
+	if err != nil {
+		t.Fatalf("open a tenant-scoped store: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	store, ok := ws.(*MSSQLStore)
+	if !ok {
+		t.Fatalf("OpenStore returned %T, want *MSSQLStore", ws)
+	}
+
+	// The raw-SQL reads below are subject to the same policies. They check
+	// what the store did rather than acting as a tenant, which is
+	// administrative work, so they go through the admin connection.
+	adminDB := testutil.MSSQLAdminDB(t, db)
 
 	for _, tc := range []struct {
 		name  string
@@ -90,13 +111,13 @@ func TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint(t *testing.T) {
 					"migrations/mssql/001_schema.sql does with every schedule.", err)
 			}
 			t.Cleanup(func() {
-				_, _ = db.Exec(`DELETE FROM workflow_schedules WHERE name = @p1`, name)
+				_, _ = adminDB.Exec(`DELETE FROM workflow_schedules WHERE name = @p1`, name)
 			})
 
 			// And the value has to come back as the JSON that went in, not as
 			// something that merely satisfies ISJSON.
 			var stored string
-			if err := db.QueryRow(
+			if err := adminDB.QueryRow(
 				`SELECT CAST(input AS NVARCHAR(MAX)) FROM workflow_schedules WHERE name = @p1`,
 				name).Scan(&stored); err != nil {
 				t.Fatalf("read input back: %v", err)
