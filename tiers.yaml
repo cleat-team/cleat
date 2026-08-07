@@ -15,9 +15,20 @@
 # settled that way carry `decision: DECIDED <date>`; entries with no `decision:` key were
 # assigned on measurement alone and need no product call.
 #
-# Nothing enforces this file until `scripts/tier-gate.sh` is wired into CI as a required
-# check. Until then a tier here is a claim about what we intend to hold ourselves to, not
-# a claim that anything is checking.
+# ENFORCED since 2026-08-07 by `.github/workflows/tier1-gate.yml`, which runs
+# `scripts/tier-gate.sh` on every push and pull request to main and develop. Tier 1 is
+# therefore a property CI checks rather than a claim about what we intend to hold
+# ourselves to -- which is what the rest of this header is for.
+#
+# The gate is deliberately strict, and that is the point rather than an oversight: no
+# continue-on-error, no known-failure list, and it refuses to run at all when a
+# precondition is missing rather than running and reporting a green that measured
+# nothing. Widening it to accommodate a failure is the one change that would make it
+# worthless.
+#
+# First green, on the commit that wired it up:
+#   ran=6595 pass=6593 fail=0 skip=2   (both TestHelperProcess, allowlisted)
+#   tier 1 green: 6593 passed, 0 failed, 0 skipped, on all of: postgres mysql mssql
 # ---------------------------------------------------------------------------
 
 meta:
