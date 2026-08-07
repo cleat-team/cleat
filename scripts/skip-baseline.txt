@@ -10,7 +10,6 @@ cmd/cleat	newASVetProject	1
 cmd/cleat	runVetCmd	1
 cmd/cleat-bench	TestHelperProcess	1
 cmd/cleat-gen-plugin	TestHelperProcess	1
-cmd/cleat-worker	TestAPIMetrics	1
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
 cmd/cleat-worker	TestDeployOverAnotherTenantsNameIsRefusedOverHTTP	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1
@@ -85,8 +84,6 @@ migration	newMSSQLScratchDB	1
 migration	newMySQLScratchDB	1
 migration	newScratchDB	1
 plugin	TestDownloadWASMInvalidURL	1
-plugin	TestRunMigrations_ExecInTxError	1
-plugin	TestRunMigrations_InsertRecordError	1
 plugin	newPluginScratchDB	1
 plugins/scheduledbackup	TestNextRun_Feb29NonLeapYear	1
 plugins/scheduler	TestCronDSTTransition	1

@@ -789,12 +789,134 @@ func TestRunMigrations_QueryRowError(t *testing.T) {
 	}
 }
 
+// The two tests below were `t.Skip("requires more sophisticated fake ...")`
+// over empty bodies. The fake already had what they needed: execFailAfter and
+// execCallCount, whose own comment says "Used to defer errors past the CREATE
+// TABLE statement", which is the whole of the difficulty they claimed. The
+// capability was presumably added for one of the two callers at lines 621 and
+// 933 and these were never revisited.
+//
+// The exec sequence they index into, measured rather than reasoned about, for
+// one plugin with one migration on DialectPostgres:
+//
+//	exec 1  session  CREATE TABLE IF NOT EXISTS plugin_migrations (...)
+//	exec 2  tx       the plugin's own migration SQL
+//	exec 3  tx       INSERT INTO plugin_migrations (plugin_name, version)
+//
+// The advisory lock and the search_path pin are deliberately not counted --
+// ExecContext routes them to lockCalls instead, so they do not shift these
+// indices.
+//
+// One thing to know before trusting a green run here. Deleting the production
+// `_ = tx.Rollback()` these tests assert on does NOT turn them red -- it hangs
+// them, and `go test` reports a timeout with no failing assertion:
+//
+//	panic: test timed out after 25s
+//	goroutine 1 [chan receive]:
+//	database/sql.(*Conn).close(...)
+//	  .../plugin/migration_test.go:829   <- the RunMigrations call
+//
+// The leaked *Tx still holds the pooled connection, so RunMigrations blocks in
+// its own session.Close(). That is a real property of the production code
+// rather than an artifact of the fake -- the rollback is not only about not
+// leaving a half-applied migration committed, it is what lets the session
+// close at all -- but it means a regression here costs a CI timeout instead of
+// a message. The txRollback assertions below are still worth having: they are
+// what names the cause when someone does read the log.
+//
+// So these were falsified the other way, by breaking the fixture rather than
+// the fix: dropping conn.execErr makes RunMigrations succeed and both tests
+// fail on "expected an error ...", which proves the injection is load-bearing.
+// conn.txRollback has exactly one writer, migrationTestTx.Rollback.
+
+// TestRunMigrations_ExecInTxError: the plugin's own migration SQL fails inside
+// the transaction. RunMigrations must roll back and report which plugin and
+// version, because the operator's next question is which migration to fix.
 func TestRunMigrations_ExecInTxError(t *testing.T) {
-	t.Skip("requires more sophisticated fake to fire error mid-transaction")
+	db, conn := newTestMigrationDB(t)
+	conn.existsResult = false
+	// Past the CREATE TABLE, so exec 2 -- the migration SQL -- is the one that
+	// fails.
+	conn.execFailAfter = 1
+	conn.execErr = errors.New("migration sql failed")
+
+	plugin := &LoadedPlugin{
+		Plugin: &testMigrationPlugin{
+			info:       PluginInfo{Name: "my-plugin"},
+			migrations: []Migration{{Version: 1, Up: "CREATE TABLE t (id INT)"}},
+		},
+		Healthy: true,
+	}
+
+	err := RunMigrations(context.Background(), db, DialectPostgres, nil, []*LoadedPlugin{plugin})
+	if err == nil {
+		t.Fatal("expected an error when the migration SQL fails inside the transaction")
+	}
+	// Naming the injected error, not just asserting non-nil: RunMigrations has
+	// several other failure paths that also return non-nil here, so a bare
+	// err != nil would pass on a fixture that never fired.
+	if !strings.Contains(err.Error(), "migration sql failed") {
+		t.Errorf("error = %v, want it to carry the injected \"migration sql failed\"", err)
+	}
+	if !strings.Contains(err.Error(), "my-plugin") || !strings.Contains(err.Error(), "v1") {
+		t.Errorf("error = %v, want it to name the plugin and version", err)
+	}
+	if !conn.txRollback {
+		t.Error("transaction was not rolled back after the migration SQL failed")
+	}
+	// The INSERT must not have run: recording a migration that did not apply
+	// is what makes the next run skip it.
+	for _, c := range conn.txExecCalls {
+		if strings.Contains(c.query, "INSERT INTO plugin_migrations") {
+			t.Errorf("the migration was recorded despite failing: %q", c.query)
+		}
+	}
 }
 
+// TestRunMigrations_InsertRecordError: the migration applies but recording it
+// fails. Same requirement in the other direction -- the transaction must roll
+// back, so the applied-but-unrecorded state never reaches the database.
 func TestRunMigrations_InsertRecordError(t *testing.T) {
-	t.Skip("requires more sophisticated fake to distinguish exec calls")
+	db, conn := newTestMigrationDB(t)
+	conn.existsResult = false
+	// Past the CREATE TABLE and past the migration SQL, so exec 3 -- the
+	// INSERT -- is the one that fails.
+	conn.execFailAfter = 2
+	conn.execErr = errors.New("record insert failed")
+
+	plugin := &LoadedPlugin{
+		Plugin: &testMigrationPlugin{
+			info:       PluginInfo{Name: "my-plugin"},
+			migrations: []Migration{{Version: 1, Up: "CREATE TABLE t (id INT)"}},
+		},
+		Healthy: true,
+	}
+
+	err := RunMigrations(context.Background(), db, DialectPostgres, nil, []*LoadedPlugin{plugin})
+	if err == nil {
+		t.Fatal("expected an error when recording the migration fails")
+	}
+	if !strings.Contains(err.Error(), "record insert failed") {
+		t.Errorf("error = %v, want it to carry the injected \"record insert failed\"", err)
+	}
+	if !strings.Contains(err.Error(), "record") {
+		t.Errorf("error = %v, want it to say the *record* step failed rather than the "+
+			"migration itself -- they need different operator responses", err)
+	}
+	if !conn.txRollback {
+		t.Error("transaction was not rolled back after the record insert failed")
+	}
+	// This is the assertion that makes the test worth having: the migration
+	// SQL did run, and the rollback is the only thing that undoes it.
+	sawMigration := false
+	for _, c := range conn.txExecCalls {
+		if strings.Contains(c.query, "CREATE TABLE t") {
+			sawMigration = true
+		}
+	}
+	if !sawMigration {
+		t.Error("the migration SQL never ran, so this test did not reach the record step")
+	}
 }
 
 func TestRunMigrations_CommitError(t *testing.T) {
