@@ -98,13 +98,36 @@ tier1:
   # +20% for native RLS -- see IMPROVEMENT-PLAN.md 1.7 for the measurement. Emulating a
   # missing engine feature at 6x is a worse product than stating which engines have it.
   tenancy:
-    multi_tenant: [postgres, mssql]   # mssql PENDING #333, see blockers below
+    multi_tenant: [postgres, mssql]   # mssql cleared 2026-08-06 by #333
     single_tenant: [postgres, mysql, mssql]
-  blockers:
-    - "mssql multi-tenant is tier 1 ONLY once #333 lands: the test schema currently
-       defines none of the seven security policies, so ~220 MSSQL tests run with no
-       backstop and cannot observe isolation working or failing. #345 (the cleat_admin
-       principal) merges first; #333 is stacked on it at 9 remaining failures."
+
+  # Cleared 2026-08-06. Kept as history rather than deleted: what the blocker
+  # predicted and what actually happened differ in a way worth recording.
+  #
+  # It said the test schema defined none of the seven security policies, so
+  # ~220 MSSQL tests ran with no backstop. #345 landed the cleat_admin
+  # principal and #333 built the schema from migrations/mssql/*.sql, which put
+  # the policies in front of the tests for the first time.
+  #
+  # The prediction was that this would show whether isolation works. What it
+  # actually showed first was that the *tests* had never been subject to it:
+  # 26 subtests across nine top-level tests went red, and every one was a
+  # verification path that had only ever worked by bypassing the fence.
+  # PostgreSQL's test role is SUPERUSER BYPASSRLS -- checked, not assumed --
+  # so the same code was unfenced on one dialect and fenced on the other, and
+  # the hand-written schema had hidden that on both.
+  #
+  # TestCascadeDelete is the one to remember: its DELETE matched no rows, so
+  # nothing cascaded, and of the five child-table assertions three failed and
+  # two *passed* -- their rows were still there and the same policy hid them
+  # from the count. A green result measuring nothing, which is the failure
+  # CLAUDE.md opens with.
+  #
+  # Now: 3888 pass / 0 fail / 3 skip on a from-scratch database with all three
+  # DSNs set, over ./engine/... ./migration/... (CI's scope). Re-derive with
+  #   CLEAT_TEST_POSTGRES=... CLEAT_TEST_MYSQL=... CLEAT_TEST_MSSQL=... \
+  #     go test -count=1 -p 1 -timeout=30m ./engine/... ./migration/...
+  blockers: []
 
   # Packages in the root module.
   packages:
