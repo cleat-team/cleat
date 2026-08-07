@@ -162,18 +162,51 @@ func TestMySQLStore_CompleteWorkflow_BeginError(t *testing.T) {
 	}
 }
 
+// TestMySQLStore_CompleteWorkflow_UpdateError covers the path where the status
+// UPDATE itself fails: CompleteWorkflow must return that error rather than
+// swallowing it the way the idempotency UPDATE below is deliberately allowed to
+// be swallowed.
+//
+// It was skipped unconditionally with its body commented out, and the stated
+// reason -- "CompleteWorkflow execs DELETE+UPDATE, mock matches DELETE first"
+// -- does not describe the code. MySQLStore.CompleteWorkflow execs no DELETE at
+// all; it is two UPDATEs, on workflow_instances and then idempotency_keys.
+//
+// The actual problem was the match string. mockExecResult matches on a
+// substring of the query text, and the query reads
+//
+//	UPDATE workflow_instances
+//	SET status = 'done', ...
+//
+// so "UPDATE workflow_instances SET status = 'done'" is not a substring of it
+// -- there is a newline and a tab between the table name and SET. The mock
+// therefore never fired, and rather than being fixed the test was disabled with
+// a guess about why. TestMySQLStore_CompleteWorkflow_IdempotencyUpdateFails,
+// three lines below, has always matched on "SET status = 'done'" and works.
+//
+// FailWorkflow has a near-identical statement, so the match is kept specific to
+// 'done' rather than 'failed'.
 func TestMySQLStore_CompleteWorkflow_UpdateError(t *testing.T) {
-	t.Skip("mockDB query matching needs refinement — CompleteWorkflow execs DELETE+UPDATE, mock matches DELETE first")
-	// db := newMockDBForPostgres(t, nil, []mockExecResult{
-	// 	{match: "UPDATE workflow_instances SET status = 'done'", err: errors.New("update failed")},
-	// })
-	// defer db.Close()
-	//
-	// store := NewMySQLStore(db)
-	// err := store.CompleteWorkflow(testCtxMySQL, "wf-1", "worker-1", 0, `{}`, nil)
-	// if err == nil {
-	// 	t.Fatal("expected error from update failure, got nil")
-	// }
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "SET status = 'done'", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewMySQLStore(db)
+	err := store.CompleteWorkflow(testCtxMySQL, "wf-1", "worker-1", 0, `{}`, nil)
+	if err == nil {
+		t.Fatal("expected error from update failure, got nil")
+	}
+	// Naming the injected error, not just asserting non-nil. An unmatched mock
+	// returns zero rows affected, which CompleteWorkflow turns into
+	// ErrFenceLost -- also non-nil, and it would let this test pass without the
+	// mock ever having fired. That is exactly how the original match string
+	// could have been declared working.
+	if !strings.Contains(err.Error(), "update failed") {
+		t.Errorf("CompleteWorkflow returned %v, want it to carry the injected "+
+			"\"update failed\" -- a different error means the mock did not match "+
+			"the UPDATE and the test is not exercising this path", err)
+	}
 }
 
 func TestMySQLStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
