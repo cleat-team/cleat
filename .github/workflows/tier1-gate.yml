@@ -119,8 +119,9 @@ jobs:
           --health-retries 5
 
       mssql:
-        # Pinned by digest on 2026-08-07. THE RATIONALE FOR ALL SIX SITES LIVES
-        # HERE; the other five carry a one-line pointer back to this comment.
+        # Pinned by digest on 2026-08-07. THE RATIONALE FOR ALL SEVEN `image:`
+        # SITES LIVES HERE; the other six, spread over five files, carry a
+        # one-line pointer back to this comment.
         #
         # `2022-latest` is a moving tag. Microsoft republishes it on their own
         # schedule, so a republish can turn every open PR in the repo red for a
@@ -152,12 +153,14 @@ jobs:
         #   docker ps -q --filter "ancestor=alpine@sha256:c64c687c..."  -> 1 match
         #   docker ps -q --filter "ancestor=alpine:3.20"                -> 0 matches
         #
-        # All six `image:` sites and all four `ancestor=` filters name the same
-        # digest, and they have to be bumped together. Nothing enforces that as
-        # this lands -- the guard that would (an `ancestor=` filter naming a
-        # reference that is not also an `image:` in the same file) is the next
-        # item on plans/ci-integrity-followup-plan.md, and this sentence is what
-        # should be corrected when it arrives. Re-derive the set:
+        # All seven `image:` sites and all four `ancestor=` filters name the
+        # same digest, and they have to be bumped together. That is enforced as
+        # of #399: `scripts/check-workflow-guards.py` fails the required `Lint`
+        # job on an `ancestor=` reference that is not also an `image:` in the
+        # same file. (This paragraph previously said "six" and "nothing
+        # enforces that" -- both were true when written and neither is now.
+        # The count was short because it grepped only .github/workflows/ and
+        # missed the two compose files.) Re-derive the set:
         #
         #   grep -rn 'mcr.microsoft.com/mssql/server' .github/workflows/ \
         #     docker-compose.cluster.yml docker-compose.dev.yml
