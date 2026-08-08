@@ -10,15 +10,15 @@ import json
 import pytest
 
 try:
-    from cleat_sdk.test_harness import CleatTestHarness
     from cleat_sdk.host_calls import HostCalls
+    from cleat_sdk.test_harness import CleatTestHarness
     from cleat_sdk.types import (
+        ChildWorkflow,
+        CleatDefer,
         Saga,
         SagaStep,
         SagaStepResult,
         TerminalError,
-        ChildWorkflow,
-        CleatDefer,
     )
 except ImportError as e:
     pytest.fail(

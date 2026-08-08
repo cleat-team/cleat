@@ -245,9 +245,26 @@ jobs:
   # check. Nothing is waived here -- the job fails when the linters fail.
   #
   # The backlogs get triaged the same way the CodeQL one did: fix, then
-  # promote back into `Lint`. ShellCheck's 7 findings are the near-term one;
-  # Ruff's 260 need a rule-set decision first, since this repo ships no ruff
-  # config and is being measured against defaults.
+  # promote back into `Lint`. ShellCheck's 7 findings are the near-term one.
+  #
+  # CORRECTION, 2026-08-08, to the paragraph that used to end this comment.
+  # It said Ruff's 260 "need a rule-set decision first, since this repo ships
+  # no ruff config and is being measured against defaults." The second half is
+  # wrong twice over. python-sdk/pyproject.toml has always carried a
+  # [tool.ruff] section -- line-length, target-version, exclude. What it had no
+  # rules. And "defaults" is not a fixed thing: ruff's built-in rule set
+  # changes between releases, and `pip install ruff` below was unpinned, so the
+  # 260 was a property of whichever ruff ran that morning. Measured on the same
+  # tree, same config, 2026-08-08:
+  #
+  #   ruff==0.6.9   ->  60 rules enabled,   3 errors
+  #   ruff==0.16.2  -> 413 rules enabled, 260 errors
+  #
+  # A lint check whose strictness is set by a third party's release schedule is
+  # the same defect as the moving container tag pinned in #390. The rule set is
+  # now named explicitly in python-sdk/pyproject.toml, which also carries
+  # `required-version = ">=0.16,<0.17"`; the pin below has to match it, and
+  # ruff fails loudly rather than silently if they drift. Bump both together.
   # -------------------------------------------------------------------------
   lint-advisory:
     name: Lint (advisory)
@@ -262,7 +279,11 @@ jobs:
 
       - name: Install lint tools
         run: |
-          pip install ruff
+          # Pinned, and must match `required-version` in
+          # python-sdk/pyproject.toml -- ruff's default rule set moves between
+          # releases, so an unpinned install silently changes what this check
+          # means. See the comment above this job.
+          pip install ruff==0.16.2
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
 

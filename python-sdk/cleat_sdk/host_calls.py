@@ -35,11 +35,11 @@ imported and tested without WASM.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Optional, TypeVar
+from typing import Any, TypeVar
 
 from .memory import (
     OUT_BUF_SIZE,
@@ -51,8 +51,6 @@ from .memory import (
     decode_await_signals_result,
     decode_cleat_call_result,
     decode_dual_string_result,
-    decode_poll_cancellation_result,
-    decode_poll_signal_result,
     decode_simple_result,
     decode_sleep_result,
     read_string,
@@ -66,90 +64,152 @@ from .memory import (
 # when not running in WASM ― the stubs are replaced by real WASM FFI
 # functions at runtime via the componentize-py host adaptor.
 try:
-    from wit_world.imports.durable_sleep import (
-        durable_sleep as _import_cleat_sleep,
-        durable_now as _import_cleat_now,
-        durable_random as _import_cleat_random,
-        durable_log as _import_cleat_log,
-    )
     from wit_world.imports.durable_call import (
         durable_call as _import_cleat_call,
-        durable_call_retry as _import_cleat_call_retry,
+    )
+    from wit_world.imports.durable_call import (
         durable_call_heartbeat as _import_cleat_call_heartbeat,
     )
-    from wit_world.imports.durable_signals import (
-        durable_await_signals as _import_cleat_await_signals,
-        durable_poll_signal as _import_cleat_poll_signal,
-        durable_send_signal_and_wait as _import_cleat_send_signal_and_wait,
-        durable_reply_to_signal as _import_cleat_reply_to_signal,
-        durable_signal_workflow as _import_cleat_signal_workflow,
+    from wit_world.imports.durable_call import (
+        durable_call_retry as _import_cleat_call_retry,
     )
-    from wit_world.imports.durable_promises import (
-        durable_create_promise as _import_cleat_create_promise,
-        durable_await_promise as _import_cleat_await_promise,
-        durable_resolve_promise as _import_cleat_resolve_promise,
-        durable_reject_promise as _import_cleat_reject_promise,
+    from wit_world.imports.durable_children import (
+        durable_await_all_children as _import_cleat_await_all_children,
+    )
+    from wit_world.imports.durable_children import (
+        durable_await_child as _import_cleat_await_child,
     )
     from wit_world.imports.durable_children import (
         durable_child_workflow as _import_cleat_child_workflow,
-        durable_await_child as _import_cleat_await_child,
-        durable_await_all_children as _import_cleat_await_all_children,
+    )
+    from wit_world.imports.durable_children import (
         durable_child_workflow_with_options as _import_cleat_child_workflow_with_options,
-    )
-    from wit_world.imports.durable_lifecycle import (
-        durable_defer as _import_cleat_defer,
-        durable_continue_as_new as _import_cleat_continue_as_new,
-        durable_poll_cancellation as _import_cleat_poll_cancellation,
-    )
-    from wit_world.imports.durable_lock import (
-        durable_acquire_lock as _import_cleat_acquire_lock,
-        durable_release_lock as _import_cleat_release_lock,
-    )
-    from wit_world.imports.durable_handlers import (
-        durable_register_update_handler as _import_cleat_register_update_handler,
-        durable_register_query_handler as _import_cleat_register_query_handler,
-    )
-    from wit_world.imports.durable_state import (
-        set_query_state as _import_set_query_state,
-    )
-    from wit_world.imports.durable_version import (
-        durable_version as _import_cleat_version,
-        durable_min_version as _import_cleat_min_version,
-    )
-    from wit_world.imports.durable_identity import (
-        durable_workflow_id as _import_cleat_workflow_id,
-        durable_run_id as _import_cleat_run_id,
-    )
-    from wit_world.imports.durable_messaging import (
-        durable_send as _import_cleat_send,
-        durable_schedule_invoke as _import_cleat_schedule_invoke,
-    )
-    from wit_world.imports.plugin import (
-        plugin_call as _import_plugin_call,
-        plugin_call_streaming as _import_plugin_call_streaming,
-    )
-    from wit_world.imports.durable_scope import (
-        set_scope as _import_set_scope,
-        get_scope as _import_get_scope,
-        uuid as _import_uuid,
-    )
-    from wit_world.imports.durable_stream_state import (
-        set_state as _import_stream_set_state,
-        get_state as _import_stream_get_state,
-        delete_state as _import_stream_delete_state,
-        incr_state as _import_stream_incr_state,
-        has_state as _import_stream_has_state,
-        list_state as _import_stream_list_state,
-    )
-    from wit_world.imports.durable_extended_lifecycle import (
-        continue_as_new_versioned as _import_continue_as_new_versioned,
-        side_effect as _import_side_effect,
     )
     from wit_world.imports.durable_extended_children import (
         child_workflow_in_schema as _import_child_workflow_in_schema,
     )
+    from wit_world.imports.durable_extended_lifecycle import (
+        continue_as_new_versioned as _import_continue_as_new_versioned,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
+        side_effect as _import_side_effect,
+    )
     from wit_world.imports.durable_fetch import (
         fetch as _import_fetch,
+    )
+    from wit_world.imports.durable_handlers import (
+        durable_register_query_handler as _import_cleat_register_query_handler,
+    )
+    from wit_world.imports.durable_handlers import (
+        durable_register_update_handler as _import_cleat_register_update_handler,
+    )
+    from wit_world.imports.durable_identity import (
+        durable_run_id as _import_cleat_run_id,
+    )
+    from wit_world.imports.durable_identity import (
+        durable_workflow_id as _import_cleat_workflow_id,
+    )
+    from wit_world.imports.durable_lifecycle import (
+        durable_continue_as_new as _import_cleat_continue_as_new,
+    )
+    from wit_world.imports.durable_lifecycle import (
+        durable_defer as _import_cleat_defer,
+    )
+    from wit_world.imports.durable_lifecycle import (
+        durable_poll_cancellation as _import_cleat_poll_cancellation,
+    )
+    from wit_world.imports.durable_lock import (
+        durable_acquire_lock as _import_cleat_acquire_lock,
+    )
+    from wit_world.imports.durable_lock import (
+        durable_release_lock as _import_cleat_release_lock,
+    )
+    from wit_world.imports.durable_messaging import (
+        durable_schedule_invoke as _import_cleat_schedule_invoke,
+    )
+    from wit_world.imports.durable_messaging import (
+        durable_send as _import_cleat_send,
+    )
+    from wit_world.imports.durable_promises import (
+        durable_await_promise as _import_cleat_await_promise,
+    )
+    from wit_world.imports.durable_promises import (
+        durable_create_promise as _import_cleat_create_promise,
+    )
+    from wit_world.imports.durable_promises import (
+        durable_reject_promise as _import_cleat_reject_promise,
+    )
+    from wit_world.imports.durable_promises import (
+        durable_resolve_promise as _import_cleat_resolve_promise,
+    )
+    from wit_world.imports.durable_scope import (
+        get_scope as _import_get_scope,
+    )
+    from wit_world.imports.durable_scope import (
+        set_scope as _import_set_scope,
+    )
+    from wit_world.imports.durable_scope import (
+        uuid as _import_uuid,
+    )
+    from wit_world.imports.durable_signals import (
+        durable_await_signals as _import_cleat_await_signals,
+    )
+    from wit_world.imports.durable_signals import (
+        durable_poll_signal as _import_cleat_poll_signal,
+    )
+    from wit_world.imports.durable_signals import (
+        durable_reply_to_signal as _import_cleat_reply_to_signal,
+    )
+    from wit_world.imports.durable_signals import (
+        durable_send_signal_and_wait as _import_cleat_send_signal_and_wait,
+    )
+    from wit_world.imports.durable_signals import (
+        durable_signal_workflow as _import_cleat_signal_workflow,
+    )
+    from wit_world.imports.durable_sleep import (
+        durable_log as _import_cleat_log,
+    )
+    from wit_world.imports.durable_sleep import (
+        durable_now as _import_cleat_now,
+    )
+    from wit_world.imports.durable_sleep import (
+        durable_random as _import_cleat_random,
+    )
+    from wit_world.imports.durable_sleep import (
+        durable_sleep as _import_cleat_sleep,
+    )
+    from wit_world.imports.durable_state import (
+        set_query_state as _import_set_query_state,
+    )
+    from wit_world.imports.durable_stream_state import (
+        delete_state as _import_stream_delete_state,
+    )
+    from wit_world.imports.durable_stream_state import (
+        get_state as _import_stream_get_state,
+    )
+    from wit_world.imports.durable_stream_state import (
+        has_state as _import_stream_has_state,
+    )
+    from wit_world.imports.durable_stream_state import (
+        incr_state as _import_stream_incr_state,
+    )
+    from wit_world.imports.durable_stream_state import (
+        list_state as _import_stream_list_state,
+    )
+    from wit_world.imports.durable_stream_state import (
+        set_state as _import_stream_set_state,
+    )
+    from wit_world.imports.durable_version import (
+        durable_min_version as _import_cleat_min_version,
+    )
+    from wit_world.imports.durable_version import (
+        durable_version as _import_cleat_version,
+    )
+    from wit_world.imports.plugin import (
+        plugin_call as _import_plugin_call,
+    )
+    from wit_world.imports.plugin import (
+        plugin_call_streaming as _import_plugin_call_streaming,
     )
 
     _USING_WASM = True
@@ -172,7 +232,6 @@ class SuspendSentinel(Exception):
     the workflow to be resumed later.
     """
 
-    pass
 
 
 # ========================================================================
@@ -207,7 +266,6 @@ class CleatCallTransientError(CleatCallError):
     The caller should retry the call.
     """
 
-    pass
 
 
 class CleatCallPermanentError(CleatCallError):
@@ -216,7 +274,6 @@ class CleatCallPermanentError(CleatCallError):
     The caller should NOT retry; the error is permanent.
     """
 
-    pass
 
 
 class CleatCallTimeoutError(CleatCallTransientError):
@@ -225,7 +282,6 @@ class CleatCallTimeoutError(CleatCallTransientError):
     The call exceeded its deadline. This is a transient / retryable error.
     """
 
-    pass
 
 
 # Map of call_error_code values from the host to the appropriate exception class.
@@ -325,7 +381,7 @@ class ChildResult:
     result: str
     """The child's output JSON (empty if the child errored)."""
 
-    error: Optional[str] = None
+    error: str | None = None
     """Error message if the child failed, or ``None`` on success."""
 
 
@@ -854,7 +910,7 @@ class HostCalls:
     def __init__(self) -> None:
         """Initialize the HostCalls instance."""
         self._update_handlers: dict[
-            str, tuple[Callable[[str], str], Optional[Callable[[str], bool]]]
+            str, tuple[Callable[[str], str], Callable[[str], bool] | None]
         ] = {}
         self._query_handlers: dict[str, Callable[[str], str]] = {}
         self._scope_prefix: str = ""
@@ -1164,7 +1220,7 @@ class HostCalls:
         service: str,
         operation: str,
         request: Any,
-        timeout_ms: Optional[int] = None,
+        timeout_ms: int | None = None,
     ) -> str:
         """Make a durable (deterministically replayed) call to an external service.
 
@@ -1499,7 +1555,7 @@ class HostCalls:
         self,
         url: str,
         method: str = "GET",
-        headers: Optional[dict] = None,
+        headers: dict | None = None,
         body: str = "",
     ) -> tuple:
         # Routes through call('http', 'fetch', ...) — no separate WASM import needed.
@@ -1537,7 +1593,7 @@ class HostCalls:
         self,
         url: str,
         method: str = "GET",
-        headers: Optional[dict] = None,
+        headers: dict | None = None,
         body: str = "",
         result_type: type[T] = dict,
     ) -> T:
@@ -2264,7 +2320,7 @@ class HostCalls:
     # 25. create_promise — create a cleat promise
     # --------------------------------------------------------------------
 
-    def create_promise(self, name: str, ttl_ms: Optional[int] = None) -> str:
+    def create_promise(self, name: str, ttl_ms: int | None = None) -> str:
         """Create a cleat promise with the given name.
 
         The host allocates a promise ID that can be used to resolve or
@@ -2416,7 +2472,7 @@ class HostCalls:
         self,
         name: str,
         handler: Callable[[str], str],
-        validator: Optional[Callable[[str], bool]] = None,
+        validator: Callable[[str], bool] | None = None,
     ) -> None:
         """Register a handler for update calls on this workflow.
 
@@ -2691,7 +2747,7 @@ class HostCalls:
     # 28. run_detached — execute detached from cancellation
     # --------------------------------------------------------------------
 
-    def run_detached(self, fn: Callable[["HostCalls"], Any]) -> None:
+    def run_detached(self, fn: Callable[[HostCalls], Any]) -> None:
         """Execute a function that is detached from workflow cancellation.
 
         The function receives this ``HostCalls`` instance so it can make

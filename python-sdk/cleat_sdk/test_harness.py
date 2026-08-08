@@ -29,18 +29,18 @@ Port of the Go pattern from ``durable/durabletest/durabletest.go``.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 from .host_calls import (
-    HostCalls,
     ChildResult,
+    HostCalls,
     PromiseResult,
     RetryPolicy,
     SignalResult,
     SuspendSentinel,
 )
-
 
 # ---------------------------------------------------------------------------
 # Call record for test assertions
@@ -69,7 +69,7 @@ class CallRecord:
     operation: str
     request: str
     response: str = ""
-    error: Optional[str] = None
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ class _CallStub:
     service: str
     operation: str
     response: str
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -93,7 +93,7 @@ class _ChildStub:
 
     name: str
     result: str
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -174,7 +174,7 @@ class CleatTestHarness(HostCalls):
         service: str,
         operation: str,
         response: str = "",
-        error: Optional[str] = None,
+        error: str | None = None,
     ) -> None:
         """Register a stub response for a ``call``.
 
@@ -250,7 +250,7 @@ class CleatTestHarness(HostCalls):
         else:
             self._promises[promise_id] = _PromiseState(name="stub", status="rejected", error=error)
 
-    def stub_child_workflow(self, name: str, result: str, error: Optional[str] = None) -> None:
+    def stub_child_workflow(self, name: str, result: str, error: str | None = None) -> None:
         """Register a stub result for a child workflow.
 
         Parameters
@@ -379,7 +379,7 @@ class CleatTestHarness(HostCalls):
         """
         return self.call_count(service, operation) == 0
 
-    def last_call(self, service: str, operation: str) -> Optional[CallRecord]:
+    def last_call(self, service: str, operation: str) -> CallRecord | None:
         """Return the last call record for the given service+operation.
 
         Parameters
@@ -496,7 +496,7 @@ class CleatTestHarness(HostCalls):
         self,
         url: str,
         method: str = "GET",
-        headers: Optional[dict] = None,
+        headers: dict | None = None,
         body: str = "",
     ) -> tuple:
         # Delegate to call("http", "fetch", ...)
@@ -624,7 +624,7 @@ class CleatTestHarness(HostCalls):
     # Promises
     # ------------------------------------------------------------------
 
-    def create_promise(self, name: str, ttl_ms: Optional[int] = None) -> str:
+    def create_promise(self, name: str, ttl_ms: int | None = None) -> str:
         self._promise_counter += 1
         promise_id = f"test-prom-{name}-{self._promise_counter}"
         if name in self._promises:
@@ -670,7 +670,6 @@ class CleatTestHarness(HostCalls):
 
     def extend_timeout(self, additional_ms: int) -> None:
         """Extend the workflow's execution timeout (no-op in test harness)."""
-        pass
 
     # ------------------------------------------------------------------
     # Scope management (virtual object lifecycle)

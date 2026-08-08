@@ -33,7 +33,6 @@ import os
 import sys
 from datetime import datetime, timezone
 
-
 # WASM constants
 SECTION_ID_CUSTOM = 0x00
 SECTION_NAME = "cleat.metadata"

@@ -30,17 +30,18 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Optional, TypeVar
+from typing import Any, TypeVar
 
 from .host_calls import (
+    INFINITE_TIMEOUT_MS,
     ChildResult,
     ChildWorkflowOptions,
     PromiseResult,
     RetryPolicy,
     SignalResult,
 )
-from .host_calls import INFINITE_TIMEOUT_MS
 
 T = TypeVar("T")
 
@@ -60,7 +61,7 @@ class _EventLogEntry:
     args: tuple = ()
     kwargs: dict = field(default_factory=dict)
     result: Any = None
-    exception: Optional[str] = None
+    exception: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +76,7 @@ class _ChildState:
     name: str
     run_id: str
     result: str
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -124,7 +125,7 @@ class LocalHostCalls:
         self._cron_schedules: dict[str, dict] = {}
         self._cron_counter: int = 0
         self._update_handlers: dict[
-            str, tuple[Callable[[str], str], Optional[Callable[[str], bool]]]
+            str, tuple[Callable[[str], str], Callable[[str], bool] | None]
         ] = {}
         self._query_handlers: dict[str, Callable[[str], str]] = {}
         self._scope_prefix: str = ""
@@ -473,7 +474,7 @@ class LocalHostCalls:
         service: str,
         operation: str,
         request: Any,
-        timeout_ms: Optional[int] = None,
+        timeout_ms: int | None = None,
     ) -> str:
         """Make a durable (deterministically replayed) call to an external service.
 
@@ -560,7 +561,7 @@ class LocalHostCalls:
         self,
         url: str,
         method: str = "GET",
-        headers: Optional[dict] = None,
+        headers: dict | None = None,
         body: str = "",
     ) -> tuple:
         """Perform an HTTP fetch via the ``"http"`` service.
@@ -586,7 +587,7 @@ class LocalHostCalls:
         self,
         url: str,
         method: str = "GET",
-        headers: Optional[dict] = None,
+        headers: dict | None = None,
         body: str = "",
         result_type: type[T] = dict,
     ) -> T:
@@ -1045,7 +1046,7 @@ class LocalHostCalls:
     # 35. create_promise
     # ------------------------------------------------------------------
 
-    def create_promise(self, name: str, ttl_ms: Optional[int] = None) -> str:
+    def create_promise(self, name: str, ttl_ms: int | None = None) -> str:
         """Create a cleat promise with the given name.
 
         Returns
@@ -1128,7 +1129,7 @@ class LocalHostCalls:
         self,
         name: str,
         handler: Callable[[str], str],
-        validator: Optional[Callable[[str], bool]] = None,
+        validator: Callable[[str], bool] | None = None,
     ) -> None:
         """Register a handler for update calls on this workflow."""
         if self._mode == "replay":
@@ -1234,8 +1235,8 @@ class LocalHostCalls:
         target_schema: str,
         name: str,
         input_json: Any,
-        version: Optional[int] = None,
-        parent_close_policy: Optional[str] = None,
+        version: int | None = None,
+        parent_close_policy: str | None = None,
     ) -> str:
         """Start a child workflow in a schema. Delegates to child_workflow, ignoring schema.
 
@@ -1302,7 +1303,7 @@ class LocalHostCalls:
     # 44. run_detached
     # ------------------------------------------------------------------
 
-    def run_detached(self, fn: Callable[["LocalHostCalls"], Any]) -> None:
+    def run_detached(self, fn: Callable[[LocalHostCalls], Any]) -> None:
         """Execute a function that is detached from workflow cancellation."""
         saved = self._detached_context
         self._detached_context = True

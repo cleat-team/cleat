@@ -25,9 +25,11 @@ import functools
 import inspect
 import json
 import typing
-from typing import Any, Callable, Optional, get_type_hints
+from collections.abc import Callable
+from typing import Any, get_type_hints
 
 from .host_calls import HostCalls, SuspendSentinel
+
 # String sentinel for workflow suspension (matches Go side check).
 SUSPEND_SENTINEL_STR = "__CLEAT_SUSPEND__"
 
@@ -58,7 +60,7 @@ def _unwrap_result(result: Any) -> Any:
 def _from_dict(
     value: Any,
     target_type: Any,
-    _cache: Optional[dict] = None,
+    _cache: dict | None = None,
 ) -> Any:
     """Recursively construct typed objects from JSON-deserialised values.
 
@@ -117,13 +119,13 @@ def _from_dict(
         return value
 
     # ---- list[Element] / List[Element] ----
-    if origin in (list, typing.List):
+    if origin in (list, list):
         if args and isinstance(value, (list, tuple)):
             return [_from_dict(item, args[0], _cache) for item in value]
         return value
 
     # ---- dict[str, Value] / Dict[str, Value] ----
-    if origin in (dict, typing.Dict):
+    if origin in (dict, dict):
         if args and len(args) == 2 and isinstance(value, dict):
             return {k: _from_dict(v, args[1], _cache) for k, v in value.items()}
         return value
@@ -233,7 +235,7 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
     module.WitWorld = type("WitWorld", (), {"run": wrapped})
 
 
-def cleat_entry(name: Optional[str] = None) -> Callable:
+def cleat_entry(name: str | None = None) -> Callable:
     """Mark a function as a Cleat workflow entry point.
 
     The decorated function **must** accept a :class:`HostCalls` instance as
@@ -385,7 +387,7 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
     return _make_entry
 
 
-def virtual_object(name: Optional[str] = None) -> Callable:
+def virtual_object(name: str | None = None) -> Callable:
     """Register a function as a virtual object entry point.
 
     This decorator wraps :func:`cleat_entry` and marks the function as
@@ -429,7 +431,7 @@ def virtual_object(name: Optional[str] = None) -> Callable:
     return _make_entry
 
 
-def query_handler(name: Optional[str] = None) -> Callable:
+def query_handler(name: str | None = None) -> Callable:
     """Mark a function as a read-only query handler (no journaling).
 
     Unlike :func:`cleat_entry`, which marks a workflow entry point that

@@ -12,7 +12,6 @@ Bit-packing conventions match the Rust SDK at
 ``ABI.md``.
 """
 
-from typing import Tuple
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -132,7 +131,7 @@ def encode_export_result(err_code: int, actual_len: int) -> int:
     return ((actual_len & 0xFFFFFFFF) << 32) | (err_code & 0xFFFFFFFF)
 
 
-def decode_export_result(result: int) -> Tuple[int, int]:
+def decode_export_result(result: int) -> tuple[int, int]:
     """Decode the export return value.
 
     Bit layout:
@@ -153,7 +152,7 @@ def decode_export_result(result: int) -> Tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def decode_cleat_call_result(result: int) -> Tuple[int, int, int]:
+def decode_cleat_call_result(result: int) -> tuple[int, int, int]:
     """Decode a ``cleat_call`` result.
 
     Bit layout:
@@ -176,7 +175,7 @@ def decode_cleat_call_result(result: int) -> Tuple[int, int, int]:
 # ---------------------------------------------------------------------------
 
 
-def decode_simple_result(result: int) -> Tuple[int, int]:
+def decode_simple_result(result: int) -> tuple[int, int]:
     """Decode a simple result (used by defer, continue_as_new,
     child_workflow, await_child, and others).
 
@@ -198,7 +197,7 @@ def decode_simple_result(result: int) -> Tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def decode_sleep_result(result: int) -> Tuple[int, int]:
+def decode_sleep_result(result: int) -> tuple[int, int]:
     """Decode a ``cleat_sleep`` result.
 
     Bit layout:
@@ -219,7 +218,7 @@ def decode_sleep_result(result: int) -> Tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def decode_await_signals_result(result: int) -> Tuple[int, int, bool, int]:
+def decode_await_signals_result(result: int) -> tuple[int, int, bool, int]:
     """Decode a ``cleat_await_signals`` result.
 
     Bit layout:
@@ -244,7 +243,7 @@ def decode_await_signals_result(result: int) -> Tuple[int, int, bool, int]:
 # ---------------------------------------------------------------------------
 
 
-def decode_await_promise_result(result: int) -> Tuple[int, bool, bool, int]:
+def decode_await_promise_result(result: int) -> tuple[int, bool, bool, int]:
     """Decode a ``cleat_await_promise`` result.
 
     Bit layout:
@@ -269,7 +268,7 @@ def decode_await_promise_result(result: int) -> Tuple[int, bool, bool, int]:
 # ---------------------------------------------------------------------------
 
 
-def decode_poll_signal_result(result: int) -> Tuple[int, bool, int]:
+def decode_poll_signal_result(result: int) -> tuple[int, bool, int]:
     """Decode a ``cleat_poll_signal`` result.
 
     Bit layout:
@@ -293,7 +292,7 @@ def decode_poll_signal_result(result: int) -> Tuple[int, bool, int]:
 # ---------------------------------------------------------------------------
 
 
-def decode_poll_cancellation_result(result: int) -> Tuple[int, bool]:
+def decode_poll_cancellation_result(result: int) -> tuple[int, bool]:
     """Decode a ``cleat_poll_cancellation`` result.
 
     Bit layout:
@@ -309,7 +308,7 @@ def decode_poll_cancellation_result(result: int) -> Tuple[int, bool]:
     return (reason_len, cancelled)
 
 
-def decode_dual_string_result(result: int) -> Tuple[int, int, int]:
+def decode_dual_string_result(result: int) -> tuple[int, int, int]:
     """Decode a result from a host call that writes two output strings.
 
     Bit layout:

@@ -29,11 +29,10 @@ Usage::
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
-
-import urllib.request
 import urllib.error
 import urllib.parse
+import urllib.request
+from typing import Any
 
 
 class CleatClient:
@@ -66,7 +65,7 @@ class CleatClient:
         self,
         method: str,
         path: str,
-        body: Optional[str] = None,
+        body: str | None = None,
     ) -> tuple[int, str]:
         """Make an HTTP request to the Cleat host.
 
@@ -114,7 +113,7 @@ class CleatClient:
         self,
         name: str,
         input: Any,
-        idempotency_key: Optional[str] = None,
+        idempotency_key: str | None = None,
     ) -> str:
         """Start a new workflow execution.
 

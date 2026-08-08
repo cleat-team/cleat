@@ -28,21 +28,21 @@ import pytest
 try:
     from cleat_sdk import memory
     from cleat_sdk.host_calls import (
-        HostCalls,
-        RetryPolicy,
-        SignalResult,
         ChildResult,
-        PromiseResult,
         CleatCallError,
-        CleatCallTransientError,
         CleatCallPermanentError,
         CleatCallTimeoutError,
+        CleatCallTransientError,
+        HostCalls,
+        PromiseResult,
+        RetryPolicy,
+        SignalResult,
     )
     from cleat_sdk.plugins import (
-        Plugins,
         LLMChatResult,
         LLMEmbedResult,
         LLMListModelsResult,
+        Plugins,
     )
     from cleat_sdk.test_harness import CleatTestHarness
 except ImportError as e:
@@ -1167,9 +1167,8 @@ class TestPluginAIMethods:
             plugins._h,
             "plugin_call",
             side_effect=RuntimeError("plugin not available"),
-        ):
-            with pytest.raises(RuntimeError, match="plugin not available"):
-                plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
+        ), pytest.raises(RuntimeError, match="plugin not available"):
+            plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
 
     # --- llm_embed ---
 
@@ -1336,9 +1335,8 @@ class TestPluginErrorHandling:
             plugins._h,
             "plugin_call",
             return_value="not json",
-        ):
-            with pytest.raises(RuntimeError, match="invalid JSON"):
-                plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
+        ), pytest.raises(RuntimeError, match="invalid JSON"):
+            plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
 
     def test_non_object_response(self, plugins):
         """``_call`` raises ``RuntimeError`` when the response is not a JSON object."""
@@ -1346,9 +1344,8 @@ class TestPluginErrorHandling:
             plugins._h,
             "plugin_call",
             return_value='"just a string"',
-        ):
-            with pytest.raises(RuntimeError, match="expected a JSON object"):
-                plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
+        ), pytest.raises(RuntimeError, match="expected a JSON object"):
+            plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
 
     def test_plugin_call_runtime_error(self, host):
         """``plugin_call`` propagates ``RuntimeError`` from the WASM import stub."""
