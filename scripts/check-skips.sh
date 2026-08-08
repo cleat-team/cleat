@@ -88,9 +88,17 @@ scan() {
   # precede the whole command, not a stage inside its pipeline.
   # shellcheck disable=SC2016
   findings="$(
+# `.claude/worktrees/` is excluded because it is gitignored (.gitignore:95)
+# and holds full checkouts of this repo -- one per agent worktree. A bare
+# `find .` walks into them and reports their contents as findings in this
+# tree. CI never sees it (its checkout is clean), so this guard was only
+# ever exercised where the bug could not appear, while anyone using the
+# repo's own worktree convention hit it on every local run. The general
+# rule, for the next `find .` added here: a gitignored directory holding a
+# copy of the repo makes an unpruned walk report someone else's tree.
     find . \( -name '*_test.go' -o \( -path '*/testutil/*' -name '*.go' \) \) \
       -not -path './node_modules/*' -not -path '*/node_modules/*' \
-      -not -path './.git/*' -print0 |
+      -not -path './.git/*' -not -path './.claude/*' -print0 |
       LC_ALL=C sort -z |
       xargs -0 awk '
         FNR == 1 {

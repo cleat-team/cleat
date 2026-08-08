@@ -46,7 +46,16 @@ checked=0
 # splitting in the loop below would silently drop -- so it is emitted as "."
 # instead. (It was dropped, in the first version of this script, which
 # reported "3 modules" when there are 4.)
-mods="$(find . -name go.mod -not -path './node_modules/*' -not -path '*/node_modules/*' 2>/dev/null |
+# `.claude/worktrees/` is excluded because it is gitignored (.gitignore:95)
+# and holds full checkouts of this repo -- one per agent worktree. A bare
+# `find .` walks into them and reports their contents as findings in this
+# tree. CI never sees it (its checkout is clean), so this guard was only
+# ever exercised where the bug could not appear, while anyone using the
+# repo's own worktree convention hit it on every local run. The general
+# rule, for the next `find .` added here: a gitignored directory holding a
+# copy of the repo makes an unpruned walk report someone else's tree.
+mods="$(find . -name go.mod -not -path './node_modules/*' -not -path '*/node_modules/*' \
+  -not -path './.claude/*' 2>/dev/null |
   sed 's|^\./||; s|/\{0,1\}go\.mod$||; s|^$|.|' | sort)"
 
 for dir in $mods; do
