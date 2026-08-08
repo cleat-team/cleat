@@ -387,6 +387,19 @@ func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migra
 	return nil
 }
 
+// SplitSQL splits a multi-statement MySQL script into individual statements,
+// honouring DELIMITER directives, quoted strings/identifiers, and comments.
+// See the unexported splitSQL below for the parsing rules.
+//
+// It is exported so that other packages needing MySQL-correct statement
+// splitting -- notably tests/plugin-harness's migration test setup, which
+// used to carry its own copy that did not understand DELIMITER and silently
+// mangled migrations/mysql/003_procedures.sql -- can reuse this rather than
+// diverging from it again.
+func SplitSQL(sql string) []string {
+	return splitSQL(sql)
+}
+
 // splitMSSQL splits a MSSQL SQL string into batches on GO lines.
 // GO must appear on its own line (case-insensitive, optional trailing whitespace).
 func splitMSSQL(sql string) []string {

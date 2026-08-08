@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/plugin"
 )
 
@@ -133,7 +134,7 @@ func RunCoreMigrations(t *testing.T, db *sql.DB, dialect plugin.Dialect, schemaN
 		if prefix := schemaPrefix(dialect, schemaName); prefix != "" {
 			sqlStr = prefix + ";" + "\n" + sqlStr
 		}
-		statements := splitSQL(sqlStr)
+		statements := splitStatements(dialect, sqlStr)
 		for _, stmt := range statements {
 			if _, err := conn.ExecContext(ctx, stmt); err != nil {
 				t.Fatalf("RunCoreMigrations: execute %s: %v", f.Name(), err)
@@ -213,7 +214,7 @@ func RunPluginMigrations(t *testing.T, db *sql.DB, dialect plugin.Dialect, loade
 				continue
 			}
 
-			if err := execStatements(ctx, db, sqlStr); err != nil {
+			if err := execStatements(ctx, db, dialect, sqlStr); err != nil {
 				t.Fatalf("RunPluginMigrations: plugin %s v%d: %v", pluginName, m.Version, err)
 			}
 
@@ -483,6 +484,32 @@ func selectMigrationSQL(dialect plugin.Dialect, m plugin.Migration) string {
 	}
 }
 
+// splitStatements splits a migration file's SQL text into individual
+// statements to execute, using dialect-appropriate rules.
+//
+// For MySQL this delegates to migration.SplitSQL, the production splitter
+// used by migration.Runner. This harness used to carry its own copy of a
+// semicolon splitter that did not understand MySQL's DELIMITER directive,
+// which cut migrations/mysql/003_procedures.sql's stored procedure body on
+// the semicolons inside it and sent the fragments (plus the bare word
+// DELIMITER, which no MySQL server accepts) to the server -- Error 1064 near
+// 'DELIMITER //'. The production splitter already handled this correctly
+// (see migration/runner.go and migration/split_test.go); the harness only
+// needed to call it instead of maintaining a second, divergent copy.
+//
+// PostgreSQL and MSSQL keep using the local splitSQL below, which
+// additionally understands PostgreSQL's dollar-quoted strings. Production's
+// migration.Runner does not split PostgreSQL SQL at all (it executes the
+// whole file in one statement, relying on the driver's native
+// multi-statement support) and splits MSSQL only on GO batch separators, so
+// neither is a drop-in replacement for what this harness needs here.
+func splitStatements(dialect plugin.Dialect, sql string) []string {
+	if dialect == plugin.DialectMySQL {
+		return migration.SplitSQL(sql)
+	}
+	return splitSQL(sql)
+}
+
 // splitSQL splits SQL text on semicolons, discarding empty fragments.
 func splitSQL(sql string) []string {
 	// Split on semicolons, but skip semicolons that appear inside
@@ -588,8 +615,8 @@ func splitSQL(sql string) []string {
 	return stmts
 }
 
-func execStatements(ctx context.Context, db *sql.DB, sqlStr string) error {
-	for _, stmt := range splitSQL(sqlStr) {
+func execStatements(ctx context.Context, db *sql.DB, dialect plugin.Dialect, sqlStr string) error {
+	for _, stmt := range splitStatements(dialect, sqlStr) {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
