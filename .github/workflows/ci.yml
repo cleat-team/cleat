@@ -396,10 +396,55 @@ jobs:
       # identical output today, so this changes no current finding. It is
       # preventive rather than a fix for a live miss, and worth saying so
       # rather than implying it caught something.
-      - name: govulncheck
+      # EVERY first-party module, not just the root one. `./...` stops at a
+      # module boundary, so `govulncheck ./...` run from the repo root reached
+      # 0 of the 8 packages in cleat/ and 0 of the 1 in cleat/backendkit --
+      # both of which have their own go.mod and their own dependency sets.
+      # Verified 2026-08-08:
+      #
+      #   go list ./... | grep -c 'cleat-team/cleat/cleat'   -> 0
+      #
+      # This is the shape tiers.yaml grew a `modules:` list for, and the same
+      # one that let wasm-demo sit un-compiled for three months (item 2 of
+      # plans/ci-integrity-followup-plan.md): a separate module is invisible to
+      # every command that walks the root one, and nothing says so.
+      #
+      # PREVENTIVE, NOT A CATCH -- stated plainly, the same way the CGO note
+      # above is. Running it against the two uncovered modules on 2026-08-08
+      # found only GO-2026-5856 (crypto/tls, fixed in go1.26.5), which is a
+      # standard-library finding the root module reports too and which CI's
+      # `go-version: stable` toolchain does not have. No module-specific
+      # vulnerability was hiding here today. What was missing was the coverage.
+      #
+      # benchmarks/comparative/** is excluded deliberately: those modules pin
+      # specific competitor releases (Temporal, DBOS) for like-for-like
+      # measurement, so their dependency sets are meant to be old and are not
+      # shipped. check-go-mod-tidy.sh exempts them for the same reason.
+      #
+      # The loop fails if it finds no modules at all, because a scan that
+      # silently covers nothing is what this whole job exists to not be.
+      - name: govulncheck (all first-party modules)
         env:
           CGO_ENABLED: "1"
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: |
+          set -uo pipefail
+          mods="$(find . -name go.mod \
+                    -not -path './node_modules/*' -not -path '*/node_modules/*' \
+                    -not -path './.claude/*' \
+                    -not -path './benchmarks/comparative/*' |
+                  sed 's|/go\.mod$||; s|^\./||; s|^$|.|' | sort)"
+          if [ -z "$mods" ]; then
+            echo "::error title=govulncheck::found no go.mod at all -- this scan would pass vacuously" >&2
+            exit 1
+          fi
+          echo "scanning modules:"; echo "$mods" | sed 's/^/  /'
+          rc=0
+          for m in $mods; do
+            echo "::group::govulncheck $m"
+            ( cd "$m" && go run golang.org/x/vuln/cmd/govulncheck@latest ./... ) || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
 
   # -------------------------------------------------------------------------
   # Test Go (matrix: Go version x package group)
