@@ -453,3 +453,21 @@ func scheduleInputJSON(input json.RawMessage) string {
 	}
 	return string(input)
 }
+
+// ClaimDueSchedule advances a schedule's next_run_at, but only if it still
+// holds expectedNextRun. See the interface doc for why this is a CAS.
+func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_schedules
+		SET next_run_at = @p2, last_run_at = SYSUTCDATETIME()
+		WHERE name = @p1 AND next_run_at = @p3
+	`, name, newNextRun, expectedNextRun)
+	if err != nil {
+		return false, fmt.Errorf("ClaimDueSchedule: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("ClaimDueSchedule: rows affected: %w", err)
+	}
+	return n == 1, nil
+}

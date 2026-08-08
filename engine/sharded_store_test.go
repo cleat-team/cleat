@@ -430,6 +430,10 @@ func (m *mockShardStore) UpdateScheduleNextRun(ctx context.Context, name string,
 	return m.err
 }
 
+func (m *mockShardStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	return true, nil
+}
+
 func (m *mockShardStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	m.recordCall("LoadWorkflowConfig")
 	if m.loadWorkflowConfigFn != nil {

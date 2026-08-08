@@ -331,6 +331,10 @@ func (m *mockStore) UpdateScheduleNextRun(ctx context.Context, name string, next
 	return nil
 }
 
+func (m *mockStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	return true, nil
+}
+
 func (m *mockStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	if m.loadWorkflowConfigFn != nil {
 		return m.loadWorkflowConfigFn(ctx, defName, defVersion)

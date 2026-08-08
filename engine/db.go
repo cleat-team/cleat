@@ -1263,3 +1263,30 @@ func (f *PostgresStoreFactory) Dialect() Dialect { return DialectPostgres }
 type nopCloser struct{}
 
 func (nopCloser) Close() error { return nil }
+
+// ClaimDueSchedule advances a schedule's next_run_at, but only if it still
+// holds expectedNextRun. See the interface doc for why this is a CAS.
+func (s *PostgresStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return false, fmt.Errorf("claim due schedule: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE workflow_schedules
+		SET next_run_at = $2, last_run_at = now()
+		WHERE name = $1 AND tenant_id = $4 AND next_run_at = $3
+	`, name, newNextRun, expectedNextRun, s.tenantID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}

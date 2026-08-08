@@ -443,6 +443,10 @@ func (m *mockCompactStore) GetDueSchedules(ctx context.Context) ([]Schedule, err
 func (m *mockCompactStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
 	return nil
 }
+
+func (m *mockCompactStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	return true, nil
+}
 func (m *mockCompactStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	return 0, nil
 }

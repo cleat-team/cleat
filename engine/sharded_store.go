@@ -1473,3 +1473,34 @@ func (s *ShardedStore) AdminReReplay(ctx context.Context, workflowID string, gen
 	}
 	return shard.Store.AdminReReplay(ctx, workflowID, generation, operator)
 }
+
+// ClaimDueSchedule claims on the shard that holds the schedule.
+//
+// Unlike UpdateScheduleNextRun, this deliberately does NOT fan out to every
+// shard. The CAS is what decides who owns a firing instant, and a fan-out
+// would report "claimed" if any shard's row matched -- turning a
+// single-winner election into a poll. Schedules are replicated across shards,
+// so the first shard whose row still holds expectedNextRun is the winner and
+// the rest are already-advanced copies.
+func (s *ShardedStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+
+	claimed := false
+	var lastErr error
+	for _, shard := range shards {
+		ok, err := shard.Store.ClaimDueSchedule(ctx, name, expectedNextRun, newNextRun)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if ok {
+			claimed = true
+		}
+	}
+	if !claimed && lastErr != nil {
+		return false, lastErr
+	}
+	return claimed, nil
+}

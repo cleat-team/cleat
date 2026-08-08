@@ -2044,14 +2044,6 @@ func (w *Worker) scheduleLoop() {
 				if tenantID == "" {
 					tenantID = engine.DefaultTenantUUID
 				}
-				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "", tenantID, 0)
-				if serr != nil {
-					w.logger.ErrorContext(w.ctx, "Scheduler: failed to start workflow", "worker_id", w.id, "schedule", sch.Name, "error", serr)
-					continue
-				}
-
-				// Compute next run time and update.
-				//
 				// In the SCHEDULE's zone, not the worker's. This used to be
 				// engine.NextCronTime(sch.CronExpression, time.Now()), and
 				// time.Now() carries the local zone of whichever machine in the
@@ -2069,12 +2061,76 @@ func (w *Worker) scheduleLoop() {
 					w.logger.WarnContext(w.ctx, "Scheduler: unknown timezone, falling back to UTC",
 						"worker_id", w.id, "schedule", sch.Name, "timezone", sch.Timezone)
 				}
-				nextRun := engine.NextCronTimeIn(sch.CronExpression, time.Now(), loc)
-				if uerr := w.store.UpdateScheduleNextRun(w.ctx, sch.Name, nextRun); uerr != nil {
-					w.logger.ErrorContext(w.ctx, "Scheduler: failed to update next run", "worker_id", w.id, "schedule", sch.Name, "error", uerr)
+
+				// The instant this firing IS FOR, which is not the same as the
+				// instant we noticed it. Everything below keys off the former.
+				scheduled := sch.NextRunAt
+				nextRun, skipped := scheduleAdvance(sch.CronExpression, scheduled, loc, time.Now())
+				if skipped > 0 {
+					// A silent skip is the failure mode at-least-once exists to
+					// rule out, so it is logged with a count rather than just
+					// happening.
+					w.logger.WarnContext(w.ctx, "Scheduler: schedule was too far behind to catch up; instants were skipped",
+						"worker_id", w.id, "schedule", sch.Name, "skipped_firings", skipped,
+						"was_due_at", scheduled.Format(time.RFC3339), "resuming_at", nextRun.Format(time.RFC3339))
+					w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "schedule_skipped_firings", int64(skipped))
 				}
 
-				w.logger.InfoContext(w.ctx, "Scheduler: fired schedule", "worker_id", w.id, "schedule", sch.Name, "workflow_id", runID, "next_at", nextRun.Format(time.RFC3339), "timezone", loc.String())
+				// START FIRST, ADVANCE SECOND. The order is the guarantee.
+				//
+				// Advancing first would give at-most-once: a crash between the
+				// two loses the firing entirely, with nothing recording that it
+				// was lost. Starting first means a crash before the advance
+				// leaves the schedule still due, so the next poll retries it --
+				// and the idempotency key below makes that retry produce the
+				// same run rather than a second one.
+				//
+				// The key is (schedule, tenant, SCHEDULED INSTANT), not
+				// time.Now(): two workers racing the same instant, or one
+				// worker retrying after a crash, must derive the same key.
+				// StartNewRun hashes it, looks it up scoped by tenant, and
+				// returns the existing run with alreadyExisted=true on a hit
+				// (engine/store_lifecycle.go). Duplicate DELIVERY still
+				// happens at this layer; it stops at admission.
+				//
+				// Bound worth knowing: the idempotency key TTL is 30 days
+				// (720h, identical in all three stores). A catch-up firing for
+				// an instant staler than that would not dedup -- irrelevant up
+				// to weekly, real for a monthly schedule after a long outage.
+				idemKey := fmt.Sprintf("cron:%s:%s:%d", tenantID, sch.Name, scheduled.UTC().Unix())
+				runID, alreadyExisted, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, idemKey, tenantID, 0)
+				if serr != nil {
+					// Deliberately NOT advancing. The schedule stays due and
+					// the next tick retries it, which is what at-least-once
+					// means.
+					w.logger.ErrorContext(w.ctx, "Scheduler: failed to start workflow; leaving the schedule due for retry", "worker_id", w.id, "schedule", sch.Name, "error", serr)
+					continue
+				}
+				if alreadyExisted {
+					// Suppression must be visible. If this is silent we lose
+					// the ability to tell "dedup is working" from "dedup
+					// silently stopped engaging", and the latter looks
+					// identical to a healthy scheduler right up until it
+					// double-bills someone.
+					w.logger.InfoContext(w.ctx, "Scheduler: duplicate firing suppressed at admission", "worker_id", w.id, "schedule", sch.Name, "workflow_id", runID, "scheduled_at", scheduled.Format(time.RFC3339))
+					w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "schedule_duplicates_suppressed", 1)
+				}
+
+				// Compare-and-swap the schedule forward. Whoever wins owns this
+				// instant. GetDueSchedules' row locks are released when its own
+				// transaction ends -- before any of the above ran -- so two
+				// workers polling milliseconds apart both saw this row as due.
+				claimed, cerr := w.store.ClaimDueSchedule(w.ctx, sch.Name, scheduled, nextRun)
+				if cerr != nil {
+					w.logger.ErrorContext(w.ctx, "Scheduler: failed to advance next run", "worker_id", w.id, "schedule", sch.Name, "error", cerr)
+					continue
+				}
+				if !claimed {
+					w.logger.DebugContext(w.ctx, "Scheduler: another worker advanced this schedule first", "worker_id", w.id, "schedule", sch.Name, "scheduled_at", scheduled.Format(time.RFC3339))
+					continue
+				}
+
+				w.logger.InfoContext(w.ctx, "Scheduler: fired schedule", "worker_id", w.id, "schedule", sch.Name, "workflow_id", runID, "scheduled_at", scheduled.Format(time.RFC3339), "next_at", nextRun.Format(time.RFC3339), "timezone", loc.String())
 			}
 			w.scheduleMu.Unlock()
 			w.Metrics.RecordBackgroundLoop(w.ctx, "schedule", "ok")
@@ -2548,4 +2604,80 @@ func (w *Worker) restartLoop(name string) {
 		w.withPanicRecovery(name, fn)()
 	}()
 	w.logger.InfoContext(w.ctx, "watchdog: restarted loop", "worker_id", w.id, "loop", name)
+}
+
+// maxCatchUpFirings bounds how far behind a schedule may be before the
+// scheduler stops replaying missed instants one at a time and jumps to the
+// next future one.
+//
+// The bound exists because advancing from the SCHEDULED instant rather than
+// from now() is what makes catch-up possible at all, and unbounded catch-up
+// after a long outage is its own outage: a per-minute schedule that was down
+// for a day owes 1440 firings, and delivering them as fast as the poll loop
+// turns is a self-inflicted stampede against whatever those workflows touch.
+//
+// 60 is a judgement call, not a measurement. It is generous for the schedules
+// this bound is meant to protect (hourly and slower are never affected at all)
+// and small enough that the catch-up burst stays in the same order of
+// magnitude as a normal minute. What matters more than the number is that
+// exceeding it is LOGGED with a count -- a silently dropped firing is exactly
+// what an at-least-once promise is supposed to make impossible, so if we do
+// drop some, that has to be visible. PR "catch-up + overlap policy" replaces
+// this constant with a per-schedule misfire_policy column.
+const maxCatchUpFirings = 60
+
+// scheduleAdvance computes the next firing instant after `scheduled`, and
+// reports how many owed firings were DROPPED to stop the schedule falling
+// further behind than maxCatchUpFirings.
+//
+// Advancing from `scheduled` rather than from `now` is the whole point: it is
+// what lets a firing missed during an outage be delivered rather than silently
+// forgotten. NextCronTimeIn(expr, now, loc) -- what this used to do -- jumps
+// straight to the next future instant and loses every instant in between with
+// nothing recording that it did.
+//
+// THE NORMAL BEHIND-CASE DROPS NOTHING. A schedule that is behind advances by
+// exactly ONE interval, and the poll loop delivers the backlog one instant per
+// tick until it catches up. That is what at-least-once means here, and it is
+// why the second return value is 0 in every case except the bounded one.
+//
+// Only when the backlog exceeds maxCatchUpFirings does it give up, jump to the
+// next future instant, and report a floor on how many it abandoned. The count
+// is a floor rather than the exact number because establishing the exact number
+// means walking the entire backlog, which for a per-minute schedule down for a
+// week is 10,080 steps to produce a figure only used for a log line.
+func scheduleAdvance(expr string, scheduled time.Time, loc *time.Location, now time.Time) (next time.Time, droppedAtLeast int) {
+	next = engine.NextCronTimeIn(expr, scheduled, loc)
+	if !next.Before(now) {
+		// Caught up: the next owed instant has not happened yet.
+		return next, 0
+	}
+
+	// Behind. Find out by how much, but stop counting once past the bound --
+	// the only thing the exact number beyond it would change is a log line.
+	count := 0
+	probe := next
+	for count <= maxCatchUpFirings && probe.Before(now) {
+		advanced := engine.NextCronTimeIn(expr, probe, loc)
+		if !advanced.After(probe) {
+			// Defensive: an expression whose "next" does not advance would
+			// spin here forever. NextCronTimeIn's daily fallback always
+			// advances, so this is unreachable rather than expected -- but an
+			// infinite loop inside a background daemon is not a failure mode
+			// worth leaving to a proof.
+			break
+		}
+		probe = advanced
+		count++
+	}
+
+	if count > maxCatchUpFirings {
+		// Too far behind to walk out of. Resume in the future so the schedule
+		// starts firing on time again instead of staying permanently behind
+		// and re-entering this path on every tick.
+		return engine.NextCronTimeIn(expr, now, loc), count
+	}
+
+	// Within the bound: step one interval and drop nothing.
+	return next, 0
 }

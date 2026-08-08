@@ -1434,3 +1434,21 @@ func (s *MySQLStore) ResolveVersionByTag(ctx context.Context, workflowName strin
 	}
 	return version, nil
 }
+
+// ClaimDueSchedule advances a schedule's next_run_at, but only if it still
+// holds expectedNextRun. See the interface doc for why this is a CAS.
+func (s *MySQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_schedules
+		SET next_run_at = ?, last_run_at = NOW(6)
+		WHERE name = ? AND tenant_id = ? AND next_run_at = ?
+	`, newNextRun, name, s.tenantID, expectedNextRun)
+	if err != nil {
+		return false, fmt.Errorf("ClaimDueSchedule: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("ClaimDueSchedule: rows affected: %w", err)
+	}
+	return n == 1, nil
+}
