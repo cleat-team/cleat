@@ -1,14 +1,16 @@
 # CI Integrity — what is left after the 2026-08-07 sweep
 
-**Date:** 2026-08-07. **Outcomes recorded in place, same day.**
+**Date:** 2026-08-07. **Outcomes recorded in place the same day, and corrected on 2026-08-08.**
 **Follows:** #363–#378, which found and fixed seven checks that were green and measured nothing.
 **Method:** every claim below carries the command that re-derives it. Nothing here is estimated.
 
-**Status:** items 1, 2, 3, 4a, 4c, 5, 6 and 8 are done — see [Sequence](#sequence--as-executed-2026-08-07)
+**Status:** items 1, 2, 3, 4a, 4c, 5, 6 and 8 are done — see [Sequence](#sequence--as-executed)
 for the PR against each. 4b stays blocked on §2.71 and 7 was not started, both deliberately. Each item
 heading below carries its outcome, and the original finding is folded under it rather than overwritten,
-because the evidence is what made the case. **Three of this document's own claims turned out to be
-wrong** — noted at the item that carried each, and summarised in Sequence.
+because the evidence is what made the case. **Four of this document's own claims turned out to be
+wrong** — noted at the item that carried each, and summarised in Sequence. The fourth was written into
+this file while recording the outcomes and was wrong the next morning, which is the sharpest thing this
+document has to say about itself: writing an outcome down is not checking it.
 
 ---
 
@@ -508,7 +510,38 @@ else would have.
 Both moved to a new non-required `Lint (advisory)` job. That is not a rename of the waiver: the job
 goes **red**, visibly, on the PR — it simply does not gate. Making 267 findings blocking on every PR is
 how a check gets switched off; leaving them invisible is how they stayed at 267. Promote each back into
-`Lint` as its backlog reaches zero. ShellCheck's 7 are the near-term candidate.
+`Lint` as its backlog reaches zero.
+
+**Ruff was promoted back on 2026-08-08 (#403, #404), and its 260 turned out not to be a backlog.**
+This document said the number "need[s] a rule-set decision first, since this repo ships no ruff config
+and is being measured against defaults." Both halves of that were wrong, and the second is the
+interesting one. `python-sdk/pyproject.toml` had always carried a `[tool.ruff]` section — line-length,
+target-version, exclude — with no `select`. With no `select` the rule set is ruff's built-in default,
+and **that default is not a fixed thing**: it changes between ruff releases, and CI installed ruff
+unpinned. Measured on the same tree with the same config, only the version changing:
+
+```
+$ pip install ruff==0.6.9  && ruff check python-sdk/    #  60 rules enabled,   3 errors
+$ pip install ruff==0.16.2 && ruff check python-sdk/    # 413 rules enabled, 260 errors
+```
+
+So the strictness of a lint check was set by a third party's release schedule — item 3's defect
+exactly, in a place nobody had thought to look for it, and this one had already fired. The 260 was
+about to be triaged as if it described the code.
+
+Fixed by naming the rules (modelled on httpx's set, extended after measuring every family against this
+tree) and pinning the version in three places that have to agree: `required-version` in pyproject, the
+`pip install ruff==0.16.2` in `ci.yml`, and the `dev` extra. Ruff refuses to run on a mismatch, so they
+cannot drift silently. `--fix` cleared 230 of 256; of the 42 left, one was a real defect (a mutable
+default argument shared across every call), six were a rule that was wrong at all six sites (`PERF203`,
+unselected with the reason rather than suppressed six times), and twelve were deliberate boundary
+catches that now say so at the call site.
+
+The loop closes on the mistake that started this: re-adding `continue-on-error: true` to the promoted
+Ruff step now makes guard 2 fail the build. The trap cannot be set silently on a required job again.
+
+**ShellCheck's 7 are still open** and are now the only thing in `Lint (advisory)`. When they reach
+zero, promote it and *delete* the job rather than leave an empty green one.
 
 **One thing the guards deliberately do not do**, stated in `.github/required-checks.txt` itself: they do
 not verify that file against GitHub. Reading branch protection needs an admin token and a workflow's
@@ -559,7 +592,7 @@ document is about, and a guard is not exempt from it.
 
 ---
 
-## Sequence — as executed, 2026-08-07
+## Sequence — as executed
 
 | # | Item | PR | Merge |
 |---|------|----|-------|
@@ -571,24 +604,40 @@ document is about, and a guard is not exempt from it.
 | 6 | `pluginapi` contract assertions | #388 | `a55d375` |
 | 4a | plugin-harness MySQL splitter | #392 | `d99943e` |
 | 4a | plugin-harness MSSQL `GO` batches | #395 | `f9c6ba6` |
-| 4a | MSSQL `001_schema.sql` re-application ordering | #396 | |
-| 4a | skip removed, budget → 0 | #400 | |
-| 8 | Four workflow guards; two linters that could not fail | #399 | |
+| 4a | MSSQL `001_schema.sql` re-application ordering | #396 | `0a1a097` |
+| 4a | skip removed, budget → 0 | #400 | `12f2ae2` |
+| 8 | Four workflow guards; two linters that could not fail | #399 | `740203e` |
 | — | CodeQL's 3 highs triaged and dismissed with the reasoning in code | #397, #398 | `428b422`, `b795601` |
 | — | CodeQL's 11 `missing-workflow-permissions` fixed | #401 | `c97ceac` |
+| — | These outcomes recorded here | #402 | `ea54155` |
+| 8 | Ruff's rule set named and version pinned | #403 | `cabc89c` |
+| 8 | Ruff's last 42 cleared; promoted into required `Lint` | #404 | `993a051` |
 | 4b | `TestTenantIsolationOverHTTP_MSSQL` | — | blocked on §2.71, left |
 | 7 | §2.60d `CleanupPostgresTestData` | — | not started; listed for cost, not readiness |
 
-**Three of this document's own claims were wrong**, each caught by running something rather than
-reading it — the estimate in item 4a, the date in item 2, and *"currently zero"* in item 8 guard 2. All
-three are corrected in place above with what replaced them. A plan is a claim nothing checks, which is
-the first of the two shapes this document names at the end, and it does not exempt itself.
+Item 4a verified end to end on merged `develop`, 2026-08-08, CGO on with all three DSNs set:
+
+```
+$ go test ./tests/plugin-harness/... -run TestPluginCalls_MultiDB -v -count=1
+--- PASS: TestPluginCalls_MultiDB (5.52s)   # postgres, mysql, mssql — 3 run, 0 skipped
+```
+
+**Four of this document's own claims were wrong**, each caught by running something rather than
+reading it — the estimate in item 4a, the date in item 2, *"currently zero"* in item 8 guard 2, and
+the ruff paragraph in item 8's outcome. All four are corrected in place above with what replaced them.
+A plan is a claim nothing checks, which is the first of the two shapes this document names at the end,
+and it does not exempt itself. The fourth was written *into this file* on 2026-08-07 as part of
+recording the outcomes, and was wrong by the next morning — recording an outcome is not the same as
+checking one.
 
 **Open, untriaged, and named so it is not mistaken for finished:** the 68 Dependabot vulnerabilities (16
 critical, 25 high) that item 1 surfaced, and the 8 update PRs it opened, are still untriaged — that was
-step 2 when item 1 was written and it is still step 2. Ruff's 260 findings need a rule-set decision
-before they mean anything; the repo ships no ruff config, so the number is "what ruff's defaults say",
-not "what this project considers wrong."
+step 2 when item 1 was written and it is still step 2. **ShellCheck's 7** findings are open and are now
+the only occupant of `Lint (advisory)`.
+
+Ruff was on this list on 2026-08-07 and is not any more: its 260 was an artefact of an unpinned tool
+rather than a backlog, and it now gates with a backlog of zero — see item 8 above for what that turned
+out to mean.
 
 ---
 
