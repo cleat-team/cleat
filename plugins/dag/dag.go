@@ -215,7 +215,15 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input any, opts ExecuteOptio
 		// Wait for at least one child to complete.
 		completedRunID, result, awaitErr := h.AwaitAnyChild(runIDs)
 		if awaitErr != nil {
-			return fmt.Errorf("dag: await any child failed: %v", awaitErr)
+			// Name the task. AwaitAnyChild returns the run ID alongside the
+			// error, and discarding it here produced "dag: await any child
+			// failed: <child's message>" -- which, in a DAG of twenty tasks,
+			// does not say which one. %w rather than %v so a caller can still
+			// match the child's own error.
+			if task := running[completedRunID]; task != nil {
+				return fmt.Errorf("dag: task %q failed: %w", task.Name, awaitErr)
+			}
+			return fmt.Errorf("dag: await any child failed: %w", awaitErr)
 		}
 
 		task := running[completedRunID]

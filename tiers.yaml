@@ -46,9 +46,16 @@ meta:
     # and it also printed `ok`. That delta is why this file exists.
     failing:
       - package: examples/dag
-        cause: code defect — AwaitAnyChild called outside a workflow context
+        # The cause recorded here on 2026-08-06 read "code defect — AwaitAnyChild
+        # called outside a workflow context", taken from the error message. That was
+        # wrong: cleat/cleattest never wired AwaitAnyChild into HostCallsOptions, so
+        # the hook was nil and the message was the harness's, not the caller's. The
+        # measurement (this package failed) stands and keeps its date; the diagnosis
+        # did not survive being checked. Fixed 2026-08-08.
+        cause: cleat/cleattest never implemented the AwaitAnyChild host call
         item: IMPROVEMENT-PLAN.md §3.14
         kind: real
+        resolved: 2026-08-08
       - package: tests/exhaustion
         cause: cluster compose stack not running; DSN expects user `cleat`
         kind: environmental
@@ -570,7 +577,7 @@ tier2:
         matrix does not descend into it. Measured 2026-08-07: builds and passes, and no
         workflow references it at all.
 
-  known_failures:
+  known_failures: []
     # "importpath::TestName", one per line, matched exactly against `go test -json`.
     # Flat strings rather than nested package/tests blocks so the gate can read this with
     # awk: pyyaml is not installed on the runners, and a gate that cannot parse its own
@@ -582,17 +589,20 @@ tier2:
     # gate, because a stale entry is a false statement that hides the next regression in
     # the same test.
     #
-    # §3.14 -- owner: unassigned. Measured 2026-08-07: all six fail with
-    #   "durable: AwaitAnyChild can only be called from within a workflow function
-    #    (the HostCalls runtime was not initialized)"
-    # The package's other 8 tests pass; these 6 are the ones that drive Pipeline/Execute
-    # through cleattest.NewTestEnv(). Small; fix or park.
-    - "examples/dag::TestPipelineWithDurableTest"
-    - "examples/dag::TestPipelineTaskError"
-    - "examples/dag::TestDAGExecuteDiamond"
-    - "examples/dag::TestDAGExecuteLinearChain"
-    - "examples/dag::TestDAGExecuteDisconnectedNodes"
-    - "examples/dag::TestDAGExecuteMaxParallelism"
+    # EMPTY as of 2026-08-08, and the gate is what forced it.
+    #
+    # The six entries that were here were the examples/dag tests, recorded 2026-08-07
+    # as failing with "durable: AwaitAnyChild can only be called from within a workflow
+    # function (the HostCalls runtime was not initialized)". That message was taken at
+    # face value and the cause recorded as the example calling AwaitAnyChild outside a
+    # workflow. It was not. cleat/cleattest never wired AwaitAnyChild into
+    # HostCallsOptions, so the hook was nil for every TestEnv and the error was the
+    # harness's, not the caller's. Fixed in the PR that empties this list.
+    #
+    # Worth keeping in mind the next time an entry is added here: this list recorded a
+    # diagnosis, not just a symptom, and the diagnosis was wrong for a day. The symptom
+    # (which tests fail) is what the gate checks; the cause is prose and rots like any
+    # other prose.
 
 tier3:
   name: parked

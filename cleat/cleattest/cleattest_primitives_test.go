@@ -3,6 +3,8 @@ package cleattest
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -918,5 +920,223 @@ func TestDurableCallTypedWithHeartbeatImplDirectMarshalError(t *testing.T) {
 	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", func() {}, nil, 0, nil)
 	if err == nil {
 		t.Fatal("expected marshal error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitAnyChild / PollChild
+//
+// These were the two child host calls TestEnv never wired into
+// HostCallsOptions, so h.awaitAnyChild and h.pollChild were nil and every call
+// returned "AwaitAnyChild can only be called from within a workflow function
+// (the HostCalls runtime was not initialized)" -- regardless of context. That
+// is what made all six examples/dag tests red for as long as they existed, and
+// it meant no external SDK user could test a workflow using either call.
+// TestEveryHostCallIsWired below is the guard against the next one.
+// ---------------------------------------------------------------------------
+
+func TestAwaitAnyChild_PicksLowestSortedRunID(t *testing.T) {
+	env := NewTestEnv()
+	env.OnChildWorkflow("c").Return("result-c", nil)
+	env.OnChildWorkflow("a").Return("result-a", nil)
+	env.OnChildWorkflow("b").Return("result-b", nil)
+
+	runIDs := make([]string, 0, 3)
+	for _, name := range []string{"c", "a", "b"} {
+		runID, err := env.H().ChildWorkflow(name, "{}")
+		if err != nil {
+			t.Fatalf("ChildWorkflow(%s): %v", name, err)
+		}
+		runIDs = append(runIDs, runID)
+	}
+
+	// All three have already resolved, so the winner is decided purely by the
+	// polling order. engine/children.go sorts the run IDs before polling so a
+	// replay picks the same winner as the original execution; this harness has
+	// to agree with it or a test will disagree with production about which
+	// child came back first.
+	sorted := append([]string(nil), runIDs...)
+	sort.Strings(sorted)
+
+	// Hand them over in an order that is not the sorted one, so honouring
+	// argument order and honouring sorted order give different answers. If
+	// runIDs happen to already be sorted the assertion still holds but stops
+	// discriminating, so fail loudly rather than pass vacuously.
+	shuffled := []string{runIDs[2], runIDs[0], runIDs[1]}
+	if shuffled[0] == sorted[0] {
+		t.Fatalf("test is vacuous: shuffled order already leads with the lowest run ID (%v)", runIDs)
+	}
+
+	got, result, err := env.H().AwaitAnyChild(shuffled)
+	if err != nil {
+		t.Fatalf("AwaitAnyChild: %v", err)
+	}
+	if got != sorted[0] {
+		t.Errorf("AwaitAnyChild picked %q, want the lowest sorted run ID %q (given %v)", got, sorted[0], shuffled)
+	}
+	if result == "" {
+		t.Error("AwaitAnyChild returned an empty result")
+	}
+}
+
+func TestAwaitAnyChild_ReturnsRunIDAlongsideAChildError(t *testing.T) {
+	env := NewTestEnv()
+	env.OnChildWorkflow("failing").Return("", fmt.Errorf("boom"))
+
+	runID, err := env.H().ChildWorkflow("failing", "{}")
+	if err != nil {
+		t.Fatalf("ChildWorkflow: %v", err)
+	}
+
+	// The run ID must come back even on the error path. plugins/dag/dag.go
+	// needs it to say WHICH task failed; without it the DAG could only report
+	// the child's bare message.
+	got, _, awaitErr := env.H().AwaitAnyChild([]string{runID})
+	if awaitErr == nil {
+		t.Fatal("expected the child's error to propagate")
+	}
+	if got != runID {
+		t.Errorf("AwaitAnyChild returned run ID %q on the error path, want %q", got, runID)
+	}
+}
+
+func TestAwaitAnyChild_EmptyRunIDsIsAnError(t *testing.T) {
+	env := NewTestEnv()
+	if _, _, err := env.H().AwaitAnyChild(nil); err == nil {
+		t.Fatal("expected an error for an empty run ID set, not a silent zero value")
+	}
+}
+
+func TestPollChild_ReportsCompletedRunningAndFailed(t *testing.T) {
+	env := NewTestEnv()
+	env.OnChildWorkflow("ok").Return("result-ok", nil)
+	env.OnChildWorkflow("bad").Return("", fmt.Errorf("boom"))
+
+	okID, err := env.H().ChildWorkflow("ok", "{}")
+	if err != nil {
+		t.Fatalf("ChildWorkflow(ok): %v", err)
+	}
+	badID, err := env.H().ChildWorkflow("bad", "{}")
+	if err != nil {
+		t.Fatalf("ChildWorkflow(bad): %v", err)
+	}
+
+	if status, result, err := env.H().PollChild(okID); err != nil || status != "completed" || result != "result-ok" {
+		t.Errorf("PollChild(ok) = (%q, %q, %v), want (completed, result-ok, nil)", status, result, err)
+	}
+	if status, _, err := env.H().PollChild(badID); err == nil || status != "failed" {
+		t.Errorf("PollChild(bad) = (%q, _, %v), want (failed, _, non-nil)", status, err)
+	}
+	// An unknown child is "running", not an error -- a poll loop has to be able
+	// to terminate.
+	if status, _, err := env.H().PollChild("no-such-run-id"); err != nil || status != "running" {
+		t.Errorf("PollChild(unknown) = (%q, _, %v), want (running, _, nil)", status, err)
+	}
+}
+
+// TestEveryHostCallIsWired is the guard against the next AwaitAnyChild.
+//
+// A field left out of hostCallsOptions leaves its hook nil, and most of
+// cleat/runtime_*.go answers a nil hook with "can only be called from within a
+// workflow function (the HostCalls runtime was not initialized)". That message
+// is about workflow context and says nothing about the harness, so the failure
+// reads as the caller's fault. Six examples/dag tests were red on that message
+// for as long as they existed, and nobody could tell from it that cleattest
+// simply had not implemented the call.
+//
+// Measured 2026-08-08 with AwaitAnyChild and PollChild now wired: 58 func
+// fields on cleat.HostCallsOptions, 19 still nil. That is not a claim they are
+// all broken -- most degrade gracefully, and the split below was checked by
+// reading which hook each method's nil-check actually tests, not by assuming
+// the names line up. DurableSleepMs looked unwired-and-broken until you notice
+// its guard is on h.durableSleep, which IS wired.
+//
+// This test does not require the list to be empty. It requires it to be
+// EXACTLY this, so that a host call added to HostCallsOptions tomorrow and not
+// implemented here fails immediately rather than in someone's example a year
+// later. Shrinking it is the improvement; growing it has to be deliberate.
+//
+// Re-derive the split with:
+//
+//	grep -rn "func (h \*HostCallsImpl) <Name>(" -A 5 cleat/runtime*.go |
+//	  grep -oE "h\.[a-zA-Z]+ [=!]= nil"
+func TestEveryHostCallIsWired(t *testing.T) {
+	// Unwired AND hard-erroring: a nil hook here makes the call return the
+	// "runtime was not initialized" error, so a workflow using any of these
+	// cannot be tested with cleattest at all. This is the backlog.
+	unimplemented := map[string]string{
+		"ResolvePromise":           "promise resolution from outside the workflow",
+		"RejectPromise":            "promise rejection from outside the workflow",
+		"ScheduleCron":             "cron scheduling",
+		"DeleteCron":               "cron deletion",
+		"ListCrons":                "cron listing",
+		"ContinueAsNewWithVersion": "continue-as-new pinned to a version",
+		"DurableDeferFunc":         "func-valued defer (the string-valued DurableDefer is wired)",
+	}
+	// Unwired but harmless: each has a fallback in cleat/runtime_*.go that does
+	// the right thing without a hook, so wiring them would add code with no
+	// behaviour change.
+	fallsBack := map[string]string{
+		"DurableCallTyped":            "marshals and calls DurableCall",
+		"DurableCallTypedWithOptions": "falls back to the untyped path",
+		"DurableCallJSONWithOptions":  "falls back to the untyped path",
+		"DurableCallWithHeartbeat":    "falls back to the plain call",
+		"DurableCallWithRetry":        "no nil-check on this hook",
+		"DurableSleepMs":              "guards on durableSleep, which is wired",
+		"ChildWorkflowWithOptions":    "falls back to ChildWorkflow",
+		"WorkflowID":                  "returns an empty string",
+		"RunID":                       "returns an empty string",
+		"NewUUID":                     "built on Random, which is wired",
+		"HandleQuery":                 "falls back to the registered handlers",
+		"HandleUpdate":                "falls back to the registered handlers",
+		"PluginCallStreaming":         "guarded with != nil, so nil is a no-op path",
+		"AwaitSignalsWithQuorum":      "falls back to the plain await",
+	}
+
+	opts := NewTestEnv().hostCallsOptions()
+	v := reflect.ValueOf(opts)
+	typ := v.Type()
+
+	var total int
+	var unexpected []string
+	seen := map[string]bool{}
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.Type.Kind() != reflect.Func {
+			continue
+		}
+		total++
+		if !v.Field(i).IsNil() {
+			continue
+		}
+		seen[field.Name] = true
+		if _, ok := unimplemented[field.Name]; ok {
+			continue
+		}
+		if _, ok := fallsBack[field.Name]; ok {
+			continue
+		}
+		unexpected = append(unexpected, field.Name)
+	}
+
+	if total == 0 {
+		t.Fatal("found no func fields on HostCallsOptions -- this check would pass vacuously")
+	}
+	for _, name := range unexpected {
+		t.Errorf("cleattest does not implement HostCallsOptions.%s. Wire it in "+
+			"hostCallsOptions, or add it to one of the maps in this test with a "+
+			"reason -- an unwired hook makes the call fail with a message about "+
+			"workflow context that has nothing to do with the real cause.", name)
+	}
+	// The other direction: a name recorded here that is now wired, or gone from
+	// the struct, means the record has rotted.
+	for _, m := range []map[string]string{unimplemented, fallsBack} {
+		for name := range m {
+			if _, ok := typ.FieldByName(name); !ok {
+				t.Errorf("HostCallsOptions has no field %q -- remove it from this test", name)
+			} else if !seen[name] {
+				t.Errorf("HostCallsOptions.%s is wired now -- remove it from this test", name)
+			}
+		}
 	}
 }
