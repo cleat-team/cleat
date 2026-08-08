@@ -202,6 +202,20 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
 
+      # ShellCheck, promoted into this required job on 2026-08-08 -- the last
+      # of the two linters that ran here under `continue-on-error: true`. Its 7
+      # findings are fixed; four were SC2164, `cd "$REPO_ROOT"` with no failure
+      # branch, in guard scripts whose whole job is to inspect a particular
+      # tree.
+      #
+      # Must stay after "Install lint tools" above, which is what apt-gets
+      # shellcheck. Placed before it on the first attempt, where it failed with
+      # `shellcheck: command not found` -- a step ordered before its own
+      # dependency fails loudly, which is the good case; the bad case is the
+      # one this file is otherwise about.
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh benchmarks/*.sh
+
       # CGO on. With CGO_ENABLED=0 this step analysed a build that is not the
       # one we ship: `//go:build cgo` takes eight files out of ./engine/,
       # including backend_wasmtime.go -- the backend of record -- and all four
@@ -231,80 +245,26 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
   # -------------------------------------------------------------------------
-  # Lint (advisory) -- Ruff and ShellCheck
+  # The `Lint (advisory)` job stood here from 2026-08-07 to 2026-08-08.
   #
-  # These two ran inside the required `Lint` job with `continue-on-error: true`
-  # until 2026-08-07, which meant neither could ever fail a build: a required
-  # check running two linters whose verdict was discarded. #370 and #373's
-  # shape, one level down.
+  # It existed because Ruff and ShellCheck ran inside the required `Lint` job
+  # under `continue-on-error: true` -- a required check running two linters
+  # whose verdict was discarded, which is #370 and #373's shape one level
+  # down. Worse, the REST jobs API reports `steps[].conclusion: success` for
+  # any step carrying that waiver, so reading it showed two passing tools. It
+  # did not; running them showed 260 and 7 findings respectively.
   #
-  # THE FIRST ATTEMPT AT THIS WAS TO DELETE THE WAIVER AND LEAVE THEM IN
-  # `Lint`, on the evidence that both were already passing. That evidence was
-  # wrong, and wrong in a way worth recording, because it is the exact trap
-  # this workflow's guards exist to catch. The check used was:
+  # A separate non-required job was the honest interim: it goes red visibly on
+  # the PR rather than hiding inside a green required check, while its backlog
+  # is worked off. Both backlogs are now zero and both linters are steps in
+  # `Lint` above, so the job is deleted rather than left as a permanent green
+  # -- a job with nothing left to advise is the same defect in a new costume.
+  # (It had in fact gone permanently RED on develop while ShellCheck's 7 sat
+  # unfixed, which is equally uninformative and is what prompted finishing it.)
   #
-  #   gh api repos/cleat-team/cleat/actions/runs/<id>/jobs \
-  #     --jq '.jobs[] | select(.name=="Lint") | .steps[] | .conclusion'
-  #
-  # which reported `success` for both. It does that for ANY step carrying
-  # `continue-on-error: true` -- the waiver rewrites the field. Reading it is
-  # reading the waiver's output, not the tool's. Running the tools says
-  # otherwise; measured 2026-08-07 by running them:
-  #
-  #   ruff check python-sdk/                      -> Found 260 errors
-  #                                                  (210 auto-fixable)
-  #   shellcheck scripts/*.sh benchmarks/*.sh     -> exit 1, 7 findings
-  #                                                  (5x SC2164, 2x SC2034,
-  #                                                   2x SC2016, 1x SC2181)
-  #
-  # So both linters have a real backlog, and both had been reporting it to
-  # nobody for as long as the waiver has been there.
-  #
-  # They live here rather than in `Lint` because this job is NOT a required
-  # status check. That is a genuine difference from `continue-on-error`, not a
-  # rename of it: this job reports its own red or green on the PR where a
-  # reviewer sees it, instead of being invisible inside a green required
-  # check. Nothing is waived here -- the job fails when the linters fail.
-  #
-  # The backlogs get triaged the same way the CodeQL one did: fix, then
-  # promote back into `Lint`.
-  #
-  # RUFF HAS BEEN PROMOTED (2026-08-08) and no longer runs here -- it is a step
-  # in the required `Lint` job above. Its 260 turned out not to be a backlog at
-  # all: python-sdk/pyproject.toml carried a [tool.ruff] section with no
-  # `select`, so the rule set was ruff's built-in default, and that default
-  # moves between releases while CI installed ruff unpinned. Same tree, same
-  # config, 2026-08-08:
-  #
-  #   ruff==0.6.9   ->  60 rules enabled,   3 errors
-  #   ruff==0.16.2  -> 413 rules enabled, 260 errors
-  #
-  # (That also corrects the sentence this comment used to end on, which said
-  # the repo "ships no ruff config and is being measured against defaults" --
-  # wrong on both halves.) The rule set is now named explicitly and the version
-  # is pinned in three places that must agree; see the promoted step above.
-  #
-  # SHELLCHECK STAYS HERE. Its 7 findings are real and unfixed. It is the last
-  # thing in this job, and when it reaches zero this job should be deleted
-  # rather than left as an empty green -- an advisory job with nothing advisory
-  # left in it is the shape this file keeps warning about. Deleting it also
-  # means removing `Lint (advisory)` from .github/required-checks.txt's
-  # not-required list.
+  # Kept as a comment rather than deleted outright because `git log` does not
+  # answer "why is there no advisory job" for someone about to add one back.
   # -------------------------------------------------------------------------
-  lint-advisory:
-    name: Lint (advisory)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install lint tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
-
-      - name: ShellCheck
-        run: shellcheck scripts/*.sh benchmarks/*.sh
-
   # -------------------------------------------------------------------------
   # Lint Go (golangci-lint)
   # -------------------------------------------------------------------------
