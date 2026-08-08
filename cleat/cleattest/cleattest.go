@@ -330,8 +330,9 @@ type TestEnv struct {
 	replayRecording bool
 
 	// ContinueAsNew tracking.
-	continued      bool
-	continuedInput string
+	continued        bool
+	continuedInput   string
+	continuedVersion int64
 
 	// clock provides simulated timeouts.
 	clock Clock
@@ -384,6 +385,9 @@ func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
 		PollCancellation:              e.pollCancellationImpl,
 		PollSignal:                    e.pollSignalImpl,
 		ContinueAsNew:                 e.continueAsNewImpl,
+		ContinueAsNewWithVersion:      e.continueAsNewWithVersionImpl,
+		ResolvePromise:                e.resolvePromiseImpl,
+		RejectPromise:                 e.rejectPromiseImpl,
 		ChildWorkflow:                 e.childWorkflowImpl,
 		AwaitChild:                    e.awaitChildImpl,
 		AwaitAnyChild:                 e.awaitAnyChildImpl,
@@ -717,6 +721,19 @@ func (e *TestEnv) LastContinuedInput() string {
 	return e.continuedInput
 }
 
+// LastContinuedVersion returns the version passed to the most recent
+// ContinueAsNewWithVersion, or 0 if the workflow used plain ContinueAsNew.
+//
+// 0 is the engine's own "keep the current version" sentinel (see
+// engine/lifecycle.go), so it means "no version was pinned" rather than
+// "version zero" -- and it is also the zero value here, which makes the two
+// indistinguishable. Pair it with AssertContinued when that matters.
+func (e *TestEnv) LastContinuedVersion() int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.continuedVersion
+}
+
 // ---------------------------------------------------------------------------
 // Internal HostCalls function implementations
 // ---------------------------------------------------------------------------
@@ -990,6 +1007,51 @@ func (e *TestEnv) continueAsNewImpl(newInputJSON string) (retErr error) {
 	e.continued = true
 	e.continuedInput = newInputJSON
 	return
+}
+
+// continueAsNewWithVersionImpl is continueAsNewImpl plus the target version.
+//
+// engine/lifecycle.go records EventTypeContinueAsNew with NewInput and
+// NewVersion and then suspends, and documents newVersion == 0 as "keep the
+// current version". This harness has no version to keep, so it records what it
+// was asked for verbatim and lets LastContinuedVersion report it -- a test
+// asserting 0 is asserting "the workflow did not pin a version", which is the
+// distinction the engine draws.
+func (e *TestEnv) continueAsNewWithVersionImpl(newInputJSON string, newVersion int64) (retErr error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	replayKey := "ContinueAsNewWithVersion|" + newInputJSON + "|" + strconv.FormatInt(newVersion, 10)
+	if _, cachedErr, matched := e.replayLookup("ContinueAsNewWithVersion", replayKey); matched {
+		return cachedErr
+	}
+	defer func() { e.replayRecord("ContinueAsNewWithVersion", replayKey, "", retErr) }()
+
+	e.continued = true
+	e.continuedInput = newInputJSON
+	e.continuedVersion = newVersion
+	return
+}
+
+// resolvePromiseImpl is the workflow-side counterpart of the public
+// TestEnv.ResolvePromise driver method.
+//
+// It always returns nil, matching the engine: engine/promises.go records the
+// event, calls the promise store, and LOGS rather than returns a store error --
+// the host function's result is unconditionally success. A mock that surfaced
+// an error here would let a test assert a failure mode production cannot
+// produce. Resolving an unknown promise is likewise a silent no-op, because the
+// store's UPDATE matches no rows and SQL does not call that an error.
+func (e *TestEnv) resolvePromiseImpl(promiseID, value string) error {
+	e.ResolvePromise(promiseID, value)
+	return nil
+}
+
+// rejectPromiseImpl is the workflow-side counterpart of TestEnv.RejectPromise.
+// Same contract as resolvePromiseImpl above, including the nil return.
+func (e *TestEnv) rejectPromiseImpl(promiseID, errMsg string) error {
+	e.RejectPromise(promiseID, errMsg)
+	return nil
 }
 
 // RegisterChildWorkflow registers a handler function for a child workflow with the
