@@ -1480,6 +1480,10 @@ func (s *stubWorkflowStore) GetDueSchedules(ctx context.Context) ([]Schedule, er
 func (s *stubWorkflowStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
 	return nil
 }
+
+func (s *stubWorkflowStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	return true, nil
+}
 func (s *stubWorkflowStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	return 0, nil
 }
@@ -2628,6 +2632,10 @@ func (m *mockCollectMetricsStore) GetDueSchedules(ctx context.Context) ([]Schedu
 func (m *mockCollectMetricsStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
 	return nil
 }
+
+func (m *mockCollectMetricsStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	return true, nil
+}
 func (m *mockCollectMetricsStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error) {
 	return 0, nil
 }
@@ -2818,6 +2826,10 @@ func (m *mockCheckStaleStore) GetDueSchedules(ctx context.Context) ([]Schedule, 
 func (m *mockCheckStaleStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
 	return nil
 }
+
+func (m *mockCheckStaleStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	return true, nil
+}
 func (m *mockCheckStaleStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error) {
 	return 0, nil
 }
@@ -3005,6 +3017,10 @@ func (m *mockGCStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 func (m *mockGCStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
 	return nil
 }
+
+func (m *mockGCStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	return true, nil
+}
 func (m *mockGCStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error) {
 	return 0, nil
 }
@@ -3181,6 +3197,10 @@ func (m *mockPurgeStore) SetScheduleEnabled(ctx context.Context, name string, en
 func (m *mockPurgeStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
 func (m *mockPurgeStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
 	return nil
+}
+
+func (m *mockPurgeStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+	return true, nil
 }
 func (m *mockPurgeStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error) {
 	return 0, nil

@@ -175,6 +175,21 @@ type WorkflowStore interface {
 	// UpdateScheduleNextRun updates a schedule's next_run_at after firing.
 	UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error
 
+	// ClaimDueSchedule advances a schedule from one firing instant to the next,
+	// but only if it is still sitting on the instant the caller saw. It reports
+	// whether this caller was the one that moved it.
+	//
+	// This is a compare-and-swap, and it is what makes a firing happen a
+	// bounded number of times in a fleet. GetDueSchedules takes row locks, but
+	// releases them when the read's transaction ends -- before the caller has
+	// started anything -- so two workers polling a few milliseconds apart both
+	// see the same row as due. Whoever wins this CAS owns that instant;
+	// everybody else gets false and does nothing.
+	//
+	// expectedNextRun must be the NextRunAt the caller read. A mismatch means
+	// another worker has already advanced the schedule.
+	ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (claimed bool, err error)
+
 	// LoadWorkflowConfig returns the max_history_length for a workflow definition.
 	LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error)
 
