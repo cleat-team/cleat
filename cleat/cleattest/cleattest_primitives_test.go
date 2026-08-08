@@ -1064,14 +1064,37 @@ func TestEveryHostCallIsWired(t *testing.T) {
 	// Unwired AND hard-erroring: a nil hook here makes the call return the
 	// "runtime was not initialized" error, so a workflow using any of these
 	// cannot be tested with cleattest at all. This is the backlog.
+	//
+	// 7 on 2026-08-08 when this guard was added; 4 now. ResolvePromise,
+	// RejectPromise and ContinueAsNewWithVersion were wired the same day --
+	// all three were thin wrappers over state TestEnv already had.
 	unimplemented := map[string]string{
-		"ResolvePromise":           "promise resolution from outside the workflow",
-		"RejectPromise":            "promise rejection from outside the workflow",
-		"ScheduleCron":             "cron scheduling",
-		"DeleteCron":               "cron deletion",
-		"ListCrons":                "cron listing",
-		"ContinueAsNewWithVersion": "continue-as-new pinned to a version",
-		"DurableDeferFunc":         "func-valued defer (the string-valued DurableDefer is wired)",
+		// NOT a cleattest gap. ScheduleCron/DeleteCron/ListCrons have NO
+		// production implementation anywhere: no host import in
+		// engine/imports.go, nothing in engine/, and no wiring in
+		// cleat/embedded, cleat/localdev or the worker. cleat.HostCalls
+		// declares three methods the engine does not implement. Production
+		// cron is a different mechanism entirely -- a worker-daemon poll loop
+		// over a schedule table (cmd/cleat-worker/setup.go), not something a
+		// workflow calls from inside itself.
+		//
+		// So mocking these would be inventing the first specification of
+		// "a workflow schedules its own cron" anywhere in the codebase, and a
+		// green cleattest test would then assert a contract nothing downstream
+		// honours -- strictly worse than today's honest hard-error. The fix
+		// belongs in the engine, or the three methods should come off the
+		// public interface. Not a decision to make inside a test harness.
+		"ScheduleCron": "no engine implementation exists -- see above",
+		"DeleteCron":   "no engine implementation exists -- see above",
+		"ListCrons":    "no engine implementation exists -- see above",
+		// Implementable, but needs one design decision first: WHEN do the
+		// closures run. cleat/embedded/runner.go drains its deferFuncs LIFO
+		// under recover() at a completion boundary; cleattest has no such
+		// boundary -- tests run the workflow body and assert whenever they
+		// like. Wiring it without answering that gives closures that are
+		// registered and never called, which is the exact bug embedded/ had
+		// for months before 2026-08-05.
+		"DurableDeferFunc": "func-valued defer; drain trigger undecided (string-valued DurableDefer is wired)",
 	}
 	// Unwired but harmless: each has a fallback in cleat/runtime_*.go that does
 	// the right thing without a hook, so wiring them would add code with no
@@ -1138,5 +1161,92 @@ func TestEveryHostCallIsWired(t *testing.T) {
 				t.Errorf("HostCallsOptions.%s is wired now -- remove it from this test", name)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The three host calls wired on 2026-08-08. Before that, each returned
+// "the HostCalls runtime was not initialized" from a fully-constructed
+// TestEnv, so a workflow using any of them could not be tested at all.
+// ---------------------------------------------------------------------------
+
+func TestResolvePromise_FromInsideTheWorkflow(t *testing.T) {
+	env := NewTestEnv()
+
+	id, err := env.H().CreatePromise("p")
+	if err != nil {
+		t.Fatalf("CreatePromise: %v", err)
+	}
+
+	// The workflow-side call, not the test-driver TestEnv.ResolvePromise.
+	if err := env.H().ResolvePromise(id, "the-value"); err != nil {
+		t.Fatalf("ResolvePromise: %v", err)
+	}
+
+	result, timedOut, err := env.H().AwaitPromise(id, 0)
+	if err != nil {
+		t.Fatalf("AwaitPromise: %v", err)
+	}
+	if timedOut {
+		t.Fatal("promise was resolved, but AwaitPromise timed out")
+	}
+	if result != "the-value" {
+		t.Errorf("AwaitPromise = %q, want %q", result, "the-value")
+	}
+}
+
+func TestRejectPromise_FromInsideTheWorkflow(t *testing.T) {
+	env := NewTestEnv()
+
+	id, err := env.H().CreatePromise("p")
+	if err != nil {
+		t.Fatalf("CreatePromise: %v", err)
+	}
+	if err := env.H().RejectPromise(id, "nope"); err != nil {
+		t.Fatalf("RejectPromise: %v", err)
+	}
+
+	if _, _, err := env.H().AwaitPromise(id, 0); err == nil {
+		t.Fatal("expected the rejection to surface from AwaitPromise")
+	}
+}
+
+func TestResolvePromise_UnknownIDIsNotAnError(t *testing.T) {
+	env := NewTestEnv()
+	// Matches the engine: engine/promises.go logs rather than returns a store
+	// error, and the store's UPDATE matching no rows is not an error in SQL.
+	// A harness that failed here would let a test assert a failure mode
+	// production cannot produce.
+	if err := env.H().ResolvePromise("no-such-promise", "v"); err != nil {
+		t.Errorf("resolving an unknown promise returned %v, want nil", err)
+	}
+	if err := env.H().RejectPromise("no-such-promise", "e"); err != nil {
+		t.Errorf("rejecting an unknown promise returned %v, want nil", err)
+	}
+}
+
+func TestContinueAsNewWithVersion_RecordsInputAndVersion(t *testing.T) {
+	env := NewTestEnv()
+
+	if err := env.H().ContinueAsNewWithVersion(`{"n":2}`, 7); err != nil {
+		t.Fatalf("ContinueAsNewWithVersion: %v", err)
+	}
+	env.AssertContinued(t, `{"n":2}`)
+	if got := env.LastContinuedVersion(); got != 7 {
+		t.Errorf("LastContinuedVersion = %d, want 7", got)
+	}
+}
+
+func TestContinueAsNew_LeavesVersionUnpinned(t *testing.T) {
+	env := NewTestEnv()
+
+	// The non-versioned entry point must not invent a version. 0 is the
+	// engine's own "keep the current version" sentinel.
+	if err := env.H().ContinueAsNew(`{"n":1}`); err != nil {
+		t.Fatalf("ContinueAsNew: %v", err)
+	}
+	env.AssertContinued(t, `{"n":1}`)
+	if got := env.LastContinuedVersion(); got != 0 {
+		t.Errorf("LastContinuedVersion = %d after plain ContinueAsNew, want 0", got)
 	}
 }
