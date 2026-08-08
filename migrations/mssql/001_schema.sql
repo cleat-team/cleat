@@ -28,6 +28,26 @@ GO
 -- policies up front, before anything that depends on them is touched, is a
 -- no-op on a fresh install (sys.security_policies has no rows yet, so every
 -- IF EXISTS below is false) and makes a second application succeed.
+--
+-- WHY THIS DOES NOT OPEN AN RLS HOLE, AND THE ONE CONDITION IT DEPENDS ON.
+-- Read naively, this moves the window in which the FILTER PREDICATEs are
+-- absent from a handful of statements to the entire rest of the file -- the
+-- fail-open direction IMPROVEMENT-PLAN.md §2.71 is about. It does not,
+-- because of something outside this file: migration.Runner.applyMigration
+-- opens ONE transaction per migration file (`session.BeginTx`), runs every
+-- GO-separated batch inside it via `tx.ExecContext`, and commits only at the
+-- end -- see migration/runner.go. MSSQL DDL is transactional, so from any
+-- other session the drop and the recreate land together or not at all, and
+-- there is no instant at which a committed database has these tables without
+-- their policies. That is also why the OLD ordering failed safely: the
+-- CREATE OR ALTER FUNCTION error rolled the whole file back.
+--
+-- The condition: that atomicity is the runner's, not this file's. Applying
+-- this file by hand -- sqlcmd, a GUI, any tool that treats GO as a real batch
+-- separator and autocommits each batch -- does leave tenant-scoped tables
+-- unfiltered from here to the CREATE SECURITY POLICY block at the end. Do not
+-- do that on a database that already holds data, and do not change the runner
+-- to per-batch commits without recreating the policies before the commit.
 -- ===========================================================================
 IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
     DROP SECURITY POLICY dbo.TenantFilter_Defs;
