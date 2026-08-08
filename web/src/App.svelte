@@ -48,7 +48,14 @@
       {#if idA && idB}
         <WorkflowCompare workflowIdA={idA} workflowIdB={idB} onNavigate={navigate} />
       {:else}
-        <p style="color: var(--color-text-muted);">Invalid compare route. Use #compare/{id1}/{id2}</p>
+        <!-- The braces are HTML entities on purpose. Svelte parses `{...}` in
+             markup as a live expression, so `#compare/{id1}/{id2}` was not
+             placeholder text -- it referenced two variables that do not exist
+             anywhere in this file, and svelte-check reported it as two errors
+             ("Cannot find name 'id1'" / "'id2'"). The route's real variables
+             are idA and idB. Nothing caught it because nothing ran
+             svelte-check. -->
+        <p style="color: var(--color-text-muted);">Invalid compare route. Use #compare/&#123;id1&#125;/&#123;id2&#125;</p>
       {/if}
     {:else}
       <Dashboard />
