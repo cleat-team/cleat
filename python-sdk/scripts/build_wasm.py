@@ -163,7 +163,10 @@ def run_componentize_py(
               "Try simplifying the workflow or increasing the timeout.",
               file=sys.stderr)
         return False
-    except Exception as e:
+    # Deliberate: this is a build script's top-level reporter. Any failure of
+    # the toolchain becomes a readable message and a non-zero exit, not a
+    # traceback the user has to interpret.
+    except Exception as e:  # noqa: BLE001
         print(f"Error running componentize-py: {e}", file=sys.stderr)
         return False
 
@@ -451,7 +454,8 @@ def main():
                   file=sys.stderr)
             print("  (cargo install wasm-tools) only if you need core WASM as well.",
                   file=sys.stderr)
-        except Exception as e:
+        # Deliberate: same reasoning as the compile step above.
+        except Exception as e:  # noqa: BLE001
             print(f"Error: component decomposition failed: {e}", file=sys.stderr)
             sys.exit(1)
 

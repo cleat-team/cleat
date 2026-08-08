@@ -170,6 +170,28 @@ jobs:
       - name: Workflow integrity guards
         run: scripts/check-workflow-guards.py
 
+      # Ruff, promoted back into this required job on 2026-08-08. It ran here
+      # before under `continue-on-error: true`, which meant it could not fail a
+      # build and -- worse -- reported `success` in the REST jobs API, so the
+      # waiver looked like a passing tool. It was moved to `Lint (advisory)`
+      # while its backlog was worked off, and the backlog is now zero.
+      #
+      # Pinned, and must match `required-version` in python-sdk/pyproject.toml.
+      # Ruff's default rule set moves between releases, so an unpinned install
+      # silently changes what this required check means; on the same tree,
+      # 0.6.9 reported 3 findings and 0.16.2 reported 260. ruff itself refuses
+      # to run on a mismatch, so the two cannot drift silently -- but bump them
+      # in the same PR, deliberately, reading the release's rule-set changes.
+      #
+      # No `continue-on-error` here, and guard 2 in check-workflow-guards.py
+      # above now fails this job if anyone adds one to a required job or any of
+      # its steps.
+      - name: Install ruff
+        run: pip install ruff==0.16.2
+
+      - name: Ruff check
+        run: ruff check python-sdk/
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -245,26 +267,29 @@ jobs:
   # check. Nothing is waived here -- the job fails when the linters fail.
   #
   # The backlogs get triaged the same way the CodeQL one did: fix, then
-  # promote back into `Lint`. ShellCheck's 7 findings are the near-term one.
+  # promote back into `Lint`.
   #
-  # CORRECTION, 2026-08-08, to the paragraph that used to end this comment.
-  # It said Ruff's 260 "need a rule-set decision first, since this repo ships
-  # no ruff config and is being measured against defaults." The second half is
-  # wrong twice over. python-sdk/pyproject.toml has always carried a
-  # [tool.ruff] section -- line-length, target-version, exclude. What it had no
-  # rules. And "defaults" is not a fixed thing: ruff's built-in rule set
-  # changes between releases, and `pip install ruff` below was unpinned, so the
-  # 260 was a property of whichever ruff ran that morning. Measured on the same
-  # tree, same config, 2026-08-08:
+  # RUFF HAS BEEN PROMOTED (2026-08-08) and no longer runs here -- it is a step
+  # in the required `Lint` job above. Its 260 turned out not to be a backlog at
+  # all: python-sdk/pyproject.toml carried a [tool.ruff] section with no
+  # `select`, so the rule set was ruff's built-in default, and that default
+  # moves between releases while CI installed ruff unpinned. Same tree, same
+  # config, 2026-08-08:
   #
   #   ruff==0.6.9   ->  60 rules enabled,   3 errors
   #   ruff==0.16.2  -> 413 rules enabled, 260 errors
   #
-  # A lint check whose strictness is set by a third party's release schedule is
-  # the same defect as the moving container tag pinned in #390. The rule set is
-  # now named explicitly in python-sdk/pyproject.toml, which also carries
-  # `required-version = ">=0.16,<0.17"`; the pin below has to match it, and
-  # ruff fails loudly rather than silently if they drift. Bump both together.
+  # (That also corrects the sentence this comment used to end on, which said
+  # the repo "ships no ruff config and is being measured against defaults" --
+  # wrong on both halves.) The rule set is now named explicitly and the version
+  # is pinned in three places that must agree; see the promoted step above.
+  #
+  # SHELLCHECK STAYS HERE. Its 7 findings are real and unfixed. It is the last
+  # thing in this job, and when it reaches zero this job should be deleted
+  # rather than left as an empty green -- an advisory job with nothing advisory
+  # left in it is the shape this file keeps warning about. Deleting it also
+  # means removing `Lint (advisory)` from .github/required-checks.txt's
+  # not-required list.
   # -------------------------------------------------------------------------
   lint-advisory:
     name: Lint (advisory)
@@ -272,23 +297,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
       - name: Install lint tools
         run: |
-          # Pinned, and must match `required-version` in
-          # python-sdk/pyproject.toml -- ruff's default rule set moves between
-          # releases, so an unpinned install silently changes what this check
-          # means. See the comment above this job.
-          pip install ruff==0.16.2
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-
-      - name: Ruff check
-        run: ruff check python-sdk/
 
       - name: ShellCheck
         run: shellcheck scripts/*.sh benchmarks/*.sh

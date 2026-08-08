@@ -675,10 +675,7 @@ class ThreadingChecker(ast.NodeVisitor):
 
     def _has_host_calls_param(self, func_node: ast.FunctionDef) -> bool:
         """Check if a function has a HostCalls-like parameter."""
-        for arg in func_node.args.args:
-            if arg.arg in HOSTCALLS_PARAM_NAMES:
-                return True
-        return False
+        return any(arg.arg in HOSTCALLS_PARAM_NAMES for arg in func_node.args.args)
 
     def check(self) -> list[dict[str, Any]]:
         """Run the threading check and return errors."""
@@ -788,9 +785,7 @@ def compute_closure(
         visited.add(func)
         closure.add(func)
         # Add all callers of this function (reverse edges)
-        for caller in reverse_graph.get(func, set()):
-            if caller not in visited:
-                queue.append(caller)
+        queue.extend(c for c in reverse_graph.get(func, set()) if c not in visited)
 
     return closure
 

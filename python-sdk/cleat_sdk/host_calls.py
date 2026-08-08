@@ -1621,7 +1621,7 @@ class HostCalls:
         T
             An instance of *result_type* constructed from the response.
         """
-        resp_body, status = self.fetch(url, method, headers, body)
+        resp_body, _status = self.fetch(url, method, headers, body)
         data = json.loads(resp_body)
         if isinstance(data, dict) and result_type is not dict:
             return result_type(**data)
@@ -1902,7 +1902,7 @@ class HostCalls:
         return _import_cleat_child_workflow(name, input_str)
 
     def child_workflow_with_options(
-        self, name: str, input: Any, options: ChildWorkflowOptions = ChildWorkflowOptions()
+        self, name: str, input: Any, options: ChildWorkflowOptions | None = None
     ) -> str:
         """Start a child workflow instance with version and priority options.
 
@@ -1915,14 +1915,22 @@ class HostCalls:
             Child workflow definition name.
         input : Any
             Input for the child workflow.
-        options : ChildWorkflowOptions
-            Version and priority options for the child workflow.
+        options : ChildWorkflowOptions, optional
+            Version and priority options for the child workflow. Defaults to
+            ``ChildWorkflowOptions()`` (version 0, priority 0).
 
         Returns
         -------
         str
             The child workflow's run ID.
         """
+        # Constructed per call, not in the signature default. A default
+        # argument is evaluated once at import, so every caller that omitted
+        # `options` shared one instance -- and ChildWorkflowOptions is a
+        # plain (non-frozen) dataclass, so anything that mutated it would
+        # silently change the default for every later call in the process.
+        if options is None:
+            options = ChildWorkflowOptions()
         input_str = self._marshal(input)
         return _import_cleat_child_workflow_with_options(name, input_str, options.version, options.priority, "")
 

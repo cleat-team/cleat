@@ -76,7 +76,10 @@ class CleatCheckpointer:
         key = f"langgraph_ckpt_{thread_id}"
         try:
             data = self._h.get_state(key, dict)
-        except Exception:
+        # Deliberate: a checkpoint that cannot be read is reported as absent, so
+        # langgraph starts a fresh thread rather than propagating a host error
+        # into a caller that has no way to act on it.
+        except Exception:  # noqa: BLE001
             return None
 
         if not data:
@@ -191,7 +194,9 @@ class CleatCheckpointer:
         prefix = f"langgraph_write_{thread_id}_"
         try:
             keys = self._h.list_state(prefix)
-        except Exception:
+        # Deliberate: same reasoning as get_tuple above -- unreadable state
+        # reads as empty state.
+        except Exception:  # noqa: BLE001
             return []
 
         writes: list[Any] = []
@@ -200,7 +205,9 @@ class CleatCheckpointer:
                 raw = self._h.get_state(k, dict)
                 if raw:
                     writes.append(raw)
-            except Exception:
+            # Deliberate: skip the one key that will not decode rather than
+            # lose every other pending write for this thread.
+            except Exception:  # noqa: BLE001
                 pass
         return writes
 
@@ -244,7 +251,8 @@ class CleatCheckpointer:
         prefix = f"langgraph_ckpt_{thread_id}"
         try:
             keys = self._h.list_state(prefix)
-        except Exception:
+        # Deliberate: an unlistable prefix reads as no checkpoints.
+        except Exception:  # noqa: BLE001
             return []
 
         results: list[Any] = []
@@ -255,7 +263,9 @@ class CleatCheckpointer:
                     ckpt_tuple = self._deserialize_checkpoint_tuple(raw)
                     if ckpt_tuple is not None:
                         results.append(ckpt_tuple)
-            except Exception:
+            # Deliberate: one corrupt checkpoint must not hide the rest of the
+            # thread's history, which is what the caller is iterating for.
+            except Exception:  # noqa: BLE001
                 pass
 
         # Sort by checkpoint_id descending (newest first).

@@ -62,9 +62,14 @@ def decode_uleb128(data: bytes, offset: int) -> tuple[int, int]:
     shift = 0
     consumed = 0
 
+    # SIM113 suggests enumerate() for `consumed`. Suppressed on the increment
+    # below: `consumed` is not a loop index, it is a byte count this function
+    # returns, and the loop exits early via `return result, consumed`.
+    # enumerate(..., start=1) yields the same numbers while making the returned
+    # value look incidental to the iteration rather than the point of it.
     for i in range(offset, len(data)):
         b = data[i]
-        consumed += 1
+        consumed += 1  # noqa: SIM113
         result |= (b & 0x7F) << shift
         if b & 0x80 == 0:
             return result, consumed
@@ -176,18 +181,9 @@ def build_metadata(args: argparse.Namespace) -> dict:
     language = env_or_arg("CLEAT_LANGUAGE", args.language)
 
     # Parse numeric values from env (they come as strings).
-    if version is not None:
-        version = int(version)
-    else:
-        version = 0
-    if min_version is not None:
-        min_version = int(min_version)
-    else:
-        min_version = 1
-    if abi_version is not None:
-        abi_version = int(abi_version)
-    else:
-        abi_version = 1
+    version = int(version) if version is not None else 0
+    min_version = int(min_version) if min_version is not None else 1
+    abi_version = int(abi_version) if abi_version is not None else 1
 
     plugin_deps = {}
     if plugin_deps_str:

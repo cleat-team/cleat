@@ -133,7 +133,10 @@ def _from_dict(
     # ---- Dataclass ----
     try:
         is_dc = dataclasses.is_dataclass(target_type)
-    except Exception:
+    # Deliberate: target_type is caller-supplied and may be any object,
+    # including one with a hostile __class__ or a broken metaclass. A failure
+    # to identify it as a dataclass just means "treat it as a plain value".
+    except Exception:  # noqa: BLE001
         is_dc = False
 
     if is_dc:
@@ -147,7 +150,11 @@ def _from_dict(
         if type_hints is None:
             try:
                 type_hints = typing.get_type_hints(target_type)
-            except Exception:
+            # Deliberate: get_type_hints evaluates annotations, so it raises
+            # whatever a user's forward reference raises -- NameError for an
+            # unresolvable name, TypeError, or anything a module-level
+            # __getattr__ chooses. Unresolvable hints degrade to no coercion.
+            except Exception:  # noqa: BLE001
                 type_hints = {}
             _cache[target_type] = type_hints
 
@@ -208,7 +215,7 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
             raise RuntimeError("No cleat_entry functions registered")
 
         if len(wrappers) == 1:
-            return list(wrappers.values())[0](args_str)
+            return next(iter(wrappers.values()))(args_str)
 
         # Multiple entries: dispatch based on __cleat_entry__ in input JSON.
         input_data: dict = json.loads(args_str) if args_str else {}
@@ -363,7 +370,11 @@ def cleat_entry(name: str | None = None) -> Callable:
                 # fresh execution).  Propagate a sentinel string.
                 return SUSPEND_SENTINEL_STR
 
-            except Exception as exc:
+            # Deliberate, and load-bearing: this is the workflow error
+            # boundary. Everything the user's workflow body can raise has to
+            # become a JSON error payload here, or it crosses the WASM ABI as
+            # a trap and the engine sees a dead guest instead of a failed step.
+            except Exception as exc:  # noqa: BLE001
                 # Any other exception is treated as a workflow error.
                 return json.dumps({"error": str(exc)})
 

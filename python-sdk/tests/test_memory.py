@@ -146,7 +146,7 @@ class TestCleatCallResult:
         """Negative i64 values should be handled via _to_u64."""
         # High bit (sign) in responseLen field
         result = (1 << 63) | (1 << 40)
-        response_len, call_error_code, err_code = memory.decode_cleat_call_result(result)
+        response_len, _call_error_code, err_code = memory.decode_cleat_call_result(result)
         # responseLen is 24 bits so the sign bit gets masked
         assert response_len == 0x80_0001  # bit 63>>40=bit23, plus bit 40>>40=bit0
         assert err_code == 0

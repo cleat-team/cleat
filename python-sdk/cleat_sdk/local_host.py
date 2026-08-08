@@ -592,7 +592,7 @@ class LocalHostCalls:
         result_type: type[T] = dict,
     ) -> T:
         """Perform a cleat HTTP fetch and deserialize the JSON response."""
-        resp_body, status = self.fetch(url, method, headers, body)
+        resp_body, _status = self.fetch(url, method, headers, body)
         data = json.loads(resp_body)
         if isinstance(data, dict) and result_type is not dict:
             return result_type(**data)
@@ -866,9 +866,17 @@ class LocalHostCalls:
         return run_id
 
     def child_workflow_with_options(
-        self, name: str, input: Any, options: ChildWorkflowOptions = ChildWorkflowOptions()
+        self, name: str, input: Any, options: ChildWorkflowOptions | None = None
     ) -> str:
-        """Start a child workflow instance with version and priority options."""
+        """Start a child workflow instance with version and priority options.
+
+        ``options`` defaults to ``ChildWorkflowOptions()``; see the note in
+        ``HostCalls.child_workflow_with_options`` for why it is built here
+        rather than in the signature. This signature has to keep matching that
+        one -- it is the local stand-in for it.
+        """
+        if options is None:
+            options = ChildWorkflowOptions()
         if self._mode == "replay":
             return self._replay_next("child_workflow_with_options")
         run_id = self.child_workflow(name, input)

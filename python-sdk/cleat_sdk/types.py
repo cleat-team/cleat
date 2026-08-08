@@ -364,7 +364,7 @@ class Saga(Generic[SagaResultT]):
                     )
                 )
                 completed.append(step)
-            except all_terminal + (TerminalError,) as exc:
+            except (*all_terminal, TerminalError) as exc:
                 # Terminal error: compensate and re-raise.
                 results.append(
                     SagaStepResult(
@@ -453,10 +453,16 @@ def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
     for step in reversed(completed):
         try:
             step.compensate(h)
-        except Exception as exc:
+        # Deliberate: one step's compensation failing must not abort the
+        # compensation of the steps before it. That is the whole contract of a
+        # saga -- unwinding is best-effort and has to keep going.
+        except Exception as exc:  # noqa: BLE001
             try:
                 h.log(f"Saga compensation failed for step '{step.name}': {exc}")
-            except Exception:
+            # Deliberate: the logger itself can be gone (host torn down
+            # mid-unwind). Falling through to stderr is the last resort; there
+            # is nothing useful to do with an exception raised while reporting.
+            except Exception:  # noqa: BLE001
                 # Fall back to stderr when log is unavailable
                 # (e.g., workflow context already torn down).
                 msg = f"Saga compensation failed for step '{step.name}': {exc}\n"

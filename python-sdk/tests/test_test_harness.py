@@ -204,10 +204,10 @@ class TestSignals:
         h.stub_signal("sig1", "data")
         h.stub_signal("sig2", "more")
         # First poll consumes sig1
-        payload, found = h.poll_signal("sig1")
+        _payload, found = h.poll_signal("sig1")
         assert found
         # sig2 is still there
-        payload2, found2 = h.poll_signal("sig2")
+        _payload2, found2 = h.poll_signal("sig2")
         assert found2
 
 
