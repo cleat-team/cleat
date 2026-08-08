@@ -442,6 +442,35 @@ func migrateMSSQLWorkflowDefsTenantID(t *testing.T, db *sql.DB) {
 		        DEFAULT '00000000-0000-0000-0000-000000000000' FOR tenant_id`); err != nil {
 		t.Fatalf("setup MSSQL full schema: workflow_defs.tenant_id default: %v", err)
 	}
+
+	// workflow_schedules.timezone, added by migrations/mssql/021.
+	//
+	// The CREATE TABLE above already declares this column, so on a fresh
+	// database this ALTER is a no-op. It is here for the case where the table
+	// ALREADY EXISTS -- because the CREATE is guarded by
+	// `IF NOT EXISTS (SELECT 1 FROM sys.tables ...)`, and a guard on the TABLE
+	// says nothing about its COLUMNS.
+	//
+	// That is not hypothetical. Tests in this package build a database from the
+	// shipped migrations/mssql/001_schema.sql, which predates the column; a
+	// later test calling SetupMSSQLFullSchema against the same database found
+	// the table present, skipped the CREATE entirely, and every CreateSchedule
+	// after it failed with "Invalid column name 'timezone'" -- in tests that
+	// had nothing to do with schedules, because setupTestData creates one.
+	//
+	// This is CLAUDE.md's "CREATE TABLE IF NOT EXISTS never adds a column" in
+	// its test-harness form, and the fix is the same shape as the migration.
+	if _, err := db.Exec(`
+		IF NOT EXISTS (
+		    SELECT 1 FROM sys.columns
+		    WHERE object_id = OBJECT_ID(N'dbo.workflow_schedules')
+		      AND name = N'timezone'
+		)
+		    ALTER TABLE dbo.workflow_schedules
+		        ADD timezone NVARCHAR(64) NOT NULL
+		            CONSTRAINT df_workflow_schedules_timezone_test DEFAULT 'UTC'`); err != nil {
+		t.Fatalf("setup MSSQL full schema: workflow_schedules.timezone: %v", err)
+	}
 }
 
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.

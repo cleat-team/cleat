@@ -292,6 +292,18 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 	execIgnoreDupKey(t, db, `CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
 	execIgnoreDupKey(t, db, `CREATE INDEX idx_idempotency_keys_expires ON idempotency_keys(expires_at)`)
 	execIgnoreDupKey(t, db, `CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
+
+	// workflow_schedules.timezone, added by migrations/mysql/021.
+	//
+	// A no-op on a fresh database -- the CREATE TABLE above already declares
+	// the column, and execIgnoreDupKey swallows MySQL's 1060 (Duplicate column
+	// name). It matters when the table ALREADY EXISTS: the CREATE is guarded by
+	// IF NOT EXISTS, and a guard on the TABLE says nothing about its COLUMNS,
+	// so a database built by an earlier test from a schema predating the column
+	// would keep its old shape and every CreateSchedule against it would fail.
+	// CLAUDE.md's "CREATE TABLE IF NOT EXISTS never adds a column", in its
+	// test-harness form. The SQL Server side has the same guard.
+	execIgnoreDupKey(t, db, `ALTER TABLE workflow_schedules ADD COLUMN timezone VARCHAR(64) NOT NULL DEFAULT 'UTC'`)
 }
 
 // migrateMySQLEventIntentAt adds event_history.intent_at to an already-existing
