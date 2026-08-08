@@ -105,9 +105,14 @@ jobs:
       # ever actually run on any PR. This step catches the next one, from a
       # workflow that does parse.
       #
-      # (release-notes-check.yml was deleted on 2026-08-07 -- parsing turned
-      # out to be only the first of four reasons it gated nothing. The guard
-      # below is unaffected; it walks whatever files are present.)
+      # (Both files were deleted on 2026-08-07: parsing turned out to be the
+      # first of four reasons release-notes-check.yml gated nothing, and
+      # ai-pr-review.yml ran for months posting only "AI review unavailable".
+      # See IMPROVEMENT-PLAN 1.12a and 1.12b. The guard below is unaffected;
+      # it walks whatever files are present. Worth keeping in mind when it
+      # next fires: a startup failure hides every other defect in the file
+      # behind it, so making a workflow parse is where the investigation
+      # starts, not where it ends.)
       - name: Workflow files parse
         run: |
           set -euo pipefail
