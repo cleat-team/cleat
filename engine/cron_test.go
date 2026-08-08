@@ -113,6 +113,89 @@ func TestNextCronTime_DayOfWeekSevenIsSunday(t *testing.T) {
 // Step on a range
 // ---------------------------------------------------------------------------
 
+// The five tests below came from db_behavioral_test.go, where they called
+// matchField. They assert the same field-level behaviour against
+// parseCronField, which is what NextCronTime uses.
+
+func mustParseCronField(t *testing.T, pattern string, min, max int) cronField {
+	t.Helper()
+	f, err := parseCronField(pattern, min, max, "minute")
+	if err != nil {
+		t.Fatalf("parseCronField(%q, %d, %d): %v", pattern, min, max, err)
+	}
+	return f
+}
+
+func TestParseCronField_Wildcard(t *testing.T) {
+	f := mustParseCronField(t, "*", 0, 59)
+	for _, v := range []int{0, 30, 59} {
+		if !f.matches(v) {
+			t.Errorf("* should match %d", v)
+		}
+	}
+	if !f.star {
+		t.Error("* should carry the star flag")
+	}
+}
+
+func TestParseCronField_Exact(t *testing.T) {
+	f := mustParseCronField(t, "5", 0, 59)
+	if !f.matches(5) {
+		t.Error("5 should match 5")
+	}
+	if f.matches(6) {
+		t.Error("5 should not match 6")
+	}
+	if f.star {
+		t.Error("5 should not carry the star flag")
+	}
+}
+
+func TestParseCronField_Step(t *testing.T) {
+	f := mustParseCronField(t, "*/5", 0, 59)
+	for _, v := range []int{0, 5, 10, 55} {
+		if !f.matches(v) {
+			t.Errorf("*/5 should match %d", v)
+		}
+	}
+	if f.matches(3) {
+		t.Error("*/5 should not match 3")
+	}
+	// `*/0` used to be silently false at every value. It is now a parse error,
+	// which is what lets a caller say so.
+	if _, err := parseCronField("*/0", 0, 59, "minute"); err == nil {
+		t.Error("*/0 should be a parse error")
+	}
+}
+
+func TestParseCronField_Range(t *testing.T) {
+	f := mustParseCronField(t, "10-20", 0, 59)
+	for _, v := range []int{10, 15, 20} {
+		if !f.matches(v) {
+			t.Errorf("10-20 should match %d", v)
+		}
+	}
+	for _, v := range []int{9, 21} {
+		if f.matches(v) {
+			t.Errorf("10-20 should not match %d", v)
+		}
+	}
+}
+
+func TestParseCronField_List(t *testing.T) {
+	f := mustParseCronField(t, "1,3,5", 0, 59)
+	for _, v := range []int{1, 3, 5} {
+		if !f.matches(v) {
+			t.Errorf("1,3,5 should match %d", v)
+		}
+	}
+	for _, v := range []int{2, 4} {
+		if f.matches(v) {
+			t.Errorf("1,3,5 should not match %d", v)
+		}
+	}
+}
+
 func TestParseCronField_StepOnRange(t *testing.T) {
 	f, err := parseCronField("10-20/5", 0, 59, "minute")
 	if err != nil {
@@ -272,14 +355,14 @@ func TestNextCronTime_LeapDay(t *testing.T) {
 	}
 }
 
-// TestMatchField_UnparseablePatternMatchesNothing pins the behaviour change in
-// matchField: a pattern that does not parse now matches nothing, where it used
-// to match 0 because that is what fmt.Sscanf left behind.
-func TestMatchField_UnparseablePatternMatchesNothing(t *testing.T) {
-	if matchField("not-a-number", 0, 0, 59) {
-		t.Error("matchField('not-a-number', 0) should be false, not true-because-Sscanf-left-a-zero")
-	}
-	if matchField("", 0, 0, 59) {
-		t.Error("matchField('', 0) should be false")
+// TestParseCronField_UnparseablePatternIsAnError pins the behaviour change at
+// the field level: a pattern that does not parse is now an error, where
+// matchField used to report that it matched 0 -- because 0 is what fmt.Sscanf
+// left in the destination for any non-numeric input.
+func TestParseCronField_UnparseablePatternIsAnError(t *testing.T) {
+	for _, pattern := range []string{"not-a-number", "", "  ", "1-", "-5", "5-x"} {
+		if _, err := parseCronField(pattern, 0, 59, "minute"); err == nil {
+			t.Errorf("parseCronField(%q) = nil error, want a parse error", pattern)
+		}
 	}
 }

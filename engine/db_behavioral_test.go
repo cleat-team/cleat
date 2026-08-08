@@ -434,26 +434,14 @@ func TestHelperNullInt64_Negative(t *testing.T) {
 	}
 }
 
-func TestHelperDaysInMonth(t *testing.T) {
-	tests := []struct {
-		year  int
-		month time.Month
-		want  int
-	}{
-		{2024, time.January, 31},
-		{2024, time.February, 29}, // leap year
-		{2025, time.February, 28}, // non-leap year
-		{2024, time.April, 30},
-		{2024, time.September, 30},
-		{2024, time.December, 31},
-	}
-	for _, tt := range tests {
-		got := daysInMonth(tt.year, tt.month)
-		if got != tt.want {
-			t.Errorf("daysInMonth(%d, %d) = %d, want %d", tt.year, tt.month, got, tt.want)
-		}
-	}
-}
+// TestHelperDaysInMonth is gone along with daysInMonth itself. It guarded
+// NextCronTime against matching a day that does not exist in the current month,
+// which the rewritten search cannot do: it walks real time.Time values, so
+// February 30th is never a date it visits. The month-length behaviour it
+// asserted is time.Date's, not this package's.
+//
+// TestNextCronTime_ValidButNeverMatching and TestNextCronTime_LeapDay in
+// cron_test.go cover what this was actually protecting.
 
 func TestCronAtoi_Valid(t *testing.T) {
 	tests := []struct {
@@ -490,81 +478,10 @@ func TestCronAtoi_Invalid(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// matchField tests (cron field pattern matching)
-// ---------------------------------------------------------------------------
-
-func TestMatchField_Wildcard(t *testing.T) {
-	if !matchField("*", 30, 0, 59) {
-		t.Error("matchField('*', 30) should be true")
-	}
-	if !matchField("*", 0, 0, 59) {
-		t.Error("matchField('*', 0) should be true")
-	}
-}
-
-func TestMatchField_Exact(t *testing.T) {
-	if !matchField("5", 5, 0, 59) {
-		t.Error("matchField('5', 5) should be true")
-	}
-	if matchField("5", 6, 0, 59) {
-		t.Error("matchField('5', 6) should be false")
-	}
-}
-
-func TestMatchField_Step(t *testing.T) {
-	if !matchField("*/5", 0, 0, 59) {
-		t.Error("matchField('*/5', 0) should be true (0 %% 5 == 0)")
-	}
-	if !matchField("*/5", 5, 0, 59) {
-		t.Error("matchField('*/5', 5) should be true")
-	}
-	if !matchField("*/5", 10, 0, 59) {
-		t.Error("matchField('*/5', 10) should be true")
-	}
-	if matchField("*/5", 3, 0, 59) {
-		t.Error("matchField('*/5', 3) should be false")
-	}
-	if matchField("*/0", 5, 0, 59) {
-		t.Error("matchField('*/0', 5) should be false (step is 0)")
-	}
-}
-
-func TestMatchField_Range(t *testing.T) {
-	if !matchField("10-20", 15, 0, 59) {
-		t.Error("matchField('10-20', 15) should be true")
-	}
-	if !matchField("10-20", 10, 0, 59) {
-		t.Error("matchField('10-20', 10) should be true (low bound)")
-	}
-	if !matchField("10-20", 20, 0, 59) {
-		t.Error("matchField('10-20', 20) should be true (high bound)")
-	}
-	if matchField("10-20", 9, 0, 59) {
-		t.Error("matchField('10-20', 9) should be false")
-	}
-	if matchField("10-20", 21, 0, 59) {
-		t.Error("matchField('10-20', 21) should be false")
-	}
-}
-
-func TestMatchField_List(t *testing.T) {
-	if !matchField("1,3,5", 1, 0, 59) {
-		t.Error("matchField('1,3,5', 1) should be true")
-	}
-	if !matchField("1,3,5", 3, 0, 59) {
-		t.Error("matchField('1,3,5', 3) should be true")
-	}
-	if !matchField("1,3,5", 5, 0, 59) {
-		t.Error("matchField('1,3,5', 5) should be true")
-	}
-	if matchField("1,3,5", 2, 0, 59) {
-		t.Error("matchField('1,3,5', 2) should be false")
-	}
-	if matchField("1,3,5", 4, 0, 59) {
-		t.Error("matchField('1,3,5', 4) should be false")
-	}
-}
+// The matchField tests moved to cron_test.go as TestParseCronField_* when
+// matchField itself was removed. They now call parseCronField, the function
+// NextCronTime actually uses, rather than a wrapper kept alive for their
+// benefit -- which scripts/check-test-only-code.sh correctly flags.
 
 // ---------------------------------------------------------------------------
 // NextCronTime tests

@@ -258,20 +258,17 @@ func NextCronTime(cronExpr string, from time.Time) time.Time {
 	return from.Add(24 * time.Hour)
 }
 
-// matchField reports whether value satisfies a single cron field pattern.
+// matchField and daysInMonth used to live here, and are deliberately gone.
 //
-// Retained as a thin wrapper over the parser so that the field-level tests keep
-// testing the field-level behaviour directly. An unparseable pattern matches
-// nothing, where it used to match whatever fmt.Sscanf left in the destination
-// (0, for any non-numeric input).
-func matchField(pattern string, value int, min, max int) bool {
-	f, err := parseCronField(pattern, min, max, "field")
-	if err != nil {
-		return false
-	}
-	return f.matches(value)
-}
-
-func daysInMonth(year int, month time.Month) int {
-	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
-}
+// matchField was the old per-field predicate, re-parsing the pattern text on
+// every one of NextCronTime's up-to-two-million search iterations. Parsing once
+// into a cronField replaces it. Keeping it as a thin wrapper purely so the
+// field-level tests had something to call would have made it test-only code,
+// which scripts/check-test-only-code.sh correctly refuses -- and it would have
+// meant those tests exercised a shim rather than the code that runs. They call
+// parseCronField now.
+//
+// daysInMonth guarded NextCronTime against matching a day that does not exist
+// in the current month (February 30th). It is unreachable now: the search walks
+// real time.Time values, so a nonexistent date is never visited at all, and the
+// day-of-month field is range-checked once at parse time.
