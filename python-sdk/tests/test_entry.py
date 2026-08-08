@@ -14,7 +14,7 @@ import pytest
 
 try:
     from cleat_sdk import memory
-    from cleat_sdk.entry import cleat_entry, _unwrap_result
+    from cleat_sdk.entry import _unwrap_result, cleat_entry
     from cleat_sdk.host_calls import HostCalls
 except ImportError as e:
     pytest.skip(

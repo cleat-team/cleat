@@ -15,6 +15,7 @@ Test layout
 from __future__ import annotations
 
 import json
+
 import pytest
 
 from cleat_sdk.host_calls import (
@@ -22,7 +23,6 @@ from cleat_sdk.host_calls import (
     RetryPolicy,
 )
 from cleat_sdk.local_host import LocalHostCalls
-
 
 # ========================================================================
 # Fixtures

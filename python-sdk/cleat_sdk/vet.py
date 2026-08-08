@@ -21,8 +21,7 @@ from __future__ import annotations
 import ast
 import json
 import sys
-from typing import Any, Dict, List, Optional, Set, Tuple
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -45,7 +44,7 @@ ERROR_MULTIPLE_ENTRIES = "PY013"  # multiple @cleat_entry functions
 
 #: SDK durable leaf function names --- HostCalls methods that the runtime
 #: journalises (i.e. they create events in the workflow history).
-DURABLE_LEAVES: Set[str] = {
+DURABLE_LEAVES: set[str] = {
     # Core durable calls
     "call",
     "call_typed",
@@ -121,7 +120,7 @@ DURABLE_LEAVES: Set[str] = {
 #: Callable expression prefixes that identify forbidden APIs.
 #: Maps ``(module, name)`` to ``(error_code, message, suggestion)``.
 #: When *module* is ``None``, the name refers to a builtin or unqualified call.
-FORBIDDEN_API_RULES: Dict[Tuple[Optional[str], str], Tuple[str, str, str]] = {
+FORBIDDEN_API_RULES: dict[tuple[str | None, str], tuple[str, str, str]] = {
     (None, "open"): (
         "PY002",
         "File I/O is not allowed in workflow code: file system operations produce non-deterministic side effects across replays.",
@@ -275,12 +274,12 @@ FORBIDDEN_API_RULES: Dict[Tuple[Optional[str], str], Tuple[str, str, str]] = {
 }
 
 #: Builtins that are forbidden in workflow code
-FORBIDDEN_BUILTINS: Dict[str, Tuple[str, str, str]] = {
+FORBIDDEN_BUILTINS: dict[str, tuple[str, str, str]] = {
     # Already covered by FORBIDDEN_API_RULES with module=None
 }
 
 #: Parameter names that are accepted as HostCalls threading indicators
-HOSTCALLS_PARAM_NAMES: Set[str] = {"h", "host_calls", "hc", "host"}
+HOSTCALLS_PARAM_NAMES: set[str] = {"h", "host_calls", "hc", "host"}
 
 
 # ---------------------------------------------------------------------------
@@ -293,13 +292,13 @@ class AnalysisResult:
 
     def __init__(self, filepath: str) -> None:
         self.filepath: str = filepath
-        self.errors: List[Dict[str, Any]] = []
-        self.warnings: List[Dict[str, Any]] = []
-        self.entry_functions: List[str] = []
-        self.call_graph: Dict[str, Set[str]] = {}
-        self.durable_closure: Set[str] = set()
-        self.durable_leaf_callers: Set[str] = set()
-        self.function_defs: Dict[str, ast.FunctionDef] = {}
+        self.errors: list[dict[str, Any]] = []
+        self.warnings: list[dict[str, Any]] = []
+        self.entry_functions: list[str] = []
+        self.call_graph: dict[str, set[str]] = {}
+        self.durable_closure: set[str] = set()
+        self.durable_leaf_callers: set[str] = set()
+        self.function_defs: dict[str, ast.FunctionDef] = {}
 
     def add_error(
         self,
@@ -340,7 +339,7 @@ class AnalysisResult:
         )
 
     @property
-    def summary(self) -> Dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         return {
             "functions": len(self.function_defs),
             "durable_leaves": len(self.durable_leaf_callers),
@@ -364,13 +363,13 @@ class CallGraphBuilder(ast.NodeVisitor):
 
     def __init__(self) -> None:
         # caller_name -> set of callee names (user-defined functions only)
-        self.graph: Dict[str, Set[str]] = {}
+        self.graph: dict[str, set[str]] = {}
         # caller_name -> set of callee attribute names (e.g., "call", "sleep")
-        self.leaf_calls: Dict[str, Set[str]] = {}
+        self.leaf_calls: dict[str, set[str]] = {}
         # Module-level function defs
-        self.function_defs: Dict[str, ast.FunctionDef] = {}
+        self.function_defs: dict[str, ast.FunctionDef] = {}
         # Current function being analyzed
-        self._current_func: Optional[str] = None
+        self._current_func: str | None = None
 
     def _process_function(self, node: ast.FunctionDef) -> None:
         """Record module-level function definitions and their calls."""
@@ -443,11 +442,11 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
     ``FORBIDDEN_API_RULES``.
     """
 
-    def __init__(self, filepath: str, target_funcs: Set[str]) -> None:
+    def __init__(self, filepath: str, target_funcs: set[str]) -> None:
         self.filepath = filepath
         self.target_funcs = target_funcs
-        self.errors: List[Dict[str, Any]] = []
-        self._current_func: Optional[str] = None
+        self.errors: list[dict[str, Any]] = []
+        self._current_func: str | None = None
 
     def _check_function(self, node: ast.FunctionDef) -> None:
         """Check calls in a function if it is in the target set."""
@@ -667,12 +666,12 @@ class ThreadingChecker(ast.NodeVisitor):
     """
 
     def __init__(
-        self, filepath: str, func_defs: Dict[str, ast.FunctionDef], closure_funcs: Set[str]
+        self, filepath: str, func_defs: dict[str, ast.FunctionDef], closure_funcs: set[str]
     ) -> None:
         self.filepath = filepath
         self.func_defs = func_defs
         self.closure_funcs = closure_funcs
-        self.errors: List[Dict[str, Any]] = []
+        self.errors: list[dict[str, Any]] = []
 
     def _has_host_calls_param(self, func_node: ast.FunctionDef) -> bool:
         """Check if a function has a HostCalls-like parameter."""
@@ -681,7 +680,7 @@ class ThreadingChecker(ast.NodeVisitor):
                 return True
         return False
 
-    def check(self) -> List[Dict[str, Any]]:
+    def check(self) -> list[dict[str, Any]]:
         """Run the threading check and return errors."""
         for func_name in sorted(self.closure_funcs):
             if func_name in self.func_defs:
@@ -711,7 +710,7 @@ class ThreadingChecker(ast.NodeVisitor):
 # ---------------------------------------------------------------------------
 
 
-def decorate_name(decorator: ast.expr) -> Optional[str]:
+def decorate_name(decorator: ast.expr) -> str | None:
     """Extract the decorator name from a decorator node.
 
     Handles ``@cleat_entry``, ``@cleat_entry("name")``, ``@cleat_entry()``,
@@ -741,9 +740,9 @@ def _is_function_def(node: ast.AST) -> bool:
 def find_cleat_entry_functions(
     tree: ast.Module,
     filepath: str,
-) -> List[Tuple[str, Any]]:
+) -> list[tuple[str, Any]]:
     """Find all ``@cleat_entry`` decorated functions in the AST."""
-    results: List[Tuple[str, ast.FunctionDef]] = []
+    results: list[tuple[str, ast.FunctionDef]] = []
     for node in ast.iter_child_nodes(tree):
         if _is_function_def(node):
             for dec in node.decorator_list:
@@ -756,7 +755,7 @@ def find_cleat_entry_functions(
 
 def build_call_graph_and_leaf_callers(
     tree: ast.Module,
-) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]], Dict[str, ast.FunctionDef]]:
+) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, ast.FunctionDef]]:
     """Build call graph and identify leaf callers from AST."""
     builder = CallGraphBuilder()
     builder.visit(tree)
@@ -764,23 +763,23 @@ def build_call_graph_and_leaf_callers(
 
 
 def compute_closure(
-    call_graph: Dict[str, Set[str]],
-    leaf_callers: Set[str],
-) -> Set[str]:
+    call_graph: dict[str, set[str]],
+    leaf_callers: set[str],
+) -> set[str]:
     """Compute transitive closure of functions that reach durable leaves.
 
     Uses BFS from leaf callers following reverse edges in the call graph.
     """
     # Build reverse call graph (callee -> set of callers)
-    reverse_graph: Dict[str, Set[str]] = {}
+    reverse_graph: dict[str, set[str]] = {}
     for caller, callees in call_graph.items():
         for callee in callees:
             reverse_graph.setdefault(callee, set()).add(caller)
 
     # BFS from leaf callers
-    closure: Set[str] = set()
+    closure: set[str] = set()
     queue = list(leaf_callers)
-    visited: Set[str] = set()
+    visited: set[str] = set()
 
     while queue:
         func = queue.pop(0)
@@ -823,7 +822,7 @@ def analyze_file(filepath: str) -> AnalysisResult:
             suggestion="Check that the file path is correct.",
         )
         return result
-    except IOError as e:
+    except OSError as e:
         result.add_error(
             "E001",
             0,
@@ -866,7 +865,7 @@ def analyze_file(filepath: str) -> AnalysisResult:
     result.function_defs = func_defs
 
     # --- Durable leaf callers ---
-    leaf_callers: Set[str] = set()
+    leaf_callers: set[str] = set()
     for func_name, leaves in leaf_calls_by_func.items():
         if leaves:
             leaf_callers.add(func_name)
@@ -901,7 +900,7 @@ def analyze_file(filepath: str) -> AnalysisResult:
 # ---------------------------------------------------------------------------
 
 
-def detect_entry(filepath: str) -> Tuple[Optional[str], Optional[str]]:
+def detect_entry(filepath: str) -> tuple[str | None, str | None]:
     """Detect the single ``@cleat_entry`` function in a file.
 
     Returns ``(function_name, None)`` on success, or
@@ -914,7 +913,7 @@ def detect_entry(filepath: str) -> Tuple[Optional[str], Optional[str]]:
             source = f.read()
     except FileNotFoundError:
         return None, f"File not found: {filepath}"
-    except IOError as e:
+    except OSError as e:
         return None, f"Error reading file: {e}"
 
     try:
@@ -953,7 +952,7 @@ def detect_entry(filepath: str) -> Tuple[Optional[str], Optional[str]]:
 # ---------------------------------------------------------------------------
 
 
-def format_line(error: Dict[str, Any]) -> str:
+def format_line(error: dict[str, Any]) -> str:
     """Format a single error for human-readable display."""
     parts = [
         f"{error['file']}:{error['line']}",
@@ -1029,7 +1028,7 @@ def main() -> int:
             return 1
 
     # Full analysis mode
-    all_results: List[AnalysisResult] = []
+    all_results: list[AnalysisResult] = []
     exit_code = 0
 
     for filepath in files:

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, Optional, TypeVar
+from typing import Any, Generic, TypeVar
 
 from .host_calls import HostCalls
 
@@ -27,7 +28,6 @@ class TerminalError(Exception):
     compensation, allowing the caller to retry the entire saga.
     """
 
-    pass
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ class ChildWorkflow(Generic[T]):
     input: Any
     """Input payload --- will be JSON-serialised before sending to the host."""
 
-    run_id: Optional[str] = None
+    run_id: str | None = None
     """Run ID returned by the host after ``start()``."""
 
     def start(self, h: HostCalls) -> str:
@@ -191,8 +191,8 @@ class SagaStepResult(Generic[T]):
 
     step_name: str
     success: bool
-    result: Optional[T] = None
-    error: Optional[str] = None
+    result: T | None = None
+    error: str | None = None
 
 
 class Saga(Generic[SagaResultT]):
@@ -244,7 +244,7 @@ class Saga(Generic[SagaResultT]):
     def __init__(
         self,
         h: HostCalls,
-        terminal_exceptions: Optional[tuple[type[BaseException], ...]] = None,
+        terminal_exceptions: tuple[type[BaseException], ...] | None = None,
     ) -> None:
         self._h = h
         self._steps: list[SagaStep[Any]] = []
@@ -253,8 +253,8 @@ class Saga(Generic[SagaResultT]):
     def add_step(
         self,
         step_or_name: SagaStep[SagaResultT] | str,
-        action: Optional[Callable[..., SagaResultT]] = None,
-        compensate: Optional[Callable[..., Any]] = None,
+        action: Callable[..., SagaResultT] | None = None,
+        compensate: Callable[..., Any] | None = None,
     ) -> None:
         """Register a saga step.
 
@@ -297,7 +297,7 @@ class Saga(Generic[SagaResultT]):
         self,
         name: str,
         action: Callable[[HostCalls], SagaResultT],
-        compensate: Optional[Callable[[HostCalls], None]] = None,
+        compensate: Callable[[HostCalls], None] | None = None,
     ) -> None:
         """Register a saga step using callables that receive ``HostCalls``.
 
@@ -320,7 +320,7 @@ class Saga(Generic[SagaResultT]):
 
     def execute(
         self,
-        terminal_exceptions: Optional[tuple[type[BaseException], ...]] = None,
+        terminal_exceptions: tuple[type[BaseException], ...] | None = None,
     ) -> list[SagaStepResult]:
         """Execute all steps in order, compensating on terminal failure.
 
@@ -403,8 +403,8 @@ class _LambdaSagaStep(SagaStep):
     def __init__(
         self,
         name: str,
-        action: Optional[Callable[..., Any]],
-        compensate: Optional[Callable[..., Any]],
+        action: Callable[..., Any] | None,
+        compensate: Callable[..., Any] | None,
     ) -> None:
         super().__init__(name)
         self._action = action
@@ -427,7 +427,7 @@ class _FnSagaStep(SagaStep):
         self,
         name: str,
         action: Callable[[HostCalls], Any],
-        compensate: Optional[Callable[[HostCalls], None]],
+        compensate: Callable[[HostCalls], None] | None,
     ) -> None:
         super().__init__(name)
         self._action = action
@@ -486,10 +486,10 @@ class CleatDefer:
     description: str
     """Human-readable description of the cleanup action."""
 
-    _h: Optional[HostCalls] = field(default=None, repr=False)
+    _h: HostCalls | None = field(default=None, repr=False)
     """HostCalls instance (set via the constructor or ``__enter__``)."""
 
-    _defer_id: Optional[str] = field(default=None, repr=False)
+    _defer_id: str | None = field(default=None, repr=False)
     """Defer ID returned by the host, if applicable."""
 
     def __enter__(self) -> CleatDefer:
@@ -500,9 +500,9 @@ class CleatDefer:
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[object],
-    ) -> Optional[bool]:
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object | None,
+    ) -> bool | None:
         """No synchronous cleanup needed; host manages the defer lifecycle."""
         return None

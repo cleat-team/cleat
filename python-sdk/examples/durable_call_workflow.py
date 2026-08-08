@@ -10,6 +10,7 @@ Python -> WASM -> Host -> WASM -> Python round trip.
 """
 
 from dataclasses import dataclass
+
 from cleat_sdk import HostCalls, cleat_entry
 
 

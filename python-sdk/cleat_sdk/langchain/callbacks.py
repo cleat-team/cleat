@@ -18,7 +18,7 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
 from ..host_calls import HostCalls
@@ -56,10 +56,10 @@ class CleatCallbackHandler:
         serialized: dict[str, Any],
         prompts: list[str],
         *,
-        run_id: Optional[UUID] = None,
-        parent_run_id: Optional[UUID] = None,
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        run_id: UUID | None = None,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when an LLM call starts."""
@@ -92,8 +92,8 @@ class CleatCallbackHandler:
         self,
         response: Any,
         *,
-        run_id: Optional[UUID] = None,
-        parent_run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
+        parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when an LLM call ends."""
@@ -120,7 +120,7 @@ class CleatCallbackHandler:
         self,
         error: BaseException,
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when an LLM call errors."""
@@ -138,13 +138,12 @@ class CleatCallbackHandler:
         self,
         token: str,
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called for each new token during streaming (no-op for state size)."""
         # Streaming tokens are too fine-grained for event recording.
         # The final on_llm_end captures the complete response.
-        pass
 
     # ------------------------------------------------------------------
     # Tool callbacks
@@ -155,11 +154,11 @@ class CleatCallbackHandler:
         serialized: dict[str, Any],
         input_str: str,
         *,
-        run_id: Optional[UUID] = None,
-        parent_run_id: Optional[UUID] = None,
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
-        inputs: Optional[dict[str, Any]] = None,
+        run_id: UUID | None = None,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        inputs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when a tool invocation starts."""
@@ -185,7 +184,7 @@ class CleatCallbackHandler:
         self,
         output: Any,
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when a tool invocation ends."""
@@ -211,7 +210,7 @@ class CleatCallbackHandler:
         self,
         error: BaseException,
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when a tool invocation errors."""
@@ -234,10 +233,10 @@ class CleatCallbackHandler:
         serialized: dict[str, Any],
         inputs: dict[str, Any],
         *,
-        run_id: Optional[UUID] = None,
-        parent_run_id: Optional[UUID] = None,
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        run_id: UUID | None = None,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when a chain starts executing."""
@@ -260,7 +259,7 @@ class CleatCallbackHandler:
         self,
         outputs: dict[str, Any],
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when a chain finishes executing."""
@@ -276,7 +275,7 @@ class CleatCallbackHandler:
         self,
         error: BaseException,
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when a chain errors."""
@@ -294,7 +293,7 @@ class CleatCallbackHandler:
         self,
         action: Any,
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when an agent decides on an action."""
@@ -321,7 +320,7 @@ class CleatCallbackHandler:
         self,
         finish: Any,
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when an agent finishes."""
@@ -346,10 +345,10 @@ class CleatCallbackHandler:
         serialized: dict[str, Any],
         query: str,
         *,
-        run_id: Optional[UUID] = None,
-        parent_run_id: Optional[UUID] = None,
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        run_id: UUID | None = None,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when a retriever starts."""
@@ -367,7 +366,7 @@ class CleatCallbackHandler:
         self,
         documents: Any,
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when a retriever ends."""
@@ -386,7 +385,7 @@ class CleatCallbackHandler:
         self,
         error: BaseException,
         *,
-        run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called when a retriever errors."""
@@ -403,12 +402,11 @@ class CleatCallbackHandler:
         self,
         text: str,
         *,
-        run_id: Optional[UUID] = None,
-        parent_run_id: Optional[UUID] = None,
+        run_id: UUID | None = None,
+        parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
         """Called on arbitrary text (no-op)."""
-        pass
 
     # ------------------------------------------------------------------
     # Helpers

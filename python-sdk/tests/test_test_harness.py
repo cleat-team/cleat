@@ -9,8 +9,8 @@ import json
 import pytest
 
 try:
-    from cleat_sdk.test_harness import CleatTestHarness
     from cleat_sdk.host_calls import HostCalls, RetryPolicy, SuspendSentinel
+    from cleat_sdk.test_harness import CleatTestHarness
 except ImportError as e:
     pytest.skip(
         f"Skipping test harness tests: {e}",
