@@ -487,25 +487,33 @@ func selectMigrationSQL(dialect plugin.Dialect, m plugin.Migration) string {
 // splitStatements splits a migration file's SQL text into individual
 // statements to execute, using dialect-appropriate rules.
 //
-// For MySQL this delegates to migration.SplitSQL, the production splitter
-// used by migration.Runner. This harness used to carry its own copy of a
-// semicolon splitter that did not understand MySQL's DELIMITER directive,
-// which cut migrations/mysql/003_procedures.sql's stored procedure body on
-// the semicolons inside it and sent the fragments (plus the bare word
-// DELIMITER, which no MySQL server accepts) to the server -- Error 1064 near
-// 'DELIMITER //'. The production splitter already handled this correctly
-// (see migration/runner.go and migration/split_test.go); the harness only
-// needed to call it instead of maintaining a second, divergent copy.
+// For MySQL and MSSQL this delegates to migration.SplitSQL / SplitMSSQL, the
+// production splitters used by migration.Runner (see migration/runner.go).
+// This harness used to carry its own copy of a single semicolon splitter
+// used for all three dialects. It did not understand MySQL's DELIMITER
+// directive, which cut migrations/mysql/003_procedures.sql's stored
+// procedure body on the semicolons inside it and sent the fragments (plus
+// the bare word DELIMITER, which no MySQL server accepts) to the server --
+// Error 1064 near 'DELIMITER //'. It also split MSSQL batches on every
+// semicolon rather than only on GO, breaking
+// migrations/mssql/003_procedures.sql's CREATE OR ALTER PROCEDURE the same
+// way ("Incorrect syntax near 'ON'"). The production splitters already
+// handled both correctly (see migration/runner.go and
+// migration/split_test.go); the harness only needed to call them instead of
+// maintaining a second, divergent copy.
 //
-// PostgreSQL and MSSQL keep using the local splitSQL below, which
-// additionally understands PostgreSQL's dollar-quoted strings. Production's
+// PostgreSQL keeps using the local splitSQL below, which additionally
+// understands PostgreSQL's dollar-quoted strings. Production's
 // migration.Runner does not split PostgreSQL SQL at all (it executes the
 // whole file in one statement, relying on the driver's native
-// multi-statement support) and splits MSSQL only on GO batch separators, so
-// neither is a drop-in replacement for what this harness needs here.
+// multi-statement support), so it is not a drop-in replacement for what
+// this harness needs here.
 func splitStatements(dialect plugin.Dialect, sql string) []string {
-	if dialect == plugin.DialectMySQL {
+	switch dialect {
+	case plugin.DialectMySQL:
 		return migration.SplitSQL(sql)
+	case plugin.DialectMSSQL:
+		return migration.SplitMSSQL(sql)
 	}
 	return splitSQL(sql)
 }
