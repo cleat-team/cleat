@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/cespare/xxhash/v2"
 )
@@ -256,73 +254,7 @@ func (s *PostgresStore) CompleteUpdateRequest(ctx context.Context, workflowID, u
 	return tx.Commit()
 }
 
-// NextCronTime computes the next firing time for a 5-field cron expression
-// (minute hour day-of-month month day-of-week) from the given time.
-func NextCronTime(cronExpr string, from time.Time) time.Time {
-	fields := strings.Fields(cronExpr)
-	if len(fields) != 5 {
-		return from.Add(24 * time.Hour) // fallback: daily
-	}
-
-	// Start at the next minute.
-	t := from.Truncate(time.Minute).Add(time.Minute)
-
-	// Search up to 4 years ahead.
-	end := from.AddDate(4, 0, 0)
-	for t.Before(end) {
-		if matchField(fields[0], t.Minute(), 0, 59) &&
-			matchField(fields[1], t.Hour(), 0, 23) &&
-			matchField(fields[2], t.Day(), 1, 31) &&
-			matchField(fields[3], int(t.Month()), 1, 12) &&
-			matchField(fields[4], int(t.Weekday()), 0, 6) {
-			// Also verify day-of-month is valid for this month.
-			if t.Day() <= daysInMonth(t.Year(), t.Month()) {
-				return t
-			}
-		}
-		t = t.Add(time.Minute)
-	}
-	return from.Add(24 * time.Hour)
-}
-
-func matchField(pattern string, value int, min, max int) bool {
-	if pattern == "*" {
-		return true
-	}
-	// Handle step values: */N
-	if strings.HasPrefix(pattern, "*/") {
-		step := atoi(strings.TrimPrefix(pattern, "*/"))
-		if step > 0 {
-			return (value-min)%step == 0
-		}
-		return false
-	}
-	// Handle comma-separated lists.
-	for _, part := range strings.Split(pattern, ",") {
-		part = strings.TrimSpace(part)
-		// Handle ranges: N-M
-		if strings.Contains(part, "-") {
-			rangeParts := strings.Split(part, "-")
-			lo, hi := atoi(rangeParts[0]), atoi(rangeParts[1])
-			if value >= lo && value <= hi {
-				return true
-			}
-		} else if atoi(part) == value {
-			return true
-		}
-	}
-	return false
-}
-
-func daysInMonth(year int, month time.Month) int {
-	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
-}
-
-func atoi(s string) int {
-	var n int
-	fmt.Sscanf(strings.TrimSpace(s), "%d", &n)
-	return n
-}
+// NextCronTime, matchField and the cron parser now live in cron.go.
 
 // computeEventChecksum computes an xxHash64 checksum of the event record's data,
 // chained with the previous event's checksum so that deleting an event breaks
