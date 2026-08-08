@@ -180,18 +180,44 @@ def service_images() -> dict[str, set[str]]:
 
 
 def is_floating(ref: str) -> str | None:
-    """Return the reason `ref` is a floating reference, or None if it is pinned."""
+    """Return the reason `ref` is a floating reference, or None if it is pinned.
+
+    A DIGEST IS NOW THE ONLY THING THAT COUNTS AS PINNED, and that is a
+    tightening made on 2026-08-08 after this function missed a real one.
+
+    It used to reject `:latest` and tags ending in `-latest` and accept
+    everything else. So `postgres:16` and `mysql:8.4` both passed it -- and
+    both move. `postgres:16` walked from 16.0 to 16.14 over the life of this
+    repo while every required check that touches a database resolved whatever
+    the registry served that morning. That is the same defect the guard was
+    written for (#377, a `2022-latest` SQL Server tag), one level less obvious:
+    a major-only tag is a moving tag that happens not to say so in its name.
+
+    Enumerating the moving-tag *spellings* was always the wrong shape. There is
+    no rule over tag text that separates `8.4` (moves) from `8.4.11` (does
+    not) without knowing the upstream's versioning policy, and even a full
+    `16.14` is only immutable by the publisher's convention -- Docker Hub tags
+    are mutable by design and can be repointed. The property actually wanted is
+    "this resolves to the same bytes every time", and only a digest gives it.
+
+    Every `services:` image in this repo satisfies this today, so the rule
+    costs nothing to hold. The readable `name:tag@sha256:...` form is
+    encouraged -- Docker resolves by digest and ignores the tag, so the tag is
+    there for the reader -- but the digest is what is checked.
+    """
     if "@sha256:" in ref:
         return None
     last = ref.rsplit("/", 1)[-1]  # so a registry:port prefix is not read as a tag
     if ":" not in last:
         return "no tag at all, which Docker resolves as :latest"
     tag = last.rsplit(":", 1)[1]
-    if tag == "latest":
-        return "tag is :latest"
-    if tag.endswith("-latest"):
-        return f"tag {tag!r} ends in -latest, so it moves"
-    return None
+    return (
+        f"tag {tag!r} is not a digest. Docker Hub tags are mutable, so a tag "
+        f"pins nothing -- `postgres:16` moved from 16.0 to 16.14 under this "
+        f"repo's required checks. Pin it: "
+        f"`docker buildx imagetools inspect <ref>` prints the digest, and "
+        f"`<name>:<version>@sha256:<digest>` keeps it readable"
+    )
 
 
 def guard_required_contexts_resolve(jobs, required, errors) -> None:
