@@ -279,13 +279,50 @@ cluster	417	# same as test-go/engine, and for the same reason; see the note ther
 # skip can only mean the env override in ci.yml stopped taking effect.
 # Measured 2026-08-07 against a live 4-container cluster: 1 pass, 0 skip.
 cluster/exhaustion	0	# measured: 1 pass, 0 skip
-# plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
-# unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
-# starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is
-# recorded rather than zeroed so a known upstream bug does not break the build,
-# the same treatment as the deadcode and test-only-code baselines. Drop it to 0
-# when the skip is removed.
-plugin-harness/multi-db	1
+# plugin-harness/multi-db was 1, not 0, because TestPluginCalls_MultiDB
+# carried an unconditional t.Skip blaming "wazero v1.11.1 nil Sys context
+# panic (see runtime.go)" -- so that job started PostgreSQL, MySQL and SQL
+# Server and then tested nothing at all.
+#
+# That reason was false, and had been false since CGO-on landed: the
+# postgres subtest runs the same WASM Go workflow through wasmtime
+# successfully, so the WASM path -- and wazero -- is never reached at all.
+# Removing the skip and running CGO-on against all three live databases
+# surfaced what it was actually hiding: three unrelated migration-tooling
+# defects, none of them in wazero, in engine execution, or in the WASM path
+# the skip's text pointed at.
+#
+#   - mysql: tests/plugin-harness/testdb.go carried its own copy of a SQL
+#     statement splitter that did not understand MySQL's DELIMITER
+#     directive, and fragmented migrations/mysql/003_procedures.sql's
+#     stored procedure body on the semicolons inside it (Error 1064 near
+#     'DELIMITER //'). Fixed by exporting and reusing migration.SplitSQL,
+#     the splitter migration.Runner already used correctly in production.
+#   - mssql (splitting): the same home-grown splitter also split MSSQL
+#     batches on every semicolon rather than only on GO, breaking
+#     migrations/mssql/003_procedures.sql's stored procedure the same way
+#     ("Incorrect syntax near 'ON'"). Fixed by exporting and reusing
+#     migration.SplitMSSQL.
+#   - mssql (re-run ordering): migrations/mssql/001_schema.sql dropped the
+#     SECURITY POLICY objects that depend on dbo.fn_tenant_filter only near
+#     the bottom of the file, after CREATE OR ALTER FUNCTION had already
+#     tried to alter that function -- so re-applying the file against a
+#     database that already carried the schema failed ("Cannot ALTER
+#     'dbo.fn_tenant_filter' because it is being referenced by object
+#     'TenantFilter_Defs'"). This is what MSSQL's test setup does on every
+#     run, since MSSQL core migrations are not schema-isolated per test the
+#     way PostgreSQL and MySQL are (real isolation would require
+#     schema-parameterising engine/'s MSSQL queries too, which hardcode
+#     "dbo." -- out of scope for a test-harness fix). Fixed by moving the
+#     DROP SECURITY POLICY block before the function it enables re-altering;
+#     a no-op reorder on a fresh install, verified against migration/'s
+#     existing MSSQL test suite.
+#
+# The lesson for the next reader: a skip's stated reason is a claim, not a
+# fact, and it can go stale the moment the surrounding code changes (here,
+# CGO-on landing) without anyone updating the text. Believe the error a
+# removed skip actually produces, not the comment above it.
+plugin-harness/multi-db	0
 # 1 = TestPluginCalls_Wasm_Python only, which needs componentize-py that this
 # job does not install. Go, Rust, AssemblyScript and Java must all run.
 #
