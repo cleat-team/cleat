@@ -1281,10 +1281,20 @@ job now parses every file under `.github/workflows/` and fails on any that does 
 has no `jobs:` key. Falsified against the two files as they stood at `4de8f69`: the guard
 reports both.
 
-**Correction, 2026-08-07.** "and had neither" was right; "fixed in `HEAD`" was right only for
-`ai-pr-review.yml`. Making `release-notes-check.yml` *parse* did not make it a gate — it went
-on doing nothing for three further reasons, none of them syntactic, and it has now been
-deleted rather than repaired a second time. See §1.12a.
+**Correction, 2026-08-07.** "and had neither" was right. "Fixed in `HEAD`" was wrong about
+**both** files, and the heading should be read as describing the parse error only.
+
+Making each file *parse* made it run. It did not make either one do its job, and in both
+cases the reason it did nothing was never the reason anyone fixed. Both are now deleted
+rather than repaired a second time: `release-notes-check.yml` in §1.12a, `ai-pr-review.yml`
+in §1.12b.
+
+The generalisation, which is the part worth carrying forward: **a startup failure hides
+every other defect in the file behind it.** Nobody can find the four reasons a check is
+inert while the check is not running at all — so fixing the parse error feels like the
+repair, and the repo gets a green check and a false belief instead of a red one and a true
+one. When a workflow starts running for the first time, that is the moment to ask what it
+actually does, not the moment to close the item.
 
 ---
 
@@ -1319,6 +1329,47 @@ honestly unenforced rather than appearing to be a gate. Enforcing it would mean 
 something that exists, the natural candidate being the branch prefix that
 `Validate branch name` already requires; that is a policy change, not a repair, and is not
 made here.
+
+---
+
+### 1.12b The AI PR review posted only failure notices — deleted 2026-08-07
+
+Removed at the owner's request: no GitHub-side AI review. Recorded here because of what
+looking at it turned up, which is §1.12a's shape a second time.
+
+`ai-pr-review.yml` parsed and ran after §1.12. Its last 29 completed runs all report
+`success`, and every one of them posted the same comment:
+
+    ## AI Review
+    AI review unavailable (API error). A human reviewer must review this PR.
+
+    gh run list --workflow=ai-pr-review.yml --limit 30 \
+      --json conclusion,status --jq '[.[] | select(.status=="completed")] |
+      group_by(.conclusion) | map({c: .[0].conclusion, n: length})'
+
+Two independent reasons it reported success while doing nothing: `continue-on-error: true`
+at job level, so failure was not an available outcome; and the script catches a non-ok API
+response and substitutes that fallback text, so the step exits 0 even without it.
+
+The API key was unset or invalid. **Supplying one would not have made it work**, and that is
+the finding:
+
+    git diff origin/main...HEAD > /tmp/pr.diff
+
+The base branch is `develop`. That command diffs from `merge-base(main, HEAD)`, so for any
+PR into develop it emits the whole accumulated develop-to-main delta alongside the change
+under review — 370 commits, 1089 files, 241502 lines, measured 2026-08-07:
+
+    git rev-list --count origin/main..origin/develop
+    git diff origin/main...origin/develop | wc -l
+
+The script then truncates to the first 50000 **characters**. A working key would have
+produced a confident review of the first few files of an unrelated diff, on every PR — worse
+than the failure notice, because it would look like a review. The three checks a reader
+would apply to judge it (does it run? does it report success? did it post something?) all
+answered yes.
+
+`/code-review ultra` remains available and is user-triggered.
 
 ---
 
