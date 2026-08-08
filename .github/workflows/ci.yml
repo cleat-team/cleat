@@ -1105,11 +1105,33 @@ jobs:
       # IMPROVEMENT-PLAN 2.5, and the end-to-end regression test for 2.28.
       # Runs before the integration tests because it is the only step in this
       # job that puts real work through the running containers -- everything
-      # else proves the cluster comes up, not that it executes anything. It
-      # talks to the cluster's own database (the default in the test), not the
-      # cleat_tests database the step below uses.
+      # else proves the cluster comes up, not that it executes anything.
+      #
+      # CLEAT_TEST_DB, overriding the job-wide value, for the same reason the
+      # "Cluster suite" step below overrides it: clusterDB() in
+      # exhaustion_test.go now reads CLEAT_TEST_POSTGRES / CLEAT_TEST_DB with
+      # the same precedence as engine/testutil.TestDB, so without this
+      # override it would inherit the job-wide cleat_tests database -- a
+      # database with no worker consuming its queue, against which the test
+      # would just time out. It has to point at the database the cluster's
+      # own workers actually serve.
+      #
+      # -json, teed to its own report: this suite gets its own skip-budget
+      # check below, separate from the ./engine/... one. Because a DSN is
+      # always configured here, clusterDB() can only Fatal on an unreachable
+      # database, never skip -- so the budget is 0, and a skip appearing
+      # under it means the override above stopped taking effect.
       - name: Resource exhaustion — runaway workflow is terminated
-        run: go test -count=1 -timeout=300s ./tests/exhaustion/...
+        shell: bash
+        env:
+          CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout=300s -json ./tests/exhaustion/... 2>&1 | tee exhaustion-report.json
+
+      - name: Skip budget — resource exhaustion
+        if: always()
+        run: scripts/check-skip-budget.sh cluster/exhaustion exhaustion-report.json
 
       # After the exhaustion step, not before: TestKillPostgresAndRestart stops
       # and restarts the postgres container, and TestFullClusterRestart releases

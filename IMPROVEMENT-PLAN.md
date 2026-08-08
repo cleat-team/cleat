@@ -6053,10 +6053,14 @@ Either wire it into a job or say in the tree that examples are not tested.
 
 Two things that are **not** defects and are recorded so the next sweep does not re-derive them:
 
-- `tests/exhaustion` fails locally with `cluster database unreachable … this test requires
-  docker-compose.cluster.yml to be up`. That is the intended behaviour (§2.12: a configured
-  resource that is missing must fail, not skip); it runs in the `cluster` job, which provides
-  one.
+- `tests/exhaustion` used to fail hard locally with `cluster database unreachable … this test
+  requires docker-compose.cluster.yml to be up`, even with nothing configured — that was
+  tiers.yaml's blocker on gating it (fixed 2026-08-07, see tier2.gated_by). `clusterDB()` now
+  applies §2.12's distinction itself: `CLEAT_TEST_POSTGRES`/`CLEAT_TEST_DB` unset skips (nobody
+  asked), set-but-unreachable still fails naming the redacted DSN. It runs in the `cluster` job
+  (ci.yml's "Cluster Integration Tests"), which sets `CLEAT_TEST_DB` explicitly for this step,
+  so a skip there can only mean that override stopped taking effect — see
+  `scripts/skip-budget.txt`'s `cluster/exhaustion` entry (budget 0).
 - `tests/plugin-harness` fails when the repo is entered through `/localssd/rcownie/cleat`,
   the symlink `PARALLEL-WORKSTREAMS.md` tells all three streams to use:
 
