@@ -292,6 +292,14 @@ plugin-harness/multi-db	1
 # language was indistinguishable from a passing one -- which is how Go sat
 # unconditionally skipped and Rust skipped for want of a toolchain, in a job
 # named WASM Integration. Measured on the runner after both were fixed.
+#
+# wasm_plugin_test.go used to carry four t.Skipf sites (Rust/AS/Java) whose
+# text called a crash a "compatibility issue" -- this budget of 0 was the
+# only thing making one of those skips fail the build. They are now
+# t.Fatalf, so a wasmtime/TeaVM crash fails the test directly and this
+# budget is no longer load-bearing for that particular failure mode. Kept at
+# 0 regardless: it still catches an unconditional skip of a whole language,
+# same as the Go/Rust history above.
 plugin-harness/wasm	0
 # 0: the Cross-Language E2E workflow installs Rust and the wasm32-wasip1 target,
 # so every test in tests/cross-language has what it needs. Measured on darwin

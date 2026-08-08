@@ -414,7 +414,7 @@ func TestPluginCalls_Wasm_Rust(t *testing.T) {
 	result, history, err := wenv.Execute(t, wasmBytes, "call_all_plugins", `{}`)
 	if err != nil {
 		if strings.Contains(err.Error(), "wasmtime panic") {
-			t.Skipf("wasmtime-go compatibility issue with this WASM module: %v", err)
+			t.Fatalf("wasmtime-go crashed on this WASM module: %v", err)
 		}
 		t.Fatalf("workflow execution failed: %v", err)
 	}
@@ -498,7 +498,7 @@ func TestPluginCalls_Wasm_AS(t *testing.T) {
 	result, history, err := wenv.Execute(t, wasmBytes, "call_all_plugins", `{}`)
 	if err != nil {
 		if strings.Contains(err.Error(), "wasm trap") {
-			t.Skip("AS WASM runtime trap — likely AS/transform version incompatibility, skipping")
+			t.Fatalf("AS WASM module trapped at runtime: %v", err)
 		}
 		t.Fatalf("workflow execution failed: %v", err)
 	}
@@ -649,15 +649,15 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 	result, history, err := wenv.Execute(t, wasmBytes, "CallAllPlugins", `{}`)
 	if err != nil {
 		if strings.Contains(err.Error(), "wasmtime panic") || strings.Contains(err.Error(), "wasm trap") {
-			t.Skipf("wasmtime-go compatibility issue with Java/TeaVM modules: %v", err)
+			t.Fatalf("wasmtime-go crashed on this Java/TeaVM module: %v", err)
 		}
 		t.Fatalf("workflow execution failed: %v", err)
 	}
-	// Clean trailing bytes and skip crash defaults.
+	// Clean trailing bytes and detect crash defaults.
 	result = strings.TrimRight(result, "\x00")
 	result = strings.TrimSpace(result)
 	if result == "ok" || result == `"ok"` || strings.Contains(result, "wasmtime panic") {
-		t.Skipf("Java module crashed (wasmtime-go compat): raw: %.200s", result)
+		t.Fatalf("Java/TeaVM module crashed: execution returned the crash-default placeholder result instead of plugin output, raw: %.200s", result)
 	}
 	// TeaVM encodes the result as a JSON-encoded string matching the
 	// Go/Python/AS convention. Unwrap the outer JSON string, then
