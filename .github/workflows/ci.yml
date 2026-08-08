@@ -716,6 +716,87 @@ jobs:
         run: npm test
 
   # -------------------------------------------------------------------------
+  # Web Dashboard
+  #
+  # NOTHING RAN THIS BEFORE 2026-08-08. `grep -ln web .github/workflows/*.yml`
+  # matched exactly one file, release.yml, and its step is a no-op -- it does
+  # `cd cmd/cleat-worker/web && if [ -f package.json ]`, and that directory
+  # contains only a prebuilt `dist/`, so it has always taken the else branch.
+  # So the Svelte admin dashboard shipped with no build, no test and no type
+  # check of any kind, while `web/` carried 4 test files and 79 real tests that
+  # nobody ran.
+  #
+  # Two defects were sitting in it, both found the moment anything looked:
+  #
+  #   * src/App.svelte referenced `{id1}`/`{id2}` in markup. Svelte parses
+  #     `{...}` as a live expression, so that was not placeholder text -- it
+  #     named two variables that do not exist. svelte-check: 2 errors.
+  #   * vite.config.ts built into `../cmd/durable-worker/web/dist`, a
+  #     directory that does not exist in this repo. The real one is
+  #     cmd/cleat-worker. `npm run build` created the wrong tree and left the
+  #     shipped one untouched.
+  #
+  # Both fixed in the same PR as this job. Measured cost of the whole job:
+  # under 15s (npm ci ~7s cold, check ~1.5s, test ~1s, build ~0.4s).
+  #
+  # WHAT THIS JOB DOES NOT DO, STATED SO IT IS NOT MISTAKEN FOR MORE:
+  #
+  #   * It builds to a THROWAWAY directory, not to cmd/cleat-worker/web/dist.
+  #     That bundle is committed and has not been regenerated since 2026-06-06
+  #     (fbaf7506, the same commit that broke outDir). Whether CI should
+  #     rebuild and diff it is a release-process decision, not a lint one, and
+  #     release.yml already has the cleanliness check that would enforce it
+  #     once its build step is made real. Left alone deliberately.
+  #   * 5 of 25 source files have any test coverage (cost.ts, api.ts,
+  #     StatusBadge, SummaryCard). This job catches build breaks, type errors
+  #     and regressions in those four. It would pass through a runtime
+  #     regression in Dashboard, WorkflowDetail, ScheduleManagement or
+  #     WorkflowCompare -- there is no browser or e2e test.
+  #   * svelte-check reports 13 a11y warnings today. `npm run check` fails on
+  #     errors, not warnings, so those do not gate. They are real and unfixed.
+  # -------------------------------------------------------------------------
+  test-web:
+    name: Web Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      # Before build and test, because it is the one that found a real defect
+      # and its failures are the most specific.
+      - name: Type check (svelte-check)
+        working-directory: web
+        run: npm run check
+
+      - name: Test
+        working-directory: web
+        run: npm test
+
+      # Into RUNNER_TEMP rather than the configured outDir: this step asks
+      # "does the dashboard build", and answering it must not entangle the
+      # committed cmd/cleat-worker/web/dist bundle. See the note above.
+      - name: Build
+        working-directory: web
+        run: npx vite build --outDir "$RUNNER_TEMP/web-dist" --emptyOutDir
+
+      # A build that emits nothing exits 0. Cheapest possible guard against
+      # this job going green on an empty output.
+      - name: Build produced something
+        run: |
+          set -euo pipefail
+          test -f "$RUNNER_TEMP/web-dist/index.html" \
+            || { echo "::error title=Web Dashboard::build produced no index.html" >&2; exit 1; }
+          echo "built: $(find "$RUNNER_TEMP/web-dist" -type f | wc -l) files"
+
+  # -------------------------------------------------------------------------
   # Test Rust
   # -------------------------------------------------------------------------
   test-rust:
