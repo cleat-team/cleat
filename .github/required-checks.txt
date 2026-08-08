@@ -1,0 +1,105 @@
+# The status checks required to merge into `develop`, as of 2026-08-07.
+#
+# WHY THIS FILE EXISTS
+#
+# A required status context is a string. GitHub matches it against the *name* a
+# check run reports, and nothing connects the two. Two things can go wrong and
+# neither announces itself:
+#
+#   * a context names a job that no longer exists -> every PR waits forever on
+#     a check that will never report, and the only symptom is "Expected" next
+#     to a name nobody recognises;
+#   * a job is renamed out from under its context -> the job still runs, still
+#     goes green, and stops gating anything at all. Silent. This is the shape
+#     of six of the seven inert checks found on 2026-08-06/07.
+#
+# `scripts/check-workflow-guards.py` reads this file and fails the `Lint` job
+# if any context here does not resolve to a job that actually exists across
+# `.github/workflows/`, matrix jobs expanded.
+#
+# WHAT THIS FILE DOES NOT DO, STATED PLAINLY
+#
+# It does not verify itself against GitHub. Reading branch protection needs an
+# admin token, and the `GITHUB_TOKEN` available to a workflow is not one -- so
+# this list can drift from the live setting and `Lint` would not notice. What
+# it buys is that the intended set is *in git*, reviewable in a diff, and that
+# the far more common failure (a context pointing at a job that is gone) is
+# caught. Do not read a green `Lint` as proof this matches the API.
+#
+# Re-derive the live list, with an admin token:
+#
+#   gh api repos/cleat-team/cleat/branches/develop/protection/required_status_checks \
+#     --jq '.contexts[]' | sort
+#
+# and compare against this file:
+#
+#   scripts/check-workflow-guards.py --verify-against-api
+#
+# When you add or remove a required check, change it in both places in the same
+# PR. The API is the one that actually gates; this file is the one that is
+# reviewable.
+#
+# Contexts are job *display names* (`name:`), not job ids, and not workflow
+# names. Blank lines and #-comments are ignored.
+
+AssemblyScript Tests
+Blobstore S3 Round-Trip
+Build
+Cluster Integration Tests
+Contributor License Agreement
+Cross-Language WASM E2E
+Developer Certificate of Origin
+Fuzz Tests
+Java Tests
+Layer 1 — SDK (cleattest)
+Layer 2 — WASM Integration
+Layer 3 — Multi-DB
+Lint
+lint-go
+Test Go (commands) on 1.26
+Test Go (core) on 1.26
+Test Go (engine) on 1.26
+Test Go (integrity) on 1.26
+Test Go (internal) on 1.26
+Test Go (manifests) on 1.26
+Test Go (plugins) on 1.26
+Test Go (scale) on 1.26
+Test Go (support) on 1.26
+Test Go (upgrade) on 1.26
+Test Go (wasm) on 1.26
+Test MySQL
+Test Rust
+Test SQL Server
+Tier 1 Gate
+Tier 2 Gate
+Validate branch name
+Vulnerability Check
+
+# NOT required, and deliberately recorded here so the absence is a decision
+# rather than an oversight:
+#
+#   Test Go (crash) on 1.26   -- the twelfth arm of the test-go matrix. The
+#                                crash suite is a tier-1 package, so `Tier 1
+#                                Gate` (required) already runs it; the per-
+#                                package job would only change which name the
+#                                failure carries. Same reasoning that applied
+#                                to `Test MySQL`/`Test SQL Server` before they
+#                                were made required on 2026-08-07.
+#   Coverage                  -- the only job in the repo with job-level
+#                                `continue-on-error: true`, which is exactly
+#                                why it must not be required. Guard 2 below
+#                                enforces that pairing in both directions.
+#   Lint (advisory)           -- Ruff and ShellCheck. They ran inside the
+#                                required `Lint` job under
+#                                `continue-on-error: true`, so neither could
+#                                fail a build. Measured 2026-08-07 by running
+#                                them: ruff reports 260 errors, shellcheck 7.
+#                                Moved to their own job rather than either
+#                                waived-in-place (invisible) or made blocking
+#                                (267 findings blocking every PR). This job
+#                                waives nothing -- it goes red -- it just does
+#                                not gate. Promote each back into `Lint` as
+#                                its backlog reaches zero; ShellCheck's 7 are
+#                                the near-term candidate.
+#   Test Python 3.10/3.11/3.12
+#   Benchmarks, Docs, Examples, and the release/soak/stale/ecosystem jobs.
