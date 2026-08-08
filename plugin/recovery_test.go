@@ -204,9 +204,17 @@ func TestPanicError_Unwrap(t *testing.T) {
 	}
 }
 
-func TestPanicError_ImplementsError(t *testing.T) {
-	var err error = &PanicError{Plugin: "p", Value: "x"}
-	if err == nil {
-		t.Fatal("PanicError should implement error interface")
-	}
-}
+// PanicError must satisfy error.
+//
+// This is a compile-time assertion rather than a test because the test could
+// not fail. It read:
+//
+//	var err error = &PanicError{Plugin: "p", Value: "x"}
+//	if err == nil { t.Fatal("PanicError should implement error interface") }
+//
+// and staticcheck's SA4023 is right that `err == nil` is never true there: an
+// interface holding a non-nil concrete pointer is not nil. The only part of it
+// doing any work was the assignment on the first line, which is checked by the
+// compiler -- so that is where the check belongs. Found once _test.go files
+// stopped being excluded from golangci-lint.
+var _ error = (*PanicError)(nil)

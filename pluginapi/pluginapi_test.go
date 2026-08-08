@@ -258,6 +258,14 @@ func TestConstants_ResolveToTheClaimedPluginConstant(t *testing.T) {
 		{"DatabaseAccessReadWrite", pluginapi.DatabaseAccessReadWrite, plugin.DatabaseAccessReadWrite},
 	}
 	for _, c := range cases {
+		// The conversion is a no-op today and unconvert says so, because
+		// pluginapi.DatabaseAccess is an alias (`= plugin.DatabaseAccess`).
+		// Keeping it is the point: if the alias is ever replaced by a defined
+		// type -- which is the change this test exists to survive -- the
+		// comparison still compiles and still checks the value. Without it the
+		// package would simply stop building, which is a worse signal than a
+		// test failure.
+		//nolint:unconvert // deliberate; see above
 		if plugin.DatabaseAccess(c.got) != c.want {
 			t.Errorf("pluginapi.%s = %q, want plugin.%s = %q", c.name, c.got, c.name, c.want)
 		}

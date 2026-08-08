@@ -1042,6 +1042,12 @@ func TestMySQLIntegration_CreateAndResolvePromise(t *testing.T) {
 	if result != `{"resolved":true}` {
 		t.Errorf("result = %q, want %q", result, `{"resolved":true}`)
 	}
+	// errMsg was assigned here and never read, which ineffassign found once
+	// _test.go files stopped being excluded. The pending block above checks all
+	// three returns; this one checked two. A resolved promise carries no error.
+	if errMsg != "" {
+		t.Errorf("errMsg (after resolve) = %q, want empty", errMsg)
+	}
 }
 
 // 22.

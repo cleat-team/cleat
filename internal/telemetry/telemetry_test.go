@@ -32,7 +32,7 @@ func TestWorkflowSpan(t *testing.T) {
 	}
 	defer shutdown(ctx)
 
-	ctx, span := WorkflowSpan(ctx, "wf-123", "my-workflow", 1, "tenant-1", "trace-abc")
+	_, span := WorkflowSpan(ctx, "wf-123", "my-workflow", 1, "tenant-1", "trace-abc")
 	if span == nil {
 		t.Fatal("expected non-nil span")
 	}
@@ -50,7 +50,7 @@ func TestEventSpanWithoutServiceOrOperation(t *testing.T) {
 	shutdown, _ := InitTracing(ctx, "", "test-service")
 	defer shutdown(ctx)
 
-	ctx, span := EventSpan(ctx, 1, "http_request", "", "")
+	_, span := EventSpan(ctx, 1, "http_request", "", "")
 	if span == nil {
 		t.Fatal("expected non-nil span")
 	}
@@ -62,7 +62,7 @@ func TestEventSpanWithServiceAndOperation(t *testing.T) {
 	shutdown, _ := InitTracing(ctx, "", "test-service")
 	defer shutdown(ctx)
 
-	ctx, span := EventSpan(ctx, 2, "db_query", "postgres", "SELECT")
+	_, span := EventSpan(ctx, 2, "db_query", "postgres", "SELECT")
 	if span == nil {
 		t.Fatal("expected non-nil span")
 	}
@@ -74,7 +74,7 @@ func TestEventSpanWithServiceOnly(t *testing.T) {
 	shutdown, _ := InitTracing(ctx, "", "test-service")
 	defer shutdown(ctx)
 
-	ctx, span := EventSpan(ctx, 0, "start", "my-service", "")
+	_, span := EventSpan(ctx, 0, "start", "my-service", "")
 	if span == nil {
 		t.Fatal("expected non-nil span")
 	}
@@ -86,7 +86,7 @@ func TestEventSpanWithOperationOnly(t *testing.T) {
 	shutdown, _ := InitTracing(ctx, "", "test-service")
 	defer shutdown(ctx)
 
-	ctx, span := EventSpan(ctx, 5, "custom", "", "do-thing")
+	_, span := EventSpan(ctx, 5, "custom", "", "do-thing")
 	if span == nil {
 		t.Fatal("expected non-nil span")
 	}

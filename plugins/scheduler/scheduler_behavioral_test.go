@@ -507,7 +507,6 @@ func (c *fakeConn) queryDueSchedules(args []driver.NamedValue, corrupt bool) (dr
 			nr = *s.nextRunAt
 		}
 		if corrupt && first {
-			first = false
 			// Return a row with a wrong type for next_run_at (should be time.Time)
 			return &fakeRows{
 				columns: []string{"id", "tenant_id", "name", "cron", "workflow_name", "input", "next_run_at"},

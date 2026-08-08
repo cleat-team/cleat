@@ -1163,8 +1163,7 @@ func TestReaperLoop_CallsReap(t *testing.T) {
 	// we verify the store method signature and default timeout.
 	_, _ = w.store.ReapStaleInstances(context.Background(), 30*time.Second)
 	if !reapCalled {
-		// The direct call is the primary assertion; this just confirms the
-		// mock was properly wired.
+		t.Fatal("store.ReapStaleInstances did not reach the mock")
 	}
 }
 
@@ -1191,7 +1190,6 @@ func TestReaperLoop_StopsOnCancel(t *testing.T) {
 
 func TestReaperLoop_HandlesResults(t *testing.T) {
 	ms := &mockStore{}
-	reapedCount := -1
 	ms.reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) {
 		return 3, nil
 	}

@@ -839,7 +839,7 @@ func TestCompareValues(t *testing.T) {
 		}
 
 		ce.op = ">"
-		result, err = evalComparison(ce, data)
+		_, err = evalComparison(ce, data)
 		if err == nil {
 			t.Error("expected error for > on bool")
 		}
