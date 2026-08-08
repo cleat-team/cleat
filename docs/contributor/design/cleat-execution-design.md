@@ -926,7 +926,13 @@ The design is strongest for Segment A, viable for Segment B, and a hard sell for
 
 **What the Phase 1 demo does NOT demonstrate:**
 
-The `wasm-demo/` directory contains proof-of-concept code that validates the core replay/checkpoint/recovery mechanism. It is intentionally a simulation — the infrastructure integration points are stubbed or simplified. Specifically, the demo does NOT demonstrate:
+> **2026-08-07:** The `wasm-demo/` directory described below has been deleted — it never
+> compiled, and every mechanism it sketched now has a real, tested implementation in
+> `engine/` (e.g. `engine/versioned_loader.go`, `engine/store_versioning.go`). The
+> paragraphs below are kept as a historical record of what Phase 1 covered, not as a
+> pointer to code that still exists.
+
+The `wasm-demo/` directory contained proof-of-concept code that validated the core replay/checkpoint/recovery mechanism. It was intentionally a simulation — the infrastructure integration points were stubbed or simplified. Specifically, the demo did NOT demonstrate:
 
 - **Actual WASM compilation or wazero runtime integration.** The workflow function is native Go, not compiled to WASM. The `DurableCall` boundary behaves identically in both modes, but the sandbox, import resolution, and module lifecycle are absent.
 - **Multi-worker coordination with a real database.** The worker uses an in-memory `simulatedDB` struct, not PostgreSQL. There is no real `SELECT ... FOR UPDATE SKIP LOCKED`, no connection pooling, and no transaction conflict handling.

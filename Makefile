@@ -250,7 +250,6 @@ build: build-go build-python build-java build-as
 .PHONY: build-go
 build-go:
 	go build ./cmd/...
-	cd wasm-demo && go build ./...
 
 .PHONY: build-python
 build-python:

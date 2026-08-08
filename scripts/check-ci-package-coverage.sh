@@ -21,14 +21,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CI_FILE="${1:-$REPO_ROOT/.github/workflows/ci.yml}"
 
 # Directories that legitimately need no entry in the test-go matrix.
-#   examples, testdata, wasm-demo — fixtures and demos, not product code
+#   examples, testdata           — fixtures and demos, not product code
 #   benchmarks, tests            — driven by their own dedicated CI jobs
 #   packages                     — AssemblyScript SDK. NOTE: its Go harness
 #     (packages/cleat-as/test_runner/test_runner.go) is NOT run by any CI job;
 #     the `assemblyscript` job runs `npm test`, which invokes as-pect only.
 #     Exempt here because this guard checks matrix drift, not overall coverage.
 #     Wiring that harness into CI is tracked in IMPROVEMENT-PLAN.md Phase 2.
-EXEMPT="examples testdata wasm-demo benchmarks tests packages"
+EXEMPT="examples testdata benchmarks tests packages"
 
 cd "$REPO_ROOT"
 
