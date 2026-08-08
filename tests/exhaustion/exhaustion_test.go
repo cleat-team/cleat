@@ -69,6 +69,16 @@ func clusterDB(t *testing.T) *sql.DB {
 	// anything) is "nobody asked".
 	if err := db.Ping(); err != nil {
 		if !configured {
+			// scripts/skip-baseline.txt records this site (tests/exhaustion,
+			// clusterDB, 1). It is legitimate under scripts/check-skips.sh's
+			// own test: nobody configured a DSN, which is the one thing a
+			// skip is allowed to mean, and the sibling arm below is a
+			// t.Fatalf rather than a skip. It is also inert in the one job
+			// that runs this suite: ci.yml's "Cluster Integration Tests" sets
+			// CLEAT_TEST_DB explicitly for this step, so `configured` is
+			// always true there and this branch can never fire -- which is
+			// why scripts/skip-budget.txt gives "cluster/exhaustion" a
+			// budget of 0.
 			t.Skipf("no cluster database configured (CLEAT_TEST_POSTGRES / CLEAT_TEST_DB "+
 				"not set); default DSN %s is unreachable: %v -- this suite needs "+
 				"docker-compose.cluster.yml up, so it skips rather than failing when "+
