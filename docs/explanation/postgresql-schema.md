@@ -6,7 +6,7 @@ roles: blob store, state store, work queue, and timer service.
 ## Schema File
 
 The canonical schema is `migrations/postgres/`. Apply every file, in
-lexical order, against a PostgreSQL 14+ database before deploying workflows:
+lexical order, against a PostgreSQL 16+ database before deploying workflows:
 
 ```bash
 for f in migrations/postgres/*.sql; do psql -U postgres -d cleat -f "$f"; done
@@ -325,7 +325,7 @@ implementation details.
 
 ## Cross-Database Type Mappings
 
-The project now supports three database backends: PostgreSQL 14+, MySQL 8.0+, and
+The project now supports three database backends: PostgreSQL 16+, MySQL 8.0+, and
 SQL Server 2017+. This section documents how types and SQL patterns map between
 them.
 
@@ -386,7 +386,7 @@ them.
 
 ### Index Differences
 
-| Feature | PostgreSQL 14+ | MySQL 8.0+ | SQL Server 2017+ |
+| Feature | PostgreSQL 16+ | MySQL 8.0+ | SQL Server 2017+ |
 |---|---|---|---|
 | Partial indexes (WHERE clause) | Yes | **No** — partial indexes are omitted; application code adds the filter to queries | Yes — filtered indexes with deterministic predicates only |
 | Covering indexes (INCLUDE) | Yes (11+) | **No** — columns must be in the index key | Yes |
