@@ -292,7 +292,7 @@ NEWFAIL=""
 if [ -n "$FAILED_LIST" ]; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    if printf '%s\n' "$KNOWN" | grep -qxF "$f"; then
+    if grep -qxF "$f" <<< "$KNOWN"; then
       note "known failure (allowed): $f"
     else
       NEWFAIL="$NEWFAIL$f"$'\n'
@@ -310,16 +310,51 @@ if [ -n "$NEWFAIL" ]; then
 fi
 
 # 4c. Every known failure must still fail. This is what makes "can only shrink" real.
+#
+# THE MEMBERSHIP TESTS BELOW USE A HERE-STRING, NOT `printf ... | grep -q`, AND THAT
+# IS NOT A STYLE CHOICE.
+#
+# They read `if printf '%s\n' "$PASSED_LIST" | grep -qxF "$k"` until 2026-08-08, and
+# that construct reports the OPPOSITE of the truth under this script's own `set -o
+# pipefail` (line 47), whenever the match is near the front of a large list:
+#
+#   * printf writes $PASSED_LIST -- 74 KB, 1565 lines -- in one write() into the pipe;
+#   * grep -q finds the match early and closes its read end while most of it is still
+#     unwritten;
+#   * printf dies of SIGPIPE (141);
+#   * pipefail takes the pipeline's status from the non-zero member, so a SUCCESSFUL
+#     match reports failure.
+#
+# So a known failure that had been FIXED fell through to the `else` and was reported as
+# "did not run at all -- renamed, deleted, or filtered out", sending the reader after a
+# filtering bug that does not exist. Observed on the six examples/dag entries the moment
+# they were fixed: they sort to lines 14-26 of 1565, which is exactly the shape that
+# triggers it.
+#
+# Three things make this hard to catch, all of them worth knowing before "simplifying"
+# this back:
+#
+#   * It is data-dependent, not flaky. A short list does not trigger it (printf finishes
+#     first) and a match on the LAST line does not either (grep must read everything).
+#     Only "large list, early match" does -- and it is then 100% reproducible.
+#   * zsh does not reproduce it. An interactive check pasted into a zsh prompt reports
+#     `pipestatus=(0 0)` and looks fine; the script runs under bash, where it is (141 0).
+#   * The gate still FAILED, correctly -- only its explanation was wrong. Which is why it
+#     survived: nobody re-reads the reason a red build is red.
+#
+# A here-string has no producer process, so there is nothing for pipefail to misread.
+# Line 295 has the identical shape and got the same fix; $KNOWN is small enough today
+# that it was not yet triggering, which is not a reason to leave it.
 PASSED_LIST=$(read_field passed)
 SKIPPED_LIST=$(read_field skipped)
 FIXED=""
 if [ -n "$KNOWN" ]; then
   while IFS= read -r k; do
     [ -n "$k" ] || continue
-    if printf '%s\n' "$PASSED_LIST" | grep -qxF "$k"; then
+    if grep -qxF "$k" <<< "$PASSED_LIST"; then
       FIXED="$FIXED$k (now passes)"$'\n'
-    elif ! printf '%s\n' "$FAILED_LIST" | grep -qxF "$k"; then
-      if printf '%s\n' "$SKIPPED_LIST" | grep -qxF "$k"; then
+    elif ! grep -qxF "$k" <<< "$FAILED_LIST"; then
+      if grep -qxF "$k" <<< "$SKIPPED_LIST"; then
         FIXED="$FIXED$k (now skips -- a skip is not a failure, so this entry is wrong)"$'\n'
       else
         FIXED="$FIXED$k (did not run at all -- renamed, deleted, or filtered out)"$'\n'
