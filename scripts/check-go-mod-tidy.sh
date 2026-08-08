@@ -2,13 +2,12 @@
 #
 # Guard against cross-module go.mod drift.
 #
-# This repo has several Go modules, four of which are wired together with
+# This repo has several Go modules, three of which are wired together with
 # `replace` directives:
 #
 #     go.mod                 replace github.com/cleat-team/cleat/cleat => ./cleat
 #     cleat/go.mod           replace github.com/cleat-team/cleat => ../
 #     cleat/backendkit/go.mod replace github.com/cleat-team/cleat => ../..
-#     wasm-demo/go.mod       replace ... => ../ and ../cleat
 #
 # Because of those replaces, changing a dependency in the root module can
 # leave the others stale. `go build`/`go vet` at the root will not notice --
@@ -71,3 +70,44 @@ if [ "$failed" -ne 0 ]; then
 fi
 
 echo "OK: all $checked Go modules are tidy."
+
+# --- Cross-check: every module on disk is declared in tiers.yaml, or exempt --------------
+#
+# wasm-demo/ (module cleat-wasm-demo) went undetected for over three months: `go build
+# ./...` at the root never reached it, because it was its own module, and tiers.yaml's
+# `modules:` list -- which exists precisely so a separate module gets built -- never
+# named it either. Nothing was ever going to catch that but a check like this one.
+#
+# The root module ("."), covered by tier1.packages rather than a `modules:` entry, and
+# the benchmarks/comparative/** pins above, are the only modules allowed to be absent
+# from tier1.modules / tier2.modules below.
+TIERS="$REPO_ROOT/tiers.yaml"
+declared="$( {
+  awk '/^tier1:/{t=1} t&&/^  modules:/{p=1;next} p&&/^    - dir: /{sub(/^    - dir: /,"");print;next} p&&/^      /{next} p&&/^ *#/{next} p&&/^$/{next} p{exit}' "$TIERS"
+  awk '/^tier2:/{t=1} t&&/^  modules:/{p=1;next} p&&/^    - dir: /{sub(/^    - dir: /,"");print;next} p&&/^      /{next} p&&/^ *#/{next} p&&/^$/{next} p{exit}' "$TIERS"
+} | sort -u)"
+
+undeclared=0
+for dir in $mods; do
+  [ "$dir" = "." ] && continue
+  case "$dir/" in "$EXEMPT_PREFIX"*) continue ;; esac
+
+  found=0
+  for d in $declared; do
+    [ "$d" = "$dir" ] && found=1 && break
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "ERROR: $dir/go.mod exists but is not named in tiers.yaml's tier1.modules or" >&2
+    echo "  tier2.modules, and is not under $EXEMPT_PREFIX. tiers.yaml's modules: list" >&2
+    echo "  exists precisely so a separate Go module gets built -- see the note above" >&2
+    echo "  tier1.modules in tiers.yaml for the wasm-demo/ precedent. Either add $dir" >&2
+    echo "  to a modules: list, or delete it, or record it as excluded with a reason." >&2
+    undeclared=1
+  fi
+done
+
+if [ "$undeclared" -ne 0 ]; then
+  exit 1
+fi
+
+echo "OK: every Go module on disk is declared in tiers.yaml or exempt."

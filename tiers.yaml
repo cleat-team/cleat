@@ -538,14 +538,15 @@ tier2:
   # Separate Go modules, tested from inside their own directory -- `go test ./cleat/...`
   # from the root fails with "main module does not contain package".
   #
-  # Deliberately NOT here:
-  #   wasm-demo   Measured 2026-08-07: it does not compile. WorkflowInstance, Worker and
-  #               main are each declared twice in package `worker`, across
-  #               worker/versioned_loader.go and worker/failover_worker.go, both last
-  #               touched by c26c332 (2026-08-02). It has no _test.go files anywhere, and
-  #               no workflow references it -- scripts/ci-check.sh builds it and nothing
-  #               invokes that script. Listing it would make the gate red on a broken
-  #               build with no tests behind it. It needs a fix or a deletion, not a tier.
+  # wasm-demo/ (module cleat-wasm-demo) was here as a documented exclusion until
+  # 2026-08-07: it had never compiled, not even in the repo's initial commit --
+  # WorkflowInstance, Worker and main were each declared twice in package `worker`,
+  # across worker/versioned_loader.go and worker/failover_worker.go. Both files were
+  # pre-implementation design sketches (see prompts/versioning_plan.md, 2026-05-07);
+  # the real thing they sketched has since been built for real, with tests, as
+  # engine/versioned_loader.go and engine/store_versioning.go. Deleted rather than
+  # fixed or parked -- nothing referenced it, and fixing it would mean maintaining a
+  # second, worse, untested copy of code that already exists for real.
   modules:
     - dir: cleat/backendkit
       why: >-

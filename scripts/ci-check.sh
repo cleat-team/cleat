@@ -152,9 +152,6 @@ section "BUILD"
 run_step "go build ./cmd/..." \
     go build ./cmd/...
 
-run_step "go build wasm-demo" \
-    bash -c "cd '$REPO_ROOT/wasm-demo' && go build ./..."
-
 run_step "cargo build (durable-macro)" \
     bash -c "cd '$REPO_ROOT/crates/durable-macro' && cargo build"
 
