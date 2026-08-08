@@ -6033,7 +6033,40 @@ its recorded history and continues, so it needs the replay semantics §1.4 phase
 about — not a fourth `UPDATE`. Taking it before those is how the write-ahead intent work got
 built before the observation that would have judged it.
 
-### 3.14 `examples/dag` is red on `develop`, and no CI job runs it — 🔴 **OPEN**
+### 3.14 `examples/dag` is red on `develop`, and no CI job runs it — ✅ **FIXED**
+
+**Two of the three claims in that heading were wrong, and the third was half wrong.**
+
+It was not the example. `cleat/cleattest` never wired `AwaitAnyChild` into
+`HostCallsOptions`, so the hook was nil for every `TestEnv` and
+`cleat/runtime_children.go` returned its "the HostCalls runtime was not initialized"
+message — which is about workflow context and says nothing about the harness. The
+diagnosis below took that message at face value. `plugins/dag/dag.go` is the only caller
+of `AwaitAnyChild` in the repo, so all six tests failed on it; and no external SDK user
+could test a workflow using that call either. So this was the shipped public test harness,
+not example code, and "low severity" was wrong.
+
+"No CI job runs it" was also wrong. **The Tier 2 Gate runs `./examples/...`** — the six
+failures were recorded in `tier2.known_failures`, which is exactly the mechanism working.
+What is true is the narrower claim: nothing in `.github/workflows/` runs `examples/` other
+than `as-workflow` *outside* the tier gates, and the gate's known-failure list meant these
+six were red-but-permitted rather than unwatched.
+
+Fixing them emptied `tier2.known_failures` for the first time, and the gate is what forced
+it — a stale entry fails the gate in the same way a new failure does.
+
+`TestEveryHostCallIsWired` in `cleat/cleattest` is the mechanism, and it found **19 more**
+unwired host calls: seven that hard-error the same way (`ResolvePromise`, `RejectPromise`,
+`ScheduleCron`, `DeleteCron`, `ListCrons`, `ContinueAsNewWithVersion`, `DurableDeferFunc`)
+and twelve with real fallbacks. `AwaitAnyChild` and `PollChild` were simply the two someone
+happened to write an example against.
+
+A second defect was hiding behind the first: `dag.go` discarded `completedRunID` on the
+error path, so a failed child reported `dag: await any child failed: <message>` without
+naming which of the tasks failed.
+
+<details><summary>The original entry, kept because its diagnosis is the thing worth
+learning from</summary>
 
 Noticed while sweeping `go test ./...` for §3.12 regressions, and confirmed against a clean
 `develop` worktree at `2ee62d0` so it is not that change:
@@ -6050,6 +6083,8 @@ Six tests, all in `examples/dag`, all the same cause. `.github/workflows/` runs
 nothing has ever reported this. Low severity — it is example code, not the engine — but it is
 the §2.31/§2.33 pattern once more: a suite that exists, fails, and is watched by nobody.
 Either wire it into a job or say in the tree that examples are not tested.
+
+</details>
 
 Two things that are **not** defects and are recorded so the next sweep does not re-derive them:
 
