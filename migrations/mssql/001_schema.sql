@@ -13,6 +13,60 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'admin')
 GO
 
 -- ===========================================================================
+-- Drop any security policies left over from a previous application of this
+-- file, before (not after) the function they depend on gets re-created below.
+--
+-- CREATE OR ALTER FUNCTION on fn_tenant_filter fails with "Cannot ALTER
+-- 'dbo.fn_tenant_filter' because it is being referenced by object
+-- 'TenantFilter_Defs'" if these still exist -- a SECURITY POLICY's FILTER
+-- PREDICATE holds a hard dependency on the function underneath it, and this
+-- file used to drop the policies much later (right before recreating them,
+-- next to the tables they guard), which is after the function has already
+-- been (re-)altered. That ordering made the file fail on a second
+-- application against a database that already carries this schema, despite
+-- every individual statement being guarded as idempotent. Dropping the
+-- policies up front, before anything that depends on them is touched, is a
+-- no-op on a fresh install (sys.security_policies has no rows yet, so every
+-- IF EXISTS below is false) and makes a second application succeed.
+--
+-- WHY THIS DOES NOT OPEN AN RLS HOLE, AND THE ONE CONDITION IT DEPENDS ON.
+-- Read naively, this moves the window in which the FILTER PREDICATEs are
+-- absent from a handful of statements to the entire rest of the file -- the
+-- fail-open direction IMPROVEMENT-PLAN.md §2.71 is about. It does not,
+-- because of something outside this file: migration.Runner.applyMigration
+-- opens ONE transaction per migration file (`session.BeginTx`), runs every
+-- GO-separated batch inside it via `tx.ExecContext`, and commits only at the
+-- end -- see migration/runner.go. MSSQL DDL is transactional, so from any
+-- other session the drop and the recreate land together or not at all, and
+-- there is no instant at which a committed database has these tables without
+-- their policies. That is also why the OLD ordering failed safely: the
+-- CREATE OR ALTER FUNCTION error rolled the whole file back.
+--
+-- The condition: that atomicity is the runner's, not this file's. Applying
+-- this file by hand -- sqlcmd, a GUI, any tool that treats GO as a real batch
+-- separator and autocommits each batch -- does leave tenant-scoped tables
+-- unfiltered from here to the CREATE SECURITY POLICY block at the end. Do not
+-- do that on a database that already holds data, and do not change the runner
+-- to per-batch commits without recreating the policies before the commit.
+-- ===========================================================================
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
+    DROP SECURITY POLICY dbo.TenantFilter_Defs;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Instances')
+    DROP SECURITY POLICY dbo.TenantFilter_Instances;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_EventHistory')
+    DROP SECURITY POLICY dbo.TenantFilter_EventHistory;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Signals')
+    DROP SECURITY POLICY dbo.TenantFilter_Signals;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Schedules')
+    DROP SECURITY POLICY dbo.TenantFilter_Schedules;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Tags')
+    DROP SECURITY POLICY dbo.TenantFilter_Tags;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Routing')
+    DROP SECURITY POLICY dbo.TenantFilter_Routing;
+
+GO
+
+-- ===========================================================================
 -- Function: dbo.fn_tenant_filter
 -- Inline TVF used by SECURITY POLICY (native MSSQL RLS).
 -- Returns a row only when the table's tenant_id matches the session-scoped
@@ -375,25 +429,12 @@ CREATE TABLE dbo.workflow_routing (
 -- Row-Level Security: SECURITY POLICY using fn_tenant_filter
 -- Applies FILTER PREDICATE on every tenant-scoped table.
 -- Requires sp_set_session_context 'tenant_id' on each connection.
+--
+-- Any pre-existing policies were already dropped near the top of this file,
+-- before fn_tenant_filter was (re-)created -- see the comment there for why
+-- dropping them this late would be too late. Nothing between here and there
+-- recreates a policy, so a plain CREATE (not CREATE OR ALTER) is correct.
 -- ===========================================================================
-
--- Drop existing policies (idempotent: no-op if they do not exist).
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
-    DROP SECURITY POLICY dbo.TenantFilter_Defs;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Instances')
-    DROP SECURITY POLICY dbo.TenantFilter_Instances;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_EventHistory')
-    DROP SECURITY POLICY dbo.TenantFilter_EventHistory;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Signals')
-    DROP SECURITY POLICY dbo.TenantFilter_Signals;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Schedules')
-    DROP SECURITY POLICY dbo.TenantFilter_Schedules;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Tags')
-    DROP SECURITY POLICY dbo.TenantFilter_Tags;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Routing')
-    DROP SECURITY POLICY dbo.TenantFilter_Routing;
-
--- Recreate security policies on all tenant-scoped tables.
 GO
 CREATE SECURITY POLICY dbo.TenantFilter_Defs
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_defs
