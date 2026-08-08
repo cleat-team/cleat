@@ -23,6 +23,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege token, added 2026-08-07. Without a `permissions:` key a
+# workflow inherits the repository default, which can be read/write for every
+# scope -- so a compromised action or dependency in any job here would hold a
+# writable GITHUB_TOKEN. CodeQL flagged all 4 jobs in this file
+# (actions/missing-workflow-permissions). Every job here only checks out code
+# and runs tests, so read is all they need; re-derive with
+#
+#   grep -nE 'gh (pr|issue|api)|github-script|upload-artifact|packages:|id-token' .github/workflows/plugin-harness-ci.yml
+#
+# and widen this block, not the repository default, if that ever stops being
+# true.
+permissions:
+  contents: read
+
 jobs:
   # --------------------------------------------------------------------------
   # Layer 1 — cleattest-based SDK tests (fast, no infra needed)
