@@ -31,6 +31,20 @@ import (
 	"syscall"
 	"time"
 
+	// Embed the IANA timezone database in the binary.
+	//
+	// workflow_schedules.timezone holds an IANA name and the scheduler resolves
+	// it with time.LoadLocation, which reads the SYSTEM zoneinfo database. On an
+	// image without tzdata installed, every name except "UTC" and "Local" fails
+	// to load -- and the failure is not loud: the schedule falls back to UTC and
+	// fires at the wrong wall-clock time, on an image that is otherwise working.
+	// A scaled-down base image would reintroduce the exact defect the timezone
+	// column was added to remove.
+	//
+	// Roughly 450KB of binary. Cheap next to a scheduler that cannot be trusted
+	// to know what "07:00 America/New_York" means.
+	_ "time/tzdata"
+
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/migration"

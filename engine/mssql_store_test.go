@@ -708,8 +708,8 @@ func TestMSSQLStore_ListSchedules(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_schedules", data: [][]driver.Value{
-			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now},
-			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, false, now, nil},
+			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "UTC"},
+			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, false, now, nil, "America/New_York"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -742,6 +742,11 @@ func TestMSSQLStore_ListSchedules(t *testing.T) {
 	if s1.LastRunAt == nil || !s1.LastRunAt.Equal(now) {
 		t.Errorf("schedule 1 last_run: %v, want %v", s1.LastRunAt, now)
 	}
+	// Different zones per row on purpose: a Scan that dropped the column would
+	// leave both empty and still return two schedules.
+	if s1.Timezone != "UTC" {
+		t.Errorf("schedule 1 timezone: %q, want UTC", s1.Timezone)
+	}
 
 	s2 := schedules[1]
 	if s2.Name != "schedule-2" {
@@ -752,6 +757,9 @@ func TestMSSQLStore_ListSchedules(t *testing.T) {
 	}
 	if s2.LastRunAt != nil {
 		t.Error("schedule 2 LastRunAt should be nil")
+	}
+	if s2.Timezone != "America/New_York" {
+		t.Errorf("schedule 2 timezone: %q, want America/New_York", s2.Timezone)
 	}
 }
 
@@ -1778,7 +1786,7 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "READPAST", data: [][]driver.Value{
-			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now},
+			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "Asia/Tokyo"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -1793,6 +1801,11 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	}
 	if schedules[0].Name != "due-sch" || !schedules[0].Enabled {
 		t.Errorf("unexpected schedule: %+v", schedules[0])
+	}
+	// The scheduler computes the next firing from this field; without it
+	// every schedule silently reverts to the UTC wall clock.
+	if schedules[0].Timezone != "Asia/Tokyo" {
+		t.Errorf("timezone = %q, want Asia/Tokyo", schedules[0].Timezone)
 	}
 }
 

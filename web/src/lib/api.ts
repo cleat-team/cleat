@@ -60,7 +60,7 @@ export async function listSchedules(): Promise<Schedule[]> {
   return fetchJSON<Schedule[]>('/api/schedules');
 }
 
-export async function createSchedule(schedule: { name: string; cron: string; def_name: string; entry_point?: string; input?: string }): Promise<void> {
+export async function createSchedule(schedule: { name: string; cron: string; def_name: string; entry_point?: string; input?: string; timezone?: string }): Promise<void> {
   await fetchJSON('/api/schedules', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

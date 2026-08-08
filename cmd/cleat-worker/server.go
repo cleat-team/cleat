@@ -954,6 +954,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		DefName    string          `json:"def_name"`
 		EntryPoint string          `json:"entry_point"`
 		Input      json.RawMessage `json:"input"`
+		Timezone   string          `json:"timezone"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -969,6 +970,20 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, 400, "name, cron, and def_name are required")
 		return
 	}
+	// Validate before storing, not after. A cron expression that does not
+	// parse used to be accepted here and then silently fall back to firing
+	// daily, and an unloadable timezone would silently fall back to UTC --
+	// both at some later point, in the scheduler, where there is no longer
+	// anyone to report them to. 400 at the door is the only place the caller
+	// can be told.
+	if err := engine.ValidateCronExpr(req.Cron); err != nil {
+		s.writeError(w, 400, err.Error())
+		return
+	}
+	if err := engine.ValidateTimezone(req.Timezone); err != nil {
+		s.writeError(w, 400, err.Error())
+		return
+	}
 	sch := engine.Schedule{
 		Name:           req.Name,
 		DefName:        req.DefName,
@@ -976,6 +991,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		CronExpression: req.Cron,
 		Input:          req.Input,
 		Enabled:        true,
+		Timezone:       req.Timezone,
 	}
 	if err := st.CreateSchedule(r.Context(), sch); err != nil {
 		s.writeError(w, 500, err.Error())

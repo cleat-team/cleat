@@ -1,0 +1,48 @@
+-- cleat migration 021 (postgres): schedule timezone
+--
+-- A cron expression is a statement about a WALL CLOCK. "0 7 * * *" means seven
+-- in the morning, and seven in the morning is not a fixed offset from UTC --
+-- it moves twice a year in most of the world.
+--
+-- Until this column existed, workflow_schedules stored the expression and
+-- nothing else, and cmd/cleat-worker evaluated it with
+--
+--     engine.NextCronTime(sch.CronExpression, time.Now())
+--
+-- time.Now() carries the WORKER PROCESS's local zone. So the firing time of a
+-- schedule depended on which machine in the fleet happened to pick it up: a
+-- fleet spanning two zones computed two different answers for one row, and
+-- moving a worker between regions silently re-timed every schedule it served.
+-- The public SDK signature has advertised a timezone parameter the whole time
+-- (ScheduleCron(workflowName, cronExpr, timezone, inputJSON)) with nowhere to
+-- put it.
+--
+-- 'UTC' as the default, not the server's zone
+-- ------------------------------------------
+-- Existing rows have no recorded intent, so the migration has to pick
+-- something, and UTC is the only choice that is the same answer everywhere.
+-- Defaulting to the database server's zone would reproduce the bug this column
+-- removes, one layer down: the schedule would still mean different instants
+-- depending on where something was deployed.
+--
+-- This IS a behaviour change for any deployment whose workers did not already
+-- run in UTC -- their schedules were firing at their local wall clock and will
+-- now fire at UTC's. That is the point (they had no defined firing time
+-- before), but it is a change, and it belongs in release notes rather than in
+-- a surprise.
+--
+-- IANA names only, validated by the application
+-- --------------------------------------------
+-- The column is free text and engine.ValidateTimezone gates what reaches it.
+-- A fixed offset like '-05:00' is deliberately NOT accepted: it carries no DST
+-- rules, so a schedule written that way would drift an hour against the wall
+-- clock it was meant to track for half of every year -- silently, and in a way
+-- that looks correct on the day it is created.
+--
+-- Timezone resolution is the application's job, not the database's, because
+-- the three supported engines disagree about which zone names they know and
+-- PostgreSQL's own set is not the same as Go's tzdata. Doing it in Go keeps
+-- one answer across all three dialects.
+
+ALTER TABLE workflow_schedules
+    ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';

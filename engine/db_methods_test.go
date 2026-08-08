@@ -1145,8 +1145,8 @@ func TestPostgresStore_ListSchedules(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nextRunAt},
-				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil},
+				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nextRunAt, "UTC"},
+				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York"},
 			},
 		},
 	}, nil)
@@ -1166,6 +1166,15 @@ func TestPostgresStore_ListSchedules(t *testing.T) {
 	if scheds[1].Name != "sched-2" || scheds[1].LastRunAt != nil {
 		t.Errorf("unexpected second schedule: %+v", scheds[1])
 	}
+	// The fixture gives the two rows different zones on purpose: a Scan that
+	// read the column into the wrong destination, or not at all, would leave
+	// both empty and still return two schedules.
+	if scheds[0].Timezone != "UTC" {
+		t.Errorf("first schedule timezone = %q, want UTC", scheds[0].Timezone)
+	}
+	if scheds[1].Timezone != "America/New_York" {
+		t.Errorf("second schedule timezone = %q, want America/New_York", scheds[1].Timezone)
+	}
 }
 
 func TestPostgresStore_GetDueSchedules(t *testing.T) {
@@ -1174,7 +1183,7 @@ func TestPostgresStore_GetDueSchedules(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil},
+				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo"},
 			},
 		},
 	}, nil)
@@ -1190,6 +1199,12 @@ func TestPostgresStore_GetDueSchedules(t *testing.T) {
 	}
 	if scheds[0].Name != "due-sched" {
 		t.Errorf("unexpected name: %q", scheds[0].Name)
+	}
+	// The scheduler loop computes the next firing from this field. If
+	// GetDueSchedules does not select it, every schedule silently reverts to
+	// the UTC wall clock -- the exact defect the column was added to fix.
+	if scheds[0].Timezone != "Asia/Tokyo" {
+		t.Errorf("timezone = %q, want Asia/Tokyo", scheds[0].Timezone)
 	}
 }
 

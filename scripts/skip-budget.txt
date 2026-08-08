@@ -185,7 +185,24 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # TestConcurrencyKeyExcludesWhileHeld, each with a mysql and an mssql arm that
 # skip here. Measured as a delta rather than assumed: with the file removed the
 # same command reports 408, with it 412, so +4 on whatever the runner's base is.
-test-go/engine	417	# 413 + 3.34's four dialect arms (local delta 408 -> 412)
+#
+# 417 -> 420: PR "schedules carry a timezone" adds three tests running against
+# registeredBackends -- TestScheduleTimezone_RoundTrips, _EmptyBecomesUTC and
+# _ReachesGetDueSchedules -- whose mysql and mssql arms skip in a job
+# configured for PostgreSQL only.
+#
+# OBSERVED on the runner, not derived: both jobs reported
+# `skipped=420 budget=417 (passed=3433 failed=0)`. Zero failing tests; the
+# whole delta is skips.
+#
+# WORTH FLAGGING: the rule of thumb at the top of this file predicts +6 for
+# three registeredBackends tests (two arms each), and the runner moved +3.
+# The number set here is the observed one, per this file's own instruction not
+# to widen a budget past what the guard actually reports -- but the discrepancy
+# is unexplained, and it is the same *shape* as the long-standing local/runner
+# gap noted further up. If a later three-dialect test moves this by 6 rather
+# than 3, that is the thing to investigate, not this line.
+test-go/engine	420	# 417 + the three schedule-timezone dialect tests (observed 417 -> 420)
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -266,7 +283,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	417	# same as test-go/engine, and for the same reason; see the note there
+cluster	420	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a

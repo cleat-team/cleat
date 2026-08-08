@@ -47,6 +47,12 @@ type Schedule struct {
 	Enabled        bool            `json:"enabled"`
 	NextRunAt      time.Time       `json:"next_run_at"`
 	LastRunAt      *time.Time      `json:"last_run_at,omitempty"`
+
+	// Timezone is the IANA zone the cron expression's wall-clock fields are
+	// evaluated in (see engine.NextCronTimeIn). Empty means
+	// DefaultScheduleTimezone; the stores write 'UTC' rather than '' so the
+	// column is never ambiguous about whether a zone was chosen.
+	Timezone string `json:"timezone"`
 }
 
 // PromiseInfo holds the state of a cleat promise.
