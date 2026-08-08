@@ -708,8 +708,8 @@ func TestMSSQLStore_ListSchedules(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_schedules", data: [][]driver.Value{
-			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "UTC"},
-			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, false, now, nil, "America/New_York"},
+			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "UTC", "00000000-0000-0000-0000-000000000000"},
+			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, false, now, nil, "America/New_York", "33333333-3333-3333-3333-333333333333"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -1786,7 +1786,7 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "READPAST", data: [][]driver.Value{
-			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "Asia/Tokyo"},
+			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -1806,6 +1806,9 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	// every schedule silently reverts to the UTC wall clock.
 	if schedules[0].Timezone != "Asia/Tokyo" {
 		t.Errorf("timezone = %q, want Asia/Tokyo", schedules[0].Timezone)
+	}
+	if schedules[0].TenantID != "33333333-3333-3333-3333-333333333333" {
+		t.Errorf("tenant = %q, want 33333333-3333-3333-3333-333333333333", schedules[0].TenantID)
 	}
 }
 
