@@ -13,6 +13,40 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'admin')
 GO
 
 -- ===========================================================================
+-- Drop any security policies left over from a previous application of this
+-- file, before (not after) the function they depend on gets re-created below.
+--
+-- CREATE OR ALTER FUNCTION on fn_tenant_filter fails with "Cannot ALTER
+-- 'dbo.fn_tenant_filter' because it is being referenced by object
+-- 'TenantFilter_Defs'" if these still exist -- a SECURITY POLICY's FILTER
+-- PREDICATE holds a hard dependency on the function underneath it, and this
+-- file used to drop the policies much later (right before recreating them,
+-- next to the tables they guard), which is after the function has already
+-- been (re-)altered. That ordering made the file fail on a second
+-- application against a database that already carries this schema, despite
+-- every individual statement being guarded as idempotent. Dropping the
+-- policies up front, before anything that depends on them is touched, is a
+-- no-op on a fresh install (sys.security_policies has no rows yet, so every
+-- IF EXISTS below is false) and makes a second application succeed.
+-- ===========================================================================
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
+    DROP SECURITY POLICY dbo.TenantFilter_Defs;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Instances')
+    DROP SECURITY POLICY dbo.TenantFilter_Instances;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_EventHistory')
+    DROP SECURITY POLICY dbo.TenantFilter_EventHistory;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Signals')
+    DROP SECURITY POLICY dbo.TenantFilter_Signals;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Schedules')
+    DROP SECURITY POLICY dbo.TenantFilter_Schedules;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Tags')
+    DROP SECURITY POLICY dbo.TenantFilter_Tags;
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Routing')
+    DROP SECURITY POLICY dbo.TenantFilter_Routing;
+
+GO
+
+-- ===========================================================================
 -- Function: dbo.fn_tenant_filter
 -- Inline TVF used by SECURITY POLICY (native MSSQL RLS).
 -- Returns a row only when the table's tenant_id matches the session-scoped
@@ -375,25 +409,12 @@ CREATE TABLE dbo.workflow_routing (
 -- Row-Level Security: SECURITY POLICY using fn_tenant_filter
 -- Applies FILTER PREDICATE on every tenant-scoped table.
 -- Requires sp_set_session_context 'tenant_id' on each connection.
+--
+-- Any pre-existing policies were already dropped near the top of this file,
+-- before fn_tenant_filter was (re-)created -- see the comment there for why
+-- dropping them this late would be too late. Nothing between here and there
+-- recreates a policy, so a plain CREATE (not CREATE OR ALTER) is correct.
 -- ===========================================================================
-
--- Drop existing policies (idempotent: no-op if they do not exist).
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
-    DROP SECURITY POLICY dbo.TenantFilter_Defs;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Instances')
-    DROP SECURITY POLICY dbo.TenantFilter_Instances;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_EventHistory')
-    DROP SECURITY POLICY dbo.TenantFilter_EventHistory;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Signals')
-    DROP SECURITY POLICY dbo.TenantFilter_Signals;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Schedules')
-    DROP SECURITY POLICY dbo.TenantFilter_Schedules;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Tags')
-    DROP SECURITY POLICY dbo.TenantFilter_Tags;
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Routing')
-    DROP SECURITY POLICY dbo.TenantFilter_Routing;
-
--- Recreate security policies on all tenant-scoped tables.
 GO
 CREATE SECURITY POLICY dbo.TenantFilter_Defs
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_defs
