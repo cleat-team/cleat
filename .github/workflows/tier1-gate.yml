@@ -79,11 +79,14 @@ jobs:
         # database resolved whatever the registry served that morning.
         #
         # scripts/check-workflow-guards.py's floating-tag guard did NOT catch
-        # this. It only rejects `:latest` and tags ending in `-latest`, so a
-        # major-only tag walked straight through. Tightening it means pinning
-        # mysql:8.4 in the same change, so both are a follow-up -- recorded
-        # here so the gap is a known one rather than an assumption that the
-        # guard has this covered.
+        # this when the pin landed: it only rejected `:latest` and tags ending
+        # in `-latest`, so a major-only tag walked straight through. Tightened
+        # the same day to require a digest and nothing else, once mysql:8.4 was
+        # pinned too -- so this is now enforced rather than merely done. See
+        # is_floating() for why enumerating moving-tag spellings was the wrong
+        # shape: no rule over tag TEXT separates `8.4` from `8.4.11` without
+        # knowing the publisher's versioning policy, and Docker Hub tags are
+        # mutable by design regardless.
         #
         # Re-derive the digest, and read the version it resolves to:
         #
@@ -133,7 +136,7 @@ jobs:
           --health-retries 5
 
       mysql:
-        image: mysql:8.4
+        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
