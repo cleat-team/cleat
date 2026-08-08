@@ -2015,7 +2015,36 @@ func (w *Worker) scheduleLoop() {
 					continue
 				}
 
-				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "", engine.DefaultTenantUUID, 0)
+				// The run belongs to the tenant that owns the schedule, which
+				// is not necessarily the constant that used to be hardcoded
+				// here (engine.DefaultTenantUUID).
+				//
+				// Today those are always the same value, and it is worth being
+				// precise about WHY, because the reason is not "schedules are
+				// single-tenant". The worker opens exactly one store, scoped to
+				// the default tenant (cmd/cleat-worker/main.go), and every
+				// dialect scopes GetDueSchedules to the store's tenant -- RLS on
+				// Postgres and SQL Server, an explicit predicate on MySQL. So
+				// the loop only ever SEES default-tenant schedules, and the
+				// constant was right by accident rather than by construction.
+				//
+				// Measured 2026-08-08 against SQL Server: a schedule created
+				// through POST /api/schedules by a non-default tenant is
+				// returned by that tenant's own store and is NOT returned to
+				// this loop. It is listed in the dashboard, shows as enabled
+				// with a next_run_at, and never fires. That is a property of
+				// the worker's single-tenant execution scope -- dispatch has it
+				// too -- and not something this line can fix. It is recorded in
+				// TestScheduleLoop_OnlySeesItsOwnTenantsSchedules so the next
+				// person does not have to rediscover it.
+				//
+				// Reading the tenant off the row costs nothing and makes the
+				// loop correct by construction if that scope ever widens.
+				tenantID := sch.TenantID
+				if tenantID == "" {
+					tenantID = engine.DefaultTenantUUID
+				}
+				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "", tenantID, 0)
 				if serr != nil {
 					w.logger.ErrorContext(w.ctx, "Scheduler: failed to start workflow", "worker_id", w.id, "schedule", sch.Name, "error", serr)
 					continue

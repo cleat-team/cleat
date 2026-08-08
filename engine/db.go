@@ -469,9 +469,9 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone
-		FROM workflow_schedules ORDER BY name
-	`)
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
+		FROM workflow_schedules WHERE tenant_id = $1 ORDER BY name
+	`, s.tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +482,7 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
 			return nil, err
 		}
 		if lastRunAt.Valid {
@@ -503,7 +503,7 @@ func (s *PostgresStore) DeleteSchedule(ctx context.Context, name string) error {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM workflow_schedules WHERE name = $1`, name)
+	_, err = tx.ExecContext(ctx, `DELETE FROM workflow_schedules WHERE name = $1 AND tenant_id = $2`, name, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -518,8 +518,8 @@ func (s *PostgresStore) SetScheduleEnabled(ctx context.Context, name string, ena
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_schedules SET enabled = $2 WHERE name = $1
-	`, name, enabled)
+		UPDATE workflow_schedules SET enabled = $2 WHERE name = $1 AND tenant_id = $3
+	`, name, enabled, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -534,11 +534,11 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
 		FROM workflow_schedules
-		WHERE enabled = true AND next_run_at <= now()
+		WHERE enabled = true AND next_run_at <= now() AND tenant_id = $1
 		FOR UPDATE SKIP LOCKED
-	`)
+	`, s.tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -549,7 +549,7 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
 			return nil, err
 		}
 		if lastRunAt.Valid {
@@ -571,8 +571,8 @@ func (s *PostgresStore) UpdateScheduleNextRun(ctx context.Context, name string, 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_schedules SET next_run_at = $2, last_run_at = now() WHERE name = $1
-	`, name, nextRun)
+		UPDATE workflow_schedules SET next_run_at = $2, last_run_at = now() WHERE name = $1 AND tenant_id = $3
+	`, name, nextRun, s.tenantID)
 	if err != nil {
 		return err
 	}

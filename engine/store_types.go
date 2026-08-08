@@ -53,6 +53,14 @@ type Schedule struct {
 	// DefaultScheduleTimezone; the stores write 'UTC' rather than '' so the
 	// column is never ambiguous about whether a zone was chosen.
 	Timezone string `json:"timezone"`
+
+	// TenantID owns this schedule, and is the tenant the runs it starts belong
+	// to.
+	//
+	// Populated on read. It is NOT read from the caller on CreateSchedule --
+	// the stores write their own s.tenantID there, so a caller cannot create a
+	// schedule for a tenant it is not scoped to.
+	TenantID string `json:"tenant_id"`
 }
 
 // PromiseInfo holds the state of a cleat promise.

@@ -1145,8 +1145,8 @@ func TestPostgresStore_ListSchedules(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nextRunAt, "UTC"},
-				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York"},
+				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nextRunAt, "UTC", "00000000-0000-0000-0000-000000000000"},
+				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333"},
 			},
 		},
 	}, nil)
@@ -1183,7 +1183,7 @@ func TestPostgresStore_GetDueSchedules(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo"},
+				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333"},
 			},
 		},
 	}, nil)
@@ -1205,6 +1205,11 @@ func TestPostgresStore_GetDueSchedules(t *testing.T) {
 	// the UTC wall clock -- the exact defect the column was added to fix.
 	if scheds[0].Timezone != "Asia/Tokyo" {
 		t.Errorf("timezone = %q, want Asia/Tokyo", scheds[0].Timezone)
+	}
+	// The scheduler passes this to StartNewRun, so a dropped column would
+	// attribute every scheduled run to the fallback constant.
+	if scheds[0].TenantID != "33333333-3333-3333-3333-333333333333" {
+		t.Errorf("tenant = %q, want 33333333-3333-3333-3333-333333333333", scheds[0].TenantID)
 	}
 }
 

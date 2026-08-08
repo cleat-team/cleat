@@ -287,7 +287,7 @@ func (s *MySQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 // ListSchedules returns all registered schedules for the current tenant.
 func (s *MySQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
 		FROM workflow_schedules
 		WHERE tenant_id = ?
 		ORDER BY name
@@ -302,7 +302,7 @@ func (s *MySQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
 			return nil, fmt.Errorf("ListSchedules: scan: %w", err)
 		}
 		if lastRunAt.Valid {
@@ -338,7 +338,7 @@ func (s *MySQLStore) SetScheduleEnabled(ctx context.Context, name string, enable
 // GetDueSchedules returns enabled schedules whose next_run_at <= NOW(6).
 func (s *MySQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
 		FROM workflow_schedules
 		WHERE enabled = 1 AND next_run_at <= NOW(6) AND tenant_id = ?
 		FOR UPDATE SKIP LOCKED
@@ -353,7 +353,7 @@ func (s *MySQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
 			return nil, fmt.Errorf("GetDueSchedules: scan: %w", err)
 		}
 		if lastRunAt.Valid {

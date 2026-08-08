@@ -431,8 +431,8 @@ func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, lastRunAt, "UTC"},
-				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York"},
+				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, lastRunAt, "UTC", "00000000-0000-0000-0000-000000000000"},
+				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333"},
 			},
 		},
 	}, nil)
@@ -496,7 +496,7 @@ func TestMySQLStore_GetDueSchedules_WithRows(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo"},
+				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333"},
 			},
 		},
 	}, nil)
@@ -511,6 +511,9 @@ func TestMySQLStore_GetDueSchedules_WithRows(t *testing.T) {
 	// every schedule silently reverts to the UTC wall clock.
 	if scheds[0].Timezone != "Asia/Tokyo" {
 		t.Errorf("timezone = %q, want Asia/Tokyo", scheds[0].Timezone)
+	}
+	if scheds[0].TenantID != "33333333-3333-3333-3333-333333333333" {
+		t.Errorf("tenant = %q, want 33333333-3333-3333-3333-333333333333", scheds[0].TenantID)
 	}
 }
 
