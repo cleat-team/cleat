@@ -111,6 +111,18 @@ func triggerMatchingWorkflows(
 		if sub.FilterExpr != "" && sub.FilterExpr != "true" {
 			ok, err := EvaluateFilter(sub.FilterExpr, eventData)
 			if err != nil {
+				// CodeQL go/clear-text-logging (alert #14) flags this: eventData
+				// here can be built from inbound webhook HTTP headers
+				// (plugins/webhookingest/routes.go), and eventData is a
+				// parameter to EvaluateFilter, so the tool conservatively
+				// treats err as tainted by header content. It never actually
+				// is: every error path in filter.go's tokenizer, parser, and
+				// evaluator (EvaluateFilter, evalPath, compareValues,
+				// matchOperators, etc.) only formats the filter expression's
+				// own tokens/paths/operators and Go type names (%T) into its
+				// error strings — none of them interpolate an eventData
+				// value. Verified by reading every fmt.Errorf in that file.
+				// Dismissed as a false positive; see alert #14.
 				logger.Error("event-triggers: filter evaluation error",
 					"subscription_id", sub.ID,
 					"filter_expr", sub.FilterExpr,
