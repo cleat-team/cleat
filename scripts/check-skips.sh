@@ -47,7 +47,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || exit 1
 
 BASELINE="scripts/skip-baseline.txt"
 
@@ -80,6 +80,13 @@ SCAN_FAILED="__scan_failed__"
 # locale and the runner's and makes the baseline diff-noisy.
 scan() {
   local findings
+  # The awk program below is single-quoted on purpose, so SC2016 does not
+  # apply: its $1/$3/$NF are awk fields, and letting the shell expand them
+  # would substitute this function's positional arguments instead -- almost
+  # always the empty string, which would make every scan silently return
+  # nothing. The directive sits here because a shellcheck directive has to
+  # precede the whole command, not a stage inside its pipeline.
+  # shellcheck disable=SC2016
   findings="$(
     find . \( -name '*_test.go' -o \( -path '*/testutil/*' -name '*.go' \) \) \
       -not -path './node_modules/*' -not -path '*/node_modules/*' \

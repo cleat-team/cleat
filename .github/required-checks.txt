@@ -89,21 +89,12 @@ Vulnerability Check
 #                                `continue-on-error: true`, which is exactly
 #                                why it must not be required. Guard 2 below
 #                                enforces that pairing in both directions.
-#   Lint (advisory)           -- ShellCheck only, as of 2026-08-08. Ruff and
-#                                ShellCheck both ran inside the required
-#                                `Lint` job under `continue-on-error: true`,
-#                                so neither could fail a build; they were
-#                                moved here rather than waived in place
-#                                (invisible) or made blocking (267 findings
-#                                blocking every PR). This job waives nothing
-#                                -- it goes red -- it just does not gate.
-#                                Ruff has since been promoted back into the
-#                                required `Lint` job: its rule set is named
-#                                explicitly in python-sdk/pyproject.toml and
-#                                its backlog is zero. ShellCheck's 7 findings
-#                                are still open and still here. When they
-#                                reach zero, promote it and DELETE this job
-#                                rather than leaving an empty green one --
-#                                then delete this entry too.
+#   (`Lint (advisory)` was here from 2026-08-07 to 2026-08-08 and no longer
+#   exists. Ruff and ShellCheck had both run inside the required `Lint` job
+#   under `continue-on-error: true`, so neither could fail a build; the
+#   separate non-required job was the honest interim while their backlogs --
+#   260 and 7 -- were worked off. Both are zero and both linters are now steps
+#   in `Lint`, so the job was deleted rather than left as a permanent green.
+#   ci.yml keeps the full rationale where the job used to be.)
 #   Test Python 3.10/3.11/3.12
 #   Benchmarks, Docs, Examples, and the release/soak/stale/ecosystem jobs.

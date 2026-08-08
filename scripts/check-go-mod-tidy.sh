@@ -29,7 +29,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || exit 1
 
 # benchmarks/comparative/** are standalone modules that exist to pin specific
 # competitor releases (Temporal, DBOS) for like-for-like measurement. Their
@@ -53,8 +53,7 @@ for dir in $mods; do
   case "$dir/" in "$EXEMPT_PREFIX"*) continue ;; esac
 
   checked=$((checked + 1))
-  out="$(cd "$REPO_ROOT/$dir" && go mod tidy -diff 2>&1)"
-  if [ $? -ne 0 ]; then
+  if ! out="$(cd "$REPO_ROOT/$dir" && go mod tidy -diff 2>&1)"; then
     echo "ERROR: $dir/go.mod is not tidy. \`cd $dir && go mod tidy\` would change it:" >&2
     echo "$out" | head -40 >&2
     echo >&2
