@@ -455,7 +455,7 @@ func TestHelperDaysInMonth(t *testing.T) {
 	}
 }
 
-func TestHelperAtoi_Valid(t *testing.T) {
+func TestCronAtoi_Valid(t *testing.T) {
 	tests := []struct {
 		input string
 		want  int
@@ -467,19 +467,26 @@ func TestHelperAtoi_Valid(t *testing.T) {
 		{"999", 999},
 	}
 	for _, tt := range tests {
-		got := atoi(tt.input)
+		got, err := cronAtoi(tt.input, "minute")
+		if err != nil {
+			t.Errorf("cronAtoi(%q) returned error %v, want %d", tt.input, err, tt.want)
+			continue
+		}
 		if got != tt.want {
-			t.Errorf("atoi(%q) = %d, want %d", tt.input, got, tt.want)
+			t.Errorf("cronAtoi(%q) = %d, want %d", tt.input, got, tt.want)
 		}
 	}
 }
 
-func TestHelperAtoi_Invalid(t *testing.T) {
-	if got := atoi("not-a-number"); got != 0 {
-		t.Errorf("atoi('not-a-number') = %d, want 0", got)
-	}
-	if got := atoi(""); got != 0 {
-		t.Errorf("atoi('') = %d, want 0", got)
+// TestCronAtoi_Invalid replaces TestHelperAtoi_Invalid, which asserted that
+// atoi("not-a-number") == 0 -- pinning in place the silent misparse that let
+// `abc * * * *` run at minute zero of every hour. The behaviour under test is
+// now the opposite one: a non-numeric term is an error the caller can report.
+func TestCronAtoi_Invalid(t *testing.T) {
+	for _, input := range []string{"not-a-number", "", "  ", "1x", "-"} {
+		if _, err := cronAtoi(input, "minute"); err == nil {
+			t.Errorf("cronAtoi(%q) returned nil error, want a parse error", input)
+		}
 	}
 }
 
