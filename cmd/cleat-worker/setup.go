@@ -2065,7 +2065,58 @@ func (w *Worker) scheduleLoop() {
 				// The instant this firing IS FOR, which is not the same as the
 				// instant we noticed it. Everything below keys off the former.
 				scheduled := sch.NextRunAt
-				nextRun, skipped := scheduleAdvance(sch.CronExpression, scheduled, loc, time.Now())
+
+				// OVERLAP. Under "skip", an instant that arrives while the run
+				// this schedule started last is still going is dropped rather
+				// than stacked. The schedule still advances -- otherwise it
+				// would stay due and re-check every tick, which is the same
+				// answer at higher cost.
+				//
+				// "allow" is the default only because it is what the scheduler
+				// has always done and changing it would silently alter existing
+				// deployments. It is the wrong default for most real schedules:
+				// a job that occasionally overruns its interval quietly becomes
+				// an unbounded fan-out.
+				if engine.OverlapPolicyOrDefault(sch.OverlapPolicy) == engine.OverlapSkip && sch.LastRunID != "" {
+					prev, gerr := w.store.GetWorkflowByID(w.ctx, sch.LastRunID)
+					switch {
+					case gerr != nil:
+						// Cannot tell. Fire rather than skip: the promise is
+						// at-least-once, so an unanswerable overlap check must
+						// fail towards delivery.
+						w.logger.WarnContext(w.ctx, "Scheduler: overlap check failed, firing anyway",
+							"worker_id", w.id, "schedule", sch.Name, "last_run_id", sch.LastRunID, "error", gerr)
+					case prev != nil && (prev.Status == "running" || prev.Status == "ready"):
+						nextRun, _ := scheduleAdvance(sch.CronExpression, scheduled, loc, time.Now(), engine.CatchUpLimitOrDefault(sch.CatchUpLimit))
+						if _, cerr := w.store.ClaimDueSchedule(w.ctx, sch.Name, scheduled, nextRun, ""); cerr != nil {
+							w.logger.ErrorContext(w.ctx, "Scheduler: failed to advance a skipped-for-overlap schedule", "worker_id", w.id, "schedule", sch.Name, "error", cerr)
+						}
+						w.logger.InfoContext(w.ctx, "Scheduler: firing skipped, previous run still in flight",
+							"worker_id", w.id, "schedule", sch.Name, "last_run_id", sch.LastRunID,
+							"status", prev.Status, "scheduled_at", scheduled.Format(time.RFC3339))
+						w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "schedule_overlap_skipped", 1)
+						continue
+					}
+				}
+
+				// MISFIRE. "skip" resumes at the next future instant and
+				// delivers none of the backlog, for schedules where a late
+				// firing is worse than no firing.
+				if engine.MisfirePolicyOrDefault(sch.MisfirePolicy) == engine.MisfireSkip {
+					future := engine.NextCronTimeIn(sch.CronExpression, time.Now(), loc)
+					if scheduled.Before(time.Now().Add(-time.Minute)) {
+						w.logger.InfoContext(w.ctx, "Scheduler: misfire policy is skip; not delivering the backlog",
+							"worker_id", w.id, "schedule", sch.Name,
+							"was_due_at", scheduled.Format(time.RFC3339), "resuming_at", future.Format(time.RFC3339))
+						if _, cerr := w.store.ClaimDueSchedule(w.ctx, sch.Name, scheduled, future, ""); cerr != nil {
+							w.logger.ErrorContext(w.ctx, "Scheduler: failed to advance a misfired schedule", "worker_id", w.id, "schedule", sch.Name, "error", cerr)
+						}
+						w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "schedule_misfire_skipped", 1)
+						continue
+					}
+				}
+
+				nextRun, skipped := scheduleAdvance(sch.CronExpression, scheduled, loc, time.Now(), engine.CatchUpLimitOrDefault(sch.CatchUpLimit))
 				if skipped > 0 {
 					// A silent skip is the failure mode at-least-once exists to
 					// rule out, so it is logged with a count rather than just
@@ -2120,7 +2171,7 @@ func (w *Worker) scheduleLoop() {
 				// instant. GetDueSchedules' row locks are released when its own
 				// transaction ends -- before any of the above ran -- so two
 				// workers polling milliseconds apart both saw this row as due.
-				claimed, cerr := w.store.ClaimDueSchedule(w.ctx, sch.Name, scheduled, nextRun)
+				claimed, cerr := w.store.ClaimDueSchedule(w.ctx, sch.Name, scheduled, nextRun, runID)
 				if cerr != nil {
 					w.logger.ErrorContext(w.ctx, "Scheduler: failed to advance next run", "worker_id", w.id, "schedule", sch.Name, "error", cerr)
 					continue
@@ -2606,25 +2657,10 @@ func (w *Worker) restartLoop(name string) {
 	w.logger.InfoContext(w.ctx, "watchdog: restarted loop", "worker_id", w.id, "loop", name)
 }
 
-// maxCatchUpFirings bounds how far behind a schedule may be before the
-// scheduler stops replaying missed instants one at a time and jumps to the
-// next future one.
-//
-// The bound exists because advancing from the SCHEDULED instant rather than
-// from now() is what makes catch-up possible at all, and unbounded catch-up
-// after a long outage is its own outage: a per-minute schedule that was down
-// for a day owes 1440 firings, and delivering them as fast as the poll loop
-// turns is a self-inflicted stampede against whatever those workflows touch.
-//
-// 60 is a judgement call, not a measurement. It is generous for the schedules
-// this bound is meant to protect (hourly and slower are never affected at all)
-// and small enough that the catch-up burst stays in the same order of
-// magnitude as a normal minute. What matters more than the number is that
-// exceeding it is LOGGED with a count -- a silently dropped firing is exactly
-// what an at-least-once promise is supposed to make impossible, so if we do
-// drop some, that has to be visible. PR "catch-up + overlap policy" replaces
-// this constant with a per-schedule misfire_policy column.
-const maxCatchUpFirings = 60
+// The catch-up bound is now per-schedule (workflow_schedules.catch_up_limit,
+// engine.DefaultCatchUpLimit when unset), which is what the package-level
+// maxCatchUpFirings constant used to be. See engine.DefaultCatchUpLimit for
+// why the default is what it is.
 
 // scheduleAdvance computes the next firing instant after `scheduled`, and
 // reports how many owed firings were DROPPED to stop the schedule falling
@@ -2646,7 +2682,7 @@ const maxCatchUpFirings = 60
 // is a floor rather than the exact number because establishing the exact number
 // means walking the entire backlog, which for a per-minute schedule down for a
 // week is 10,080 steps to produce a figure only used for a log line.
-func scheduleAdvance(expr string, scheduled time.Time, loc *time.Location, now time.Time) (next time.Time, droppedAtLeast int) {
+func scheduleAdvance(expr string, scheduled time.Time, loc *time.Location, now time.Time, catchUpLimit int) (next time.Time, droppedAtLeast int) {
 	next = engine.NextCronTimeIn(expr, scheduled, loc)
 	if !next.Before(now) {
 		// Caught up: the next owed instant has not happened yet.
@@ -2657,7 +2693,7 @@ func scheduleAdvance(expr string, scheduled time.Time, loc *time.Location, now t
 	// the only thing the exact number beyond it would change is a log line.
 	count := 0
 	probe := next
-	for count <= maxCatchUpFirings && probe.Before(now) {
+	for count <= catchUpLimit && probe.Before(now) {
 		advanced := engine.NextCronTimeIn(expr, probe, loc)
 		if !advanced.After(probe) {
 			// Defensive: an expression whose "next" does not advance would
@@ -2671,7 +2707,7 @@ func scheduleAdvance(expr string, scheduled time.Time, loc *time.Location, now t
 		count++
 	}
 
-	if count > maxCatchUpFirings {
+	if count > catchUpLimit {
 		// Too far behind to walk out of. Resume in the future so the schedule
 		// starts firing on time again instead of staying permanently behind
 		// and re-entering this path on every tick.

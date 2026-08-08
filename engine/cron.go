@@ -412,3 +412,82 @@ func NextCronTime(cronExpr string, from time.Time) time.Time {
 // in the current month (February 30th). It is unreachable now: the search walks
 // real time.Time values, so a nonexistent date is never visited at all, and the
 // day-of-month field is range-checked once at parse time.
+
+// Schedule policy values. These are stored as text and read by a background
+// loop that has nobody to report a bad value to, so the database carries CHECK
+// constraints as well -- a value the scheduler cannot interpret must be
+// impossible to store rather than handled at 03:00.
+const (
+	// MisfireCatchUp delivers firings missed during an outage, one instant per
+	// poll tick, up to the schedule's catch-up limit. The default, because the
+	// engine promises at-least-once.
+	MisfireCatchUp = "catch_up"
+
+	// MisfireSkip resumes at the next future instant and delivers none of the
+	// backlog. For schedules where a late firing is worse than no firing -- a
+	// "send the 09:00 digest" job has nothing useful to say at 14:00.
+	MisfireSkip = "skip"
+
+	// OverlapAllow starts a run even if the previous one is still going. The
+	// default only because it is what the scheduler has always done: changing
+	// it would silently alter existing deployments. It is the wrong default for
+	// most real schedules, since a job that occasionally overruns its interval
+	// quietly becomes an unbounded fan-out.
+	OverlapAllow = "allow"
+
+	// OverlapSkip does not start a run while the previous one from this
+	// schedule is still running or ready.
+	OverlapSkip = "skip"
+
+	// DefaultCatchUpLimit bounds catch_up when a schedule does not set its own.
+	//
+	// Generous for the schedules the bound is meant to protect -- hourly and
+	// slower cannot reach it within any plausible outage -- and small enough
+	// that a catch-up burst stays in the same order of magnitude as a normal
+	// minute of work. It is a judgement call, not a measurement.
+	DefaultCatchUpLimit = 60
+)
+
+// ValidateMisfirePolicy reports whether p is a misfire policy the scheduler
+// understands. Empty is valid and means MisfireCatchUp.
+func ValidateMisfirePolicy(p string) error {
+	switch p {
+	case "", MisfireCatchUp, MisfireSkip:
+		return nil
+	}
+	return fmt.Errorf("cron: misfire policy %q: want %q or %q", p, MisfireCatchUp, MisfireSkip)
+}
+
+// ValidateOverlapPolicy reports whether p is an overlap policy the scheduler
+// understands. Empty is valid and means OverlapAllow.
+func ValidateOverlapPolicy(p string) error {
+	switch p {
+	case "", OverlapAllow, OverlapSkip:
+		return nil
+	}
+	return fmt.Errorf("cron: overlap policy %q: want %q or %q", p, OverlapAllow, OverlapSkip)
+}
+
+// MisfirePolicyOrDefault and friends normalise on the way into the store, so
+// the column never holds an empty string that a reader has to know means
+// something.
+func MisfirePolicyOrDefault(p string) string {
+	if p == "" {
+		return MisfireCatchUp
+	}
+	return p
+}
+
+func OverlapPolicyOrDefault(p string) string {
+	if p == "" {
+		return OverlapAllow
+	}
+	return p
+}
+
+func CatchUpLimitOrDefault(n int) int {
+	if n <= 0 {
+		return DefaultCatchUpLimit
+	}
+	return n
+}

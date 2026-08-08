@@ -1353,6 +1353,12 @@ func runSchedule(args []string) {
 		inputJSON := fs.String("input", "{}", "workflow input JSON")
 		timezone := fs.String("timezone", engine.DefaultScheduleTimezone,
 			"IANA timezone the cron expression is evaluated in (e.g. America/New_York)")
+		misfire := fs.String("misfire-policy", engine.MisfireCatchUp,
+			"what a firing missed during an outage means: catch_up or skip")
+		catchUp := fs.Int("catch-up-limit", engine.DefaultCatchUpLimit,
+			"how many owed firings catch_up delivers before resuming in the future")
+		overlap := fs.String("overlap-policy", engine.OverlapAllow,
+			"what happens when the previous run is still going: allow or skip")
 		fs.Parse(remainder)
 
 		fsArgs := fs.Args()
@@ -1375,6 +1381,14 @@ func runSchedule(args []string) {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+		if err := engine.ValidateMisfirePolicy(*misfire); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := engine.ValidateOverlapPolicy(*overlap); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 
 		loc, _ := engine.LoadScheduleLocation(*timezone)
 		nextRun := engine.NextCronTimeIn(*cronExpr, time.Now(), loc)
@@ -1387,6 +1401,9 @@ func runSchedule(args []string) {
 			Enabled:        true,
 			NextRunAt:      nextRun,
 			Timezone:       *timezone,
+			MisfirePolicy:  *misfire,
+			CatchUpLimit:   *catchUp,
+			OverlapPolicy:  *overlap,
 		}
 
 		if err := store.CreateSchedule(ctx, sch); err != nil {

@@ -471,6 +471,26 @@ func migrateMSSQLWorkflowDefsTenantID(t *testing.T, db *sql.DB) {
 		            CONSTRAINT df_workflow_schedules_timezone_test DEFAULT 'UTC'`); err != nil {
 		t.Fatalf("setup MSSQL full schema: workflow_schedules.timezone: %v", err)
 	}
+
+	// workflow_schedules policy columns, added by migrations/mssql/022. Same
+	// reasoning as the timezone guard above: a guard on the TABLE says nothing
+	// about its COLUMNS, so a table an earlier test built from an older schema
+	// keeps its old shape.
+	for _, stmt := range []struct{ col, ddl string }{
+		{"misfire_policy", `ADD misfire_policy NVARCHAR(16) NOT NULL CONSTRAINT df_ws_misfire_test DEFAULT 'catch_up'`},
+		{"catch_up_limit", `ADD catch_up_limit INT NOT NULL CONSTRAINT df_ws_catchup_test DEFAULT 60`},
+		{"overlap_policy", `ADD overlap_policy NVARCHAR(16) NOT NULL CONSTRAINT df_ws_overlap_test DEFAULT 'allow'`},
+		{"last_run_id", `ADD last_run_id NVARCHAR(255) NULL`},
+	} {
+		if _, err := db.Exec(`
+			IF NOT EXISTS (
+			    SELECT 1 FROM sys.columns
+			    WHERE object_id = OBJECT_ID(N'dbo.workflow_schedules') AND name = N'` + stmt.col + `'
+			)
+			    ALTER TABLE dbo.workflow_schedules ` + stmt.ddl); err != nil {
+			t.Fatalf("setup MSSQL full schema: workflow_schedules.%s: %v", stmt.col, err)
+		}
+	}
 }
 
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.

@@ -708,8 +708,8 @@ func TestMSSQLStore_ListSchedules(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_schedules", data: [][]driver.Value{
-			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "UTC", "00000000-0000-0000-0000-000000000000"},
-			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, false, now, nil, "America/New_York", "33333333-3333-3333-3333-333333333333"},
+			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
+			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, false, now, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
 		}},
 	}, nil)
 	defer db.Close()
@@ -1786,7 +1786,7 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "READPAST", data: [][]driver.Value{
-			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333"},
+			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -1809,6 +1809,17 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	}
 	if schedules[0].TenantID != "33333333-3333-3333-3333-333333333333" {
 		t.Errorf("tenant = %q, want 33333333-3333-3333-3333-333333333333", schedules[0].TenantID)
+	}
+	// Distinct per-row policy values, so a Scan that dropped these columns
+	// cannot pass by returning the right number of rows.
+	if schedules[0].MisfirePolicy != "skip" || schedules[0].OverlapPolicy != "skip" {
+		t.Errorf("policies = %q/%q, want skip/skip", schedules[0].MisfirePolicy, schedules[0].OverlapPolicy)
+	}
+	if schedules[0].CatchUpLimit != 11 {
+		t.Errorf("catch_up_limit = %d, want 11", schedules[0].CatchUpLimit)
+	}
+	if schedules[0].LastRunID != "run-due" {
+		t.Errorf("last_run_id = %q, want run-due", schedules[0].LastRunID)
 	}
 }
 

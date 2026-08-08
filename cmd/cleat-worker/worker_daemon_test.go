@@ -331,7 +331,7 @@ func (m *mockStore) UpdateScheduleNextRun(ctx context.Context, name string, next
 	return nil
 }
 
-func (m *mockStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+func (m *mockStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
 

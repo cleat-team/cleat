@@ -188,7 +188,12 @@ type WorkflowStore interface {
 	//
 	// expectedNextRun must be the NextRunAt the caller read. A mismatch means
 	// another worker has already advanced the schedule.
-	ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (claimed bool, err error)
+	//
+	// runID is recorded as the schedule's last_run_id, which is what makes
+	// OverlapPolicy "skip" answerable: without it there is no way to tell a run
+	// this schedule started from any other run of the same definition. Pass ""
+	// to leave it unchanged.
+	ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (claimed bool, err error)
 
 	// LoadWorkflowConfig returns the max_history_length for a workflow definition.
 	LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error)

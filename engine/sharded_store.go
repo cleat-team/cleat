@@ -1482,7 +1482,7 @@ func (s *ShardedStore) AdminReReplay(ctx context.Context, workflowID string, gen
 // single-winner election into a poll. Schedules are replicated across shards,
 // so the first shard whose row still holds expectedNextRun is the winner and
 // the rest are already-advanced copies.
-func (s *ShardedStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+func (s *ShardedStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
@@ -1490,7 +1490,7 @@ func (s *ShardedStore) ClaimDueSchedule(ctx context.Context, name string, expect
 	claimed := false
 	var lastErr error
 	for _, shard := range shards {
-		ok, err := shard.Store.ClaimDueSchedule(ctx, name, expectedNextRun, newNextRun)
+		ok, err := shard.Store.ClaimDueSchedule(ctx, name, expectedNextRun, newNextRun, runID)
 		if err != nil {
 			lastErr = err
 			continue

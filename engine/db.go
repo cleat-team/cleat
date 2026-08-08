@@ -451,10 +451,11 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID,
-		scheduleTimezoneOrDefault(sch.Timezone))
+		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
+		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy))
 	if err != nil {
 		return err
 	}
@@ -469,7 +470,7 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
 		FROM workflow_schedules WHERE tenant_id = $1 ORDER BY name
 	`, s.tenantID)
 	if err != nil {
@@ -482,7 +483,8 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, err
 		}
 		if lastRunAt.Valid {
@@ -534,7 +536,7 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
 		FROM workflow_schedules
 		WHERE enabled = true AND next_run_at <= now() AND tenant_id = $1
 		FOR UPDATE SKIP LOCKED
@@ -549,7 +551,8 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, err
 		}
 		if lastRunAt.Valid {
@@ -1266,7 +1269,7 @@ func (nopCloser) Close() error { return nil }
 
 // ClaimDueSchedule advances a schedule's next_run_at, but only if it still
 // holds expectedNextRun. See the interface doc for why this is a CAS.
-func (s *PostgresStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+func (s *PostgresStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return false, fmt.Errorf("claim due schedule: begin: %w", err)
@@ -1275,9 +1278,10 @@ func (s *PostgresStore) ClaimDueSchedule(ctx context.Context, name string, expec
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_schedules
-		SET next_run_at = $2, last_run_at = now()
+		SET next_run_at = $2, last_run_at = now(),
+		    last_run_id = CASE WHEN $5 = '' THEN last_run_id ELSE $5 END
 		WHERE name = $1 AND tenant_id = $4 AND next_run_at = $3
-	`, name, newNextRun, expectedNextRun, s.tenantID)
+	`, name, newNextRun, expectedNextRun, s.tenantID, runID)
 	if err != nil {
 		return false, err
 	}

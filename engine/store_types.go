@@ -54,6 +54,28 @@ type Schedule struct {
 	// column is never ambiguous about whether a zone was chosen.
 	Timezone string `json:"timezone"`
 
+	// MisfirePolicy decides what a firing missed during an outage means:
+	// "catch_up" (default) delivers the backlog one instant per tick up to
+	// CatchUpLimit, "skip" resumes at the next future instant. Empty means
+	// the default.
+	MisfirePolicy string `json:"misfire_policy"`
+
+	// CatchUpLimit bounds how many owed firings catch_up will work through
+	// before giving up and resuming in the future. Zero means the default;
+	// see engine.DefaultCatchUpLimit.
+	CatchUpLimit int `json:"catch_up_limit"`
+
+	// OverlapPolicy decides what happens when an instant arrives and the run
+	// this schedule started last has not finished: "allow" (default, and what
+	// the scheduler has always done) or "skip". Empty means the default.
+	OverlapPolicy string `json:"overlap_policy"`
+
+	// LastRunID is the run this schedule started most recently. It is what
+	// makes OverlapPolicy "skip" answerable at all -- without it there is no
+	// way to tell a run this schedule started from any other run of the same
+	// definition.
+	LastRunID string `json:"last_run_id,omitempty"`
+
 	// TenantID owns this schedule, and is the tenant the runs it starts belong
 	// to.
 	//
