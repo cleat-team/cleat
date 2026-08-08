@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -359,7 +360,21 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		opt(e)
 	}
 	e.clock = &simClock{env: e}
-	e.h = cleat.NewHostCalls(cleat.HostCallsOptions{
+	e.h = cleat.NewHostCalls(e.hostCallsOptions())
+	return e
+}
+
+// hostCallsOptions is the harness's implementation of every host call.
+//
+// It is a method rather than a literal inlined into NewTestEnv so that
+// TestEveryHostCallIsWired can reflect over what it returns. A field left out
+// of this struct leaves the corresponding hook nil, and cleat/runtime_*.go
+// answers a nil hook with "can only be called from within a workflow function
+// (the HostCalls runtime was not initialized)" -- a message about workflow
+// context that says nothing about the real cause. AwaitAnyChild and PollChild
+// were missing here from the day they were added to HostCallsOptions.
+func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
+	return cleat.HostCallsOptions{
 		DurableCall:                   e.durableCallImpl,
 		DurableCallWithOptions:        e.durableCallWithOptionsImpl,
 		DurableSleep:                  e.durableSleepImpl,
@@ -371,7 +386,9 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		ContinueAsNew:                 e.continueAsNewImpl,
 		ChildWorkflow:                 e.childWorkflowImpl,
 		AwaitChild:                    e.awaitChildImpl,
+		AwaitAnyChild:                 e.awaitAnyChildImpl,
 		AwaitAllChildren:              e.awaitAllChildrenImpl,
+		PollChild:                     e.pollChildImpl,
 		ChildWorkflowTyped:            e.childWorkflowTypedImpl,
 		AwaitChildTyped:               e.awaitChildTypedImpl,
 		DurableCallTypedWithHeartbeat: e.durableCallTypedWithHeartbeatImpl,
@@ -395,8 +412,7 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		ReleaseLock:                   e.releaseLockImpl,
 		AwaitCondition:                e.awaitConditionImpl,
 		SideEffect:                    e.sideEffectImpl,
-	})
-	return e
+	}
 }
 
 // H returns the HostCalls interface for workflow code to use.
@@ -1062,6 +1078,75 @@ func (e *TestEnv) awaitChildImpl(runID string) (resp string, retErr error) {
 	}
 	resp = `{"status":"completed"}`
 	return
+}
+
+// awaitAnyChildImpl mirrors engine/children.go's AwaitAnyChild: it polls the
+// children in SORTED runID order and returns the first one with a result.
+//
+// The sort matches the engine deliberately. plugins/dag/dag.go builds its
+// runIDs slice by ranging over a map, so the argument order is randomised on
+// every call, and engine/children.go sorts before polling so that a replay
+// after a suspend picks the same winner as the original execution. A harness
+// that honoured argument order instead would disagree with the engine about
+// which child wins.
+//
+// It is fidelity, not something the current suite pins -- measured, because
+// the first version of this comment claimed otherwise. Disabling the sort and
+// running examples/dag 20 times: 20/20 still pass. The DAG's outputs are keyed
+// by task name and its levels respect dependencies either way, so the choice
+// of winner does not change its result. TestAwaitAnyChild_PicksLowestSortedRunID
+// in this package is what actually holds the behaviour in place.
+//
+// Every child in this harness has already run to completion by the time it is
+// awaited -- childWorkflowImpl resolves it synchronously -- so "first
+// completed" degenerates to "first in sorted order" and there is no suspend
+// path to model. The per-child replay bookkeeping is awaitChildImpl's, which
+// is why this delegates to it rather than reading e.childResults directly.
+func (e *TestEnv) awaitAnyChildImpl(runIDs []string) (string, string, error) {
+	if len(runIDs) == 0 {
+		return "", "", fmt.Errorf("cleattest: AwaitAnyChild called with no run IDs")
+	}
+
+	sorted := append([]string(nil), runIDs...)
+	sort.Strings(sorted)
+
+	e.mu.Lock()
+	winner := ""
+	for _, runID := range sorted {
+		if _, ok := e.childResults[runID]; ok {
+			winner = runID
+			break
+		}
+	}
+	e.mu.Unlock()
+
+	if winner == "" {
+		// No recorded result for any of them. awaitChildImpl treats an unknown
+		// runID as a completed child with a default result rather than
+		// blocking, and this follows it: a harness that hung here would turn a
+		// mis-wired test into a timeout instead of a failure.
+		winner = sorted[0]
+	}
+
+	result, err := e.awaitChildImpl(winner)
+	return winner, result, err
+}
+
+// pollChildImpl is the non-blocking counterpart. Children resolve synchronously
+// here, so a known child is always "completed"; an unknown one is "running"
+// rather than an error, which is what lets a poll loop in a workflow terminate.
+func (e *TestEnv) pollChildImpl(runID string) (string, string, error) {
+	e.mu.Lock()
+	result, ok := e.childResults[runID]
+	e.mu.Unlock()
+
+	if !ok {
+		return "running", "", nil
+	}
+	if result.err != nil {
+		return "failed", "", result.err
+	}
+	return "completed", result.result, nil
 }
 
 func (e *TestEnv) awaitAllChildrenImpl(runIDs []string) ([]cleat.ChildResult, error) {
