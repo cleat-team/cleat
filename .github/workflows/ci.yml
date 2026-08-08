@@ -197,10 +197,27 @@ jobs:
         with:
           components: clippy
 
+      # Pinned to a released binary rather than apt, because ShellCheck's
+      # findings differ by version and apt's version floats with the runner
+      # image. This was not theoretical: the promotion below failed its first
+      # CI run on two findings that shellcheck 0.11.0 does not report at all --
+      # SC2317 and SC2015, in files that already carried suppressions written
+      # against the newer code names (SC2317 was split into SC2329 in 0.10). So
+      # the repo passed locally and failed in CI on the same source, which is
+      # the ruff problem fixed in #403 wearing different clothes: a linter whose
+      # strictness is set by whoever built the runner image.
+      #
+      # Bump deliberately, reading the release notes for new checks, rather than
+      # inheriting one from an image refresh.
       - name: Install lint tools
+        env:
+          SHELLCHECK_VERSION: v0.11.0
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
+          set -euo pipefail
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJf - -C /tmp
+          sudo install "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
 
       # ShellCheck, promoted into this required job on 2026-08-08 -- the last
       # of the two linters that ran here under `continue-on-error: true`. Its 7

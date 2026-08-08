@@ -41,7 +41,16 @@ NC='\033[0m'
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
-# shellcheck disable=SC2329 # invoked indirectly via trap
+# Invoked indirectly via the `trap` below, which the linter cannot see.
+# Both codes are listed because they are one check under two names:
+# 0.11 reports SC2329 (function never invoked); older builds report
+# SC2317 (command appears unreachable). CI's apt build was the older one,
+# so an SC2329-only suppression passed locally and failed there. The
+# version is pinned in ci.yml now; the pair stays until that pin is old
+# enough that nothing runs a pre-0.10 build.
+# (No line above may begin with the linter's own name -- it would be
+# parsed as a directive rather than read as prose. SC1073.)
+# shellcheck disable=SC2329,SC2317
 cleanup() {
     rm -f "$CURRENT_FILE"
 }

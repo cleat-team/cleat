@@ -211,7 +211,11 @@ if [ -n "$EXCL" ]; then
   # A pattern that matches nothing individually is just as stale as the whole list
   # being stale, and is far easier to miss.
   for pat in $EXCL; do
-    # shellcheck disable=SC2086
+    # SC2086: $PKGS is a deliberately unquoted package list.
+    # SC2015: `A && B || C` is not if-then-else, but here C is `|| true` on
+    # the pipeline, guarding grep -c's exit 1 on no match -- which is the
+    # case this loop exists to detect, so it must not abort.
+    # shellcheck disable=SC2086,SC2015
     n=$(cd "$REPO_ROOT" && go test -list "$pat" $PKGS 2>/dev/null | grep -cE '^Test' || true)
     [ "$n" = "0" ] && fail "tier1.exclude_tests pattern '$pat' matches no test -- stale entry"
   done
