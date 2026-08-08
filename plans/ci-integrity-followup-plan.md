@@ -1,8 +1,14 @@
 # CI Integrity — what is left after the 2026-08-07 sweep
 
-**Date:** 2026-08-07
+**Date:** 2026-08-07. **Outcomes recorded in place, same day.**
 **Follows:** #363–#378, which found and fixed seven checks that were green and measured nothing.
 **Method:** every claim below carries the command that re-derives it. Nothing here is estimated.
+
+**Status:** items 1, 2, 3, 4a, 4c, 5, 6 and 8 are done — see [Sequence](#sequence--as-executed-2026-08-07)
+for the PR against each. 4b stays blocked on §2.71 and 7 was not started, both deliberately. Each item
+heading below carries its outcome, and the original finding is folded under it rather than overwritten,
+because the evidence is what made the case. **Three of this document's own claims turned out to be
+wrong** — noted at the item that carried each, and summarised in Sequence.
 
 ---
 
@@ -151,7 +157,33 @@ grant.*
 
 ---
 
-### 2. `wasm-demo` has not compiled since 2026-08-02 and nothing builds it
+### 2. ~~`wasm-demo` has not compiled since 2026-08-02 and nothing builds it~~ — DELETED in #391 (`dadf574`)
+
+**The heading's date is wrong, and the error it led to is the interesting part.** `wasm-demo/` did not
+break on 2026-08-02. It has never compiled, once, since it entered the repository:
+
+```
+$ git log --diff-filter=A --format='%h %ad %s' --date=short -- \
+    wasm-demo/worker/versioned_loader.go wasm-demo/worker/failover_worker.go
+0a1f6af 2026-05-05 initial commit
+```
+
+Both halves of the collision arrived in the same commit — the initial one. `c26c332` touched the
+directory; it did not break it. That single wrong attribution is what made "the duplicate declarations
+look like an incomplete refactor" (below) sound plausible, and it is not: there is no earlier state to
+refactor *from*. A module that has never once built is not a regression to repair, it is a directory
+nobody ever wired up, which settled the three-way decision immediately. Deleted rather than fixed or
+parked; `prompts/versioning_plan.md`, its only referrer, now points at `engine/versioned_loader.go`
+and `engine/store_versioning.go` instead.
+
+The general lesson is the one this document already argues in the other direction: **a date is a claim
+and needs its command too.** `git log -1 <path>` answers "when was this last touched", which is not the
+question, and reads like it is.
+
+---
+
+<details>
+<summary>The original finding</summary>
 
 **Severity: medium-high** — the cost is that it is invisible, not that it is broken.
 
@@ -190,9 +222,53 @@ The one unacceptable option is the current state, which is tier 3 in effect and 
 **Verify:** whichever is chosen, `go build ./...` inside every module named in `tiers.yaml` is green in
 CI, and the module list matches what exists on disk.
 
+</details>
+
 ---
 
-### 3. `mcr.microsoft.com/mssql/server:2022-latest` is a moving tag on three required checks
+### 3. ~~`mcr.microsoft.com/mssql/server:2022-latest` is a moving tag on three required checks~~ — PINNED in #390 (`09322ba`)
+
+Pinned to `mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89`,
+the digest `2022-latest` resolved to on 2026-08-07, so the pin was a no-op on the day it landed.
+
+**"Five call sites must move together" undercounted, in two directions.** Re-derived on `develop`,
+2026-08-07:
+
+```
+$ grep -rn 'image: *mcr.microsoft.com/mssql' .github/workflows/ docker-compose*.yml | wc -l
+7
+$ grep -rn 'ancestor=mcr.microsoft.com/mssql' .github/workflows/ | wc -l
+4
+```
+
+Seven `image:` sites, not five — the original count grepped only `.github/workflows/`, missing
+`docker-compose.dev.yml` and `docker-compose.cluster.yml`. And there is a second kind of site the
+original did not contemplate at all: four `docker ps --filter ancestor=...` invocations. **Docker's
+`ancestor=` filter matches on the reference the container was created from, not on the repository**, so
+pinning `image:` while leaving `ancestor=mcr.microsoft.com/mssql/server:2022-latest` would have left
+those filters matching nothing and every subsequent `docker exec "$CID"` running against an empty
+container id. Probed before trusting it, using `alpine` as a stand-in so the real containers were not
+disturbed:
+
+```
+docker ps -q --filter "ancestor=alpine@sha256:c64c687c..."   # 1 match
+docker ps -q --filter "ancestor=alpine:3.20"                 # 0 matches
+```
+
+That is a partial pin that reports green while testing nothing — this document's subject exactly, and
+it would have been introduced *by the fix for* this document's item 3.
+
+Eleven sites now have to move together, which is more than a reviewer will hold in their head.
+`scripts/check-workflow-guards.py` (item 8, #399) has a guard for precisely this: every `ancestor=`
+reference must equal an `image:` reference in the same file.
+
+`postgres:16` (8 sites) and `mysql:8.4` (5) still float within a minor series — same class, lower risk,
+still a follow-on.
+
+---
+
+<details>
+<summary>The original finding</summary>
 
 **Severity: medium.** Same class as the MinIO `:latest` fixed in #377, and larger.
 
@@ -220,6 +296,8 @@ Treat `postgres:16` and `mysql:8.4` as a follow-on, not a blocker.
 green on it before merge. Watch for one thing #377 did not have to: five call sites must move together,
 and a partial pin is worse than none because it hides which one drifted.
 
+</details>
+
 ---
 
 ### 4. Two skips that are failures wearing a skip's clothing
@@ -236,24 +314,64 @@ tests/plugin-harness/wasm_plugin_test.go:652:    wasmtime-go compatibility issue
 tests/plugin-harness/wasm_plugin_test.go:660:    Java module crashed (wasmtime-go compat)
 ```
 
-**4a. `TestPluginCalls_MultiDB` skips unconditionally.** Budget `plugin-harness/multi-db 1`, whose own
+**4a — DONE, and the estimate was wrong by an order of magnitude.** The sequence table below called
+this *"~30m — may already be stale — cheapest possible win"* and guessed the fix was deleting a line.
+The skip's stated cause **was** stale, exactly as predicted: it names a wazero v1.11.1 panic, and under
+CGO-on the test reaches PostgreSQL and passes. That is where the prediction stopped being right.
+
+Behind the stale skip were **three unrelated, real defects**, none of which anything else in the repo
+was positioned to find, because this is the only test under `./tests/...` that touches MySQL or SQL
+Server at all:
+
+| | Defect | Fix |
+|---|---|---|
+| mysql | `tests/plugin-harness` carried its own private SQL splitter that did not understand `DELIMITER`, so it cut stored-procedure bodies in half — while `migration.Runner` had a correct splitter it declined to reuse | #392 (`d99943e`) |
+| mssql | the same private splitter cut on every `;`, ignoring `GO` batch separators | #395 (`f9c6ba6`) |
+| mssql | `migrations/mssql/001_schema.sql` dropped its `SECURITY POLICY` objects *after* `CREATE OR ALTER FUNCTION dbo.fn_tenant_filter`, which a policy's `FILTER PREDICATE` holds a hard dependency on — so the file could not be re-applied to a database that already carried it, despite a header claiming it was idempotent | #396 |
+
+The third is in a **shipped migration**, and the file's own header said `Idempotent: all statements use
+IF NOT EXISTS / IF EXISTS guards`. That was true statement-by-statement and false of the file, which is
+its own small instance of this document's thesis: the guard was present on every statement and guarded
+nothing about the order they ran in.
+
+The skip removal and the budget drop to 0 are #400, which is what makes the three fixes stay fixed.
+
+**What to take from the estimate being wrong.** "The stated reason is stale" and "there is nothing
+behind it" are different claims, and the first does not imply the second. A skip suppresses whatever
+would have happened next, not only the thing its message names — so the cost of removing one is
+unknowable until it is removed, and estimating it as a line-delete is estimating the size of something
+nobody has looked at. Three defects had been sitting behind this one since before it was written.
+
+---
+
+**4a (original).** `TestPluginCalls_MultiDB` skips unconditionally. Budget `plugin-harness/multi-db 1`, whose own
 comment says *"that job starts PostgreSQL, MySQL and SQL Server and then tests nothing at all… Drop it
 to 0 when the skip is removed."* It is the only test under `./tests/...` touching MySQL or SQL Server.
 The stated cause is a wazero v1.11.1 panic — and `plugin-harness-ci.yml` now runs CGO-on throughout,
 which is what removed the sibling skip in `TestPluginCalls_Wasm_Go`. **Check whether this skip is still
 true before doing anything else**; it may already be stale, in which case the fix is deleting a line.
 
-**4b. `TestTenantIsolationOverHTTP_MSSQL` skips unconditionally,** blocked on §2.71 (`SESSION_CONTEXT`
-cleared by `sp_reset_connection` on a pooled connection). Budget `test-go/commands 6`. Correctly
-recorded as the acceptance test for §2.71 rather than deleted — leave it until §2.71 lands, then drop
-the budget.
+**4b — checked, still correctly blocked. Left in place.** `TestTenantIsolationOverHTTP_MSSQL` skips
+unconditionally, blocked on §2.71 (`SESSION_CONTEXT` cleared by `sp_reset_connection` on a pooled
+connection). Budget `test-go/commands 6`. §2.71 is now 🔶 PARTLY FIXED; the part still open is that the
+test schema is missing two tenant-scoped tables, so the acceptance test cannot yet assert what it
+exists to assert. Correctly recorded as §2.71's acceptance test rather than deleted — leave it until
+§2.71 closes, then drop the budget. Re-checked 2026-08-07; unchanged.
 
-**4c. The four `wasm_plugin_test.go` compat skips are conditional and already neutralised**, because
+**4c — DONE in #381 (`d6c057f`).** The four `wasm_plugin_test.go` compat skips are conditional and were
+already neutralised, because
 `plugin-harness/wasm` has a budget of 0 — any of them firing turns the job red. That is the right
 outcome reached by an indirect route, and it is fragile: the skip *text* still says "compatibility
 issue", so the next reader sees a skip and a budget failure and has to work out which is lying.
-Convert them to `t.Fatalf` with the same message. No behaviour change under the current budget; it
-stops the budget being the only thing standing between a crash and a green.
+Converted to `t.Fatalf` with the same message. No behaviour change under the current budget; it stops
+the budget being the only thing standing between a crash and a green.
+
+One thing worth recording from doing it: `scripts/check-skips.sh` is a **set-membership** guard over
+`scripts/skip-baseline.txt`, not a threshold, so removing skips is not automatically safe either —
+adding an unrelated `t.Skipf` elsewhere in the same PR fails `Lint` until the baseline is regenerated.
+It caught one during this batch (#394). That is the guard working, and the baseline is machine-written:
+`--update` does `printf '%s\n' "$fresh" > "$BASELINE"`, a whole-file overwrite, so a hand-added comment
+in it is deleted on the next regeneration without saying so. Annotate the `t.Skipf` call site instead.
 
 **Verify (4a):** remove the skip, run `./tests/plugin-harness/... -run TestPluginCalls_MultiDB` with
 CGO on and all three DSNs. If it passes, drop the budget to 0 in the same PR — the budget is what stops
@@ -261,7 +379,7 @@ it regressing.
 
 ---
 
-### 5. `tests/exhaustion` cannot be gated
+### 5. ~~`tests/exhaustion` cannot be gated~~ — DONE in #394 (`96a6247`)
 
 `tiers.yaml` records this as the blocker keeping the suite ungated. Two separate defects:
 
@@ -281,11 +399,27 @@ unreachable → fail, naming it.** That is the only shape that is both runnable 
 Then wire it into a job and give it a skip budget.
 
 **Verify:** with no DSN set it skips; with an unreachable DSN set it fails and prints the DSN
-(redacted). Both, in that order — the second is the one that has been getting skipped past.
+(redacted). Both, in that order — the second is the one that has been getting skipped past. Both were
+run, in that order.
 
 ---
 
-### 6. `pluginapi` is the external contract and has no tests
+### 6. ~~`pluginapi` is the external contract and has no tests~~ — DONE in #388 (`a55d375`)
+
+Compile-time contract assertions over the re-export surface. **The obvious form of this test is
+vacuous, which is the part worth writing down.** For a type alias, `var _ A = B{}` and `var _ B = A{}`
+both compile whether the declaration is `type X = Y` (an alias, what external authors depend on) or
+`type X Y` (a distinct type that silently breaks every caller passing one to the other). Two-way
+assignment proves nothing about an alias. The assertion has to compare `reflect.Type` identity, which
+is the only thing that separates the two declarations.
+
+That is the same shape as everything else in this document — a check that runs, passes, and cannot
+fail — and it would have been introduced by the fix for the item complaining about it.
+
+`wasmrw` and `monitoring/prometheus` are untouched and still stand as written.
+
+<details>
+<summary>The original finding</summary>
 
 ```
 $ go list -f '{{if and (eq (len .TestGoFiles) 0) (eq (len .XTestGoFiles) 0)}}{{.ImportPath}}{{end}}' ./... \
@@ -308,9 +442,11 @@ $ go list -f '{{if and (eq (len .TestGoFiles) 0) (eq (len .XTestGoFiles) 0)}}{{.
 re-exported symbol still resolves to the type it claims — that is the failure an external author sees
 and the maintainer does not.
 
+</details>
+
 ---
 
-### 7. §2.60d — `CleanupPostgresTestData`, and the `-p 1` tax
+### 7. §2.60d — `CleanupPostgresTestData`, and the `-p 1` tax — NOT DONE, deliberately
 
 Open in `IMPROVEMENT-PLAN.md`. An unqualified `DELETE FROM` across eleven tables, which is why every
 multi-package database run in this repo needs `-p 1`, which is why `Tier 1 Gate` takes ~11 minutes and
@@ -323,7 +459,73 @@ argument for picking one; picking one is not something to do in passing.
 
 ---
 
-### 8. The mechanism the sweep is missing
+### 8. ~~The mechanism the sweep is missing~~ — BUILT in #399, as four guards not three
+
+`scripts/check-workflow-guards.py`, run from the required `Lint` job. Each guard was tested by breaking
+the thing it guards and **reading the message**, not just the exit status. What they cover, and what
+each cost to get right:
+
+**Guard 1 — every required context resolves to a job that exists.** Needs matrix expansion, since ten
+of the 32 contexts are matrix arms (`Test Go (engine) on 1.26`). The expander refuses `include:` and
+`exclude:` rather than approximating them:
+
+```python
+raise Unexpandable(f"{where}: strategy.matrix uses '{key}', which this guard does not expand. "
+                   f"Teach it, or the guard is weaker than it looks.")
+```
+
+A guard that silently under-expands is this document's subject in miniature, so it fails loudly instead.
+
+**Guard 2 — no `continue-on-error` on a required job.** *"Currently zero — worth keeping there"* was
+**wrong**, and wrong in a way that matters: it is true at *job* granularity and false at *step*
+granularity. Two steps inside the required `Lint` job carried `continue-on-error: true` — Ruff and
+ShellCheck. A required check with a step that cannot fail is #370's shape exactly, in the one job the
+sweep did not look inside. The guard now checks both levels.
+
+**Guard 3 — no floating tag in a `services:` image.** As specified; `:latest`, `-latest`, and a bare
+repository with no tag at all (which Docker resolves as `:latest`) are the recognised cases.
+
+**Guard 4 — every `docker ps --filter ancestor=` reference equals an `image:` in the same file.** Not
+in the original three; it exists because item 3 turned up the failure mode. It scans **parsed `run:`
+bodies**, not raw file text — scanning raw text flagged the worked example inside `tier1-gate.yml`'s
+own explanatory comment, which is the guard being right about a string and wrong about the repo.
+
+**What guard 2 found, and how the finding was nearly missed.** Having removed the two waivers, I
+recorded that both linters "were already passing," on this evidence:
+
+```
+gh api repos/cleat-team/cleat/actions/runs/<id>/jobs \
+  --jq '.jobs[] | select(.name=="Lint") | .steps[] | .conclusion'     # success
+```
+
+That reads `success` for **any** step with `continue-on-error: true`, because the waiver rewrites the
+field. It is the output of the waiver, not of the tool — the same mistake as trusting a green check,
+one level down, and made while writing the guard against it. Running the tools directly, 2026-08-07:
+**ruff 260 errors** (210 fixable), **shellcheck 7** (5×SC2164, 2×SC2034, 2×SC2016, 1×SC2181). What
+caught it was making the step blocking and watching CI go red — `Lint` failed at step 15, Ruff. Nothing
+else would have.
+
+Both moved to a new non-required `Lint (advisory)` job. That is not a rename of the waiver: the job
+goes **red**, visibly, on the PR — it simply does not gate. Making 267 findings blocking on every PR is
+how a check gets switched off; leaving them invisible is how they stayed at 267. Promote each back into
+`Lint` as its backlog reaches zero. ShellCheck's 7 are the near-term candidate.
+
+**One thing the guards deliberately do not do**, stated in `.github/required-checks.txt` itself: they do
+not verify that file against GitHub. Reading branch protection needs an admin token and a workflow's
+`GITHUB_TOKEN` is not one, so the list can drift from the live setting and `Lint` will not notice.
+`--verify-against-api` does the comparison when run by hand with a token. **Do not read a green `Lint`
+as proof the required set matches the API** — what the guard buys is that the intended set is in git and
+reviewable in a diff, and that the far more common failure (a context naming a job that is gone) is
+caught.
+
+Current state, 2026-08-07 — `scripts/check-workflow-guards.py`: *checked 14 workflow files, 49 distinct
+job names, 32 required contexts, 0 problems.* The only remaining `continue-on-error` in the repo is on
+`Coverage`, which is not required — and guard 2 enforces that pairing in both directions.
+
+---
+
+<details>
+<summary>The original finding</summary>
 
 `CLAUDE.md` asks whether the answer is a sweep or a mechanism. Seven inert checks were found by hand,
 one at a time, over one session. There is no reason to think that process was exhaustive, and every
@@ -353,9 +555,45 @@ spent finding an instance by hand.
 **Test each guard by breaking the thing it guards** before trusting it. That rule is what this whole
 document is about, and a guard is not exempt from it.
 
+</details>
+
 ---
 
-## Sequence
+## Sequence — as executed, 2026-08-07
+
+| # | Item | PR | Merge |
+|---|------|----|-------|
+| 1 | CodeQL + secret scanning on; five false doc claims corrected | #393 | `bc67ab3` |
+| 4c | `wasm_plugin_test.go` compat skips → `t.Fatalf` | #381 | `d6c057f` |
+| 3 | Pin the SQL Server image by digest (11 sites) | #390 | `09322ba` |
+| 2 | `wasm-demo` deleted | #391 | `dadf574` |
+| 5 | `tests/exhaustion` DSN + skip/fail split | #394 | `96a6247` |
+| 6 | `pluginapi` contract assertions | #388 | `a55d375` |
+| 4a | plugin-harness MySQL splitter | #392 | `d99943e` |
+| 4a | plugin-harness MSSQL `GO` batches | #395 | `f9c6ba6` |
+| 4a | MSSQL `001_schema.sql` re-application ordering | #396 | |
+| 4a | skip removed, budget → 0 | #400 | |
+| 8 | Four workflow guards; two linters that could not fail | #399 | |
+| — | CodeQL's 3 highs triaged and dismissed with the reasoning in code | #397, #398 | `428b422`, `b795601` |
+| — | CodeQL's 11 `missing-workflow-permissions` fixed | #401 | `c97ceac` |
+| 4b | `TestTenantIsolationOverHTTP_MSSQL` | — | blocked on §2.71, left |
+| 7 | §2.60d `CleanupPostgresTestData` | — | not started; listed for cost, not readiness |
+
+**Three of this document's own claims were wrong**, each caught by running something rather than
+reading it — the estimate in item 4a, the date in item 2, and *"currently zero"* in item 8 guard 2. All
+three are corrected in place above with what replaced them. A plan is a claim nothing checks, which is
+the first of the two shapes this document names at the end, and it does not exempt itself.
+
+**Open, untriaged, and named so it is not mistaken for finished:** the 68 Dependabot vulnerabilities (16
+critical, 25 high) that item 1 surfaced, and the 8 update PRs it opened, are still untriaged — that was
+step 2 when item 1 was written and it is still step 2. Ruff's 260 findings need a rule-set decision
+before they mean anything; the repo ships no ruff config, so the number is "what ruff's defaults say",
+not "what this project considers wrong."
+
+---
+
+<details>
+<summary>The original sequence, as planned</summary>
 
 Items are independent. Recommended order by cost-to-benefit:
 
@@ -371,6 +609,8 @@ Items are independent. Recommended order by cost-to-benefit:
 | 4c | `wasm_plugin_test.go` compat skips → `t.Fatalf` | ~30m | Removes a lie; no behaviour change |
 | 4b | `TestTenantIsolationOverHTTP_MSSQL` | — | Blocked on §2.71; leave |
 | 7 | §2.60d `CleanupPostgresTestData` | days | Design decision; costs ~11 min/PR until then |
+
+</details>
 
 ---
 
