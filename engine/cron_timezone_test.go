@@ -3,6 +3,21 @@ package engine
 import (
 	"testing"
 	"time"
+
+	// Embed the IANA database in the TEST binary, so LoadLocation below cannot
+	// fail for want of a system zoneinfo.
+	//
+	// This is deliberately in a _test.go file and not in the engine package
+	// itself: engine is a library, and embedding ~450KB of tzdata in it would
+	// force that on every consumer. cmd/cleat-worker imports it for real,
+	// because the shipped scheduler must resolve zones on any base image.
+	//
+	// Without this, newYork() had to skip when the host had no zoneinfo -- and
+	// a skipped DST test is indistinguishable from a passing one, which is the
+	// precise failure this repo's conditional-skip guard exists to catch. With
+	// it, the precondition is always satisfiable and an unloadable zone is a
+	// hard failure.
+	_ "time/tzdata"
 )
 
 // These tests all use America/New_York, which has both kinds of DST
@@ -11,15 +26,15 @@ import (
 //	2024-03-10  01:59:59 EST -> 03:00:00 EDT   (02:00-02:59 never happens)
 //	2024-11-03  01:59:59 EDT -> 01:00:00 EST   (01:00-01:59 happens twice)
 //
-// If the host has no zoneinfo database, LoadLocation fails and there is
-// nothing to test -- but that is an environmental precondition, not a
-// behaviour, so it is a legitimate skip. cmd/cleat-worker embeds tzdata so the
-// shipped binary does not depend on this.
+// This does not skip when the zone will not load. The test binary embeds
+// time/tzdata (see the import block), so America/New_York is always
+// resolvable regardless of what the host has installed -- which makes an
+// unloadable zone a real failure rather than an environmental one.
 func newYork(t *testing.T) *time.Location {
 	t.Helper()
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
-		t.Skipf("no zoneinfo database on this host: %v", err)
+		t.Fatalf("America/New_York failed to load despite the embedded tzdata: %v", err)
 	}
 	return loc
 }
