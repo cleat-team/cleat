@@ -10,8 +10,16 @@
 Workflows run for days to months. During that time, code and plugins change.
 A workflow **must** continue executing against the exact code version it was
 started with, and child workflows **must** get the correct version. This plan
-builds on the existing WASM-loadable-module design in `wasm-demo/` and extends
-it to cover plugins, child workflows, and migration paths.
+builds on the existing WASM-loadable-module design and extends it to cover
+plugins, child workflows, and migration paths.
+
+> **2026-08-07.** This document was written against `wasm-demo/`, a separate
+> module of pre-implementation design sketches. That directory has been deleted
+> — it never compiled, from the initial commit onwards, and nothing in CI built
+> it. Everything section 2 below describes as "Designed, demo" has since been
+> implemented for real in `engine/versioned_loader.go` and
+> `engine/store_versioning.go`, so read those rather than the file:line
+> references in the table, which no longer resolve.
 
 The core insight: WASM makes workflow code a **versioned data artifact** stored
 in the database. Deploying a new version is `INSERT INTO workflow_defs`, not a
