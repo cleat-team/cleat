@@ -180,7 +180,11 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
+        # a required check. Full rationale, the re-derive commands, and why the
+        # `ancestor=` filter had to move with it: tier1-gate.yml's mssql
+        # service. Bump all six sites together or `Lint` fails the PR.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
@@ -275,10 +279,13 @@ jobs:
         # image fields, so a newer digest arrives as a reviewable PR that must go
         # green before it lands -- which is the whole difference from `:latest`.
         #
-        # Not done here, and it is the larger version of the same problem:
-        # mcr.microsoft.com/mssql/server:2022-latest is also a moving tag, and it
-        # appears five times across these workflows including the required
-        # `Test SQL Server`, `Tier 1 Gate` and `Tier 2 Gate`.
+        # The larger version of the same problem was mcr.microsoft.com/mssql/
+        # server:2022-latest, which this comment used to record as not done.
+        # Done on 2026-08-07: it is pinned by digest at six sites, and the
+        # rationale is in tier1-gate.yml's mssql service. That one had a wrinkle
+        # this one did not -- four `docker ps --filter ancestor=` lookups name
+        # the image too, and they match on the pull reference, so pinning only
+        # `image:` would have left them matching nothing.
         image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
         env:
           MINIO_ROOT_USER: minioadmin

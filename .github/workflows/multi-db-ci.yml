@@ -194,7 +194,11 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
+        # a required check. Full rationale, the re-derive commands, and why the
+        # `ancestor=` filters had to move with it: tier1-gate.yml's mssql
+        # service. Bump all six sites together or `Lint` fails the PR.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
@@ -212,7 +216,7 @@ jobs:
 
       - name: Create cleat database
         run: |
-          docker exec $(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server:2022-latest") /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
+          docker exec $(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89") /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Setup Go
         uses: actions/setup-go@v7
@@ -299,7 +303,11 @@ jobs:
           --health-start-period 60s
           --publish 3306:3306
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
+        # a required check. Full rationale, the re-derive commands, and why the
+        # `ancestor=` filters had to move with it: tier1-gate.yml's mssql
+        # service. Bump all six sites together or `Lint` fails the PR.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
@@ -324,7 +332,7 @@ jobs:
 
       - name: Create cleat database on MSSQL
         run: |
-          docker exec $(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server:2022-latest" -q) /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
+          docker exec $(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89" -q) /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Run plugin migration tests
         run: go test -count=1 -timeout=600s -run TestPluginMigrations ./engine/...
