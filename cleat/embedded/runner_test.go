@@ -1096,6 +1096,13 @@ func TestScopeManagement(t *testing.T) {
 
 		// Clear scope and verify.
 		prev = h.ClearScope()
+		// Asserted rather than dropped: ineffassign found this return being
+		// discarded once the cleat module started being linted. The block below
+		// asserts exactly this property for Invoice, so leaving it unchecked
+		// here meant the first ClearScope could return anything at all.
+		if prev != "vo:Order:ord-42:" {
+			return fmt.Errorf("expected scope prefix 'vo:Order:ord-42:', got %q", prev)
+		}
 		objType, instKey = h.GetScope()
 		if objType != "" || instKey != "" {
 			return errors.New("expected empty scope after clear")

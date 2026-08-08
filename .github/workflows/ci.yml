@@ -374,10 +374,49 @@ jobs:
       # The deeper point is that a lint gate whose pass depends on a cache hit
       # is one eviction away from a red build on an unchanged tree. The timeout
       # should bound the analysis, not the cache.
-      - name: golangci-lint
+      # `./...` STOPS AT MODULE BOUNDARIES, which is why this loops.
+      #
+      # This step ran `golangci-lint run ./...` from the repo root until
+      # 2026-08-08, and Go's `./...` does not descend into a nested module. So
+      # `cleat/` -- the PUBLIC SDK module, the one external users import -- and
+      # `cleat/backendkit` had never been linted by anything, while a required
+      # check called `lint-go` went green. Exactly the gap #408 fixed for
+      # govulncheck, in the job whose entire purpose is linting.
+      #
+      # The module list is derived the same way `scripts/check-go-mod-tidy.sh`
+      # and the govulncheck step below derive theirs. Three copies of one find
+      # is one too many, but making them agree by construction is a refactor of
+      # its own; what matters here is that this one does not invent a fourth
+      # set of exclusions. benchmarks/comparative/* is excluded for the reason
+      # check-go-mod-tidy.sh gives: those modules deliberately pin old
+      # competitor releases and are not ours to keep clean.
+      #
+      # Cost, measured 2026-08-08 on an M-series Mac with a cold lint cache:
+      # cleat/ 3.5s (47 files), cleat/backendkit 1.6s (6 files), against the
+      # root module's 764 files. The --timeout is per-invocation, so the loop
+      # does not eat into the root module's budget.
+      - name: golangci-lint (all first-party modules)
         run: |
+          set -uo pipefail
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.7
-          golangci-lint run --timeout=5m ./...
+          cfg="$PWD/.golangci.yml"
+          mods="$(find . -name go.mod \
+                    -not -path './node_modules/*' -not -path '*/node_modules/*' \
+                    -not -path './.claude/*' \
+                    -not -path './benchmarks/comparative/*' |
+                  sed 's|/go\.mod$||; s|^\./||; s|^$|.|' | sort)"
+          if [ -z "$mods" ]; then
+            echo "::error title=lint-go::found no go.mod at all -- this lint would pass vacuously" >&2
+            exit 1
+          fi
+          echo "linting modules:"; echo "$mods" | sed 's/^/  /'
+          rc=0
+          for m in $mods; do
+            echo "::group::golangci-lint $m"
+            ( cd "$m" && golangci-lint run --timeout=5m -c "$cfg" ./... ) || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
 
   # -------------------------------------------------------------------------
   # Vulnerability check (govulncheck)
