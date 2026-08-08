@@ -83,6 +83,23 @@ func extractAPIKey(r *http.Request) string {
 	return r.Header.Get("X-Cleat-API-Key")
 }
 
+// sha256Hash hashes an API key for lookup, not for password-style
+// verification. CodeQL flags this (go/weak-sensitive-data-hashing,
+// alert #13) because SHA-256 is not a computationally expensive KDF and
+// would be a poor choice for a low-entropy, human-chosen secret. It is a
+// reasonable choice here because the input is never that: every key
+// reaching this function was produced by GenerateAPIKey (tenant_store.go),
+// which is 32 bytes from crypto/rand — 256 bits of entropy, hex-encoded.
+// SHA-256 over a secret with that much entropy is not brute-forceable
+// offline even given the hash, so a slow KDF buys no additional
+// protection; its only job here is to avoid storing the plaintext key and
+// to give the DB an equality-indexable lookup value (ResolveTenantFromAPIKey
+// does `WHERE key_hash = $1`, not a constant-time password comparison).
+// If a future caller ever stores a lower-entropy, user-chosen credential
+// through this same path, this reasoning no longer holds and the hash
+// needs to move to bcrypt/scrypt/argon2 (golang.org/x/crypto is already a
+// dependency) with a versioned-hash migration for existing rows.
+// Dismissed: see alert #13.
 func sha256Hash(s string) []byte {
 	h := sha256.Sum256([]byte(s))
 	return h[:]
