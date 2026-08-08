@@ -451,9 +451,10 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID,
+		scheduleTimezoneOrDefault(sch.Timezone))
 	if err != nil {
 		return err
 	}
@@ -468,7 +469,7 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone
 		FROM workflow_schedules ORDER BY name
 	`)
 	if err != nil {
@@ -481,7 +482,7 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone); err != nil {
 			return nil, err
 		}
 		if lastRunAt.Valid {
@@ -533,7 +534,7 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone
 		FROM workflow_schedules
 		WHERE enabled = true AND next_run_at <= now()
 		FOR UPDATE SKIP LOCKED
@@ -548,7 +549,7 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone); err != nil {
 			return nil, err
 		}
 		if lastRunAt.Valid {

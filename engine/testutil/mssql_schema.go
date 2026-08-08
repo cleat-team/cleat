@@ -39,6 +39,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
              last_run_at DATETIMEOFFSET,
              created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
              tenant_id UNIQUEIDENTIFIER,
+             timezone NVARCHAR(64) NOT NULL DEFAULT 'UTC',
              CONSTRAINT ck_workflow_schedules_input CHECK (ISJSON(input) = 1)
          )`,
 

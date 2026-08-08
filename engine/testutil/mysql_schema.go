@@ -149,6 +149,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			last_run_at        TIMESTAMP(6),
 			created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			tenant_id          VARCHAR(255),
+			timezone           VARCHAR(64) NOT NULL DEFAULT 'UTC',
 			PRIMARY KEY (name)
 		) ENGINE=InnoDB`,
 

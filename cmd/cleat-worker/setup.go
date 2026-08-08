@@ -2022,12 +2022,30 @@ func (w *Worker) scheduleLoop() {
 				}
 
 				// Compute next run time and update.
-				nextRun := engine.NextCronTime(sch.CronExpression, time.Now())
+				//
+				// In the SCHEDULE's zone, not the worker's. This used to be
+				// engine.NextCronTime(sch.CronExpression, time.Now()), and
+				// time.Now() carries the local zone of whichever machine in the
+				// fleet happened to claim the row -- so "0 7 * * *" fired at
+				// 07:00 in a zone nobody chose, and two workers in different
+				// regions computed different next-run times for the same
+				// schedule.
+				loc, fellBack := engine.LoadScheduleLocation(sch.Timezone)
+				if fellBack && sch.Timezone != "" {
+					// Distinct from "this schedule is UTC": the zone was named
+					// and this process could not load it, which on a container
+					// without tzdata would otherwise silently re-time every
+					// schedule to UTC. cmd/cleat-worker embeds tzdata to make
+					// this unreachable, so if it fires something is wrong.
+					w.logger.WarnContext(w.ctx, "Scheduler: unknown timezone, falling back to UTC",
+						"worker_id", w.id, "schedule", sch.Name, "timezone", sch.Timezone)
+				}
+				nextRun := engine.NextCronTimeIn(sch.CronExpression, time.Now(), loc)
 				if uerr := w.store.UpdateScheduleNextRun(w.ctx, sch.Name, nextRun); uerr != nil {
 					w.logger.ErrorContext(w.ctx, "Scheduler: failed to update next run", "worker_id", w.id, "schedule", sch.Name, "error", uerr)
 				}
 
-				w.logger.InfoContext(w.ctx, "Scheduler: fired schedule", "worker_id", w.id, "schedule", sch.Name, "workflow_id", runID, "next_at", nextRun.Format(time.RFC3339))
+				w.logger.InfoContext(w.ctx, "Scheduler: fired schedule", "worker_id", w.id, "schedule", sch.Name, "workflow_id", runID, "next_at", nextRun.Format(time.RFC3339), "timezone", loc.String())
 			}
 			w.scheduleMu.Unlock()
 			w.Metrics.RecordBackgroundLoop(w.ctx, "schedule", "ok")

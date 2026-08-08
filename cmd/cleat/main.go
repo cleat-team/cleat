@@ -53,7 +53,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
 		fmt.Fprintf(os.Stderr, "  cleat dev [--input <json>] [--entry-point <name>] [--concurrency-key <key>] [--watch] <package>\n")
-		fmt.Fprintf(os.Stderr, "  cleat schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>]\n")
+		fmt.Fprintf(os.Stderr, "  cleat schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>] [--timezone <iana-zone>]\n")
 		fmt.Fprintf(os.Stderr, "  cleat schedule list\n")
 		fmt.Fprintf(os.Stderr, "  cleat schedule delete <name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat schedule enable <name>\n")
@@ -1351,16 +1351,33 @@ func runSchedule(args []string) {
 		defName := fs.String("def", "", "workflow definition name")
 		entryPoint := fs.String("entry-point", "", "entry point function name")
 		inputJSON := fs.String("input", "{}", "workflow input JSON")
+		timezone := fs.String("timezone", engine.DefaultScheduleTimezone,
+			"IANA timezone the cron expression is evaluated in (e.g. America/New_York)")
 		fs.Parse(remainder)
 
 		fsArgs := fs.Args()
 		if len(fsArgs) < 1 || *cronExpr == "" || *defName == "" {
-			fmt.Fprintf(os.Stderr, "Usage: cleat schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>]\n")
+			fmt.Fprintf(os.Stderr, "Usage: cleat schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>] [--timezone <iana-zone>]\n")
 			os.Exit(1)
 		}
 		name := fsArgs[0]
 
-		nextRun := engine.NextCronTime(*cronExpr, time.Now())
+		// Reject at the point of entry. Both of these used to be accepted and
+		// then silently degrade much later, inside the scheduler: an
+		// unparseable expression fell back to firing daily, and an unknown
+		// zone fell back to UTC. Neither had anywhere to report itself from
+		// there.
+		if err := engine.ValidateCronExpr(*cronExpr); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := engine.ValidateTimezone(*timezone); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		loc, _ := engine.LoadScheduleLocation(*timezone)
+		nextRun := engine.NextCronTimeIn(*cronExpr, time.Now(), loc)
 		sch := engine.Schedule{
 			Name:           name,
 			DefName:        *defName,
@@ -1369,14 +1386,15 @@ func runSchedule(args []string) {
 			Input:          json.RawMessage(*inputJSON),
 			Enabled:        true,
 			NextRunAt:      nextRun,
+			Timezone:       *timezone,
 		}
 
 		if err := store.CreateSchedule(ctx, sch); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating schedule: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Created schedule %q: %s every %s (next at %s)\n",
-			name, *defName, *cronExpr, nextRun.Format(time.RFC3339))
+		fmt.Printf("Created schedule %q: %s every %s (%s) (next at %s)\n",
+			name, *defName, *cronExpr, loc, nextRun.In(loc).Format(time.RFC3339))
 
 	case "list":
 		schedules, err := store.ListSchedules(ctx)
@@ -1388,15 +1406,21 @@ func runSchedule(args []string) {
 			fmt.Println("No schedules found.")
 			return
 		}
-		fmt.Printf("%-20s %-20s %-20s %-7s %s\n", "NAME", "DEFINITION", "CRON", "ENABLED", "NEXT RUN")
+		// NEXT RUN is rendered in the schedule's own zone, and TIMEZONE is
+		// shown next to it. A next-run time printed in UTC beside a cron
+		// expression written for America/New_York is the operator-facing
+		// version of the bug the timezone column fixes: both are correct and
+		// they do not look like they agree.
+		fmt.Printf("%-20s %-20s %-20s %-7s %-20s %s\n", "NAME", "DEFINITION", "CRON", "ENABLED", "TIMEZONE", "NEXT RUN")
 		for _, sch := range schedules {
 			enabled := "no"
 			if sch.Enabled {
 				enabled = "yes"
 			}
-			fmt.Printf("%-20s %-20s %-20s %-7s %s\n",
-				sch.Name, sch.DefName, sch.CronExpression, enabled,
-				sch.NextRunAt.Format(time.RFC3339))
+			loc, _ := engine.LoadScheduleLocation(sch.Timezone)
+			fmt.Printf("%-20s %-20s %-20s %-7s %-20s %s\n",
+				sch.Name, sch.DefName, sch.CronExpression, enabled, loc,
+				sch.NextRunAt.In(loc).Format(time.RFC3339))
 		}
 
 	case "delete":

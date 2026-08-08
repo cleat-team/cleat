@@ -431,8 +431,8 @@ func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, lastRunAt},
-				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil},
+				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, lastRunAt, "UTC"},
+				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York"},
 			},
 		},
 	}, nil)
@@ -448,6 +448,14 @@ func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 	}
 	if scheds[1].LastRunAt != nil {
 		t.Error("expected nil LastRunAt")
+	}
+	// Different zones per row on purpose: a Scan that dropped the column
+	// would leave both empty and still return two schedules.
+	if scheds[0].Timezone != "UTC" {
+		t.Errorf("first schedule timezone = %q, want UTC", scheds[0].Timezone)
+	}
+	if scheds[1].Timezone != "America/New_York" {
+		t.Errorf("second schedule timezone = %q, want America/New_York", scheds[1].Timezone)
 	}
 }
 
@@ -488,7 +496,7 @@ func TestMySQLStore_GetDueSchedules_WithRows(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil},
+				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo"},
 			},
 		},
 	}, nil)
@@ -497,7 +505,12 @@ func TestMySQLStore_GetDueSchedules_WithRows(t *testing.T) {
 		t.Fatalf("GetDueSchedules: %v", err)
 	}
 	if len(scheds) != 1 || scheds[0].Name != "due-sched" {
-		t.Errorf("unexpected: %+v", scheds)
+		t.Fatalf("unexpected: %+v", scheds)
+	}
+	// The scheduler computes the next firing from this field; without it
+	// every schedule silently reverts to the UTC wall clock.
+	if scheds[0].Timezone != "Asia/Tokyo" {
+		t.Errorf("timezone = %q, want Asia/Tokyo", scheds[0].Timezone)
 	}
 }
 

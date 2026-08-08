@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,10 @@ type cronExpr struct {
 type cronField struct {
 	star bool
 	vals map[int]bool
+	// sorted is vals in ascending order. NextCronTimeIn walks candidate wall
+	// times in order and returns the first one after `from`, which requires an
+	// ordering that a map does not have.
+	sorted []int
 }
 
 func (f cronField) matches(v int) bool { return f.vals[v] }
@@ -176,6 +181,12 @@ func parseCronField(pattern string, min, max int, name string) (cronField, error
 		}
 	}
 
+	f.sorted = make([]int, 0, len(f.vals))
+	for v := range f.vals {
+		f.sorted = append(f.sorted, v)
+	}
+	sort.Ints(f.sorted)
+
 	return f, nil
 }
 
@@ -225,6 +236,147 @@ func (e cronExpr) dayMatches(t time.Time) bool {
 	}
 }
 
+// DefaultScheduleTimezone is the zone a schedule is evaluated in when it does
+// not name one. UTC, because a schedule that means "02:00" should keep meaning
+// the same instant regardless of which worker in the fleet happens to pick it
+// up, and because UTC has no DST transitions to reason about.
+const DefaultScheduleTimezone = "UTC"
+
+// ValidateTimezone reports whether name is an IANA timezone this process can
+// load, returning nil if it is.
+//
+// Worth knowing where the answer comes from: time.LoadLocation reads the
+// system zoneinfo database, so on a container image without tzdata installed
+// every name except "UTC" and "Local" fails. cmd/cleat-worker imports
+// _ "time/tzdata" so the worker carries its own copy and does not depend on
+// the base image -- see the comment there.
+func ValidateTimezone(name string) error {
+	if name == "" {
+		return nil // caller substitutes DefaultScheduleTimezone
+	}
+	if _, err := time.LoadLocation(name); err != nil {
+		return fmt.Errorf("cron: timezone %q: %w", name, err)
+	}
+	return nil
+}
+
+// LoadScheduleLocation resolves a schedule's timezone name to a *time.Location,
+// falling back to UTC when the name is empty or unloadable. The bool reports
+// whether the fallback was taken, so a caller can log the difference between
+// "this schedule is UTC" and "this schedule wanted a zone this process cannot
+// load" -- which are very different operational situations and must not look
+// the same in the logs.
+func LoadScheduleLocation(name string) (*time.Location, bool) {
+	if name == "" || name == DefaultScheduleTimezone {
+		return time.UTC, name == ""
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC, true
+	}
+	return loc, false
+}
+
+// scheduleTimezoneOrDefault is what the stores write to workflow_schedules.
+//
+// The column is NOT NULL, and an empty string would be a third state alongside
+// "UTC" and a real zone name -- indistinguishable on read from a schedule
+// whose author meant UTC. Normalising on the way in keeps the column able to
+// answer "which zone was chosen" without the reader having to know that empty
+// means UTC.
+func scheduleTimezoneOrDefault(tz string) string {
+	if tz == "" {
+		return DefaultScheduleTimezone
+	}
+	return tz
+}
+
+// cronInstant returns the absolute instant for the wall-clock time (h:m) on the
+// civil date y/mo/d in loc.
+//
+// This is where daylight saving is decided, and it is not decided by
+// time.Date alone.
+//
+// AMBIGUOUS WALL TIMES (autumn, clocks go back). 01:30 happens twice on
+// 2024-11-03 in America/New_York. time.Date returns the FIRST of the two
+// (01:30 EDT, 05:30 UTC) -- measured, not assumed. Constructing exactly one
+// instant per (date, wall time) is what makes the schedule fire once rather
+// than twice, and taking the first is the rule this engine promises.
+//
+// NONEXISTENT WALL TIMES (spring, clocks go forward). 02:30 does not occur on
+// 2024-03-10 in America/New_York: the clock jumps 01:59:59 -> 03:00:00.
+// time.Date does NOT normalise such a time forward to 03:30 as one might
+// expect -- it normalises BACKWARDS, returning 01:30 EST (06:30 UTC), an hour
+// EARLIER than asked for. Taking that value would fire a 02:30 job at 01:30,
+// once a year, in the wrong direction. So a nonexistent wall time is detected
+// by round-tripping the fields and resolved forward to the transition instant
+// (03:00 EDT), which is the promised rule: a skipped wall time fires at the
+// next instant that exists, rather than being silently dropped for the day.
+func cronInstant(y int, mo time.Month, d, h, m int, loc *time.Location) time.Time {
+	t := time.Date(y, mo, d, h, m, 0, 0, loc)
+	if t.Hour() == h && t.Minute() == m && t.Day() == d {
+		return t
+	}
+
+	// The wall time does not exist. Walk forward from where time.Date landed
+	// to the first instant whose local clock has reached the requested time.
+	// The largest forward transition in tzdata is a small number of hours; the
+	// day bound stops this from running away if a zone ever does something
+	// stranger.
+	for probe := t; probe.Day() == d; probe = probe.Add(time.Minute) {
+		if ph, pm := probe.Hour(), probe.Minute(); ph > h || (ph == h && pm >= m) {
+			return probe
+		}
+	}
+	return t
+}
+
+// NextCronTimeIn computes the next firing time strictly after from, evaluating
+// the expression's wall-clock fields in loc.
+//
+// It walks civil days rather than absolute minutes, because "07:00 every day"
+// is a statement about a wall clock and a wall clock is not a fixed offset from
+// UTC. A minute-by-minute scan over absolute time gets DST wrong in both
+// directions: it fires twice in autumn and not at all in spring.
+//
+// A nil loc is UTC.
+func NextCronTimeIn(expr string, from time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	e, err := parseCronExpr(expr)
+	if err != nil {
+		return from.Add(24 * time.Hour) // fallback: daily. See NextCronTime.
+	}
+
+	local := from.In(loc)
+	y, mo, d := local.Date()
+
+	// Four years of days, for the same reason NextCronTime searched four
+	// years: `0 0 29 2 *` fires once every four.
+	const maxDays = 4*366 + 1
+	for i := 0; i < maxDays; i++ {
+		// Probe the civil date at noon. No zone in tzdata shifts by twelve
+		// hours, so noon always exists and always lands on the date asked
+		// for. Midnight does not have that property -- zones have historically
+		// transitioned at midnight, and constructing one would silently roll
+		// the date to the next day.
+		probe := time.Date(y, mo, d+i, 12, 0, 0, 0, loc)
+		if !e.dayMatches(probe) {
+			continue
+		}
+		py, pmo, pd := probe.Date()
+		for _, h := range e.hour.sorted {
+			for _, m := range e.minute.sorted {
+				if cand := cronInstant(py, pmo, pd, h, m, loc); cand.After(from) {
+					return cand
+				}
+			}
+		}
+	}
+	return from.Add(24 * time.Hour)
+}
+
 // NextCronTime computes the next firing time at or after from for a five-field
 // cron expression.
 //
@@ -237,25 +389,13 @@ func (e cronExpr) dayMatches(t time.Time) bool {
 //
 // The same value is returned for an expression that parses but can never match
 // (`0 0 30 2 *` -- there is no 30th of February), after a four-year search.
+// It evaluates in from's own location, which for a caller passing time.Now()
+// is the host's local zone. That is exactly the ambiguity NextCronTimeIn
+// exists to remove: two workers in different zones computed different firing
+// times for the same schedule. Prefer NextCronTimeIn with the schedule's
+// stored timezone.
 func NextCronTime(cronExpr string, from time.Time) time.Time {
-	e, err := parseCronExpr(cronExpr)
-	if err != nil {
-		return from.Add(24 * time.Hour) // fallback: daily
-	}
-
-	// Start at the next whole minute: "next" is strictly after from.
-	t := from.Truncate(time.Minute).Add(time.Minute)
-
-	// Search up to 4 years ahead. Four covers a leap year, which is the
-	// longest legitimate gap (`0 0 29 2 *` fires once every four years).
-	end := from.AddDate(4, 0, 0)
-	for t.Before(end) {
-		if e.dayMatches(t) && e.hour.matches(t.Hour()) && e.minute.matches(t.Minute()) {
-			return t
-		}
-		t = t.Add(time.Minute)
-	}
-	return from.Add(24 * time.Hour)
+	return NextCronTimeIn(cronExpr, from, from.Location())
 }
 
 // matchField and daysInMonth used to live here, and are deliberately gone.

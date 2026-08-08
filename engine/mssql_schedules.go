@@ -11,15 +11,16 @@ import (
 
 func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id)
-		VALUES (@p1, @p2, @p3, @p4, CAST(@p5 AS NVARCHAR(MAX)), @p6, @p7, @p8)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputJSON(sch.Input), sch.Enabled, sch.NextRunAt, s.tenantID)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone)
+		VALUES (@p1, @p2, @p3, @p4, CAST(@p5 AS NVARCHAR(MAX)), @p6, @p7, @p8, @p9)
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputJSON(sch.Input), sch.Enabled, sch.NextRunAt, s.tenantID,
+		scheduleTimezoneOrDefault(sch.Timezone))
 	return err
 }
 
 func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone
 		FROM workflow_schedules WHERE tenant_id = @p1 ORDER BY name
 	`, s.tenantID)
 	if err != nil {
@@ -33,7 +34,7 @@ func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var lastRunAt sql.NullTime
 		var inputStr string
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
+			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone); err != nil {
 			return nil, err
 		}
 		sch.Input = json.RawMessage(inputStr)
@@ -59,7 +60,7 @@ func (s *MSSQLStore) SetScheduleEnabled(ctx context.Context, name string, enable
 
 func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone
 		FROM workflow_schedules WITH (READPAST, UPDLOCK, ROWLOCK)
 		WHERE enabled = 1 AND next_run_at <= SYSUTCDATETIME()
 		ORDER BY next_run_at
@@ -75,7 +76,7 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		var lastRunAt sql.NullTime
 		var inputStr string
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
+			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone); err != nil {
 			return nil, err
 		}
 		sch.Input = json.RawMessage(inputStr)
