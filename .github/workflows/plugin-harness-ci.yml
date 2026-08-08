@@ -246,7 +246,40 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       minio:
-        image: quay.io/minio/minio:latest
+        # Pinned by digest, not by tag, and not to `latest`.
+        #
+        # `Blobstore S3 Round-Trip` is a required status check. `:latest` on a
+        # required check means a third party can turn every PR in this repo red
+        # by publishing a release, at a moment unrelated to anything we did --
+        # and the failure would land on whichever PR happened to be open, whose
+        # author would have no reason to suspect the image. That is the shape of
+        # the actions/setup-go v7 cache-key change that made #325 permanently
+        # unmergeable (tiers.yaml records it), arriving through a different door.
+        #
+        # The digest below is what `:latest` resolved to when this was pinned on
+        # 2026-08-07, so this is the image the job had already been green on --
+        # RELEASE.2025-09-07T16-13-09Z, which quay has carried as `latest` since
+        # 2025-09-07. Pinning it is a no-op today and a guarantee tomorrow.
+        #
+        # By digest rather than by the RELEASE tag because MinIO republishes
+        # hotfix tags against old releases (RELEASE.2024-08-03...hotfix.ca75c7346
+        # was pushed in March 2026), so a release tag is not by itself a promise
+        # that the bytes are fixed. Re-derive both:
+        #
+        #   curl -s 'https://quay.io/api/v1/repository/minio/minio/tag/?onlyActiveTags=true' \
+        #     | python3 -c "import json,sys; [print(t['name'], t['manifest_digest']) \
+        #       for t in json.load(sys.stdin)['tags'] if t['name']=='latest']"
+        #
+        # This is a pin to be bumped deliberately, not a fossil: renovate.json
+        # extends config:recommended, whose github-actions manager reads service
+        # image fields, so a newer digest arrives as a reviewable PR that must go
+        # green before it lands -- which is the whole difference from `:latest`.
+        #
+        # Not done here, and it is the larger version of the same problem:
+        # mcr.microsoft.com/mssql/server:2022-latest is also a moving tag, and it
+        # appears five times across these workflows including the required
+        # `Test SQL Server`, `Tier 1 Gate` and `Tier 2 Gate`.
+        image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
