@@ -119,7 +119,54 @@ jobs:
           --health-retries 5
 
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        # Pinned by digest on 2026-08-07. THE RATIONALE FOR ALL SIX SITES LIVES
+        # HERE; the other five carry a one-line pointer back to this comment.
+        #
+        # `2022-latest` is a moving tag. Microsoft republishes it on their own
+        # schedule, so a republish can turn every open PR in the repo red for a
+        # reason unrelated to anything the project did, and the failure lands on
+        # whoever happens to have a PR open. Three of its uses are required
+        # status checks -- Test SQL Server, Tier 1 Gate and Tier 2 Gate -- so
+        # that is not a hypothetical inconvenience. Same class as the MinIO
+        # `:latest` pinned in #377, and larger.
+        #
+        # The digest below is what `2022-latest` resolved to on 2026-08-07, so
+        # this is the image these jobs were already green on: pinning it is a
+        # no-op today and a guarantee tomorrow. It is SQL Server 16.0.4265.3 on
+        # an ubuntu 22.04 base, linux/amd64. The tag carries a single manifest
+        # rather than an index, so there is one digest and not one per platform
+        # -- worth knowing before bumping it. Re-derive both:
+        #
+        #   docker manifest inspect -v mcr.microsoft.com/mssql/server:2022-latest
+        #   curl -sL https://mcr.microsoft.com/v2/mssql/server/blobs/<config-digest> \
+        #     | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["Labels"])'
+        #
+        # WHY THE `docker ps --filter ancestor=` LINES BELOW MOVED WITH IT.
+        # Pinning `image:` on its own would have been worse than not pinning at
+        # all. The steps that create the cleat database find their container
+        # with `docker ps -q --filter ancestor=<ref>`, and that filter matches
+        # on the reference actually used to pull, not on the repository. So a
+        # half-done pin leaves `docker exec` with an empty container ID.
+        # Measured on 2026-08-07, against a container started from a digest ref:
+        #
+        #   docker ps -q --filter "ancestor=alpine@sha256:c64c687c..."  -> 1 match
+        #   docker ps -q --filter "ancestor=alpine:3.20"                -> 0 matches
+        #
+        # All six `image:` sites and all four `ancestor=` filters name the same
+        # digest, and they have to be bumped together. Nothing enforces that as
+        # this lands -- the guard that would (an `ancestor=` filter naming a
+        # reference that is not also an `image:` in the same file) is the next
+        # item on plans/ci-integrity-followup-plan.md, and this sentence is what
+        # should be corrected when it arrives. Re-derive the set:
+        #
+        #   grep -rn 'mcr.microsoft.com/mssql/server' .github/workflows/ \
+        #     docker-compose.cluster.yml docker-compose.dev.yml
+        #
+        # This is a pin to be bumped deliberately, not a fossil: renovate.json
+        # extends config:recommended, whose github-actions manager reads service
+        # image fields, so a newer digest arrives as a reviewable PR that has to
+        # go green before it lands. That is the whole difference from a tag.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
@@ -201,7 +248,7 @@ jobs:
       # a service has no way to run SQL after it is healthy.
       - name: Create the cleat database on SQL Server
         run: |
-          docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server:2022-latest')" \
+          docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89')" \
             /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
             -Q "IF DB_ID('cleat') IS NULL CREATE DATABASE cleat"
 

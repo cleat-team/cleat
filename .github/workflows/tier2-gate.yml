@@ -106,7 +106,11 @@ jobs:
       # cleat defect. The tier-1 gate already runs green against server:2022, so this
       # picks the image that is known to work rather than importing a local artifact.
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
+        # a required check. Full rationale, the re-derive commands, and why the
+        # `ancestor=` filters had to move with it: tier1-gate.yml's mssql
+        # service. Bump all six sites together or `Lint` fails the PR.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
@@ -142,7 +146,7 @@ jobs:
 
       - name: Create the cleat database on SQL Server
         run: |
-          docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server:2022-latest')" \
+          docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89')" \
             /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
             -Q "IF DB_ID('cleat') IS NULL CREATE DATABASE cleat"
 
