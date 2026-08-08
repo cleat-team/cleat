@@ -362,6 +362,10 @@ func TestTenantIDFromContext_NilContext(t *testing.T) {
 			t.Error("expected panic with nil context")
 		}
 	}()
+	// The nil is the test. SA1012 is right in general and wrong here: this
+	// asserts that TenantIDFromContext panics rather than silently returning a
+	// zero tenant, and context.TODO() would test the opposite path.
+	//nolint:staticcheck // SA1012: passing nil is what is under test
 	_, _ = TenantIDFromContext(nil)
 }
 

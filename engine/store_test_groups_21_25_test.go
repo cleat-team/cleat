@@ -362,7 +362,7 @@ func TestLoadDAGSpec(t *testing.T) {
 				return
 			}
 			// Undeployed workflows have no DAG spec; result is nil or empty.
-			if spec != nil && len(spec) > 0 {
+			if len(spec) > 0 {
 				t.Logf("DAG spec (unexpected): %s", string(spec))
 			}
 		})

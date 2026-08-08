@@ -609,7 +609,7 @@ func (c *fakeConn) queryListJobs(query string, args []driver.NamedValue) (driver
 	hasStatusFilter := strings.Contains(query, "AND status =")
 
 	var statusFilter string
-	var limit int64 = 50
+	var limit int64
 	if hasStatusFilter {
 		statusFilter, err = argString(args, 3)
 		if err != nil {

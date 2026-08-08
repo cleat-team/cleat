@@ -653,8 +653,7 @@ func buildImportWasm(imports []struct {
 	if numImports > 0 {
 		var importContent []byte
 		for _, imp := range imports {
-			key := string(imp.Type)
-			idx := typeIdx[key]
+			idx := typeIdx[string(imp.Type)]
 			importContent = append(importContent, wasmName("env")...)
 			importContent = append(importContent, wasmName(imp.Name)...)
 			importContent = append(importContent, 0x00)                          // kind = function
@@ -671,8 +670,7 @@ func buildImportWasm(imports []struct {
 			// Use the type of the import being called.
 			impIdx := int(exp.CallIdx)
 			if impIdx < len(imports) {
-				key := string(imports[impIdx].Type)
-				funcContent = append(funcContent, encodeULEB128(uint32(typeIdx[key]))...)
+				funcContent = append(funcContent, encodeULEB128(uint32(typeIdx[string(imports[impIdx].Type)]))...)
 			} else {
 				funcContent = append(funcContent, encodeULEB128(0)...)
 			}

@@ -107,7 +107,7 @@ func TestReadWasmString(t *testing.T) {
 	// Out of bounds (wazero returns zero-extended buffer).
 	if got := readWasmString(mem, 0, 100); len(got) != 100 {
 		t.Errorf("readWasmString(0,100) length = %d, want 100", len(got))
-	} else if string(got[:11]) != "hello world" {
+	} else if got[:11] != "hello world" {
 		t.Errorf("readWasmString(0,100) prefix = %q, want %q", got[:11], "hello world")
 	}
 }

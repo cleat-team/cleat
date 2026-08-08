@@ -1187,7 +1187,7 @@ func TestListAfterDelete(t *testing.T) {
 
 	// Create two limits.
 	put := func(key string) {
-		body := fmt.Sprintf(`{"max_requests":5,"window_seconds":30}`)
+		body := `{"max_requests":5,"window_seconds":30}`
 		req := httptest.NewRequest("PUT", "/rate-limits/"+key, bytes.NewReader([]byte(body)))
 		req.Header.Set("Authorization", "Bearer "+testAPIKey)
 		rec := httptest.NewRecorder()

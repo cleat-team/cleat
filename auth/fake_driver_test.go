@@ -282,9 +282,7 @@ func (r *fakeRows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.data) {
 		return io.EOF
 	}
-	for i, v := range r.data[r.pos] {
-		dest[i] = v
-	}
+	copy(dest, r.data[r.pos])
 	r.pos++
 	return nil
 }

@@ -230,7 +230,7 @@ func TestScanWasmImports_NoImportSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if imports != nil && len(imports) != 0 {
+	if len(imports) != 0 {
 		t.Errorf("expected empty imports, got %d", len(imports))
 	}
 }

@@ -93,8 +93,10 @@ linters:
   # were created hours earlier by staticcheck's SA4016 fix in the same file, so
   # the two linters disagreed about the same lines until both were run. Applied
   # with `unconvert -apply ./...` rather than by hand; the only judgement call
-  # was reverting its one edit to a _test.go file, since this config excludes
-  # test files and the change should be exactly what the linter enforces.
+  # was reverting its one edit to a _test.go file, since this config excluded
+  # test files at the time and the change should be exactly what the linter
+  # enforces. That exclusion is gone as of 2026-08-08, so that revert has since
+  # been re-applied along with the rest of the test-file backlog.
   #
   # unused, 2026-08-05 (WS-3): MEASURED AT 30 AND DELIBERATELY NOT ENABLED.
   # It is the same U1000 analysis that scripts/check-test-only-code.sh already
@@ -119,6 +121,68 @@ linters:
   # unused nearly doubled and gosec grew by 90 in a day of three streams
   # landing changes. Part of that is new code, which is the point: a disabled
   # linter is not a backlog being worked off, it is one being added to.
+  #
+  # RE-MEASURED 2026-08-08, and none of the four became tractable:
+  #
+  #     linter      08-04   08-05   08-08   08-08 incl. tests
+  #     errcheck      307     280     283          878
+  #     gosec         193     283     268          659
+  #     gocyclo        28      35      35           44
+  #     unused         16      30      30           55
+  #
+  # Re-derive any column with:
+  #
+  #     golangci-lint run --timeout=15m -c <one-linter.yml> ./... | grep -c '(<linter>)'
+  #
+  # where <one-linter.yml> sets `linters: {disable-all: true, enable: [<linter>]}`
+  # and `issues: {max-issues-per-linter: 0, max-same-issues: 0}`. Note that you
+  # cannot get this by passing `--disable-all --enable=X` on the command line
+  # against THIS file -- golangci-lint refuses ("can't combine options
+  # --disable-all and --disable") and, if you pipe its output to grep, the
+  # error is swallowed and every count comes back 0. That produced a tidy table
+  # of four zeroes on the first attempt at this measurement.
+  #
+  # The last column is new: it is the same count with test files included, now
+  # that they are no longer excluded (see `issues:` below). It is the number
+  # that matters for anyone thinking of enabling one of these, and it is 2-3x
+  # the third column in every row -- errcheck alone is 878. So removing the
+  # test exclusion did not make these four any closer to enableable; what it
+  # made cheaper was the six linters that ARE on, which cost 28 findings.
 issues:
-  exclude-files:
-    - ".*_test\\.go$"
+  # THERE IS NO `exclude-files` HERE ANY MORE, AND THAT IS THE POINT.
+  #
+  # This file carried `exclude-files: [".*_test\.go$"]` from the beginning, so
+  # every linter above skipped every test file. Measured 2026-08-08:
+  #
+  #     find . -name '*.go'      -not -path './.claude/*' | wc -l   ->  764
+  #     find . -name '*_test.go' -not -path './.claude/*' | wc -l   ->  366
+  #
+  # 366 of 764 files -- 48% of the repo's Go source -- were outside a REQUIRED
+  # status check, and nothing said so. `lint-go` went green on roughly half the
+  # tree while reading like it covered all of it.
+  #
+  # Removing the exclusion cost 28 findings (ineffassign 14, staticcheck 6,
+  # gosimple 6, unconvert 2), fixed in the same PR. Three of them were not
+  # style:
+  #
+  #   * plugin/recovery_test.go -- SA4023, a `err == nil` on an interface
+  #     holding a non-nil pointer. The comparison is never true, so the
+  #     t.Fatal was unreachable and the test could not fail. Now a
+  #     compile-time `var _ error = (*PanicError)(nil)`.
+  #   * cmd/cleat-worker/worker_daemon_test.go -- SA9003, `if !reapCalled {}`
+  #     with an EMPTY BODY. The test asserted nothing at all.
+  #   * engine/mysql_store_integration_test.go -- ineffassign on `errMsg`,
+  #     which was a dropped assertion: the block before it checks all three
+  #     return values, this one checked two.
+  #
+  # A linter that cannot see test files cannot see a test that does not test.
+  # If you are tempted to re-add the exclusion to make a new linter tractable,
+  # scope it to that linter instead of blinding all of them.
+  #
+  # The two caps below are golangci-lint's defaults (50 and 3) turned off. They
+  # truncate the *report*, not the exit code, so they never affected whether
+  # this gate passed -- but they are why the errcheck row in the table above
+  # reads 50 with them on and 283 with them off, and a truncated count is how
+  # a backlog gets mis-sized. Off, so what the job prints is what it found.
+  max-issues-per-linter: 0
+  max-same-issues: 0
