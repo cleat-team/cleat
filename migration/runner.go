@@ -387,6 +387,24 @@ func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migra
 	return nil
 }
 
+// SplitMSSQL splits a MSSQL SQL string into batches on GO lines.
+//
+// It is exported so that other packages needing MSSQL-correct statement
+// splitting -- notably tests/plugin-harness's migration test setup, which
+// used to carry its own copy that also split on every semicolon inside a
+// batch -- can reuse this rather than diverging from it again. Splitting a
+// stored procedure body's internal semicolons the same way a top-level
+// statement separator would is the MSSQL analogue of what MySQL's DELIMITER
+// directive guards against: it cuts CREATE OR ALTER PROCEDURE
+// dbo.finalize_workflow_status (migrations/mssql/003_procedures.sql) into
+// fragments and sends them to the server individually, which fails with
+// "Incorrect syntax" partway through the body. GO is the only batch
+// separator MSSQL recognises; everything else inside a batch, semicolons
+// included, is the server's job to parse as one unit.
+func SplitMSSQL(sql string) []string {
+	return splitMSSQL(sql)
+}
+
 // splitMSSQL splits a MSSQL SQL string into batches on GO lines.
 // GO must appear on its own line (case-insensitive, optional trailing whitespace).
 func splitMSSQL(sql string) []string {
