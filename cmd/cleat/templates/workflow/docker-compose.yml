@@ -1,6 +1,11 @@
 version: "3.9"
 services:
   postgres:
+    # Deliberately NOT digest-pinned, unlike the twelve sites cleat's own CI and
+    # compose files use (see .github/workflows/tier1-gate.yml for the reasoning).
+    # This file is scaffolded into someone else's project, and a digest frozen on
+    # the day they ran `cleat init` is theirs to carry, not ours to choose. 16 is
+    # cleat's minimum supported PostgreSQL -- see README.
     image: postgres:16
     environment:
       POSTGRES_USER: cleat

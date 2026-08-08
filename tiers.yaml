@@ -165,6 +165,30 @@ tier1:
   languages: [go, python]
   backend: wasmtime          # CGO required; see CLAUDE.md on why CGO_ENABLED=0 invalidates a run
   dialects: [postgres, mysql, mssql]
+
+  # The versions those dialect names mean. Added 2026-08-08, because until then this
+  # file named the dialects and no version, while README.md, docs/operations/upgrading.md
+  # and docs/explanation/postgresql-schema.md all claimed "PostgreSQL 14+" and
+  # docs/explanation/architecture.md claimed "16+". Four docs, two answers, and nothing
+  # upstream of them to be wrong about -- which is the exact failure this file exists to
+  # prevent, in the one place nobody had looked.
+  #
+  # DECIDED 2026-08-08: the claim is 16+, matching what CI has always actually run. 14+
+  # was never tested by anything. Nothing in the codebase needs 16 -- the Postgres-
+  # specific SQL is `FOR UPDATE SKIP LOCKED` (9.5), LISTEN/NOTIFY, and gen_random_uuid()
+  # via pgcrypto, and there is no runtime version check anywhere (grep for
+  # `server_version` returns nothing). So this is a claim about what is *verified*, not
+  # about what would happen to work. A floor nobody exercises is the claim most likely to
+  # be false, and lowering the claim to what CI runs is cheaper and more honest than
+  # adding a 14 arm to a matrix that does not exist.
+  #
+  # There is no CI matrix over database versions for ANY dialect; each is pinned to
+  # exactly one. If that changes, this is the key to widen.
+  dialect_versions:
+    postgres: ">=16"     # tested against 16.14, digest-pinned at twelve sites
+    mysql: ">=8.0"       # tested against 8.4, tag-pinned (not digest) -- see below
+    mssql: ">=2022"      # tested against the digest pinned in tier1-gate.yml
+
   # D1, DECIDED 2026-08-06. The rule: multi-tenancy requires database-enforced RLS.
   # PostgreSQL and SQL Server have it; MySQL has no row-level security feature at all
   # (CREATE POLICY is a syntax error on 8.4). A view + stored-function + WITH CHECK OPTION

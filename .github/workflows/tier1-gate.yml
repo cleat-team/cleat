@@ -73,7 +73,34 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # PINNED 2026-08-08. `postgres:16` is a floating tag in exactly the way
+        # `2022-latest` was for SQL Server below: it moved from 16.0 to 16.14
+        # over the life of this repo, and every required check that touches a
+        # database resolved whatever the registry served that morning.
+        #
+        # scripts/check-workflow-guards.py's floating-tag guard did NOT catch
+        # this. It only rejects `:latest` and tags ending in `-latest`, so a
+        # major-only tag walked straight through. Tightening it means pinning
+        # mysql:8.4 in the same change, so both are a follow-up -- recorded
+        # here so the gap is a known one rather than an assumption that the
+        # guard has this covered.
+        #
+        # Re-derive the digest, and read the version it resolves to:
+        #
+        #   docker buildx imagetools inspect postgres:16      # Digest: sha256:...
+        #   docker run --rm postgres:16 postgres --version    # -> 16.14
+        #
+        # The `:16.14@sha256:` form is redundant on purpose: Docker resolves by
+        # digest and ignores the tag, so the tag is there for the reader. If
+        # you bump one, bump both -- a tag that disagrees with its digest is
+        # worse than no tag, because it is a claim nothing checks.
+        #
+        # THIS IS ONE OF TWELVE SITES. The others are in ci.yml, tier2-gate.yml,
+        # multi-db-ci.yml, soak.yml, plugin-harness-ci.yml (x2), this file (x2),
+        # and the four compose files at the repo root and in .devcontainer/.
+        # cmd/cleat/templates/workflow/docker-compose.yml is deliberately NOT
+        # pinned -- see the comment there.
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat
@@ -92,7 +119,7 @@ jobs:
       # own port for that reason. The DSN shape below matches the default in
       # tests/crash/harness_test.go's ownerDSN.
       postgres-crash:
-        image: postgres:16
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat

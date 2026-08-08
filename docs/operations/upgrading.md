@@ -381,7 +381,7 @@ deterministic replay.
 
 ## PostgreSQL major version upgrade
 
-Cleat requires PostgreSQL 14+. When upgrading PostgreSQL to a new major version,
+Cleat requires PostgreSQL 16+. When upgrading PostgreSQL to a new major version,
 follow this procedure.
 
 ### Procedure
