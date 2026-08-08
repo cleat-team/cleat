@@ -95,6 +95,12 @@ func TestInMemorySignalStore_Cancellation(t *testing.T) {
 	if cancelled {
 		t.Fatal("expected not cancelled after clear")
 	}
+	// Asserted rather than dropped: ineffassign found `reason` being discarded
+	// here once the cleat module started being linted. A cleared cancellation
+	// that still carried its old reason would be a real defect.
+	if reason != "" {
+		t.Fatalf("reason survived ClearCancelled: %q", reason)
+	}
 }
 
 // ---------------------------------------------------------------------------

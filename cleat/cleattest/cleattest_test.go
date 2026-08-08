@@ -233,6 +233,12 @@ func TestAfterSignal(t *testing.T) {
 	if !timedOut {
 		t.Fatal("expected timeout before time advance")
 	}
+	// Asserted rather than dropped: ineffassign found `name` being discarded
+	// here once the cleat module started being linted. A timeout that also
+	// returned a signal name would be a real defect, and nothing said so.
+	if name != "" || payload != "" {
+		t.Fatalf("timeout returned a signal: name=%q payload=%q", name, payload)
+	}
 
 	// Advance time past the delay.
 	env.AdvanceTime(200 * time.Millisecond)
