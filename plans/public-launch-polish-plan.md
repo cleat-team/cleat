@@ -19,6 +19,11 @@ Before taking cleat public, we benchmarked it against 20 highly-rated open-sourc
 > place rather than silently edited, because a table that quietly corrects itself teaches the next
 > reader nothing. Status that CI does not check rots; see `tiers.yaml`'s header and
 > `plans/ci-integrity-followup-plan.md` §8.
+>
+> **Updated later the same day.** The CodeQL row is now genuinely Done — see the row itself for
+> what was enabled and what it immediately found. The audit missed a fifth wrong claim, in
+> "Remaining Gaps" rather than in this table: gap 1 asks for a placeholder to be fixed in an
+> OpenSSF badge the README does not contain. Corrected there.
 
 | Category | Item | Status |
 |----------|------|--------|
@@ -37,9 +42,11 @@ Before taking cleat public, we benchmarked it against 20 highly-rated open-sourc
 | **Templates** | Issue templates: bug_report.yml, feature_request.yml, config.yml | Done |
 | **Templates** | PR template with change-type checklist, release notes, AI disclosure, breaking change section | Done |
 | **CI/CD** | Main CI (ci.yml) — lint, golangci-lint, govulncheck, test matrix, fuzz, benchmarks, build, cluster tests | Done |
-| **CI/CD** | CodeQL scanning (codeql.yml) | **NOT DONE — corrected 2026-08-07.** No such workflow, and CodeQL default setup reports `not-configured`; `gh api .../code-scanning/alerts` returns 404 "no analysis found". Secret scanning and push protection are also disabled. See `plans/ci-integrity-followup-plan.md` §1. |
+| **CI/CD** | CodeQL scanning | **Done 2026-08-07, but not as this row described it.** There is still no `codeql.yml` and there will not be — this is CodeQL *default setup*, which is one fewer hand-written workflow to rot, and this repo's evidence on hand-written workflows is not encouraging. Enabled for `actions`, `go`, `javascript-typescript` and `python` (the API reports six, expanding `javascript-typescript` into its two aliases). Deliberately **not** `c-cpp`, `java-kotlin` or `rust`: those need autobuild, the `C` GitHub reports is vendored, and a scanner that fails to build is a scanner that reports nothing. Re-derive: `gh api repos/cleat-team/cleat/code-scanning/default-setup --jq '{state,languages}'`. |
+| **CI/CD** | Secret scanning + push protection | **Done 2026-08-07.** Both enabled, plus non-provider patterns. `gh api repos/cleat-team/cleat --jq .security_and_analysis` |
+| **CI/CD** | Dependabot security updates | **Done 2026-08-07, and it is not cosmetic.** Enabling alerts surfaced **68 existing vulnerabilities — 16 critical, 25 high, 26 medium, 1 low** — on the default branch, and opened 8 update PRs. That backlog was always there; nothing was reporting it. Triage it before making any of this a required check: requiring it first blocks every PR on unrelated findings, which is how a security gate gets switched off. `gh api repos/cleat-team/cleat/dependabot/alerts --jq 'map(select(.state=="open"))\|length'` |
 | **CI/CD** | DCO check (dco-check.yml) | Done |
-| **CI/CD** | Semantic PR title check (semantic-pull-request.yml) | **NOT DONE — corrected 2026-08-07.** No such workflow exists. `Validate branch name` enforces a prefix vocabulary and is required; decide whether this row is a workflow to write or a row to delete. |
+| **CI/CD** | Semantic PR title check (semantic-pull-request.yml) | **NOT DONE, and decided 2026-08-07 not to do it.** No such workflow ever existed. `Validate branch name` already enforces a prefix vocabulary (`feature/`, `bugfix/`, `fix/`, `docs/`, `release/`, `hotfix/`) and is a required check, so a title check would be a second guard over the same convention. The repo's problem has never been unparseable PR titles; it has been checks that pass without measuring anything. Adding a third overlapping guard is not the answer to that. Row kept rather than deleted so the decision is visible. |
 | **CI/CD** | Auto-labeler (labeler.yml + labeler.yml config) | Removed 2026-08-06 (#366) — v4 config under a v5 action; never applied a label |
 | **CI/CD** | Release notes check (release-notes-check.yml) | Removed 2026-08-07 — keyed on labels nothing could apply; never gated a PR (IMPROVEMENT-PLAN §1.12a) |
 | **CI/CD** | Ecosystem CI (ecosystem-ci.yml — tests Python/Rust/Java/AS SDKs on core changes) | Done |
@@ -53,12 +60,27 @@ Before taking cleat public, we benchmarked it against 20 highly-rated open-sourc
 
 ## Remaining Gaps (7 items)
 
-### 1. Fix OpenSSF Best Practices Badge (placeholder URL)
+### 1. ~~Fix OpenSSF Best Practices Badge (placeholder URL)~~ — corrected 2026-08-07
 
-**File:** `README.md`
-**Issue:** The OpenSSF Best Practices badge uses `XXXX` as a placeholder in the URL instead of a real project ID. It won't render correctly.
+**This gap described a badge the README does not contain.** Both sentences of it were wrong:
 
-**Fix:** Either register cleat at https://www.bestpractices.dev/ and get a real project ID, or remove the badge until that's done. The OpenSSF Scorecard badge is already present and working, so this specific badge isn't critical.
+```
+$ grep -n '^\[!\[' README.md
+3: CI   4: Go Version   5: License   6: Go Report Card   7: Discord   8: Go Reference
+$ grep -c -i 'bestpractices\|scorecard\|XXXX' README.md
+0
+```
+
+There is no OpenSSF Best Practices badge with a placeholder to fix, and the claim that "the OpenSSF
+Scorecard badge is already present and working" is false — that badge is not present either, which
+the badge row of the table above already recorded. The two statements contradicted each other
+inside one document.
+
+**What is actually open**, stated as a choice rather than a fix: decide whether cleat wants an
+OpenSSF presence at all. Registering at https://www.bestpractices.dev/ earns a real badge; running
+the Scorecard action earns another. Both are worth having, and neither is a five-minute edit — the
+entry in the effort table below said 5 min because it assumed a URL typo. Until one is chosen,
+there is nothing here to fix.
 
 ### 2. Create `SUPPORT.md`
 
@@ -165,7 +187,7 @@ All 7 items are independent and can be done in any order. Recommended order by i
 | 1 | Verify/create Dockerfile | 15 min | Blocks CI |
 | 2 | Create MAINTAINERS.md | 5 min | Fixes broken cross-reference in GOVERNANCE.md |
 | 3 | Create SUPPORT.md | 10 min | GitHub community profile completeness |
-| 4 | Fix OpenSSF badge placeholder | 5 min | Visual polish |
+| 4 | ~~Fix OpenSSF badge placeholder~~ — **void, corrected 2026-08-07.** No such badge exists; see gap 1. What remains is a decision about whether to seek an OpenSSF presence, not a 5-minute edit | — | — |
 | 5 | Expand Dependabot config | 10 min | Dependency hygiene |
 | 6 | Add release-dry-run to Makefile | 5 min | Contributor convenience |
 | 7 | Logo/branding | Variable | High visual impact, may need design time |
@@ -176,11 +198,11 @@ All 7 items are independent and can be done in any order. Recommended order by i
 
 The audit confirms cleat is already well above the median of the 20 reviewed projects:
 
-- **README:** 821 lines, 12 badges, architecture diagram, full API reference, CLI reference, DB schema, testing guide, honest limitations section — better than 80% of projects reviewed
+- **README:** 821 lines, **6** badges (`grep -c '^\[!\[' README.md`, 2026-08-07 — this line said 12 until it was checked), architecture diagram, full API reference, CLI reference, DB schema, testing guide, honest limitations section — better than 80% of projects reviewed
 - **CONTRIBUTING.md:** 366 lines, 17 sections — better than Rust, Tokio, and Ripgrep; competitive with Temporal and Vite
 - **SECURITY.md:** 231 lines with threat model — better than all but Caddy and Vite
 - **GOVERNANCE.md:** 442 lines with TSC, meeting cadence, removal policy — better than 17/20 projects
-- **CI/CD:** 14 workflows (`ls .github/workflows/ | wc -l`, 2026-08-07), including DCO, CLA, ecosystem CI, the tier 1 and tier 2 gates, cross-language E2E and the plugin harness. **Corrected 2026-08-07:** of the five named here previously, CodeQL and the semantic-PR check never existed, the release-notes check never gated a PR (deleted, #373), and the auto-labeler never applied a label (deleted, #366). 32 of these jobs are required status checks with `enforce_admins: true` — a stronger claim than the workflow count, and a checkable one.
+- **CI/CD:** 14 workflows (`ls .github/workflows/ | wc -l`, 2026-08-07), including DCO, CLA, ecosystem CI, the tier 1 and tier 2 gates, cross-language E2E and the plugin harness. **Corrected 2026-08-07:** of the five named here previously, CodeQL and the semantic-PR check never existed, the release-notes check never gated a PR (deleted, #373), and the auto-labeler never applied a label (deleted, #366). 32 of these jobs are required status checks with `enforce_admins: true` — a stronger claim than the workflow count, and a checkable one. **CodeQL now runs**, as default setup rather than a workflow, so it does not appear in that count at all.
 - **PRINCIPLES.md:** 8 design principles — only Docker/Moby had this among 20 projects
 
 The remaining 7 items are small polish tasks. The repo is substantially public-ready.
@@ -192,7 +214,8 @@ The remaining 7 items are small polish tasks. The repo is substantially public-r
 - [ ] `Dockerfile` exists and `docker build -t cleat-worker:latest .` succeeds
 - [ ] `MAINTAINERS.md` exists and GOVERNANCE.md's reference to it resolves
 - [ ] `SUPPORT.md` exists and links to Discord, Issues, Discussions, SECURITY.md
-- [ ] OpenSSF Best Practices badge either works or is removed
+- [ ] Decide whether cleat wants an OpenSSF presence (Best Practices registration, Scorecard action, or neither) — there is no such badge in the README today, so there is nothing to fix, only something to choose
+- [ ] Triage the 68 Dependabot alerts surfaced on 2026-08-07, and the first CodeQL analysis, before making either a required check
 - [ ] Dependabot covers Go, npm, pip, and Cargo in addition to Actions
 - [ ] `make release-dry-run` runs GoReleaser in snapshot mode
 - [ ] `make lint && make test` passes

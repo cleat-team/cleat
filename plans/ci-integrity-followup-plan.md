@@ -39,9 +39,54 @@ Ordered by what would hurt most if it stayed as it is.
 
 ---
 
-### 1. There is no security scanning, and three documents say there is
+### 1. ~~There is no security scanning, and three documents say there is~~ — DONE 2026-08-07
 
-**Severity: high.** This is the only item here that is a live false claim rather than a gap.
+**Severity: high.** This was the only item here that was a live false claim rather than a gap.
+
+**What was enabled**, later the same day this was written:
+
+```
+$ gh api repos/cleat-team/cleat/code-scanning/default-setup --jq '{state,languages}'
+{"state":"configured",
+ "languages":["actions","go","javascript","javascript-typescript","python","typescript"]}
+
+$ gh api repos/cleat-team/cleat --jq '.security_and_analysis'
+secret_scanning: enabled, secret_scanning_push_protection: enabled,
+secret_scanning_non_provider_patterns: enabled
+```
+
+CodeQL **default setup**, not a `codeql.yml`, for the reason given under "Do" below. Four languages
+were requested — `actions`, `go`, `javascript-typescript`, `python` — and GitHub stores six, because
+it expands `javascript-typescript` into its `javascript` and `typescript` aliases. The command above
+prints what is stored, which is why it does not match what was asked for.
+
+`c-cpp`, `java-kotlin` and `rust` were deliberately left out: they need autobuild, the `C` GitHub
+attributes to this repo is vendored, and a scanner that fails to build is a scanner that reports
+nothing — which is this document's entire subject.
+
+**What it immediately found, and the reason step 2 below was the important one.** Turning on
+Dependabot alerts surfaced **68 open vulnerabilities on the default branch — 16 critical, 25 high,
+26 medium, 1 low** — and opened 8 update PRs. None of that was new; nothing had been reporting it.
+(The API says `medium` where the web UI says `moderate`; the command below prints the API's word.)
+Re-derive:
+
+```
+gh api repos/cleat-team/cleat/dependabot/alerts --paginate \
+  --jq 'map(select(.state=="open"))|group_by(.security_advisory.severity)|map({(.[0].security_advisory.severity):length})|add'
+```
+
+**Still open, and deliberately so:** none of this is a required check yet. Triage first. Requiring a
+scanner before its backlog is triaged blocks every PR on unrelated findings, which is how a security
+gate gets switched off. That was step 2 when this was written and it is still step 2.
+
+The doc corrections (step 3) landed alongside; the semantic-PR-title decision (step 4) is recorded
+in `plans/public-launch-polish-plan.md` — not doing it, because `Validate branch name` already
+enforces the same convention and is required.
+
+---
+
+<details>
+<summary>The original finding, kept because the evidence is what made the case</summary>
 
 Measured 2026-08-07:
 
@@ -101,6 +146,8 @@ grant.*
 
 **Verify:** `gh api .../code-scanning/default-setup --jq .state` reports `configured`, and
 `gh api .../code-scanning/alerts` returns a list rather than 404.
+
+</details>
 
 ---
 
