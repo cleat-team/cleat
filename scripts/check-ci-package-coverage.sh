@@ -35,8 +35,16 @@ cd "$REPO_ROOT"
 # Every top-level dir that contains at least one .go file.
 # Portable: no `mapfile` (bash 4+) and no `find -printf` (GNU only), so this
 # also runs on a stock macOS shell.
+# `.claude/worktrees/` is excluded because it is gitignored (.gitignore:95)
+# and holds full checkouts of this repo -- one per agent worktree. A bare
+# `find .` walks into them and reports their contents as findings in this
+# tree. CI never sees it (its checkout is clean), so this guard was only
+# ever exercised where the bug could not appear, while anyone using the
+# repo's own worktree convention hit it on every local run. The general
+# rule, for the next `find .` added here: a gitignored directory holding a
+# copy of the repo makes an unpruned walk report someone else's tree.
 go_dirs="$(find . -mindepth 2 -name '*.go' -not -path './node_modules/*' \
-             -not -path '*/node_modules/*' 2>/dev/null |
+             -not -path '*/node_modules/*' -not -path './.claude/*' 2>/dev/null |
   sed 's|^\./||' | cut -d/ -f1 | sort -u)"
 
 # The set of directories covered by the matrix. Two forms count:
