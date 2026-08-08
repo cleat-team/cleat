@@ -143,7 +143,7 @@ class CleatClient:
         if idempotency_key is not None:
             body["idempotency_key"] = idempotency_key
 
-        status, response = self._request("POST", "/api/workflows", json.dumps(body))
+        _status, response = self._request("POST", "/api/workflows", json.dumps(body))
         data = json.loads(response)
         run_id = data.get("run_id") or data.get("id", "")
         if not run_id:
@@ -221,7 +221,7 @@ class CleatClient:
         RuntimeError
             If the host returns an error.
         """
-        status, response = self._request(
+        _status, response = self._request(
             "GET",
             f"/api/workflows/{run_id}/state/{key}",
         )
@@ -245,7 +245,7 @@ class CleatClient:
         RuntimeError
             If the host returns an error.
         """
-        status, response = self._request(
+        _status, response = self._request(
             "GET",
             f"/api/workflows/{run_id}",
         )
@@ -284,7 +284,7 @@ class CleatClient:
             If the host returns an error.
         """
         body = json.dumps(payload)
-        status, response = self._request(
+        _status, response = self._request(
             "POST",
             f"/api/workflows/{run_id}/update/{update_name}",
             body,

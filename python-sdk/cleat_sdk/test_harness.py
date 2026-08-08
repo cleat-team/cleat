@@ -603,10 +603,7 @@ class CleatTestHarness(HostCalls):
     def get_state(self, key: str, result_type: type = str) -> Any:
         result = self.call("state", "get", {"key": key})
         data = json.loads(result)
-        if isinstance(data, dict):
-            value = data.get("value", data)
-        else:
-            value = data
+        value = data.get("value", data) if isinstance(data, dict) else data
         if result_type is str:
             return str(value)
         if isinstance(value, dict):

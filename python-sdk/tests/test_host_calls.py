@@ -21,6 +21,7 @@ Test layout
    ``plugin_call``, and error handling in the ``_call`` helper.
 """
 
+from typing import ClassVar
 from unittest import mock
 
 import pytest
@@ -538,7 +539,7 @@ class TestPollCancellation:
             h.stub_call("worker", "process", '"ok"')
 
         for batch in range(3):
-            cancelled, reason = h.poll_cancellation()
+            cancelled, _reason = h.poll_cancellation()
             assert not cancelled, f"Cancelled unexpectedly at batch {batch}"
             h.call("worker", "process", {"batch": batch})
 
@@ -770,7 +771,7 @@ class TestInfrastructure:
 class TestHostCallsMethodExistence:
     """Single-test verification that every expected ``HostCalls`` method exists."""
 
-    EXPECTED_METHODS = {
+    EXPECTED_METHODS: ClassVar[set[str]] = {
         # Core operations
         "now",
         "random",
@@ -1058,7 +1059,7 @@ class TestCleatCallErrorHierarchy:
 class TestPluginMethodExistence:
     """Verify every expected ``Plugins`` public method exists."""
 
-    EXPECTED_PLUGIN_METHODS = {
+    EXPECTED_PLUGIN_METHODS: ClassVar[set[str]] = {
         "blobstore_put",
         "blobstore_get",
         "await_event",

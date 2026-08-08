@@ -660,7 +660,7 @@ class TestFetchMethods:
 
     def test_fetch_get(self, host: LocalHostCalls):
         """``fetch_get`` delegates to fetch with GET."""
-        body, status = host.fetch_get("http://example.com")
+        _body, status = host.fetch_get("http://example.com")
         assert status == 200
 
     def test_fetch_get_json(self, host: LocalHostCalls):
