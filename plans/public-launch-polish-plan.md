@@ -11,11 +11,18 @@ Before taking cleat public, we benchmarked it against 20 highly-rated open-sourc
 
 ---
 
-## What's Already Done (23 items)
+## What's Already Done (23 items — see the corrections below)
+
+> **Audited 2026-08-07.** Four rows in this table were wrong. Two claimed workflows that do not
+> exist (CodeQL, semantic PR title), one counted badges the README does not carry, and two more
+> describe checks since deleted for never having gated anything (#366, #373). Each is marked in
+> place rather than silently edited, because a table that quietly corrects itself teaches the next
+> reader nothing. Status that CI does not check rots; see `tiers.yaml`'s header and
+> `plans/ci-integrity-followup-plan.md` §8.
 
 | Category | Item | Status |
 |----------|------|--------|
-| **README** | 12 badges (CI, Go version, license, Go Report Card, Codecov, OpenSSF Scorecard, govulncheck, Discord, Go Reference, etc.) | Done |
+| **README** | Badges | **Corrected 2026-08-07** — README carries 6 (`grep -c '^\[!\[' README.md`): CI, Go version, license, Go Report Card, Discord, Go Reference. Codecov, OpenSSF Scorecard and govulncheck badges are not present. |
 | **README** | One-line value proposition ("Durable workflow engine on PostgreSQL...") | Done |
 | **README** | Quick start with brew install + docker compose commands | Done |
 | **README** | "When NOT to use cleat" section | Done |
@@ -30,9 +37,9 @@ Before taking cleat public, we benchmarked it against 20 highly-rated open-sourc
 | **Templates** | Issue templates: bug_report.yml, feature_request.yml, config.yml | Done |
 | **Templates** | PR template with change-type checklist, release notes, AI disclosure, breaking change section | Done |
 | **CI/CD** | Main CI (ci.yml) — lint, golangci-lint, govulncheck, test matrix, fuzz, benchmarks, build, cluster tests | Done |
-| **CI/CD** | CodeQL scanning (codeql.yml) | Done |
+| **CI/CD** | CodeQL scanning (codeql.yml) | **NOT DONE — corrected 2026-08-07.** No such workflow, and CodeQL default setup reports `not-configured`; `gh api .../code-scanning/alerts` returns 404 "no analysis found". Secret scanning and push protection are also disabled. See `plans/ci-integrity-followup-plan.md` §1. |
 | **CI/CD** | DCO check (dco-check.yml) | Done |
-| **CI/CD** | Semantic PR title check (semantic-pull-request.yml) | Done |
+| **CI/CD** | Semantic PR title check (semantic-pull-request.yml) | **NOT DONE — corrected 2026-08-07.** No such workflow exists. `Validate branch name` enforces a prefix vocabulary and is required; decide whether this row is a workflow to write or a row to delete. |
 | **CI/CD** | Auto-labeler (labeler.yml + labeler.yml config) | Removed 2026-08-06 (#366) — v4 config under a v5 action; never applied a label |
 | **CI/CD** | Release notes check (release-notes-check.yml) | Removed 2026-08-07 — keyed on labels nothing could apply; never gated a PR (IMPROVEMENT-PLAN §1.12a) |
 | **CI/CD** | Ecosystem CI (ecosystem-ci.yml — tests Python/Rust/Java/AS SDKs on core changes) | Done |
@@ -173,7 +180,7 @@ The audit confirms cleat is already well above the median of the 20 reviewed pro
 - **CONTRIBUTING.md:** 366 lines, 17 sections — better than Rust, Tokio, and Ripgrep; competitive with Temporal and Vite
 - **SECURITY.md:** 231 lines with threat model — better than all but Caddy and Vite
 - **GOVERNANCE.md:** 442 lines with TSC, meeting cadence, removal policy — better than 17/20 projects
-- **CI/CD:** 9 workflows including CodeQL, DCO, semantic PRs, release notes check, ecosystem CI — competitive with Biome (23) and Astro (20)
+- **CI/CD:** 14 workflows (`ls .github/workflows/ | wc -l`, 2026-08-07), including DCO, CLA, ecosystem CI, the tier 1 and tier 2 gates, cross-language E2E and the plugin harness. **Corrected 2026-08-07:** of the five named here previously, CodeQL and the semantic-PR check never existed, the release-notes check never gated a PR (deleted, #373), and the auto-labeler never applied a label (deleted, #366). 32 of these jobs are required status checks with `enforce_admins: true` — a stronger claim than the workflow count, and a checkable one.
 - **PRINCIPLES.md:** 8 design principles — only Docker/Moby had this among 20 projects
 
 The remaining 7 items are small polish tasks. The repo is substantially public-ready.
