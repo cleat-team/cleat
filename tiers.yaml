@@ -390,8 +390,12 @@ tier2:
         compute-bound guest — measured three ways, all failing. Never the backend of record.
 
     - id: cluster-and-scale
-      why: tests/cluster, tests/scale, tests/soak, tests/exhaustion — need compose stacks.
-      open_items: ["tests/exhaustion fails hard rather than skipping when the stack is absent"]
+      why: >-
+        tests/cluster, tests/scale, tests/soak, tests/exhaustion — need compose stacks.
+        tests/exhaustion is gated (see tier2.gated_by) as of 2026-08-07 — clusterDB() now
+        reads CLEAT_TEST_POSTGRES / CLEAT_TEST_DB with the same skip-when-unconfigured,
+        fail-when-configured-but-unreachable split as engine/testutil.TestDB, instead of
+        hardcoding a DSN and hard-failing when the stack was absent.
 
   # What the gate runs. Read by scripts/tier2-gate.sh; the components above are prose and
   # nothing could execute them, which is why tier 2 spent its whole life as a claim.
@@ -403,12 +407,12 @@ tier2:
   #                      nobody is about to change. It is named here so the absence is on
   #                      the record rather than achieved by omission.
   #   ./benchmarks/...   tier 3 (comparative-benchmarks).
-  #   ./tests/exhaustion/...   Hard-FAILS rather than skipping when the compose stack is
-  #                            absent, and it hardcodes postgres://cleat:cleat@localhost:5432
-  #                            independent of CLEAT_TEST_DB. That is its own open item
-  #                            (see cluster-and-scale above), and it has to be fixed before
-  #                            the suite can be gated rather than tracked as a tolerated
-  #                            failure forever.
+  #   ./tests/exhaustion/...   Needs a real four-worker cluster (docker-compose.cluster.yml),
+  #                            not the bare PostgreSQL service tier2-gate.yml runs -- the same
+  #                            reason tests/cross-language and tests/plugin-harness are not
+  #                            here either. As of 2026-08-07 it is covered by `gated_by`
+  #                            below instead, against ci.yml's "Cluster Integration Tests"
+  #                            job, which already builds the image and brings the cluster up.
   #   ./tests/soak/...         Behind `//go:build soak_test`, so `go test ./tests/...`
   #                            reports "matched no packages" -- not "no test files".
   #                            Measured 2026-08-07: with `-tags soak_test SOAK_DURATION=15s`
@@ -464,6 +468,18 @@ tier2:
         Seven Go<->Rust cross-replay tests: execute under one runtime, replay the recorded
         history under the other, and detect divergence across the boundary. Needs cargo
         plus wasm32-unknown-unknown, which this job installs and tier2-gate.yml does not.
+    - suite: ./tests/exhaustion/...
+      job: "Cluster Integration Tests"
+      workflow: .github/workflows/ci.yml
+      why: >-
+        IMPROVEMENT-PLAN 2.5/2.29: deploys a real, unbounded WASM workflow into the live
+        four-worker cluster this job's earlier steps build and bring up, and asserts the
+        execution fence terminates it while the worker stays healthy and goes on to
+        complete an ordinary workflow. Needs real cleat-worker containers enforcing
+        --wasm-instance-timeout, which tier2-gate.yml's bare PostgreSQL service cannot
+        provide. Gated at a skip budget of 0 (scripts/skip-budget.txt, key
+        "cluster/exhaustion") -- the step sets CLEAT_TEST_DB explicitly, so the test can
+        only pass or Fatalf, never skip, in this job.
     - suite: ./tests/plugin-harness/...
       job: "Layer 1 — SDK (cleattest)"
       workflow: .github/workflows/plugin-harness-ci.yml

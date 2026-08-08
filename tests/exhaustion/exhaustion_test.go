@@ -38,21 +38,44 @@ const (
 func clusterDB(t *testing.T) *sql.DB {
 	t.Helper()
 
-	dsn := os.Getenv("CLEAT_CLUSTER_DB")
+	// Same env var names and precedence as engine/testutil.TestDB(t,
+	// DialectPostgres): CLEAT_TEST_POSTGRES, falling back to CLEAT_TEST_DB.
+	// The default DSN differs from testutil.PostgresTestDSN's -- this suite
+	// talks to the cluster brought up by docker-compose.cluster.yml, which
+	// runs as the `cleat` role, not testutil's default superuser role -- so
+	// it cannot just call that helper.
+	dsn := os.Getenv("CLEAT_TEST_POSTGRES")
+	if dsn == "" {
+		dsn = os.Getenv("CLEAT_TEST_DB")
+	}
+	configured := dsn != ""
 	if dsn == "" {
 		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
 	}
+
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("opening cluster database: %v", err)
 	}
-	// Fatal, not Skip. This test is only ever run by a job that brings the
-	// cluster up, so an unreachable database means that job's setup failed --
-	// which is a failure, not "nobody asked". See the skip-budget rationale in
-	// ci.yml.
+
+	// Same distinction engine/testutil.TestDB makes, and for the same reason:
+	// an unreachable database is only a legitimate skip when nobody asked for
+	// one. This suite requires docker-compose.cluster.yml (or an equivalent)
+	// to be up; if CLEAT_TEST_POSTGRES/CLEAT_TEST_DB was set explicitly and
+	// the database at that DSN cannot be reached, that is a failure of the
+	// configuration -- e.g. the job's cluster setup did not come up -- and
+	// skipping it would hide exactly the kind of green-but-untested run
+	// CLAUDE.md warns about. Only the true default (nobody configured
+	// anything) is "nobody asked".
 	if err := db.Ping(); err != nil {
-		t.Fatalf("cluster database unreachable at %s: %v -- this test requires "+
-			"docker-compose.cluster.yml to be up", redact(dsn), err)
+		if !configured {
+			t.Skipf("no cluster database configured (CLEAT_TEST_POSTGRES / CLEAT_TEST_DB "+
+				"not set); default DSN %s is unreachable: %v -- this suite needs "+
+				"docker-compose.cluster.yml up, so it skips rather than failing when "+
+				"nobody asked for it", redact(dsn), err)
+		}
+		t.Fatalf("configured cluster database at %s is unreachable: %v -- this test "+
+			"requires docker-compose.cluster.yml to be up", redact(dsn), err)
 	}
 	return db
 }

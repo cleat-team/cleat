@@ -267,6 +267,18 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
 cluster	417	# same as test-go/engine, and for the same reason; see the note there
+# 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
+# own budget, separate from the "cluster" entry above -- that one is
+# ./engine/... run against the job's own cleat_tests database, this one is a
+# single package run against the cluster's own database, overridden with
+# CLEAT_TEST_DB at the step level precisely so it is always configured. Its
+# clusterDB() helper honours CLEAT_TEST_POSTGRES / CLEAT_TEST_DB with the same
+# skip-when-unconfigured, fail-when-configured-but-unreachable split as
+# engine/testutil.TestDB -- see tests/exhaustion/exhaustion_test.go. Since
+# this job always configures it, "unconfigured" can never be true here, so a
+# skip can only mean the env override in ci.yml stopped taking effect.
+# Measured 2026-08-07 against a live 4-container cluster: 1 pass, 0 skip.
+cluster/exhaustion	0	# measured: 1 pass, 0 skip
 # plugin-harness/multi-db is 1, not 0, because TestPluginCalls_MultiDB skips
 # unconditionally on a wazero v1.11.1 nil Sys context panic -- so that job
 # starts PostgreSQL, MySQL and SQL Server and then tests nothing at all. It is
