@@ -32,6 +32,7 @@ engine	TestIntegrationReplayDivergence	1
 engine	TestIntegrationSignalAndResume	1
 engine	TestIntegrationWorkflowMaxDuration	1
 engine	TestJavaWorkflowExecute	1
+engine	TestMSSQLClaim_ReturnsTenantIDAsCanonicalUUIDText	1
 engine	TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint	1
 engine	TestMSSQLDeadlock_ClassifiedFromTheRealDriverError	2
 engine	TestMSSQLFactoryClose	2
@@ -115,11 +116,11 @@ tests/integrity	TestWalCorruption_PgSwitchWAL	1
 tests/integrity	buildStressWasm	2
 tests/integrity	newStressEngine	1
 tests/plugin-harness	TestPluginCalls_MultiDB	1
-tests/plugin-harness	TestPluginCalls_Wasm_AS	2
+tests/plugin-harness	TestPluginCalls_Wasm_AS	1
 tests/plugin-harness	TestPluginCalls_Wasm_Go	1
-tests/plugin-harness	TestPluginCalls_Wasm_Java	5
+tests/plugin-harness	TestPluginCalls_Wasm_Java	3
 tests/plugin-harness	TestPluginCalls_Wasm_Python	1
-tests/plugin-harness	TestPluginCalls_Wasm_Rust	2
+tests/plugin-harness	TestPluginCalls_Wasm_Rust	1
 tests/plugin-harness	buildASWorkflowWasm	1
 tests/plugin-harness	buildGoWorkflowWasm	2
 tests/plugin-harness	buildJavaWorkflowWasm	2

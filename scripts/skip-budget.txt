@@ -243,7 +243,21 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # on both -- the rule of thumb is right either way; the absolute base differs
 # by 4 because build tags and toolchain availability change which tests exist
 # at all (the runner also reports 4 fewer passing, the same 4 tests).
-test-go/engine	446	# runner 2026-08-08: develop 438 + four cron host-call dialect tests (+8); darwin measures 442
+#
+# 446 -> 447: TestMSSQLClaim_ReturnsTenantIDAsCanonicalUUIDText, one test gated
+# on CLEAT_TEST_MSSQL. +1, which is exactly what the rule of thumb at the top of
+# this file predicts for a top-level test gated on one dialect -- not a
+# registeredBackends test, so it costs one arm and not two.
+#
+# OBSERVED, not derived: both jobs reported `skipped=447 budget=446
+# (passed=3487 failed=0)`. Zero failing tests, so the entire delta is the one
+# new skip.
+#
+# It is not a free skip. multi-db-ci.yml's test-mssql job sets CLEAT_TEST_MSSQL
+# and the test runs for real there -- it is the only thing anywhere asserting
+# that a claimed row's TenantID is parseable UUID text, which is what
+# cmd/cleat-worker routes execution on.
+test-go/engine	447	# runner 2026-08-09: 446 + the MSSQL claim tenant_id test (+1)
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -324,7 +338,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	446	# same as test-go/engine, and for the same reason; see the note there
+cluster	447	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a
