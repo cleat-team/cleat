@@ -21,7 +21,9 @@ func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 
 func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone,
+		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
+		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WHERE tenant_id = @p1 ORDER BY name
 	`, s.tenantID)
 	if err != nil {
@@ -62,7 +64,18 @@ func (s *MSSQLStore) SetScheduleEnabled(ctx context.Context, name string, enable
 
 func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone,
+		       -- CONVERT, not the raw column. go-mssqldb scans UNIQUEIDENTIFIER
+		       -- into a Go string as its 16 raw storage bytes, not the canonical
+		       -- text. The scheduler loop reads Schedule.TenantID and passes it
+		       -- straight to StartNewRun, which binds it back to a
+		       -- UNIQUEIDENTIFIER parameter -- so the raw form fails the round
+		       -- trip with "Conversion failed when converting from a character
+		       -- string to uniqueidentifier" and NO schedule ever fires on SQL
+		       -- Server. It also lands in the cron:<tenant>:<name>:<instant>
+		       -- idempotency key, which is the at-least-once delivery guarantee.
+		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
+		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WITH (READPAST, UPDLOCK, ROWLOCK)
 		WHERE enabled = 1 AND next_run_at <= SYSUTCDATETIME()
 		ORDER BY next_run_at

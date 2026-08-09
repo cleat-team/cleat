@@ -274,7 +274,22 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # skips: this job sets CLEAT_TEST_DB, so they run here, and they are the arm
 # that matters -- PostgreSQL is the only dialect where the claim function
 # actually exists.
-test-go/engine	451	# runner 2026-08-09: 447 + four cross-tenant dialect tests (+4)
+#
+# 451 -> 452: TestMSSQLSchedules_TenantIDSurvivesTheRoundTripToStartNewRun, one
+# test gated on CLEAT_TEST_MSSQL. +1 by the rule of thumb -- a single-dialect
+# top-level test, one arm.
+#
+# MEASURED as a delta on darwin: develop reports `skipped=447 (passed=3492)`,
+# this branch `skipped=448 (passed=3505)`, against the documented +4
+# darwin/runner offset.
+#
+# The other test added alongside it,
+# TestMSSQLUUIDColumnsAreConvertedInProjections, needs NO database at all --
+# it reads the shipped migrations and the store's own source -- so it adds no
+# skip and runs in every job. That is the point of it: the defect it guards
+# has now shipped twice, and both times every job without a SQL Server was
+# blind to it.
+test-go/engine	452	# runner 2026-08-09: 451 + the MSSQL schedule tenant_id test (+1)
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -355,7 +370,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	451	# same as test-go/engine, and for the same reason; see the note there
+cluster	452	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a
