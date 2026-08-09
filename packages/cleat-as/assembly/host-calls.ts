@@ -373,9 +373,9 @@ export declare function import_cleat_send(
 
 /**
  * 28. schedule_invoke: Schedule a one-shot delayed invocation.
- * (import "env" "schedule_invoke") (param i32 i32 i32 i32 i32 i32 i64) (result i64)
+ * (import "env" "cleat_schedule_invoke") (param i32 i32 i32 i32 i32 i32 i64) (result i64)
  */
-@external("env", "schedule_invoke")
+@external("env", "cleat_schedule_invoke")
 export declare function import_schedule_invoke(
   svcPtr: i32,
   svcLen: i32,
@@ -528,9 +528,9 @@ export declare function import_cleat_release_lock(
 
 /**
  * 39. schedule_cron: Register a recurring cron-triggered workflow.
- * (import "env" "schedule_cron") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
+ * (import "env" "cleat_schedule_cron") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
  */
-@external("env", "schedule_cron")
+@external("env", "cleat_schedule_cron")
 export declare function import_schedule_cron(
   workflowNamePtr: i32,
   workflowNameLen: i32,
@@ -546,9 +546,9 @@ export declare function import_schedule_cron(
 
 /**
  * 40. delete_cron: Remove a previously registered cron schedule.
- * (import "env" "delete_cron") (param i32 i32) (result i64)
+ * (import "env" "cleat_delete_cron") (param i32 i32) (result i64)
  */
-@external("env", "delete_cron")
+@external("env", "cleat_delete_cron")
 export declare function import_delete_cron(
   scheduleIdPtr: i32,
   scheduleIdLen: i32,
@@ -556,9 +556,9 @@ export declare function import_delete_cron(
 
 /**
  * 41. list_crons: List all registered cron schedules.
- * (import "env" "list_crons") (param i32 i32) (result i64)
+ * (import "env" "cleat_list_crons") (param i32 i32) (result i64)
  */
-@external("env", "list_crons")
+@external("env", "cleat_list_crons")
 export declare function import_list_crons(
   outPtr: i32,
   outMaxLen: i32,
