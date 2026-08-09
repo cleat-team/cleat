@@ -252,6 +252,198 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
+// ClaimWorkflowsAcrossTenants claims runnable workflows for every tenant.
+//
+// Unlike PostgresStore and MySQLStore, this is not a different query: SQL
+// Server's isolation was never an application-level "AND tenant_id = ?"
+// predicate to begin with, it is entirely dbo.fn_tenant_filter (the RLS
+// filter predicate bound to workflow_instances and six other tables). That
+// predicate already special-cases exactly this call:
+//
+//	WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)
+//	   OR IS_ROLEMEMBER(N'cleat_admin') = 1
+//
+// so a connection whose login is a member of dbo.cleat_admin sees every row
+// regardless of SESSION_CONTEXT -- unset, stale, or set to some other
+// tenant's ID, it does not matter, because the OR admits the row on role
+// membership alone. migrations/mssql/012_admin_role.sql documents the
+// mechanism and, deliberately, ships the role with no members: granting it is
+// a deployment decision.
+//
+// That is why claimWorkflowsAcrossTenantsOnce below runs the same SELECT FOR
+// UPDATE / UPDATE / OUTPUT statement claimWorkflowsOnce does, with two
+// differences. First, it never calls setSessionContext or beginTxWithContext
+// -- setting SESSION_CONTEXT to any one tenant here would be misleading (this
+// call is not scoped to a tenant) and is not even load-bearing for an admin
+// connection, since the role check bypasses it either way. Second, its OUTPUT
+// clause reads tenant_id through CONVERT(NVARCHAR(36), ...), which
+// claimWorkflowsOnce and claimStickyWorkflowsOnce do not: they scan
+// INSERTED.tenant_id (a UNIQUEIDENTIFIER) straight into a Go string, and
+// go-mssqldb hands back that type's raw 16-byte storage rather than the
+// hyphenated form -- the same hazard ResolveTenantFromAPIKey's doc comment
+// already names ("MSSQL UNIQUEIDENTIFIER mixed-endian storage") and works
+// around the same way. It went unnoticed there because nothing asserted on a
+// claimed row's TenantID string content until this method's own integration
+// test did. This call cannot inherit that: CrossTenantClaimer's entire
+// contract is that the caller re-scopes on TenantID
+// (cmd/cleat-worker's storeForTenant), so a mangled value here would silently
+// misroute every claimed workflow rather than merely being an unused field.
+// Whether the sibling methods should be fixed the same way is a separate
+// question -- they don't currently promise TenantID to a caller that acts on
+// it the way this one does -- and is left to whoever owns that call.
+//
+// What this method cannot do is turn a non-admin connection into one: it
+// cannot grant itself the role, and running the claim without checking first
+// would silently return at most one tenant's work (whatever SESSION_CONTEXT
+// happens to hold, or nothing at all if it was never set) -- which reads
+// exactly like an idle queue to whoever is watching the dispatch loop, the
+// specific failure mode CrossTenantClaimer exists to avoid. So this checks
+// IS_ROLEMEMBER itself, before touching workflow_instances, and returns
+// ErrCrossTenantClaimUnsupported naming the missing grant and the file that
+// documents it, rather than an empty and misleading claim. The worker warns
+// once and falls back to the per-tenant claim, the same answer MySQL's
+// per-tenant-database topology gets: the operator is told, and dispatch keeps
+// running on what this connection can legitimately see.
+func (s *MSSQLStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	if err := s.requireCleatAdminMembership(ctx); err != nil {
+		return nil, err
+	}
+
+	var claimed []*WorkflowInstance
+	err := withRollbackGuaranteedRetry(ctx, "claim workflows across tenants", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		claimed, err = s.claimWorkflowsAcrossTenantsOnce(ctx, workerID, limit)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
+}
+
+// requireCleatAdminMembership fails loudly, naming the missing grant, when
+// this store's connection cannot see across tenants. A claim run without this
+// check would not fail -- it would succeed and quietly return the wrong
+// answer, which is worse. See the doc comment on ClaimWorkflowsAcrossTenants.
+func (s *MSSQLStore) requireCleatAdminMembership(ctx context.Context) error {
+	var isMember sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT IS_ROLEMEMBER(N'cleat_admin')`,
+	).Scan(&isMember); err != nil {
+		return fmt.Errorf("claim workflows across tenants: check cleat_admin membership: %w", err)
+	}
+	if isMember.Int64 == 1 {
+		return nil
+	}
+	// IS_ROLEMEMBER returns NULL (not 0) when the role itself does not exist,
+	// which means migration 012 was never applied at all rather than merely
+	// not granted. Both reach here as isMember.Int64 == 0 (NullInt64's zero
+	// value), and the message below covers both: applying the migration is
+	// also step one of granting membership.
+	// ErrCrossTenantClaimUnsupported, not a bare error, and for the same reason
+	// MySQL returns it: this is a provisioning gap, not a claim that went
+	// wrong. The worker answers it by warning once and falling back to the
+	// per-tenant claim, so a deployment that passed --claim-across-tenants
+	// without granting the role keeps dispatching its own tenant's work instead
+	// of failing every poll. The message carries the remediation, because the
+	// warning is the only place an operator will see it.
+	return fmt.Errorf("claim workflows across tenants: this connection is not a member of "+
+		"dbo.cleat_admin, so the RLS filter predicate (dbo.fn_tenant_filter) admits only rows "+
+		"whose tenant_id matches this connection's SESSION_CONTEXT -- claiming across tenants "+
+		"through it would silently see at most one tenant's work and look exactly like an idle "+
+		"queue for everyone else. Grant membership as documented in "+
+		"migrations/mssql/012_admin_role.sql: CREATE LOGIN, CREATE USER, then "+
+		"ALTER ROLE cleat_admin ADD MEMBER, and point this store's connection at that login: %w",
+		ErrCrossTenantClaimUnsupported)
+}
+
+func (s *MSSQLStore) claimWorkflowsAcrossTenantsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	// No beginTxWithContext: that helper sets SESSION_CONTEXT to this store's
+	// tenantID, which is irrelevant here on an admin connection (see the doc
+	// comment above) and would misstate what this call is scoped to. A plain
+	// transaction is enough -- the UPDATE...OUTPUT below is already atomic.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows across tenants: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	tqParam := s.buildTaskQueueParam()
+
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'running',
+		    assigned_to = @p1,
+		    heartbeat_at = SYSUTCDATETIME(),
+		    generation = generation + 1
+		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
+		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
+		       INSERTED.next_wake_at, CONVERT(NVARCHAR(36), INSERTED.tenant_id) AS tenant_id,
+		       INSERTED.created_at, INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
+		       COALESCE(INSERTED.priority, 0) AS priority,
+		       INSERTED.trace_id
+		WHERE id IN (
+			SELECT id
+			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
+			WHERE status = 'ready'
+			  AND next_wake_at <= SYSUTCDATETIME()
+			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+			ORDER BY priority ASC, created_at
+			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
+		)
+	`, workerID, tqParam, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows across tenants: %w", err)
+	}
+	defer rows.Close()
+
+	var wfs []*WorkflowInstance
+	for rows.Next() {
+		var wf WorkflowInstance
+		var nextWakeAt sql.NullTime
+		var tenantID sql.NullString
+		var createdAt sql.NullTime
+		var inputStr string
+		var errorCode, errorOp sql.NullString
+		var traceID sql.NullString
+
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID); err != nil {
+			return nil, fmt.Errorf("claim workflows across tenants scan: %w", err)
+		}
+		wf.TraceID = traceID.String
+
+		wf.Input = json.RawMessage(inputStr)
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		if tenantID.Valid {
+			wf.TenantID = tenantID.String
+		}
+		if createdAt.Valid {
+			wf.CreatedAt = createdAt.Time
+		}
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
+		wfs = append(wfs, &wf)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim workflows across tenants rows: %w", err)
+	}
+
+	if len(wfs) == 0 {
+		tx.Rollback()
+		return nil, nil
+	}
+	// finishClaim's excess-release path goes through ReleaseWorkflow, which on
+	// MSSQL carries no explicit tenant_id predicate at all -- isolation here is
+	// 100% dbo.fn_tenant_filter, so a release issued through this same admin
+	// connection sees and releases an excess row regardless of which tenant it
+	// belongs to. Unlike MySQLStore's cross-tenant claim, reusing finishClaim
+	// is safe here.
+	return s.finishClaim(ctx, tx, workerID, limit, wfs)
+}
+
 // ---------------------------------------------------------------------------
 // Workflow Lifecycle Methods (C.5)
 // ---------------------------------------------------------------------------

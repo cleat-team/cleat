@@ -832,6 +832,7 @@ func main() {
 		storeTenantID:                    defaultTenantID,
 		storeFactory:                     factory,
 		taskQueues:                       taskQueues,
+		claimAcrossTenants:               *claimAcrossTenants,
 		concurrency:                      *concurrency,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,

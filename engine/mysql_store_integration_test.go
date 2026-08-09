@@ -14,6 +14,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -469,6 +470,128 @@ func TestMySQLIntegration_ClaimAndRelease(t *testing.T) {
 	}
 	if stored.NextWakeAt.After(time.Now().Add(40 * time.Minute)) {
 		t.Errorf("NextWakeAt too late: %v (expected ~30m from now)", stored.NextWakeAt)
+	}
+}
+
+// TestMySQLIntegration_ClaimWorkflowsAcrossTenants proves the two halves of
+// ClaimWorkflowsAcrossTenants's contract on the shared-database shape it
+// actually widens (see its doc comment in mysql_lifecycle.go): the ordinary
+// claim stays scoped to one tenant, and the cross-tenant claim is not.
+func TestMySQLIntegration_ClaimWorkflowsAcrossTenants(t *testing.T) {
+	s, teardown := mysqlIntegrationStore(t)
+	defer teardown()
+	ctx := context.Background()
+
+	const otherTenant = "11111111-1111-1111-1111-111111111111"
+
+	deployTestDef(t, s, "test-workflow", 1)
+
+	// Both rows land in the one database mysqlIntegrationStore opens -- there
+	// is no MySQLStoreFactory here, so "tenant" is only ever the tenant_id
+	// column, which is exactly the shape this method's doc comment says it
+	// widens.
+	ownID, _, err := s.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
+	if err != nil {
+		t.Fatalf("StartNewRun (own tenant): %v", err)
+	}
+	otherID, _, err := s.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", otherTenant, 0)
+	if err != nil {
+		t.Fatalf("StartNewRun (other tenant): %v", err)
+	}
+
+	// s defaults to DefaultTenantUUID (NewMySQLStore's default), so the
+	// ordinary claim must see its own workflow and not the other tenant's,
+	// exactly like every other MySQLStore method's "AND tenant_id = ?".
+	scoped, err := s.ClaimWorkflows(ctx, "worker-scoped", 10)
+	if err != nil {
+		t.Fatalf("ClaimWorkflows: %v", err)
+	}
+	if len(scoped) != 1 || scoped[0].ID != ownID {
+		t.Fatalf("ClaimWorkflows claimed %d workflow(s) (%v), want exactly [%s]", len(scoped), claimedIDs(scoped), ownID)
+	}
+
+	// The cross-tenant claim has to reach the row ClaimWorkflows above could
+	// not: the other tenant's, still 'ready'.
+	across, err := s.ClaimWorkflowsAcrossTenants(ctx, "worker-cross", 10)
+	if err != nil {
+		t.Fatalf("ClaimWorkflowsAcrossTenants: %v", err)
+	}
+	if len(across) != 1 || across[0].ID != otherID {
+		t.Fatalf("ClaimWorkflowsAcrossTenants claimed %d workflow(s) (%v), want exactly [%s]", len(across), claimedIDs(across), otherID)
+	}
+	claimed := across[0]
+	if claimed.TenantID != otherTenant {
+		t.Errorf("claimed workflow TenantID = %q, want %q -- callers re-scope on this field, "+
+			"see CrossTenantClaimer's doc comment", claimed.TenantID, otherTenant)
+	}
+	if claimed.Status != "running" {
+		t.Errorf("claimed workflow status = %q, want %q", claimed.Status, "running")
+	}
+	if claimed.AssignedTo != "worker-cross" {
+		t.Errorf("claimed workflow AssignedTo = %q, want %q", claimed.AssignedTo, "worker-cross")
+	}
+
+	// Nothing left for either claim to find.
+	if more, err := s.ClaimWorkflowsAcrossTenants(ctx, "worker-cross-2", 10); err != nil {
+		t.Fatalf("ClaimWorkflowsAcrossTenants (drained): %v", err)
+	} else if len(more) != 0 {
+		t.Errorf("ClaimWorkflowsAcrossTenants on a drained queue returned %v, want none", claimedIDs(more))
+	}
+}
+
+// TestMySQLIntegration_CrossTenantClaimRefusedOnFactoryStore covers the other
+// topology: a store MySQLStoreFactory opened, whose connection points at one
+// tenant's own physical database.
+//
+// There, dropping the tenant_id predicate widens nothing -- the other tenants'
+// rows are in other databases, not filtered out of this one -- so the claim
+// would return one tenant's work and report that it had swept them all. That
+// is the failure ErrCrossTenantClaimUnsupported exists to make audible: the
+// worker does the same work either way, but it says which claim it ran.
+//
+// The two halves have to be tested together. A ClaimWorkflowsAcrossTenants
+// that refused unconditionally would satisfy the first half alone, and it
+// would also be wrong -- the shared-database deployment above is real, and
+// this method is the only thing that serves it.
+func TestMySQLIntegration_CrossTenantClaimRefusedOnFactoryStore(t *testing.T) {
+	s, teardown := mysqlIntegrationStore(t)
+	defer teardown()
+	ctx := context.Background()
+
+	factory := NewMySQLStoreFactory(s.db, mysqlTestBaseDSN(t))
+	defer factory.Close()
+
+	const tenant = "22222222-2222-2222-2222-222222222222"
+	opened, closer, err := factory.OpenStore(ctx, tenant)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer closer.Close()
+
+	xt, ok := opened.(CrossTenantClaimer)
+	if !ok {
+		t.Fatal("a factory-opened MySQL store does not implement CrossTenantClaimer, so the " +
+			"worker would never ask it and never learn the claim is unsupported here")
+	}
+	_, err = xt.ClaimWorkflowsAcrossTenants(ctx, "worker-factory", 10)
+	if !errors.Is(err, ErrCrossTenantClaimUnsupported) {
+		t.Fatalf("ClaimWorkflowsAcrossTenants on a per-tenant-database store returned %v, want "+
+			"ErrCrossTenantClaimUnsupported -- without it the worker believes it swept every "+
+			"tenant while it swept one, and nothing says otherwise", err)
+	}
+	// The message has to name the tenant, or an operator reading one line in a
+	// multi-tenant deployment cannot tell which store refused.
+	if !strings.Contains(err.Error(), tenant) {
+		t.Errorf("refusal does not name the tenant it is scoped to: %v", err)
+	}
+
+	// The other half: the same method on a store built directly, against one
+	// shared database, must NOT refuse -- it is the deployment shape the method
+	// exists for. TestMySQLIntegration_ClaimWorkflowsAcrossTenants asserts what
+	// it returns; this asserts only that the refusal is conditional.
+	if _, err := s.ClaimWorkflowsAcrossTenants(ctx, "worker-shared", 10); errors.Is(err, ErrCrossTenantClaimUnsupported) {
+		t.Error("a directly-built MySQL store refused the cross-tenant claim; the refusal is " +
+			"unconditional, which breaks the shared-database deployment it is meant to serve")
 	}
 }
 

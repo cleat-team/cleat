@@ -97,31 +97,9 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	}
 	defer rows.Close()
 
-	var wfs []*WorkflowInstance
-	for rows.Next() {
-		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var tenantID sql.NullString
-		var createdAt sql.NullTime
-		var errorCode, errorOp sql.NullString
-
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
-			return nil, fmt.Errorf("claim workflows scan: %w", err)
-		}
-
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
-		}
-		if tenantID.Valid {
-			wf.TenantID = tenantID.String
-		}
-		if createdAt.Valid {
-			wf.CreatedAt = createdAt.Time
-		}
-		wf.ErrorCode = errorCode.String
-		wf.ErrorOp = errorOp.String
-		wfs = append(wfs, &wf)
+	wfs, err := scanClaimedWorkflows(rows)
+	if err != nil {
+		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("claim workflows rows: %w", err)
@@ -803,4 +781,140 @@ func truncateForLog(s string) string {
 		return s
 	}
 	return s[:max] + "... (truncated)"
+}
+
+// scanClaimedWorkflows reads the rows a claim returns.
+//
+// Shared by ClaimWorkflows and ClaimWorkflowsAcrossTenants deliberately: the
+// second reads its columns from admin.claim_workflows, a function defined in a
+// migration, and the only thing keeping that definition in step with this scan
+// is that there is exactly one scan. Two copies would drift, and the symptom
+// would be a scan error at claim time on whichever deployment ran the newer
+// migration.
+func scanClaimedWorkflows(rows *sql.Rows) ([]*WorkflowInstance, error) {
+	var wfs []*WorkflowInstance
+	for rows.Next() {
+		var wf WorkflowInstance
+		var nextWakeAt, createdAt sql.NullTime
+		var tenantID, errorCode, errorOp sql.NullString
+
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp,
+			&wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
+			return nil, fmt.Errorf("claim workflows scan: %w", err)
+		}
+
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		if tenantID.Valid {
+			wf.TenantID = tenantID.String
+		}
+		if createdAt.Valid {
+			wf.CreatedAt = createdAt.Time
+		}
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
+		wfs = append(wfs, &wf)
+	}
+	return wfs, rows.Err()
+}
+
+// ErrCrossTenantClaimUnsupported is returned by a store that implements
+// CrossTenantClaimer but cannot honour it in the topology it finds itself in.
+//
+// Implementing the interface and quietly returning one tenant's work would be
+// worse than not implementing it: the caller would believe it was claiming for
+// everyone. MySQL is the case that forced this -- MySQLStoreFactory gives each
+// tenant its own physical database, so there is no predicate to drop; the other
+// tenants' rows are not filtered out, they are in a different database. The
+// same type is also used against a single shared database, where the claim IS
+// meaningful, so the answer depends on how the store was built rather than on
+// which type it is.
+var ErrCrossTenantClaimUnsupported = errors.New("cross-tenant claim not supported by this store's topology")
+
+// CrossTenantClaimer is implemented by stores that can claim runnable work for
+// every tenant in a single query.
+//
+// It is deliberately NOT part of WorkflowStore. A store that cannot do it --
+// because its dialect has no mechanism, or because the deployment has not
+// granted one -- simply does not implement it, and the caller falls back to the
+// ordinary tenant-scoped claim. Putting it on WorkflowStore would force every
+// implementation and every test double to answer a question most of them have
+// no business answering.
+//
+// The returned instances carry TenantID, and the caller MUST re-scope to it
+// before touching anything else. That is the whole bargain: one query sees
+// across tenants so the dispatch loop does not have to poll each one, and
+// everything downstream of it is scoped again immediately. See
+// cmd/cleat-worker's storeForTenant.
+type CrossTenantClaimer interface {
+	ClaimWorkflowsAcrossTenants(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error)
+}
+
+// ClaimWorkflowsAcrossTenants claims runnable workflows for every tenant.
+//
+// It calls admin.claim_workflows (migrations/postgres/023_cross_tenant_claim.sql)
+// rather than issuing the claim directly, because the exemption that lets it
+// see across tenants belongs to that function's owner and nowhere else. The
+// statement inside is the same one ClaimWorkflows runs; the column list here is
+// the contract with it.
+//
+// No beginTxWithRLS. That helper exists to set the tenant GUC the policies read,
+// and this call must not be scoped to a tenant -- setting one would filter the
+// very rows it exists to find. The function performs its own UPDATE, so a single
+// statement is already atomic.
+func (s *PostgresStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at,
+		       tenant_id, created_at, error_code, error_op, generation, priority, trace_id
+		FROM admin.claim_workflows($1, $2, $3)
+	`, workerID, pq.Array(s.taskQueues), limit)
+	if err != nil {
+		if reason := crossTenantProvisioningGap(err); reason != "" {
+			return nil, fmt.Errorf("claim workflows across tenants: %s: %w", reason, ErrCrossTenantClaimUnsupported)
+		}
+		return nil, fmt.Errorf("claim workflows across tenants: %w", err)
+	}
+	defer rows.Close()
+
+	return scanClaimedWorkflows(rows)
+}
+
+// crossTenantProvisioningGap distinguishes "this deployment never provisioned
+// the cross-tenant claim" from "the claim ran and something went wrong".
+//
+// The distinction decides whether the worker keeps running. A provisioning gap
+// is answered by falling back to the per-tenant claim and warning once, which
+// keeps dispatch alive on a deployment that opted into a flag it had not yet
+// granted; anything else propagates, because a claim that fails for a reason
+// nobody anticipated should not be quietly downgraded into a narrower one that
+// works.
+//
+// Both codes here mean the same thing from the operator's side -- migration 023
+// has not been applied and granted -- and neither is reachable once it has:
+//
+//	42883 undefined_function     admin.claim_workflows does not exist
+//	42501 insufficient_privilege it exists, but EXECUTE was never granted
+//	                             (023 revokes from PUBLIC, so this is the
+//	                             default state until a role is granted)
+//
+// A missing BYPASSRLS on the owner is deliberately NOT in this list. It does
+// not raise: the function runs and returns only the rows RLS admits, which is
+// the silent-wrong-answer case this whole mechanism exists to avoid. Nothing
+// here can detect it, which is why 023 sets the attribute in the same migration
+// that creates the role rather than leaving it to a deployment step.
+func crossTenantProvisioningGap(err error) string {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return ""
+	}
+	switch pqErr.Code {
+	case "42883":
+		return "admin.claim_workflows does not exist; apply migrations/postgres/023_cross_tenant_claim.sql"
+	case "42501":
+		return "this connection may not EXECUTE admin.claim_workflows; grant it as " +
+			"migrations/postgres/023_cross_tenant_claim.sql documents"
+	}
+	return ""
 }

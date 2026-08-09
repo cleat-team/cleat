@@ -450,9 +450,62 @@ tier2:
            wasm/component_rewrite.go, and a machine with componentize-py to verify on"
         - "rust and java SDKs declare no cron surface at all"
         - "a non-default tenant's schedules never fire: the worker opens exactly one
-           default-tenant store. Recorded in
-           engine.TestScheduleLoop_OnlySeesItsOwnTenantsSchedules; dispatch has the same
-           scope, so those tenants' workflows do not execute either"
+           default-tenant store, and GetDueSchedules only ever reads through it. Recorded
+           in engine.TestScheduleLoop_OnlySeesItsOwnTenantsSchedules. The second half of
+           this item -- 'dispatch has the same scope, so those tenants' workflows do not
+           execute either' -- is addressed by cross-tenant-claim below, behind
+           --claim-across-tenants. The schedule read is not, so the firing loop is still
+           the binding constraint: nothing enqueues those runs in the first place"
+
+    - id: cross-tenant-claim
+      status: SUPPORTED on postgres and mssql, both behind a deployment grant — NOT on mysql
+      why: |
+        Added 2026-08-09. `--claim-across-tenants` makes a worker's dispatch loop claim
+        runnable work for every tenant in one query instead of only its own, so the cost
+        of a tick is one round trip rather than one per tenant. Each claimed workflow then
+        executes against a store scoped to its OWN tenant (cmd/cleat-worker's
+        storeForTenant), so the widened view lasts exactly as long as the claim.
+
+        Tier 2 and not tier 1 because it cannot be green on every dialect, which is what
+        tier 1 requires:
+
+          postgres — works. admin.claim_workflows, a SECURITY DEFINER function owned by a
+            BYPASSRLS role (migrations/postgres/023_cross_tenant_claim.sql). FORCE ROW
+            LEVEL SECURITY subjects even the table owner to RLS, so SECURITY DEFINER alone
+            is not enough; the BYPASSRLS attribute is the exemption, and the migration
+            sets it rather than leaving it to a deployment step, because a missing
+            BYPASSRLS does not raise — the function simply returns fewer rows.
+          mssql — works. dbo.fn_tenant_filter already admits on
+            `IS_ROLEMEMBER(N'cleat_admin') = 1` (migrations/mssql/012_admin_role.sql), so
+            the exemption is in the predicate rather than in a role attribute. The role
+            ships with NO MEMBERS; granting it is a deployment decision.
+          mysql — does NOT work, and cannot without a different mechanism. MySQLStoreFactory
+            gives each tenant its own physical database (cleat_<tenant_id>), so there is no
+            predicate to drop: the other tenants' rows are not filtered out, they are in
+            another database. The store returns ErrCrossTenantClaimUnsupported and the
+            worker falls back to the per-tenant claim with one WARN line. A MySQL
+            deployment pointed at ONE shared database does work — that is a real if less
+            common shape, and it is the one the tests cover.
+
+        OFF BY DEFAULT, and that is deliberate. Every path needs a grant the deployment
+        has to make, and both grants ship unmade. A worker that is told to claim across
+        tenants but cannot warns once and claims its own tenant — it does not fail
+        dispatch, because a missing GRANT should narrow the worker rather than stop it.
+
+        WHAT THIS BUYS AND WHAT IT COSTS. It is a deliberate step outside RLS: for the
+        duration of one query the claim sees every tenant's ready rows. That is the point
+        — the alternative is polling N tenants per tick — but it means a bug in the claim
+        path has a blast radius of every tenant rather than one. It is confined to a single
+        statement that reads and writes only workflow_instances' claim columns, and
+        nothing downstream of it runs unscoped.
+      open_items:
+        - "sticky claims stay tenant-scoped (ClaimStickyWorkflows), so another tenant's
+           sticky workflow is claimed by the general path instead and loses its worker
+           affinity. Correctness is unaffected — it is still claimed exactly once"
+        - "no startup validation: a deployment that sets the flag without the grant finds
+           out on the first poll, via one WARN line, rather than at boot"
+        - "mysql per-tenant-database topology would need database enumeration plus a union
+           across cleat_* schemas; not implemented"
 
     - id: backend-wazero
       why: |

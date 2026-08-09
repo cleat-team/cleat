@@ -982,6 +982,16 @@ type Worker struct {
 	// poll the same set or it would see a different slice of the work.
 	taskQueues []string
 
+	// claimAcrossTenants makes the dispatch loop claim work for every tenant in
+	// one query instead of only its own. Off by default: it needs a mechanism
+	// the deployment has to grant (a BYPASSRLS owner on PostgreSQL, cleat_admin
+	// membership on SQL Server), and turning it on without that should be a
+	// deliberate act rather than an upgrade side effect.
+	claimAcrossTenants bool
+
+	// crossTenantUnsupportedOnce keeps the fallback warning to one line.
+	crossTenantUnsupportedOnce sync.Once
+
 	concurrency          int
 	maxQueued            int
 	heartbeatInterval    time.Duration
@@ -1347,7 +1357,7 @@ func (w *Worker) dispatchLoop() {
 		var generalWfs []*engine.WorkflowInstance
 		if remaining > 0 {
 			var err error
-			generalWfs, err = w.store.ClaimWorkflows(w.ctx, w.id, remaining)
+			generalWfs, err = w.claimGeneral(remaining)
 			w.Metrics.RecordPollWaitDuration(w.ctx, time.Since(pollStart))
 			if err != nil {
 				if isConnectionError(err) {
@@ -2848,4 +2858,48 @@ func (w *Worker) storeFor(wf *engine.WorkflowInstance) engine.WorkflowStore {
 		return w.store
 	}
 	return st
+}
+
+// claimGeneral claims the next batch of runnable work.
+//
+// With claimAcrossTenants set it claims for every tenant in one query rather
+// than polling each separately, which is the whole reason the cross-tenant path
+// exists: one round trip per tick regardless of how many tenants there are.
+// Each claimed workflow then executes against a store scoped to its OWN tenant
+// -- see storeForTenant -- so the widened view lasts exactly as long as the
+// claim.
+//
+// A store that does not implement CrossTenantClaimer falls back rather than
+// failing. The flag says what the operator wants; the store says what the
+// dialect and the deployment's grants can actually do, and those can disagree
+// on a mixed fleet.
+func (w *Worker) claimGeneral(limit int) ([]*engine.WorkflowInstance, error) {
+	if w.claimAcrossTenants {
+		if xt, ok := w.store.(engine.CrossTenantClaimer); ok {
+			wfs, err := xt.ClaimWorkflowsAcrossTenants(w.ctx, w.id, limit)
+			if !errors.Is(err, engine.ErrCrossTenantClaimUnsupported) {
+				return wfs, err
+			}
+			// The store implements the interface but cannot honour it here --
+			// a MySQL store on the per-tenant-database topology, for instance.
+			// Fall through to the scoped claim rather than returning the error
+			// every tick, which would look like a database fault.
+			w.crossTenantUnsupportedOnce.Do(func() {
+				w.logger.WarnContext(w.ctx,
+					"claim-across-tenants is set but this store's topology cannot honour it; "+
+						"claiming only this worker's own tenant",
+					"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
+			})
+			return w.store.ClaimWorkflows(w.ctx, w.id, limit)
+		}
+		// Once, not every tick: this is a static property of the store, and at
+		// the poll interval it would otherwise be one line per second forever.
+		w.crossTenantUnsupportedOnce.Do(func() {
+			w.logger.WarnContext(w.ctx,
+				"claim-across-tenants is set but this store does not support it; "+
+					"claiming only this worker's own tenant",
+				"worker_id", w.id, "tenant_id", w.storeTenantID)
+		})
+	}
+	return w.store.ClaimWorkflows(w.ctx, w.id, limit)
 }
