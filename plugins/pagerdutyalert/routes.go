@@ -48,24 +48,24 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 // ---- types ----
 
 type pdConfigJSON struct {
-	ID         uuid.UUID `json:"id"`
-	TenantID   uuid.UUID `json:"tenant_id"`
-	Name       string    `json:"name"`
-	RoutingKey string    `json:"routing_key"`
-	Enabled    bool      `json:"enabled"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         uuid.UUID     `json:"id"`
+	TenantID   uuid.UUID     `json:"tenant_id"`
+	Name       string        `json:"name"`
+	RoutingKey plugin.Secret `json:"routing_key"`
+	Enabled    bool          `json:"enabled"`
+	CreatedAt  time.Time     `json:"created_at"`
+	UpdatedAt  time.Time     `json:"updated_at"`
 }
 
 type createConfigRequest struct {
-	Name       string `json:"name"`
-	RoutingKey string `json:"routing_key"`
+	Name       string        `json:"name"`
+	RoutingKey plugin.Secret `json:"routing_key"`
 }
 
 type updateConfigRequest struct {
-	Name       *string `json:"name,omitempty"`
-	RoutingKey *string `json:"routing_key,omitempty"`
-	Enabled    *bool   `json:"enabled,omitempty"`
+	Name       *string        `json:"name,omitempty"`
+	RoutingKey *plugin.Secret `json:"routing_key,omitempty"`
+	Enabled    *bool          `json:"enabled,omitempty"`
 }
 
 // ---- POST /pagerduty/configs ----
@@ -105,7 +105,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO pd_config (tenant_id, id, name, routing_key, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, true, $5, $5)
-		`, p.dialect), tid, id, req.Name, req.RoutingKey, now)
+		`, p.dialect), tid, id, req.Name, req.RoutingKey.Reveal(), now)
 	if err != nil {
 		p.logger.Error("pagerduty: create config", "error", err)
 		p.writeError(w, 500, "failed to create config")
@@ -243,7 +243,7 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RoutingKey != nil {
 		setClauses = append(setClauses, fmt.Sprintf("routing_key = $%d", argIdx))
-		args = append(args, *req.RoutingKey)
+		args = append(args, req.RoutingKey.Reveal())
 		argIdx++
 	}
 	if req.Enabled != nil {

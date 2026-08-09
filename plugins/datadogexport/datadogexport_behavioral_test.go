@@ -20,6 +20,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
 
@@ -730,6 +731,77 @@ func TestConfigCreateAndGet(t *testing.T) {
 	}
 	if fetched["name"] != "test-config" {
 		t.Errorf("expected name 'test-config', got %s", fetched["name"])
+	}
+}
+
+// TestListAndGetDoNotLeakAPIKey verifies that neither the list nor the get
+// endpoint (nor create) ever returns the real Datadog API key in the
+// response body, and that there is no bypass -- redactAPIKey and its
+// ?show_api_key=true escape hatch have been removed; the plugin.Secret type
+// now redacts unconditionally.
+func TestListAndGetDoNotLeakAPIKey(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	const realKey = "dd-do-not-leak-me"
+	body := `{"name":"leak-test","api_key":"` + realKey + `"}`
+	req := authedRequest("POST", "/datadog/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("create response leaked the real api_key: %s", rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	if created["api_key"] != plugin.RedactedPlaceholder {
+		t.Errorf("create: expected api_key %q, got %v", plugin.RedactedPlaceholder, created["api_key"])
+	}
+	id := created["id"].(string)
+
+	// GET, including the former bypass query parameter -- it must no longer
+	// have any effect.
+	req = authedRequest("GET", "/datadog/configs/"+id+"?show_api_key=true", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("GET response (with ?show_api_key=true) leaked the real api_key: %s", rec.Body.String())
+	}
+	var fetched map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &fetched)
+	if fetched["api_key"] != plugin.RedactedPlaceholder {
+		t.Errorf("GET: expected api_key %q, got %v", plugin.RedactedPlaceholder, fetched["api_key"])
+	}
+
+	// LIST, also with the former bypass parameter.
+	req = authedRequest("GET", "/datadog/configs?show_api_key=true", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("LIST response (with ?show_api_key=true) leaked the real api_key: %s", rec.Body.String())
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("LIST: failed to decode: %v", err)
+	}
+	found := false
+	for _, c := range list {
+		if c["id"] == id {
+			found = true
+			if c["api_key"] != plugin.RedactedPlaceholder {
+				t.Errorf("LIST: expected api_key %q, got %v", plugin.RedactedPlaceholder, c["api_key"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected config %s in list response", id)
 	}
 }
 

@@ -75,7 +75,7 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 	}
 
 	// Look up the Slack config, verifying tenant ownership.
-	var webhookURL string
+	var webhookURL plugin.Secret
 	var defaultChannel *string
 	err := p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT webhook_url, default_channel
@@ -104,7 +104,7 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 		return "", fmt.Errorf("slack-notify: marshal payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewReader(payloadBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", webhookURL.Reveal(), bytes.NewReader(payloadBytes))
 	if err != nil {
 		return "", fmt.Errorf("slack-notify: create request: %w", err)
 	}
