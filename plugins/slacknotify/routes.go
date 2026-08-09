@@ -49,27 +49,27 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 // ---- types ----
 
 type slackConfigJSON struct {
-	ID             uuid.UUID `json:"id"`
-	TenantID       uuid.UUID `json:"tenant_id"`
-	Name           string    `json:"name"`
-	WebhookURL     string    `json:"webhook_url"`
-	DefaultChannel *string   `json:"default_channel,omitempty"`
-	Enabled        bool      `json:"enabled"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             uuid.UUID     `json:"id"`
+	TenantID       uuid.UUID     `json:"tenant_id"`
+	Name           string        `json:"name"`
+	WebhookURL     plugin.Secret `json:"webhook_url"`
+	DefaultChannel *string       `json:"default_channel,omitempty"`
+	Enabled        bool          `json:"enabled"`
+	CreatedAt      time.Time     `json:"created_at"`
+	UpdatedAt      time.Time     `json:"updated_at"`
 }
 
 type createConfigRequest struct {
-	Name           string  `json:"name"`
-	WebhookURL     string  `json:"webhook_url"`
-	DefaultChannel *string `json:"default_channel,omitempty"`
+	Name           string        `json:"name"`
+	WebhookURL     plugin.Secret `json:"webhook_url"`
+	DefaultChannel *string       `json:"default_channel,omitempty"`
 }
 
 type updateConfigRequest struct {
-	Name           *string `json:"name,omitempty"`
-	WebhookURL     *string `json:"webhook_url,omitempty"`
-	DefaultChannel *string `json:"default_channel,omitempty"` // nil = no change; pointer to empty string = clear
-	Enabled        *bool   `json:"enabled,omitempty"`
+	Name           *string        `json:"name,omitempty"`
+	WebhookURL     *plugin.Secret `json:"webhook_url,omitempty"`
+	DefaultChannel *string        `json:"default_channel,omitempty"` // nil = no change; pointer to empty string = clear
+	Enabled        *bool          `json:"enabled,omitempty"`
 }
 
 // ---- POST /slack/configs ----
@@ -98,7 +98,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 		p.writeError(w, 400, "name is required")
 		return
 	}
-	if req.WebhookURL == "" {
+	if req.WebhookURL.Reveal() == "" {
 		p.writeError(w, 400, "webhook_url is required")
 		return
 	}
@@ -109,7 +109,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO slack_config (tenant_id, id, name, webhook_url, default_channel, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
-		`, p.dialect), tid, id, req.Name, req.WebhookURL, req.DefaultChannel, now)
+		`, p.dialect), tid, id, req.Name, req.WebhookURL.Reveal(), req.DefaultChannel, now)
 	if err != nil {
 		p.logger.Error("slack-notify: create config", "error", err)
 		p.writeError(w, 500, "failed to create config")
@@ -248,7 +248,7 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.WebhookURL != nil {
 		setClauses = append(setClauses, fmt.Sprintf("webhook_url = $%d", argIdx))
-		args = append(args, *req.WebhookURL)
+		args = append(args, req.WebhookURL.Reveal())
 		argIdx++
 	}
 	if req.DefaultChannel != nil {

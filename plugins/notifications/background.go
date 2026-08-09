@@ -70,7 +70,7 @@ type deliveryRow struct {
 // webhookConfigRow represents the webhook configuration needed for delivery.
 type webhookConfigRow struct {
 	URL    string
-	Secret string
+	Secret plugin.Secret
 }
 
 // processDeliveries queries for pending and retrying deliveries whose retry
@@ -131,7 +131,7 @@ func (p *Plugin) deliver(ctx context.Context, d deliveryRow) (string, error) {
 
 	// Build the request body.
 	payloadBytes := []byte(d.Payload)
-	mac := hmac.New(sha256.New, []byte(cfg.Secret))
+	mac := hmac.New(sha256.New, []byte(cfg.Secret.Reveal()))
 	mac.Write(payloadBytes)
 	signature := hex.EncodeToString(mac.Sum(nil))
 

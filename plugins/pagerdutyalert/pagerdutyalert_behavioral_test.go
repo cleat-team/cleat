@@ -481,8 +481,8 @@ func TestPDCreateConfig(t *testing.T) {
 	if resp["name"] != "test-config" {
 		t.Errorf("expected name 'test-config', got %q", resp["name"])
 	}
-	if resp["routing_key"] != "rk_test_123" {
-		t.Errorf("expected routing_key 'rk_test_123', got %q", resp["routing_key"])
+	if resp["routing_key"] != plugin.RedactedPlaceholder {
+		t.Errorf("expected routing_key to be redacted as %q, got %q", plugin.RedactedPlaceholder, resp["routing_key"])
 	}
 	if resp["enabled"] != true {
 		t.Error("expected enabled to be true")
@@ -568,6 +568,70 @@ func TestPDGetConfig(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &got)
 	if got["name"] != "get-test" {
 		t.Errorf("expected name 'get-test', got %q", got["name"])
+	}
+}
+
+// TestPDListAndGetDoNotLeakRoutingKey verifies that neither the list nor the
+// get endpoint ever returns the real routing key in the response body.
+func TestPDListAndGetDoNotLeakRoutingKey(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	const realKey = "rk_do_not_leak_me"
+	createBody := `{"name":"leak-test","routing_key":"` + realKey + `"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("create response leaked the real routing_key: %s", rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	configID := created["id"].(string)
+
+	// GET.
+	req = authedRequest("GET", "/pagerduty/configs/"+configID, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("GET response leaked the real routing_key: %s", rec.Body.String())
+	}
+	var got map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["routing_key"] != plugin.RedactedPlaceholder {
+		t.Errorf("GET: expected routing_key %q, got %q", plugin.RedactedPlaceholder, got["routing_key"])
+	}
+
+	// LIST.
+	req = authedRequest("GET", "/pagerduty/configs", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("LIST response leaked the real routing_key: %s", rec.Body.String())
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("LIST: failed to decode: %v", err)
+	}
+	found := false
+	for _, c := range list {
+		if c["id"] == configID {
+			found = true
+			if c["routing_key"] != plugin.RedactedPlaceholder {
+				t.Errorf("LIST: expected routing_key %q, got %q", plugin.RedactedPlaceholder, c["routing_key"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected config %s in list response", configID)
 	}
 }
 

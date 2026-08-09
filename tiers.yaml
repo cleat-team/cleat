@@ -377,8 +377,29 @@ tier2:
     - id: plugins
       why: 21 built-in, all with unit tests; 10 covered by the integration harness.
       open_items:
-        - "secrets stored and returned in plaintext via CRUD endpoints"
-        - "no retry/backoff on outbound HTTP in the alerting plugins"
+        - "RESOLVED 2026-08-09 for the read paths: webhookingest and notifications (HMAC keys),
+           pagerdutyalert (routing key), slacknotify (webhook URL) and datadogexport (API key)
+           returned their credential unredacted from list and get. datadogexport DID redact
+           and the redaction was defeated by ?show_api_key=true with no authorization behind
+           it, which is why the fix is a type (plugin.Secret) and not a helper: a convention
+           you must remember is one the next author forgets. Guarded by
+           plugin.TestPluginCredentialFieldsUseTheSecretType"
+        - "process-config credentials are still plain strings: blobstore SecretAccessKey,
+           email SendGridAPIKey, llm ProviderConfig.APIKey, slacknotify SlackSigningSecret,
+           oauthprovider ClientSecret. None is returned by any endpoint, so none is part of
+           the leak above; the exposure is the logging path. Converting them was attempted
+           and backed out of that change -- plugin.Secret deliberately does not round-trip
+           through json.Marshal, and six llm test helpers build Environment.Config by
+           marshaling a Config struct, which production never does. Allowlisted with that
+           reason in the guard"
+        - "no retry/backoff on outbound HTTP in the alerting plugins -- but read this before
+           adding any. slacknotify, pagerdutyalert, email and datadogexport register as
+           NON-idempotent (RegisterFunc, not RegisterIdempotentFunc), correctly: a Slack post
+           cannot safely be repeated. A failed host call surfaces to the workflow, where the
+           author's retry policy applies, which is the layer that owns durability. Naive
+           retry here would double-send on a timeout that the remote actually accepted. The
+           only defensible version retries errors that are provably pre-send (DNS failure,
+           connection refused) and never a timeout. Assessed 2026-08-09"
         - "RESOLVED 2026-08-09: kafkaconnect.produce() now refuses when no REST proxy is
            configured, naming the setting and the topic, instead of logging the message and
            returning success=true. The consume poller warns once instead of skipping at

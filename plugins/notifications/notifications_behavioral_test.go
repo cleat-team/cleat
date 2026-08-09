@@ -817,8 +817,8 @@ func TestHandleUpdateWebhook_Secret(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
-	if resp["secret"] != "new-secret" {
-		t.Errorf("expected secret 'new-secret', got %q", resp["secret"])
+	if resp["secret"] != plugin.RedactedPlaceholder {
+		t.Errorf("expected secret to be redacted as %q, got %q", plugin.RedactedPlaceholder, resp["secret"])
 	}
 }
 

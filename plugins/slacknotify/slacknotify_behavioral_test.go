@@ -542,8 +542,11 @@ func TestConfigCreateAndGet(t *testing.T) {
 	if created["name"] != "alerts" {
 		t.Errorf("expected name 'alerts', got %s", created["name"])
 	}
-	if created["webhook_url"] != "https://hooks.slack.com/services/T00/B00/abc123" {
-		t.Errorf("unexpected webhook_url: %s", created["webhook_url"])
+	// webhook_url IS the credential (Slack requires no separate auth header),
+	// so it must be redacted on every response, including create -- the
+	// caller already has the value they just sent.
+	if created["webhook_url"] != plugin.RedactedPlaceholder {
+		t.Errorf("expected webhook_url to be redacted as %q, got %s", plugin.RedactedPlaceholder, created["webhook_url"])
 	}
 	if created["enabled"] != true {
 		t.Errorf("expected enabled=true, got %v", created["enabled"])
@@ -573,6 +576,71 @@ func TestConfigCreateAndGet(t *testing.T) {
 	}
 	if fetched["name"] != "alerts" {
 		t.Errorf("expected name 'alerts', got %s", fetched["name"])
+	}
+	if fetched["webhook_url"] != plugin.RedactedPlaceholder {
+		t.Errorf("expected webhook_url to be redacted as %q, got %s", plugin.RedactedPlaceholder, fetched["webhook_url"])
+	}
+}
+
+// TestListAndGetConfigsDoNotLeakWebhookURL verifies that neither the list
+// nor the get endpoint ever returns the real webhook URL in the response
+// body. For this plugin the webhook URL IS the credential (Slack's incoming
+// webhook needs no separate auth header), so leaking it is equivalent to
+// leaking an API key.
+func TestListAndGetConfigsDoNotLeakWebhookURL(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	const realURL = "https://hooks.slack.com/services/T00/B00/do-not-leak-me"
+	body := fmt.Sprintf(`{"name":"alerts","webhook_url":"%s"}`, realURL)
+	req := authedRequest("POST", "/slack/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realURL) {
+		t.Errorf("create response leaked the real webhook_url: %s", rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	id := created["id"].(string)
+
+	// GET by ID.
+	req = authedRequest("GET", "/slack/configs/"+id, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realURL) {
+		t.Errorf("GET response leaked the real webhook_url: %s", rec.Body.String())
+	}
+
+	// LIST.
+	req = authedRequest("GET", "/slack/configs", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realURL) {
+		t.Errorf("LIST response leaked the real webhook_url: %s", rec.Body.String())
+	}
+	var listResp []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("LIST: failed to decode: %v", err)
+	}
+	found := false
+	for _, c := range listResp {
+		if c["id"] == id {
+			found = true
+			if c["webhook_url"] != plugin.RedactedPlaceholder {
+				t.Errorf("LIST: expected webhook_url %q, got %v", plugin.RedactedPlaceholder, c["webhook_url"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected config %s in list response", id)
 	}
 }
 

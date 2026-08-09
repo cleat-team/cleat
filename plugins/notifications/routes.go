@@ -49,27 +49,27 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 // ---- types ----
 
 type webhookConfigJSON struct {
-	ID        uuid.UUID `json:"id"`
-	TenantID  uuid.UUID `json:"tenant_id"`
-	URL       string    `json:"url"`
-	Secret    string    `json:"secret"`
-	Events    []string  `json:"events"`
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        uuid.UUID     `json:"id"`
+	TenantID  uuid.UUID     `json:"tenant_id"`
+	URL       string        `json:"url"`
+	Secret    plugin.Secret `json:"secret"`
+	Events    []string      `json:"events"`
+	Enabled   bool          `json:"enabled"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
 }
 
 type createWebhookRequest struct {
-	URL    string   `json:"url"`
-	Secret string   `json:"secret,omitempty"`
-	Events []string `json:"events"`
+	URL    string        `json:"url"`
+	Secret plugin.Secret `json:"secret,omitempty"`
+	Events []string      `json:"events"`
 }
 
 type updateWebhookRequest struct {
-	URL     *string   `json:"url,omitempty"`
-	Secret  *string   `json:"secret,omitempty"`
-	Events  *[]string `json:"events,omitempty"`
-	Enabled *bool     `json:"enabled,omitempty"`
+	URL     *string        `json:"url,omitempty"`
+	Secret  *plugin.Secret `json:"secret,omitempty"`
+	Events  *[]string      `json:"events,omitempty"`
+	Enabled *bool          `json:"enabled,omitempty"`
 }
 
 type deliveryJSON struct {
@@ -130,7 +130,7 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO webhook_config (tenant_id, id, url, secret, events, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
-		`, p.dialect), tid, id, req.URL, req.Secret, string(eventsJSON), now)
+		`, p.dialect), tid, id, req.URL, req.Secret.Reveal(), string(eventsJSON), now)
 	if err != nil {
 		p.logger.Error("notifications: create webhook", "error", err)
 		p.writeError(w, 500, "failed to create webhook")
@@ -278,7 +278,7 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Secret != nil {
 		setClauses = append(setClauses, fmt.Sprintf("secret = $%d", argIdx))
-		args = append(args, *req.Secret)
+		args = append(args, req.Secret.Reveal())
 		argIdx++
 	}
 	if req.Events != nil {

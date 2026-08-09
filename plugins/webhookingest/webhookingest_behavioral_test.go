@@ -1071,6 +1071,74 @@ func TestCreateSource(t *testing.T) {
 	}
 }
 
+// TestListAndGetSourcesDoNotLeakSecret verifies that neither the list nor
+// the get endpoint (nor create) ever returns the real HMAC secret in the
+// response body.
+func TestListAndGetSourcesDoNotLeakSecret(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	const realSecret = "do-not-leak-this-hmac-secret"
+	body := `{"name":"github-webhook","source_type":"github","secret":"` + realSecret + `"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) {
+		t.Errorf("create response leaked the real secret: %s", rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	if created["secret"] != plugin.RedactedPlaceholder {
+		t.Errorf("create: expected secret %q, got %v", plugin.RedactedPlaceholder, created["secret"])
+	}
+	id := created["id"].(string)
+
+	// GET.
+	req = authedRequest("GET", "/ingest/sources/"+id, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) {
+		t.Errorf("GET response leaked the real secret: %s", rec.Body.String())
+	}
+	var fetched map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &fetched)
+	if fetched["secret"] != plugin.RedactedPlaceholder {
+		t.Errorf("GET: expected secret %q, got %v", plugin.RedactedPlaceholder, fetched["secret"])
+	}
+
+	// LIST.
+	req = authedRequest("GET", "/ingest/sources", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) {
+		t.Errorf("LIST response leaked the real secret: %s", rec.Body.String())
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("LIST: failed to decode: %v", err)
+	}
+	found := false
+	for _, s := range list {
+		if s["id"] == id {
+			found = true
+			if s["secret"] != plugin.RedactedPlaceholder {
+				t.Errorf("LIST: expected secret %q, got %v", plugin.RedactedPlaceholder, s["secret"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected source %s in list response", id)
+	}
+}
+
 // TestCreateSourceDefaults verifies default values when creating a source
 // without source_type.
 func TestCreateSourceDefaults(t *testing.T) {
@@ -1832,7 +1900,13 @@ func TestListSourcesHandler(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for list sources, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var sources []webhookSourceJSON
+	// Unmarshal into map[string]any rather than webhookSourceJSON: the
+	// response's "secret" field is always the literal RedactedPlaceholder,
+	// and Secret.UnmarshalJSON deliberately rejects that literal, so decoding
+	// a redacted response back into webhookSourceJSON is not possible (nor
+	// should it be -- that type is for producing responses, not consuming
+	// them).
+	var sources []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
 		t.Fatalf("unmarshal sources: %v", err)
 	}
@@ -2315,15 +2389,18 @@ func TestWH_ListSources_TenantIsolation(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("tenant 1 list: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var sources []webhookSourceJSON
+	// Unmarshal into map[string]any: the response's "secret" field is always
+	// the literal RedactedPlaceholder, which Secret.UnmarshalJSON refuses to
+	// parse back into a webhookSourceJSON.
+	var sources []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(sources) != 1 {
 		t.Fatalf("expected 1 source for tenant 1, got %d", len(sources))
 	}
-	if sources[0].Name != "tenant-1-source" {
-		t.Errorf("expected 'tenant-1-source', got %s", sources[0].Name)
+	if sources[0]["name"] != "tenant-1-source" {
+		t.Errorf("expected 'tenant-1-source', got %s", sources[0]["name"])
 	}
 
 	// Tenant 2 lists sources.
@@ -2340,8 +2417,8 @@ func TestWH_ListSources_TenantIsolation(t *testing.T) {
 	if len(sources) != 1 {
 		t.Fatalf("expected 1 source for tenant 2, got %d", len(sources))
 	}
-	if sources[0].Name != "tenant-2-source" {
-		t.Errorf("expected 'tenant-2-source', got %s", sources[0].Name)
+	if sources[0]["name"] != "tenant-2-source" {
+		t.Errorf("expected 'tenant-2-source', got %s", sources[0]["name"])
 	}
 }
 

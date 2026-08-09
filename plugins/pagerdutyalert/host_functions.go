@@ -113,7 +113,7 @@ func (p *Plugin) triggerIncident(ctx context.Context, inputJSON string) (string,
 	}
 
 	// Look up the PagerDuty config, verifying tenant ownership.
-	var routingKey string
+	var routingKey plugin.Secret
 	err := p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT routing_key
 			FROM pd_config
@@ -136,7 +136,7 @@ func (p *Plugin) triggerIncident(ctx context.Context, inputJSON string) (string,
 	}
 
 	payload := pdEventRequest{
-		RoutingKey:  routingKey,
+		RoutingKey:  routingKey.Reveal(),
 		EventAction: "trigger",
 		Payload: &pdEventPayload{
 			Summary:       input.Summary,
@@ -170,7 +170,7 @@ func (p *Plugin) resolveIncident(ctx context.Context, inputJSON string) (string,
 	}
 
 	// Look up the PagerDuty config, verifying tenant ownership.
-	var routingKey string
+	var routingKey plugin.Secret
 	err := p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT routing_key
 			FROM pd_config
@@ -181,7 +181,7 @@ func (p *Plugin) resolveIncident(ctx context.Context, inputJSON string) (string,
 	}
 
 	payload := pdEventRequest{
-		RoutingKey:  routingKey,
+		RoutingKey:  routingKey.Reveal(),
 		EventAction: "resolve",
 		DedupKey:    input.IncidentKey,
 	}
