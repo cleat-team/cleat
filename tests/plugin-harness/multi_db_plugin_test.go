@@ -49,15 +49,15 @@ func TestPluginCalls_MultiDB(t *testing.T) {
 				t.Fatalf("workflow execution failed: %v", err)
 			}
 
-			// Go WASM workflows wrap the result in a JSON-encoded string.
-			// Unwrap the outer layer first, then parse the inner JSON object.
-			var rawJSON string
-			if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
-				t.Fatalf("failed to decode outer wrapper: %v\nraw: %.500s", err, result)
-			}
+			// One unmarshal. This ran a GO workflow, and Go's generated wrapper
+			// now passes the result through rather than re-encoding it (ABI.md:
+			// an entry point returns a string containing a JSON-encoded object).
+			// The comment here used to say Go "wraps the result in a
+			// JSON-encoded string", which described the bug as though it were
+			// the design.
 			var results map[string]interface{}
-			if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-				t.Fatalf("failed to parse result JSON: %v\nraw: %.500s", err, rawJSON)
+			if err := json.Unmarshal([]byte(result), &results); err != nil {
+				t.Fatalf("failed to parse result JSON: %v\nraw: %.500s", err, result)
 			}
 
 			expectedKeys := []string{

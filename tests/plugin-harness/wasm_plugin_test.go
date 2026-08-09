@@ -312,16 +312,20 @@ func TestPluginCalls_Wasm_Go(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workflow execution failed: %v", err)
 	}
-	// The workflow returns a JSON string via the WASM ABI. The engine
-	// JSON-encodes the return value, so Execute returns a JSON-encoded
-	// string containing the actual result object.  Unwrap it first.
-	var rawJSON string
-	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
-		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.2000s", err, result)
-	}
+	// One unmarshal, not two.
+	//
+	// This used to unwrap an outer JSON string first, because the generated
+	// dispatch wrapper called encodeJSONString on a result the workflow had
+	// already marshalled -- so {"a":1} arrived as "{\"a\":1}". The comment here
+	// described that as "the engine JSON-encodes the return value", which read
+	// like the design rather than the bug it was.
+	//
+	// The contract is a string containing a JSON-encoded object (ABI.md), the
+	// wrapper now passes it through, and this test needed the extra unwrap only
+	// for as long as the encoding was wrong.
 	var results map[string]interface{}
-	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-		t.Fatalf("failed to parse result JSON: %v\nraw: %.2000s", err, rawJSON)
+	if err := json.Unmarshal([]byte(result), &results); err != nil {
+		t.Fatalf("failed to parse result JSON: %v\nraw: %.2000s", err, result)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 
@@ -587,9 +591,14 @@ func TestPluginCalls_Wasm_Python(t *testing.T) {
 		t.Fatalf("workflow execution failed: %v", err)
 	}
 
-	// The workflow returns a JSON string via the WASM ABI. The engine
-	// JSON-encodes the return value, so Execute returns a JSON-encoded
-	// string containing the actual result object. Unwrap it first.
+	// Two unmarshals here, deliberately, unlike the Go case above.
+	//
+	// Go's generated wrapper now passes the result through (ABI.md: an entry
+	// point returns a string containing a JSON-encoded object), so its test
+	// unmarshals once. This guest still arrives double-encoded for its own
+	// reason -- componentize-py hands back a JSON string, and the Rust fixture
+	// returns a String that serde then serialises -- so the outer unwrap is
+	// still correct HERE. Do not remove it for symmetry with the Go case.
 	var rawJSON string
 	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
 		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.2000s", err, result)
