@@ -223,7 +223,7 @@ func (b *wasmtimeBackend) dispatchDurableDefer(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.DurableDefer(ctxWithMem(context.Background(), buf), nil, desc, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -254,7 +254,7 @@ func (b *wasmtimeBackend) dispatchPollCancellation(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.PollCancellation(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -296,7 +296,7 @@ func (b *wasmtimeBackend) dispatchPollSignal(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.PollSignal(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -318,7 +318,7 @@ func (b *wasmtimeBackend) dispatchSendSignalAndWait(
 	buf := make([]byte, 65536)
 	packed := b.handler.SendSignalAndWait(ctxWithMem(context.Background(), buf), nil,
 		target, sigName, payload, timeoutMs, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -372,7 +372,7 @@ func (b *wasmtimeBackend) dispatchChildWorkflow(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.ChildWorkflow(ctxWithMem(context.Background(), buf), nil, name, input, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -390,7 +390,7 @@ func (b *wasmtimeBackend) dispatchAwaitChild(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -408,7 +408,7 @@ func (b *wasmtimeBackend) dispatchAwaitAllChildren(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitAllChildren(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -431,7 +431,7 @@ func (b *wasmtimeBackend) dispatchChildWorkflowWithOptions(
 	buf := make([]byte, 65536)
 	packed := b.handler.ChildWorkflowWithOptions(ctxWithMem(context.Background(), buf), nil,
 		name, input, version, priority, policy, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -454,7 +454,7 @@ func (b *wasmtimeBackend) dispatchCreatePromise(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.CreatePromise(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -473,7 +473,7 @@ func (b *wasmtimeBackend) dispatchAwaitPromise(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitPromise(ctxWithMem(context.Background(), buf), nil, id, timeoutMs, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -612,7 +612,7 @@ func (b *wasmtimeBackend) dispatchWorkflowID(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.WorkflowID(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -629,7 +629,7 @@ func (b *wasmtimeBackend) dispatchRunID(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.RunID(ctxWithMem(context.Background(), buf), nil, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -729,7 +729,7 @@ func (b *wasmtimeBackend) dispatchSetScope(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.SetScope(ctxWithMem(context.Background(), buf), nil, objType, instKey, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -764,7 +764,7 @@ func (b *wasmtimeBackend) dispatchUUID(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.UUID(ctxWithMem(context.Background(), buf), nil, seed, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -801,7 +801,7 @@ func (b *wasmtimeBackend) dispatchGetState(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.GetState(ctxWithMem(context.Background(), buf), nil, key, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -862,7 +862,7 @@ func (b *wasmtimeBackend) dispatchListState(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.ListState(ctxWithMem(context.Background(), buf), nil, prefix, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -899,7 +899,7 @@ func (b *wasmtimeBackend) dispatchSideEffect(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.SideEffect(ctxWithMem(context.Background(), buf), nil, result, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -927,7 +927,7 @@ func (b *wasmtimeBackend) dispatchChildWorkflowInSchema(
 	buf := make([]byte, 65536)
 	packed := b.handler.ChildWorkflowInSchema(ctxWithMem(context.Background(), buf), nil,
 		schema, name, input, version, priority, policy, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
@@ -952,7 +952,7 @@ func (b *wasmtimeBackend) dispatchFetch(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.Fetch(ctxWithMem(context.Background(), buf), nil, method, url, headers, body, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
+	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
