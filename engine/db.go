@@ -232,7 +232,68 @@ func (s *PostgresStore) beginTxWithRLS(ctx context.Context) (*sql.Tx, error) {
 	return tx, nil
 }
 
-// ClaimWorkflow atomically claims a runnable workflow using SKIP LOCKED.
+// Heartbeat renews this worker's lease on one workflow instance, fenced on
+// (assigned_to, generation), and reports whether the lease still held.
+//
+// # The decision: wire it, not delete it (B4)
+//
+// This was the one per-workflow generation-checked heartbeat in the store and
+// nothing called it: cmd/cleat-worker calls only BatchHeartbeat, which by its
+// own doc comment does not check generation because it refreshes every
+// workflow this worker holds in one statement. A generation-checked function
+// nothing calls is a trap for the next reader -- it reads like a safety net
+// that is actually just dead code.
+//
+// # Where it is actually used now
+//
+// Not as the primary fencing mechanism for the two hot paths B4 found
+// unfenced. Postgres's per-step flush (engine/flush.go's insertEventSQL) and
+// all three dialects' write-ahead-intent statements
+// (engine/store_intent.go) fold the (assigned_to, generation) check directly
+// into the INSERT/UPDATE's own WHERE clause instead -- see insertEventSQL's
+// doc for why: an earlier version of this fix called Heartbeat as a separate
+// statement before every write, and a round-trip-counting measurement
+// against the real test database found that cost exactly double the round
+// trips per event (8 vs 4, tenanted path) for a guarantee that was still
+// only an argument about timing, not an atomic fact. Heartbeat's own SQL
+// did not need to change for that rewrite; the callers did.
+//
+// Heartbeat is still called from three places, all of them the case where
+// folding the check into the write statement was not available or not worth
+// it:
+//
+//   - flush.go's afterFencedInsert and store_intent.go's
+//     intentFenceOrNotPending call it as a *disambiguation* step, and only
+//     on the rare path where a fenced write's own statement reported zero
+//     rows affected -- distinguishing "the fence failed" from "the row was
+//     already terminal / not pending", which are both legitimate zero-row
+//     outcomes for different reasons. The common case (a row was actually
+//     written) never reaches this call.
+//   - engine/flush.go calls it once, upfront, before dispatching to
+//     MySQLStore's/MSSQLStore's flushEventForStep (flush_dialect.go). Those
+//     two dialects' per-step insert goes through appendEventsInTxOpts, a
+//     function also used for genuinely unfenced multi-event batch writes
+//     (FinalizeWorkflowSegment, AppendEventHistoryBatch), so folding a fence
+//     predicate into its SQL would fence those other callers too; a
+//     Heartbeat-before-write check, scoped to the one caller that needs it,
+//     was the trade made instead. See flush_dialect.go's perStepEventFlusher
+//     doc.
+//   - adaptive_flush.go's partitionFencedBatch does not call this method
+//     directly -- it runs the equivalent renewal for every distinct claim in
+//     a batch in one query -- but exists for the same reason: a single
+//     Heartbeat call cannot fence a batch spanning many workflow instances
+//     at once.
+//
+// For the two call sites that still do a Heartbeat-before-write (unlike the
+// disambiguation callers, these do incur it on every call, not just the rare
+// path): a successful Heartbeat does not just check the lease, it renews it
+// -- heartbeat_at = now(), unconditionally, for the row that matched. Since
+// ReapStaleInstances only reclaims a workflow whose heartbeat_at predates the
+// reap timeout (tens of seconds in every deployment config this repo ships),
+// the window that matters is "between the renewal and the timeout elapsing",
+// not "between the renewal and the write milliseconds later" -- which is why
+// this is safe despite being two statements rather than one, for the two
+// places it is still used that way.
 func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {

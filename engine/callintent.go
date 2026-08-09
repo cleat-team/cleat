@@ -133,7 +133,7 @@ func (s *execSession) freshCallWithIntent(ctx context.Context, service, operatio
 		Op:        operation,
 		Request:   requestJSON,
 	}
-	if err := st.WriteCallIntent(ctx, s.workflowID, intent); err != nil {
+	if err := st.WriteCallIntent(ctx, s.workflowID, intent, s.engine.workerID, s.engine.generation); err != nil {
 		// The call has NOT been dispatched. That is the correct outcome of a
 		// failed intent write: without a durable intent, a crash mid-call
 		// would be indistinguishable from a call that never happened, which
@@ -157,7 +157,7 @@ func (s *execSession) freshCallWithIntent(ctx context.Context, service, operatio
 
 	payload, _ := eventRecordToPayload(rec)
 	checksum := computeEventChecksum(rec, s.lastChecksum)
-	if err := st.CompleteCallIntent(ctx, s.workflowID, rec, payload, checksum); err != nil {
+	if err := st.CompleteCallIntent(ctx, s.workflowID, rec, payload, checksum, s.engine.workerID, s.engine.generation); err != nil {
 		// The call HAS been dispatched and its outcome is not durable. Say so
 		// rather than returning the response as though it were recorded: a
 		// replay will find the pending row and report ambiguity, and a caller
@@ -264,7 +264,7 @@ func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (st
 	}
 	payload, _ := eventRecordToPayload(completed)
 
-	if err := store.ResolveCallIntent(ctx, s.workflowID, completed, payload); err != nil {
+	if err := store.ResolveCallIntent(ctx, s.workflowID, completed, payload, s.engine.workerID, s.engine.generation); err != nil {
 		s.engine.log().ErrorContext(ctx, "ambiguity was resolved but could not be recorded; reporting ambiguity instead",
 			"workflow_id", s.workflowID, "step", rec.Step, "error", err)
 		return "", false

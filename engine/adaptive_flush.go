@@ -20,6 +20,13 @@ type batchEntry struct {
 	step       int
 	done       chan error
 	params     []interface{} // 31 values matching insertEventSQL parameter order
+
+	// workerID and generation are the claiming worker's identity, for
+	// fencing (B4). workerID == "" means the caller did not ask for fencing
+	// (Engine.fencingEnabled() was false), and this entry is never held back
+	// by partitionFencedBatch regardless of generation.
+	workerID   string
+	generation int64
 }
 
 // AdaptiveFlusher tracks the recent step rate and automatically switches
@@ -102,7 +109,13 @@ func (af *AdaptiveFlusher) SetEncryption(encrypt bool, enc *PayloadEncryption) {
 // Flush is called from recordEvent. In direct mode it returns (nil, false)
 // and the caller falls through to flushEvent. In batch mode it returns a
 // done channel; the caller blocks on <-done until the batch is persisted.
-func (af *AdaptiveFlusher) Flush(ctx context.Context, workflowID string, rec EventRecord, checksum string) (chan error, bool) {
+//
+// workerID and generation are the claiming worker's identity, for fencing
+// (B4) -- the same values Engine.flushEvent passes to Heartbeat, threaded
+// through here because a single AdaptiveFlusher batches events from every
+// workflow this worker process is running, each under its own generation.
+// Pass workerID == "" to opt out, matching Engine.fencingEnabled() == false.
+func (af *AdaptiveFlusher) Flush(ctx context.Context, workflowID string, rec EventRecord, checksum string, workerID string, generation int64) (chan error, bool) {
 	af.updateRate()
 
 	af.mu.Lock()
@@ -116,6 +129,8 @@ func (af *AdaptiveFlusher) Flush(ctx context.Context, workflowID string, rec Eve
 
 	t0 := time.Now()
 	entry, err := af.prepareEntry(workflowID, rec, checksum)
+	entry.workerID = workerID
+	entry.generation = generation
 	af.totalPrepareUs.Add(time.Since(t0).Microseconds())
 	if err != nil {
 		done := make(chan error, 1)
@@ -170,8 +185,129 @@ func (af *AdaptiveFlusher) onTimer() {
 	}
 }
 
+// partitionFencedBatch splits batch into entries whose claim still holds
+// (held) and entries whose claim was lost (lost), renewing the lease for
+// every distinct (workflow_id, worker_id, generation) triple in the batch in
+// one round trip -- the batch-mode counterpart to Engine.flushEvent's single
+// Heartbeat call (B4). A single Heartbeat call cannot fence a whole batch
+// because one AdaptiveFlusher accumulates events from every workflow this
+// worker process is running, each claimed under its own generation, so this
+// does the same (assigned_to, generation) check for all of them at once
+// instead of one at a time.
+//
+// Entries with workerID == "" (fencing not requested for that entry) always
+// come back in held, regardless of generation.
+//
+// A DISTINCT (workflow_id, worker_id, generation) triple, not just distinct
+// workflow_id, in case a workflow was reaped and reclaimed within one
+// worker's own batch window: an older entry for the same workflow_id under a
+// stale generation must not be waved through just because a newer entry for
+// the same ID, under the current generation, is also in this batch. That
+// case is not expected in practice -- events for one workflow are produced by
+// one goroutine, which does not keep producing them after losing its claim --
+// but the query is no more expensive keyed this way, so it does not rely on
+// that expectation holding.
+func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []batchEntry) (held, lost []batchEntry, err error) {
+	type claim struct {
+		workflowID string
+		workerID   string
+		generation int64
+	}
+	seen := make(map[claim]bool)
+	var claims []claim
+	for _, e := range batch {
+		if e.workerID == "" {
+			continue
+		}
+		c := claim{e.workflowID, e.workerID, e.generation}
+		if !seen[c] {
+			seen[c] = true
+			claims = append(claims, c)
+		}
+	}
+	if len(claims) == 0 {
+		// Nothing in this batch asked to be fenced.
+		return batch, nil, nil
+	}
+
+	valuesSQL := make([]string, len(claims))
+	args := make([]interface{}, 0, len(claims)*3)
+	for i, c := range claims {
+		base := i * 3
+		valuesSQL[i] = fmt.Sprintf("($%d::text, $%d::text, $%d::bigint)", base+1, base+2, base+3)
+		args = append(args, c.workflowID, c.workerID, c.generation)
+	}
+
+	rows, qerr := af.db.QueryContext(ctx, fmt.Sprintf(`
+		WITH claims(workflow_id, worker_id, generation) AS (VALUES %s)
+		UPDATE workflow_instances wi
+		SET heartbeat_at = now()
+		FROM claims c
+		WHERE wi.id = c.workflow_id AND wi.assigned_to = c.worker_id AND wi.generation = c.generation
+		RETURNING wi.id
+	`, strings.Join(valuesSQL, ", ")), args...)
+	if qerr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: %w", qerr)
+	}
+	defer rows.Close()
+
+	fencedOK := make(map[string]bool, len(claims))
+	for rows.Next() {
+		var id string
+		if serr := rows.Scan(&id); serr != nil {
+			return nil, nil, fmt.Errorf("adaptive flusher: batch fence check scan: %w", serr)
+		}
+		fencedOK[id] = true
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check rows: %w", rerr)
+	}
+
+	for _, e := range batch {
+		if e.workerID == "" || fencedOK[e.workflowID] {
+			held = append(held, e)
+		} else {
+			lost = append(lost, e)
+		}
+	}
+	return held, lost, nil
+}
+
 func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntry) {
 	tStart := time.Now()
+
+	needsFencing := false
+	for _, e := range batch {
+		if e.workerID != "" {
+			needsFencing = true
+			break
+		}
+	}
+	if needsFencing {
+		held, lostEntries, perr := af.partitionFencedBatch(ctx, batch)
+		if perr != nil {
+			// The fence check itself failed (a DB error, not a fence loss).
+			// Fail the whole batch rather than guess which entries would
+			// have been safe to write -- the same "loud rather than silently
+			// downgraded" choice engine/callintent.go's intentStore makes.
+			for _, entry := range batch {
+				if entry.done != nil {
+					entry.done <- perr
+				}
+			}
+			return
+		}
+		for _, entry := range lostEntries {
+			if entry.done != nil {
+				entry.done <- ErrFenceLost
+			}
+		}
+		batch = held
+		if len(batch) == 0 {
+			return
+		}
+	}
+
 	events := make([]map[string]interface{}, len(batch))
 	for i, entry := range batch {
 		p := entry.params

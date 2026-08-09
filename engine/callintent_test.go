@@ -123,7 +123,7 @@ func TestCallIntent_PendingRowIsNotCorruption(t *testing.T) {
 			Step: 0, EventType: EventTypeCall,
 			Service: intentService, Op: intentOperation, Request: `{"amount":100}`,
 		}
-		if err := st.WriteCallIntent(ctx, wfID, intent); err != nil {
+		if err := st.WriteCallIntent(ctx, wfID, intent, "", 0); err != nil {
 			t.Fatalf("WriteCallIntent: %v", err)
 		}
 
@@ -144,7 +144,7 @@ func TestCallIntent_PendingRowIsNotCorruption(t *testing.T) {
 		done.TimestampMs = time.Now().UnixMilli()
 		payload, _ := eventRecordToPayload(done)
 		checksum := computeEventChecksum(done, "")
-		if err := st.CompleteCallIntent(ctx, wfID, done, payload, checksum); err != nil {
+		if err := st.CompleteCallIntent(ctx, wfID, done, payload, checksum, "", 0); err != nil {
 			t.Fatalf("CompleteCallIntent: %v", err)
 		}
 
@@ -180,16 +180,16 @@ func TestCallIntent_CompletionIsFenced(t *testing.T) {
 		checksum := computeEventChecksum(rec, "")
 
 		// No intent was written, so there is nothing to complete.
-		if err := st.CompleteCallIntent(ctx, wfID, rec, payload, checksum); !errors.Is(err, errIntentNotPending) {
+		if err := st.CompleteCallIntent(ctx, wfID, rec, payload, checksum, "", 0); !errors.Is(err, errIntentNotPending) {
 			t.Errorf("completing a step with no intent returned %v, want errIntentNotPending", err)
 		}
 
 		if err := st.WriteCallIntent(ctx, wfID, EventRecord{
 			Step: 0, EventType: EventTypeCall, Service: intentService, Op: intentOperation, Request: `{}`,
-		}); err != nil {
+		}, "", 0); err != nil {
 			t.Fatalf("WriteCallIntent: %v", err)
 		}
-		if err := st.CompleteCallIntent(ctx, wfID, rec, payload, checksum); err != nil {
+		if err := st.CompleteCallIntent(ctx, wfID, rec, payload, checksum, "", 0); err != nil {
 			t.Fatalf("first CompleteCallIntent: %v", err)
 		}
 
@@ -203,7 +203,7 @@ func TestCallIntent_CompletionIsFenced(t *testing.T) {
 		conflicting.Response = `{"ok":false,"by":"a second writer"}`
 		conflictingPayload, _ := eventRecordToPayload(conflicting)
 		conflictingChecksum := computeEventChecksum(conflicting, "")
-		if err := st.CompleteCallIntent(ctx, wfID, conflicting, conflictingPayload, conflictingChecksum); !errors.Is(err, errIntentNotPending) {
+		if err := st.CompleteCallIntent(ctx, wfID, conflicting, conflictingPayload, conflictingChecksum, "", 0); !errors.Is(err, errIntentNotPending) {
 			t.Errorf("second completion returned %v, want errIntentNotPending", err)
 		}
 		if after := stepRecord(t, ctx, store, wfID, 0); strings.Contains(after.Response, "second writer") {
@@ -318,7 +318,7 @@ func TestReplay_PendingIntentIsAmbiguous(t *testing.T) {
 		if err := st.WriteCallIntent(ctx, wfID, EventRecord{
 			Step: 0, EventType: EventTypeCall,
 			Service: intentService, Op: intentOperation, Request: `{"amount":100}`,
-		}); err != nil {
+		}, "", 0); err != nil {
 			t.Fatalf("WriteCallIntent: %v", err)
 		}
 
@@ -463,7 +463,7 @@ func writePendingCall(t *testing.T, ctx context.Context, store WorkflowStore, wf
 	if err := intentStoreOf(t, store).WriteCallIntent(ctx, wfID, EventRecord{
 		Step: 0, EventType: EventTypeCall,
 		Service: intentService, Op: intentOperation, Request: `{"amount":100}`,
-	}); err != nil {
+	}, "", 0); err != nil {
 		t.Fatalf("WriteCallIntent: %v", err)
 	}
 }
@@ -593,7 +593,7 @@ func TestResolveAmbiguity_UnrecordableResolutionIsNotUsed(t *testing.T) {
 		}
 		payload, _ := eventRecordToPayload(done)
 		if err := intentStoreOf(t, store).CompleteCallIntent(ctx, wfID, done, payload,
-			computeEventChecksum(done, "")); err != nil {
+			computeEventChecksum(done, ""), "", 0); err != nil {
 			t.Fatalf("CompleteCallIntent: %v", err)
 		}
 
