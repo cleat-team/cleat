@@ -537,7 +537,12 @@ during bulk replay operations).
 
 ## Resource Quotas
 
-Per-workflow-instance resource limits. Set to `0` for unlimited.
+Resource limits. Set to `0` for unlimited.
+
+The first three are per workflow instance. `--max-quota-schedules` is per
+tenant, because a cron schedule outlives the run that created it -- counting
+schedules against that run would let a workflow create its limit, exit, and be
+started again.
 
 ### --max-quota-events
 
@@ -569,6 +574,23 @@ When exceeded, further child start attempts fail with a quota error.
 
 Limits the number of distinct concurrency keys a single workflow can register.
 When exceeded, further key registrations fail with a quota error.
+
+---
+
+### --max-quota-schedules
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` | Max cron schedules per tenant (0 = unlimited) |
+
+Limits how many cron schedules a tenant may hold, counted across every workflow
+in that tenant rather than per run -- see the note at the top of this section.
+When exceeded, `ScheduleCron` fails with a quota error naming the current count
+and the limit; the workflow itself keeps running.
+
+Only reached through the `ScheduleCron` host call. Schedules created with
+`cleat schedule create` or through the admin API are counted against the quota
+but are not refused by it.
 
 ---
 

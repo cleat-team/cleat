@@ -6061,6 +6061,18 @@ unwired host calls: seven that hard-error the same way (`ResolvePromise`, `Rejec
 and twelve with real fallbacks. `AwaitAnyChild` and `PollChild` were simply the two someone
 happened to write an example against.
 
+Of those seven, **one is left** as of 2026-08-08 (`DurableDeferFunc`, still waiting on the
+question of when its closures drain). `ResolvePromise`, `RejectPromise` and
+`ContinueAsNewWithVersion` were wired the same day. The three cron calls took longer and
+were the more interesting case: the guard's own note said mocking them would be *inventing*
+a specification, because `cleat.HostCalls` declared three methods **the engine did not
+implement anywhere** — an AssemblyScript guest that called one failed at instantiation with
+`unknown import`. That is now built (#430, #431, #432): the host calls exist on both
+backends, journaled and replayed, and `cleattest` validates against the engine's own
+`ValidateCronExpr` / `ValidateTimezone` rather than rules invented in a harness. Delivery is
+at-least-once; see `tiers.yaml`, `workflow-callable-cron`, which also records that Python
+still cannot make these calls.
+
 A second defect was hiding behind the first: `dag.go` discarded `completedRunID` on the
 error path, so a failed child reported `dag: await any child failed: <message>` without
 naming which of the tasks failed.
