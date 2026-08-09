@@ -4,58 +4,113 @@ This document describes the current and planned security mechanisms in cleat.
 
 ## WASM Sandbox
 
-The primary security boundary in cleat is the WebAssembly sandbox provided by
-wazero.
+> Corrected 2026-08-09 (see CLAUDE.md's "Two WASM backends" section, and
+> `engine/backend_wasmtime.go`, `engine/wasmtime_options.go`). This section
+> previously said the primary security boundary was wazero and never
+> mentioned wasmtime. That was backwards: **wasmtime is the backend of
+> record** (preferred automatically whenever CGO is available — the default —
+> per `cmd/cleat-worker/main.go`), and wazero is the CGO-less fallback only.
+> The two are not equivalent for this purpose: per CLAUDE.md, wazero cannot be
+> fenced for a compute-bound guest (`WithCloseOnContextDone` breaks all
+> execution, fuel only decrements on function entry, and closing the module
+> has no effect on a tight loop — all measured, all failing). Treat a
+> wazero-only deployment as running without CPU/wall-clock enforcement.
+
+The primary security boundary in cleat is the WebAssembly sandbox. On the
+wasmtime backend it is enforced with real resource limits (below); on the
+wazero fallback it is enforced only at the memory-limit and syscall level, not
+at the CPU/wall-clock level.
 
 ### Current
 
-- **No native code execution**: Workflow code runs inside wazero's WASM
-  interpreter or compiler. It cannot execute native CPU instructions, make
-  arbitrary syscalls, or access host memory outside its linear memory.
+- **No native code execution**: Workflow code runs inside the WASM sandbox
+  (wasmtime by default, wazero as the CGO-less fallback). It cannot execute
+  native CPU instructions, make arbitrary syscalls, or access host memory
+  outside its linear memory.
 - **WASI limited**: WASI preview 1 is instantiated but does not provide
   filesystem or network access by default.
 - **Host functions controlled**: The only way workflow code interacts with the
-  outside world is through the 15+ host functions registered on the `env`
-  module. Each host function is a controlled Go function that validates inputs
-  before acting.
+  outside world is through the host functions registered on the `env` module
+  (59 as of 2026-08-09 — `grep -c '\.Export("' engine/imports.go` plus the
+  three non-`cleat_`-prefixed exports; see `ABI.md` §2). Each host function is
+  a controlled Go function that validates inputs before acting.
 - **Linear memory isolation**: Each WASM module gets its own linear memory.
   Modules cannot read or write each other's memory.
+- **Resource limits are wired on the backend of record**: the wasmtime
+  backend enforces a wall-clock execution timeout via epoch interruption
+  (default 30s, `DefaultWasmtimeExecutionTimeout` in
+  `engine/wasmtime_options.go`, configurable via `--wasm-instance-timeout`),
+  an optional instruction/fuel budget (`--wasm-instruction-limit`), and a
+  linear-memory ceiling (default 32 MiB per module,
+  `DefaultWasmtimeMemoryLimitBytes`, configurable via `--wasm-memory-max-mb`).
+  These bound even a WASM module stuck in a tight loop that never calls back
+  into the host — see CLAUDE.md's note that this differs across wasmtime's
+  three execution paths (core module, native component, decomposition).
 
 ### Limitations
 
-- **WASM sandbox for versioning, not security**: The primary motivation for
-  WASM compilation is lifecycle decoupling, not security. While the WASM
-  sandbox provides defense-in-depth, it should not be the only security layer
-  in multi-tenant deployments.
-- **No resource limits**: wazero does not enforce WASM-level CPU or memory
-  limits. A runaway workflow could consume excessive CPU (though it cannot
-  escape the sandbox).
+- **WASM sandbox for versioning, not solely security**: The primary
+  motivation for WASM compilation is lifecycle decoupling, not security.
+  While the WASM sandbox provides defense-in-depth, it should not be the only
+  security layer in multi-tenant deployments.
+- **wazero has no CPU/wall-clock enforcement**: unlike wasmtime, wazero
+  cannot be fenced for a compute-bound guest (see the callout above). A
+  deployment that falls back to wazero (`CGO_ENABLED=0`, no CGO toolchain)
+  loses this specific protection, not just performance.
 - **No WASI preview 2 support**: Current Go `wasip1` target only supports WASI
   preview 1, which has a broader (and less secure) syscall surface than
   preview 2's component model.
 
 ### Planned
 
-- Per-module CPU and memory limits via wazero's `WithMemoryLimitConfig` and
-  `WithCompiledModule` configuration.
 - WASI preview 2 support for finer-grained capability-based security.
+- Per-instruction resource accounting that is uniform across wasmtime's three
+  execution paths (core module, native component, decomposition), which
+  today have had three different answers about what a limit bounds.
 
-## PostgreSQL Row-Level Security (Future)
+## PostgreSQL and SQL Server Row-Level Security
+
+> Corrected 2026-08-09. This section previously said RLS was not yet
+> configured ("Future"). That was wrong: RLS ships and is enforced today on
+> both PostgreSQL and SQL Server. Verified via
+> `grep -n "FORCE ROW LEVEL SECURITY" migrations/postgres/001_schema.sql`
+> (8 tables: `workflow_defs`, `workflow_instances`, `event_history`,
+> `workflow_signals`, `workflow_schedules`, `workflow_tags`,
+> `workflow_routing`, `workflow_promises`) and
+> `migrations/mssql/012_admin_role.sql:110-121`, which binds
+> `dbo.fn_tenant_filter` as a `FILTER PREDICATE` security policy on the same
+> seven multi-tenant tables. `tiers.yaml`'s D1 decision (2026-08-06) grants
+> `multi_tenant: [postgres, mssql]`; MySQL has no row-level security feature
+> at all (`CREATE POLICY`/`CREATE SECURITY POLICY` is not available), so it
+> remains single-tenant only — see `docs/reference/multi-tenancy.md`.
 
 ### Current
 
-- **Namespace isolation**: Workflows can be scoped to a namespace via the
-  `namespace` column. The worker filters by namespace in its claim queries.
-- **No RLS**: PostgreSQL RLS (Row-Level Security) policies are not yet
-  configured. All workflows in the database share the same worker connection.
+- **Database-enforced tenant isolation on PostgreSQL and SQL Server**:
+  PostgreSQL uses `CREATE POLICY` plus `FORCE ROW LEVEL SECURITY` on 8
+  multi-tenant tables, scoped by a `tenant_id` session variable set per
+  connection. SQL Server uses a native `SECURITY POLICY` with a
+  `FILTER PREDICATE` function (`dbo.fn_tenant_filter`) bound to the same set
+  of tables, checked against `SESSION_CONTEXT('tenant_id')`.
+  `engine/rls_check.go` verifies the policies are present at startup and
+  fails closed (`assert_tenant_set()`) rather than falling back to a default
+  tenant.
+- **MySQL is single-tenant only, by design**: MySQL has no row-level security
+  feature (`CREATE POLICY` is a syntax error on 8.4). Application-layer
+  tenant filtering was prototyped as an emulation and measured at 6.1x the
+  cost of a full scan versus SQL Server's native +20% — see
+  `IMPROVEMENT-PLAN.md` §1.7. Emulating a missing engine feature at 6x is a
+  worse product than stating plainly which engines have it, so MySQL is
+  documented single-tenant-only rather than pretending to isolate tenants it
+  cannot actually fence.
+- **Namespace isolation**: Independent of tenancy, workflows can also be
+  scoped to a namespace via the `namespace` column; the worker filters by
+  namespace in its claim queries.
 
 ### Planned
 
-- **Tenant isolation via RLS**: Each tenant will have a dedicated connection
-  with a `tenant_id` session variable. RLS policies on `workflow_instances`,
-  `event_history`, and `workflow_defs` will filter by tenant.
-- **Per-tenant connection pooling**: The sharded store will route each tenant
-  to its own database shard or schema.
+- Per-tenant connection pooling: the sharded store routing each tenant to its
+  own database shard or schema, beyond the current session-variable model.
 
 ## API Key Authentication
 
@@ -195,8 +250,9 @@ func Middleware(db *sql.DB) func(http.Handler) http.Handler {
 
 | Area | Current State | Planned |
 |------|---------------|---------|
-| WASM sandbox | wazero runtime, no native code, controlled host functions | Resource limits, WASI preview 2 |
-| PostgreSQL RLS | Namespace filter only | Per-tenant RLS policies |
+| WASM sandbox | wasmtime (backend of record: epoch/fuel/memory limits) or wazero (CGO-less fallback, no CPU/wall-clock enforcement); no native code, controlled host functions | WASI preview 2, uniform limits across all three wasmtime execution paths |
+| PostgreSQL / SQL Server RLS | Database-enforced, FORCEd/FILTER PREDICATE on 8 tables, fail-closed | Per-tenant connection pooling / sharding |
+| MySQL tenancy | Single-tenant only (no RLS feature; documented product boundary, not a gap) | — |
 | API auth | Bearer token / header-based, SHA-256 hashed | Scoped keys, rotation, rate limiting |
 | Secrets | Plaintext in DB, no built-in secrets manager | Secrets API on HostCalls, encryption |
 | Input validation | Minimal (length, JSON parseability) | JSON Schema, stricter enforcement |

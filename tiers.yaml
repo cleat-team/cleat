@@ -854,10 +854,17 @@ tier3:
 
     - id: formal-specs
       why: |
-        specs/CleatClaim.tla uses `=====` as a decorative separator, which is TLA+'s module
-        terminator — the first is at line 53 of 495, so 89% of the spec is outside the module.
-        No .cfg files exist and TLC never runs in CI. Either fix and run them, or move them to
-        docs/ as design notes.
+        Checked 2026-08-09 (`grep -n '^====\|^\\\* =' specs/CleatClaim.tla`, and
+        `find specs -iname '*.cfg'`, `grep -rn 'tlc2\.TLC' .github/workflows/`). An
+        earlier version of this entry claimed line 53 was TLA+'s `====` module
+        terminator, cutting off 89% of the 495-line spec. That was wrong: line 53 is
+        `\* =============...`, a `\*`-prefixed line *comment* used as a decorative
+        divider (the same pattern repeats at 21 other lines). The real module
+        terminator is the bare `====` on line 495, the file's last line, so the
+        module is not truncated. The narrower claim stands and is why this stays
+        tier 3: no `.cfg` file exists anywhere under `specs/`, and nothing under
+        `.github/workflows/` invokes `tlc2.TLC` — TLC never runs, in CI or otherwise.
+        Either fix that and run them, or move them to docs/ as design notes.
 
     - id: comparative-benchmarks
       why: |

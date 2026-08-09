@@ -28,48 +28,67 @@
 
 ## Module Boundaries
 
+> Corrected 2026-08-09. This table previously named `internal/host/`,
+> `internal/wasm/`, `internal/wasmrw/`, and `internal/plugin/`, and listed a
+> `cmd/clew-service/`. Commit `3eeb74e` (2026-06-01), "promote internal
+> packages to public — engine as a library", moved the first four to
+> `engine/`, `wasm/`, `wasmrw/`, and `plugin/` respectively (see CLAUDE.md's
+> note on paths in older commits). `cmd/clew-service/` never existed in this
+> repo — verified with `find . -iname '*clew*'`, which turns up only
+> `testdata/clew-lifecycle` and the `make clew` Makefile target (a
+> `cleat-worker` invocation against Neon, not a separate service binary).
+> Layout re-verified against the actual tree with `ls -d */` and `ls cmd/`.
+
 | Package | Owns | Depends On |
 |---------|------|------------|
-| `internal/host/` | Engine, workflow execution loop, replay, signals | wasm, migration, telemetry |
-| `internal/wasm/` | WASM module loading, wasmtime bindings | — |
-| `internal/wasmrw/` | WASM read/write helpers | wasm |
-| `internal/migration/` | Schema DDL, migrations (PG/MSSQL/MySQL) | — |
-| `internal/auth/` | Tenant auth, RLS policy enforcement | migration |
+| `engine/` | Engine, workflow execution loop, WASM backends (wasmtime + wazero), replay, signals | wasm, migration, telemetry |
+| `wasm/` | WASM module loading, codegen | — |
+| `wasmrw/` | WASM read/write helpers | wasm |
+| `migration/` | Schema DDL, migrations (PG/MSSQL/MySQL) | — |
+| `auth/` | Tenant auth, RLS policy enforcement | migration |
 | `internal/telemetry/` | OTel setup, span hierarchy | — |
-| `internal/plugin/` | Plugin interface, registry | — |
+| `plugin/` | Plugin interface, registry | — |
 | `internal/plugingen/` | Plugin code generation | plugin |
 | `internal/analyzer/` | Static analysis of workflow code | — |
 | `internal/callgraph/` | Call graph construction | analyzer |
 | `internal/closure/` | Transitive closure over dependencies | callgraph |
 | `internal/transform/` | AST transformations | analyzer |
-| `cmd/cleat-worker/` | Worker binary entry point | host |
-| `cmd/cleatctl/` | CLI admin/debug tool | host (read-only) |
-| `cmd/clew-service/` | Standalone clew HTTP service | host |
+| `cmd/cleat-worker/` | Worker binary entry point | engine |
+| `cmd/cleatctl/` | CLI admin/debug tool | engine (read-only) |
 
 ## Coupling Matrix
 
-- `cmd/cleat-worker` → `internal/host`: MEDIUM (consumes Engine API)
-- `cmd/cleatctl` → `internal/host`: MEDIUM (read-only Engine API for debug)
-- `internal/host` → `internal/wasm`: TIGHT (shared wasmtime types, execution)
-- `internal/host` → `internal/migration`: MEDIUM (schema contracts)
-- `internal/host` → `internal/telemetry`: LOOSE (OTel is initialized
-  separately)
-- `internal/wasmrw` → `internal/wasm`: TIGHT (shared WASM primitives)
-- `internal/plugingen` → `internal/plugin`: TIGHT (generates plugin code)
+- `cmd/cleat-worker` → `engine`: MEDIUM (consumes Engine API)
+- `cmd/cleatctl` → `engine`: MEDIUM (read-only Engine API for debug)
+- `engine` → `wasm`: TIGHT (shared wasmtime/wazero types, execution)
+- `engine` → `migration`: MEDIUM (schema contracts)
+- `engine` → `internal/telemetry`: LOOSE (OTel is initialized separately)
+- `wasmrw` → `wasm`: TIGHT (shared WASM primitives)
+- `internal/plugingen` → `plugin`: TIGHT (generates plugin code)
 - `internal/callgraph` → `internal/analyzer`: TIGHT (shared AST types)
 - `internal/closure` → `internal/callgraph`: TIGHT (operates on call graphs)
 - `internal/transform` → `internal/analyzer`: TIGHT (shared AST types)
 
 ## Data Model
 
-- `workflow_runs` — workflow instances (id, tenant_id, state, checksum)
-- `event_history` — event log (FK→workflow_runs, ON DELETE CASCADE from
-  cleat-222)
+> Corrected 2026-08-09: table names below did not match
+> `migrations/postgres/001_schema.sql` (`workflow_runs` should be
+> `workflow_instances`; `signals`, `promises`, `schedules` should be their
+> `workflow_`-prefixed names — there is no bare `signals`/`promises`/
+> `schedules` table). Verified with
+> `grep -n '^CREATE TABLE' migrations/postgres/001_schema.sql`.
+
+- `workflow_defs` — versioned WASM workflow definitions
+- `workflow_instances` — workflow instances (id, tenant_id, state, checksum)
+- `event_history` — event log (FK→workflow_instances)
 - `concurrency_keys` — idempotency / concurrency control (tenant_id scoped)
-- `signals` — cross-workflow signal delivery
-- `promises` — async promise resolution
-- `schedules` — scheduled workflow triggers
-- All multi-tenant tables include `tenant_id` with RLS policy
+- `workflow_signals` — cross-workflow signal delivery
+- `workflow_promises` — async promise resolution
+- `workflow_schedules` — scheduled workflow triggers (cron)
+- `workflow_tags`, `workflow_routing` — tagging and task-queue routing
+- All multi-tenant tables carry `tenant_id`; on PostgreSQL and SQL Server it
+  is enforced by database-side RLS (FORCEd policy / FILTER PREDICATE), not
+  just present as a column — see `docs/explanation/security-model.md`.
 
 ## Patterns
 
@@ -88,6 +107,10 @@
 - MSSQL `uniqueidentifier` type differs from PG `UUID` — scan carefully.
 - MySQL test schema historically lagged production schema (cleat-215 fixed
   this, but the pattern could recur).
-- Engine.go is large (~3000+ lines) — surgery requires careful review.
+- The engine package is large (~174 files per CLAUDE.md's repo structure;
+  `engine/engine.go` itself is 507 lines as of 2026-08-09, `wc -l
+  engine/engine.go` — logic that used to live in one file is now spread
+  across many) — surgery requires careful review of the whole package, not
+  just one file.
 - Replay determinism depends on all backends handling SideEffect results
   identically (cleat-207 verified cross-language).
