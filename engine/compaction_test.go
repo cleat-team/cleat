@@ -11,6 +11,35 @@ import (
 	"github.com/google/uuid"
 )
 
+// TestCompactionPreservesErrNonRetryable is the regression test for S4a: a
+// call event's non-retryable classification must survive a compaction
+// round-trip, or a compacted-region call that was originally classified
+// non-retryable replays as retryable (durablecalls.go replayCall reads
+// rec.ErrNonRetryable to pick the replay classification -- see
+// recordedFailureCode).
+func TestCompactionPreservesErrNonRetryable(t *testing.T) {
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op",
+			Request: `{}`, Err: "bad request", ErrNonRetryable: true},
+		{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "op2",
+			Request: `{}`, Err: "connection reset", ErrNonRetryable: false},
+	}
+
+	cs := extractCompactionState(events)
+	reconstructed := buildFullHistoryFromCompaction(nil, cs)
+	if len(reconstructed) != len(events) {
+		t.Fatalf("expected %d reconstructed events, got %d", len(events), len(reconstructed))
+	}
+
+	if !reconstructed[0].ErrNonRetryable {
+		t.Errorf("event 0: ErrNonRetryable lost in compaction round-trip: got false, want true "+
+			"(original event: %+v)", events[0])
+	}
+	if reconstructed[1].ErrNonRetryable {
+		t.Errorf("event 1: ErrNonRetryable round-trip: got true, want false")
+	}
+}
+
 // TestPluginCallCompactionRoundTrip verifies that plugin_call and
 // plugin_call_stream_chunk events survive a compaction round-trip.
 func TestPluginCallCompactionRoundTrip(t *testing.T) {
