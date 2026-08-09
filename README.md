@@ -11,9 +11,22 @@
 
 ```bash
 go install github.com/cleat-team/cleat/cmd/cleat@latest
-docker compose up -d postgres
-cleat dev start
+cleat dev --entry-point PlaceOrder \
+    --input '{"userID":"u1","cart":[{"sku":"widget","quantity":2}]}' \
+    ./testdata/basic/
 ```
+
+<!-- Corrected 2026-08-09: this previously read
+       docker compose up -d postgres
+       cleat dev start
+     Neither line worked. `docker-compose.yml` doesn't exist at the repo root
+     (only docker-compose.{partner,dev,cluster,monitoring}.yml do), and there
+     is no `dev start` subcommand -- `cleat dev` parsed "start" as a Go
+     package path and exited 1 with "package start is not in std". `cleat
+     dev` also runs entirely locally, without a database, so the compose
+     line was never needed for it in the first place; that's the point of
+     `dev` mode -- see the full Quick Start below for the build/deploy/worker
+     path that does need Postgres. -->
 
 ## What is Cleat
 
@@ -37,20 +50,47 @@ make setup
 # 1. Install the CLI
 go install github.com/cleat-team/cleat/cmd/cleat@latest
 
-# 2. Compile a workflow package to WASM
+# 2. Start Postgres and apply the schema. `cleat-worker` (step 5) also
+#    applies migrations/postgres/*.sql automatically on boot, but `cleat
+#    deploy` (step 4) does not, and deploy runs first in this walkthrough --
+#    so the schema has to exist before that. See
+#    docs/explanation/postgresql-schema.md for the full procedure.
+docker compose -f docker-compose.partner.yml up -d postgres
+for f in migrations/postgres/*.sql; do
+    psql "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" -f "$f"
+done
+
+# 3. Compile a workflow package to WASM
 cleat build -o ./out ./testdata/basic/
+# Wrote ./out/cancel_order.wasm -- cleat build bundles every entry point
+# in the package (PlaceOrder, CancelOrder, LongRunning) into one module,
+# named after the first entry point it found. All three are still callable
+# from that one file; --entry-point at trigger time (step 6) picks one.
 
-# 3. Deploy to your database
-cleat deploy --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
-    --name place_order ./out/place_order.wasm
+# 4. Deploy to your database
+cleat deploy --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" \
+    --name place_order ./out/cancel_order.wasm
 
-# 4. Start the worker daemon
-cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable"
+# 5. Start the worker daemon
+cleat-worker --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable"
 
-# 5. Trigger a workflow (via REST API)
-curl -X POST http://localhost:8080/api/workflows \
-    -d '{"def_name":"place_order","input":"{\"user_id\":\"u1\"}"}'
+# 6. Trigger a workflow (via REST API) -- POST .../<name>/start, not POST
+#    .../workflows (that route is GET-only and returns 405 on POST)
+curl -X POST http://localhost:8080/api/workflows/place_order/start \
+    -d '{"input":{"userID":"u1","cart":[{"sku":"widget","quantity":2}]},"entry_point":"PlaceOrder"}'
 ```
+
+<!-- Corrected 2026-08-09: `cleat build ./testdata/basic/` was previously
+     followed by `cleat deploy ... ./out/place_order.wasm`, a file `cleat
+     build` never writes (it writes cancel_order.wasm -- the first entry
+     point found, all three bundled inside). Step 6 previously POSTed to
+     `/api/workflows` with a `def_name` body, which routes to the GET-only
+     list handler and returns 405; the real route is
+     `/api/workflows/<name>/start`, and the input field name for PlaceOrder
+     is `userID` (camelCase, matching the Go parameter name), not
+     `user_id`. Verified by building testdata/basic and reading
+     cmd/cleat-worker/server.go's route table and cmd/cleat/main.go's
+     runDeploy. -->
 
 See the [Quick Start Tutorial](docs/tutorials/quick-start.md) for a complete
 walkthrough with a real-world example.
