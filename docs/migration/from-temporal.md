@@ -313,16 +313,43 @@ REST endpoints at `/api/workflows` for listing and filtering.
 - **Workaround**: Use Cleat's REST API (`GET /api/workflows?status=running&limit=50`)
   or query `workflow_instances` directly via SQL.
 
-### 6. No Side Effect Equivalent
+### 6. Side Effects — direct equivalent, same semantics
 
-Temporal has `Workflow.SideEffect` for non-deterministic code that runs once and is
-recorded. Cleat does not have an equivalent.
+Temporal's `Workflow.SideEffect` maps directly onto cleat's `SideEffect`. This
+entry previously said cleat had no equivalent and recommended routing the
+computation through a stub service; that was wrong, and the workaround is
+strictly worse than the real thing.
 
-- **Workaround**: Use `call("side_effect", "compute", {data: ...})` with a
-  stub service that runs the non-deterministic computation and records the result.
-  Or use `random()` for deterministic randomness.
+```go
+// HostCalls.SideEffect(fn func() (string, error)) (string, error)
+id, err := h.SideEffect(func() (string, error) { return uuid.NewString(), nil })
 
-### 7. Versioning Model Differences
+// or, typed:
+id, err := cleat.SideEffectTyped(h, func() (uuid.UUID, error) { return uuid.New(), nil })
+```
+
+The function runs once on first execution and its result is recorded in the
+event history; every replay afterwards returns the recorded value without
+running it again. Available in the Go SDK (`cleat/runtime.go`,
+`SideEffectTyped` in `cleat/runtime_workflow.go`), the AssemblyScript SDK
+(`sideEffect()`), and exported by both WASM backends as `cleat_side_effect`.
+
+`random()` remains available for deterministic randomness and does not need
+`SideEffect`.
+
+### 7. `IsReplaying()` has no equivalent, deliberately
+
+Temporal's `workflow.IsReplaying()` is not offered by cleat. Branching workflow
+logic on it records different events on replay than on execution, which is what
+replay exists to prevent. The one safe use -- suppressing a side effect the
+history cannot see, such as a log line or a metric -- is covered by `SideEffect`
+above, which is replay-consistent by construction rather than by the author
+remembering to check a flag.
+
+See [determinism.md](../determinism.md#why-there-is-no-isreplaying) for the full
+reasoning.
+
+### 8. Versioning Model Differences
 
 Temporal versions workflows by keeping old worker binaries running. Cleat versions
 by storing WASM blobs in the database.

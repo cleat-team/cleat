@@ -106,6 +106,43 @@ The following patterns are blocked at build time:
 - `fmt.Print*` -- blocked (captures stdout non-deterministically)
 - Goroutines, channels -- use cleat's async patterns
 
+## Why there is no `isReplaying()`
+
+Cleat does not give a workflow a way to ask whether it is currently replaying.
+This is deliberate, and it is the opposite of what several other engines do --
+if you are arriving from Temporal, `workflow.IsReplaying()` has no equivalent
+here on purpose.
+
+A raw replay flag has exactly one safe use and one very tempting unsafe one.
+
+**Unsafe:** branching workflow *logic* on it.
+
+```go
+// Never. This records different events on replay than it did on execution,
+// which is the one thing replay exists to prevent.
+if !isReplaying() {
+    h.DurableCall("billing", "charge", ...)
+}
+```
+
+**The safe use** -- not repeating a side effect that is invisible to the event
+history, such as a log line or a metric -- is what `SideEffect` is for:
+
+```go
+requestID := h.SideEffect(uuid.NewString())   // computed once, replayed after
+```
+
+`SideEffect` records the result on first execution and returns the recorded
+value on every replay afterwards. The value is replay-consistent *by
+construction* rather than because the author remembered to check a flag, and
+the difference matters: a missed check is silent, and the corresponding missed
+`SideEffect` is a divergence the engine detects.
+
+The AssemblyScript SDK carried an `isReplaying()` method until 2026-08-09. It
+was hardcoded to return `false` and no host call ever backed it, so every
+"only on first execution" branch fired on every replay too. It has been
+removed rather than implemented, for the reason above.
+
 ## Verifying Determinism
 
 Run `cleat vet` before deploying any workflow:

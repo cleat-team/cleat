@@ -613,7 +613,7 @@ class CleatEntryTransformer {
       "signalWorkflow", "resolvePromise", "rejectPromise", "cleatSend",
       "scheduleInvoke", "scheduleInvokeMs", "registerQueryHandler",
       "runDetached", "setState", "getState", "deleteState", "incrState",
-      "hasState", "listState", "awaitAllChildren", "isReplaying",
+      "hasState", "listState", "awaitAllChildren",
       "currentRunId", "cleatFetch", "fetchGet", "acquireLock",
       "acquireLockMs", "releaseLock", "scheduleCron", "deleteCron",
       "listCrons",
