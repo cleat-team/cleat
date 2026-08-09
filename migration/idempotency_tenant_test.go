@@ -1,4 +1,7 @@
-package migration
+package migration_test
+
+// package migration_test (external), not migration: see runner_test.go's
+// file header for why -- engine/testutil now depends on this package.
 
 import (
 	"context"
@@ -13,6 +16,7 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/migration"
 )
 
 // 010_idempotency_keys_tenant_id.sql is a migration whose entire point is what
@@ -45,7 +49,7 @@ func TestIdempotencyTenantMigrationPreservesExistingKeys(t *testing.T) {
 			// Before: the schema as it shipped, with no tenant_id on
 			// idempotency_keys at all.
 			before := stageMigrations(t, d.dialect, "001_schema.sql")
-			if err := NewRunner(db, d.dialect, before).Run(ctx); err != nil {
+			if err := migration.NewRunner(db, d.dialect, before).Run(ctx); err != nil {
 				t.Fatalf("apply 001_schema.sql: %v", err)
 			}
 
@@ -60,7 +64,7 @@ func TestIdempotencyTenantMigrationPreservesExistingKeys(t *testing.T) {
 
 			// After.
 			after := stageMigrations(t, d.dialect, "001_schema.sql", "010_idempotency_keys_tenant_id.sql")
-			if err := NewRunner(db, d.dialect, after).Run(ctx); err != nil {
+			if err := migration.NewRunner(db, d.dialect, after).Run(ctx); err != nil {
 				t.Fatalf("apply 010_idempotency_keys_tenant_id.sql: %v", err)
 			}
 
@@ -113,7 +117,7 @@ func TestIdempotencyTenantMigrationPreservesExistingKeys(t *testing.T) {
 // how to get an empty database, and the three places where the SQL genuinely
 // differs.
 type idempotencyDialect struct {
-	dialect engine.Dialect
+	dialect migration.Dialect
 	// scratchDB returns a handle to an empty database, skipping the subtest
 	// when this dialect is not configured.
 	scratchDB func(t *testing.T) *sql.DB
@@ -130,7 +134,7 @@ type idempotencyDialect struct {
 
 func postgresDialect() idempotencyDialect {
 	return idempotencyDialect{
-		dialect:         engine.DialectPostgres,
+		dialect:         migration.DialectPostgres,
 		scratchDB:       func(t *testing.T) *sql.DB { return newScratchDB(t, "cleat_migration_idem_tenant_test") },
 		rebind:          rebindNumbered,
 		futureTimestamp: "now() + INTERVAL '1 day'",
@@ -140,7 +144,7 @@ func postgresDialect() idempotencyDialect {
 
 func mysqlDialect() idempotencyDialect {
 	return idempotencyDialect{
-		dialect:         engine.DialectMySQL,
+		dialect:         migration.DialectMySQL,
 		scratchDB:       func(t *testing.T) *sql.DB { return newMySQLScratchDB(t, idempotencyScratchDB) },
 		rebind:          func(q string) string { return q },
 		futureTimestamp: "DATE_ADD(NOW(6), INTERVAL 1 DAY)",
@@ -155,7 +159,7 @@ func mysqlDialect() idempotencyDialect {
 
 func mssqlDialect() idempotencyDialect {
 	return idempotencyDialect{
-		dialect:         engine.DialectMSSQL,
+		dialect:         migration.DialectMSSQL,
 		scratchDB:       func(t *testing.T) *sql.DB { return newMSSQLScratchDB(t, idempotencyScratchDB) },
 		rebind:          rebindAtP,
 		futureTimestamp: "DATEADD(DAY, 1, SYSUTCDATETIME())",
@@ -194,7 +198,7 @@ func rebindAtP(q string) string {
 // stageMigrations builds a migrations root containing only the named files for
 // one dialect, so a Runner can be pointed at a chosen prefix of the real
 // history. The files are the shipped ones, copied rather than rewritten.
-func stageMigrations(t *testing.T, dialect engine.Dialect, names ...string) string {
+func stageMigrations(t *testing.T, dialect migration.Dialect, names ...string) string {
 	t.Helper()
 	root := t.TempDir()
 	dir := filepath.Join(root, string(dialect))

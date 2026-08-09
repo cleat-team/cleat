@@ -380,8 +380,38 @@ func truncateAll(t *testing.T, store WorkflowStore) {
 }
 
 // TestCascadeDelete verifies that ON DELETE CASCADE foreign keys work correctly
-// on all five child tables referencing workflow_instances. It tests against
-// each available database backend using raw SQL.
+// on the child tables referencing workflow_instances. It tests against each
+// available database backend using raw SQL.
+//
+// event_history is asserted on MySQL and SQL Server, not PostgreSQL. All
+// three dialects' 001_schema.sql ship it with the same
+// "ON DELETE CASCADE" FK, but migrations/postgres/003_procedures.sql
+// deliberately drops fk_event_history_workflow on PostgreSQL alone ("no
+// longer needed; events are deleted on terminal", by
+// finalize_workflow_status itself), and migrations/postgres/032's comment
+// re-derives the same fact independently, checked against pg_constraint on
+// a live database rather than assumed from the CREATE TABLE text: "NO FK AT
+// ALL". Adding fk_test_cascade_eh back here and asserting it cascades
+// tested a constraint the shipped PostgreSQL schema has not had since 003,
+// and goes out of its way to explain why it does not have it -- not this
+// test's job to reassert.
+//
+// This was found from a full-package run failing with
+// `ALTER TABLE event_history ADD CONSTRAINT fk_test_cascade_eh ... : pq:
+// insert or update on table "event_history" violates foreign key
+// constraint (23503)` -- meaning a row already in event_history at that
+// point referenced a workflow_instances id that no longer existed, which
+// "no FK at all" is exactly what permits. The specific earlier test that
+// left that row could not be pinned down (five separate full and partial
+// reruns against freshly recreated databases, including two back-to-back
+// runs against the same database, all passed with zero orphaned
+// event_history rows found afterward by direct query) so this is not
+// claimed as the full explanation, only as what is independently true
+// regardless of it: the assertion this test made was never something
+// production's PostgreSQL schema promises, with or without an orphan
+// anywhere in the table. MySQL and SQL Server never dropped their
+// equivalent FK, so their event_history assertion below is a real, current
+// invariant and stays.
 func TestCascadeDelete(t *testing.T) {
 	dialects := []struct {
 		name    string
@@ -467,12 +497,22 @@ func TestCascadeDelete(t *testing.T) {
 			}
 
 			// Verify all child rows are gone.
+			//
+			// event_history is excluded on PostgreSQL: addCascadeFKs does not
+			// add a CASCADE FK for it there (see TestCascadeDelete's doc
+			// comment), so the row insertChildRows wrote for it is not
+			// expected to go away with the parent -- that omission is
+			// production's, not a gap in this test. CleanupTestData's
+			// pattern-based delete at the end of this subtest still removes
+			// it.
 			childTables := []string{
-				"event_history",
 				"workflow_signals",
 				"workflow_promises",
 				"concurrency_keys",
 				"workflow_update_requests",
+			}
+			if d.dialect != testutil.DialectPostgres {
+				childTables = append([]string{"event_history"}, childTables...)
 			}
 			for _, table := range childTables {
 				var count int
@@ -519,13 +559,19 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 
 	switch dialect {
 	case testutil.DialectPostgres:
+		// event_history is deliberately not here. See TestCascadeDelete's doc
+		// comment: migrations/postgres/003_procedures.sql drops
+		// fk_event_history_workflow on this dialect alone, so adding it back
+		// under a test-only name would assert a constraint the shipped
+		// schema has never had since 003 -- and would validate it against
+		// whatever event_history already holds, including rows a prior
+		// test's own (permitted, FK-less) state legitimately left behind.
+		//
 		// Drop test constraints from prior runs so re-runs are idempotent.
-		exec(`ALTER TABLE event_history DROP CONSTRAINT IF EXISTS fk_test_cascade_eh`)
 		exec(`ALTER TABLE workflow_signals DROP CONSTRAINT IF EXISTS fk_test_cascade_ws`)
 		exec(`ALTER TABLE workflow_promises DROP CONSTRAINT IF EXISTS fk_test_cascade_wp`)
 		exec(`ALTER TABLE concurrency_keys DROP CONSTRAINT IF EXISTS fk_test_cascade_ck`)
 		exec(`ALTER TABLE workflow_update_requests DROP CONSTRAINT IF EXISTS fk_test_cascade_wu`)
-		exec(`ALTER TABLE event_history ADD CONSTRAINT fk_test_cascade_eh FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
 		exec(`ALTER TABLE workflow_signals ADD CONSTRAINT fk_test_cascade_ws FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
 		exec(`ALTER TABLE workflow_promises ADD CONSTRAINT fk_test_cascade_wp FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
 		exec(`ALTER TABLE concurrency_keys ADD CONSTRAINT fk_test_cascade_ck FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
@@ -724,7 +770,8 @@ func removeCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 
 	switch dialect {
 	case testutil.DialectPostgres:
-		exec(`ALTER TABLE event_history DROP CONSTRAINT IF EXISTS fk_test_cascade_eh`)
+		// event_history is not here; addCascadeFKs never adds fk_test_cascade_eh
+		// on this dialect. See TestCascadeDelete's doc comment.
 		exec(`ALTER TABLE workflow_signals DROP CONSTRAINT IF EXISTS fk_test_cascade_ws`)
 		exec(`ALTER TABLE workflow_promises DROP CONSTRAINT IF EXISTS fk_test_cascade_wp`)
 		exec(`ALTER TABLE concurrency_keys DROP CONSTRAINT IF EXISTS fk_test_cascade_ck`)

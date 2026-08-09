@@ -572,7 +572,7 @@ func main() {
 		migrateDB = mdb
 	}
 
-	migrator := migration.NewRunner(migrateDB, factory.Dialect(), "migrations")
+	migrator := migration.NewRunner(migrateDB, migration.Dialect(factory.Dialect()), "migrations")
 	if err := migrator.Run(ctx); err != nil {
 		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
 		os.Exit(1)
@@ -615,7 +615,7 @@ func main() {
 				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations")
+			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), "migrations")
 			if terr = tm.Run(ctx); terr != nil {
 				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)

@@ -1,4 +1,4 @@
-package migration
+package migration_test
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/migration"
 )
 
 // The Runner in this package is what every cleat-worker executes against the
@@ -36,9 +36,30 @@ import (
 //
 // Both reproduce only against a database that looks like a real deployment, so
 // these tests build one rather than a convenient approximation.
+//
+// This file (and every other test file in this directory except split_test.go
+// and internal_test.go) is `package migration_test`, an external test
+// package, rather than `package migration`. That is load-bearing, not a
+// style choice: engine/testutil now applies migrations through
+// migration.NewRunner (IMPROVEMENT-PLAN, "the tests do not run against the
+// schema that ships"), so this package is itself a dependency of testutil.
+// This file also depends on testutil, for its scratch-database DSN helper.
+// Go refuses to build a package whose *internal* test files (same package as
+// the code under test) import something that imports the package itself --
+// "import cycle not allowed in test" -- and migration -> testutil ->
+// migration is exactly that shape if this file stays `package migration`.
+// An *external* test package (migration_test) does not have this problem:
+// Go explicitly allows X_test to import something that imports X. The two
+// tests that need unexported access (TestTrackingTable_QualifiedOnlyForPostgres,
+// and split_test.go's splitSQL/isAllComments cases) stay behind in
+// internal_test.go and split_test.go, `package migration`, which do not
+// import testutil.
 
 // migrationsRoot returns the repo's migrations/ directory (the runner appends
-// the dialect subdirectory itself).
+// the dialect subdirectory itself). Duplicated from the one in
+// internal_test.go: that one is unexported to `package migration` and this
+// file is a different package (migration_test), so it cannot see it. Ten
+// lines of directory lookup, not the kind of copy that drifts.
 func migrationsRoot(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd() // .../migration
@@ -218,7 +239,7 @@ func TestRunner_AppliesShippedPostgresMigrations(t *testing.T) {
 	db := newScratchDB(t, "cleat_migration_runner_test")
 	simulateExistingDeployment(t, db)
 
-	r := NewRunner(db, engine.DialectPostgres, migrationsRoot(t))
+	r := migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t))
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run against the shipped migrations failed: %v\n\n"+
 			"This is the code path every cleat-worker takes at boot. If it "+
@@ -258,7 +279,7 @@ func TestRunner_SecondRunAppliesNothing(t *testing.T) {
 	root := migrationsRoot(t)
 	ctx := context.Background()
 
-	if err := NewRunner(db, engine.DialectPostgres, root).Run(ctx); err != nil {
+	if err := migration.NewRunner(db, migration.DialectPostgres, root).Run(ctx); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
 	var firstApplied string
@@ -267,7 +288,7 @@ func TestRunner_SecondRunAppliesNothing(t *testing.T) {
 		t.Fatalf("read applied_at: %v", err)
 	}
 
-	if err := NewRunner(db, engine.DialectPostgres, root).Run(ctx); err != nil {
+	if err := migration.NewRunner(db, migration.DialectPostgres, root).Run(ctx); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
 	var secondApplied string
@@ -308,7 +329,7 @@ func TestRunner_ConcurrentRunsAreSerialised(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			errs[i] = NewRunner(db, engine.DialectPostgres, root).Run(context.Background())
+			errs[i] = migration.NewRunner(db, migration.DialectPostgres, root).Run(context.Background())
 		}(i)
 	}
 	close(start)
@@ -355,7 +376,7 @@ func TestRunner_LeavesSearchPathUnchanged(t *testing.T) {
 		t.Fatalf("show search_path: %v", err)
 	}
 
-	if err := NewRunner(db, engine.DialectPostgres, migrationsRoot(t)).Run(context.Background()); err != nil {
+	if err := migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t)).Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -366,24 +387,5 @@ func TestRunner_LeavesSearchPathUnchanged(t *testing.T) {
 	if before != after {
 		t.Errorf("migrations leaked a search_path change onto a pooled connection: %q -> %q",
 			before, after)
-	}
-}
-
-// TestTrackingTable_QualifiedOnlyForPostgres guards the dialect split: MySQL
-// and SQL Server have no schema of that shape and would reject "public.".
-func TestTrackingTable_QualifiedOnlyForPostgres(t *testing.T) {
-	cases := []struct {
-		dialect engine.Dialect
-		want    string
-	}{
-		{engine.DialectPostgres, "public.schema_migrations"},
-		{engine.DialectMySQL, "schema_migrations"},
-		{engine.DialectMSSQL, "schema_migrations"},
-	}
-	for _, c := range cases {
-		r := &Runner{dialect: c.dialect}
-		if got := r.trackingTable(); got != c.want {
-			t.Errorf("dialect %s: trackingTable() = %q, want %q", c.dialect, got, c.want)
-		}
 	}
 }

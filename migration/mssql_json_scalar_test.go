@@ -1,10 +1,13 @@
-package migration
+package migration_test
+
+// package migration_test (external), not migration: see runner_test.go's
+// file header for why -- engine/testutil now depends on this package.
 
 import (
 	"context"
 	"testing"
 
-	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/migration"
 )
 
 // TestMSSQLPayloadConstraintsAcceptJSONScalars covers IMPROVEMENT-PLAN 3.18.
@@ -27,7 +30,7 @@ func TestMSSQLPayloadConstraintsAcceptJSONScalars(t *testing.T) {
 	db := newMSSQLScratchDB(t, "cleat_migration_json_scalar_test")
 	ctx := context.Background()
 
-	if err := NewRunner(db, engine.DialectMSSQL, migrationsRoot(t)).Run(ctx); err != nil {
+	if err := migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t)).Run(ctx); err != nil {
 		t.Fatalf("apply the shipped SQL Server migrations: %v", err)
 	}
 

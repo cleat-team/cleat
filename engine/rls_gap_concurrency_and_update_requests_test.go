@@ -11,13 +11,18 @@ package engine
 // applies RLS to a superuser connection, and CLEAT_TEST_POSTGRES /
 // CLEAT_TEST_DB conventionally point at one (verified below).
 //
-// This file applies 031_... directly via os.ReadFile + Exec rather than
-// through engine/testutil.postgresSchemaFiles(), which is an explicit list
-// (not a directory glob) and is engine/testutil's -- owned by another
-// stream this round per PARALLEL-WORKSTREAMS.md, which asks other streams
-// not to add to it without asking first. Applying the migration file
-// directly here keeps this stream's verification self-contained without
-// touching that file.
+// This file applies 031_... directly via os.ReadFile + Exec, which is now
+// redundant with (but harmless alongside) testutil.TestDB/SetupFullSchema:
+// Stream A1 replaced engine/testutil's curated migration file list with the
+// real migration.Runner over the whole migrations/postgres/ directory, so
+// 031 is already applied by the time this test's testutil.TestDB call
+// returns -- it was exactly the gap A1 closed (this file's own history is
+// why: postgresSchemaFiles() was an explicit list that had fallen behind by
+// one migration, this one, at the time A1 started). The direct apply here is
+// left in place rather than removed: 031's own statements are idempotent
+// (DROP POLICY IF EXISTS ... CREATE POLICY), so reapplying is a no-op, and
+// keeping the explicit call documents the dependency locally rather than
+// relying on a reader to know testutil now does this implicitly.
 
 import (
 	"context"

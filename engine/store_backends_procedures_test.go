@@ -2,14 +2,21 @@ package engine
 
 // Installs the finalize_workflow_status stored procedure/function (and any
 // other migrations/<dialect>/003_procedures.sql + 004_*.sql content) into a
-// test database. testutil.SetupFullSchema and friends only create the raw
-// tables -- they do not run the server-side procedures migration -- so any
-// test that exercises FinalizeWorkflowSegment against a real database
-// (including the pre-existing TestFinalizeWorkflowSegment_ParentWake* tests
-// and the new zombie-writer regression test in
-// fence_lost_integration_test.go) needs this applied first, or the
-// procedure simply won't exist and the call will fail with
-// "function/procedure finalize_workflow_status does not exist".
+// test database.
+//
+// engine/testutil now applies every file under migrations/<dialect>/,
+// 003/004 included, via migration.Runner -- so on a db built through
+// testutil.TestDB/SetupFullSchema (which is every current caller here) the
+// procedure already exists by the time a test reaches this function, and the
+// re-apply below is a no-op in effect, not merely in intent: 003's
+// `DROP FUNCTION IF EXISTS` / MySQL's `DROP PROCEDURE IF EXISTS` / MSSQL's
+// `CREATE OR ALTER PROCEDURE` all make replaying 003 then 004 safe against a
+// database where 004 is already installed, which is what makes reapplying
+// here harmless rather than merely convenient. Left in place (rather than
+// deleted) because it is still what makes finalize_workflow_status exist for
+// any caller that builds its db some other way; if you're tracing why the
+// procedure exists at all on a testutil-built db, the answer is
+// migration.Runner, not this file.
 //
 // This reads the actual production migration files from disk (under
 // ../migrations/<dialect>/) rather than duplicating their SQL, so tests
