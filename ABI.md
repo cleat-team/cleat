@@ -56,7 +56,31 @@ The host must check for this value before decoding the normal result. Suspension
 
 ### Input/Output format
 
-All arguments are JSON-serialized into a single object. The export function deserializes them, calls the workflow logic, and serializes the result as JSON into the output buffer.
+All arguments are JSON-serialized into a single object. The export function deserializes them, calls the workflow logic, and writes the result into the output buffer.
+
+**The result contract, normatively — this is the whole point of the ABI being language-agnostic.**
+An entry point returns **a string containing a JSON-encoded object**. Not a JSON-encoded
+string, and not a bare scalar. Every SDK conforms to the same rule, which is what lets a Go
+host read a Java, Python, Rust or AssemblyScript guest's result with one decoder.
+
+The distinction is not pedantic, and the failure mode is silent. `{"amount":250}` and
+`"{\"amount\":250}"` are both "the result serialized as JSON" under a loose reading of the
+previous sentence, and the second one decodes to a *string* where the caller expects an
+object — so `amount` is unreachable and, once it is finally unwrapped, it is a string where
+it should be a number. Getting this wrong does not fail; it produces a result that looks
+plausible and is the wrong shape.
+
+That is exactly what happened to the Java SDK, and it happened *twice in one value*: the
+entry point returned a `String` it had already hand-built as JSON, `CleatEntryProcessor` then
+applied `JsonHelper.stringify()` to it, and separately the workflow embedded a host call's
+JSON response into a string field. Fixed 2026-08-09 (#455) by returning a
+`Map<String, Object>` from the entry point. See `tiers.yaml`'s `sdk-java` entry for the full
+account, including the detail that converting the result to a `Map` too eagerly regressed a
+numeric field into a string.
+
+Known gap, recorded rather than implied: **Go has no typed-result path** — it has no
+equivalent of the `Map<String, Object>` return that fixed Java, so Go workflows still
+hand-build their result JSON and nothing enforces the contract at the type level.
 
 **Input example** (for a Go `func PlaceOrder(h HostCalls, userID string, cart []CartItem) (string, error)`):
 ```json
