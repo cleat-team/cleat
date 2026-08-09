@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -344,7 +345,11 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 		// Flush immediately so plugin results survive worker crashes.
 		if s.engine.db != nil {
 			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum); flushErr != nil {
-				s.engine.log().ErrorContext(ctx, "PluginCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
+				if errors.Is(flushErr, ErrFenceLost) {
+					s.engine.log().DebugContext(ctx, "PluginCall flushEvent: fence lost, workflow reassigned to another worker", "workflow_id", s.workflowID, "step", rec.Step)
+				} else {
+					s.engine.log().ErrorContext(ctx, "PluginCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
+				}
 			}
 		}
 	}

@@ -31,6 +31,15 @@ import (
 // point. PostgresStore deliberately does not implement it: the engine's own SQL
 // is already correct there, and leaving that path untouched keeps this change
 // off the primary dialect entirely.
+//
+// Neither implementation below re-checks the (assigned_to, generation) fence
+// itself (B4). That is deliberate rather than an omission: flushEventForStep
+// is reachable only from Engine.flushEvent (engine/flush.go), which already
+// calls WorkflowStore.Heartbeat -- implemented by MySQLStore and MSSQLStore
+// the same as PostgresStore -- and returns ErrFenceLost before ever reaching
+// here if the lease was lost. Adding a second check here would not close any
+// gap the first one leaves open; it would just be the same check twice on
+// every one of these dialects' hot paths.
 type perStepEventFlusher interface {
 	flushEventForStep(ctx context.Context, workflowID string, rec EventRecord) error
 }

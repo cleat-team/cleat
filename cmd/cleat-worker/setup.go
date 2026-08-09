@@ -1714,6 +1714,13 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
 		engine.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),
 		engine.WithWorkflowID(wf.ID),
+		// B4: the same claim identity (w.id, wf.Generation) every terminal
+		// write below (ContinueAsNew, FinalizeWorkflowSegment) already
+		// fences on. Without these two, Engine.fencingEnabled() is false and
+		// the per-step flush / write-ahead-intent paths stay unfenced, which
+		// was the whole finding -- so this is not optional wiring.
+		engine.WithWorkerID(w.id),
+		engine.WithGeneration(wf.Generation),
 		engine.WithTraceID(traceID),
 		engine.WithTenantID(wf.TenantID),
 		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend),

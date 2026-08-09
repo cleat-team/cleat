@@ -96,9 +96,60 @@ func setRLSOnFlushTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
 // flushEvent persists a single event to event_history. Each step is one INSERT
 // that auto-commits; no explicit transaction is needed. The checksum chain is
 // tracked in-memory (execSession.lastChecksum) to avoid a DB round-trip.
+//
+// # Fencing (B4)
+//
+// This is the per-step write B4 found unfenced: a worker that stalled, was
+// reaped (generation bumped, assigned_to cleared, workflow reclaimed), and
+// then resumed could flush an event here and have it persist permanently,
+// interleaved with its successor's writes -- even though the same worker's
+// eventual FinalizeWorkflowSegment would correctly fail its own fence check
+// and roll back. The event row does not roll back with it, because it was
+// never in that transaction.
+//
+// The fence check below closes that: when the engine was constructed with
+// both WithWorkerID and WithGeneration (true of every workflow reached
+// through a claim; see fencingEnabled), a flush first renews this worker's
+// lease via Heartbeat -- the same (workflow_id, assigned_to, generation)
+// check CompleteWorkflow/FailWorkflow/FinalizeWorkflowSegment already gate
+// on -- and only proceeds to write if the lease still holds. This one check
+// covers all three dialects: Heartbeat is a WorkflowStore method implemented
+// by PostgresStore, MySQLStore and MSSQLStore alike, so MySQLStore's and
+// MSSQLStore's flushEventForStep (flush_dialect.go) never need their own copy
+// of this check -- they are only ever reached from here, after it has run.
+//
+// See engine/db.go's Heartbeat doc for why renew-then-write is safe despite
+// not being one atomic statement, and for the decision to wire Heartbeat into
+// production at all rather than delete it.
+//
+// On fence loss this returns ErrFenceLost rather than silently dropping the
+// write. It does not abort the workflow's execution session itself -- that
+// would require recordEvent (lifecycle.go) and its callers to change control
+// flow on a specific error, which is a session-lifetime decision belonging to
+// that code, not to the write path. What this function guarantees on its own
+// is narrower and sufficient for B4: a write made under a lost fence does not
+// become a permanent row. A zombie that keeps running after this returns
+// ErrFenceLost keeps failing every subsequent flush and call-intent write the
+// same way, and its FinalizeWorkflowSegment fails its own fence at the end
+// exactly as it did before this change -- so it burns CPU until then, but it
+// can no longer leave anything durable behind for its successor to collide
+// with. That residual (a reaped worker is not stopped early, only prevented
+// from writing) is the same trade-off CLAUDE.md's wazero section describes
+// for compute-bound guests: detecting a lost lease is not the same problem as
+// halting execution, and this change solves the first, not the second.
 func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRecord, prevChecksum string) error {
 	if e.db == nil || e.noPerStepFlush {
 		return nil
+	}
+
+	if e.fencingEnabled() {
+		held, err := e.workflowStore.Heartbeat(ctx, workflowID, e.workerID, e.generation)
+		if err != nil {
+			return fmt.Errorf("flush event: fence check: %w", err)
+		}
+		if !held {
+			return ErrFenceLost
+		}
 	}
 
 	// Everything below this point is PostgreSQL-dialect SQL. When the store

@@ -51,16 +51,43 @@ import (
 // callIntentStore is implemented by the three shipped stores. It is unexported
 // for the same reason perStepEventFlusher is: this is an arrangement between
 // the engine and its own stores, not a new public extension point.
+//
+// # Fencing (B4)
+//
+// Both methods take workerID and generation, the same claim identity
+// CompleteWorkflow/FailWorkflow/FinalizeWorkflowSegment already fence on. A
+// caller that has neither -- engine.fencingEnabled() false, e.g. an Engine
+// built without going through a claim -- passes workerID = "" and
+// generation = 0, which every implementation below treats as "fencing not
+// requested" and skips the check, matching the unfenced behaviour this had
+// before B4.
+//
+// The two call sites need this for different reasons:
+//
+//   - WriteCallIntent runs BEFORE the call is dispatched. A fence check that
+//     fails here is the cheap case: the call is never made, so a zombie that
+//     lost its lease before writing the intent cannot duplicate a real-world
+//     side effect through this path either.
+//   - CompleteCallIntent runs AFTER the call is dispatched, so a lost fence
+//     here cannot un-happen the call -- but it can and must stop the zombie
+//     from overwriting a pending row that a new owner may have already acted
+//     on (replayed past it as ambiguous, or resolved it through
+//     ResolveCallIntent). Without this, two workers could each believe they
+//     were the one to record this step's outcome.
 type callIntentStore interface {
 	// WriteCallIntent durably records that a call is about to be dispatched.
 	// It must not return until the row is committed -- durability before the
-	// side effect is the entire point.
-	WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord) error
+	// side effect is the entire point. Returns ErrFenceLost if workerID and
+	// generation are non-zero and no longer match the claim on record.
+	WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord, workerID string, generation int64) error
 
 	// CompleteCallIntent writes the outcome over the pending row and clears
 	// its pending state. It returns errIntentNotPending if no pending row
-	// matched, which means something else has already resolved this step.
-	CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string) error
+	// matched, which means something else has already resolved this step, and
+	// ErrFenceLost if workerID and generation are non-zero and no longer
+	// match the claim on record -- checked first, since a fence loss is a
+	// more specific and more actionable diagnosis than "not pending".
+	CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string, workerID string, generation int64) error
 }
 
 // errIntentNotPending is returned when a completion matches no pending row.
@@ -71,11 +98,42 @@ type callIntentStore interface {
 // something else completed the step (so two writers believe they own it).
 var errIntentNotPending = fmt.Errorf("call intent: no pending row to complete")
 
+// fenceCallIntent is the shared fence check for WriteCallIntent and
+// CompleteCallIntent/ResolveCallIntent, across all three dialects. See
+// callIntentStore's doc for why this exists (B4) and hb's doc
+// (engine/db.go's Heartbeat) for why a renew-then-write check on a store
+// method whose own transaction has already committed is still safe against
+// the reaper.
+//
+// workerID == "" is the signal that fencing was not requested -- the caller
+// (engine/callintent.go) passes engine.workerID/engine.generation, which are
+// both zero-valued unless the engine was built via WithWorkerID and
+// WithGeneration. That is a no-op success rather than a hard requirement so
+// every existing caller that constructs a store directly, without an Engine
+// in front of it, keeps the pre-B4 unfenced behaviour.
+func fenceCallIntent(ctx context.Context, hb func(ctx context.Context, workflowID, workerID string, generation int64) (bool, error), workflowID, workerID string, generation int64) error {
+	if workerID == "" || generation == 0 {
+		return nil
+	}
+	held, err := hb(ctx, workflowID, workerID, generation)
+	if err != nil {
+		return fmt.Errorf("call intent: fence check: %w", err)
+	}
+	if !held {
+		return ErrFenceLost
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // PostgreSQL
 // ---------------------------------------------------------------------------
 
-func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord) error {
+func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord, workerID string, generation int64) error {
+	if err := fenceCallIntent(ctx, s.Heartbeat, workflowID, workerID, generation); err != nil {
+		return err
+	}
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("write call intent: begin: %w", err)
@@ -96,7 +154,11 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 	return nil
 }
 
-func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string) error {
+func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string, workerID string, generation int64) error {
+	if err := fenceCallIntent(ctx, s.Heartbeat, workflowID, workerID, generation); err != nil {
+		return err
+	}
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("complete call intent: begin: %w", err)
@@ -127,7 +189,11 @@ func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID strin
 // MySQL
 // ---------------------------------------------------------------------------
 
-func (s *MySQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord) error {
+func (s *MySQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord, workerID string, generation int64) error {
+	if err := fenceCallIntent(ctx, s.Heartbeat, workflowID, workerID, generation); err != nil {
+		return err
+	}
+
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("write call intent: begin: %w", err)
@@ -148,7 +214,11 @@ func (s *MySQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec
 	return nil
 }
 
-func (s *MySQLStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string) error {
+func (s *MySQLStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string, workerID string, generation int64) error {
+	if err := fenceCallIntent(ctx, s.Heartbeat, workflowID, workerID, generation); err != nil {
+		return err
+	}
+
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("complete call intent: begin: %w", err)
@@ -179,7 +249,11 @@ func (s *MySQLStore) CompleteCallIntent(ctx context.Context, workflowID string, 
 // SQL Server
 // ---------------------------------------------------------------------------
 
-func (s *MSSQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord) error {
+func (s *MSSQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord, workerID string, generation int64) error {
+	if err := fenceCallIntent(ctx, s.Heartbeat, workflowID, workerID, generation); err != nil {
+		return err
+	}
+
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("write call intent: begin: %w", err)
@@ -200,7 +274,11 @@ func (s *MSSQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec
 	return nil
 }
 
-func (s *MSSQLStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string) error {
+func (s *MSSQLStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string, workerID string, generation int64) error {
+	if err := fenceCallIntent(ctx, s.Heartbeat, workflowID, workerID, generation); err != nil {
+		return err
+	}
+
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("complete call intent: begin: %w", err)
@@ -261,11 +339,20 @@ var (
 // replay and another way on the next. Replay determinism is the constraint this
 // whole stream is held to, so a resolution is written down once and read back
 // from then on.
+//
+// Fenced the same way and for the same reason as CompleteCallIntent (B4):
+// the engine performing this replay is itself just another claimant, and can
+// itself stall and be reaped mid-resolution. workerID == "" skips the check,
+// per callIntentStore's doc.
 type callIntentResolver interface {
-	ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte) error
+	ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error
 }
 
-func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte) error {
+func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error {
+	if err := fenceCallIntent(ctx, s.Heartbeat, workflowID, workerID, generation); err != nil {
+		return err
+	}
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: begin: %w", err)
@@ -298,7 +385,11 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 	return tx.Commit()
 }
 
-func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte) error {
+func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error {
+	if err := fenceCallIntent(ctx, s.Heartbeat, workflowID, workerID, generation); err != nil {
+		return err
+	}
+
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: begin: %w", err)
@@ -331,7 +422,11 @@ func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, r
 	return tx.Commit()
 }
 
-func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte) error {
+func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error {
+	if err := fenceCallIntent(ctx, s.Heartbeat, workflowID, workerID, generation); err != nil {
+		return err
+	}
+
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: begin: %w", err)
