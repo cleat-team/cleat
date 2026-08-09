@@ -232,7 +232,51 @@ func (s *PostgresStore) beginTxWithRLS(ctx context.Context) (*sql.Tx, error) {
 	return tx, nil
 }
 
-// ClaimWorkflow atomically claims a runnable workflow using SKIP LOCKED.
+// Heartbeat renews this worker's lease on one workflow instance, fenced on
+// (assigned_to, generation), and reports whether the lease still held.
+//
+// # The decision: wire it, not delete it (B4)
+//
+// This was the one per-workflow generation-checked heartbeat in the store and
+// nothing called it: cmd/cleat-worker calls only BatchHeartbeat, which by its
+// own doc comment does not check generation because it refreshes every
+// workflow this worker holds in one statement. A generation-checked function
+// nothing calls is a trap for the next reader -- it reads like a safety net
+// that is actually just dead code.
+//
+// It is now the fencing primitive the per-step event flush
+// (engine/flush.go, engine/adaptive_flush.go) and write-ahead-intent
+// (engine/store_intent.go) paths call before writing, wherever the engine was
+// constructed with WithWorkerID and WithGeneration. Those two facts were
+// exactly what this function already checked; nothing about its SQL needed to
+// change; it just needed a caller.
+//
+// # Why "renew, then write" instead of a single atomic statement
+//
+// The obvious worry: Heartbeat commits and releases its row lock on
+// workflow_instances before the caller's own write to event_history begins,
+// so there is a window between the two where a reaper could reclaim the
+// workflow and the caller would go on to write anyway.
+//
+// That window is real but not the same size as it looks. A successful
+// Heartbeat does not just check the lease, it renews it: it sets
+// heartbeat_at = now() in the same statement, unconditionally, for the row
+// that matched. ReapStaleInstances only reclaims a workflow whose
+// heartbeat_at is older than the reap timeout (tens of seconds in every
+// deployment config this repo ships). So the window that matters is not
+// "between Heartbeat's commit and the write" -- it is "between Heartbeat's
+// commit and the reap timeout elapsing", and the write that follows happens
+// within the same function call, milliseconds later. A single combined
+// statement (fence-and-write in one CTE) would close the residual
+// microsecond-scale race completely, but at the cost of restructuring every
+// call site's SQL around a data-modifying CTE per dialect; the reap-timeout
+// margin makes that not worth it here. The backstop that closes the
+// remaining gap regardless is the one that already existed:
+// FinalizeWorkflowSegment re-fences the whole segment at the end and rolls
+// back if the fence was lost by then, discarding anything written under a
+// stale claim -- discarding it from the workflow's outcome, that is; the
+// point of this change is that the event_history rows written along the way
+// no longer survive that rollback as leftover permanent writes.
 func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
