@@ -415,6 +415,45 @@ tier2:
            the worker's API and token storage in the browser both need answering"
         - "docs and deployment manifests still imply the dashboard works as shipped"
 
+    - id: workflow-callable-cron
+      status: SUPPORTED in go and assemblyscript — NOT available in python
+      why: |
+        Added 2026-08-08. A workflow can register, remove and list recurring triggers for
+        other workflows: cleat_schedule_cron / cleat_delete_cron / cleat_list_crons, on
+        both WASM backends, journaled and replayed.
+
+        Tier 2 and not tier 1 for one reason: tier 1 declares languages [go, python], and
+        Python cannot make these calls. Its host calls come from bindings componentize-py
+        generates out of python-sdk/wit/cleat.wit, which has no interface for them, so
+        nothing is generated and the built component never imports them. Measured
+        2026-08-08 with the parsing in python-sdk/tests/test_dead_stubs.py: 49 of the
+        SDK's _import_* names come from wit_world, and 4 do not — these three plus
+        cleat_extend_timeout. Rust and Java declare no cron surface at all.
+
+        The scheduler underneath is not what is scoped here — the schedule store, the
+        timezone evaluation and the firing loop live in ./engine/... and ./cmd/..., both
+        tier-1 packages. What is tier 2 is the guest-facing door onto it.
+
+        DELIVERY IS AT-LEAST-ONCE, and that is a promise, not an artefact. A firing may be
+        delivered more than once (a worker that starts a run and dies before recording the
+        claim will start it again); it will not be silently skipped. Making a duplicate
+        harmless is the workflow author's job. At-most-once is close to useless for
+        scheduled work, and exactly-once is not attainable across a process boundary, so
+        it is not offered under any name. Enforced by
+        engine.ClaimDueSchedule's compare-and-swap plus a
+        cron:<tenant>:<schedule>:<instant> idempotency key at admission (#428), and by
+        deriving schedule IDs from (tenant, workflow, step) so a retried ScheduleCron
+        addresses the same row rather than orphaning one (#430).
+      open_items:
+        - "python: no durable-cron interface in python-sdk/wit/cleat.wit, so the three
+           calls raise rather than working. Needs the WIT interface plus a mapping in
+           wasm/component_rewrite.go, and a machine with componentize-py to verify on"
+        - "rust and java SDKs declare no cron surface at all"
+        - "a non-default tenant's schedules never fire: the worker opens exactly one
+           default-tenant store. Recorded in
+           engine.TestScheduleLoop_OnlySeesItsOwnTenantsSchedules; dispatch has the same
+           scope, so those tenants' workflows do not execute either"
+
     - id: backend-wazero
       why: |
         The CGO-less fallback and nothing else (settled 2026-08-05). Cannot be fenced for a
