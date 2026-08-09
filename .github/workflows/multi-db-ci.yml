@@ -197,8 +197,14 @@ jobs:
       # MySQL test path built its schema from engine/testutil's Go copy
       # instead -- which is why nothing noticed. The regression test for that
       # lives in ./migration/ and needs a real MySQL to mean anything.
+      # -p 1: this invocation names three database-backed packages -- engine,
+      # engine/testutil and migration -- against one database. Without it Go
+      # runs them concurrently, and engine/testutil's CleanupPostgresTestData
+      # is an unqualified DELETE across eleven tables, so they delete each
+      # other's fixtures mid-test. Measured on develop 2026-08-09 with just two
+      # of those packages: 3 failures in 8 runs, none in 8 with -p 1.
       - name: Run tests
-        run: go test -count=1 -timeout=900s ./engine/... ./migration/...
+        run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
 
   # -------------------------------------------------------------------------
   # Test SQL Server backend
@@ -253,8 +259,14 @@ jobs:
       # live SQL Server, and the migration tests that assert the shipped
       # .sql files can actually be applied (IMPROVEMENT-PLAN 3.10's upgrade
       # path, 3.13) need a real server to mean anything.
+      # -p 1: this invocation names three database-backed packages -- engine,
+      # engine/testutil and migration -- against one database. Without it Go
+      # runs them concurrently, and engine/testutil's CleanupPostgresTestData
+      # is an unqualified DELETE across eleven tables, so they delete each
+      # other's fixtures mid-test. Measured on develop 2026-08-09 with just two
+      # of those packages: 3 failures in 8 runs, none in 8 with -p 1.
       - name: Run tests
-        run: go test -count=1 -timeout=900s ./engine/... ./migration/...
+        run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
 
   # -------------------------------------------------------------------------
   # Plugin migration smoke test (all three backends)
@@ -349,7 +361,7 @@ jobs:
           docker exec $(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89" -q) /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Run plugin migration tests
-        run: go test -count=1 -timeout=600s -run TestPluginMigrations ./engine/...
+        run: go test -count=1 -p 1 -timeout=600s -run TestPluginMigrations ./engine/...
 
       - name: Run plugin behavioral tests (all backends)
         run: go test -count=1 -timeout=900s -run 'MultiBackend' ./plugins/...

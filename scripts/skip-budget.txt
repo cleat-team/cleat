@@ -25,8 +25,35 @@
 # To check without waiting for CI:
 #
 #   env -u CLEAT_TEST_MYSQL -u CLEAT_TEST_MSSQL -u CLEAT_TEST_POSTGRES \
-#     CLEAT_TEST_DB=postgres://... go test -count=1 -json ./engine/... > r.json
+#     CLEAT_TEST_DB=postgres://... go test -count=1 -p 1 -json ./engine/... > r.json
 #   scripts/check-skip-budget.sh test-go/engine r.json
+#
+# THE `-p 1` IS NOT OPTIONAL, and this command was missing it until 2026-08-09.
+# `./engine/...` matches two database-backed packages -- engine and
+# engine/testutil -- and without -p 1 Go runs them concurrently against one
+# database. engine/testutil's CleanupPostgresTestData is an unqualified DELETE
+# across eleven tables, so it wipes the other package's fixtures mid-test.
+#
+# Measured 2026-08-09 on develop, same machine, live PostgreSQL 16, eight runs
+# each way:
+#
+#   without -p 1   3 of 8 runs failed
+#   with    -p 1   0 of 8 runs failed
+#
+# The casualties are whichever package loses the race, which is the tell:
+# usually TestAdminForceResolve_RefusesAnotherTenant and
+# _AuditCollisionRollsBack in ./engine (an FK violation on a workflow_defs row
+# the test itself had just deployed), but one run instead took out
+# TestCleanupPostgresTestData in ./engine/testutil. Both pass in isolation.
+#
+# It looks exactly like a flaky product defect and is not one -- a session was
+# spent chasing it as if develop were nondeterministic, and a develop-vs-branch
+# comparison run this way produced two different answers for the same tree. It
+# also
+# perturbs the counts this file exists to record: a test that dies early never
+# reaches the subtests that would have skipped, so a measurement taken off a
+# failing run is not a measurement of anything. check-skip-budget.sh now says
+# so out loud when the report contains failures.
 #
 # The absolute number differs from the runner's; the delta does not.
 #

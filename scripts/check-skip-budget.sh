@@ -90,6 +90,27 @@ fi
 
 echo "job=$JOB skipped=$skipped budget=$budget (passed=$passed failed=$failed)"
 
+# A skip count read off a failing run is not a measurement of anything: a test
+# that dies early never reaches the subtests that would have skipped, so the
+# number is low by an unknown amount. Whoever writes it into skip-budget.txt
+# then records a ceiling nobody can reach, and this file's own history says
+# that is how the guard stops being able to fail.
+#
+# Not fatal -- the test step that produced this report has already failed the
+# job -- but loud, because the number printed above is about to be copied into
+# a comment claiming it was measured.
+if [ "$failed" -gt 0 ]; then
+  echo >&2
+  echo "WARNING: this report contains $failed failing test(s), so the skip count" >&2
+  echo "above is not a usable measurement -- do not write it into" >&2
+  echo "scripts/skip-budget.txt. Fix the failures and re-measure." >&2
+  echo >&2
+  echo "If you are running locally: './engine/...' matches two database-backed" >&2
+  echo "packages, and without '-p 1' they run concurrently against one database" >&2
+  echo "and delete each other's fixtures. See the header of skip-budget.txt." >&2
+  echo >&2
+fi
+
 if [ "$skipped" -gt "$budget" ]; then
   echo >&2
   echo "ERROR: '$JOB' skipped $skipped tests, budget is $budget." >&2
