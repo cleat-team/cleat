@@ -37,8 +37,28 @@ func TenantFromAPIKey(ctx context.Context, store engine.WorkflowStore, keyHash [
 // Supports: Authorization: Bearer cleat_sk_<key>
 // Also supports: X-Cleat-API-Key: <key>
 // When requireAuth is true, requests without a valid API key are rejected with 401,
-// except for public paths (/healthz, /metrics).
-func Middleware(store engine.WorkflowStore, requireAuth bool) func(http.Handler) http.Handler {
+// except for public paths (/healthz, /metrics, and any additional patterns passed via
+// publicPatterns).
+//
+// publicPatterns is a hand-maintained allowlist, not a generic plugin-declared
+// mechanism. It exists for endpoints that are meant to be called by parties who cannot
+// present a cleat API key -- an inbound webhook receiver with its own HMAC check
+// (plugins/webhookingest), a third-party IdP's OAuth redirect target
+// (plugins/oauthprovider) -- and would otherwise 401 before that endpoint's own
+// verification ever runs. Each entry is a Go 1.22+ http.ServeMux pattern
+// ("POST /ingest/{source_id}"), matched with the exact same method+wildcard semantics
+// the real mux uses, via a throwaway ServeMux built only for matching (see
+// buildPublicMatcher) -- so "POST /ingest/{source_id}" does not also make
+// "GET /ingest/sources" public.
+//
+// A plugin-declared version of this (a PublicRoutes() method plugins implement
+// themselves) would need changes to plugin/plugin.go and to each plugin, which are
+// outside this package's ownership; wiring the list by hand in
+// cmd/cleat-worker/main.go is the option available without those changes. Anyone
+// adding a new externally-triggered plugin endpoint must add it here too -- nothing
+// enforces that the two stay in sync.
+func Middleware(store engine.WorkflowStore, requireAuth bool, publicPatterns ...string) func(http.Handler) http.Handler {
+	publicMatcher := buildPublicMatcher(publicPatterns)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Public paths are always accessible without authentication.
@@ -46,6 +66,12 @@ func Middleware(store engine.WorkflowStore, requireAuth bool) func(http.Handler)
 			if path == "/healthz" || path == "/metrics" {
 				next.ServeHTTP(w, r)
 				return
+			}
+			if publicMatcher != nil {
+				if _, pattern := publicMatcher.Handler(r); pattern != "" {
+					next.ServeHTTP(w, r)
+					return
+				}
 			}
 
 			key := extractAPIKey(r)
@@ -68,6 +94,26 @@ func Middleware(store engine.WorkflowStore, requireAuth bool) func(http.Handler)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// buildPublicMatcher builds a ServeMux containing only the given patterns, used purely
+// for its Handler(r) pattern-matching -- never for actually serving anything. This
+// reuses net/http's own method + wildcard matching (the same rules the real route mux
+// registered these patterns with) instead of reimplementing it, so a pattern like
+// "POST /ingest/{source_id}" matches only a POST to that exact shape and not, say, a
+// GET to the same path or a request to a same-prefixed but different route such as
+// "/ingest/sources". Returns nil when there is nothing to match, so the hot path in
+// Middleware can skip the check entirely for the common case (no publicPatterns).
+func buildPublicMatcher(patterns []string) *http.ServeMux {
+	if len(patterns) == 0 {
+		return nil
+	}
+	mux := http.NewServeMux()
+	noop := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	for _, p := range patterns {
+		mux.HandleFunc(p, noop)
+	}
+	return mux
 }
 
 func extractAPIKey(r *http.Request) string {
