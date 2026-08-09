@@ -438,19 +438,25 @@ tier2:
         - "docs and deployment manifests still imply the dashboard works as shipped"
 
     - id: workflow-callable-cron
-      status: SUPPORTED in go and assemblyscript — NOT available in python
+      status: SUPPORTED in go, assemblyscript and python
       why: |
         Added 2026-08-08. A workflow can register, remove and list recurring triggers for
         other workflows: cleat_schedule_cron / cleat_delete_cron / cleat_list_crons, on
         both WASM backends, journaled and replayed.
 
-        Tier 2 and not tier 1 for one reason: tier 1 declares languages [go, python], and
-        Python cannot make these calls. Its host calls come from bindings componentize-py
-        generates out of python-sdk/wit/cleat.wit, which has no interface for them, so
-        nothing is generated and the built component never imports them. Measured
-        2026-08-08 with the parsing in python-sdk/tests/test_dead_stubs.py: 49 of the
-        SDK's _import_* names come from wit_world, and 4 do not — these three plus
-        cleat_extend_timeout. Rust and Java declare no cron surface at all.
+        The reason this was tier 2 — tier 1 declares languages [go, python], and Python
+        could not make these calls — was resolved on 2026-08-09 by adding a durable-cron
+        interface to python-sdk/wit/cleat.wit and its mapping to
+        wasm/component_rewrite.go. test_dead_stubs.py now reports only
+        cleat_extend_timeout without a WIT binding, down from four. Rust and Java still
+        declare no cron surface, which tier 1's [go, python] does not require.
+
+        STILL TIER 2, deliberately, and this is the honest reason: tier 1 is what
+        scripts/tier-gate.sh enforces, and nothing it runs exercises a Python component
+        calling cron. Promotion needs a test that builds such a component and executes it
+        against the engine — the language coverage is there, the gate coverage is not, and
+        moving the entry without the second is exactly the kind of claim this file exists
+        to prevent.
 
         The scheduler underneath is not what is scoped here — the schedule store, the
         timezone evaluation and the firing loop live in ./engine/... and ./cmd/..., both
@@ -467,9 +473,12 @@ tier2:
         deriving schedule IDs from (tenant, workflow, step) so a retried ScheduleCron
         addresses the same row rather than orphaning one (#430).
       open_items:
-        - "python: no durable-cron interface in python-sdk/wit/cleat.wit, so the three
-           calls raise rather than working. Needs the WIT interface plus a mapping in
-           wasm/component_rewrite.go, and a machine with componentize-py to verify on"
+        - "RESOLVED 2026-08-09: python-sdk/wit/cleat.wit gains a durable-cron interface and
+           wasm/component_rewrite.go the matching env mapping, so the three calls work from
+           a componentized Python workflow. Verified by building a component that actually
+           CALLS them (componentize-py 0.25.0, linux/arm64 container): it builds, and the
+           binary contains the durable-cron import names where a baseline build contains
+           none. Guarded by wasm.TestEveryImportedWitFunctionHasAnEnvMapping"
         - "rust and java SDKs declare no cron surface at all"
         - "a non-default tenant's schedules fire ONLY with --claim-across-tenants set and
            the database-side grants made. By default the worker opens exactly one

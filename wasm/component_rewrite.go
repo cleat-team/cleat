@@ -100,6 +100,15 @@ var WitToEnvImport = map[string]map[string]string{
 	"cleat:host-calls/durable-fetch": {
 		"fetch": "cleat_fetch",
 	},
+	// The engine exports these three as core "env" imports (engine/imports.go
+	// for wazero, engine/wasmtime_hostfuncs_schedules.go for wasmtime). Without
+	// this entry a componentized Python workflow that calls cron carries an
+	// unsatisfied import and fails to instantiate.
+	"cleat:host-calls/durable-cron": {
+		"durable-schedule-cron": "cleat_schedule_cron",
+		"durable-delete-cron":   "cleat_delete_cron",
+		"durable-list-crons":    "cleat_list_crons",
+	},
 }
 
 // envModule is the canonical "env" module name imported by the engine.
