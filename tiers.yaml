@@ -361,9 +361,15 @@ tier2:
         Both are fixed, and the e2e now asserts each value that has to survive a hop.
         Tier 1 wants a record, not a good day; revisit after the open item below.
       open_items:
-        - "isReplaying() is hardcoded `return false` with a TODO — a workflow that
-           branches on it gets the wrong answer during replay. Needs a host-side
-           cleat_is_replaying ABI entry, so it is not a test-side fix."
+        - "RESOLVED 2026-08-09: isReplaying() removed rather than implemented. It was hardcoded
+           `return false` with no host call behind it in any SDK, so every 'only on first
+           execution' branch fired on every replay -- duplicate logs, metrics and
+           notifications after each worker restart, with nothing failing. A raw replay flag
+           is a determinism footgun regardless: branching workflow LOGIC on it records
+           different events on replay than on execution. sideEffect() already covers the one
+           safe use and is replay-consistent by construction. Documented in
+           docs/determinism.md and the Temporal migration guide, which had never mentioned
+           it despite Temporal's own IsReplaying() being a well-known footgun"
 
     - id: plugins
       why: 21 built-in, all with unit tests; 10 covered by the integration harness.

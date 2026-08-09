@@ -2909,52 +2909,30 @@ export class HostCalls {
   }
 
   // ────────────────────────────────────────────
-  // 43. isReplaying — check if workflow is in replay
+  // 43. isReplaying — deliberately NOT offered
   // ────────────────────────────────────────────
-
-  /**
-   * Check whether the current workflow execution is replaying.
-   *
-   * **IMPORTANT:** There is no direct `cleat_is_replaying` host import
-   * in the current ABI. This method ALWAYS returns `false`.
-   *
-   * To detect replay at runtime, use the `cleatSleep` return-value pattern:
-   *
-   * ```ts
-   * // cleatSleep returns `true` on fresh execution (should suspend).
-   * // On replay it returns `false` immediately (sleep already completed).
-   * let isReplay = !host.cleatSleepMs(1); // 1ms sleep, non-zero
-   * ```
-   *
-   * A zero-duration variant also works and does not advance the timer:
-   *
-   * ```ts
-   * let isReplay = !host.cleatSleepMs(0); // 0ms sleep, no-op on both paths
-   * ```
-   *
-   * **Caveat:** Any non-zero sleep (including 1ms) is recorded in the event
-   * history. Use this pattern sparingly and only for diagnostics/debugging.
-   * The zero-duration variant avoids history bloat.
-   *
-   * This method is a placeholder for future host-side support. When a
-   * `cleat_is_replaying` import is added to the ABI, this method will
-   * delegate to it.
-   *
-   * @returns `false` (always — requires future host-side support).
-   */
-  isReplaying(): bool {
-    // TODO(#as-sdk): Replace body with `return import_cleat_is_replaying();`
-    //                once the Go host exports `cleat_is_replaying` and the
-    //                ABI entry is added in:
-    //                  1. runtime/host.go — add export
-    //                  2. abi/abi.go       — add ABI constant and hook
-    //                  3. This file       — add @external import above
-    //                Target ABI version: 0.2.0
-    //
-    // Until then, consumers should use cleatSleepMs(0) as the workaround
-    // documented in the JSDoc above.
-    return false;
-  }
+  //
+  // This SDK used to expose isReplaying(): bool. It was hardcoded `return
+  // false` with a TODO, and no host call backing it existed in the engine for
+  // any SDK -- so every "only on first execution" branch fired on every replay
+  // too, silently defeating its own purpose. Nothing failed, because a constant
+  // is consistent between execute and replay; you just got duplicate logs,
+  // duplicate metrics and duplicate notifications after each worker restart.
+  //
+  // Removed rather than implemented. The engine does know whether it is
+  // replaying (execSession.isReplay), so wiring it up was possible -- but a raw
+  // replay flag is a determinism footgun: a workflow that branches its LOGIC on
+  // it records different events on replay than it did on execution, which is
+  // precisely what replay exists to prevent.
+  //
+  // The one legitimate use -- not repeating a side effect on replay -- is what
+  // sideEffect() is for. It records the result on first execution and returns
+  // the recorded one afterwards, so the value is replay-consistent by
+  // construction rather than by the author remembering to check a flag:
+  //
+  //   let id = h.sideEffect(generateRequestId());  // computed once, replayed after
+  //
+  // See docs/determinism.md, "Why there is no isReplaying()".
 
   // ────────────────────────────────────────────
   // 44. currentRunId — get current run ID
