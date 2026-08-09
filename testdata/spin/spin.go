@@ -36,5 +36,5 @@ func Spin(h cleat.HostCalls, iterations int) (string, error) {
 		x = x*6364136223846793005 + 1442695040888963407
 		x ^= x >> 33
 	}
-	return strconv.FormatUint(x, 10), nil
+	return `{"value":` + strconv.FormatUint(x, 10) + `}`, nil
 }

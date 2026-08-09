@@ -9,7 +9,7 @@ func SimpleWorkflow(h cleat.HostCalls, input string) (string, error) {
 			return "", err
 		}
 	}
-	return "ok", nil
+	return `{"status":"ok"}`, nil
 }
 
 func SimpleWorkflowShort(h cleat.HostCalls, input string) (string, error) {
@@ -18,5 +18,5 @@ func SimpleWorkflowShort(h cleat.HostCalls, input string) (string, error) {
 			return "", err
 		}
 	}
-	return "ok", nil
+	return `{"status":"ok"}`, nil
 }

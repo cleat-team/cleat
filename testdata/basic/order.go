@@ -60,7 +60,7 @@ func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, erro
 	}
 
 	_ = notifyCustomer(h, userID, trackingID)
-	return trackingID, nil
+	return fmt.Sprintf(`{"tracking_id":%q}`, trackingID), nil
 }
 
 // CancelOrder is an entry point for cancelling an active order.
