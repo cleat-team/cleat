@@ -525,9 +525,14 @@ tier2:
             gives each tenant its own physical database (cleat_<tenant_id>), so there is no
             predicate to drop: the other tenants' rows are not filtered out, they are in
             another database. The store returns ErrCrossTenantClaimUnsupported and the
-            worker falls back to the per-tenant claim with one WARN line. A MySQL
-            deployment pointed at ONE shared database does work — that is a real if less
-            common shape, and it is the one the tests cover.
+            worker falls back to the per-tenant claim with one WARN line.
+
+            The code path also functions against ONE shared MySQL database, and the tests
+            cover that shape — but read it as test scaffolding, not a supported
+            deployment. multi-tenancy-mysql is NOT SUPPORTED regardless of topology: the
+            objection is the absence of RLS, not the arrangement of databases. Sharing one
+            database would put every tenant behind an application-level predicate with no
+            backstop, which is exactly what that policy refuses.
 
         OFF BY DEFAULT, and that is deliberate. Every path needs a grant the deployment
         has to make, and both grants ship unmade. A worker that is told to claim across
@@ -549,8 +554,14 @@ tier2:
            it is not. A report and not a gate, deliberately -- refusing to start would
            contradict the degradation the feature is built on. See
            engine.CrossTenantCapabilityChecker"
-        - "mysql per-tenant-database topology would need database enumeration plus a union
-           across cleat_* schemas; not implemented"
+        - "mysql is NOT a gap here, and this item used to say it was. multi-tenancy-mysql
+           records the policy: no multi-tenancy on a database without row-level security,
+           because isolation would be application-layer only with no backstop behind a
+           missed tenant_id filter — 'a documented product boundary, not an open
+           engineering item'. So there is nothing to implement for MySQL, and the store
+           refusing with ErrCrossTenantClaimUnsupported is the correct terminal behaviour
+           rather than a placeholder. Corrected 2026-08-09 after the framing was
+           questioned"
 
     - id: cross-tenant-schedules
       status: SUPPORTED on postgres and mssql, both behind a deployment grant — NOT on mysql
