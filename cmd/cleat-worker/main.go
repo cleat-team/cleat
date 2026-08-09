@@ -858,6 +858,7 @@ func main() {
 		maxQuotaEvents:                   *maxQuotaEvents,
 		maxQuotaChildren:                 *maxQuotaChildren,
 		maxQuotaConcurrencyKeys:          *maxQuotaConcurrencyKeys,
+		maxQuotaSchedules:                *maxQuotaSchedules,
 		maxWorkflowDuration:              *maxWorkflowDuration,
 		childBindingOverride:             *childBindingOverride,
 		healthCheckInterval:              *healthCheckInterval,

@@ -276,6 +276,18 @@ func (h *mockHostHandler) Fetch(ctx context.Context, m api.Module, method, url, 
 	h.record("Fetch", method, url, headersJSON, body)
 	return h.ret
 }
+func (h *mockHostHandler) ScheduleCron(ctx context.Context, m api.Module, workflowName, cronExpr, timezone, inputJSON string, idPtr, idMaxLen uint32) int64 {
+	h.record("ScheduleCron", workflowName, cronExpr, timezone, inputJSON)
+	return h.ret
+}
+func (h *mockHostHandler) DeleteCron(ctx context.Context, m api.Module, scheduleID string) int64 {
+	h.record("DeleteCron", scheduleID)
+	return h.ret
+}
+func (h *mockHostHandler) ListCrons(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64 {
+	h.record("ListCrons")
+	return h.ret
+}
 func (h *mockHostHandler) JsonParse(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
 	h.record("JsonParse", input)
 	return h.ret

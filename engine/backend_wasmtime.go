@@ -1577,6 +1577,15 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatFetch(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatScheduleCron(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatDeleteCron(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatListCrons(linker); err != nil {
+		return err
+	}
 	if err := b.registerCleatJsonParse(linker); err != nil {
 		return err
 	}

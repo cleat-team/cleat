@@ -53,6 +53,9 @@ const (
 	EventCodeDurableLog            = 24
 	EventCodeDurableSend           = 25
 	EventCodeDurableScheduleInvoke = 26
+	EventCodeScheduleCron          = 27
+	EventCodeDeleteCron            = 28
+	EventCodeListCrons             = 29
 )
 
 // EventCodeSleep (1) is defined above but has no corresponding EventType
@@ -86,6 +89,9 @@ var eventTypeToCode = map[EventType]int{
 	EventTypeDurableLog:            EventCodeDurableLog,
 	EventTypeDurableSend:           EventCodeDurableSend,
 	EventTypeDurableScheduleInvoke: EventCodeDurableScheduleInvoke,
+	EventTypeScheduleCron:          EventCodeScheduleCron,
+	EventTypeDeleteCron:            EventCodeDeleteCron,
+	EventTypeListCrons:             EventCodeListCrons,
 }
 
 var codeToEventType = map[int]EventType{
@@ -115,6 +121,9 @@ var codeToEventType = map[int]EventType{
 	EventCodeDurableLog:            EventTypeDurableLog,
 	EventCodeDurableSend:           EventTypeDurableSend,
 	EventCodeDurableScheduleInvoke: EventTypeDurableScheduleInvoke,
+	EventCodeScheduleCron:          EventTypeScheduleCron,
+	EventCodeDeleteCron:            EventTypeDeleteCron,
+	EventCodeListCrons:             EventTypeListCrons,
 }
 
 // CompactionState holds the minimal state needed to reconstruct the compacted
@@ -358,6 +367,14 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.ChildInput = ev.FetchBody
 			ce.Response = ev.FetchResponse
 			ce.Error = ev.Err
+		case EventTypeScheduleCron, EventTypeDeleteCron, EventTypeListCrons:
+			ce.ChildName = ev.CronWorkflowName
+			ce.Service = ev.CronExpr
+			ce.Op = ev.CronTimezone
+			ce.ChildInput = ev.CronInput
+			ce.RunID = ev.CronScheduleID
+			ce.Response = ev.CronResult
+			ce.Error = ev.Err
 		case EventTypeAcquireLock:
 			ce.ChildName = ev.LockKey
 			ce.DurationMs = ev.LockTTLMs
@@ -503,6 +520,14 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.FetchHeaders = ce.Request
 			rec.FetchBody = ce.ChildInput
 			rec.FetchResponse = ce.Response
+			rec.Err = ce.Error
+		case EventCodeScheduleCron, EventCodeDeleteCron, EventCodeListCrons:
+			rec.CronWorkflowName = ce.ChildName
+			rec.CronExpr = ce.Service
+			rec.CronTimezone = ce.Op
+			rec.CronInput = ce.ChildInput
+			rec.CronScheduleID = ce.RunID
+			rec.CronResult = ce.Response
 			rec.Err = ce.Error
 		case EventCodeAcquireLock:
 			rec.LockKey = ce.ChildName

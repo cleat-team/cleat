@@ -122,6 +122,11 @@ type HostHandler interface {
 
 	// JsonStringify validates and re-serializes a JSON string via the host's encoding/json.
 	JsonStringify(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64
+
+	// Cron schedules
+	ScheduleCron(ctx context.Context, m api.Module, workflowName, cronExpr, timezone, inputJSON string, idPtr, idMaxLen uint32) int64
+	DeleteCron(ctx context.Context, m api.Module, scheduleID string) int64
+	ListCrons(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64
 }
 
 // registerHostFunctions registers all cleat_* imports on the "env" host module.
@@ -858,6 +863,51 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		}
 		return uint64(h.Fetch(ctx, m, method, url, headersJSON, body, responsePtr, responseMaxLen))
 	}).Export("cleat_fetch")
+
+	// cleat_schedule_cron: (ptr,len x4, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		wfPtr, wfLen, cronPtr, cronLen, tzPtr, tzLen, inputPtr, inputLen,
+		idPtr, idMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		workflowName, ok := readServiceName(mem, wfPtr, wfLen)
+		if !ok {
+			return errBadParam
+		}
+		cronExpr, ok := readWasmStringValidated(mem, cronPtr, cronLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		// The timezone is optional -- "" means DefaultScheduleTimezone --
+		// so it is read as a payload, not as a required string.
+		timezone, ok := readWasmPayload(mem, tzPtr, tzLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		inputJSON, ok := readWasmPayload(mem, inputPtr, inputLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(h.ScheduleCron(ctx, m, workflowName, cronExpr, timezone, inputJSON, idPtr, idMaxLen))
+	}).Export("cleat_schedule_cron")
+
+	// cleat_delete_cron: (ptr,len) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		idPtr, idLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		scheduleID, ok := readServiceName(m.Memory(), idPtr, idLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(h.DeleteCron(ctx, m, scheduleID))
+	}).Export("cleat_delete_cron")
+
+	// cleat_list_crons: (ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		outPtr, outMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		return uint64(h.ListCrons(ctx, m, outPtr, outMaxLen))
+	}).Export("cleat_list_crons")
 
 	// cleat_json_parse: (ptr,len, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
