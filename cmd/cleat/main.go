@@ -22,6 +22,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,7 +47,7 @@ func main() {
 	flag.StringVar(&dbCredProviderName, "db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
 	flag.StringVar(&dbCredPath, "db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init> [flags] <args>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init|version> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>\n")
@@ -60,6 +62,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cleat run [--wasm <file>] [--entry-point <name>] [--input <json>] [--api-addr <addr>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat plugin <validate|install|list|update|uninstall> [flags]\n")
 		fmt.Fprintf(os.Stderr, "  cleat lock [--db <conn>] [--update] <package>\n")
+		fmt.Fprintf(os.Stderr, "  cleat version\n")
 		fmt.Fprintf(os.Stderr, "Common flags:\n")
 		fmt.Fprintf(os.Stderr, "  --db <connstr>  PostgreSQL connection string\n")
 		fmt.Fprintf(os.Stderr, "Example: cleat build -o ./out ./testdata/basic/\n")
@@ -70,6 +73,20 @@ func main() {
 	// init doesn't require a second argument (pattern)
 	if len(args) >= 1 && args[0] == "init" {
 		runInit(flag.Args()[1:])
+		return
+	}
+	// version doesn't take a package argument either. docs/tutorials/quick-start.md
+	// has documented `cleat version` since before this subcommand existed;
+	// main's switch below never had a case for it, so it fell through to
+	// "Error: missing command or package argument" or "Unknown command".
+	//
+	// --version is deliberately not handled here: flag.Parse() above already
+	// rejects an unregistered "-version"/"--version" flag before flag.Args()
+	// is ever produced, so a check on args[0] here would be unreachable dead
+	// code. Making --version itself work would mean registering it as a real
+	// top-level flag, which is more than this fix needs.
+	if len(args) >= 1 && args[0] == "version" {
+		runVersion()
 		return
 	}
 	if len(args) < 2 {
@@ -198,7 +215,7 @@ func main() {
 		runLock(flag.Args()[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
-		fmt.Fprintf(os.Stderr, "Valid commands: build, vet, deploy, versions, rollback, dev, schedule, run, dag, plugin, lock, init\n")
+		fmt.Fprintf(os.Stderr, "Valid commands: build, vet, deploy, versions, rollback, dev, schedule, run, dag, plugin, lock, init, version\n")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -1204,6 +1221,30 @@ func derivePluginDeps(usage *wasm.UsageInfo) map[string]string {
 	// should come from the workflow author's configuration.
 	_ = usage
 	return nil
+}
+
+// runVersion implements "cleat version". docs/tutorials/quick-start.md has
+// told new users to run this as an install smoke test since before the
+// subcommand existed; main's switch had no case for it, so it fell through
+// to "missing command or package argument" or "Unknown command: version".
+//
+// There is no build-time ldflags version injection in this repo (checked:
+// no -X github.com/cleat-team/cleat/... in Makefile or CI), so this reports
+// what runtime/debug actually knows about the running binary rather than a
+// hand-maintained string that would drift the same way the tiers.yaml intro
+// warns prose status does. For a binary built with `go install
+// .../cmd/cleat@<version>`, Main.Version is that version (e.g. "v0.1.0",
+// matching quick-start.md's example); for a binary built from a local
+// checkout with plain `go build`, module version information isn't
+// embedded and Main.Version reads "(devel)" -- reported as such rather than
+// papered over.
+func runVersion() {
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info.Main.Version == "" {
+		fmt.Printf("cleat (devel) (%s)\n", runtime.Version())
+		return
+	}
+	fmt.Printf("cleat %s (%s)\n", info.Main.Version, runtime.Version())
 }
 
 // getDBConnStr returns the database connection string using the configured
