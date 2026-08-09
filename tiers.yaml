@@ -451,12 +451,18 @@ tier2:
         cleat_extend_timeout without a WIT binding, down from four. Rust and Java still
         declare no cron surface, which tier 1's [go, python] does not require.
 
-        STILL TIER 2, deliberately, and this is the honest reason: tier 1 is what
-        scripts/tier-gate.sh enforces, and nothing it runs exercises a Python component
-        calling cron. Promotion needs a test that builds such a component and executes it
-        against the engine — the language coverage is there, the gate coverage is not, and
-        moving the entry without the second is exactly the kind of claim this file exists
-        to prevent.
+        The gate coverage now exists too: engine.TestPythonCronEndToEnd compiles a real
+        component from python-sdk/examples/cron_workflow.py — which CALLS all three, so a
+        declared-but-unwired binding fails it — and runs it through wasmtime's Component
+        Model path against a Postgres-backed store, asserting the schedule ID round trip,
+        what list_crons observed, and that the store is empty after delete_cron. It lives
+        in ./engine/, so scripts/tier-gate.sh runs it and a skip there fails the gate.
+
+        STILL TIER 2 for the OTHER reason in this entry: rust and java declare no cron
+        surface. Tier 1 declares languages [go, python], so that does not block promotion
+        on its own terms — but this entry covers the whole guest-facing door, and moving
+        it while two of five SDKs cannot open it would overstate what is supported. The
+        Python half is now enforced rather than asserted, which was the gap worth closing.
 
         The scheduler underneath is not what is scoped here — the schedule store, the
         timezone evaluation and the firing loop live in ./engine/... and ./cmd/..., both
