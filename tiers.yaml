@@ -173,6 +173,27 @@ tier1:
   backend: wasmtime          # CGO required; see CLAUDE.md on why CGO_ENABLED=0 invalidates a run
   dialects: [postgres, mysql, mssql]
 
+  # dialects above is ENGINE support (package engine has an independent store
+  # implementation per dialect, exercised by tier 1). It is not CLI support.
+  #
+  # B6, found 2026-08-09: `grep -ci 'mysql\|mssql' cmd/cleat/*.go` -> 0, and
+  # cmd/cleat had ten hardcoded `sql.Open("postgres", connStr)` call sites
+  # (main.go and plugin_cmd.go), so `cleat deploy`, `versions`, `rollback`,
+  # `schedule`, `lock`, and `plugin` could never target MySQL or SQL Server --
+  # a non-Postgres DSN reached lib/pq unfiltered and failed with a confusing,
+  # dialect-blind error (e.g. `pq: SSL is not enabled on the server` for a
+  # sqlserver:// DSN). README.md claimed dialect parity at the CLI level that
+  # was never true.
+  #
+  # Decision: narrow the claim rather than build a multi-dialect CLI. Fixed by
+  # routing every sql.Open in cmd/cleat through one helper (openPostgresDB,
+  # cmd/cleat/db.go) that refuses a non-Postgres DSN with an actionable error
+  # naming the dialect and cmd/deploy-workflow as the alternative, guarded by
+  # cmd/cleat/db_open_guard_test.go so a new call site can't reintroduce a
+  # bypass. cmd/deploy-workflow (--driver postgres|mysql|mssql) remains the
+  # only multi-dialect entry point, and covers `deploy` only.
+  cli_dialects: [postgres]
+
   # The versions those dialect names mean. Added 2026-08-08, because until then this
   # file named the dialects and no version, while README.md, docs/operations/upgrading.md
   # and docs/explanation/postgresql-schema.md all claimed "PostgreSQL 14+" and

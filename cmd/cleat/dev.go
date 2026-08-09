@@ -373,6 +373,21 @@ func runDev(args []string) {
 
 	pattern := args[0]
 
+	// "cleat dev start" is the exact snippet in README.md's quick start, but
+	// dev's only positional argument is a package path -- there is no "start"
+	// subcommand. Without this check "start" is handed straight to
+	// analyzer.LoadPackages, which shells out to `go list` and fails with
+	// `package start is not in std (/usr/local/go/src/start)`: a real error
+	// about a nonexistent stdlib package, not a hint that the command itself
+	// was misused. Narrowly scoped to the literal string the README uses, so
+	// a workflow package genuinely named "start" is unaffected -- everything
+	// else still falls through to the ordinary load-error path below.
+	if pattern == "start" {
+		fmt.Fprintf(os.Stderr, "Error: %q is not a package path; \"cleat dev\" needs one, e.g. \".\" for the current directory.\n", pattern)
+		fmt.Fprintf(os.Stderr, "If you copied \"cleat dev start\" from the README, that's the package placeholder, not a subcommand -- run \"cleat dev .\" (or the path to your workflow package) instead.\n")
+		os.Exit(1)
+	}
+
 	if watch {
 		runDevWithWatch(pattern, entryPointName, inputJSON, concurrencyKey)
 		return
