@@ -450,9 +450,12 @@ execute. Set to `0` for no limit. Enforced via a wazero function listener.
 
 ### --wasm-output-buffer-size
 
+> Corrected 2026-08-09: was documented as `1048576` (1 MiB). The actual
+> `flag.Int` default in `cmd/cleat-worker/config.go:119` is `32768` (32 KB).
+
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `1048576` (1 MiB) | WASM output buffer size in bytes |
+| int | `32768` (32 KB) | WASM output buffer size in bytes |
 
 Controls the size of the buffer used to read output from WASM guest modules.
 Larger values support workflows that produce more output data.
@@ -461,9 +464,12 @@ Larger values support workflows that produce more output data.
 
 ### --wasm-max-string-len
 
+> Corrected 2026-08-09: was documented as `1048576` (1 MiB). The actual
+> `flag.Int` default in `cmd/cleat-worker/config.go:120` is `65536` (64 KB).
+
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `1048576` (1 MiB) | Maximum WASM string parameter length in bytes |
+| int | `65536` (64 KB) | Maximum WASM string parameter length in bytes |
 
 Limits the length of string parameters passed to WASM guest functions.
 Strings longer than this are truncated before reaching the guest.

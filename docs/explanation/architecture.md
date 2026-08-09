@@ -1,10 +1,28 @@
 # System Overview
 
-Cleat is a durable workflow engine on PostgreSQL. Workflows are written in
-near-standard Go, compiled to WebAssembly (WASM), stored in PostgreSQL, and
-executed by stateless worker daemons.
+> Corrected 2026-08-09: this page previously framed the whole system as "a
+> durable workflow engine on PostgreSQL" with a PostgreSQL-only diagram, and
+> is linked from README's documentation table. `tiers.yaml` grants tier-1
+> support for three dialects (`postgres`, `mysql`, `mssql`), each with an
+> independent, complete implementation of `WorkflowStore` — see
+> `docs/reference/database-backends.md`. The diagrams below still show
+> PostgreSQL as the representative backend (redrawing three near-identical
+> diagrams per dialect would be more duplication than signal), but the prose
+> no longer claims PostgreSQL is the only one. Where a dialect differs in a
+> way that matters (row-level security, `SKIP LOCKED` support, JSON types),
+> see `docs/reference/database-backends.md` and
+> `docs/explanation/security-model.md`.
+
+Cleat is a durable workflow engine that runs on PostgreSQL, MySQL, or SQL
+Server. Workflows are written in near-standard Go (or Rust, Python, Java, or
+AssemblyScript — see `tiers.yaml`), compiled to WebAssembly (WASM), stored in
+the database, and executed by stateless worker daemons.
 
 ## Architecture Diagram
+
+PostgreSQL is shown below as the representative backend; MySQL and SQL
+Server workers follow the identical claim-loop / event-history / signals
+flow against their own schema (`docs/reference/database-backends.md`).
 
 ```mermaid
 graph TD
@@ -39,15 +57,24 @@ graph TD
 
 ### CLI Tools (`cmd/cleat/`)
 
-The `cleat` CLI provides five commands:
+The `cleat` CLI provides these commands (re-derived 2026-08-09 via
+`cleat --help`; this list previously said "five" and named only the first
+five below -- see `docs/reference/cli.md` for the full reference):
 
 | Command | Description |
 |---------|-------------|
 | `build` | Analyzes Go source, transforms it, compiles to `wasip1` WASM binary |
 | `vet` | Validates a workflow package without compiling -- reports entry points, threading errors, closure issues |
-| `deploy` | Uploads a compiled WASM binary to PostgreSQL |
+| `deploy` | Uploads a compiled WASM binary to the database |
 | `versions` | Lists deployed versions of a workflow, latest first |
+| `rollback` | Points a workflow name at a previously deployed version |
+| `dev` | Runs a workflow locally with live-reload (`--watch`/`-w`) |
 | `schedule` | Manages cron schedules for recurring workflow execution |
+| `run` | Builds (if needed) and executes a workflow in-process |
+| `dag` | Visualizes workflow structure |
+| `plugin` | Validates, installs, lists, updates, or uninstalls plugins |
+| `lock` | Manages the workflow definition lock file |
+| `init` | Scaffolds a new workflow project |
 
 The `cleat-gen` tool generates typed client wrappers from service specs:
 
@@ -96,19 +123,33 @@ Go `embed.FS`. The UI provides:
 - Schedule management (create, enable, disable)
 - DAG visualization of workflow structure
 
-### WASM Runtime (wazero)
+### WASM Runtime (wasmtime / wazero)
 
-Execution uses [wazero](https://wazero.io/), a zero-dependency WebAssembly
-runtime for Go. Key characteristics:
+> Corrected 2026-08-09: this section previously said execution "uses wazero"
+> and gave a stale host-function count (15). wasmtime is the backend of
+> record -- preferred automatically whenever CGO is available (the default),
+> per `cmd/cleat-worker/main.go` -- with epoch/fuel/memory limits wired;
+> wazero is the pure-Go, CGO-less fallback with no compute-bound fencing (see
+> `docs/explanation/security-model.md`). Host function count re-derived
+> 2026-08-09 via `engine/imports.go` (56 `cleat_*` exports plus `plugin_call`,
+> `plugin_call_streaming`, `set_query_state` = 59; both backends register the
+> same set -- see `ABI.md` §2).
 
-- No CGo, no external dependencies -- pure Go.
-- Implements the `wasip1` preview 1 ABI required by Go's WASM target.
-- 15 host functions registered on the `env` module (`cleat_call`,
-  `cleat_call_heartbeat`, `cleat_sleep`, `cleat_now`, etc.).
+Execution uses [wasmtime](https://wasmtime.dev/) by default (the backend of
+record) or [wazero](https://wazero.io/), a zero-dependency WebAssembly
+runtime for Go, as a CGO-less fallback. Key characteristics:
+
+- wasmtime requires CGo; wazero does not.
+- Both implement the `wasip1` preview 1 ABI required by Go's WASM target.
+- 59 host functions registered on the `env` module (`cleat_call`,
+  `cleat_call_heartbeat`, `cleat_sleep`, `cleat_now`, etc. -- full list in
+  `ABI.md` §2).
 - WASM modules are compiled once and cached in memory keyed by
   `def_name:def_version`.
 - String marshalling uses a scratch region in the module's linear memory
-  (10MB offset, 64KB output buffer default).
+  (10 MiB offset; 32 KB output buffer / 64 KB max string length by default
+  in `cleat-worker`, each configurable -- see
+  `docs/reference/worker-config.md`).
 
 See [wasm-compilation.md](wasm-compilation.md) for the compilation pipeline and
 [execution-engine.md](execution-engine.md) for the replay/checkpoint model.
@@ -183,10 +224,11 @@ sequenceDiagram
    by (name, version) let v1 workflows continue using v1 code while new
    workflows use v2 on the same worker binary.
 
-2. **PostgreSQL as sole infrastructure** -- PostgreSQL serves as blob store,
-   state store, work queue, and timer service. No separate message queue,
-   cache, or scheduler is needed. This simplifies deployment at the cost of
-   queue throughput at extreme scale.
+2. **The database as sole infrastructure** -- Whichever of PostgreSQL, MySQL,
+   or SQL Server you already run serves as blob store, state store, work
+   queue, and timer service. No separate message queue, cache, or scheduler
+   is needed. This simplifies deployment at the cost of queue throughput at
+   extreme scale.
 
 3. **Replay model, not checkpoint serialization** -- Cleat uses Temporal's
    replay approach: re-execute the workflow from step 0, but return cached

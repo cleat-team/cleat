@@ -7,7 +7,9 @@ compilation targets, and the WASM host interface.
 ## Transformer Pipeline
 
 The pipeline is implemented in `internal/analyzer/`, `internal/callgraph/`,
-`internal/closure/`, `internal/transform/`, and `internal/wasm/`.
+`internal/closure/`, `internal/transform/`, and `wasm/` (corrected 2026-08-09:
+was `internal/wasm/` -- moved to `wasm/` by commit `3eeb74e`, 2026-06-01; see
+CLAUDE.md's note on paths in older commits).
 
 ```
 Source Go Package
@@ -122,7 +124,7 @@ Rewrites source files with AST transformations:
 
 ### Stage 5: wasm.Compile
 
-**Package**: `internal/wasm/`
+**Package**: `wasm/` (moved from `internal/wasm/` by commit `3eeb74e`)
 
 Assembles the build directory and compiles:
 
@@ -135,7 +137,7 @@ Assembles the build directory and compiles:
 
    | File | Purpose |
    |------|---------|
-   | `gen_wasm_imports.go` | WASM import declarations for all 15 host functions |
+   | `gen_wasm_imports.go` | WASM import declarations for the host functions this package's closure actually calls (a subset of the 59 available -- `cleat build` reports the count it generated, e.g. "Generating WASM imports (9 host functions used)") |
    | `gen_wasm_memory.go` | Memory buffer setup for string passing |
    | `gen_host_adapter.go` | Adapter code that bridges Go types to WASM i64 values |
    | `gen_wasm_exports.go` | Named WASM exports for each entry point |
@@ -230,7 +232,8 @@ the backend of record.
 
 ### Host Handler Interface (from the host side)
 
-Each import maps to a method on `internal/host.HostHandler`:
+Each import maps to a method on `engine.HostHandler` (moved from
+`internal/host.HostHandler` by commit `3eeb74e`):
 
 ```go
 type HostHandler interface {
@@ -297,7 +300,8 @@ error status:
 - **Lower 32 bits**: error code (0 = success, 1 = error).
 - **Bit 62**: suspend sentinel (1 = workflow should suspend).
 
-The encoding functions in `internal/plugin/host_helpers.go` handle this:
+The encoding functions in `plugin/host_helpers.go` (moved from
+`internal/plugin/host_helpers.go` by commit `3eeb74e`) handle this:
 
 ```go
 EncodeOK()                    // errCode=0, len=0

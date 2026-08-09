@@ -156,7 +156,7 @@ Important properties of stale instances:
   sleep, signal, and child workflow event that occurred before the backup
 - No data is lost from completed or failed instances
 
-### 3. Start workers; the reaper reclaims stale instances within 60 seconds
+### 3. Start workers; the reaper reclaims stale instances within ~10 seconds
 
 Start the cleat worker pool pointing at the restored database:
 
@@ -164,30 +164,44 @@ Start the cleat worker pool pointing at the restored database:
 cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 ```
 
-The worker pool includes a **reaper** goroutine that runs every 10 seconds. On
+> Corrected 2026-08-09 against `cmd/cleat-worker/config.go` and
+> `cmd/cleat-worker/setup.go` (`reaperLoop`). This section previously said
+> the heartbeat default was 30 seconds and derived a 60-second worst-case
+> reclaim bound from it. The actual default heartbeat interval is 5 seconds
+> (`flag.Duration("heartbeat", 5*time.Second, ...)`). The reaper's stale
+> threshold is `max(heartbeatInterval*2, 10s)` — 10 seconds at the default —
+> and the reaper's own tick interval is `max(heartbeatInterval, 10s)`, also
+> 10 seconds at the default (the "every 10 seconds" claim below was already
+> correct). Both numbers below are re-derived, not just relabeled.
+
+The worker pool includes a **reaper** goroutine that runs every 10 seconds
+(`max(heartbeatInterval, 10s)`, with the default 5s heartbeat interval). On
 each cycle, the reaper:
 
 1. Queries for `running` instances where `heartbeat_at` is older than the
-   heartbeat interval (default: 30 seconds) plus a grace period
+   stale threshold (`max(heartbeatInterval*2, 10s)` — 10 seconds at the
+   default heartbeat interval)
 2. Resets `assigned_to` to `NULL` and sets `heartbeat_at` to a past timestamp
 3. Sets `status` to `ready` so the instances are picked up by the claim loop
 
 ```sql
--- The reaper runs this query on each cycle:
+-- The reaper runs this query on each cycle (illustrative; the actual
+-- threshold is a Go-side duration passed as a parameter, not a literal):
 UPDATE workflow_instances
 SET
     assigned_to = NULL,
     heartbeat_at = '1970-01-01T00:00:00Z',
     status = 'ready'
 WHERE status = 'running'
-  AND heartbeat_at < NOW() - INTERVAL '30 seconds'
+  AND heartbeat_at < NOW() - INTERVAL '10 seconds'
 RETURNING id;
 ```
 
-Since all instances in the restored backup have `heartbeat_at` older than the
-grace period, the reaper reclaims every stale instance within its first few
-cycles. In practice, all instances are reclaimed within **60 seconds** of the
-first worker starting.
+Since all instances in the restored backup have `heartbeat_at` far older than
+the 10-second stale threshold, the reaper reclaims them on its first cycle
+after the worker starts. In practice, all instances are reclaimed within
+**one reaper interval (10 seconds)** of the first worker starting, at
+default settings.
 
 To monitor the reaper's progress:
 
@@ -199,7 +213,7 @@ curl http://localhost:8080/metrics | grep cleat_workflows_reclaimed
 Or query the database directly:
 
 ```sql
--- After workers have been running for 60 seconds:
+-- After workers have been running for ~10 seconds (one reaper cycle):
 SELECT status, COUNT(*) FROM workflow_instances GROUP BY status;
 ```
 
@@ -287,7 +301,7 @@ curl http://localhost:8080/api/workflows?status=running&since=1h
 SELECT id, def_name, heartbeat_at
 FROM workflow_instances
 WHERE status = 'running'
-  AND heartbeat_at < NOW() - INTERVAL '60 seconds';
+  AND heartbeat_at < NOW() - INTERVAL '10 seconds';  -- default stale threshold
 
 -- Should return zero rows if reaper has cycled
 ```
@@ -295,6 +309,12 @@ WHERE status = 'running'
 ## RPO and RTO
 
 ### Recommended RPO/RTO targets
+
+> **These are unlabelled targets, not measurements.** Marked as such
+> 2026-08-09: the table below states recommendations, not numbers derived
+> from a benchmark or a load test against cleat itself — no source is cited
+> because none was measured. Treat each cell as a starting point to validate
+> against your own restore times and backup cadence, not as a guarantee.
 
 The following targets are recommended for production deployments. Adjust based
 on your business requirements.
@@ -344,7 +364,7 @@ With WAL archiving every 5 minutes, RPO is typically under 5 minutes.
 RTO depends on the database restore time plus the reaper interval:
 
 ```
-RTO = database_restore_time + 60_seconds
+RTO = database_restore_time + 10_seconds   # one reaper interval, at default settings
 ```
 
 **Database restore time factors:**
@@ -366,11 +386,15 @@ RTO = database_restore_time + 60_seconds
 
 **Reaper interval:**
 
-The reaper runs every 10 seconds and reclaims all instances with stale
-heartbeats. Since every instance in a restored backup has a stale heartbeat,
-the reaper reclaims all of them within at most one reaper cycle after startup.
-Adding startup time and the first claim cycle, the practical upper bound is
-**60 seconds** of reaper overhead.
+The reaper runs every 10 seconds (`max(heartbeatInterval, 10s)` at the
+default 5s heartbeat interval) and reclaims all instances past the stale
+threshold (`max(heartbeatInterval*2, 10s)`, also 10 seconds by default).
+Since every instance in a restored backup has a stale heartbeat well past
+that threshold, the reaper reclaims all of them on its first cycle after
+startup. Adding startup time, the practical upper bound is **one reaper
+interval (10 seconds)** of reaper overhead at default settings -- corrected
+2026-08-09, was documented as 60 seconds, derived from a 30-second heartbeat
+default that was never the actual default (5s, `cmd/cleat-worker/config.go`).
 
 ### Improving RPO and RTO
 
@@ -537,7 +561,8 @@ SELECT COUNT(*) FROM event_history;
 #### 4. Let the reaper reclaim stale instances
 
 During the failover window, running workflows became stale. The reaper reclaims
-them within 60 seconds of the first worker starting. See [Recovery procedure from a full database restore](#recovery-procedure-from-a-full-database-restore) for details.
+them within ~10 seconds of the first worker starting (one reaper cycle at
+default settings; corrected 2026-08-09, was 60 seconds). See [Recovery procedure from a full database restore](#recovery-procedure-from-a-full-database-restore) for details.
 
 ### Failing back to the primary region
 
@@ -714,7 +739,7 @@ curl -s http://worker:8080/api/admin/stats
 # 4. Check for stuck workflows
 curl -s http://worker:8080/api/workflows?status=running | jq '. | length'
 
-# 5. Verify the reaper has cycled (60 seconds after worker start)
+# 5. Verify the reaper has cycled (~10 seconds after worker start, at default settings)
 psql "$DATABASE_URL" -c "
     SELECT status, COUNT(*) FROM workflow_instances GROUP BY status;
 "

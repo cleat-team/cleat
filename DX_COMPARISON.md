@@ -16,12 +16,16 @@ validating cleat's architecture against real-world code.
    rollback via UPDATE" has no equivalent in any competitor. Multiple independent
    analyses reached this conclusion.
 
-3. **Go is the only production-ready SDK.** Rust is clean (all core APIs present
-   after SDK hardening). Java/TeaVM works with painful build workarounds.
-   AssemblyScript is severely constrained by its runtime subset. The Python SDK
-   is the most comprehensive (4,508 lines, 34 WIT imports, LangChain/LangGraph
-   integration) and `componentize-py` WASM compilation has been validated end-to-end
-   end-to-end.
+3. **Go and Python are the two tier-1, record-proven SDKs** (`tiers.yaml`, D2
+   decision, 2026-08-06). Rust, Java, and AssemblyScript are tier 2 — clean
+   and working, with named open items short of the tier-1 bar. Java/TeaVM
+   works with painful build workarounds. AssemblyScript is constrained by its
+   runtime subset. The Python SDK is the most comprehensive (13,948 lines,
+   52 WIT function imports, LangChain/LangGraph integration — re-derived
+   2026-08-09, `find python-sdk/cleat_sdk -name '*.py' | xargs wc -l` and
+   `grep -cE '^\s+[a-z][a-z0-9-]*:\s*func' python-sdk/wit/cleat.wit`) and
+   `componentize-py` WASM compilation has been validated end-to-end in CI
+   (`TestPythonWasmEndToEnd`, blocking in `e2e-cross-language.yml`).
 
 4. **The WASM sandbox is both cleat's superpower and its main friction point** —
    it enables language-agnostic workflows and deterministic replay, but forces
@@ -88,8 +92,11 @@ and call history assertions. Tests run in milliseconds.
 
 ### Rust (1 port — Clean, Core APIs Present)
 
-The smallest SDK at 1,090 lines (host_calls expanded from 537 lines after SDK
-hardening pass). The port produced a 141 KB WASM binary (release, stripped).
+Grown substantially from its original size during SDK hardening: 4,324 lines
+as of 2026-08-09 across `crates/cleat-sdk/src` and `crates/cleat-macro/src`
+(`wc -l crates/cleat-sdk/src/*.rs crates/cleat-macro/src/*.rs`; earlier
+figures of 537 and 1,090 lines both predate later hardening passes and are
+out of date). The port produced a 141 KB WASM binary (release, stripped).
 
 **Strengths:**
 - `#[cleat_entry]` proc-macro — compile-time code generation, praised as best DX
@@ -149,13 +156,27 @@ SDK hardening added a `TestEnv` test harness (1,626 lines) and K/V state operati
   potential out-of-bounds reads on `awaitSignals` (AS runtime issue)
 - `@durableEntry` transform partially fixed but untested end-to-end with `durableSleep`/`awaitSignals`
 
-### Python (5 ports — Comprehensive SDK, WASM Validated)
+### Python (5 ports — Comprehensive SDK, WASM Validated, tier 1)
 
-The most requested language and the most comprehensive SDK at 4,508 lines.
-34 WIT imports defined, `@cleat_entry` decorator, `virtual_object` decorator,
-80+ tests, 4 example workflows, and LangChain/LangGraph integration. However,
-the `componentize-py` WASM compilation pipeline has been validated end-to-end
-end-to-end — no Python workflow has been confirmed running in a cleat worker.
+> Corrected 2026-08-09: this subsection previously contained a garbled,
+> self-contradictory sentence claiming the WASM pipeline both "has been
+> validated end-to-end" and, in the same breath, that "no Python workflow
+> has been confirmed running in a cleat worker" — apparently a botched edit
+> of an older "has NOT been validated" claim. Neither hedge is true today.
+> Python is tier 1 in `tiers.yaml` (D2, DECIDED 2026-08-06): all three real
+> Python tests pass in CI, building an 18.3 MB component and executing it on
+> wasmtime, and `TestPythonWasmEndToEnd` is blocking in
+> `e2e-cross-language.yml`, not advisory.
+
+The most requested language and the most comprehensive SDK at 13,948 lines
+(re-derived 2026-08-09: `find python-sdk/cleat_sdk -name '*.py' | xargs wc
+-l`). 52 WIT function imports defined (`grep -cE
+'^\s+[a-z][a-z0-9-]*:\s*func' python-sdk/wit/cleat.wit`), `@cleat_entry`
+decorator, `virtual_object` decorator, 442 tests across three Python
+versions, six example workflows, and LangChain/LangGraph integration. The
+`componentize-py` WASM compilation pipeline is validated end-to-end in CI —
+Python workflows run in a real cleat worker on every blocking cross-language
+run, not just on disk.
 
 **Resolved (SDK hardening pass):**
 - `TerminalError` added to core SDK
@@ -169,14 +190,18 @@ end-to-end — no Python workflow has been confirmed running in a cleat worker.
 - `Plugins` class with typed wrappers for LLM, blobstore, webhooks, and other plugins
 - LangChain `CleatCallbackHandler` and LangGraph `CleatCheckpointer`
 
-**Remaining gaps:**
-- **WASM compilation validated** — `build_wasm.py` and WIT file produce 19.2 MB WASM binary
-  and `componentize-py` successfully produces valid WASM binaries with cleat.metadata custom sections
-- `child_workflow_with_options` has no WIT import (stub only)
-- `cleat_fetch` has no dedicated WIT import (works via `cleat_call("http", ...)` but
-  may not work through `componentize-py` without the WIT binding)
-- Saga uses lambda closures — unknown whether `componentize-py` supports closures
-  across WASM suspend/resume
+**Resolved since (verified 2026-08-09 against `python-sdk/wit/cleat.wit`):**
+- WASM compilation is validated end-to-end in CI, not just locally via
+  `build_wasm.py` — see the correction note above.
+- `child_workflow_with_options` has a real WIT import
+  (`durable-children.durable-child-workflow-with-options`).
+- `cleat_fetch` has a dedicated WIT import (`durable-fetch.fetch`), not just
+  the generic `cleat_call("http", ...)` path.
+
+**Remaining gap (not independently re-verified this pass):**
+- Saga uses lambda closures — whether `componentize-py` supports closures
+  across WASM suspend/resume was an open question as of the last SDK
+  hardening pass; re-check before relying on it for a new Saga-heavy port.
 
 ---
 
@@ -368,8 +393,14 @@ The 202 documented issues across 19 ports break down into these categories:
 
 ### Build System
 
+> Corrected 2026-08-09: removed a "`componentize-py` end-to-end untested
+> (Python)" bullet that had been sitting here contradicting the "0 issues
+> remaining... validated end-to-end" claim two subsections up. Python's
+> end-to-end WASM compilation is proven in CI (`tiers.yaml` D2); it was not
+> an untested build-system gap even at the time this list was last true for
+> anything else in it.
+
 - TeaVM Gradle plugin resolution (Java)
-- `componentize-py` end-to-end untested (Python)
 - `@durableEntry` tree-shaking by TeaVM (Java — TeaVM limitation)
 - WASM export class warnings with `--runtime stub` (AS — AS limitation)
 
@@ -394,8 +425,9 @@ identified during the 19-port analysis are now closed — side-effect caching,
 Virtual Object enforcement, AwaitCondition, per-call timeouts, unit mismatches,
 and lock API are all implemented end-to-end. The Go SDK is production-ready.
 Rust, Java, and AS SDKs have full core API coverage with test harnesses.
-The Python SDK is comprehensive (4,508 lines, 34 WIT imports, LangChain/
-LangGraph integration) with WASM compilation validated end-to-end.
+The Python SDK is comprehensive (13,948 lines, 52 WIT function imports,
+LangChain/LangGraph integration) with WASM compilation validated
+end-to-end in CI, and is tier 1 alongside Go in `tiers.yaml`.
 
 The only remaining gaps are external tool limitations:
 1. **Python WASM validation** — DONE. `build_wasm.py` + `componentize-py` 0.23.0 produce valid WASM binaries
