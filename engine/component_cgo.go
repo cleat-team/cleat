@@ -325,6 +325,11 @@ const (
 
 	// durable-fetch interface
 	cbTypeFetch // (string,string,string,string) -> string
+
+	// durable-cron interface
+	cbTypeScheduleCron // (string,string,string,string) -> string
+	cbTypeDeleteCron   // (string) -> void (WIT has no return; host errCode is discarded)
+	cbTypeListCrons    // () -> string
 )
 
 type cbEntry struct {
@@ -540,6 +545,12 @@ func goComponentCallback(
 		return entry.backend.dispatchChildWorkflowInSchema(args, nargs, results, nresults)
 	case cbTypeFetch:
 		return entry.backend.dispatchFetch(args, nargs, results, nresults)
+	case cbTypeScheduleCron:
+		return entry.backend.dispatchScheduleCron(args, nargs, results, nresults)
+	case cbTypeDeleteCron:
+		return entry.backend.dispatchDeleteCron(args, nargs, results, nresults)
+	case cbTypeListCrons:
+		return entry.backend.dispatchListCrons(args, nargs, results, nresults)
 	default:
 		// Deprecated fallback -- unregistered functions return 0.
 		return entry.backend.dispatchComponentDefault(args, nargs, results, nresults)

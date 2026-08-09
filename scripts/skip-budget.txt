@@ -330,7 +330,26 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # darwin measured 449 against a ceiling of 452, but the runner sits +4 above
 # darwin, so CI would have reported 453 and tripped the guard. A local run that
 # is under budget by less than the offset is not a pass.
-test-go/engine	453	# runner 2026-08-09: 452 + the MySQL cross-tenant schedules test (+1)
+#
+# 453 -> 454: TestPythonCronEndToEnd, which needs componentize-py and wasm-tools.
+# This job installs neither, so it skips here -- and runs for real in
+# tier1-gate.yml and e2e-cross-language.yml, both of which install the toolchain
+# and sweep ./engine/... with a TestPython pattern.
+#
+# Same arithmetic trap as the entry above, hit twice in one session: darwin
+# measured 450 against a ceiling of 453 and check-skip-budget.sh said "under
+# budget by 3", which is NOT a pass when the runner sits +4 above darwin. 454 is
+# the number the runner will see.
+#
+# 454 -> 455: TestComponentShortStringResultsAreNotTruncated, gated on the same
+# componentize-py/wasm-tools toolchain this job does not install.
+#
+# THIRD time in one session the same arithmetic has caught me out, so it is
+# worth stating as a rule rather than a note: check-skip-budget.sh comparing a
+# DARWIN count against a RUNNER ceiling is only meaningful with the +4 offset
+# applied. "under budget by 3" means the runner will be at budget+1 and the
+# guard will trip. Local slack of 4 or less is a failure, not a pass.
+test-go/engine	455	# runner 2026-08-09: 454 + the component short-result regression test (+1)
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -411,7 +430,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	453	# same as test-go/engine, and for the same reason; see the note there
+cluster	455	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a

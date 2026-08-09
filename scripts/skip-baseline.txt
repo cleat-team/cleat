@@ -19,6 +19,7 @@ cmd/cleat-worker	newSignalAuthStore	1
 engine	RegisterBackend	2
 engine	TestAssemblyScriptWorkflowExecute	1
 engine	TestCascadeDelete	2
+engine	TestComponentShortStringResultsAreNotTruncated	1
 engine	TestEngineExecute	1
 engine	TestEngineExecuteCancelOrder	1
 engine	TestEngineReplay	1
@@ -49,6 +50,7 @@ engine	TestMySQLStoreConfigOptions	1
 engine	TestMySQLStoreFactory	1
 engine	TestPluginMigrations_AllDialects	1
 engine	TestPythonComponentExecutionFence	1
+engine	TestPythonCronEndToEnd	1
 engine	TestPythonWasmEndToEnd	1
 engine	TestRLSTenantIsolation	1
 engine	TestRustWorkflowCancelOrder	1
