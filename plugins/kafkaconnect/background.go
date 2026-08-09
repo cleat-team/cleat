@@ -89,11 +89,18 @@ func (p *Plugin) pollConfigs(ctx context.Context) error {
 // publish them as events through the event-triggers pipeline.
 func (p *Plugin) pollConfig(ctx context.Context, c configRow) {
 	if p.config.RestProxyURL == "" {
-		p.logger.Debug("kafka-connect: no REST Proxy URL configured, skipping consume",
-			"config_id", c.ID,
-			"topic", c.Topic,
-			"event_type", c.EventType,
-		)
+		// Once, and at WARN rather than DEBUG. An enabled kafka_config row is
+		// an operator saying "consume this topic"; with no REST proxy the
+		// poller does nothing forever and the event-triggers pipeline it feeds
+		// never fires. At DEBUG that is indistinguishable from a quiet topic.
+		p.unconfiguredOnce.Do(func() {
+			p.logger.Warn("kafka-connect: no REST proxy configured (rest_proxy_url); enabled "+
+				"kafka configs will never be consumed and no events will be published from them",
+				"config_id", c.ID,
+				"topic", c.Topic,
+				"event_type", c.EventType,
+			)
+		})
 		return
 	}
 

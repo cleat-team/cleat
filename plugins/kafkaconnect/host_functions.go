@@ -85,27 +85,28 @@ func (p *Plugin) produce(ctx context.Context, inputJSON string) (string, error) 
 		return "", fmt.Errorf("kafka-connect: config not found or disabled")
 	}
 
-	if p.config.RestProxyURL != "" {
-		// Send via Confluent REST Proxy.
-		output, err := p.produceViaRestProxy(ctx, topic, input)
-		if err != nil {
-			return "", err
-		}
-		outJSON, _ := json.Marshal(output)
-		return string(outJSON), nil
+	// No REST proxy configured means there is no way to reach Kafka at all.
+	//
+	// This used to log the message and return Success: true. A workflow calling
+	// produce got an unqualified success for a message that was never sent and
+	// never would be -- and a durable workflow's whole point is that what it
+	// recorded as done, happened. Compensation logic downstream of a produce
+	// has no way to know it is compensating for something that never occurred.
+	//
+	// Erroring matches every sibling that can be unconfigured: llm returns
+	// "provider %q not configured or disabled" rather than pretending. The
+	// message names the setting, because the operator reading it is the one who
+	// can fix it.
+	if p.config.RestProxyURL == "" {
+		return "", fmt.Errorf("kafka-connect: no REST proxy configured (rest_proxy_url), so the "+
+			"message to topic %q on %s cannot be delivered; refusing rather than reporting a "+
+			"send that did not happen", topic, brokers)
 	}
 
-	// No REST proxy configured — log the message as a structural stub.
-	p.logger.Info("kafka-connect: produce (stub)",
-		"config_id", input.ConfigID,
-		"topic", topic,
-		"brokers", brokers,
-		"key", input.Key,
-		"value_length", len(input.Value),
-		"headers", input.Headers,
-	)
-
-	output := produceOutput{Success: true}
+	output, err := p.produceViaRestProxy(ctx, topic, input)
+	if err != nil {
+		return "", err
+	}
 	outJSON, _ := json.Marshal(output)
 	return string(outJSON), nil
 }

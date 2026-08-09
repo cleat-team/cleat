@@ -611,18 +611,64 @@ func TestProduceHostFunction(t *testing.T) {
 	}
 	store.mu.Unlock()
 
+	// setupTestPlugin leaves RestProxyURL empty, so there is no route to Kafka
+	// at all. This used to assert success=true: the plugin logged the message
+	// and told the workflow it had been sent. A durable workflow's guarantee is
+	// that what it recorded as done actually happened, and compensation logic
+	// downstream of a produce has no way to know it is compensating for
+	// something that never occurred.
+	//
+	// The assertion is now the refusal. Note what it does NOT do: assert on
+	// wording alone. It checks the error names the setting an operator would
+	// change, because the message is the only thing that turns this from "the
+	// plugin is broken" into "the plugin is not configured".
 	input := `{"config_id":"` + cfgID + `","key":"my-key","value":"hello world","headers":{"source":"test"}}`
-	output, err := p.produce(withCallContext(context.Background()), input)
-	if err != nil {
-		t.Fatalf("produce() returned error: %v", err)
+	_, err := p.produce(withCallContext(context.Background()), input)
+	if err == nil {
+		t.Fatal("produce() reported success with no REST proxy configured; the message was " +
+			"never sent and the workflow was told it was")
 	}
+	if !strings.Contains(err.Error(), "rest_proxy_url") {
+		t.Errorf("error does not name the setting that fixes it: %v", err)
+	}
+	if !strings.Contains(err.Error(), "test-topic") {
+		t.Errorf("error does not name the topic that could not be reached: %v", err)
+	}
+}
 
+// TestProduceSucceedsWhenTheProxyIsConfigured is the false-positive half. A
+// produce that refused unconditionally would satisfy the test above and would
+// break every correctly configured deployment.
+func TestProduceSucceedsWhenTheProxyIsConfigured(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.kafka.v2+json")
+		_, _ = w.Write([]byte(`{"offsets":[{"partition":0,"offset":7}]}`))
+	}))
+	defer srv.Close()
+
+	p, _, store := setupTestPlugin(t)
+	p.config.RestProxyURL = srv.URL
+
+	cfgID := uuid.New().String()
+	store.mu.Lock()
+	store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
+		tenantID: testTenantStr, id: cfgID, name: "configured",
+		brokers: "localhost:9092", topic: "test-topic", consumerGroup: "cleat-consumer",
+		eventType: "test-topic", enabled: true, createdAt: time.Now(), updatedAt: time.Now(),
+	}
+	store.mu.Unlock()
+
+	out, err := p.produce(withCallContext(context.Background()),
+		`{"config_id":"`+cfgID+`","value":"hello"}`)
+	if err != nil {
+		t.Fatalf("produce() with a configured proxy returned: %v", err)
+	}
 	var result produceOutput
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to decode output: %v", err)
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
 	}
 	if !result.Success {
-		t.Error("expected success=true")
+		t.Error("a delivered message was not reported as a success")
 	}
 }
 
