@@ -2,12 +2,32 @@ name: Ecosystem CI
 on:
   pull_request:
     branches: [main, develop]
+    # Every job in this file tests an SDK, and until 2026-08-09 none of the SDK
+    # source trees was listed here. The filter named cleat/, internal/, cmd/ and
+    # the go module files -- so "Python SDK Integration" ran on everything
+    # EXCEPT python-sdk/, "Rust SDK Integration" on everything except crates/,
+    # and so on. Each job was triggered by every change but its own.
+    #
+    # It was silent, too: an untriggered job is absent from the PR's check list
+    # rather than pending, so the PR reads as fully green with four fewer checks
+    # than it should have. Caught on #432, which changes the AssemblyScript and
+    # Python SDKs and ran neither of their jobs.
+    #
+    # Only python-sdk consumes cmd/cleat; rust, java and assemblyscript test
+    # their own tree alone. GitHub filters paths per workflow, not per job, so
+    # this is the union -- an AS change runs all four. That is the cost of
+    # keeping them in one file, and it is cheaper than the gap was.
     paths:
       - "cleat/**"
       - "internal/**"
       - "cmd/**"
+      - "crates/**"
+      - "packages/cleat-as/**"
+      - "python-sdk/**"
       - "go.mod"
       - "go.sum"
+      # So a change to the filter itself is checked by the filter itself.
+      - ".github/workflows/ecosystem-ci.yml"
   push:
     branches: [main, develop]
 
