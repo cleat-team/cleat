@@ -662,7 +662,18 @@ Run a detached child workflow (fire-and-forget, no result expected).
 
 #### 2.25 `cleat_register_query_handler`
 
-Register a read-only query handler for the workflow.
+Records a query handler name on the host side. **No worker code ever reads
+this back out to route an external query to it** -- there is no dispatch
+path from any HTTP route, CLI command, or worker loop to a registered
+handler; the only thing that ever invoked one was each SDK's own in-process
+test harness. Every SDK's public wrapper around this call was removed
+2026-08-09 (see `docs/determinism.md`, "Why there is no
+RegisterQueryHandler"). The import is still accepted by the engine, kept as
+a no-op purely so guests already compiled against it still instantiate --
+new code should not call it and should not expect anything to happen if it
+does. Use `set_query_state` (2.27) instead: it is durable and externally
+readable via `GET /api/workflows/:id/query?key=X` regardless of whether a
+worker currently has the workflow loaded.
 
 ```
 (func (import "env" "cleat_register_query_handler")

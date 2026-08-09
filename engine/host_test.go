@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -116,21 +117,21 @@ func TestCallExportNotFound(t *testing.T) {
 
 // ---- Engine execution tests with standard Go WASM + wasmtime ----
 
-// wasmtimeUnavailableErr is the exact error backend_wasmtime_stub.go (build
-// tag //go:build !cgo) returns. Unlike backend_wasmtime_test.go, this file
-// carries no build tag, so it compiles both with and without CGO, and
-// NewWasmtimeBackend can legitimately resolve to that stub -- a genuine
-// "nobody asked for CGO" case, not a defect. But ci.yml's test-go/engine
-// entry and its cluster-tests job both run with CGO on by default, where
-// NewWasmtimeBackend resolves to the real backend_wasmtime.go implementation
-// (the primary backend per CLAUDE.md); any other error there means wasmtime
-// itself failed to initialise, which is a real defect masquerading as an
-// absent optional resource. Matching this exact string -- rather than
-// guessing from a CGO_ENABLED env var, which reflects what the compiler saw
-// and not necessarily the running binary -- lets each site tell the two
-// cases apart precisely, using the one fact that is actually reliable: what
-// the stub itself is known to say.
-const wasmtimeUnavailableErr = "wasmtime backend requires CGO"
+// ErrWasmtimeCGOUnavailable (backend_wasmtime_errors.go) is the sentinel
+// backend_wasmtime_stub.go (build tag //go:build !cgo) returns. Unlike
+// backend_wasmtime_test.go, this file carries no build tag, so it compiles
+// both with and without CGO, and NewWasmtimeBackend can legitimately resolve
+// to that stub -- a genuine "nobody asked for CGO" case, not a defect. But
+// ci.yml's test-go/engine entry and its cluster-tests job both run with CGO
+// on by default, where NewWasmtimeBackend resolves to the real
+// backend_wasmtime.go implementation (the primary backend per CLAUDE.md);
+// any other error there means wasmtime itself failed to initialise, which is
+// a real defect masquerading as an absent optional resource. Checking
+// errors.Is against the sentinel -- rather than guessing from a CGO_ENABLED
+// env var, which reflects what the compiler saw and not necessarily the
+// running binary, or matching the error's string, which is an implementation
+// detail -- lets each site tell the two cases apart precisely and is the
+// same check cmd/cleat-worker/main.go uses at startup.
 
 func TestEngineExecute(t *testing.T) {
 	wasmPath := buildTestWasm(t)
@@ -148,7 +149,7 @@ func TestEngineExecute(t *testing.T) {
 
 	backend, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		if err.Error() == wasmtimeUnavailableErr {
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
 			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
 		}
 		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)
@@ -201,7 +202,7 @@ func TestEngineReplay(t *testing.T) {
 
 	backend, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		if err.Error() == wasmtimeUnavailableErr {
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
 			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
 		}
 		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)
@@ -248,7 +249,7 @@ func TestEngineReplayDivergence(t *testing.T) {
 
 	backend, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		if err.Error() == wasmtimeUnavailableErr {
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
 			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
 		}
 		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)
@@ -323,7 +324,7 @@ func TestEngineExecuteCancelOrder(t *testing.T) {
 
 	backend, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		if err.Error() == wasmtimeUnavailableErr {
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
 			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
 		}
 		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)
@@ -1122,7 +1123,7 @@ func withWasmtimeBackend(t *testing.T) EngineOption {
 	ctx := context.Background()
 	wt, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		if err.Error() == wasmtimeUnavailableErr {
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
 			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
 		}
 		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)

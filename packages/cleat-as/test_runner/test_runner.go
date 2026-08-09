@@ -294,6 +294,13 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	}).Export("cleat_schedule_invoke")
 
 	// cleat_register_query_handler (param i32 i32) (result i64)
+	//
+	// The AS SDK no longer calls this import (registerQueryHandler was
+	// removed from host-calls.ts 2026-08-09; see docs/determinism.md, "Why
+	// there is no RegisterQueryHandler") -- it recorded a handler name but
+	// nothing ever routed an external query to it. Kept here as a no-op
+	// purely so a .wasm built against an older SDK version that still
+	// imports it can instantiate against this test runner.
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, namePtr, nameLen int32) int64 {
 		return 0
 	}).Export("cleat_register_query_handler")

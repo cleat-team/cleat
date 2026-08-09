@@ -106,12 +106,19 @@ Document every host function exposed by the SDK in a table. Group by category.
 | `resolve_promise` | `(promise_id, value) -> ()` | Resolve a promise |
 | `reject_promise` | `(promise_id, error) -> ()` | Reject a promise |
 
-### Update & Query Handlers
+### Update Handlers
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `register_update_handler` | `(name, handler, validator) -> ()` | Register update handler |
-| `register_query_handler` | `(name, handler) -> ()` | Register query handler |
+
+Do not add a `register_query_handler`. Every SDK had one until 2026-08-09; it
+recorded a handler name with the host, but no worker code ever routed an
+external query back to it -- it worked only inside each SDK's own
+in-process test harness, which called the registered closure directly. See
+`docs/determinism.md`, "Why there is no RegisterQueryHandler". A new SDK
+should expose `set_query_state` (queryable state any caller can read via
+`GET /api/workflows/:id/query?key=X`) instead.
 
 ### Lifecycle
 

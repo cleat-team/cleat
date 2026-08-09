@@ -322,8 +322,10 @@ func (s *execSession) RunID(ctx context.Context, m api.Module, idPtr, idMaxLen u
 }
 
 func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64 {
-	// Query handlers are registered but don't produce event history entries.
-	// They are invoked out-of-band by the worker, not during replay.
+	// Retained as a harmless ABI-compatibility no-op only -- see the
+	// RegisterQueryHandler doc comment on the HostHandler interface in
+	// imports.go. Nothing reads s.queryHandlers back out to dispatch a
+	// query to it; "invoked out-of-band by the worker" was never true.
 	s.queryHandlers = append(s.queryHandlers, name)
 	return 0
 }

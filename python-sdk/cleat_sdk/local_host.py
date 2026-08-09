@@ -127,7 +127,6 @@ class LocalHostCalls:
         self._update_handlers: dict[
             str, tuple[Callable[[str], str], Callable[[str], bool] | None]
         ] = {}
-        self._query_handlers: dict[str, Callable[[str], str]] = {}
         self._scope_prefix: str = ""
         self._workflow_id: str = "local-wf-id"
         self._run_id: str = "local-run-id"
@@ -256,7 +255,6 @@ class LocalHostCalls:
         self._cron_schedules.clear()
         self._cron_counter = 0
         self._update_handlers.clear()
-        self._query_handlers.clear()
         self._scope_prefix = ""
 
     # ------------------------------------------------------------------
@@ -1164,28 +1162,10 @@ class LocalHostCalls:
             return True
         return validator(payload)
 
-    # ------------------------------------------------------------------
-    # 40. register_query_handler
-    # ------------------------------------------------------------------
-
-    def register_query_handler(
-        self,
-        name: str,
-        handler: Callable[[str], str],
-    ) -> None:
-        """Register a read-only handler for query calls on this workflow."""
-        if self._mode == "replay":
-            self._replay_next("register_query_handler")
-            return
-        self._query_handlers[name] = handler
-        self._record("register_query_handler", name=name)
-
-    def _handle_query(self, name: str, payload: str) -> str:
-        """Internal: look up and invoke a registered query handler."""
-        handler = self._query_handlers.get(name)
-        if handler is None:
-            raise RuntimeError(f"No query handler registered for '{name}'")
-        return handler(payload)
+    # There is no register_query_handler / _handle_query here (removed
+    # 2026-08-09). register_query_handler recorded a handler name but nothing
+    # ever routed an external query to it -- see docs/determinism.md, "Why
+    # there is no RegisterQueryHandler". Use set_query_state instead.
 
     # ------------------------------------------------------------------
     # 41. defer

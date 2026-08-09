@@ -1,6 +1,9 @@
 // Package scheduledbackup provides scheduled PostgreSQL backups with pg_dump.
-// It supports cron-based scheduling, manual backup/restore via HTTP API and CLI
-// commands, and records backup history in PostgreSQL.
+// It supports cron-based scheduling and manual backup via HTTP API and CLI
+// commands, and records backup history in PostgreSQL. Dumps are written to
+// local disk (Config.DumpDir) only -- there is no restore path and no
+// off-host upload; see the s3_bucket/s3_prefix doc comments on backupConfig
+// in routes.go before relying on either.
 package scheduledbackup
 
 import (
@@ -19,7 +22,7 @@ func init() {
 	plugin.Register(plugin.PluginInfo{
 		Name:        "scheduled-backup",
 		Version:     "0.1.0",
-		Description: "Scheduled PostgreSQL backups to S3",
+		Description: "Scheduled PostgreSQL backups to local disk",
 		Author:      "cleat",
 	}, func() plugin.Plugin {
 		return &Plugin{}
@@ -42,8 +45,15 @@ type Plugin struct {
 
 // Config controls backup storage and pg_dump output location.
 type Config struct {
-	DSN     string `json:"dsn"`      // PostgreSQL DSN passed to pg_dump
-	DumpDir string `json:"dump_dir"` // Directory for dump output files
+	// DSN is the PostgreSQL connection string pg_dump backs up. It commonly
+	// embeds a password, so it is a plugin.Secret: never marshaled in the
+	// clear, and passed to pg_dump via runPgDump (background.go), which
+	// puts any password in the child process's PGPASSWORD environment
+	// variable rather than its argv -- argv is visible to any co-resident
+	// user via ps and /proc/*/cmdline, unlike the environment of a process
+	// you do not own.
+	DSN     plugin.Secret `json:"dsn"`
+	DumpDir string        `json:"dump_dir"` // Directory for dump output files
 }
 
 // Info returns plugin metadata for discovery and documentation.
@@ -51,7 +61,7 @@ func (p *Plugin) Info() plugin.PluginInfo {
 	return plugin.PluginInfo{
 		Name:        "scheduled-backup",
 		Version:     "0.1.0",
-		Description: "Scheduled PostgreSQL backups to S3",
+		Description: "Scheduled PostgreSQL backups to local disk",
 		Author:      "cleat",
 	}
 }

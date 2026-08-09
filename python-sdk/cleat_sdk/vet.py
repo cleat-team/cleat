@@ -89,7 +89,8 @@ DURABLE_LEAVES: set[str] = {
     "reject_promise",
     # Handlers
     "register_update_handler",
-    "register_query_handler",
+    # There is no register_query_handler here (removed 2026-08-09; see
+    # docs/determinism.md, "Why there is no RegisterQueryHandler").
     # Lifecycle
     "defer",
     "continue_as_new",

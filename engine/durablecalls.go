@@ -299,6 +299,20 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 		}
 
 		if attempt < maxAttempts {
+			// This failure is about to trigger another attempt -- record it as
+			// a retry. Nothing else in this loop is visible in Prometheus: the
+			// only event history entry freshCallWithRetry writes is the final
+			// success or failure, so a call that failed and retried 50 times
+			// before succeeding looks identical, from the metrics alone, to one
+			// that succeeded on the first try. A retry storm should be visible
+			// as a rate, not require reading event history after the fact.
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordCallRetry(ctx,
+					attribute.String("service", service),
+					attribute.String("operation", operation),
+				)
+			}
+
 			// Exponential backoff using host time (not DurableSleep).
 			backoffMs := initialIntervalMs * int64(math.Pow(float64(backoffCoefficient100x)/100.0, float64(attempt-1)))
 			if backoffMs > maxIntervalMs {

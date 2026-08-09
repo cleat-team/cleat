@@ -117,7 +117,6 @@ The `HostCalls` struct wraps all WASM imports from the `"env"` module.
 | `create_promise` / `await_promise` | Durable promise creation and awaiting |
 | `resolve_promise` / `reject_promise` | Promise resolution |
 | `register_update_handler` | Register bi-directional update handler |
-| `register_query_handler` | Register read-only query handler |
 | `acquire_lock` / `release_lock` | Concurrency lock management |
 | `continue_as_new` / `continue_as_new_versioned` | Workflow history compaction |
 | `run_detached` | Execute detached from cancellation |

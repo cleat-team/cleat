@@ -172,7 +172,10 @@ func TestSetQueryStateMultipleKeys(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// RegisterQueryHandler tests.
+// RegisterQueryHandler tests. This host call is a harmless ABI-compatibility
+// no-op (see the doc comment on HostHandler.RegisterQueryHandler in
+// imports.go) -- these tests pin that it still records the name and returns
+// success, not that anything downstream acts on it.
 // ---------------------------------------------------------------------------
 
 func TestRegisterQueryHandler(t *testing.T) {

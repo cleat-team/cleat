@@ -98,9 +98,13 @@ The `HostCalls` class wraps all 36 WASM host function imports grouped by categor
 - `resolve_promise(promise_id, value) -> None` -- resolve a promise from within the workflow
 - `reject_promise(promise_id, error) -> None` -- reject a promise from within the workflow
 
-### Update & Query Handlers
+### Update Handlers
 - `register_update_handler(name, handler, validator=None) -> None` -- register update handler (bi-directional RPC)
-- `register_query_handler(name, handler) -> None` -- register read-only query handler
+
+There is no `register_query_handler`: it was removed 2026-08-09 because
+nothing ever routed an external query to a registered handler -- it worked
+only inside this SDK's own test harness. Use `set_query_state` to publish
+state that any caller can read via `GET /api/workflows/:id/query?key=X`.
 
 ### Lifecycle
 - `cleat_defer(description) -> str` -- register cleanup to run on exit, returns defer ID

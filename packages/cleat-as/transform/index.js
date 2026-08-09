@@ -611,7 +611,9 @@ class CleatEntryTransformer {
       "sendSignalAndWait", "sendSignalAndWaitMs", "replyToSignal",
       "awaitSignalsWithQuorum", "awaitSignalsWithQuorumMs",
       "signalWorkflow", "resolvePromise", "rejectPromise", "cleatSend",
-      "scheduleInvoke", "scheduleInvokeMs", "registerQueryHandler",
+      "scheduleInvoke", "scheduleInvokeMs",
+      // There is no "registerQueryHandler" here (removed 2026-08-09; see
+      // docs/determinism.md, "Why there is no RegisterQueryHandler").
       "runDetached", "setState", "getState", "deleteState", "incrState",
       "hasState", "listState", "awaitAllChildren",
       "currentRunId", "cleatFetch", "fetchGet", "acquireLock",
