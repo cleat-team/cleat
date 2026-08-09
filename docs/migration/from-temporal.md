@@ -12,7 +12,7 @@ covers conceptual mapping, API differences, code examples, and known gaps.
 | Workflow | `@cleat_entry` function | No workflow/activity distinction in Cleat |
 | Activity | `call()` | Both service calls and activities use the same API |
 | Signal | `await_signals()` / `poll_signal()` | Same semantics, different method name |
-| Query | `set_query_state()` / query handlers | Cleat uses explicit key-value state |
+| Query | `set_query_state()` + `GET /api/workflows/:id/query?key=X` | No `QueryWorkflow`-style dispatch to a live handler -- publish state explicitly, any client reads it via the REST API |
 | Child Workflow | `child_workflow()` + `await_child()` | Similar API, no `ChildWorkflowOptions` |
 | Continue-As-New | `continue_as_new()` | Identical concept |
 | Timer / Sleep | `sleep(ms)` | **Milliseconds** in Cleat vs. `time.Duration` in Temporal Go |
@@ -359,3 +359,33 @@ by storing WASM blobs in the database.
   Rollback is a database UPDATE, not a worker re-deploy.
 - **Workaround**: Use `version()` and `min_version()` in workflow code for
   backward-compatible logic branches.
+
+### 9. `QueryWorkflow` has no equivalent -- `RegisterQueryHandler` was removed
+
+Temporal's `QueryWorkflow` routes a synchronous, read-only question to a
+handler registered inside a *running* workflow. Cleat had a same-shaped API
+(`RegisterQueryHandler` in every SDK) that turned out to be a promise the
+engine never kept: it recorded a handler name with the host and returned
+success, but no worker code ever routed an external query back to it. It
+worked only inside each SDK's in-process test harness, where the test itself
+called the handler directly. It was removed from every SDK on 2026-08-09.
+
+The gap is architectural, not an oversight to be wired up later. Cleat
+workflows do not sit resident in a worker's memory the way Temporal's do --
+they run only for the duration of a claim-execute-persist cycle, so there is
+usually no live in-memory instance for a query to reach. `SetQueryState` is
+the actual mechanism, and it fits that model: the workflow proactively
+persists queryable state to the database at points it chooses, and any
+caller can read it regardless of whether a worker currently holds the
+workflow in memory, via `GET /api/workflows/:id/query?key=X`.
+
+```go
+h.SetQueryState("order_status", "shipped")
+```
+
+```
+curl http://worker:8080/api/workflows/<id>/query?key=order_status
+```
+
+See [determinism.md](../determinism.md#why-there-is-no-registerqueryhandler)
+for the full reasoning.

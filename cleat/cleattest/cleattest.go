@@ -416,7 +416,6 @@ func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
 		ListCrons:                     e.listCronsImpl,
 		AwaitPromise:                  e.awaitPromiseImpl,
 		RegisterUpdateHandler:         e.registerUpdateHandlerImpl,
-		RegisterQueryHandler:          e.registerQueryHandlerImpl,
 		RunDetached:                   e.runDetachedImpl,
 		PluginCall:                    e.pluginCallImpl,
 		DurableSend:                   e.durableSendImpl,
@@ -1353,22 +1352,6 @@ func (e *TestEnv) createPromiseImpl(name string) (string, error) {
 
 func (e *TestEnv) registerUpdateHandlerImpl(name string) {
 	_ = name // no-op for testing; SDK layer stores handler+validator in a map
-}
-
-func (e *TestEnv) registerQueryHandlerImpl(name string) {
-	_ = name // no-op for testing; hostCallsImpl stores handler in queryHandlers map
-}
-
-// HandleQuery invokes a registered query handler by name with the given payload.
-// If the underlying HostCalls supports it, the host-provided handler is used.
-// Otherwise, falls back to the local queryHandlers map in hostCallsImpl.
-func (e *TestEnv) HandleQuery(name, payload string) (string, error) {
-	// The h field is a *hostCallsImpl which has a HandleQuery method.
-	// Type-assert to access it; if the assertion fails, try a simpler fallback.
-	if e.h.HostCallsImpl != nil {
-		return e.h.HandleQuery(name, payload)
-	}
-	return "", fmt.Errorf("cleattest: HandleQuery not available")
 }
 
 // HandleUpdate invokes a registered update handler by name with the given payload.

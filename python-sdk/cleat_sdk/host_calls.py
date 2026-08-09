@@ -126,9 +126,6 @@ try:
         fetch as _import_fetch,
     )
     from wit_world.imports.durable_handlers import (
-        durable_register_query_handler as _import_cleat_register_query_handler,
-    )
-    from wit_world.imports.durable_handlers import (
         durable_register_update_handler as _import_cleat_register_update_handler,
     )
     from wit_world.imports.durable_identity import (
@@ -868,16 +865,10 @@ if not _USING_WASM:
         )
 
 
-# -- 31. cleat_register_query_handler -------------------------------------------
-
-
-if not _USING_WASM:
-
-    def _import_cleat_register_query_handler(name: str) -> int:
-        """Stub for WASM import ``(import "env" "cleat_register_query_handler") (param i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_register_query_handler can only be called within a cleat WASM runtime."
-        )
+# There is no _import_cleat_register_query_handler here (removed 2026-08-09).
+# register_query_handler recorded a handler name with the host but nothing
+# ever routed an external query to it -- see docs/determinism.md, "Why there
+# is no RegisterQueryHandler". Use set_query_state instead.
 
 
 # -- 32. cleat_send_signal_and_wait ----------------------------------------------
@@ -940,7 +931,6 @@ class HostCalls:
         self._update_handlers: dict[
             str, tuple[Callable[[str], str], Callable[[str], bool] | None]
         ] = {}
-        self._query_handlers: dict[str, Callable[[str], str]] = {}
         self._scope_prefix: str = ""
 
     # --------------------------------------------------------------------
@@ -2582,56 +2572,13 @@ class HostCalls:
             return True
         return validator(payload)
 
-    # --------------------------------------------------------------------
-    # 27. register_query_handler — register a read-only query handler
-    # --------------------------------------------------------------------
-
-    def register_query_handler(
-        self,
-        name: str,
-        handler: Callable[[str], str],
-    ) -> None:
-        """Register a read-only handler for query calls on this workflow.
-
-        Query handlers allow external clients to read workflow state without
-        journaling.  Unlike update handlers, query handlers are deterministic
-        and read-only.
-
-        Parameters
-        ----------
-        name : str
-            The query handler name.
-        handler : Callable[[str], str]
-            Handler function that takes a JSON payload string and returns
-            a JSON result string.
-        """
-        self._query_handlers[name] = handler
-        _import_cleat_register_query_handler(name)
-
-    def _handle_query(self, name: str, payload: str) -> str:
-        """Internal: look up and invoke a registered query handler.
-
-        Parameters
-        ----------
-        name : str
-            The query handler name.
-        payload : str
-            The JSON payload string.
-
-        Returns
-        -------
-        str
-            The handler's JSON result string.
-
-        Raises
-        ------
-        RuntimeError
-            If no handler is registered for the given name.
-        """
-        handler = self._query_handlers.get(name)
-        if handler is None:
-            raise RuntimeError(f"No query handler registered for '{name}'")
-        return handler(payload)
+    # There is no register_query_handler / _handle_query here (removed
+    # 2026-08-09). register_query_handler recorded a handler name with the
+    # host but nothing ever routed an external query to it -- see
+    # docs/determinism.md, "Why there is no RegisterQueryHandler". Use
+    # set_query_state, which any caller can read via
+    # GET /api/workflows/:id/query?key=X regardless of whether a worker
+    # currently has the workflow loaded.
 
     # --------------------------------------------------------------------
     # 26. defer — register deferred cleanup

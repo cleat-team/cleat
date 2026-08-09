@@ -1158,11 +1158,9 @@ class TestHostCallsTest {
         // No-op should not throw
     }
 
-    @Test
-    void testRegisterQueryHandlerDoesNotThrow() {
-        host.registerQueryHandler("myQuery");
-        // No-op should not throw
-    }
+    // There is no testRegisterQueryHandlerDoesNotThrow here (removed
+    // 2026-08-09; see docs/determinism.md, "Why there is no
+    // RegisterQueryHandler").
 
     @Test
     void testCleatSendRecordsCallInHistory() {

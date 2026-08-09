@@ -670,11 +670,12 @@ class CleatTestEnvTest {
     void testRegisterHandlers() {
         env.execute(h -> {
             h.registerUpdateHandler("myUpdate");
-            h.registerQueryHandler("myQuery");
             return "";
         });
         // No crash = success
     }
+    // There is no registerQueryHandler test here (removed 2026-08-09; see
+    // docs/determinism.md, "Why there is no RegisterQueryHandler").
 
     // ======================================================================
     // 31. Durable state (setState / getState / deleteState / hasState)
