@@ -17,14 +17,35 @@ import (
 	"strconv"
 	"strings"
 	"time"
+)
 
-	"github.com/cleat-team/cleat/engine"
+// Dialect identifies the SQL dialect a Runner applies migrations for.
+//
+// Deliberately not engine.Dialect: this package is meant to be a leaf that
+// anything bootstrapping a database schema can depend on, including
+// engine/testutil. engine/testutil is imported by many of engine's,
+// migration's and plugin's own *_test.go files (internal tests, same
+// package as the code under test), and Go refuses to build a package whose
+// internal test files import something that imports the package itself
+// ("import cycle not allowed in test") -- so if this package imported
+// engine.Dialect, engine/testutil could not import this package without
+// breaking every one of those. A three-value string enum is cheap enough to
+// declare twice; callers that already have an engine.Dialect (e.g.
+// cmd/cleat-worker/main.go) convert with a plain string conversion, since
+// the two types share the same underlying values by construction --
+// TestDialectValuesMatchEngine below pins that.
+type Dialect string
+
+const (
+	DialectPostgres Dialect = "postgres"
+	DialectMySQL    Dialect = "mysql"
+	DialectMSSQL    Dialect = "mssql"
 )
 
 // Runner applies pending SQL migrations to a database.
 type Runner struct {
 	db            *sql.DB
-	dialect       engine.Dialect
+	dialect       Dialect
 	migrationsDir string
 }
 
@@ -81,7 +102,7 @@ const migrationsLockKey int64 = 7215842093104561
 // docker-entrypoint-initdb.d via psql, where each statement runs in its own
 // implicit transaction and a LOCAL setting would be discarded immediately.
 func (r *Runner) trackingTable() string {
-	if r.dialect == engine.DialectPostgres {
+	if r.dialect == DialectPostgres {
 		return "public.schema_migrations"
 	}
 	return "schema_migrations"
@@ -89,7 +110,7 @@ func (r *Runner) trackingTable() string {
 
 // NewRunner creates a migration runner that reads .sql files from the
 // dialect-specific subdirectory under dir and applies pending ones against db.
-func NewRunner(db *sql.DB, dialect engine.Dialect, dir string) *Runner {
+func NewRunner(db *sql.DB, dialect Dialect, dir string) *Runner {
 	return &Runner{
 		db:            db,
 		dialect:       dialect,
@@ -176,7 +197,7 @@ type sqlSession interface {
 // none: there, this returns the pool unchanged and the behaviour is exactly
 // what it was before.
 func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
-	if r.dialect != engine.DialectPostgres {
+	if r.dialect != DialectPostgres {
 		return r.db, func() {}, nil
 	}
 
@@ -205,21 +226,21 @@ func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 func (r *Runner) ensureMigrationsTable(ctx context.Context, session sqlSession) error {
 	var ddl string
 	switch r.dialect {
-	case engine.DialectPostgres:
+	case DialectPostgres:
 		ddl = `
 		CREATE TABLE IF NOT EXISTS ` + r.trackingTable() + ` (
 			version    TEXT PRIMARY KEY,
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)
 		`
-	case engine.DialectMySQL:
+	case DialectMySQL:
 		ddl = `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    VARCHAR(255) PRIMARY KEY,
 			applied_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
 		)
 		`
-	case engine.DialectMSSQL:
+	case DialectMSSQL:
 		ddl = `
 		IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'schema_migrations')
 			CREATE TABLE schema_migrations (
@@ -331,13 +352,13 @@ func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migra
 	// MySQL and MSSQL drivers require statement splitting for
 	// multi-statement SQL. Postgres (pq) handles it natively.
 	switch r.dialect {
-	case engine.DialectMySQL:
+	case DialectMySQL:
 		for _, stmt := range splitSQL(m.sql) {
 			if _, err := tx.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("execute: %w", err)
 			}
 		}
-	case engine.DialectMSSQL:
+	case DialectMSSQL:
 		for _, batch := range splitMSSQL(m.sql) {
 			if _, err := tx.ExecContext(ctx, batch); err != nil {
 				return fmt.Errorf("execute: %w", err)
@@ -354,7 +375,7 @@ func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migra
 	// other one. The files do set search_path (see trackingTable), and a pool
 	// where one connection resolves unqualified names differently from the
 	// rest is a source of failures that only reproduce under load.
-	if r.dialect == engine.DialectPostgres {
+	if r.dialect == DialectPostgres {
 		if _, err := tx.ExecContext(ctx, "RESET search_path"); err != nil {
 			return fmt.Errorf("reset search_path: %w", err)
 		}
@@ -364,13 +385,13 @@ func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migra
 	var recordSQL string
 	var recordArgs []interface{}
 	switch r.dialect {
-	case engine.DialectPostgres:
+	case DialectPostgres:
 		recordSQL = "INSERT INTO " + r.trackingTable() + " (version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING"
 		recordArgs = []interface{}{versionStr, time.Now()}
-	case engine.DialectMySQL:
+	case DialectMySQL:
 		recordSQL = "INSERT IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)"
 		recordArgs = []interface{}{versionStr, time.Now()}
-	case engine.DialectMSSQL:
+	case DialectMSSQL:
 		recordSQL = "IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = @p1) INSERT INTO schema_migrations (version, applied_at) VALUES (@p1, @p2)"
 		recordArgs = []interface{}{versionStr, time.Now()}
 	default:
