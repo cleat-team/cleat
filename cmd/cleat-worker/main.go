@@ -930,7 +930,19 @@ func main() {
 		mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
 
 		// Version management endpoints.
-		engine.RegisterVersionHandler(mux, store)
+		//
+		// api.scopedStore, not store: store is the process-wide connection
+		// opened at boot against the default tenant. Passing it here served
+		// every caller's GET /api/versions, listStaleAlerts, runGC,
+		// markDeprecated, and -- worst -- POST
+		// /api/versions/<name>/<v>/purge (which permanently deletes a
+		// workflow definition) from the default tenant's data regardless of
+		// who authenticated. api.scopedStore is the same per-request
+		// tenant resolution every other handler in this file uses (see
+		// server.go's storeFor/scopedStore doc comments); it refuses rather
+		// than falling back to the default tenant when a request has no
+		// authenticated tenant and --require-auth is on.
+		engine.RegisterVersionHandler(mux, api.scopedStore)
 
 		// Plugin discovery endpoint.
 		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
