@@ -953,9 +953,9 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 // ---------------------------------------------------------------------------
 
 type Worker struct {
-	id                   string
-	logger               *slog.Logger
-	store                engine.WorkflowStore
+	id     string
+	logger *slog.Logger
+	store  engine.WorkflowStore
 
 	// storeTenantID is the tenant `store` was opened as, and therefore the
 	// only tenant this worker can execute anything for. See executeWorkflow's
