@@ -429,9 +429,27 @@ public final class JsonHelper {
             return stringifyList((List<Object>) obj);
         }
         if (obj instanceof Boolean || obj instanceof Number) {
+            // Correct: JSON numbers and booleans are their toString form.
             return obj.toString();
         }
-        return obj.toString();
+        // Anything else used to fall through to obj.toString(), which for an
+        // ordinary POJO produces "com.example.Result@1a2b3c" -- not JSON.
+        //
+        // That was worse than it looks. The engine's only gate is json.Valid
+        // (coerceResultJSON), so a workflow returning a POJO had its result
+        // silently replaced with {} and one log line. The value was gone, and
+        // nothing on the Java side had said anything was wrong.
+        //
+        // Throwing instead tells the author at the point of the mistake. The
+        // message names the supported shapes rather than only the problem,
+        // because "unsupported type" without them just moves the guessing.
+        throw new IllegalArgumentException(
+            "JsonHelper.stringify cannot serialise " + obj.getClass().getName()
+                + ". Supported: String, Map, List, Boolean, Number, null. "
+                + "Returning this from a workflow would have produced "
+                + "non-JSON text, which the host replaces with {} -- the result "
+                + "would be lost silently. Build a Map (or return JSON text as "
+                + "a String) instead.");
     }
 
     /**
