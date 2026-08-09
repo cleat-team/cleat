@@ -301,36 +301,58 @@ func TestCompactionOfRunningWorkflow(t *testing.T) {
 // supported event types.
 func TestCompactionRoundTripThenReplay(t *testing.T) {
 	// Include all supported event types to exercise every branch of
-	// extractCompactionState and buildFullHistoryFromCompaction.
+	// extractCompactionState and buildFullHistoryFromCompaction. Every field
+	// that has a legitimate non-zero value for its event type is given one
+	// here (rather than left at the Go zero value) precisely because the
+	// comparator (eventFieldsMatch) is now reflection-based and checks every
+	// field: a field left at zero can round-trip "successfully" through a
+	// broken mapping for the trivial reason that zero equals zero. TimestampMs
+	// (S4c), ErrNonRetryable (S4a), NewVersion, StreamChunkIndex/StreamFinish,
+	// StateKeys, and ParentWorkflowID/ParentClosePolicy were all added to
+	// CompactedEvent in the same change that made this comparator
+	// reflection-based; see compaction.go's CompactedEvent field docs for why
+	// each one matters to replay.
 	events := []EventRecord{
-		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "do", Request: `{}`, Response: `{"ok":true}`},
-		{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "fail", Request: `{}`, Response: ``, Err: "timeout"},
-		{Step: 2, EventType: EventTypeCall},
-		{Step: 3, EventType: EventTypeAwaitSignals, SignalNames: "sig1,sig2", TimeoutMs: 10000},
-		{Step: 4, EventType: EventTypeSignalReceived, SignalName: "sig1", SignalPayload: `{"data":"hello"}`},
-		{Step: 5, EventType: EventTypeDefer, DeferID: "defer-0", DeferDescription: "cleanup DB"},
-		{Step: 6, EventType: EventTypeChildWorkflow, ChildName: "child-wf", ChildInput: `{"x":1}`, RunID: "run-001"},
-		{Step: 7, EventType: EventTypeAwaitChild, RunID: "run-001", Response: `{"result":"done"}`},
-		{Step: 8, EventType: EventTypeAwaitChild, RunID: "run-002", Err: "child failed"},
-		{Step: 9, EventType: EventTypeContinueAsNew, NewInput: `{"restart":true}`},
-		{Step: 10, EventType: EventTypeHeartbeat, Service: "svc", Op: "long-op"},
-		{Step: 11, EventType: EventTypeAwaitAllChildren, Response: `[{"run_id":"c1","result":"ok"}]`},
-		{Step: 12, EventType: EventTypePluginCall, PluginName: "p", PluginFunc: "f",
+		{Step: 0, EventType: EventTypeCall, TimestampMs: 1000, Service: "svc", Op: "do", Request: `{}`, Response: `{"ok":true}`},
+		{Step: 1, EventType: EventTypeCall, TimestampMs: 2000, Service: "svc", Op: "fail", Request: `{}`, Response: ``, Err: "connection reset", ErrNonRetryable: false},
+		{Step: 2, EventType: EventTypeCall, TimestampMs: 2500, Service: "svc", Op: "fail-hard", Request: `{}`, Err: "bad request", ErrNonRetryable: true},
+		{Step: 3, EventType: EventTypeCall},
+		{Step: 4, EventType: EventTypeAwaitSignals, SignalNames: "sig1,sig2", TimeoutMs: 10000},
+		{Step: 5, EventType: EventTypeSignalReceived, SignalName: "sig1", SignalPayload: `{"data":"hello"}`},
+		{Step: 6, EventType: EventTypeDefer, DeferID: "defer-0", DeferDescription: "cleanup DB"},
+		{Step: 7, EventType: EventTypeChildWorkflow, ChildName: "child-wf", ChildInput: `{"x":1}`, RunID: "run-001",
+			ParentWorkflowID: "parent-wf-1", ParentClosePolicy: "TERMINATE"},
+		{Step: 8, EventType: EventTypeAwaitChild, RunID: "run-001", Response: `{"result":"done"}`},
+		{Step: 9, EventType: EventTypeAwaitChild, RunID: "run-002", Err: "child failed"},
+		{Step: 10, EventType: EventTypeContinueAsNew, NewInput: `{"restart":true}`, NewVersion: 3},
+		{Step: 11, EventType: EventTypeHeartbeat, Service: "svc", Op: "long-op"},
+		{Step: 12, EventType: EventTypeAwaitAllChildren, Response: `[{"run_id":"c1","result":"ok"}]`},
+		{Step: 13, EventType: EventTypePluginCall, PluginName: "p", PluginFunc: "f",
 			PluginInput: `{"x":1}`, PluginOutput: `{"result":"ok"}`, PluginError: ""},
-		{Step: 13, EventType: EventTypePluginCall, PluginName: "p", PluginFunc: "g",
+		{Step: 14, EventType: EventTypePluginCall, PluginName: "p", PluginFunc: "g",
 			PluginInput: `{}`, PluginOutput: ``, PluginError: "not found"},
-		{Step: 14, EventType: EventTypeCreatePromise, PromiseName: "prom-1", PromiseID: "pid-001"},
-		{Step: 15, EventType: EventTypeAwaitPromise, PromiseID: "pid-001"},
-		{Step: 16, EventType: EventTypePromiseResolved, PromiseID: "pid-001", PromiseResult: `{"status":"ok"}`},
-		{Step: 17, EventType: EventTypePromiseRejected, PromiseID: "pid-002", PromiseError: "card declined"},
-		{Step: 18, EventType: EventTypeUpdateHandler, UpdateHandlerName: "update-shipping"},
-		{Step: 19, EventType: EventTypeStateMutation, StateKey: "count", StateValue: "3", StateDelta: 1, StateOp: "increment"},
-		{Step: 20, EventType: EventTypeRunDetached},
-		{Step: 21, EventType: EventTypeAcquireLock, LockKey: "my-lock", LockTTLMs: 30000, LockAcquired: 1},
-		{Step: 22, EventType: EventTypeReleaseLock, LockKey: "my-lock"},
-		{Step: 23, EventType: EventTypeScopeAcquired, ScopeKey: "vo:order:123:"},
-		{Step: 24, EventType: EventTypePluginCallStreamChunk,
-			PluginName: "p", PluginFunc: "f", PluginOutput: `{"chunk":1}`, StreamChunkIndex: 0, StreamFinish: true},
+		{Step: 15, EventType: EventTypeCreatePromise, PromiseName: "prom-1", PromiseID: "pid-001"},
+		{Step: 16, EventType: EventTypeAwaitPromise, PromiseID: "pid-001"},
+		{Step: 17, EventType: EventTypePromiseResolved, PromiseID: "pid-001", PromiseResult: `{"status":"ok"}`},
+		{Step: 18, EventType: EventTypePromiseRejected, PromiseID: "pid-002", PromiseError: "card declined"},
+		{Step: 19, EventType: EventTypeUpdateHandler, UpdateHandlerName: "update-shipping"},
+		{Step: 20, EventType: EventTypeStateMutation, StateKey: "count", StateValue: "3", StateDelta: 1, StateOp: "increment"},
+		{Step: 21, EventType: EventTypeStateMutation, StateKey: "order:", StateOp: "list", StateKeys: `["order:1","order:2"]`},
+		{Step: 22, EventType: EventTypeRunDetached},
+		{Step: 23, EventType: EventTypeAcquireLock, LockKey: "my-lock", LockTTLMs: 30000, LockAcquired: 1},
+		{Step: 24, EventType: EventTypeReleaseLock, LockKey: "my-lock"},
+		{Step: 25, EventType: EventTypeScopeAcquired, ScopeKey: "vo:order:123:"},
+		{Step: 26, EventType: EventTypePluginCallStreamChunk,
+			PluginName: "p", PluginFunc: "f", PluginOutput: `{"chunk":1}`, StreamChunkIndex: 3, StreamFinish: true},
+		{Step: 27, EventType: EventTypeFetch, FetchMethod: "POST", FetchURL: "https://example.com/x",
+			FetchHeaders: `{"Authorization":"..."}`, FetchBody: `{"q":1}`, FetchResponse: `{"status":200}`},
+		{Step: 28, EventType: EventTypeDurableLog, Message: "hello", LogLevel: "info", LogKV: "key=val"},
+		{Step: 29, EventType: EventTypeDurableSend, Service: "svc", Op: "notify", Request: `{"x":1}`},
+		{Step: 30, EventType: EventTypeDurableScheduleInvoke, Service: "svc", Op: "notify-later", Request: `{"x":1}`, DurationMs: 5000},
+		{Step: 31, EventType: EventTypeScheduleCron, CronWorkflowName: "cleanup", CronExpr: "0 0 * * *",
+			CronTimezone: "UTC", CronInput: `{}`, CronScheduleID: "sched-1", CronResult: `{"ok":true}`},
+		{Step: 32, EventType: EventTypeDeleteCron, CronScheduleID: "sched-1"},
+		{Step: 33, EventType: EventTypeListCrons, CronResult: `["sched-1"]`},
 	}
 
 	// Compact all events (simulating a fully compacted workflow) and reconstruct.
