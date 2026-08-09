@@ -959,6 +959,95 @@ func (b *wasmtimeBackend) dispatchFetch(
 }
 
 // ---------------------------------------------------------------------------
+// durable-cron interface
+// ---------------------------------------------------------------------------
+
+// extractStringFromSimplePacked decodes the output string from a handler
+// result packed by packSimpleResult (memory.go):
+//
+//	bits 32-63 = written length
+//	bits 8-31  = unused
+//	bits 0-7   = errCode
+//
+// This is a different layout from extractStringFromPacked, which decodes
+// packDurableCallResult's bits-40-63-for-length layout. ScheduleCron and
+// ListCrons (engine/schedules.go) both return packSimpleResult, like most
+// string-returning host calls other than the durable-call/plugin-call family
+// -- reusing extractStringFromPacked here would right-shift the written
+// length by an extra 8 bits and silently return "" for any response under
+// 256 bytes. Confirmed against packSimpleResult's actual bit layout; this
+// helper is scoped to the two cron dispatchers below rather than changed
+// package-wide.
+func extractStringFromSimplePacked(packed int64, buf []byte) string {
+	r := uint64(packed)
+	actualLen := uint32(r >> 32)
+	if actualLen > uint32(len(buf)) {
+		actualLen = uint32(len(buf))
+	}
+	return string(buf[:actualLen])
+}
+
+// dispatchScheduleCron handles (string,string,string,string) -> string.
+func (b *wasmtimeBackend) dispatchScheduleCron(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 4 || b.handler == nil {
+		return nil
+	}
+	workflowName := readStrArg(args, 0, nargs)
+	cronExpr := readStrArg(args, 1, nargs)
+	timezone := readStrArg(args, 2, nargs)
+	input := readStrArg(args, 3, nargs)
+
+	buf := make([]byte, 65536)
+	packed := b.handler.ScheduleCron(ctxWithMem(context.Background(), buf), nil,
+		workflowName, cronExpr, timezone, input, 0, 65536)
+	response := extractStringFromSimplePacked(packed, buf)
+
+	setResultString(results, nresults, response)
+	return nil
+}
+
+// dispatchDeleteCron handles (string) -> void, per the WIT signature
+// (durable-delete-cron has no return type -- the only void host call in
+// cleat.wit). DeleteCron (engine/schedules.go) writes no output buffer, only
+// an errCode via packSimpleResult, so there is nothing to extract. results
+// still gets a best-effort u64 write: setResultU64 already no-ops when
+// nresults is 0, which is what wasmtime asks for on a component function
+// that returns nothing, so this stays the same shape as every other
+// dispatch* method here instead of special-casing void.
+func (b *wasmtimeBackend) dispatchDeleteCron(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
+	scheduleID := readStrArg(args, 0, nargs)
+	r := b.handler.DeleteCron(context.Background(), nil, scheduleID)
+	setResultU64(results, nresults, uint64(r))
+	return nil
+}
+
+// dispatchListCrons handles () -> string.
+func (b *wasmtimeBackend) dispatchListCrons(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+
+	buf := make([]byte, 65536)
+	packed := b.handler.ListCrons(ctxWithMem(context.Background(), buf), nil, 0, 65536)
+	response := extractStringFromSimplePacked(packed, buf)
+
+	setResultString(results, nresults, response)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // deprecated fallback
 // ---------------------------------------------------------------------------
 
@@ -1061,6 +1150,11 @@ var witTypeMap = map[string]map[string]cbType{
 	},
 	"cleat:host-calls/durable-fetch": {
 		"fetch": cbTypeFetch,
+	},
+	"cleat:host-calls/durable-cron": {
+		"durable-schedule-cron": cbTypeScheduleCron,
+		"durable-delete-cron":   cbTypeDeleteCron,
+		"durable-list-crons":    cbTypeListCrons,
 	},
 }
 
