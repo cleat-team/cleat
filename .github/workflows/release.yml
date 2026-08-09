@@ -34,21 +34,43 @@ jobs:
         with:
           node-version: "20"
 
+      # working-directory is `web`, not `cmd/cleat-worker/web`.
+      #
+      # It was the latter until 2026-08-09, and that directory contains only
+      # dist/ -- no package.json -- so the `if [ -f package.json ]` below always
+      # took the else branch and printed "using pre-built dist/". The dashboard
+      # was never rebuilt for a release; every binary shipped whatever dist/ was
+      # last committed by hand. Measured: rebuilding from the real source
+      # produced entirely different assets (the committed build had two JS
+      # chunks, a fresh one has a single 94 kB chunk), so the shipped dashboard
+      # was genuinely older than the source, not merely re-hashed.
+      #
+      # web/vite.config.ts already writes to ../cmd/cleat-worker/web/dist, which
+      # is what cmd/cleat-worker/server.go embeds, so building here lands in the
+      # right place with no copy step.
       - name: Build Svelte UI
-        working-directory: cmd/cleat-worker/web
+        working-directory: web
         run: |
-          if [ -f package.json ]; then
-            npm ci
-            npm run build
-          else
-            echo "No Svelte UI source found — using pre-built dist/."
+          if [ ! -f package.json ]; then
+            echo "::error::web/package.json is missing. The dashboard source has moved."
+            echo "Refusing to release: the previous behaviour here was to fall back to"
+            echo "the committed dist/, which is how a stale dashboard shipped unnoticed."
+            exit 1
           fi
+          npm ci
+          npm run build
 
+      # Now meaningful. While nothing rebuilt dist/, this could never be dirty,
+      # so it passed every release without checking anything.
       - name: Validate no dirty dist/
         run: |
           if [ -n "$(git status --porcelain cmd/cleat-worker/web/dist/)" ]; then
-            echo "::error::cmd/cleat-worker/web/dist/ has uncommitted changes."
-            echo "Run the Svelte UI build and commit the results before releasing."
+            echo "::error::cmd/cleat-worker/web/dist/ differs from a fresh build of web/."
+            echo "The committed dashboard is not what this source produces. Run:"
+            echo "    cd web && npm ci && npm run build"
+            echo "and commit cmd/cleat-worker/web/dist/."
+            git status --porcelain cmd/cleat-worker/web/dist/
+            git diff --stat cmd/cleat-worker/web/dist/
             exit 1
           fi
 
