@@ -216,7 +216,7 @@ func runPluginInstall(args []string) {
 		return
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
 		os.Exit(1)
@@ -294,7 +294,7 @@ func listInstalledPlugins() {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
 		os.Exit(1)
@@ -364,7 +364,7 @@ func runPluginUpdate(args []string) {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
 		os.Exit(1)
@@ -469,7 +469,7 @@ func runPluginUninstall(args []string) {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
 		os.Exit(1)

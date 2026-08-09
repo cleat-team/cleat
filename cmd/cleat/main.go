@@ -13,7 +13,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -980,7 +979,7 @@ func runDeploy(args []string) {
 		return
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
@@ -1236,7 +1235,7 @@ func runVersions(name string) {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
@@ -1283,7 +1282,7 @@ func runRollback(name string, version int) {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
@@ -1325,7 +1324,7 @@ func runSchedule(args []string) {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
@@ -1525,7 +1524,7 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 	}
 
 	if connStr != "" {
-		db, err := sql.Open("postgres", connStr)
+		db, err := openPostgresDB(connStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: cannot connect to database: %v\n", err)
 			os.Exit(1)
@@ -1662,7 +1661,7 @@ func runLock(args []string) {
 		return
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot connect to database: %v\n", err)
 		os.Exit(1)

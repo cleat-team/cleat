@@ -63,6 +63,11 @@ walkthrough with a real-world example.
   independent implementation of the full workflow store. One exception: database-enforced
   tenant isolation (row-level security) exists on PostgreSQL only. On MySQL and SQL Server,
   tenant scoping is applied in application queries with no database-level backstop.
+  **This is engine support, not CLI support**: the `cleat` CLI (`deploy`, `versions`,
+  `rollback`, `schedule`, `lock`, `plugin`) only connects to PostgreSQL today, and refuses
+  a MySQL or SQL Server connection string with an explicit error rather than a confusing
+  driver failure. `cmd/deploy-workflow --driver mysql|mssql` is the one multi-dialect
+  entry point, and it covers `deploy` only (see `tiers.yaml`).
 - **Plugin system** -- extensible via LLM, Slack, webhooks, and custom plugins;
   plugins run in-process with lifecycle hooks.
 - **WASM workflows** -- write in Go or Rust, compile to WebAssembly, zero sandbox
