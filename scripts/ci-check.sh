@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# ci-check.sh — All-in-one local CI check
+# ci-check.sh — the cheap local checks, before pushing
 #
-# Runs the full suite of lint, test, and build steps that the GitHub
-# Actions pipeline would run.  Designed for developers to run before
-# pushing to avoid CI failures.
+# This is NOT the CI pipeline. CI runs around fifty checks; this runs the
+# handful that are quick locally and catch the most common reasons a push goes
+# red. Passing here is not evidence CI will pass.
+#
+# It also does not replace the dedicated gates, which have their own scripts and
+# their own reasons to exist:
+#   scripts/tier-gate.sh          tier 1 (needs all three DSNs; see tiers.yaml)
+#   scripts/check-skip-budget.sh  per-job skip ceilings
+#   scripts/check-skips.sh        conditional-skip guard
+#   scripts/check-test-only-code.sh
 #
 # Usage:
 #   ./scripts/ci-check.sh
@@ -12,6 +19,14 @@
 # Exit code:
 #   0 — all checks pass
 #   1 — one or more checks failed
+#
+# HISTORY, because this file rotted badly and silently. Until 2026-08-09 it
+# tested ./durable/... (renamed to ./engine/ by the 2026-06-01 package move)
+# and built crates/durable-{macro,sdk,java} (renamed to cleat-*). Five of its
+# steps pointed at paths that no longer existed, so it exited 1 at the first
+# test step and had done for months, while its header claimed to run the full
+# pipeline. The preflight below is the fix for the class, not just the
+# instance: a path that disappears now fails loudly here instead of rotting.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -69,10 +84,56 @@ run_step() {
     echo ""
 }
 
+# ---------------------------------------------------------------------------
+# Preflight: every path this script names must exist.
+#
+# This is the anti-rot check. Without it a renamed directory turns a step into
+# a silent no-op or a confusing failure a hundred lines later, which is exactly
+# how this script came to spend months unable to run at all.
+# ---------------------------------------------------------------------------
+REQUIRED_PATHS=(
+    "engine" "internal" "plugins" "cmd" "wasm"
+    "cleat" "python-sdk" "packages/cleat-as"
+    "crates/cleat-macro" "crates/cleat-sdk"
+)
+missing=()
+for p in "${REQUIRED_PATHS[@]}"; do
+    [ -e "$REPO_ROOT/$p" ] || missing+=("$p")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+    echo -e "${RED}ci-check.sh is out of date: these paths do not exist:${NC}" >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    echo "" >&2
+    echo "Fix the paths in this script rather than deleting the check -- a step" >&2
+    echo "pointing at a missing directory does not test anything." >&2
+    exit 1
+fi
+
+# A note this script cannot enforce but every reader needs (see CLAUDE.md):
+# an unset CLEAT_TEST_* DSN makes that dialect's tests SKIP, and the suite
+# still prints ok. The Go tests below are worth far less without them.
+for v in CLEAT_TEST_POSTGRES CLEAT_TEST_MYSQL CLEAT_TEST_MSSQL; do
+    [ -n "${!v:-}" ] || echo -e "${YELLOW}[warn]${NC} $v is unset — its dialect will skip silently"
+done
+
 # ===========================================================================
 # 1. LINT
 # ===========================================================================
 section "LINT"
+
+# CI's lint-go job runs this and golangci-lint does not, so it has to be here:
+# a struct field that changes an alignment block passes every other check and
+# still fails the push.
+# shellcheck disable=SC2016  # the $() must run inside the child shell, not here
+run_step "gofmt -l ." \
+    bash -c 'unformatted=$(gofmt -l . | grep -v "/testdata/" || true)
+        if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            echo "Run: gofmt -w <file>" >&2
+            exit 1
+        fi
+        echo "OK: all Go files are gofmt-clean."'
 
 run_step "go vet ./..." \
     go vet ./...
@@ -106,19 +167,25 @@ run_step "ruff check python-sdk/" \
 run_step "shellcheck scripts/*.sh benchmarks/*.sh" \
     shellcheck scripts/*.sh benchmarks/*.sh
 
-run_step "clippy (durable-macro)" \
-    bash -c "cd '$REPO_ROOT/crates/durable-macro' && cargo clippy --all-targets -- -D warnings"
+run_step "clippy (cleat-macro)" \
+    bash -c "cd '$REPO_ROOT/crates/cleat-macro' && cargo clippy --all-targets -- -D warnings"
 
-run_step "clippy (durable-sdk)" \
-    bash -c "cd '$REPO_ROOT/crates/durable-sdk' && cargo clippy --all-targets -- -D warnings"
+run_step "clippy (cleat-sdk)" \
+    bash -c "cd '$REPO_ROOT/crates/cleat-sdk' && cargo clippy --all-targets -- -D warnings"
 
 # ===========================================================================
 # 2. TEST
 # ===========================================================================
 section "TEST"
 
-run_step "go test (core) ./durable/..." \
-    go test -race -count=1 ./durable/...
+run_step "go test (engine) ./engine/..." \
+    go test -race -count=1 ./engine/...
+
+run_step "go test (wasm) ./wasm/..." \
+    go test -race -count=1 ./wasm/...
+
+run_step "go test (cleat module)" \
+    bash -c "cd '$REPO_ROOT/cleat' && go test -race -count=1 ./..."
 
 run_step "go test (internal) ./internal/..." \
     go test -race -count=1 ./internal/...
@@ -136,9 +203,9 @@ run_step "assemblyscript tests" \
     bash -c "cd '$REPO_ROOT/packages/cleat-as' && npm test"
 
 # Java tests are optional locally — skip if no Java/Gradle
-if command -v gradle &>/dev/null || [ -x "$REPO_ROOT/crates/durable-java/gradlew" ]; then
+if command -v gradle &>/dev/null || [ -x "$REPO_ROOT/crates/cleat-java/gradlew" ]; then
     run_step "java tests" \
-        bash -c "cd '$REPO_ROOT/crates/durable-java' && if [ -x gradlew ]; then ./gradlew test; else gradle test; fi"
+        bash -c "cd '$REPO_ROOT/crates/cleat-java' && if [ -x gradlew ]; then ./gradlew test; else gradle test; fi"
 else
     echo -e "  ${YELLOW}[SKIP]${NC} java tests (gradle not available)"
     RESULTS+=("skip java tests")
@@ -152,14 +219,18 @@ section "BUILD"
 run_step "go build ./cmd/..." \
     go build ./cmd/...
 
-run_step "cargo build (durable-macro)" \
-    bash -c "cd '$REPO_ROOT/crates/durable-macro' && cargo build"
+run_step "cargo build (cleat-macro)" \
+    bash -c "cd '$REPO_ROOT/crates/cleat-macro' && cargo build"
 
-run_step "cargo build (durable-sdk)" \
-    bash -c "cd '$REPO_ROOT/crates/durable-sdk' && cargo build"
+run_step "cargo build (cleat-sdk)" \
+    bash -c "cd '$REPO_ROOT/crates/cleat-sdk' && cargo build"
 
+# NOT `npm ci`. packages/cleat-as/node_modules is COMMITTED (139 tracked files
+# as of 2026-08-09, `git ls-files packages/cleat-as/node_modules | wc -l`), and
+# npm ci wipes node_modules before installing -- so the old step deleted tracked
+# files out of the developer's checkout as a side effect of a pre-push check.
 run_step "assemblyscript build" \
-    bash -c "cd '$REPO_ROOT/packages/cleat-as' && npm ci && npm run build"
+    bash -c "cd '$REPO_ROOT/packages/cleat-as' && npm run build"
 
 run_step "python install" \
     bash -c "cd '$REPO_ROOT/python-sdk' && pip install --upgrade pip && pip install ."
