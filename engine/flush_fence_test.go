@@ -134,6 +134,64 @@ func TestFlushEvent_FenceHeld(t *testing.T) {
 	}
 }
 
+// TestFlushEvent_FenceHeld_IdempotentReflushIsNotFenceLost pins the
+// composition insertEventSQL's doc describes: the fence's WHERE EXISTS
+// clause and the pre-existing
+// `ON CONFLICT ... WHERE event_history.response = '' AND error IS NULL`
+// clause both gate the same statement, for different reasons, and a zero-row
+// result from the second (the row already carries a terminal
+// response/error, so the conflict resolution correctly declined to
+// overwrite it) must not be reported as ErrFenceLost just because
+// afterFencedInsert's disambiguation only expects zero rows when the fence
+// itself failed. The fence is still held throughout this test -- only the
+// idempotent-skip path is under test.
+func TestFlushEvent_FenceHeld_IdempotentReflushIsNotFenceLost(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			ctx := context.Background()
+
+			wfID := newIntentWorkflow(t, ctx, store, "flush-fence-idempotent")
+			wf, err := store.ClaimWorkflow(ctx, "worker-live")
+			if err != nil || wf == nil || wf.ID != wfID {
+				t.Fatalf("ClaimWorkflow: wf=%v err=%v", wf, err)
+			}
+
+			eng := NewEngine(nil, nil,
+				WithDB(rawDBOf(t, store)),
+				WithWorkflowStore(store),
+				WithWorkerID("worker-live"),
+				WithGeneration(wf.Generation),
+				WithTenantID(DefaultTenantUUID))
+
+			rec := EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Response: "first-response"}
+			if flushErr := eng.flushEvent(ctx, wfID, rec, ""); flushErr != nil {
+				t.Fatalf("first flushEvent: %v, want success", flushErr)
+			}
+
+			// Re-flush the SAME step. event_history.response is now
+			// non-empty, so the ON CONFLICT ... WHERE clause declines the
+			// update -- zero rows affected, same signal a lost fence
+			// produces, but for an unrelated reason. The fence is still held
+			// (same worker, same generation, no reap in between).
+			replay := EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Response: "second-response-should-not-land"}
+			if flushErr := eng.flushEvent(ctx, wfID, replay, ""); flushErr != nil {
+				t.Fatalf("idempotent re-flush under a held fence: err = %v, want nil (this is not a fence loss)", flushErr)
+			}
+
+			hist, err := store.LoadEventHistory(ctx, wfID)
+			if err != nil {
+				t.Fatalf("LoadEventHistory: %v", err)
+			}
+			if len(hist) != 1 || hist[0].Response != "first-response" {
+				t.Fatalf("history = %+v, want the first response untouched by the re-flush", hist)
+			}
+		})
+	}
+}
+
 // TestFlushEvent_UnfencedWhenNoClaimIdentity pins the backward-compatible
 // default: an Engine built without WithWorkerID/WithGeneration (every
 // existing embedder/test that constructs one directly, not through a claim)
