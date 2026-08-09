@@ -273,15 +273,6 @@ tier2:
     known_failures_allowed: true
 
   components:
-    - id: multi-tenancy-mssql
-      why: |
-        Promoting to tier 1 — tracked here only until #333 lands. SQL Server has real RLS
-        (seven CREATE SECURITY POLICY statements over a TVF keyed on SESSION_CONTEXT), it
-        fails closed (no session context reads as empty, not as everything), and `sa` gets
-        no owner exemption. #345 adds the administrative principal; #333 builds the test
-        schema from the shipped migrations so the tests actually run under the policies.
-      open_items: ["§2.71 residual (#333, 9 failures)", "§3.12 residual"]
-
     - id: multi-tenancy-mysql
       status: NOT SUPPORTED — single-tenant only    # D1, decided 2026-08-06
       why: |
