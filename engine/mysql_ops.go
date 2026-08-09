@@ -1456,3 +1456,42 @@ func (s *MySQLStore) ClaimDueSchedule(ctx context.Context, name string, expected
 	}
 	return n == 1, nil
 }
+
+// GetDueSchedulesAcrossTenants returns every tenant's due schedules.
+//
+// Same story as ClaimWorkflowsAcrossTenants, and the same refusal. MySQL has no
+// row-level security, so this is the tenant-scoped query with its predicate
+// dropped -- which widens nothing on the topology cmd/cleat-worker actually
+// builds, because MySQLStoreFactory gives each tenant its OWN physical database
+// (cleat_<tenant_id>). The other tenants' schedules are not filtered out, they
+// are in another database, so the query would return one tenant's schedules and
+// report that it had swept them all.
+//
+// So it refuses, and the worker warns once and falls back to the per-tenant
+// read. Against a single shared database -- NewMySQLStore with no factory,
+// which is what every MySQL test in this package uses and a real if less common
+// deployment -- it does what its name says.
+func (s *MySQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedule, error) {
+	if s.perTenantDatabase {
+		return nil, fmt.Errorf("mysql store is one tenant's database (cleat_%s), so a due-schedule "+
+			"read without a tenant predicate still sees only that tenant: %w",
+			s.tenantID, ErrCrossTenantClaimUnsupported)
+	}
+
+	// No FOR UPDATE SKIP LOCKED, matching the other two dialects: the locks are
+	// released before the caller acts on the rows, and ClaimDueSchedule's
+	// compare-and-swap is what makes delivery at-least-once. See
+	// migrations/postgres/024_cross_tenant_schedules.sql.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
+		FROM workflow_schedules
+		WHERE enabled = 1 AND next_run_at <= NOW(6)
+		ORDER BY next_run_at
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("get due schedules across tenants: %w", err)
+	}
+	defer rows.Close()
+
+	return scanDueSchedules(rows)
+}

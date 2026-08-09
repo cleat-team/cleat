@@ -289,7 +289,21 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # skip and runs in every job. That is the point of it: the defect it guards
 # has now shipped twice, and both times every job without a SQL Server was
 # blind to it.
-test-go/engine	452	# runner 2026-08-09: 451 + the MSSQL schedule tenant_id test (+1)
+#
+# 452 -> 453: TestMySQLIntegration_CrossTenantSchedulesRefusedOnFactoryStore,
+# one MySQL-gated test. +1.
+#
+# The PostgreSQL cross-tenant schedule tests in
+# engine/cross_tenant_schedules_test.go add NO skips -- this job sets
+# CLEAT_TEST_DB, so they run here, and PostgreSQL is the only dialect where
+# admin.get_due_schedules exists.
+#
+# WORTH READING IF YOU ARE ABOUT TO SKIP THIS BUMP: the local check said
+# "within budget". It was wrong to trust, and this file already says why --
+# darwin measured 449 against a ceiling of 452, but the runner sits +4 above
+# darwin, so CI would have reported 453 and tripped the guard. A local run that
+# is under budget by less than the offset is not a pass.
+test-go/engine	453	# runner 2026-08-09: 452 + the MySQL cross-tenant schedules test (+1)
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -370,7 +384,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	452	# same as test-go/engine, and for the same reason; see the note there
+cluster	453	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a

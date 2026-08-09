@@ -918,3 +918,93 @@ func crossTenantProvisioningGap(err error) string {
 	}
 	return ""
 }
+
+// CrossTenantScheduleReader is implemented by stores that can read due
+// schedules for every tenant in a single query.
+//
+// Separate from CrossTenantClaimer rather than folded into it, because the two
+// are provisioned separately and a deployment can legitimately have one and not
+// the other: 023 grants the claim, 024 grants this, and a database that applied
+// only the first should get a working dispatch loop and a loud warning about
+// schedules rather than a worker that refuses both.
+//
+// The returned schedules carry TenantID, and the caller MUST re-scope to it
+// before doing anything else -- starting the run, and claiming the schedule.
+// The widened view covers the read and nothing after it. See
+// cmd/cleat-worker's scheduleLoop.
+type CrossTenantScheduleReader interface {
+	GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedule, error)
+}
+
+// GetDueSchedulesAcrossTenants returns every tenant's due schedules.
+//
+// It calls admin.get_due_schedules (migrations/postgres/024_cross_tenant_schedules.sql)
+// for the same reason ClaimWorkflowsAcrossTenants calls admin.claim_workflows:
+// the exemption that lets it see across tenants belongs to that function's
+// owner and nowhere else.
+//
+// No beginTxWithRLS. That helper sets the tenant GUC the policies read, and
+// this call must not be scoped to a tenant -- setting one would filter the very
+// rows it exists to find.
+func (s *PostgresStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedule, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, def_name, entry_point, cron_expression, input, enabled,
+		       next_run_at, last_run_at, timezone, tenant_id, misfire_policy,
+		       catch_up_limit, overlap_policy, last_run_id
+		FROM admin.get_due_schedules()
+	`)
+	if err != nil {
+		if reason := crossTenantScheduleProvisioningGap(err); reason != "" {
+			return nil, fmt.Errorf("get due schedules across tenants: %s: %w", reason, ErrCrossTenantClaimUnsupported)
+		}
+		return nil, fmt.Errorf("get due schedules across tenants: %w", err)
+	}
+	defer rows.Close()
+
+	return scanDueSchedules(rows)
+}
+
+// crossTenantScheduleProvisioningGap is crossTenantProvisioningGap for 024.
+//
+// Same two SQLSTATEs and the same reasoning -- see that function -- pointing at
+// the migration that provisions this call rather than the claim. Kept separate
+// so the remediation an operator is handed names the file they actually need to
+// apply; a worker can have 023 and not 024.
+func crossTenantScheduleProvisioningGap(err error) string {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return ""
+	}
+	switch pqErr.Code {
+	case "42883":
+		return "admin.get_due_schedules does not exist; apply migrations/postgres/024_cross_tenant_schedules.sql"
+	case "42501":
+		return "this connection may not EXECUTE admin.get_due_schedules; grant it as " +
+			"migrations/postgres/024_cross_tenant_schedules.sql documents"
+	}
+	return ""
+}
+
+// scanDueSchedules reads the rows a due-schedule query returns.
+//
+// Shared by the cross-tenant read and, on PostgreSQL, by the tenant-scoped one
+// for the same reason scanClaimedWorkflows is shared: the cross-tenant column
+// list lives in a migration, and the only thing keeping it in step with this
+// scan is that there is exactly one scan.
+func scanDueSchedules(rows *sql.Rows) ([]Schedule, error) {
+	var schedules []Schedule
+	for rows.Next() {
+		var sch Schedule
+		var lastRunAt sql.NullTime
+		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
+			return nil, fmt.Errorf("get due schedules scan: %w", err)
+		}
+		if lastRunAt.Valid {
+			sch.LastRunAt = &lastRunAt.Time
+		}
+		schedules = append(schedules, sch)
+	}
+	return schedules, rows.Err()
+}
