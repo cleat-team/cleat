@@ -608,9 +608,11 @@ enforced by row-level security on PostgreSQL and SQL Server, and by an explicit
 `tenant_id` predicate on MySQL -- which means a non-default tenant's workflows
 never execute.
 
-(Their *schedules* still do not fire either, and this flag does not change that:
-the firing loop reads due schedules through the same single-tenant store, so
-nothing enqueues those runs in the first place. That is tracked separately.)
+Their **schedules** are the other half, and this flag covers both. The firing
+loop reads due schedules through the same widened path, then re-scopes to the
+schedule's own tenant before starting the run and before advancing the schedule
+-- so a non-default tenant's cron fires, and the run it starts is recorded under
+that tenant.
 
 With this set, the claim sees every tenant in a single query. Each claimed
 workflow then executes against a store scoped to its **own** tenant, so the
@@ -628,8 +630,8 @@ for you.
 
 | dialect | what the deployment must do |
 |---------|-----------------------------|
-| PostgreSQL | Apply `023_cross_tenant_claim.sql` as a superuser. It creates `cleat_dispatcher` (`NOLOGIN BYPASSRLS`) to own the claim function, and grants `EXECUTE` to `cleat_app`. |
-| SQL Server | Add the worker's principal to the `cleat_admin` database role -- see `012_admin_role.sql`, which documents the exact statements. The role ships with no members. |
+| PostgreSQL | Apply **both** `023_cross_tenant_claim.sql` and `024_cross_tenant_schedules.sql` as a superuser. 023 creates `cleat_dispatcher` (`NOLOGIN BYPASSRLS`) to own the claim function; 024 adds the due-schedule read to the same role. They are separate grants on purpose — with 023 alone, workflows execute but cron never fires, and the warning names the file you are missing. |
+| SQL Server | Add the worker's principal to the `cleat_admin` database role -- see `012_admin_role.sql`, which documents the exact statements. The role ships with no members. One grant covers both the claim and the schedule read: `fn_tenant_filter` is bound to every table involved. |
 | MySQL | **Not supported on the default topology.** `MySQLStoreFactory` gives each tenant its own physical database (`cleat_<tenant_id>`), so there is no predicate to drop -- the other tenants' rows are not filtered out, they are in another database. The worker warns once and claims its own tenant. A MySQL deployment pointed at a *single shared* database does work, since there isolation really is just a `tenant_id` predicate. |
 
 If the flag is set but the store cannot claim across tenants -- wrong dialect,

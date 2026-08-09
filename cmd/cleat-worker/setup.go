@@ -992,6 +992,12 @@ type Worker struct {
 	// crossTenantUnsupportedOnce keeps the fallback warning to one line.
 	crossTenantUnsupportedOnce sync.Once
 
+	// crossTenantSchedulesUnsupportedOnce is separate from the claim's, because
+	// 023 and 024 are separate migrations: a deployment can have the claim and
+	// not the schedule read, and collapsing the two warnings would report only
+	// whichever failed first.
+	crossTenantSchedulesUnsupportedOnce sync.Once
+
 	concurrency          int
 	maxQueued            int
 	heartbeatInterval    time.Duration
@@ -2074,7 +2080,7 @@ func (w *Worker) scheduleLoop() {
 			w.healthTracker.recordRun("schedule")
 			schStart := time.Now()
 			w.scheduleMu.Lock()
-			schedules, err := w.store.GetDueSchedules(w.ctx)
+			schedules, err := w.dueSchedules()
 			if err != nil {
 				w.scheduleMu.Unlock()
 				if isConnectionError(err) {
@@ -2103,8 +2109,31 @@ func (w *Worker) scheduleLoop() {
 					input, _ = json.Marshal(m)
 				}
 
+				// Everything below this line runs against the schedule's OWN
+				// tenant, not the worker's. That is the whole bargain of the
+				// cross-tenant read above: one widened query finds the due set,
+				// and the firing itself -- the definition lookup, the overlap
+				// check, the run, the compare-and-swap -- is scoped again
+				// immediately. Nothing downstream of here sees another tenant.
+				tenantID := sch.TenantID
+				if tenantID == "" {
+					// Rows written before tenant_id existed, and every fixture
+					// that does not set one.
+					tenantID = engine.DefaultTenantUUID
+				}
+				schStore, terr := w.storeForTenant(tenantID)
+				if terr != nil {
+					// Refuse rather than fall back to w.store: firing this
+					// schedule through the wrong tenant's store would write one
+					// tenant's run under another's isolation, which is worse
+					// than a schedule that is late.
+					w.logger.ErrorContext(w.ctx, "Scheduler: no store for the schedule's tenant; not firing",
+						"worker_id", w.id, "schedule", sch.Name, "tenant_id", tenantID, "error", terr)
+					continue
+				}
+
 				// Find latest version.
-				versions, verr := w.store.ListVersions(w.ctx, sch.DefName)
+				versions, verr := schStore.ListVersions(w.ctx, sch.DefName)
 				if verr != nil || len(versions) == 0 {
 					w.logger.WarnContext(w.ctx, "Scheduler: definition not found", "worker_id", w.id, "schedule", sch.Name, "def_name", sch.DefName)
 					continue
@@ -2133,12 +2162,9 @@ func (w *Worker) scheduleLoop() {
 				// TestScheduleLoop_OnlySeesItsOwnTenantsSchedules so the next
 				// person does not have to rediscover it.
 				//
-				// Reading the tenant off the row costs nothing and makes the
-				// loop correct by construction if that scope ever widens.
-				tenantID := sch.TenantID
-				if tenantID == "" {
-					tenantID = engine.DefaultTenantUUID
-				}
+				// tenantID and schStore were resolved above, before the first
+				// store call, so no read in this iteration can precede the
+				// re-scoping.
 				// In the SCHEDULE's zone, not the worker's. This used to be
 				// engine.NextCronTime(sch.CronExpression, time.Now()), and
 				// time.Now() carries the local zone of whichever machine in the
@@ -2173,7 +2199,7 @@ func (w *Worker) scheduleLoop() {
 				// a job that occasionally overruns its interval quietly becomes
 				// an unbounded fan-out.
 				if engine.OverlapPolicyOrDefault(sch.OverlapPolicy) == engine.OverlapSkip && sch.LastRunID != "" {
-					prev, gerr := w.store.GetWorkflowByID(w.ctx, sch.LastRunID)
+					prev, gerr := schStore.GetWorkflowByID(w.ctx, sch.LastRunID)
 					switch {
 					case gerr != nil:
 						// Cannot tell. Fire rather than skip: the promise is
@@ -2183,7 +2209,7 @@ func (w *Worker) scheduleLoop() {
 							"worker_id", w.id, "schedule", sch.Name, "last_run_id", sch.LastRunID, "error", gerr)
 					case prev != nil && (prev.Status == "running" || prev.Status == "ready"):
 						nextRun, _ := scheduleAdvance(sch.CronExpression, scheduled, loc, time.Now(), engine.CatchUpLimitOrDefault(sch.CatchUpLimit))
-						if _, cerr := w.store.ClaimDueSchedule(w.ctx, sch.Name, scheduled, nextRun, ""); cerr != nil {
+						if _, cerr := schStore.ClaimDueSchedule(w.ctx, sch.Name, scheduled, nextRun, ""); cerr != nil {
 							w.logger.ErrorContext(w.ctx, "Scheduler: failed to advance a skipped-for-overlap schedule", "worker_id", w.id, "schedule", sch.Name, "error", cerr)
 						}
 						w.logger.InfoContext(w.ctx, "Scheduler: firing skipped, previous run still in flight",
@@ -2203,7 +2229,7 @@ func (w *Worker) scheduleLoop() {
 						w.logger.InfoContext(w.ctx, "Scheduler: misfire policy is skip; not delivering the backlog",
 							"worker_id", w.id, "schedule", sch.Name,
 							"was_due_at", scheduled.Format(time.RFC3339), "resuming_at", future.Format(time.RFC3339))
-						if _, cerr := w.store.ClaimDueSchedule(w.ctx, sch.Name, scheduled, future, ""); cerr != nil {
+						if _, cerr := schStore.ClaimDueSchedule(w.ctx, sch.Name, scheduled, future, ""); cerr != nil {
 							w.logger.ErrorContext(w.ctx, "Scheduler: failed to advance a misfired schedule", "worker_id", w.id, "schedule", sch.Name, "error", cerr)
 						}
 						w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "schedule_misfire_skipped", 1)
@@ -2244,7 +2270,7 @@ func (w *Worker) scheduleLoop() {
 				// an instant staler than that would not dedup -- irrelevant up
 				// to weekly, real for a monthly schedule after a long outage.
 				idemKey := fmt.Sprintf("cron:%s:%s:%d", tenantID, sch.Name, scheduled.UTC().Unix())
-				runID, alreadyExisted, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, idemKey, tenantID, 0)
+				runID, alreadyExisted, serr := schStore.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, idemKey, tenantID, 0)
 				if serr != nil {
 					// Deliberately NOT advancing. The schedule stays due and
 					// the next tick retries it, which is what at-least-once
@@ -2266,7 +2292,7 @@ func (w *Worker) scheduleLoop() {
 				// instant. GetDueSchedules' row locks are released when its own
 				// transaction ends -- before any of the above ran -- so two
 				// workers polling milliseconds apart both saw this row as due.
-				claimed, cerr := w.store.ClaimDueSchedule(w.ctx, sch.Name, scheduled, nextRun, runID)
+				claimed, cerr := schStore.ClaimDueSchedule(w.ctx, sch.Name, scheduled, nextRun, runID)
 				if cerr != nil {
 					w.logger.ErrorContext(w.ctx, "Scheduler: failed to advance next run", "worker_id", w.id, "schedule", sch.Name, "error", cerr)
 					continue
@@ -2858,6 +2884,50 @@ func (w *Worker) storeFor(wf *engine.WorkflowInstance) engine.WorkflowStore {
 		return w.store
 	}
 	return st
+}
+
+// dueSchedules reads the schedules that are ready to fire.
+//
+// With claimAcrossTenants set it reads for every tenant in one query rather
+// than polling each separately -- the same bargain claimGeneral makes, and the
+// half that makes a non-default tenant's cron actually fire. 023 lets the
+// dispatch loop CLAIM another tenant's workflow; without this, nothing ever
+// enqueues one for it to claim, because the loop that would fire the schedule
+// cannot see the schedule.
+//
+// The widened view covers this read and nothing after it. scheduleLoop resolves
+// storeForTenant(sch.TenantID) before its first store call and runs the whole
+// firing through that.
+//
+// The provisioning gap is answered the same way as the claim's, and separately
+// from it: 024 is a different migration from 023, so a deployment can have one
+// and not the other. A store that cannot read across tenants warns once and
+// falls back to its own tenant's schedules -- the pre-existing behaviour --
+// rather than failing the loop, because a missing GRANT should narrow the
+// worker rather than stop it firing anything at all.
+func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
+	if w.claimAcrossTenants {
+		if xt, ok := w.store.(engine.CrossTenantScheduleReader); ok {
+			schedules, err := xt.GetDueSchedulesAcrossTenants(w.ctx)
+			if !errors.Is(err, engine.ErrCrossTenantClaimUnsupported) {
+				return schedules, err
+			}
+			w.crossTenantSchedulesUnsupportedOnce.Do(func() {
+				w.logger.WarnContext(w.ctx,
+					"claim-across-tenants is set but this store cannot read due schedules across "+
+						"tenants; only this worker's own tenant's schedules will fire",
+					"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", err)
+			})
+			return w.store.GetDueSchedules(w.ctx)
+		}
+		w.crossTenantSchedulesUnsupportedOnce.Do(func() {
+			w.logger.WarnContext(w.ctx,
+				"claim-across-tenants is set but this store does not support reading due schedules "+
+					"across tenants; only this worker's own tenant's schedules will fire",
+				"worker_id", w.id, "tenant_id", w.storeTenantID)
+		})
+	}
+	return w.store.GetDueSchedules(w.ctx)
 }
 
 // claimGeneral claims the next batch of runnable work.

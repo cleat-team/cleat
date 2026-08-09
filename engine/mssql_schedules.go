@@ -488,3 +488,66 @@ func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expected
 	}
 	return n == 1, nil
 }
+
+// GetDueSchedulesAcrossTenants returns every tenant's due schedules.
+//
+// Same mechanism as ClaimWorkflowsAcrossTenants and the same reasoning: SQL
+// Server's isolation here is dbo.fn_tenant_filter, and that predicate already
+// admits a connection whose login is a member of dbo.cleat_admin regardless of
+// SESSION_CONTEXT (migrations/mssql/012_admin_role.sql). So there is no second
+// query to write -- there is the same query, on a connection the predicate lets
+// through, and a check that this connection is actually one of those.
+//
+// Unlike PostgreSQL, no migration 024 equivalent is needed: 012 already grants
+// across every table fn_tenant_filter is bound to, and workflow_schedules is
+// one of them. What a deployment must do is grant the role, which it must
+// already have done for the cross-tenant claim.
+func (s *MSSQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedule, error) {
+	if err := s.requireCleatAdminMembership(ctx); err != nil {
+		return nil, err
+	}
+
+	// No beginTxWithContext: that helper sets SESSION_CONTEXT to this store's
+	// tenantID, which would misstate what this call is scoped to and is not
+	// load-bearing on an admin connection anyway.
+	//
+	// No READPAST/UPDLOCK either, matching the PostgreSQL side's decision to
+	// drop FOR UPDATE SKIP LOCKED: the row locks are released before the caller
+	// acts on the rows, and ClaimDueSchedule's compare-and-swap is what makes
+	// delivery at-least-once. See 024_cross_tenant_schedules.sql.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone,
+		       -- CONVERT, not the raw column: go-mssqldb scans UNIQUEIDENTIFIER
+		       -- into a Go string as 16 raw bytes. This value is load-bearing
+		       -- here in a way it is nowhere else -- the caller re-scopes the
+		       -- whole firing on it -- and a raw one fails the round trip back
+		       -- into StartNewRun's UNIQUEIDENTIFIER parameter.
+		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
+		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
+		FROM workflow_schedules
+		WHERE enabled = 1 AND next_run_at <= SYSUTCDATETIME()
+		ORDER BY next_run_at
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("get due schedules across tenants: %w", err)
+	}
+	defer rows.Close()
+
+	var schedules []Schedule
+	for rows.Next() {
+		var sch Schedule
+		var lastRunAt sql.NullTime
+		var inputStr string
+		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
+			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
+			return nil, fmt.Errorf("get due schedules across tenants scan: %w", err)
+		}
+		sch.Input = json.RawMessage(inputStr)
+		if lastRunAt.Valid {
+			sch.LastRunAt = &lastRunAt.Time
+		}
+		schedules = append(schedules, sch)
+	}
+	return schedules, rows.Err()
+}

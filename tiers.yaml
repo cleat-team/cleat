@@ -449,13 +449,14 @@ tier2:
            calls raise rather than working. Needs the WIT interface plus a mapping in
            wasm/component_rewrite.go, and a machine with componentize-py to verify on"
         - "rust and java SDKs declare no cron surface at all"
-        - "a non-default tenant's schedules never fire: the worker opens exactly one
-           default-tenant store, and GetDueSchedules only ever reads through it. Recorded
-           in engine.TestScheduleLoop_OnlySeesItsOwnTenantsSchedules. The second half of
-           this item -- 'dispatch has the same scope, so those tenants' workflows do not
-           execute either' -- is addressed by cross-tenant-claim below, behind
-           --claim-across-tenants. The schedule read is not, so the firing loop is still
-           the binding constraint: nothing enqueues those runs in the first place"
+        - "a non-default tenant's schedules fire ONLY with --claim-across-tenants set and
+           the database-side grants made. By default the worker opens exactly one
+           default-tenant store and GetDueSchedules reads through it, so those schedules
+           are stored, listed and never fired -- the default-topology behaviour recorded
+           in engine.TestScheduleLoop_OnlySeesItsOwnTenantsSchedules, which still passes
+           because the RLS it asserts is unchanged. Both halves are now behind that one
+           flag: cross-tenant-claim below executes the runs, cross-tenant-schedules
+           enqueues them"
 
     - id: cross-tenant-claim
       status: SUPPORTED on postgres and mssql, both behind a deployment grant — NOT on mysql
@@ -506,6 +507,48 @@ tier2:
            out on the first poll, via one WARN line, rather than at boot"
         - "mysql per-tenant-database topology would need database enumeration plus a union
            across cleat_* schemas; not implemented"
+
+    - id: cross-tenant-schedules
+      status: SUPPORTED on postgres and mssql, both behind a deployment grant — NOT on mysql
+      why: |
+        Added 2026-08-09, and it is the other half of cross-tenant-claim rather than a
+        feature in its own right. That one lets a worker CLAIM another tenant's runnable
+        workflow; this one is what ever enqueues one. Without it a non-default tenant's
+        cron schedule is stored, listed in the dashboard, shown as enabled with a
+        next_run_at, and never fires — so the claim had nothing to find.
+
+        Same flag (--claim-across-tenants), same three-dialect story, same tier and for
+        the same reason: it cannot be green on MySQL's shipped topology. See
+        cross-tenant-claim for the mechanism per dialect; the differences are:
+
+          postgres — a SECOND migration, 024_cross_tenant_schedules.sql, granting
+            EXECUTE on admin.get_due_schedules. Deliberately separate from 023: a
+            deployment can have one and not the other, and each failure names its own
+            file so an operator is not told to apply a migration they already have.
+          mssql — no new migration. 012's dbo.cleat_admin role is bound to every table
+            fn_tenant_filter covers, and workflow_schedules is one of them.
+          mysql — refuses with ErrCrossTenantClaimUnsupported on the factory topology,
+            exactly as the claim does.
+
+        THE EXEMPTION HERE IS NARROWER THAN 023's, and deliberately: SELECT on one table,
+        no UPDATE. 023's function must read and write in one statement because a
+        non-atomic claim hands the same workflow to two workers. This one only reads —
+        the advance is still ClaimDueSchedule, a compare-and-swap through the caller's
+        own tenant-scoped store, under RLS. That also means no FOR UPDATE SKIP LOCKED
+        (PostgreSQL requires UPDATE privilege for it), which costs a wasted round trip
+        when two workers race and changes no outcome: the CAS decides, as it always did.
+
+        AT-LEAST-ONCE IS UNCHANGED. Nothing here touches the delivery guarantee — the
+        same CAS and the same cron:<tenant>:<schedule>:<instant> idempotency key decide
+        it, and both run scoped to the schedule's own tenant.
+      open_items:
+        - "the widened read is only as safe as the re-scoping after it. Asserted by
+           cmd/cleat-worker's TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore,
+           which fails if the firing runs through the worker's own store"
+        - "no startup validation, same as cross-tenant-claim: a deployment that sets the
+           flag without applying 024 finds out on the first tick, via one WARN line"
+        - "the dashboard still shows a non-default tenant's schedule as enabled whether
+           or not the deployment can fire it; nothing surfaces which mode a worker is in"
 
     - id: backend-wazero
       why: |

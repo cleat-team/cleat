@@ -546,21 +546,11 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 	}
 	defer rows.Close()
 
-	var schedules []Schedule
-	for rows.Next() {
-		var sch Schedule
-		var lastRunAt sql.NullTime
-		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
-			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
-			return nil, err
-		}
-		if lastRunAt.Valid {
-			sch.LastRunAt = &lastRunAt.Time
-		}
-		schedules = append(schedules, sch)
-	}
-	if err := rows.Err(); err != nil {
+	// Shared with GetDueSchedulesAcrossTenants, whose column list lives in
+	// migrations/postgres/024_cross_tenant_schedules.sql. One scan is the only
+	// thing keeping that function's RETURNS TABLE in step with this code.
+	schedules, err := scanDueSchedules(rows)
+	if err != nil {
 		return nil, err
 	}
 	return schedules, tx.Commit()

@@ -595,6 +595,52 @@ func TestMySQLIntegration_CrossTenantClaimRefusedOnFactoryStore(t *testing.T) {
 	}
 }
 
+// TestMySQLIntegration_CrossTenantSchedulesRefusedOnFactoryStore is the
+// schedule half of the topology refusal, and it needs its own test rather than
+// riding on the claim's: the two are separate methods, and a store that
+// refuses the claim but silently answers the schedule read would report that
+// it had swept every tenant's schedules while sweeping one.
+//
+// Both halves together, for the same reason as the claim's: a method that
+// refused unconditionally would satisfy the first assertion and break the
+// shared-database deployment this exists to serve.
+func TestMySQLIntegration_CrossTenantSchedulesRefusedOnFactoryStore(t *testing.T) {
+	s, teardown := mysqlIntegrationStore(t)
+	defer teardown()
+	ctx := context.Background()
+
+	factory := NewMySQLStoreFactory(s.db, mysqlTestBaseDSN(t))
+	defer factory.Close()
+
+	const tenant = "33333333-3333-3333-3333-333333333333"
+	opened, closer, err := factory.OpenStore(ctx, tenant)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer closer.Close()
+
+	xt, ok := opened.(CrossTenantScheduleReader)
+	if !ok {
+		t.Fatal("a factory-opened MySQL store does not implement CrossTenantScheduleReader, so " +
+			"the worker would never ask it and never learn the read is unsupported here")
+	}
+	_, err = xt.GetDueSchedulesAcrossTenants(ctx)
+	if !errors.Is(err, ErrCrossTenantClaimUnsupported) {
+		t.Fatalf("GetDueSchedulesAcrossTenants on a per-tenant-database store returned %v, want "+
+			"ErrCrossTenantClaimUnsupported -- without it the worker believes every tenant's "+
+			"schedules will fire while only one tenant's can", err)
+	}
+	if !strings.Contains(err.Error(), tenant) {
+		t.Errorf("refusal does not name the tenant it is scoped to: %v", err)
+	}
+
+	// A store built directly, against one shared database, must NOT refuse.
+	if _, err := s.GetDueSchedulesAcrossTenants(ctx); errors.Is(err, ErrCrossTenantClaimUnsupported) {
+		t.Error("a directly-built MySQL store refused the cross-tenant schedule read; the refusal " +
+			"is unconditional, which breaks the shared-database deployment it is meant to serve")
+	}
+}
+
 // 9.
 func TestMySQLIntegration_ContinueAsNew(t *testing.T) {
 	s, teardown := mysqlIntegrationStore(t)

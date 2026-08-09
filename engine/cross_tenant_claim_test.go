@@ -80,6 +80,9 @@ func crossTenantClaimDB(t *testing.T) (adminDB, appDB *sql.DB, teardown func()) 
 	for _, stmt := range []string{
 		`GRANT USAGE ON SCHEMA admin TO ` + testutil.PostgresRLSTestRole,
 		`GRANT EXECUTE ON FUNCTION admin.claim_workflows(text, text[], integer) TO ` + testutil.PostgresRLSTestRole,
+		// 024's function, granted here for the same reason: the RLS test role's
+		// baseline is deliberately minimal and neither grant is part of it.
+		`GRANT EXECUTE ON FUNCTION admin.get_due_schedules() TO ` + testutil.PostgresRLSTestRole,
 	} {
 		if _, err := adminDB.Exec(stmt); err != nil {
 			t.Fatalf("grant cross-tenant claim access to the RLS test role: %v\nstatement: %s", err, stmt)
