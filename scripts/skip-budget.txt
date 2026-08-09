@@ -238,7 +238,12 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # first). A ceiling nobody can reach is a guard that cannot fail, and it
 # quietly corrupts the arithmetic on the next PR, which is how 3 became 4.
 # Measure, then write the number down.
-test-go/engine	442	# measured 2026-08-08: develop 434 + four cron host-call dialect tests (+8)
+# Reconciled against the runner on the first CI run, as the note at the top of
+# this file says to: darwin measured 442, the Linux runner 446. The DELTA is +8
+# on both -- the rule of thumb is right either way; the absolute base differs
+# by 4 because build tags and toolchain availability change which tests exist
+# at all (the runner also reports 4 fewer passing, the same 4 tests).
+test-go/engine	446	# runner 2026-08-08: develop 438 + four cron host-call dialect tests (+8); darwin measures 442
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -319,7 +324,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	442	# same as test-go/engine, and for the same reason; see the note there
+cluster	446	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a
