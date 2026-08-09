@@ -224,6 +224,157 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
 
+// ClaimWorkflowsAcrossTenants claims runnable workflows for every tenant.
+//
+// MySQL has no row-level security (IMPROVEMENT-PLAN.md 1.7): every method on
+// this store scopes itself with its own "AND tenant_id = ?" predicate rather
+// than relying on anything the database enforces. So unlike Postgres, which
+// borrows a role's RLS exemption (admin.claim_workflows,
+// migrations/postgres/023_cross_tenant_claim.sql), or SQL Server, which relies
+// on a role its filter predicate already special-cases (dbo.cleat_admin,
+// migrations/mssql/012_admin_role.sql), there is no separate mechanism to call
+// into here. This is the exact same three-step claim as ClaimWorkflows above
+// with that one predicate removed from the SELECT.
+//
+// The result columns and order match scanClaimedWorkflows (id, def_name,
+// def_version, status, input, assigned_to, next_wake_at, tenant_id,
+// created_at, error_code, error_op, generation, priority, trace_id) exactly,
+// so this reuses it rather than the dialect.scanWorkflowInstanceExtra helper
+// ClaimWorkflows uses -- that helper's MySQL branch does nothing different
+// from scanClaimedWorkflows, it exists only for the MSSQL input-as-string
+// quirk in the same function.
+//
+// It is NOT equivalent to the Postgres and SQL Server cross-tenant claims on
+// the topology cmd/cleat-worker actually builds (NewMySQLStoreFactory in
+// main.go). That factory gives each tenant its own physical database
+// (cleat_<tenant_id>; see MySQLStoreFactory's doc comment), and this store's
+// db field is a connection pool opened against exactly one of them. Dropping
+// the tenant_id predicate does not widen what that connection can see -- the
+// other tenants' rows are not filtered out, they are not IN this database.
+// On that topology this method would return exactly what ClaimWorkflows
+// returns while reporting that it had swept every tenant, so it refuses
+// instead: perTenantDatabase is set by OpenStore, and the refusal is
+// ErrCrossTenantClaimUnsupported, which cmd/cleat-worker's claimGeneral
+// handles by logging once and falling back to the per-tenant claim. Same work
+// gets done either way; the difference is whether the operator is told. Real
+// cross-tenant claiming on that topology would mean a different mechanism
+// entirely -- enumerating cleat_* databases via the master connection and
+// unioning across them -- and that is not implemented.
+//
+// Where this method does do what its name says: a deployment that points
+// NewMySQLStore at one shared database and relies on the tenant_id column
+// alone, with no MySQLStoreFactory in the picture. That is the shape every
+// MySQL test in this package uses, including the one this is tested against,
+// and it is a real (if less common) deployment shape -- nothing in MySQLStore
+// requires the factory's per-tenant-database topology.
+func (s *MySQLStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	if s.perTenantDatabase {
+		return nil, fmt.Errorf("mysql store is one tenant's database (cleat_%s), so a claim "+
+			"without a tenant predicate still sees only that tenant: %w", s.tenantID, ErrCrossTenantClaimUnsupported)
+	}
+
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows across tenants: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	tqClause, tqArgs := s.taskQueueClause()
+
+	// Step 1: Select IDs with SKIP LOCKED. No tenant_id predicate -- see above.
+	selArgs := make([]any, 0, len(tqArgs)+1)
+	selArgs = append(selArgs, tqArgs...)
+	selArgs = append(selArgs, limit)
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id FROM workflow_instances
+		WHERE status = 'ready'
+		  AND next_wake_at <= NOW(6)
+		  AND task_queue IN (%s)
+		ORDER BY priority ASC, created_at
+		LIMIT ?
+		FOR UPDATE SKIP LOCKED
+	`, tqClause), selArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows across tenants: select: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("claim workflows across tenants: scan id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim workflows across tenants: rows: %w", err)
+	}
+	rows.Close()
+
+	if len(ids) == 0 {
+		tx.Rollback()
+		return nil, nil
+	}
+
+	// Step 2: Update the claimed rows.
+	idClause := inClausePlaceholders(len(ids))
+	idArgs := make([]any, len(ids))
+	for i, id := range ids {
+		idArgs[i] = id
+	}
+
+	updateArgs := append([]any{workerID}, idArgs...)
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE workflow_instances
+		SET status = 'running',
+		    assigned_to = ?,
+		    heartbeat_at = NOW(6),
+		    generation = generation + 1
+		WHERE id IN (%s)
+	`, idClause), updateArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows across tenants: update: %w", err)
+	}
+
+	// Step 3: Fetch the full rows. Column list and order match
+	// scanClaimedWorkflows's expectations exactly -- see the doc comment above.
+	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
+		FROM workflow_instances
+		WHERE id IN (%s)
+	`, idClause), idArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows across tenants: fetch: %w", err)
+	}
+	defer rows2.Close()
+
+	wfs, err := scanClaimedWorkflows(rows2)
+	if err != nil {
+		return nil, err
+	}
+	if err := rows2.Err(); err != nil {
+		return nil, fmt.Errorf("claim workflows across tenants rows: %w", err)
+	}
+
+	// No finishClaim here, deliberately, matching PostgresStore's cross-tenant
+	// claim rather than ClaimWorkflows above. finishClaim's over-limit backstop
+	// releases excess through ReleaseWorkflow, which filters "AND tenant_id =
+	// ?" using this store's OWN tenantID -- correct for a claim scoped to one
+	// tenant, wrong here: an excess row belonging to a different tenant would
+	// silently fail to release and stay claimed until its lease expires, with
+	// an ERROR log line blaming "releasing an over-claimed workflow failed"
+	// rather than the real cause. It is also unreachable by construction: the
+	// UPDATE in step 2 touches exactly the ids the LIMIT-bounded SELECT in step
+	// 1 chose, so there is no path to more rows than requested the way the old
+	// CTE recheck theory once worried about for Postgres (see the comment on
+	// ClaimWorkflows in store_lifecycle.go).
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return wfs, nil
+}
+
 // ---------------------------------------------------------------------------
 // CompleteWorkflow, FailWorkflow, ReleaseWorkflow
 // ---------------------------------------------------------------------------

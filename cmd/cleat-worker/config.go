@@ -130,6 +130,7 @@ var (
 	maxQuotaChildren              = flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
 	maxQuotaConcurrencyKeys       = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
 	maxQuotaSchedules             = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited)")
+	claimAcrossTenants            = flag.Bool("claim-across-tenants", false, "Claim runnable work for every tenant in one query instead of only this worker's own. Requires a database-side grant; see migrations/postgres/023_cross_tenant_claim.sql and migrations/mssql/012_admin_role.sql")
 	maxWorkflowDuration           = flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
 	healthCheckInterval           = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
 	maxPluginConnections          = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")

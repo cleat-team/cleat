@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,6 +341,91 @@ func TestMSSQLIntegration_ClaimStickyWorkflows(t *testing.T) {
 	}
 	if len(claimedB) != 0 {
 		t.Errorf("expected 0 for worker-B, got %d", len(claimedB))
+	}
+}
+
+// TestMSSQLIntegration_ClaimWorkflowsAcrossTenants proves the mechanism
+// described in ClaimWorkflowsAcrossTenants's doc comment (mssql_lifecycle.go)
+// against a real, RLS-enforced database: an ordinary tenant-scoped claim
+// cannot reach another tenant's ready work, and a claim run through a
+// dbo.cleat_admin member can -- via the identical SELECT/UPDATE, on a
+// connection dbo.fn_tenant_filter treats differently, not a different query.
+func TestMSSQLIntegration_ClaimWorkflowsAcrossTenants(t *testing.T) {
+	store, adminDB := setupMSSQLIntegrationTest(t)
+	ctx := context.Background()
+	deployWorkflowDef(t, store, "xtenant-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
+
+	const otherTenant = "11111111-1111-1111-1111-111111111111"
+
+	ownID := uuid.New().String()
+	otherID := uuid.New().String()
+	for _, seed := range []struct{ id, tenant string }{
+		{ownID, DefaultTenantUUID},
+		{otherID, otherTenant},
+	} {
+		if _, err := adminDB.ExecContext(ctx, `
+			INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
+			VALUES (@p1, 'xtenant-wf', 1, 'ready', DATEADD(DAY, -1, SYSUTCDATETIME()), '{}', 'default', @p2)
+		`, seed.id, seed.tenant); err != nil {
+			t.Fatalf("seed workflow %s (tenant %s): %v", seed.id, seed.tenant, err)
+		}
+	}
+
+	// store is scoped to DefaultTenantUUID through the same connection string
+	// CLEAT_TEST_MSSQL names -- setupMSSQLIntegrationTest builds it via
+	// NewMSSQLStoreFactory -- which is not a cleat_admin member (012_admin_role.sql:
+	// "sa reads IS_ROLEMEMBER('cleat_admin') = 0 and stays filtered"). So the
+	// ordinary claim must see only its own tenant's row.
+	scoped, err := store.ClaimWorkflows(ctx, "worker-scoped", 10)
+	if err != nil {
+		t.Fatalf("ClaimWorkflows: %v", err)
+	}
+	if len(scoped) != 1 || scoped[0].ID != ownID {
+		t.Fatalf("ClaimWorkflows claimed %v, want exactly [%s] -- it must not see tenant %s's row %s",
+			claimedIDs(scoped), ownID, otherTenant, otherID)
+	}
+
+	// adminDB (testutil.MSSQLAdminDB) is authenticated as a member of
+	// dbo.cleat_admin. A store built on it must reach the row the ordinary
+	// claim above could not.
+	adminStore := NewMSSQLStore(adminDB, "default")
+	across, err := adminStore.ClaimWorkflowsAcrossTenants(ctx, "worker-cross", 10)
+	if err != nil {
+		t.Fatalf("ClaimWorkflowsAcrossTenants: %v", err)
+	}
+	if len(across) != 1 || across[0].ID != otherID {
+		t.Fatalf("ClaimWorkflowsAcrossTenants claimed %v, want exactly [%s]", claimedIDs(across), otherID)
+	}
+	claimed := across[0]
+	if claimed.TenantID != otherTenant {
+		t.Errorf("claimed workflow TenantID = %q, want %q -- callers re-scope on this field, "+
+			"see CrossTenantClaimer's doc comment", claimed.TenantID, otherTenant)
+	}
+	if claimed.Status != "running" {
+		t.Errorf("claimed workflow status = %q, want %q", claimed.Status, "running")
+	}
+	if claimed.AssignedTo != "worker-cross" {
+		t.Errorf("claimed workflow AssignedTo = %q, want %q", claimed.AssignedTo, "worker-cross")
+	}
+}
+
+// TestMSSQLIntegration_ClaimWorkflowsAcrossTenants_RequiresCleatAdminMembership
+// proves the guard described in requireCleatAdminMembership's doc comment: a
+// claim attempted on a connection that is not a dbo.cleat_admin member must
+// fail loudly rather than silently return an empty (or worse, one-tenant)
+// result that reads exactly like an idle queue.
+func TestMSSQLIntegration_ClaimWorkflowsAcrossTenants_RequiresCleatAdminMembership(t *testing.T) {
+	store, _ := setupMSSQLIntegrationTest(t)
+	ctx := context.Background()
+
+	_, err := store.ClaimWorkflowsAcrossTenants(ctx, "worker-noadmin", 10)
+	if err == nil {
+		t.Fatal("ClaimWorkflowsAcrossTenants succeeded on a non-admin connection, " +
+			"want an error naming the missing cleat_admin grant")
+	}
+	if !strings.Contains(err.Error(), "cleat_admin") || !strings.Contains(err.Error(), "012_admin_role.sql") {
+		t.Errorf("error = %q, want it to name cleat_admin and migrations/mssql/012_admin_role.sql "+
+			"so an operator knows exactly what to grant and where it is documented", err.Error())
 	}
 }
 
