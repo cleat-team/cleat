@@ -323,20 +323,25 @@ tier2:
       open_items:
         - "no cross-language replay coverage — tests/cross-language is Go↔Rust only,
            so nothing checks that a Java guest replays a history the Go host recorded"
-        - "the workflow result is double-encoded, TWICE, and the recorded comparison was
-           wrong. Measured 2026-08-09 from engine.TestJavaWorkflowExecute: the whole result
-           is a JSON string containing JSON, AND withdraw_ref/deposit_ref are themselves
-           JSON strings containing JSON, so reading withdraw_ref.ref takes three Unmarshals.
-           CleatEntryProcessor emits JsonHelper.stringify(result) for any non-void return
-           and the workflow returns a String it already built as JSON -- the idiom
-           JsonHelper's own javadoc recommends. NOT Java-only, which is why the item said to
-           compare all three first: Go has NO typed-result path at all (wasm/exports.go only
-           compiles a string return and encodeJSONString quotes it unconditionally), so the
-           same mistake is one json.Marshal away there. Rust is the only one with a correct,
-           tested typed path. The engine cannot detect any of it -- coerceResultJSON only
-           calls json.Valid, and a JSON string literal is valid JSON. Pinned by
-           engine.assertJavaResultShape so a fix cannot land silently; fixing it is a
-           contract decision across three SDKs, not a repair"
+        - "RESOLVED 2026-08-09: the workflow result came back double-encoded TWICE, and the
+           comparison recorded here was also wrong. The whole result was a JSON string
+           containing JSON -- CleatEntryProcessor emits JsonHelper.stringify(result) for
+           any non-void return and MoneyTransfer returned a String it had already
+           hand-built as JSON, the idiom JsonHelper's own javadoc recommended -- and
+           withdraw_ref/deposit_ref were themselves JSON-in-a-string because the workflow
+           embedded a host call's JSON response into a string field.
+           Fixed by returning Map<String, Object> from the entry point (stringify
+           serialises a Map correctly, once) and parsing nested host-call responses with
+           JsonHelper.parseObject. The contract this conforms to is the ABI's, and it is
+           language-agnostic: an entry point returns a STRING CONTAINING A JSON-ENCODED
+           OBJECT. There is no 'object' at the WASM boundary, only a length and bytes,
+           which is why every SDK invented its own answer and they diverged.
+           Verified by engine.TestJavaWorkflowExecute, which asserts the object shape and
+           that amount is a NUMBER -- converting the result to a Map first regressed 100
+           to \"100\", and asserting only field presence did not catch it.
+           Go is NOT fixed and is a separate gap: it has no typed-result path at all, and
+           its two generated wrappers disagree (one passes the string through, the other
+           quotes it)"
         - "RESOLVED 2026-08-09: JsonHelper.stringify fell through to obj.toString() for any
            unsupported type, producing non-JSON like com.example.Foo@1a2b3c. json.Valid then
            rejected it and coerceResultJSON replaced the whole result with {} plus one log

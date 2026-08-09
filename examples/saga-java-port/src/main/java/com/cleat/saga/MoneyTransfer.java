@@ -3,6 +3,10 @@ package com.cleat.saga;
 import cleat.HostCalls;
 import cleat.CleatEntry;
 import cleat.CleatResult;
+import cleat.JsonHelper;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * Money Transfer Saga -- a stress test for cleat's Java SDK under TeaVM/WASM.
@@ -40,10 +44,16 @@ public class MoneyTransfer {
      *
      * @param h     the {@link HostCalls} instance for durable orchestration
      * @param input the JSON-encoded transfer input string
-     * @return a JSON result string indicating success or failure
+     * @return the result as an object: {@code {"status":"completed",...}}, not
+     *         a JSON string containing JSON. The generated export wrapper
+     *         calls {@code JsonHelper.stringify(result)} exactly once on
+     *         whatever this method returns, so the return value here must
+     *         already be the real object (a {@code Map}), not a String that
+     *         is itself JSON text -- stringify would then quote and escape
+     *         it, double-encoding the result.
      */
     @CleatEntry(name = "transfer_money")
-    public static String transferMoney(HostCalls h, String input) {
+    public static Map<String, Object> transferMoney(HostCalls h, String input) {
         // ---- Phase 0: Initialize queryable state ----
         h.setQueryState("status", "started");
         h.cleatLog("Money transfer saga started");
@@ -51,7 +61,7 @@ public class MoneyTransfer {
         if (input == null || input.equals("{}") || input.isEmpty()) {
             h.setQueryState("status", "failed");
             h.setQueryState("error", "empty input");
-            return errorJson("empty input");
+            return errorResult("empty input");
         }
 
         // ---- Phase 1: Parse input (manual JSON field extraction) ----
@@ -67,13 +77,13 @@ public class MoneyTransfer {
         if (fromAccount == null || toAccount == null || amountStr == null) {
             h.setQueryState("status", "failed");
             h.setQueryState("error", "missing required fields");
-            return errorJson("required fields: from, to, amount");
+            return errorResult("required fields: from, to, amount");
         }
 
         if (fromAccount.equals(toAccount)) {
             h.setQueryState("status", "failed");
             h.setQueryState("error", "source and destination must differ");
-            return errorJson("source and destination accounts must be different");
+            return errorResult("source and destination accounts must be different");
         }
 
         if (currency == null) {
@@ -121,7 +131,7 @@ public class MoneyTransfer {
                 h.setQueryState("phase", "failed:withdraw");
                 h.setQueryState("error", "withdrawal failed: " + withdrawResult.getError());
                 h.cleatLog("Step 1 failed: " + withdrawResult.getError());
-                return errorJson("withdrawal failed: " + escapeJSON(withdrawResult.getError()));
+                return errorResult("withdrawal failed: " + withdrawResult.getError());
             }
 
             withdrawRef = withdrawResult.getValue();
@@ -154,16 +164,16 @@ public class MoneyTransfer {
                     // The saga is in an inconsistent state! Log it.
                     h.setQueryState("compensation_error",
                         "compensation failed: " + compResult.getError());
-                    return errorJson("cancelled but compensation failed: "
-                        + escapeJSON(compResult.getError()));
+                    return errorResult("cancelled but compensation failed: "
+                        + compResult.getError());
                 }
 
                 h.cleatLog("Compensation succeeded, funds returned to " + fromAccount);
-                return jsonObject(
+                return resultObject(
                     "status", "cancelled",
                     "detail", "withdrawal reversed",
                     "from", fromAccount,
-                    "amount", amountStr,
+                    "amount", amountNumber(amountStr),
                     "currency", currency);
             }
         }
@@ -214,10 +224,10 @@ public class MoneyTransfer {
                     h.setQueryState("deposit_error", depositResult.getError());
                     h.setQueryState("compensation_error", compensateResult.getError());
 
-                    return errorJson("INCONSISTENT STATE: deposit failed ("
-                        + escapeJSON(depositResult.getError())
+                    return errorResult("INCONSISTENT STATE: deposit failed ("
+                        + depositResult.getError()
                         + ") and compensation also failed ("
-                        + escapeJSON(compensateResult.getError()) + ")");
+                        + compensateResult.getError() + ")");
                 }
 
                 // Compensation succeeded -- saga is consistent.
@@ -227,12 +237,12 @@ public class MoneyTransfer {
                 h.setQueryState("compensated", "true");
                 h.setQueryState("compensated_at", "after_deposit_failure");
 
-                return buildJson(
+                return resultObject(
                     "status", "compensated",
                     "error", "deposit failed: " + depositResult.getError(),
                     "from", fromAccount,
                     "to", toAccount,
-                    "amount", amountStr,
+                    "amount", amountNumber(amountStr),
                     "currency", currency,
                     "detail", "withdrawal reversed");
             }
@@ -248,14 +258,21 @@ public class MoneyTransfer {
         h.cleatLog("Transfer completed: " + amountStr + " " + currency
             + " from " + fromAccount + " to " + toAccount);
 
-        return buildJson(
+        // withdrawRef/depositRef are themselves JSON text returned by the host
+        // call (e.g. {"ref":"wd_abc123","status":"completed"}). Parse them
+        // into objects so they nest as withdraw_ref/deposit_ref *objects*
+        // below, rather than being embedded as an escaped JSON-in-a-string.
+        Map<String, Object> withdrawRefObj = JsonHelper.parseObject(withdrawRef);
+        Map<String, Object> depositRefObj = JsonHelper.parseObject(depositRef);
+
+        return resultObject(
             "status", "completed",
             "from_account", fromAccount,
             "to_account", toAccount,
-            "amount", amountStr,
+            "amount", amountNumber(amountStr),
             "currency", currency,
-            "withdraw_ref", withdrawRef,
-            "deposit_ref", depositRef,
+            "withdraw_ref", withdrawRefObj,
+            "deposit_ref", depositRefObj,
             "description", description);
     }
 
@@ -269,16 +286,19 @@ public class MoneyTransfer {
      *
      * @param h     the {@link HostCalls} instance
      * @param input the JSON input (ignored in this simple example)
-     * @return a JSON string with status information
+     * @return a status object (not a JSON string containing JSON -- see
+     *         {@link #transferMoney(HostCalls, String)})
      */
     @CleatEntry(name = "get_transfer_status")
-    public static String getTransferStatus(HostCalls h, String input) {
+    public static Map<String, Object> getTransferStatus(HostCalls h, String input) {
         // This entry point demonstrates a read-only workflow.
         // It does not set any queryable state but returns a static response.
         // In a real implementation, this would look up state from the host.
         h.cleatLog("getTransferStatus called with input: " + input);
-        return "{\"note\":\"Status is tracked via setQueryState during transfer_money. "
-            + "Queryable state is host-side only.\",\"version\":1}";
+        return resultObject(
+            "note", "Status is tracked via setQueryState during transfer_money. "
+                + "Queryable state is host-side only.",
+            "version", 1);
     }
 
     // ========================================================================
@@ -440,63 +460,63 @@ public class MoneyTransfer {
     }
 
     /**
-     * Build a simple JSON object from a key and value pair.
+     * Build a workflow-return object as a {@link Map} from alternating
+     * key/value pairs, values being anything {@code JsonHelper.stringify} can
+     * serialize (a {@link String}, a nested {@code Map} such as the parsed
+     * result of a host call, a {@link Number}, etc).
+     * <p>
+     * This is the return-value counterpart to {@link #buildJson}: it produces
+     * the object itself rather than JSON text, so the generated export
+     * wrapper's single {@code JsonHelper.stringify(result)} call is the only
+     * place the object gets encoded. Encoding a value here (e.g. quoting a
+     * nested host-call response as a string) would reintroduce the
+     * double-encoding this method exists to avoid.
      */
-    static String jsonObject(String k1, String v1) {
-        return "{\"" + escapeJSON(k1) + "\":\"" + escapeJSON(v1) + "\"}";
+
+    /**
+     * Parse the amount into a JSON *number*, not a string.
+     *
+     * extractJsonNumber returns the raw text, and putting that String into the
+     * result map serialised it as "100" rather than 100 -- a JSON string where
+     * the input had a number. That silently changes the type a consumer sees,
+     * and it slipped through because the shape assertion only checked the field
+     * was present.
+     *
+     * Long when the value is integral so amounts do not gain a spurious ".0",
+     * Double otherwise. Falls back to the raw text if it is not numeric at all,
+     * which cannot normally happen because extractJsonNumber has already
+     * matched a number -- but returning null here would drop the field.
+     */
+    static Object amountNumber(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        try {
+            if (raw.indexOf('.') < 0 && raw.indexOf('e') < 0 && raw.indexOf('E') < 0) {
+                return Long.valueOf(raw);
+            }
+            return Double.valueOf(raw);
+        } catch (NumberFormatException e) {
+            return raw;
+        }
+    }
+
+    static Map<String, Object> resultObject(Object... pairs) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        for (int i = 0; i + 1 < pairs.length; i += 2) {
+            map.put((String) pairs[i], pairs[i + 1]);
+        }
+        return map;
     }
 
     /**
-     * Build a JSON object from 4 key-value pairs.
+     * Build a {@code {"error": "<message>"}} result object. Counterpart to
+     * {@link JsonHelper#errorJson(String)}, which returns JSON text for use
+     * inside the generated export wrapper's catch blocks; this returns the
+     * object itself for use as a workflow return value.
      */
-    static String jsonObject(String k1, String v1, String k2, String v2) {
-        return "{\"" + escapeJSON(k1) + "\":\"" + escapeJSON(v1) + "\",\""
-            + escapeJSON(k2) + "\":\"" + escapeJSON(v2) + "\"}";
-    }
-
-    /**
-     * Build a JSON object from 6 key-value pairs.
-     */
-    static String jsonObject(String k1, String v1, String k2, String v2,
-                              String k3, String v3) {
-        return jsonObject(k1, v1, k2, v2).replace("}",
-            ",\"" + escapeJSON(k3) + "\":\"" + escapeJSON(v3) + "\"}");
-    }
-
-    /**
-     * Build a JSON object from 8 key-value pairs.
-     */
-    static String jsonObject(String k1, String v1, String k2, String v2,
-                              String k3, String v3, String k4, String v4) {
-        return jsonObject(k1, v1, k2, v2, k3, v3).replace("}",
-            ",\"" + escapeJSON(k4) + "\":\"" + escapeJSON(v4) + "\"}");
-    }
-
-    /**
-     * Build a JSON object from 10 key-value pairs.
-     */
-    static String jsonObject(String k1, String v1, String k2, String v2,
-                              String k3, String v3, String k4, String v4,
-                              String k5, String v5) {
-        return jsonObject(k1, v1, k2, v2, k3, v3, k4, v4).replace("}",
-            ",\"" + escapeJSON(k5) + "\":\"" + escapeJSON(v5) + "\"}");
-    }
-
-    /**
-     * Build a JSON object from 12+ key-value pairs.
-     */
-    static String jsonObject(String k1, String v1, String k2, String v2,
-                              String k3, String v3, String k4, String v4,
-                              String k5, String v5, String k6, String v6) {
-        return jsonObject(k1, v1, k2, v2, k3, v3, k4, v4, k5, v5).replace("}",
-            ",\"" + escapeJSON(k6) + "\":\"" + escapeJSON(v6) + "\"}");
-    }
-
-    /**
-     * Simple error JSON helper.
-     */
-    static String errorJson(String message) {
-        return "{\"error\":\"" + escapeJSON(message) + "\"}";
+    static Map<String, Object> errorResult(String message) {
+        return resultObject("error", message);
     }
 
     /**
