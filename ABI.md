@@ -56,31 +56,39 @@ The host must check for this value before decoding the normal result. Suspension
 
 ### Input/Output format
 
-All arguments are JSON-serialized into a single object. The export function deserializes them, calls the workflow logic, and writes the result into the output buffer.
+All arguments are JSON-serialized into a single object. The export function deserializes them, calls the workflow logic, and writes the result as JSON into the output buffer.
 
-**The result contract, normatively — this is the whole point of the ABI being language-agnostic.**
-An entry point returns **a string containing a JSON-encoded object**. Not a JSON-encoded
-string, and not a bare scalar. Every SDK conforms to the same rule, which is what lets a Go
-host read a Java, Python, Rust or AssemblyScript guest's result with one decoder.
+**The result contract: an entry point returns a string containing a JSON-encoded
+object.**
 
-The distinction is not pedantic, and the failure mode is silent. `{"amount":250}` and
-`"{\"amount\":250}"` are both "the result serialized as JSON" under a loose reading of the
-previous sentence, and the second one decodes to a *string* where the caller expects an
-object — so `amount` is unreachable and, once it is finally unwrapped, it is a string where
-it should be a number. Getting this wrong does not fail; it produces a result that looks
-plausible and is the wrong shape.
+Stated this way on purpose. There is no "object" at this boundary — it carries a
+length and a byte range — so "return an object" is a per-language notion the ABI
+cannot express, and every SDK that tried to express it invented a different
+answer. A string containing a JSON object is the same rule for Go, Rust, Java,
+Python and AssemblyScript.
 
-That is exactly what happened to the Java SDK, and it happened *twice in one value*: the
-entry point returned a `String` it had already hand-built as JSON, `CleatEntryProcessor` then
-applied `JsonHelper.stringify()` to it, and separately the workflow embedded a host call's
-JSON response into a string field. Fixed 2026-08-09 (#455) by returning a
-`Map<String, Object>` from the entry point. See `tiers.yaml`'s `sdk-java` entry for the full
-account, including the detail that converting the result to a `Map` too eagerly regressed a
-numeric field into a string.
+The consequence for an SDK: the returned string **is** the serialized form, not a
+value awaiting serialization. Re-encoding it produces a JSON string containing
+JSON (`"{\"ok\":true}"`), which is valid JSON and therefore passes every naive
+check, while no consumer can read it without unwrapping first. Three SDKs shipped
+that bug independently.
 
-Known gap, recorded rather than implied: **Go has no typed-result path** — it has no
-equivalent of the `Map<String, Object>` return that fixed Java, so Go workflows still
-hand-build their result JSON and nothing enforces the contract at the type level.
+The host reports a result that is valid JSON but not an object
+(`engine.coerceResultJSON`). It stores it rather than discarding it — a storable
+result should not be destroyed, and workflows predating this contract return
+scalars — but the violation is no longer silent.
+
+Two things this contract does not yet reach, recorded rather than implied:
+
+* **Go has no typed-result path.** It has no equivalent of the `Map<String, Object>`
+  return that fixed Java (#455) or the serde struct that satisfies it in Rust, so a Go
+  workflow hand-builds its result JSON — see `testdata/basic/order.go`'s
+  `fmt.Sprintf(`{"tracking_id":%q}`, trackingID)` — and nothing enforces the contract at
+  the type level. The language most likely to be assumed correct has the weakest
+  enforcement.
+* `tiers.yaml`'s `sdk-java` entry carries the full account of how this was diagnosed,
+  including the detail that converting the result to a `Map` too eagerly regressed a
+  numeric field into a string. Worth reading before changing any SDK's return handling.
 
 **Input example** (for a Go `func PlaceOrder(h HostCalls, userID string, cart []CartItem) (string, error)`):
 ```json

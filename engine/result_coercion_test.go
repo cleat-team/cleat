@@ -35,9 +35,21 @@ func TestCoerceResultJSON(t *testing.T) {
 			want: `{"charged":true}`,
 		},
 		{
-			name: "a JSON scalar is valid JSON and is kept",
-			in:   `"completed"`,
-			want: `"completed"`,
+			// Kept, but now REPORTED. The contract is a string containing a
+			// JSON-encoded object; a scalar is valid JSON and does not satisfy
+			// it. This case used to assert silence, which encoded the older
+			// "any valid JSON is fine" rule -- and that acceptance is exactly
+			// what let a double-encoded result ("{\"ok\":true}" as a JSON
+			// string) through undetected in three SDKs.
+			//
+			// Still kept rather than replaced: destroying a storable result
+			// would lose data, and workflows predating the contract return
+			// scalars. What changes is that the violation is no longer silent.
+			name:      "a JSON scalar is kept but reported as a contract violation",
+			in:        `"completed"`,
+			want:      `"completed"`,
+			wantLog:   true,
+			wantInLog: "not an object",
 		},
 		{
 			name: "empty is the ordinary no-result case and is not logged",

@@ -360,9 +360,19 @@ tier2:
            Verified by engine.TestJavaWorkflowExecute, which asserts the object shape and
            that amount is a NUMBER -- converting the result to a Map first regressed 100
            to \"100\", and asserting only field presence did not catch it.
-           Go is NOT fixed and is a separate gap: it has no typed-result path at all, and
-           its two generated wrappers disagree (one passes the string through, the other
-           quotes it)"
+           Go was fixed separately the same day; see the entry below"
+        - "RESOLVED 2026-08-09 for Go: the generated dispatch wrapper called
+           encodeJSONString(__r), re-encoding a string that was already the serialized
+           form, while the suspend wrapper passed it through -- the same workflow produced
+           a different shape depending on which ran. It now passes through in both, and
+           ABI.md states the contract once at the boundary where it belongs: an entry point
+           returns a string containing a JSON-encoded object. Go and Rust fixtures returned
+           bare scalars and AGREED by both being wrong, which is why the cross-language
+           result comparison passed; both now return objects by different routes (Go builds
+           the JSON text, Rust returns a typed struct serde serialises once) and the
+           comparison is bit-identical. coerceResultJSON now reports a valid-but-non-object
+           result instead of accepting it silently -- that acceptance is what hid this in
+           three SDKs"
         - "RESOLVED 2026-08-09: JsonHelper.stringify fell through to obj.toString() for any
            unsupported type, producing non-JSON like com.example.Foo@1a2b3c. json.Valid then
            rejected it and coerceResultJSON replaced the whole result with {} plus one log

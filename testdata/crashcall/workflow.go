@@ -34,5 +34,5 @@ func ThreeCharges(h cleat.HostCalls, orderID string) (string, error) {
 			return "", err
 		}
 	}
-	return "completed", nil
+	return `{"status":"completed"}`, nil
 }
