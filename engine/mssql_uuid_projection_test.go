@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -53,30 +54,111 @@ func TestMSSQLUUIDColumnsAreConvertedInProjections(t *testing.T) {
 			"that thinks so will flag correct code until someone disables it")
 	}
 
-	files, err := filepath.Glob("mssql_*.go")
-	if err != nil {
-		t.Fatalf("glob: %v", err)
-	}
+	files := goFilesCarryingSQL(t)
 	var scanned int
 	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
 		scanned++
 		src, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		for _, v := range findRawUUIDProjections(string(src), byTable) {
+		for _, v := range findRawUUIDProjections(f, string(src), byTable) {
 			t.Errorf("%s:%d projects UUID column %q without CONVERT/CAST:\n    %s\n\n"+
 				"go-mssqldb scans UNIQUEIDENTIFIER into a Go string as 16 raw bytes, not "+
 				"canonical UUID text. Wrap it: CONVERT(NVARCHAR(36), %s) AS %s",
 				f, v.line, v.column, v.context, v.column, v.column)
 		}
 	}
-	if scanned == 0 {
-		t.Fatal("no engine/mssql_*.go files scanned -- this guard asserted nothing")
+	// A floor rather than an exact count: the set grows as the repo does. It
+	// exists so a glob that silently stops matching fails loudly instead of
+	// reporting a clean scan of nothing.
+	if scanned < 20 {
+		t.Fatalf("only %d Go files scanned; the discovery walk is broken and this guard "+
+			"is asserting almost nothing", scanned)
 	}
+	// The two files carrying the defects this guard was written for must be in
+	// the set, whatever else is.
+	var sawLifecycle, sawSchedules bool
+	for _, f := range files {
+		switch filepath.Base(f) {
+		case "mssql_lifecycle.go":
+			sawLifecycle = true
+		case "mssql_schedules.go":
+			sawSchedules = true
+		}
+	}
+	if !sawLifecycle || !sawSchedules {
+		t.Errorf("scan missed mssql_lifecycle.go (%v) or mssql_schedules.go (%v) -- "+
+			"the two files whose raw projections shipped as bugs", sawLifecycle, sawSchedules)
+	}
+}
+
+// goFilesCarryingSQL returns every non-test Go file in the packages that talk
+// to SQL Server.
+//
+// The original version of this guard globbed engine/mssql_*.go only. That was
+// where both known defects lived, but it is not where all the SQL Server SQL
+// lives: engine/store_intent.go and engine/store_admin.go carry @pN statements
+// under dialect switches, and so do plugin/ and tests/plugin-harness. A guard
+// whose coverage is narrower than the class it names is worse than none,
+// because its existence implies the rest was checked.
+func goFilesCarryingSQL(t *testing.T) []string {
+	t.Helper()
+	roots := []string{".", filepath.Join("..", "auth"), filepath.Join("..", "plugin"),
+		filepath.Join("..", "cmd"), filepath.Join("..", "tests")}
+	var out []string
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil // a root that does not exist is not a failure
+			}
+			if d.IsDir() {
+				if d.Name() == "node_modules" || d.Name() == "testdata" || d.Name() == "vendor" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			out = append(out, path)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mssqlDialectMarkers identify a SQL literal as SQL Server's.
+//
+// Necessary now that the scan is not confined to mssql_*.go: PostgreSQL and
+// MySQL return UUID columns as canonical text, so applying this rule to their
+// SQL would demand a CONVERT that does not exist in those dialects. The
+// filename is still honoured for the mssql_ files, which is what covers a
+// parameterless SQL Server query like GetDueSchedules.
+var mssqlDialectMarkers = []*regexp.Regexp{
+	regexp.MustCompile(`@p\d`),
+	regexp.MustCompile(`(?i)SYSUTCDATETIME`),
+	regexp.MustCompile(`(?i)NVARCHAR`),
+	regexp.MustCompile(`(?i)READPAST`),
+	regexp.MustCompile(`(?i)OUTPUT\s+INSERTED`),
+	regexp.MustCompile(`(?i)STRING_SPLIT`),
+	regexp.MustCompile(`(?i)UNIQUEIDENTIFIER`),
+}
+
+func looksLikeMSSQL(file, sql string) bool {
+	if strings.HasPrefix(filepath.Base(file), "mssql_") {
+		return true
+	}
+	for _, re := range mssqlDialectMarkers {
+		if re.MatchString(sql) {
+			return true
+		}
+	}
+	return false
 }
 
 // mssqlUUIDColumns reads the shipped SQL Server migrations and returns, per
@@ -155,7 +237,7 @@ var (
 
 // findRawUUIDProjections returns each place a UUID column appears in a SELECT
 // or OUTPUT projection without a surrounding CONVERT or CAST.
-func findRawUUIDProjections(src string, byTable map[string]map[string]bool) []rawUUIDProjection {
+func findRawUUIDProjections(file, src string, byTable map[string]map[string]bool) []rawUUIDProjection {
 	var out []rawUUIDProjection
 	for _, lit := range sqlLiteralRe.FindAllStringSubmatchIndex(src, -1) {
 		// Comments are stripped before anything else looks at this. They are
@@ -167,6 +249,12 @@ func findRawUUIDProjections(src string, byTable map[string]map[string]bool) []ra
 		// bug it was written for was reverted in front of it.
 		sql := stripSQLComments(src[lit[2]:lit[3]])
 		base := strings.Count(src[:lit[2]], "\n") + 1
+
+		// PostgreSQL and MySQL hand back UUID columns as canonical text, so
+		// this rule applies to SQL Server's SQL and nothing else.
+		if !looksLikeMSSQL(file, sql) {
+			continue
+		}
 
 		// Only the columns that are UUIDs on a table THIS statement touches.
 		uuidCols := map[string]bool{}
