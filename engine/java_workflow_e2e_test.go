@@ -151,7 +151,7 @@ func TestJavaWorkflowExecute(t *testing.T) {
 	// The result assertion. This was a t.Logf("Warning: ...") guarded by a
 	// substring check, which is to say the only test executing a Java workflow
 	// through the engine asserted NOTHING about its result: it printed a
-	// warning and passed. Both halves below can fail.
+	// warning and passed.
 	assertJavaResultShape(t, result)
 
 	t.Logf("Java workflow result: %s", result)
@@ -162,78 +162,70 @@ func TestJavaWorkflowExecute(t *testing.T) {
 	}
 }
 
-// assertJavaResultShape checks what a Java workflow's result actually is, and
-// pins the way it is currently wrong so the fix cannot land silently.
+// assertJavaResultShape checks what a Java workflow's result actually is.
 //
-// Measured 2026-08-09, unchanged since:
+// Measured 2026-08-09: the result used to come back double-encoded TWICE --
+// the whole result was a JSON string containing JSON, and withdraw_ref /
+// deposit_ref were themselves JSON strings containing JSON, because the
+// workflow embedded a host call's already-JSON response into a string field.
+// A consumer needed three Unmarshals to read withdraw_ref.ref, and the engine
+// could not detect any of it: coerceResultJSON only calls json.Valid, and a
+// JSON string literal is valid JSON.
 //
-//	"{\"status\":\"completed\",...,\"withdraw_ref\":\"{\\\"ref\\\":...}\"}"
-//
-// Two separate layers of over-encoding:
-//
-//  1. The whole result is a JSON *string containing JSON*, not an object.
-//     CleatEntryProcessor emits JsonHelper.stringify(result) for any non-void
-//     return, and the workflow returns a String it has already built as JSON
-//     text -- which JsonHelper.stringify then quotes and escapes. The SDK's own
-//     javadoc recommends exactly that idiom, so this is the documented path
-//     producing the wrong shape.
-//  2. withdraw_ref and deposit_ref are themselves JSON strings containing JSON,
-//     because the workflow embeds a host call's response -- already JSON text --
-//     into a string field.
-//
-// A consumer needs three Unmarshals to read withdraw_ref.ref. The engine cannot
-// detect any of it: coerceResultJSON only calls json.Valid, and a JSON string
-// literal is valid JSON.
-//
-// Not fixed here. The fix is a contract change about what an entry point
-// returns, it affects Go and Rust as well (Go has no typed-result path at all),
-// and picking it is a decision rather than a repair. What this function does is
-// make the current shape a thing a test asserts, so whoever changes it is told.
+// Fixed on the Java side: MoneyTransfer.transferMoney now returns
+// Map<String, Object> instead of a pre-stringified String (JsonHelper.stringify
+// already serializes a Map correctly, once), and withdraw_ref/deposit_ref are
+// parsed into Maps via JsonHelper.parseObject before nesting, instead of being
+// embedded as escaped text. This function now asserts the fixed, direct-object
+// shape, so a regression back to double-encoding fails this test instead of
+// being logged as a warning.
 func assertJavaResultShape(t *testing.T, result string) {
 	t.Helper()
 
-	if !json.Valid([]byte(result)) {
-		t.Fatalf("result is not valid JSON at all: %s", result)
-	}
-
-	// KNOWN DEFECT, pinned. When the double-encoding is fixed this unmarshal
-	// starts failing, which is the signal to delete this block and assert the
-	// object directly -- and to update tiers.yaml's sdk-java entry.
-	var inner string
-	if err := json.Unmarshal([]byte(result), &inner); err != nil {
-		t.Fatalf("result is no longer a JSON string containing JSON: %v\n"+
-			"If that was deliberate, the double-encoding is fixed: replace this block with a "+
-			"direct unmarshal into a map, and update the sdk-java entry in tiers.yaml.", err)
-	}
-
-	// The payload itself must be a real object with the expected outcome. This
-	// is the half that would have caught a workflow silently returning garbage,
-	// which the previous substring check could not.
 	var fields map[string]any
-	if err := json.Unmarshal([]byte(inner), &fields); err != nil {
-		t.Fatalf("the inner payload is not a JSON object: %v\npayload: %s", err, inner)
+	if err := json.Unmarshal([]byte(result), &fields); err != nil {
+		t.Fatalf("result is not a JSON object: %v\nresult: %s", err, result)
 	}
 	if got := fields["status"]; got != "completed" {
 		t.Errorf("status = %v, want \"completed\" -- the saga did not report success", got)
 	}
+	// amount must survive as a NUMBER. Asserting only that the field exists is
+	// what let a regression through while this change was being written:
+	// converting the result to a Map put the raw extracted text in, so 100
+	// serialised as "100" -- a JSON string where the input had a number, and a
+	// silent type change for every consumer. json.Unmarshal into any gives
+	// float64 for a JSON number and string for a JSON string, so this
+	// distinguishes them.
+	switch got := fields["amount"].(type) {
+	case float64:
+		if got != 100 {
+			t.Errorf("amount = %v, want 100", got)
+		}
+	default:
+		t.Errorf("amount is %T (%v), want a JSON number -- the input carried 100 unquoted, "+
+			"so a string here means the value was re-encoded on the way out", got, got)
+	}
+
 	for _, k := range []string{"from_account", "to_account", "amount", "withdraw_ref", "deposit_ref"} {
 		if _, ok := fields[k]; !ok {
 			t.Errorf("result is missing %q; fields present: %v", k, sortedFieldNames(fields))
 		}
 	}
 
-	// The second layer, also pinned: a host call's JSON response embedded into a
-	// string field rather than nested as an object.
-	if ref, ok := fields["withdraw_ref"].(string); ok {
-		var nested map[string]any
-		if err := json.Unmarshal([]byte(ref), &nested); err != nil {
-			t.Errorf("withdraw_ref is a string but not JSON-in-a-string: %q", ref)
-		} else if nested["ref"] == nil {
-			t.Errorf("withdraw_ref decoded but has no ref field: %v", nested)
+	// withdraw_ref/deposit_ref must be nested objects, not JSON-in-a-string.
+	if ref, ok := fields["withdraw_ref"].(map[string]any); ok {
+		if ref["ref"] == nil {
+			t.Errorf("withdraw_ref is an object but has no ref field: %v", ref)
 		}
 	} else {
-		t.Errorf("withdraw_ref is %T, not a string -- if it is now an object, the second layer "+
-			"of over-encoding is fixed too; update this test and tiers.yaml", fields["withdraw_ref"])
+		t.Errorf("withdraw_ref is %T, not an object: %v", fields["withdraw_ref"], fields["withdraw_ref"])
+	}
+	if ref, ok := fields["deposit_ref"].(map[string]any); ok {
+		if ref["ref"] == nil {
+			t.Errorf("deposit_ref is an object but has no ref field: %v", ref)
+		}
+	} else {
+		t.Errorf("deposit_ref is %T, not an object: %v", fields["deposit_ref"], fields["deposit_ref"])
 	}
 }
 

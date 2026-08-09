@@ -25,16 +25,22 @@ import org.teavm.interop.Import;
  * expected.
  * <p>
  * <strong>Usage:</strong> Workflow entry-point methods receive a
- * {@code HostCalls} instance as their first parameter:
+ * {@code HostCalls} instance as their first parameter. Return a {@link Map},
+ * not a {@link String} holding hand-built JSON text -- the generated export
+ * wrapper calls {@link JsonHelper#stringify(Object)} on the return value, and
+ * stringifying a String that already contains JSON produces a JSON string
+ * containing JSON rather than an object:
  * <pre>{@code
  * @CleatEntry(name = "place_order")
- * public static String placeOrder(HostCalls h, String input) {
+ * public static Map<String, Object> placeOrder(HostCalls h, String input) {
  *     h.cleatLog("Processing order");
  *     CleatResult<String> reserved = h.cleatCall("inventory", "Reserve", input);
  *     if (reserved.isErr()) {
- *         return "{\"error\": \"reservation failed\"}";
+ *         return Map.of("error", "reservation failed");
  *     }
- *     return reserved.getValue();
+ *     // reserved.getValue() is itself JSON text from the host call --
+ *     // parse it so it nests as an object instead of escaped text.
+ *     return JsonHelper.parseObject(reserved.getValue());
  * }
  * }</pre>
  *
