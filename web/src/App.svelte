@@ -1,5 +1,6 @@
 <script lang="ts">
   import Sidebar from './components/Sidebar.svelte';
+  import ApiKeyGate from './components/ApiKeyGate.svelte';
   import Dashboard from './pages/Dashboard.svelte';
   import WorkflowList from './pages/WorkflowList.svelte';
   import WorkflowDetail from './pages/WorkflowDetail.svelte';
@@ -7,9 +8,14 @@
   import Definitions from './pages/Definitions.svelte';
   import DeadLetters from './pages/DeadLetters.svelte';
   import WorkflowCompare from './pages/WorkflowCompare.svelte';
+  import { onUnauthorized } from './lib/auth';
 
   let route = $state(window.location.hash.slice(1) || 'dashboard');
   let routeParams = $state('');
+  // B5: opened either when the user asks for it (Sidebar's "API Key" link) or
+  // reactively the first time any api.ts call comes back 401 -- see
+  // lib/auth.ts's notifyUnauthorized().
+  let showApiKeyGate = $state(false);
 
   function navigate(path: string) {
     const [base, ...rest] = path.split('/');
@@ -24,10 +30,16 @@
     route = base;
     routeParams = rest.join('/');
   });
+
+  $effect(() => {
+    return onUnauthorized(() => {
+      showApiKeyGate = true;
+    });
+  });
 </script>
 
 <div class="app-layout">
-  <Sidebar active={route} onNavigate={navigate} />
+  <Sidebar active={route} onNavigate={navigate} onOpenApiKey={() => showApiKeyGate = true} />
   <main class="main-content">
     {#if route === 'dashboard'}
       <Dashboard />
@@ -61,4 +73,7 @@
       <Dashboard />
     {/if}
   </main>
+  {#if showApiKeyGate}
+    <ApiKeyGate onClose={() => showApiKeyGate = false} />
+  {/if}
 </div>

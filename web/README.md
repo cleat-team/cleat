@@ -24,7 +24,7 @@ Svelte 5 single-page application for managing and monitoring Cleat durable workf
 | Testing library    | @testing-library/svelte 5         |
 | CSS                | Plain CSS (no framework)          |
 
-The UI is a **static single-page application**. It communicates with the Cleat worker via REST API calls to `{API_BASE_URL}/api/...`. There is no server-side rendering -- all data is fetched client-side and rendered in the browser.
+The UI is a **static single-page application**. It communicates with the Cleat worker via same-origin REST API calls to `/api/...` (see Authentication, below, for how those calls are authorized). There is no server-side rendering -- all data is fetched client-side and rendered in the browser.
 
 ### Project structure
 
@@ -43,10 +43,13 @@ web/
     setup.ts              # Test setup (global mocks, matchers)
     lib/
       api.ts              # REST API client functions
+      auth.ts             # API key storage (localStorage) and 401 notifications
+      auth.test.ts        # Auth token storage tests
       types.ts            # TypeScript interfaces (WorkflowInstance, EventRecord, etc.)
       cost.ts             # Cost calculation helpers
       cost.test.ts        # Cost helper tests
       api.test.ts         # API client tests
+      api.auth.test.ts    # Authorization header tests
     components/
       DAGGraph.svelte     # Directed-acyclic graph visualization
       SummaryCard.svelte  # Summary statistics card
@@ -54,6 +57,7 @@ web/
       CostPanel.svelte    # Detailed cost breakdown panel
       EventTimeline.svelte # Workflow event history timeline
       Sidebar.svelte      # Navigation sidebar
+      ApiKeyGate.svelte   # Paste-your-API-key modal
       StatusBadge.svelte  # Workflow status indicator badge
       StatusBadge.test.ts # StatusBadge tests
       SummaryCard.test.ts # SummaryCard tests
@@ -113,21 +117,40 @@ The dev server runs at `http://localhost:5173` by default and proxies API reques
 
 ---
 
-## Environment Variables
+## Authentication
 
-| Variable       | Default | Description                                     |
-|----------------|---------|-------------------------------------------------|
-| `API_BASE_URL` | `""`    | Base URL for the Cleat worker REST API. When empty, requests go to the same origin as the UI is served from. |
-| `AUTH_TOKEN`   | `""`    | Bearer token included in API request headers for authenticated deployments. |
+There is no `API_BASE_URL` or `AUTH_TOKEN` environment variable. The dashboard is a
+static bundle embedded in the `cleat-worker` binary (see Build, below) -- it is not
+rebuilt per deployment, so there is no build step where an env var could be baked in,
+and the worker serves it from a plain `http.FileServer` with no template step where a
+value could be injected at request time either.
 
-Set these in a `.env` file at the project root or export them in your shell:
+The worker's supported configuration defaults to `--require-auth=true`
+(`cmd/cleat-worker/config.go`), which rejects every request without a valid API key
+except `/healthz` and `/metrics` (`auth/middleware.go`). So instead of an env var, the
+dashboard asks for the key at runtime, in the browser:
+
+- `src/lib/auth.ts` stores the key in `localStorage` under `cleat_api_token`, scoped to
+  the origin the dashboard is served from.
+- `src/lib/api.ts`'s single `fetchJSON` wrapper -- every API call in this file goes
+  through it -- attaches it as `Authorization: Bearer <token>` on every request when one
+  is stored, and does nothing extra when one is not (so an unauthenticated dev
+  deployment, `--require-auth=false`, is unaffected).
+- `src/components/ApiKeyGate.svelte` is the paste-your-key UI. It opens automatically
+  the first time any request comes back `401` (`lib/auth.ts`'s `notifyUnauthorized`,
+  wired up in `App.svelte`), and can also be opened proactively from the "API Key" link
+  in the sidebar.
+
+Get a key from the worker's own startup log (it auto-generates and prints one the first
+time it boots against a database with no keys yet, `cmd/cleat-worker/main.go`), or mint
+one with:
 
 ```bash
-export API_BASE_URL=http://localhost:8080
-export AUTH_TOKEN=sk-abc123...
+cleat-worker --db "$DATABASE_URL" --generate-api-key "<tenant-uuid>"
 ```
 
-In production, these are typically configured via environment variables on the cleat-worker process, which embeds the built web UI.
+The token never leaves the browser except as the `Authorization` header sent to this
+same worker; it is not sent to any other origin.
 
 ---
 
@@ -150,6 +173,8 @@ Test files are co-located with source files using the `*.test.ts` naming convent
 - `src/components/StatusBadge.test.ts` -- StatusBadge component tests
 - `src/components/SummaryCard.test.ts` -- SummaryCard component tests
 - `src/lib/api.test.ts` -- API client unit tests
+- `src/lib/api.auth.test.ts` -- Authorization header unit tests
+- `src/lib/auth.test.ts` -- API key storage unit tests
 - `src/lib/cost.test.ts` -- Cost calculation unit tests
 
 ### Test configuration
@@ -169,12 +194,15 @@ Vitest is configured in `vitest.config.ts`:
 npm run build
 ```
 
-Produces a static build in `../cmd/durable-worker/web/dist` (configured in `vite.config.ts`). The cleat-worker binary embeds these static files and serves them at the root URL.
+Produces a static build in `../cmd/cleat-worker/web/dist` (configured in `vite.config.ts`
+-- re-derive with `grep outDir web/vite.config.ts`; that file's own comment explains why
+this has drifted to the wrong `durable-worker` path more than once). The cleat-worker
+binary embeds these static files and serves them at the root URL.
 
 ### Build output
 
 ```
-cmd/durable-worker/web/dist/
+cmd/cleat-worker/web/dist/
   index.html
   assets/
     index-*.js

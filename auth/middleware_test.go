@@ -348,6 +348,123 @@ func TestMiddleware_TenantIDPropagation(t *testing.T) {
 	}
 }
 
+// --- publicPatterns tests -----------------------------------------------------
+//
+// S6: cleat-worker wraps plugin routes -- including externally-triggered ones
+// with their own verification, like webhook-ingest's HMAC-checked
+// POST /ingest/{source_id} and oauth-provider's GET /oauth/{provider}/callback
+// -- in this same middleware. Without an explicit publicPatterns allowlist, an
+// external caller who cannot present a cleat API key would 401 before the
+// plugin's own check ever ran. These tests exercise that allowlist directly
+// (not the specific patterns cmd/cleat-worker/main.go wires up, which live
+// outside this package).
+
+func TestMiddleware_PublicPattern_PassesThroughWithoutKey(t *testing.T) {
+	store := newFakeDBStore()
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+
+	var handlerCalled bool
+	mw := Middleware(engine.NewPostgresStore(db), true, "POST /ingest/{source_id}")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/ingest/abc-123", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !handlerCalled {
+		t.Error("expected downstream handler to be called for a declared public pattern")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for public pattern without a key, got %d", rec.Code)
+	}
+}
+
+func TestMiddleware_PublicPattern_DoesNotWidenToSiblingPath(t *testing.T) {
+	// "POST /ingest/{source_id}" is public; "/ingest/sources" (a different,
+	// tenant-scoped route registered by the same plugin) must not become
+	// public as a side effect of sharing the "/ingest/" prefix.
+	store := newFakeDBStore()
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+
+	var handlerCalled bool
+	mw := Middleware(engine.NewPostgresStore(db), true, "POST /ingest/{source_id}")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/ingest/sources", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if handlerCalled {
+		t.Error("expected downstream handler NOT to be called for /ingest/sources")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for /ingest/sources (not covered by the public pattern), got %d", rec.Code)
+	}
+}
+
+func TestMiddleware_PublicPattern_MethodIsRespected(t *testing.T) {
+	// "POST /ingest/{source_id}" is public; a GET to the same path shape is a
+	// different route (it does not exist here) and must still be rejected,
+	// not silently treated as public because the path matched.
+	store := newFakeDBStore()
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+
+	var handlerCalled bool
+	mw := Middleware(engine.NewPostgresStore(db), true, "POST /ingest/{source_id}")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/ingest/abc-123", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if handlerCalled {
+		t.Error("expected downstream handler NOT to be called for GET on a POST-only public pattern")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestMiddleware_NoPublicPatterns_StillRequiresAuth(t *testing.T) {
+	// Baseline: calling Middleware without the variadic publicPatterns
+	// (as every call site outside cmd/cleat-worker/main.go does) must behave
+	// exactly as before -- requireAuth=true rejects an unauthenticated
+	// request to any non-/healthz, non-/metrics path.
+	store := newFakeDBStore()
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+
+	var handlerCalled bool
+	mw := Middleware(engine.NewPostgresStore(db), true)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/ingest/abc-123", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if handlerCalled {
+		t.Error("expected downstream handler NOT to be called: no public patterns were declared")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
 // --- TenantFromAPIKey direct tests ------------------------------------------
 
 func TestTenantFromAPIKey_Found(t *testing.T) {

@@ -979,7 +979,20 @@ func main() {
 
 		// Wrap with auth middleware if --require-auth is true.
 		if *requireAuth {
-			handler = auth.Middleware(store, true)(handler)
+			// S6: these two plugin endpoints are meant to be called by
+			// parties who cannot present a cleat API key -- an external
+			// webhook sender (plugins/webhookingest, verifies its own
+			// HMAC signature) and a third-party IdP's OAuth redirect
+			// (plugins/oauthprovider) -- so they must stay reachable
+			// without one even though --require-auth wraps the same
+			// mux/plugHandler every other plugin route goes through. See
+			// auth.Middleware's doc comment for why this is a
+			// hand-maintained list rather than something plugins declare
+			// themselves.
+			handler = auth.Middleware(store, true,
+				"POST /ingest/{source_id}",
+				"GET /oauth/{provider}/callback",
+			)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//
