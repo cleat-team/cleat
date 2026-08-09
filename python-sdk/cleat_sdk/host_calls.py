@@ -104,15 +104,6 @@ try:
     from wit_world.imports.durable_children import (
         durable_child_workflow_with_options as _import_cleat_child_workflow_with_options,
     )
-    from wit_world.imports.durable_extended_children import (
-        child_workflow_in_schema as _import_child_workflow_in_schema,
-    )
-    from wit_world.imports.durable_extended_lifecycle import (
-        continue_as_new_versioned as _import_continue_as_new_versioned,
-    )
-    from wit_world.imports.durable_extended_lifecycle import (
-        side_effect as _import_side_effect,
-    )
     from wit_world.imports.durable_cron import (
         durable_delete_cron as _import_cleat_delete_cron,
     )
@@ -121,6 +112,15 @@ try:
     )
     from wit_world.imports.durable_cron import (
         durable_schedule_cron as _import_cleat_schedule_cron,
+    )
+    from wit_world.imports.durable_extended_children import (
+        child_workflow_in_schema as _import_child_workflow_in_schema,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
+        continue_as_new_versioned as _import_continue_as_new_versioned,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
+        side_effect as _import_side_effect,
     )
     from wit_world.imports.durable_fetch import (
         fetch as _import_fetch,
