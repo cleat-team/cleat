@@ -41,6 +41,12 @@ func TestPluginCredentialFieldsUseTheSecretType(t *testing.T) {
 		"credential", "token", "private_key", "privatekey",
 		"access_key", "accesskey", "signing_key", "signingkey",
 		"routing_key", "routingkey", "webhook_url", "webhookurl",
+		// A DSN/connection string commonly embeds a password (e.g.
+		// postgres://user:password@host/db) -- scheduledbackup.Config.DSN
+		// was exactly this, held as a plain string and passed to pg_dump as
+		// a literal argv element, visible via ps and /proc/*/cmdline to any
+		// co-resident user.
+		"dsn",
 	}
 
 	// Reviewed exceptions. Adding one is a deliberate act; an empty reason is

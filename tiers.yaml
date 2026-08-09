@@ -423,6 +423,26 @@ tier2:
            returning success=true. The consume poller warns once instead of skipping at
            DEBUG. A test asserted the old success=true, so it pinned the defect rather than
            catching it"
+        - "RESOLVED 2026-08-09: scheduledbackup claimed 'Scheduled PostgreSQL backups to S3'
+           and 'manual backup/restore via HTTP API and CLI commands'. Neither was true: there
+           is no restore implementation anywhere in the package, no AWS SDK dependency in the
+           repo, and s3_bucket/s3_prefix were stored in backup_config and returned by the API
+           but never read when running pg_dump, which writes to local disk (dump_dir) only.
+           An operator configuring this to satisfy an off-host backup requirement found out
+           only at restore time. Doc comments corrected; handleCreateConfig/
+           handleUpdateConfig now reject a non-empty s3_bucket or s3_prefix (400) instead of
+           silently accepting and ignoring them -- the columns stay, for existing rows, but
+           can no longer be set to anything but empty going forward. Also:
+           scheduledbackup.Config.DSN (a full connection string, commonly with a password)
+           was a plain string passed to pg_dump as a literal argv element in three places
+           (background.go, routes.go, the backup-run/backup-list CLI commands), visible via
+           ps and /proc/*/cmdline to any co-resident user. Converted to plugin.Secret; all
+           three call sites now go through runPgDump (pgdump.go), which strips any password
+           out of the DSN and passes it via the child's PGPASSWORD environment variable
+           instead. 'dsn' was not previously in
+           plugin.TestPluginCredentialFieldsUseTheSecretType's credential-name list (only
+           this one field in the whole plugins tree used it) -- added, so a future dsn-typed
+           credential field is caught automatically instead of by review"
         - "multi-DB harness job runs a t.Skip while starting three databases"
 
     - id: admin-dashboard

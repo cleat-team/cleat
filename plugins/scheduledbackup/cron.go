@@ -1,6 +1,7 @@
 // Package scheduledbackup provides scheduled PostgreSQL backups with pg_dump.
-// It supports cron-based scheduling, manual backup/restore via HTTP API and CLI
-// commands, and records backup history in PostgreSQL.
+// It supports cron-based scheduling and manual backup via HTTP API and CLI
+// commands, and records backup history in PostgreSQL. Dumps are written to
+// local disk only -- there is no restore path and no off-host upload.
 package scheduledbackup
 
 import (

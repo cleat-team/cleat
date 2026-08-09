@@ -1134,7 +1134,7 @@ func TestSB_CreateConfig_Success(t *testing.T) {
 	p, _, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
 
-	body := `{"name":"daily-backup","cron":"0 9 * * *","s3_bucket":"my-bucket","s3_prefix":"backups/","retention_days":30}`
+	body := `{"name":"daily-backup","cron":"0 9 * * *","retention_days":30}`
 	rec := httptest.NewRecorder()
 	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
 	p.mux.ServeHTTP(rec, req)
@@ -1155,6 +1155,25 @@ func TestSB_CreateConfig_Success(t *testing.T) {
 	}
 	if _, ok := result["next_run_at"]; !ok {
 		t.Error("expected next_run_at field in response")
+	}
+}
+
+// TestSB_CreateConfig_RejectsS3Fields pins the fix for the false "Scheduled
+// PostgreSQL backups to S3" claim: a create request naming a non-empty
+// s3_bucket or s3_prefix must be rejected (400), not silently accepted.
+// This used to be part of TestSB_CreateConfig_Success's request body,
+// asserting 201 -- exactly the defect this test now guards against.
+func TestSB_CreateConfig_RejectsS3Fields(t *testing.T) {
+	p, _, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	body := `{"name":"daily-backup","cron":"0 9 * * *","s3_bucket":"my-bucket","s3_prefix":"backups/","retention_days":30}`
+	rec := httptest.NewRecorder()
+	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
+	p.mux.ServeHTTP(rec, req)
+
+	if rec.Code != 400 {
+		t.Fatalf("create with s3 fields: want 400 (not supported), got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -2539,7 +2558,14 @@ func TestSB_DBError_RunBackup_Fetch(t *testing.T) {
 // UpdateConfig edge: s3_bucket, s3_prefix, retention_days
 // =========================================================================
 
-func TestSB_UpdateConfig_WithS3Fields(t *testing.T) {
+// TestSB_UpdateConfig_RejectsS3Fields pins the fix for the false "Scheduled
+// PostgreSQL backups to S3" claim: setting s3_bucket/s3_prefix to a
+// non-empty value must be rejected (400), not silently accepted and
+// ignored. This test used to assert the opposite -- a 200 -- which is
+// exactly the defect (an operator who set these expecting off-host storage
+// found out only at restore time, since nothing ever uploads a dump
+// anywhere).
+func TestSB_UpdateConfig_RejectsS3Fields(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
 
@@ -2557,8 +2583,43 @@ func TestSB_UpdateConfig_WithS3Fields(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
 	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("update s3 fields: want 400 (not supported), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The config must be untouched -- a rejected request is not a partial
+	// update.
+	fdb.mu.Lock()
+	got := fdb.configs[cfgID]
+	fdb.mu.Unlock()
+	if got.retentionDays != 7 {
+		t.Errorf("rejected update must not apply any field: retentionDays = %d, want unchanged 7", got.retentionDays)
+	}
+}
+
+// TestSB_UpdateConfig_RetentionDaysOnly covers the part of the old
+// TestSB_UpdateConfig_WithS3Fields that remains legitimate: retention_days
+// alone (no S3 fields) still updates normally.
+func TestSB_UpdateConfig_RetentionDaysOnly(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
+	cfgID := "00000000-0000-0000-0000-000000000552"
+	fdb.mu.Lock()
+	fdb.configs[cfgID] = &sbConfigRow{
+		id: cfgID, tenantID: tid, name: "retention-only", cron: "0 9 * * *",
+		retentionDays: 7, enabled: true,
+		createdAt: time.Now(), updatedAt: time.Now(),
+	}
+	fdb.mu.Unlock()
+
+	body := `{"retention_days":14}`
+	rec := httptest.NewRecorder()
+	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
+	p.mux.ServeHTTP(rec, req)
 	if rec.Code != 200 {
-		t.Fatalf("update s3 fields: want 200, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("update retention_days: want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var m map[string]string
 	sbReadJSON(t, rec, &m)

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -50,6 +49,14 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 }
 
 // backupConfig represents a single backup_config row.
+//
+// S3Bucket and S3Prefix are vestigial: dumps are written to local disk only
+// (Plugin.config.DumpDir) and there is no code anywhere in this package that
+// uploads one, despite the column names implying otherwise. The columns are
+// kept (rather than dropped in a migration) so existing rows still decode,
+// but handleCreateConfig and handleUpdateConfig now reject any attempt to
+// set either to a non-empty value -- see the S3 upload is not implemented
+// error there -- so from here on they can only ever read back as "".
 type backupConfig struct {
 	ID            uuid.UUID  `json:"id"`
 	Name          string     `json:"name"`
@@ -116,6 +123,10 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Cron == "" {
 		p.writeError(w, 400, "cron is required")
+		return
+	}
+	if req.S3Bucket != "" || req.S3Prefix != "" {
+		p.writeError(w, 400, "s3_bucket/s3_prefix are not supported: this plugin writes backups to local disk only (dump_dir) and does not upload them anywhere -- configure an off-host copy of dump_dir by another means")
 		return
 	}
 
@@ -257,6 +268,10 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	var req updateConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		p.writeError(w, 400, "invalid JSON body")
+		return
+	}
+	if (req.S3Bucket != nil && *req.S3Bucket != "") || (req.S3Prefix != nil && *req.S3Prefix != "") {
+		p.writeError(w, 400, "s3_bucket/s3_prefix are not supported: this plugin writes backups to local disk only (dump_dir) and does not upload them anywhere -- configure an off-host copy of dump_dir by another means")
 		return
 	}
 
@@ -524,10 +539,7 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 	dumpPath := filepath.Join(p.config.DumpDir, filename)
 
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(context.Background(), "pg_dump", "-f", dumpPath, p.config.DSN)
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	err := runPgDump(context.Background(), p.config.DSN.Reveal(), dumpPath, &stderr)
 	if err != nil {
 		errMsg := stderr.String()
 		if errMsg == "" {

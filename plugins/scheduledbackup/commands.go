@@ -2,12 +2,12 @@ package scheduledbackup
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -110,10 +110,7 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 	}
 
 	var stderr bytes.Buffer
-	cmd := exec.Command("pg_dump", "-f", dumpPath, *dsn)
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := runPgDump(context.Background(), *dsn, dumpPath, &stderr); err != nil {
 		errMsg := stderr.String()
 		if errMsg == "" {
 			errMsg = err.Error()
