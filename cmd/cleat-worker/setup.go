@@ -1021,6 +1021,10 @@ type Worker struct {
 	maxQuotaChildren        int
 	maxQuotaConcurrencyKeys int
 
+	// Per-tenant quota: a schedule outlives the run that created it, so it
+	// cannot be counted against one.
+	maxQuotaSchedules int
+
 	// Maximum wall-clock duration per workflow execution (0 = no limit).
 	maxWorkflowDuration time.Duration
 
@@ -1623,6 +1627,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithMaxQuotaEvents(w.maxQuotaEvents),
 		engine.WithMaxQuotaChildren(w.maxQuotaChildren),
 		engine.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
+		engine.WithMaxQuotaSchedules(w.maxQuotaSchedules),
 		engine.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
 		engine.WithWASMInstanceTimeout(w.wasmInstanceTimeout),
 		engine.WithChildBindingPolicy(childBindingPolicy),

@@ -2176,6 +2176,103 @@ func TestClosure_Fetch(t *testing.T) {
 	s.expectCall(t, "Fetch")
 }
 
+func TestClosure_ScheduleCron(t *testing.T) {
+	// cleat_schedule_cron: (wfPtr,wfLen, cronPtr,cronLen, tzPtr,tzLen, inputPtr,inputLen, idPtr,idMaxLen) -> i64
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
+	s := newClosureSetup(t, []struct {
+		name string
+		ft   []byte
+	}{{"cleat_schedule_cron", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
+		return b.registerCleatScheduleCron(l)
+	})
+
+	// Four distinct, recognisable values -- see the wazero counterpart of this
+	// test (TestHostFunc_CleatScheduleCron) for why "a"/"b"/"c"/"d" would not do.
+	workflowName := "wfname"
+	cronExpr := "* * * * *"
+	timezone := "Europe/Paris"
+	inputJSON := `{"k":1}`
+
+	s.writeString(50, workflowName)
+	s.writeString(100, cronExpr)
+	s.writeString(200, timezone)
+	s.writeString(300, inputJSON)
+	got := s.call(t, "test_cleat_schedule_cron",
+		i32(50), int32(len(workflowName)),
+		i32(100), int32(len(cronExpr)),
+		i32(200), int32(len(timezone)),
+		i32(300), int32(len(inputJSON)),
+		i32(400), i32(64))
+	if got != 0 {
+		t.Errorf("got %v, want 0", got)
+	}
+
+	// expectCall only checks that each written string is present somewhere in
+	// the recorded args (slices.Contains), which would still pass if two of
+	// these four were swapped between parameters. Argument order is exactly
+	// the defect this wrapper is prone to -- imports.go and
+	// wasmtime_hostfuncs_schedules.go assemble the same four strings
+	// independently -- so assert position directly instead of using expectCall.
+	defer s.reset()
+	calls := s.mock.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("want exactly 1 host-handler call, got %d", len(calls))
+	}
+	if calls[0].method != "ScheduleCron" {
+		t.Fatalf("host handler saw %s, want ScheduleCron", calls[0].method)
+	}
+	if len(calls[0].args) != 4 {
+		t.Fatalf("ScheduleCron got %d string args, want 4: %q", len(calls[0].args), calls[0].args)
+	}
+	if calls[0].args[0] != workflowName {
+		t.Errorf("arg 0 (workflowName) = %q, want %q", calls[0].args[0], workflowName)
+	}
+	if calls[0].args[1] != cronExpr {
+		t.Errorf("arg 1 (cronExpr) = %q, want %q", calls[0].args[1], cronExpr)
+	}
+	if calls[0].args[2] != timezone {
+		t.Errorf("arg 2 (timezone) = %q, want %q", calls[0].args[2], timezone)
+	}
+	if calls[0].args[3] != inputJSON {
+		t.Errorf("arg 3 (inputJSON) = %q, want %q", calls[0].args[3], inputJSON)
+	}
+}
+
+func TestClosure_DeleteCron(t *testing.T) {
+	// cleat_delete_cron: (idPtr,idLen) -> i64
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64})
+	s := newClosureSetup(t, []struct {
+		name string
+		ft   []byte
+	}{{"cleat_delete_cron", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
+		return b.registerCleatDeleteCron(l)
+	})
+
+	s.writeString(50, "sched-123")
+	got := s.call(t, "test_cleat_delete_cron", i32(50), i32(9))
+	if got != 0 {
+		t.Errorf("got %v, want 0", got)
+	}
+	s.expectCall(t, "DeleteCron")
+}
+
+func TestClosure_ListCrons(t *testing.T) {
+	// cleat_list_crons: (outPtr,outMaxLen) -> i64
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64})
+	s := newClosureSetup(t, []struct {
+		name string
+		ft   []byte
+	}{{"cleat_list_crons", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
+		return b.registerCleatListCrons(l)
+	})
+
+	got := s.call(t, "test_cleat_list_crons", i32(200), i32(1024))
+	if got != 0 {
+		t.Errorf("got %v, want 0", got)
+	}
+	s.expectCall(t, "ListCrons")
+}
+
 func TestClosure_ChildWorkflow(t *testing.T) {
 	// cleat_child_workflow: (namePtr,nameLen, inputPtr,inputLen, runIDPtr,runIDMaxLen) -> i64
 	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})

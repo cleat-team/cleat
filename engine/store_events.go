@@ -338,6 +338,28 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.Err != "" {
 			payload["error"] = rec.Err
 		}
+	case "schedule_cron", "delete_cron", "list_crons":
+		if rec.CronWorkflowName != "" {
+			payload["cron_workflow_name"] = rec.CronWorkflowName
+		}
+		if rec.CronExpr != "" {
+			payload["cron_expr"] = rec.CronExpr
+		}
+		if rec.CronTimezone != "" {
+			payload["cron_timezone"] = rec.CronTimezone
+		}
+		if rec.CronInput != "" {
+			payload["cron_input"] = rec.CronInput
+		}
+		if rec.CronScheduleID != "" {
+			payload["cron_schedule_id"] = rec.CronScheduleID
+		}
+		if rec.CronResult != "" {
+			payload["cron_result"] = rec.CronResult
+		}
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
 	case "acquire_lock":
 		if rec.LockKey != "" {
 			payload["lock_key"] = rec.LockKey
@@ -639,6 +661,28 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 			}
 		} else if v, ok := m["fetch_response"].(string); ok {
 			rec.FetchResponse = v
+		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
+	case "schedule_cron", "delete_cron", "list_crons":
+		if v, ok := m["cron_workflow_name"].(string); ok {
+			rec.CronWorkflowName = v
+		}
+		if v, ok := m["cron_expr"].(string); ok {
+			rec.CronExpr = v
+		}
+		if v, ok := m["cron_timezone"].(string); ok {
+			rec.CronTimezone = v
+		}
+		if v, ok := m["cron_input"].(string); ok {
+			rec.CronInput = v
+		}
+		if v, ok := m["cron_schedule_id"].(string); ok {
+			rec.CronScheduleID = v
+		}
+		if v, ok := m["cron_result"].(string); ok {
+			rec.CronResult = v
 		}
 		if v, ok := m["error"].(string); ok {
 			rec.Err = v

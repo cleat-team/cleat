@@ -139,6 +139,13 @@ func (h *stubHostHandler) RunDetached(_ context.Context, _ api.Module, _, _ stri
 func (h *stubHostHandler) Fetch(_ context.Context, _ api.Module, _, _, _, _ string, _, _ uint32) int64 {
 	return 0
 }
+func (h *stubHostHandler) ScheduleCron(_ context.Context, _ api.Module, _, _, _, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) DeleteCron(_ context.Context, _ api.Module, _ string) int64 { return 0 }
+func (h *stubHostHandler) ListCrons(_ context.Context, _ api.Module, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) JsonParse(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64 {
 	return 0
 }
@@ -1083,6 +1090,42 @@ func (h *fetchRecorder) Fetch(_ context.Context, _ api.Module, method, url, _, _
 	return 0
 }
 
+type scheduleCronRecorder struct {
+	stubHostHandler
+	workflowName string
+	cronExpr     string
+	timezone     string
+	inputJSON    string
+}
+
+func (h *scheduleCronRecorder) ScheduleCron(_ context.Context, _ api.Module, workflowName, cronExpr, timezone, inputJSON string, _, _ uint32) int64 {
+	h.workflowName = workflowName
+	h.cronExpr = cronExpr
+	h.timezone = timezone
+	h.inputJSON = inputJSON
+	return 0
+}
+
+type deleteCronRecorder struct {
+	stubHostHandler
+	scheduleID string
+}
+
+func (h *deleteCronRecorder) DeleteCron(_ context.Context, _ api.Module, scheduleID string) int64 {
+	h.scheduleID = scheduleID
+	return 0
+}
+
+type listCronsRecorder struct {
+	stubHostHandler
+	called bool
+}
+
+func (h *listCronsRecorder) ListCrons(_ context.Context, _ api.Module, _, _ uint32) int64 {
+	h.called = true
+	return 0
+}
+
 // ---------------------------------------------------------------------------
 // Host function tests
 // ---------------------------------------------------------------------------
@@ -1403,6 +1446,98 @@ func TestHostFunc_CleatFetch(t *testing.T) {
 	}
 	if handler.url != url {
 		t.Errorf("fetch url = %q, want %q", handler.url, url)
+	}
+}
+
+func TestHostFunc_CleatScheduleCron(t *testing.T) {
+	handler := &scheduleCronRecorder{}
+	params := []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32}
+	h := newTestHostFuncHarness(t, "cleat_schedule_cron", params, []byte{wasmI64}, true, handler)
+
+	// Four distinct, recognisable values -- not "a"/"b"/"c"/"d" -- so a
+	// transposition between these four parameters (readServiceName vs
+	// readWasmStringValidated vs readWasmPayload x2, in the wazero and
+	// wasmtime registrations independently) shows up as a mismatch against a
+	// specific expected value rather than passing by coincidence.
+	workflowName := "wfname"
+	cronExpr := "* * * * *"
+	timezone := "Europe/Paris"
+	inputJSON := `{"k":1}`
+
+	if !h.mem.Write(0, []byte(workflowName)) {
+		t.Fatal("write workflowName to memory failed")
+	}
+	if !h.mem.Write(64, []byte(cronExpr)) {
+		t.Fatal("write cronExpr to memory failed")
+	}
+	if !h.mem.Write(128, []byte(timezone)) {
+		t.Fatal("write timezone to memory failed")
+	}
+	if !h.mem.Write(256, []byte(inputJSON)) {
+		t.Fatal("write inputJSON to memory failed")
+	}
+
+	result, err := h.call(
+		0, uint64(len(workflowName)), // workflowName ptr, len
+		64, uint64(len(cronExpr)), // cronExpr ptr, len
+		128, uint64(len(timezone)), // timezone ptr, len
+		256, uint64(len(inputJSON)), // inputJSON ptr, len
+		512, 64, // id out ptr, maxLen
+	)
+	if err != nil {
+		t.Fatalf("call cleat_schedule_cron: %v", err)
+	}
+	if result == errBadParam {
+		t.Error("got errBadParam")
+	}
+	if handler.workflowName != workflowName {
+		t.Errorf("workflowName = %q, want %q", handler.workflowName, workflowName)
+	}
+	if handler.cronExpr != cronExpr {
+		t.Errorf("cronExpr = %q, want %q", handler.cronExpr, cronExpr)
+	}
+	if handler.timezone != timezone {
+		t.Errorf("timezone = %q, want %q", handler.timezone, timezone)
+	}
+	if handler.inputJSON != inputJSON {
+		t.Errorf("inputJSON = %q, want %q", handler.inputJSON, inputJSON)
+	}
+}
+
+func TestHostFunc_CleatDeleteCron(t *testing.T) {
+	handler := &deleteCronRecorder{}
+	h := newTestHostFuncHarness(t, "cleat_delete_cron", []byte{wasmI32, wasmI32}, []byte{wasmI64}, true, handler)
+
+	scheduleID := "sched-123"
+	if !h.mem.Write(0, []byte(scheduleID)) {
+		t.Fatal("write scheduleID to memory failed")
+	}
+
+	result, err := h.call(0, uint64(len(scheduleID)))
+	if err != nil {
+		t.Fatalf("call cleat_delete_cron: %v", err)
+	}
+	if result == errBadParam {
+		t.Error("got errBadParam")
+	}
+	if handler.scheduleID != scheduleID {
+		t.Errorf("scheduleID = %q, want %q", handler.scheduleID, scheduleID)
+	}
+}
+
+func TestHostFunc_CleatListCrons(t *testing.T) {
+	handler := &listCronsRecorder{}
+	h := newTestHostFuncHarness(t, "cleat_list_crons", []byte{wasmI32, wasmI32}, []byte{wasmI64}, true, handler)
+
+	result, err := h.call(0, 4096)
+	if err != nil {
+		t.Fatalf("call cleat_list_crons: %v", err)
+	}
+	if result == errBadParam {
+		t.Error("got errBadParam")
+	}
+	if !handler.called {
+		t.Error("ListCrons was not called")
 	}
 }
 

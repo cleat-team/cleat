@@ -48,6 +48,9 @@ const (
 	EventTypePollChild             EventType = "poll_child"
 	EventTypeAwaitAnyChild         EventType = "await_any_child"
 	EventTypeAdminAction           EventType = "admin_action"
+	EventTypeScheduleCron          EventType = "schedule_cron"
+	EventTypeDeleteCron            EventType = "delete_cron"
+	EventTypeListCrons             EventType = "list_crons"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -170,6 +173,14 @@ type EventRecord struct {
 	FetchHeaders  string `json:"fetch_headers,omitempty"`
 	FetchBody     string `json:"fetch_body,omitempty"`
 	FetchResponse string `json:"fetch_response,omitempty"`
+
+	// Cron schedule fields.
+	CronWorkflowName string `json:"cron_workflow_name,omitempty"`
+	CronExpr         string `json:"cron_expr,omitempty"`
+	CronTimezone     string `json:"cron_timezone,omitempty"`
+	CronInput        string `json:"cron_input,omitempty"`
+	CronScheduleID   string `json:"cron_schedule_id,omitempty"`
+	CronResult       string `json:"cron_result,omitempty"`
 
 	// Detached workflow fields.
 	DetachedName  string `json:"detached_name,omitempty"`

@@ -66,6 +66,7 @@ type Engine struct {
 	maxQuotaEvents          int
 	maxQuotaChildren        int
 	maxQuotaConcurrencyKeys int
+	maxQuotaSchedules       int
 
 	backends             map[string]WasmBackend
 	defaultBackend       string
@@ -208,6 +209,16 @@ func WithMaxQuotaEvents(n int) EngineOption {
 
 // WithMaxQuotaChildren sets the max child workflows per workflow.
 func WithMaxQuotaChildren(n int) EngineOption { return func(e *Engine) { e.maxQuotaChildren = n } }
+
+// WithMaxQuotaSchedules sets the max cron schedules a tenant may hold.
+//
+// Unlike the other three quotas this one is per tenant, not per workflow: a
+// schedule outlives the run that created it, so counting them against that
+// run would let a workflow create its limit, exit, and be started again.
+// Zero means unlimited, matching the others.
+func WithMaxQuotaSchedules(n int) EngineOption {
+	return func(e *Engine) { e.maxQuotaSchedules = n }
+}
 
 // WithMaxQuotaConcurrencyKeys sets the max concurrency keys per workflow.
 func WithMaxQuotaConcurrencyKeys(n int) EngineOption {
