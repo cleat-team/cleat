@@ -65,7 +65,21 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		    generation = generation + 1
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
-		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at,
+		       INSERTED.next_wake_at,
+		       -- CONVERT, not the raw column. SQL Server stores UNIQUEIDENTIFIER
+		       -- in a mixed-endian layout, and go-mssqldb scans it into a Go
+		       -- string as the 16 raw bytes rather than the canonical text --
+		       -- "\x11\x11..." where the caller expects
+		       -- "11111111-1111-1111-1111-111111111111". The same workaround is
+		       -- applied in ResolveTenantFromAPIKey for the same reason.
+		       --
+		       -- This was cosmetic until the worker began routing execution on
+		       -- WorkflowInstance.TenantID: 16 raw bytes are neither empty nor
+		       -- equal to the worker's own tenant, so storeForTenant tried to
+		       -- open a store for them and the factory rejected them as an
+		       -- invalid UUID -- failing every workflow on SQL Server.
+		       CONVERT(NVARCHAR(36), INSERTED.tenant_id) AS tenant_id,
+		       INSERTED.created_at,
 		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,
 		       INSERTED.trace_id
@@ -163,7 +177,21 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 		    generation = generation + 1
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
-		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at,
+		       INSERTED.next_wake_at,
+		       -- CONVERT, not the raw column. SQL Server stores UNIQUEIDENTIFIER
+		       -- in a mixed-endian layout, and go-mssqldb scans it into a Go
+		       -- string as the 16 raw bytes rather than the canonical text --
+		       -- "\x11\x11..." where the caller expects
+		       -- "11111111-1111-1111-1111-111111111111". The same workaround is
+		       -- applied in ResolveTenantFromAPIKey for the same reason.
+		       --
+		       -- This was cosmetic until the worker began routing execution on
+		       -- WorkflowInstance.TenantID: 16 raw bytes are neither empty nor
+		       -- equal to the worker's own tenant, so storeForTenant tried to
+		       -- open a store for them and the factory rejected them as an
+		       -- invalid UUID -- failing every workflow on SQL Server.
+		       CONVERT(NVARCHAR(36), INSERTED.tenant_id) AS tenant_id,
+		       INSERTED.created_at,
 		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,
 		       INSERTED.trace_id
