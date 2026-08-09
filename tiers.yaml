@@ -379,7 +379,11 @@ tier2:
       open_items:
         - "secrets stored and returned in plaintext via CRUD endpoints"
         - "no retry/backoff on outbound HTTP in the alerting plugins"
-        - "kafkaconnect.produce() no-ops and reports success when unconfigured"
+        - "RESOLVED 2026-08-09: kafkaconnect.produce() now refuses when no REST proxy is
+           configured, naming the setting and the topic, instead of logging the message and
+           returning success=true. The consume poller warns once instead of skipping at
+           DEBUG. A test asserted the old success=true, so it pinned the defect rather than
+           catching it"
         - "multi-DB harness job runs a t.Skip while starting three databases"
 
     - id: admin-dashboard
