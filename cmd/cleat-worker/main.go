@@ -829,6 +829,7 @@ func main() {
 		id:                               workerID,
 		logger:                           logger,
 		store:                            store,
+		storeTenantID:                    defaultTenantID,
 		concurrency:                      *concurrency,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,
