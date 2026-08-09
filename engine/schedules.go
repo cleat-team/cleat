@@ -61,10 +61,18 @@ func (s *execSession) ScheduleCron(ctx context.Context, m api.Module, workflowNa
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0
 			}
-			if rec.EventType != EventTypeScheduleCron || rec.CronWorkflowName != workflowName || rec.CronExpr != cronExpr {
+			// All four arguments, not just the two that name the schedule.
+			// A run that changed only the timezone would otherwise be handed
+			// the recorded schedule's ID and carry on believing it had
+			// scheduled in the new zone -- which is precisely the class of
+			// thing this check exists to catch.
+			if rec.EventType != EventTypeScheduleCron ||
+				rec.CronWorkflowName != workflowName || rec.CronExpr != cronExpr ||
+				rec.CronTimezone != timezone || rec.CronInput != inputJSON {
 				return s.cronReplayDivergence(ctx, m, rec,
-					fmt.Sprintf("ScheduleCron mismatch.\n  workflow: %s %q\n  history: %s %q",
-						workflowName, cronExpr, rec.CronWorkflowName, rec.CronExpr),
+					fmt.Sprintf("ScheduleCron mismatch.\n  workflow: %s %q tz=%q input=%s\n  history:  %s %q tz=%q input=%s",
+						workflowName, cronExpr, timezone, truncateWithHash(inputJSON, maxPayloadLen),
+						rec.CronWorkflowName, rec.CronExpr, rec.CronTimezone, truncateWithHash(rec.CronInput, maxPayloadLen)),
 					idPtr, idMaxLen)
 			}
 			if rec.Err != "" {

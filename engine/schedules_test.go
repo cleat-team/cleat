@@ -336,6 +336,8 @@ func TestScheduleCron_ReplayReturnsTheRecordedIDWithoutCreatingAnything(t *testi
 			EventType:        EventTypeScheduleCron,
 			CronWorkflowName: "nightly",
 			CronExpr:         "0 3 * * *",
+			CronTimezone:     "UTC",
+			CronInput:        `{}`,
 			CronScheduleID:   "cron-deadbeef01",
 		}},
 	}
@@ -361,16 +363,34 @@ func TestScheduleCron_ReplayReportsDivergence(t *testing.T) {
 			EventType:        EventTypeScheduleCron,
 			CronWorkflowName: "nightly",
 			CronExpr:         "0 3 * * *",
+			CronTimezone:     "UTC",
+			CronInput:        `{}`,
 			CronScheduleID:   "cron-deadbeef01",
 		}},
 	}
 
-	code, out := callScheduleCron(t, s, "nightly", "0 4 * * *", "UTC", `{}`)
-	if code == 0 {
-		t.Fatalf("a changed cron expression replayed as a success, returning %q", out)
-	}
-	if !strings.Contains(out, "replay divergence") {
-		t.Errorf("message = %q, want it to name the divergence", out)
+	// Every argument is checked, not just the two that name the schedule: a
+	// run that changed only its timezone would otherwise be handed the
+	// recorded ID and carry on believing it scheduled somewhere else.
+	for _, tc := range []struct {
+		name                             string
+		wf, cronExpr, timezone, inputStr string
+	}{
+		{"cron expression", "nightly", "0 4 * * *", "UTC", `{}`},
+		{"workflow name", "weekly", "0 3 * * *", "UTC", `{}`},
+		{"timezone", "nightly", "0 3 * * *", "Europe/Paris", `{}`},
+		{"input", "nightly", "0 3 * * *", "UTC", `{"changed":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replay := &execSession{engine: s.engine, isReplay: true, history: s.history}
+			code, out := callScheduleCron(t, replay, tc.wf, tc.cronExpr, tc.timezone, tc.inputStr)
+			if code == 0 {
+				t.Fatalf("a changed %s replayed as a success, returning %q", tc.name, out)
+			}
+			if !strings.Contains(out, "replay divergence") {
+				t.Errorf("message = %q, want it to name the divergence", out)
+			}
+		})
 	}
 }
 
