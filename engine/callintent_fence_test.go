@@ -189,3 +189,56 @@ func TestCompleteCallIntent_FenceHeld(t *testing.T) {
 		})
 	}
 }
+
+// TestCompleteCallIntent_FenceHeld_NotPendingIsNotFenceLost is the
+// composition check for the call-intent path, mirroring
+// TestFlushEvent_FenceHeld_IdempotentReflushIsNotFenceLost: CompleteCallIntent's
+// UPDATE's WHERE already excludes non-pending rows (intent_at IS NOT NULL AND
+// checksum IS NULL) before the fence's own AND clause is even reached, so a
+// second completion attempt affects zero rows for a reason that has nothing
+// to do with fencing. With the claim still fully live (same worker, same
+// generation, no reap in between), that must report errIntentNotPending, not
+// ErrFenceLost -- disambiguated by intentFenceOrNotPending finding the fence
+// still held and falling through.
+func TestCompleteCallIntent_FenceHeld_NotPendingIsNotFenceLost(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			ctx := context.Background()
+			st := intentStoreOf(t, store)
+
+			wfID := newIntentWorkflow(t, ctx, store, "intent-complete-fence-held-not-pending")
+			wf, err := store.ClaimWorkflow(ctx, "worker-live")
+			if err != nil || wf == nil || wf.ID != wfID {
+				t.Fatalf("ClaimWorkflow: wf=%v err=%v", wf, err)
+			}
+
+			intent := EventRecord{Step: 0, EventType: EventTypeCall, Service: intentService, Op: intentOperation, Request: `{"amount":100}`}
+			if err := st.WriteCallIntent(ctx, wfID, intent, "worker-live", wf.Generation); err != nil {
+				t.Fatalf("WriteCallIntent: %v", err)
+			}
+
+			done := intent
+			done.Response = `{"charged":true}`
+			done.TimestampMs = time.Now().UnixMilli()
+			payload, _ := eventRecordToPayload(done)
+			checksum := computeEventChecksum(done, "")
+			if err := st.CompleteCallIntent(ctx, wfID, done, payload, checksum, "worker-live", wf.Generation); err != nil {
+				t.Fatalf("first CompleteCallIntent: %v, want success", err)
+			}
+
+			// Second completion, same still-live claim: the row is no
+			// longer pending, so this must fail -- but not with
+			// ErrFenceLost, since nothing about the fence changed.
+			err = st.CompleteCallIntent(ctx, wfID, done, payload, checksum, "worker-live", wf.Generation)
+			if !errors.Is(err, errIntentNotPending) {
+				t.Fatalf("second completion under a still-held fence: err = %v, want errIntentNotPending", err)
+			}
+			if errors.Is(err, ErrFenceLost) {
+				t.Fatalf("second completion under a still-held fence was reported as ErrFenceLost: %v", err)
+			}
+		})
+	}
+}
