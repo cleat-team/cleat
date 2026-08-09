@@ -431,8 +431,8 @@ func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, lastRunAt, "UTC", "00000000-0000-0000-0000-000000000000"},
-				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333"},
+				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, lastRunAt, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
+				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
 			},
 		},
 	}, nil)
@@ -496,7 +496,7 @@ func TestMySQLStore_GetDueSchedules_WithRows(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333"},
+				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
 			},
 		},
 	}, nil)
@@ -514,6 +514,17 @@ func TestMySQLStore_GetDueSchedules_WithRows(t *testing.T) {
 	}
 	if scheds[0].TenantID != "33333333-3333-3333-3333-333333333333" {
 		t.Errorf("tenant = %q, want 33333333-3333-3333-3333-333333333333", scheds[0].TenantID)
+	}
+	// Distinct per-row policy values, so a Scan that dropped these columns
+	// cannot pass by returning the right number of rows.
+	if scheds[0].MisfirePolicy != "skip" || scheds[0].OverlapPolicy != "skip" {
+		t.Errorf("policies = %q/%q, want skip/skip", scheds[0].MisfirePolicy, scheds[0].OverlapPolicy)
+	}
+	if scheds[0].CatchUpLimit != 11 {
+		t.Errorf("catch_up_limit = %d, want 11", scheds[0].CatchUpLimit)
+	}
+	if scheds[0].LastRunID != "run-due" {
+		t.Errorf("last_run_id = %q, want run-due", scheds[0].LastRunID)
 	}
 }
 

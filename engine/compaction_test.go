@@ -444,7 +444,7 @@ func (m *mockCompactStore) UpdateScheduleNextRun(ctx context.Context, name strin
 	return nil
 }
 
-func (m *mockCompactStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+func (m *mockCompactStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
 func (m *mockCompactStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {

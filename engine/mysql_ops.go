@@ -274,10 +274,11 @@ func (s *MySQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 // CreateSchedule inserts a new cron schedule.
 func (s *MySQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID,
-		scheduleTimezoneOrDefault(sch.Timezone))
+		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
+		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy))
 	if err != nil {
 		return fmt.Errorf("CreateSchedule: %w", err)
 	}
@@ -287,7 +288,7 @@ func (s *MySQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 // ListSchedules returns all registered schedules for the current tenant.
 func (s *MySQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
 		FROM workflow_schedules
 		WHERE tenant_id = ?
 		ORDER BY name
@@ -302,7 +303,8 @@ func (s *MySQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, fmt.Errorf("ListSchedules: scan: %w", err)
 		}
 		if lastRunAt.Valid {
@@ -338,7 +340,7 @@ func (s *MySQLStore) SetScheduleEnabled(ctx context.Context, name string, enable
 // GetDueSchedules returns enabled schedules whose next_run_at <= NOW(6).
 func (s *MySQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
 		FROM workflow_schedules
 		WHERE enabled = 1 AND next_run_at <= NOW(6) AND tenant_id = ?
 		FOR UPDATE SKIP LOCKED
@@ -353,7 +355,8 @@ func (s *MySQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, fmt.Errorf("GetDueSchedules: scan: %w", err)
 		}
 		if lastRunAt.Valid {
@@ -1437,12 +1440,13 @@ func (s *MySQLStore) ResolveVersionByTag(ctx context.Context, workflowName strin
 
 // ClaimDueSchedule advances a schedule's next_run_at, but only if it still
 // holds expectedNextRun. See the interface doc for why this is a CAS.
-func (s *MySQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+func (s *MySQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_schedules
-		SET next_run_at = ?, last_run_at = NOW(6)
+		SET next_run_at = ?, last_run_at = NOW(6),
+		    last_run_id = CASE WHEN ? = '' THEN last_run_id ELSE ? END
 		WHERE name = ? AND tenant_id = ? AND next_run_at = ?
-	`, newNextRun, name, s.tenantID, expectedNextRun)
+	`, newNextRun, runID, runID, name, s.tenantID, expectedNextRun)
 	if err != nil {
 		return false, fmt.Errorf("ClaimDueSchedule: %w", err)
 	}

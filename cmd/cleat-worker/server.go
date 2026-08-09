@@ -955,6 +955,9 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		EntryPoint string          `json:"entry_point"`
 		Input      json.RawMessage `json:"input"`
 		Timezone   string          `json:"timezone"`
+		Misfire    string          `json:"misfire_policy"`
+		CatchUp    int             `json:"catch_up_limit"`
+		Overlap    string          `json:"overlap_policy"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -984,6 +987,18 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, 400, err.Error())
 		return
 	}
+	if err := engine.ValidateMisfirePolicy(req.Misfire); err != nil {
+		s.writeError(w, 400, err.Error())
+		return
+	}
+	if err := engine.ValidateOverlapPolicy(req.Overlap); err != nil {
+		s.writeError(w, 400, err.Error())
+		return
+	}
+	if req.CatchUp < 0 {
+		s.writeError(w, 400, "catch_up_limit must not be negative")
+		return
+	}
 	sch := engine.Schedule{
 		Name:           req.Name,
 		DefName:        req.DefName,
@@ -992,6 +1007,9 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		Input:          req.Input,
 		Enabled:        true,
 		Timezone:       req.Timezone,
+		MisfirePolicy:  req.Misfire,
+		CatchUpLimit:   req.CatchUp,
+		OverlapPolicy:  req.Overlap,
 	}
 	if err := st.CreateSchedule(r.Context(), sch); err != nil {
 		s.writeError(w, 500, err.Error())

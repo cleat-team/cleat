@@ -219,7 +219,13 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # _AdvancesWhenTheInstantMatches, _RefusesWhenTheInstantMoved and
 # _ExactlyOneOfNConcurrentClaimsWins. +6 by the same rule, applied deliberately
 # this time rather than second-guessed.
-test-go/engine	432	# 426 + three ClaimDueSchedule dialect tests (+6)
+#
+# 432 -> 438: three more registeredBackends tests for the misfire/overlap
+# policy columns -- TestSchedulePolicies_RoundTripAndDefaults,
+# TestClaimDueSchedule_RecordsTheRunItStarted and
+# TestSchedulePolicies_DatabaseRejectsUnknownValues. +6 by the rule of thumb,
+# which the two entries above confirmed is the right one to trust.
+test-go/engine	438	# 432 + three schedule-policy dialect tests (+6)
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -300,7 +306,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	432	# same as test-go/engine, and for the same reason; see the note there
+cluster	438	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a

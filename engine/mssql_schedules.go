@@ -11,16 +11,17 @@ import (
 
 func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone)
-		VALUES (@p1, @p2, @p3, @p4, CAST(@p5 AS NVARCHAR(MAX)), @p6, @p7, @p8, @p9)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy)
+		VALUES (@p1, @p2, @p3, @p4, CAST(@p5 AS NVARCHAR(MAX)), @p6, @p7, @p8, @p9, @p10, @p11, @p12)
 	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputJSON(sch.Input), sch.Enabled, sch.NextRunAt, s.tenantID,
-		scheduleTimezoneOrDefault(sch.Timezone))
+		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
+		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy))
 	return err
 }
 
 func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WHERE tenant_id = @p1 ORDER BY name
 	`, s.tenantID)
 	if err != nil {
@@ -34,7 +35,8 @@ func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var lastRunAt sql.NullTime
 		var inputStr string
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
+			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, err
 		}
 		sch.Input = json.RawMessage(inputStr)
@@ -60,7 +62,7 @@ func (s *MSSQLStore) SetScheduleEnabled(ctx context.Context, name string, enable
 
 func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WITH (READPAST, UPDLOCK, ROWLOCK)
 		WHERE enabled = 1 AND next_run_at <= SYSUTCDATETIME()
 		ORDER BY next_run_at
@@ -76,7 +78,8 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		var lastRunAt sql.NullTime
 		var inputStr string
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID); err != nil {
+			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, err
 		}
 		sch.Input = json.RawMessage(inputStr)
@@ -456,12 +459,13 @@ func scheduleInputJSON(input json.RawMessage) string {
 
 // ClaimDueSchedule advances a schedule's next_run_at, but only if it still
 // holds expectedNextRun. See the interface doc for why this is a CAS.
-func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_schedules
-		SET next_run_at = @p2, last_run_at = SYSUTCDATETIME()
+		SET next_run_at = @p2, last_run_at = SYSUTCDATETIME(),
+		    last_run_id = CASE WHEN @p4 = '' THEN last_run_id ELSE @p4 END
 		WHERE name = @p1 AND next_run_at = @p3
-	`, name, newNextRun, expectedNextRun)
+	`, name, newNextRun, expectedNextRun, runID)
 	if err != nil {
 		return false, fmt.Errorf("ClaimDueSchedule: %w", err)
 	}

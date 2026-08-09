@@ -304,6 +304,13 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 	// CLAUDE.md's "CREATE TABLE IF NOT EXISTS never adds a column", in its
 	// test-harness form. The SQL Server side has the same guard.
 	execIgnoreDupKey(t, db, `ALTER TABLE workflow_schedules ADD COLUMN timezone VARCHAR(64) NOT NULL DEFAULT 'UTC'`)
+
+	// Policy columns, added by migrations/mysql/022. Same guard reasoning as
+	// the timezone column above.
+	execIgnoreDupKey(t, db, `ALTER TABLE workflow_schedules ADD COLUMN misfire_policy VARCHAR(16) NOT NULL DEFAULT 'catch_up'`)
+	execIgnoreDupKey(t, db, `ALTER TABLE workflow_schedules ADD COLUMN catch_up_limit INT NOT NULL DEFAULT 60`)
+	execIgnoreDupKey(t, db, `ALTER TABLE workflow_schedules ADD COLUMN overlap_policy VARCHAR(16) NOT NULL DEFAULT 'allow'`)
+	execIgnoreDupKey(t, db, `ALTER TABLE workflow_schedules ADD COLUMN last_run_id VARCHAR(255) NULL`)
 }
 
 // migrateMySQLEventIntentAt adds event_history.intent_at to an already-existing

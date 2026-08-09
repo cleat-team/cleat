@@ -95,6 +95,7 @@ func postgresSchemaFiles() []string {
 		filepath.Join(dir, "010_idempotency_keys_tenant_id.sql"),
 		filepath.Join(dir, "020_event_intent.sql"),
 		filepath.Join(dir, "021_schedule_timezone.sql"),
+		filepath.Join(dir, "022_schedule_policies.sql"),
 	}
 }
 

@@ -430,7 +430,7 @@ func (m *mockShardStore) UpdateScheduleNextRun(ctx context.Context, name string,
 	return m.err
 }
 
-func (m *mockShardStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time) (bool, error) {
+func (m *mockShardStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
 

@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cleat-team/cleat/engine"
+
 	// The scheduler resolves IANA zones, and these tests use one. See the
 	// matching note in engine/cron_timezone_test.go: embedding tzdata in the
 	// test binary is what lets an unloadable zone be a failure rather than a
@@ -24,7 +26,7 @@ func TestScheduleAdvance_NormalCaseSkipsNothing(t *testing.T) {
 	now := time.Date(2024, 6, 10, 12, 0, 30, 0, loc)
 	scheduled := time.Date(2024, 6, 10, 12, 0, 0, 0, loc)
 
-	next, dropped := scheduleAdvance("* * * * *", scheduled, loc, now)
+	next, dropped := scheduleAdvance("* * * * *", scheduled, loc, now, engine.DefaultCatchUpLimit)
 
 	if dropped != 0 {
 		t.Errorf("dropped = %d, want 0 for a schedule that is on time", dropped)
@@ -46,7 +48,7 @@ func TestScheduleAdvance_AdvancesFromTheScheduledInstantNotNow(t *testing.T) {
 	scheduled := time.Date(2024, 6, 10, 12, 0, 0, 0, loc)
 	now := time.Date(2024, 6, 10, 12, 5, 0, 0, loc)
 
-	next, dropped := scheduleAdvance("* * * * *", scheduled, loc, now)
+	next, dropped := scheduleAdvance("* * * * *", scheduled, loc, now, engine.DefaultCatchUpLimit)
 
 	want := time.Date(2024, 6, 10, 12, 1, 0, 0, loc)
 	if !next.Equal(want) {
@@ -74,13 +76,13 @@ func TestScheduleAdvance_HourlyScheduleIsNeverAffectedByTheBound(t *testing.T) {
 	scheduled := time.Date(2024, 6, 10, 0, 0, 0, 0, loc)
 	now := time.Date(2024, 6, 12, 0, 0, 0, 0, loc) // two days later
 
-	_, dropped := scheduleAdvance("0 * * * *", scheduled, loc, now)
+	_, dropped := scheduleAdvance("0 * * * *", scheduled, loc, now, engine.DefaultCatchUpLimit)
 
 	// 48 hourly instants owed, under the bound of 60, so the backlog is walked
 	// one instant per tick and none of them is dropped.
 	if dropped != 0 {
 		t.Errorf("dropped = %d, want 0; a two-day outage on an hourly schedule "+
-			"is inside the bound of %d and should be fully caught up", dropped, maxCatchUpFirings)
+			"is inside the bound of %d and should be fully caught up", dropped, engine.DefaultCatchUpLimit)
 	}
 }
 
@@ -92,10 +94,10 @@ func TestScheduleAdvance_BoundedWhenTooFarBehind(t *testing.T) {
 	scheduled := time.Date(2024, 6, 10, 0, 0, 0, 0, loc)
 	now := time.Date(2024, 6, 11, 0, 0, 0, 0, loc) // 1440 minutes later
 
-	next, dropped := scheduleAdvance("* * * * *", scheduled, loc, now)
+	next, dropped := scheduleAdvance("* * * * *", scheduled, loc, now, engine.DefaultCatchUpLimit)
 
-	if dropped <= maxCatchUpFirings {
-		t.Errorf("dropped = %d, want more than the bound %d", dropped, maxCatchUpFirings)
+	if dropped <= engine.DefaultCatchUpLimit {
+		t.Errorf("dropped = %d, want more than the bound %d", dropped, engine.DefaultCatchUpLimit)
 	}
 	// Having given up on catching up, it must resume in the FUTURE -- not
 	// somewhere in the middle of the backlog, which would leave it permanently
@@ -116,7 +118,7 @@ func TestScheduleAdvance_ModestBacklogDropsNothing(t *testing.T) {
 	scheduled := time.Date(2024, 6, 10, 0, 0, 0, 0, loc)
 	now := time.Date(2024, 6, 10, 0, 10, 0, 0, loc) // ten minutes behind
 
-	next, dropped := scheduleAdvance("* * * * *", scheduled, loc, now)
+	next, dropped := scheduleAdvance("* * * * *", scheduled, loc, now, engine.DefaultCatchUpLimit)
 
 	if dropped != 0 {
 		t.Errorf("dropped = %d, want 0: a ten-interval backlog is caught up one "+
@@ -137,14 +139,14 @@ func TestScheduleAdvance_ReportsWhatItDropped(t *testing.T) {
 	// Far enough past the bound that the schedule cannot walk out of it.
 	now := time.Date(2024, 6, 10, 4, 0, 0, 0, loc) // 240 minutes behind
 
-	_, dropped := scheduleAdvance("* * * * *", scheduled, loc, now)
+	_, dropped := scheduleAdvance("* * * * *", scheduled, loc, now, engine.DefaultCatchUpLimit)
 
 	if dropped == 0 {
 		t.Error("dropped = 0 for a backlog well past the bound; the caller has " +
 			"nothing to log and the drop would be invisible")
 	}
-	if dropped <= maxCatchUpFirings {
-		t.Errorf("dropped = %d, want more than the bound %d", dropped, maxCatchUpFirings)
+	if dropped <= engine.DefaultCatchUpLimit {
+		t.Errorf("dropped = %d, want more than the bound %d", dropped, engine.DefaultCatchUpLimit)
 	}
 }
 
@@ -160,7 +162,7 @@ func TestScheduleAdvance_UnparseableExpressionTerminates(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		scheduleAdvance("this is not a cron expression", scheduled, loc, now)
+		scheduleAdvance("this is not a cron expression", scheduled, loc, now, engine.DefaultCatchUpLimit)
 	}()
 	select {
 	case <-done:
@@ -181,7 +183,7 @@ func TestScheduleAdvance_HonoursTheScheduleZone(t *testing.T) {
 	scheduled := time.Date(2024, 3, 9, 7, 0, 0, 0, ny)
 	now := time.Date(2024, 3, 9, 7, 0, 30, 0, ny)
 
-	next, dropped := scheduleAdvance("0 7 * * *", scheduled, ny, now)
+	next, dropped := scheduleAdvance("0 7 * * *", scheduled, ny, now, engine.DefaultCatchUpLimit)
 
 	if dropped != 0 {
 		t.Errorf("dropped = %d, want 0", dropped)

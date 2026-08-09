@@ -43,7 +43,7 @@ func TestClaimDueSchedule_AdvancesWhenTheInstantMatches(t *testing.T) {
 			got := findSchedule(t, store, ctx, "claim-ok")
 			next := got.NextRunAt.Add(time.Minute)
 
-			claimed, err := store.ClaimDueSchedule(ctx, "claim-ok", got.NextRunAt, next)
+			claimed, err := store.ClaimDueSchedule(ctx, "claim-ok", got.NextRunAt, next, "")
 			if err != nil {
 				t.Fatalf("ClaimDueSchedule: %v", err)
 			}
@@ -77,14 +77,14 @@ func TestClaimDueSchedule_RefusesWhenTheInstantMoved(t *testing.T) {
 			got := findSchedule(t, store, ctx, "claim-stale")
 			winner := got.NextRunAt.Add(time.Minute)
 
-			claimed, err := store.ClaimDueSchedule(ctx, "claim-stale", got.NextRunAt, winner)
+			claimed, err := store.ClaimDueSchedule(ctx, "claim-stale", got.NextRunAt, winner, "")
 			if err != nil || !claimed {
 				t.Fatalf("first claim: claimed=%v err=%v", claimed, err)
 			}
 
 			// A second caller still holding the ORIGINAL instant.
 			loser := got.NextRunAt.Add(2 * time.Hour)
-			claimed, err = store.ClaimDueSchedule(ctx, "claim-stale", got.NextRunAt, loser)
+			claimed, err = store.ClaimDueSchedule(ctx, "claim-stale", got.NextRunAt, loser, "")
 			if err != nil {
 				t.Fatalf("second claim: %v", err)
 			}
@@ -138,7 +138,7 @@ func TestClaimDueSchedule_ExactlyOneOfNConcurrentClaimsWins(t *testing.T) {
 					// Every worker computes the SAME next instant, exactly as
 					// the scheduler does: it is derived from the schedule, not
 					// from the worker.
-					claimed, err := store.ClaimDueSchedule(ctx, "claim-race", got.NextRunAt, got.NextRunAt.Add(time.Minute))
+					claimed, err := store.ClaimDueSchedule(ctx, "claim-race", got.NextRunAt, got.NextRunAt.Add(time.Minute), "")
 					mu.Lock()
 					defer mu.Unlock()
 					if err != nil {
