@@ -956,6 +956,12 @@ type Worker struct {
 	id                   string
 	logger               *slog.Logger
 	store                engine.WorkflowStore
+
+	// storeTenantID is the tenant `store` was opened as, and therefore the
+	// only tenant this worker can execute anything for. See executeWorkflow's
+	// scope check.
+	storeTenantID string
+
 	concurrency          int
 	maxQueued            int
 	heartbeatInterval    time.Duration
@@ -1424,6 +1430,38 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			}
 		}
 	}()
+
+	// ---- Tenant scope check ----
+	//
+	// This worker holds ONE store, opened as storeTenantID, and every write
+	// below goes through it: the trace ID, the event history, state, child
+	// workflows, schedules. The engine is separately told
+	// WithTenantID(wf.TenantID), so there are two notions of tenant here and
+	// nothing else compares them.
+	//
+	// Today they cannot disagree, because the claim only ever returns rows for
+	// the store's own tenant -- which means this check never fires, and that is
+	// the point of adding it now rather than later. The same restriction that
+	// makes a non-default tenant's workflows never run (see
+	// engine.TestScheduleLoop_OnlySeesItsOwnTenantsSchedules) is also the only
+	// thing preventing a much worse failure: widen the claim without this, and
+	// another tenant's history, state and schedules get written under
+	// storeTenantID's ID, with RLS satisfied at every step because the store
+	// genuinely is that tenant. Silent cross-tenant corruption, invisible to
+	// every isolation test we have.
+	//
+	// Failing the run is the right answer rather than releasing it: no
+	// correctly-scoped worker exists to pick it up, so releasing would spin.
+	if wf.TenantID != "" && w.storeTenantID != "" && wf.TenantID != w.storeTenantID {
+		errMsg := fmt.Sprintf("workflow %s belongs to tenant %s but this worker executes tenant %s; "+
+			"refusing rather than writing its history under the wrong tenant",
+			wf.ID, wf.TenantID, w.storeTenantID)
+		w.logger.ErrorContext(context.Background(), "tenant scope violation",
+			"worker_id", w.id, "workflow_id", wf.ID,
+			"workflow_tenant_id", wf.TenantID, "worker_tenant_id", w.storeTenantID)
+		w.recordTerminalFailure(wf, workflowStartTime, errMsg, engine.ErrPermanent.String(), "tenant_scope")
+		return
+	}
 
 	// ---- Assign trace ID ----
 	traceID := wf.TraceID
