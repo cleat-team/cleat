@@ -502,6 +502,57 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), nil",
 		},
 	},
+	"ScheduleCron": {
+		FieldName:  "ScheduleCron",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"workflowName", "string"},
+			{"cronExpr", "string"},
+			{"timezone", "string"},
+			{"inputJSON", "string"},
+		},
+		ResultStmts: []string{
+			"scheduleIDLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			// The host writes the reason into the same buffer, and it is the
+			// only useful thing here: cleat_schedule_cron returns 1 for every
+			// failure, so the CallErrorCode legend the older adapters print
+			// would report a bad cron expression as a timeout.
+			`	return "", fmt.Errorf("cleat_schedule_cron: %s", hostErrMessage(scheduleIDBuf[:], scheduleIDLen))`,
+			"}",
+			"return unsafe.String(&scheduleIDBuf[0], int(scheduleIDLen)), nil",
+		},
+	},
+	"DeleteCron": {
+		FieldName:  "DeleteCron",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"scheduleID", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			// No out buffer in this call's ABI, so there is no message to
+			// report -- and the CallErrorCode legend does not apply, since
+			// the host returns 1 for every failure.
+			`	return fmt.Errorf("cleat_delete_cron failed (code %d)", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
+	"ListCrons": {
+		FieldName:  "ListCrons",
+		ReturnType: "(string, error)",
+		ResultStmts: []string{
+			"resultLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_list_crons: %s", hostErrMessage(resultBuf[:], resultLen))`,
+			"}",
+			"return unsafe.String(&resultBuf[0], int(resultLen)), nil",
+		},
+	},
 	"PluginCallStreaming": {
 		FieldName:  "PluginCallStreaming",
 		ReturnType: "(<-chan cleat.StreamEvent, error)",

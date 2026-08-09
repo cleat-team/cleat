@@ -1065,28 +1065,19 @@ func TestEveryHostCallIsWired(t *testing.T) {
 	// "runtime was not initialized" error, so a workflow using any of these
 	// cannot be tested with cleattest at all. This is the backlog.
 	//
-	// 7 on 2026-08-08 when this guard was added; 4 now. ResolvePromise,
-	// RejectPromise and ContinueAsNewWithVersion were wired the same day --
-	// all three were thin wrappers over state TestEnv already had.
+	// 7 on 2026-08-08 when this guard was added; 4 the same day once
+	// ResolvePromise, RejectPromise and ContinueAsNewWithVersion were wired;
+	// 1 now.
+	//
+	// ScheduleCron/DeleteCron/ListCrons came off this list because the reason
+	// they were on it stopped being true. The note here used to say mocking
+	// them would be "inventing the first specification of a workflow
+	// scheduling its own cron anywhere in the codebase" and that the fix
+	// belonged in the engine. It now exists there -- cleat_schedule_cron,
+	// cleat_delete_cron and cleat_list_crons in engine/schedules.go -- so
+	// cleattest validates against the engine's own ValidateCronExpr and
+	// ValidateTimezone rather than against rules invented here.
 	unimplemented := map[string]string{
-		// NOT a cleattest gap. ScheduleCron/DeleteCron/ListCrons have NO
-		// production implementation anywhere: no host import in
-		// engine/imports.go, nothing in engine/, and no wiring in
-		// cleat/embedded, cleat/localdev or the worker. cleat.HostCalls
-		// declares three methods the engine does not implement. Production
-		// cron is a different mechanism entirely -- a worker-daemon poll loop
-		// over a schedule table (cmd/cleat-worker/setup.go), not something a
-		// workflow calls from inside itself.
-		//
-		// So mocking these would be inventing the first specification of
-		// "a workflow schedules its own cron" anywhere in the codebase, and a
-		// green cleattest test would then assert a contract nothing downstream
-		// honours -- strictly worse than today's honest hard-error. The fix
-		// belongs in the engine, or the three methods should come off the
-		// public interface. Not a decision to make inside a test harness.
-		"ScheduleCron": "no engine implementation exists -- see above",
-		"DeleteCron":   "no engine implementation exists -- see above",
-		"ListCrons":    "no engine implementation exists -- see above",
 		// Implementable, but needs one design decision first: WHEN do the
 		// closures run. cleat/embedded/runner.go drains its deferFuncs LIFO
 		// under recover() at a completion boundary; cleattest has no such

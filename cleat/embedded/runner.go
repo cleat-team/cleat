@@ -86,6 +86,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -293,7 +294,32 @@ func (e *execution) hostCalls() cleat.HostCalls {
 		ReleaseLock:         e.releaseLock,
 		AwaitCondition:      e.awaitCondition,
 		SideEffect:          e.sideEffect,
+		ScheduleCron:        e.scheduleCron,
+		DeleteCron:          e.deleteCron,
+		ListCrons:           e.listCrons,
 	})
+}
+
+// Cron schedules are wired to an explicit refusal rather than left nil.
+//
+// A nil hook answers with "the HostCalls runtime was not initialized",
+// which is about workflow context and reads as the caller's fault. The
+// truth is narrower and worth saying: this runner executes a workflow in
+// process and has no schedule store behind it, so a schedule created here
+// would have nothing to fire it. Returning success for a cron that can
+// never run would be worse than failing.
+const errNoScheduleStore = "the embedded runner has no schedule store: cron schedules need a worker with a database (see cmd/cleat-worker)"
+
+func (e *execution) scheduleCron(_, _, _, _ string) (string, error) {
+	return "", errors.New(errNoScheduleStore)
+}
+
+func (e *execution) deleteCron(_ string) error {
+	return errors.New(errNoScheduleStore)
+}
+
+func (e *execution) listCrons() (string, error) {
+	return "", errors.New(errNoScheduleStore)
 }
 
 func (e *execution) acquireLock(key string, ttlMs int64) (bool, error) {

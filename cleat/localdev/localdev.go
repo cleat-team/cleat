@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -260,8 +261,33 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		ReleaseLock:                   r.releaseLockImpl,
 		AwaitCondition:                r.awaitConditionImpl,
 		SideEffect:                    r.sideEffect,
+		ScheduleCron:                  r.scheduleCron,
+		DeleteCron:                    r.deleteCron,
+		ListCrons:                     r.listCrons,
 	})
 	return r
+}
+
+// Cron schedules are wired to an explicit refusal rather than left nil.
+//
+// A nil hook answers with "the HostCalls runtime was not initialized",
+// which is about workflow context and reads as the caller's fault. The
+// truth is narrower: LocalRunner keeps its event history in memory and has
+// no schedule store, so a schedule created here would have nothing to fire
+// it. Reporting success for a cron that can never run would be worse than
+// failing.
+const errNoScheduleStore = "localdev has no schedule store: cron schedules need a worker with a database (see cmd/cleat-worker)"
+
+func (r *LocalRunner) scheduleCron(_, _, _, _ string) (string, error) {
+	return "", errors.New(errNoScheduleStore)
+}
+
+func (r *LocalRunner) deleteCron(_ string) error {
+	return errors.New(errNoScheduleStore)
+}
+
+func (r *LocalRunner) listCrons() (string, error) {
+	return "", errors.New(errNoScheduleStore)
 }
 
 // H returns the HostCalls interface for use by workflow code.
