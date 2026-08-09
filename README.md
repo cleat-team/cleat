@@ -60,13 +60,18 @@ walkthrough with a real-world example.
 - **Durable execution** -- deterministic replay via event history; workflows survive
   worker crashes, restarts, and network partitions.
 - **Multi-DB backends** -- PostgreSQL 16+, MySQL 8.0+, SQL Server 2022+, each with an
-  independent implementation of the full workflow store. One exception: database-enforced
-  tenant isolation (row-level security) exists on PostgreSQL only. On MySQL and SQL Server,
-  tenant scoping is applied in application queries with no database-level backstop.
+  independent implementation of the full workflow store. Database-enforced tenant
+  isolation (row-level security) exists on PostgreSQL and SQL Server -- FORCEd RLS
+  policies on PostgreSQL, a native `SECURITY POLICY`/`FILTER PREDICATE` on SQL Server.
+  MySQL has no row-level security feature at all, so it is documented single-tenant
+  only rather than emulating isolation the database can't back up (see
+  `docs/reference/multi-tenancy.md`).
 - **Plugin system** -- extensible via LLM, Slack, webhooks, and custom plugins;
   plugins run in-process with lifecycle hooks.
-- **WASM workflows** -- write in Go or Rust, compile to WebAssembly, zero sandbox
-  overhead with the wazero runtime.
+- **WASM workflows** -- write in Go, Rust, Python, Java, or AssemblyScript, compile to
+  WebAssembly. wasmtime is the backend of record (CPU/wall-clock/memory limits via
+  epoch interruption, fuel, and store limits); wazero is a pure-Go, CGO-less fallback
+  with no compute-bound fencing -- see `docs/explanation/security-model.md`.
 - **Signals and human-in-the-loop** -- `AwaitSignals` pauses workflows for external
   input; signals are recorded in the event history for deterministic replay.
 - **Saga / compensating transactions** -- structured rollback with `DurableDefer`,
