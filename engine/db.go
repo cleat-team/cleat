@@ -1156,28 +1156,48 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 }
 
 // DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
-// whose completed_at is older than the cutoff. Child rows (event_history, signals,
-// promises, concurrency_keys, update_requests) are automatically deleted via
-// ON DELETE CASCADE.
+// whose completed_at is older than the cutoff.
+//
+// Two bugs were found and fixed here together (both discovered verifying
+// Stream I / Finding S3's tenant-deletion work, which shares this function's
+// FK-graph question):
+//
+//  1. The previous version ran its DELETE on s.db directly -- the plain
+//     pool, with no RLS context set. workflow_instances carries
+//     `FORCE ROW LEVEL SECURITY` with a fail-closed policy
+//     (cleat.assert_tenant_set()), so under a real RLS-enforcing connection
+//     (any role that is not a superuser and does not own the table -- e.g.
+//     cleat_app in production) that statement does not silently do nothing:
+//     it raises "cleat.tenant_id is not set" and the whole call errors.
+//     Verified directly against a real cleat_rls_test_role connection: the
+//     old query, run as that role with the tenant_id predicate satisfied but
+//     no set_config call preceding it, fails with exactly that error. Fixed
+//     by running inside beginTxWithRLS, which calls setRLSOnTx before any
+//     query -- the same pattern every other tenant-scoped method here uses.
+//  2. The doc comment claimed child rows -- "event_history, signals,
+//     promises, concurrency_keys, update_requests" -- are "automatically
+//     deleted via ON DELETE CASCADE". True for four of the five, but
+//     migrations/postgres/003_procedures.sql deliberately DROPs the FK from
+//     event_history to workflow_instances ("no longer needed; events are
+//     deleted on terminal") because finalize_workflow_status() deletes a
+//     workflow's events itself when it reaches 'done' or 'failed'.
+//     MoveToDeadLetterQueue does not call finalize_workflow_status -- it
+//     does a plain UPDATE ... SET status = 'dead_lettered' -- so a
+//     dead-lettered workflow's event_history rows are never deleted there
+//     either. Verified directly: seeding a dead_lettered workflow with one
+//     event_history row and running the old DELETE FROM workflow_instances
+//     query left that event_history row in place, orphaned (no
+//     workflow_instances row it can still join to) and undeletable by any
+//     later call to this function, since it only ever looks at
+//     workflow_instances.status. Fixed by deleting event_history explicitly,
+//     by the same batch of IDs, in the same transaction.
 func (s *PostgresStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_instances
-			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < $1
-				  AND tenant_id = $2
-				ORDER BY id
-				LIMIT 10000
-			)
-		`, olderThan, s.tenantID)
+		n, err := s.deleteDeadLetteredWorkflowsBatch(ctx, olderThan)
 		if err != nil {
-			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
+			return totalDeleted, err
 		}
-		n, _ := result.RowsAffected()
 		totalDeleted += n
 		if n == 0 {
 			break
@@ -1185,6 +1205,63 @@ func (s *PostgresStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderTh
 		time.Sleep(10 * time.Millisecond)
 	}
 	return totalDeleted, nil
+}
+
+// deleteDeadLetteredWorkflowsBatch deletes up to 10000 dead-lettered
+// workflow instances (and their orphan-prone event_history rows) in a
+// single RLS-scoped transaction, returning how many workflow_instances rows
+// were removed.
+func (s *PostgresStore) deleteDeadLetteredWorkflowsBatch(ctx context.Context, olderThan time.Time) (int64, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("delete dead-lettered workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE status = 'dead_lettered'
+		  AND completed_at IS NOT NULL
+		  AND completed_at < $1
+		  AND tenant_id = $2
+		ORDER BY id
+		LIMIT 10000
+	`, olderThan, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("delete dead-lettered workflows: select batch: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("delete dead-lettered workflows: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("delete dead-lettered workflows: rows: %w", err)
+	}
+	rows.Close()
+
+	if len(ids) == 0 {
+		return 0, tx.Commit()
+	}
+
+	// event_history has no FK to workflow_instances (see the doc comment
+	// above) -- must be deleted explicitly or these rows are orphaned the
+	// moment the workflow_instances row below is gone.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM event_history WHERE workflow_id = ANY($1)`, pq.Array(ids)); err != nil {
+		return 0, fmt.Errorf("delete dead-lettered workflows: delete event_history: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM workflow_instances WHERE id = ANY($1)`, pq.Array(ids))
+	if err != nil {
+		return 0, fmt.Errorf("delete dead-lettered workflows: delete instances: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n, tx.Commit()
 }
 
 // tryDecodeBase64 attempts to base64-decode s. If decoding fails (e.g. the
