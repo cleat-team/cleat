@@ -56,7 +56,27 @@ The host must check for this value before decoding the normal result. Suspension
 
 ### Input/Output format
 
-All arguments are JSON-serialized into a single object. The export function deserializes them, calls the workflow logic, and serializes the result as JSON into the output buffer.
+All arguments are JSON-serialized into a single object. The export function deserializes them, calls the workflow logic, and writes the result as JSON into the output buffer.
+
+**The result contract: an entry point returns a string containing a JSON-encoded
+object.**
+
+Stated this way on purpose. There is no "object" at this boundary — it carries a
+length and a byte range — so "return an object" is a per-language notion the ABI
+cannot express, and every SDK that tried to express it invented a different
+answer. A string containing a JSON object is the same rule for Go, Rust, Java,
+Python and AssemblyScript.
+
+The consequence for an SDK: the returned string **is** the serialized form, not a
+value awaiting serialization. Re-encoding it produces a JSON string containing
+JSON (`"{\"ok\":true}"`), which is valid JSON and therefore passes every naive
+check, while no consumer can read it without unwrapping first. Three SDKs shipped
+that bug independently.
+
+The host reports a result that is valid JSON but not an object
+(`engine.coerceResultJSON`). It stores it rather than discarding it — a storable
+result should not be destroyed, and workflows predating this contract return
+scalars — but the violation is no longer silent.
 
 **Input example** (for a Go `func PlaceOrder(h HostCalls, userID string, cart []CartItem) (string, error)`):
 ```json

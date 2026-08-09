@@ -763,6 +763,25 @@ func coerceResultJSON(ctx context.Context, log *slog.Logger, workflowID, result 
 		return "{}"
 	}
 	if json.Valid([]byte(result)) {
+		// Valid JSON is not the same as conforming to the contract. An entry
+		// point returns a string containing a JSON-encoded OBJECT, and
+		// json.Valid happily accepts a bare string, number or array -- which is
+		// precisely why a double-encoded result ("{\"ok\":true}" as a JSON
+		// string) sailed through here undetected across three SDKs.
+		//
+		// Reported, not rejected. Replacing a valid-but-wrong-shaped result
+		// with {} would destroy data that is at least storable, and workflows
+		// predating the contract still return scalars. What this removes is the
+		// silence: a violation now names itself, with the workflow that
+		// produced it.
+		if log != nil && !looksLikeJSONObject(result) {
+			log.ErrorContext(ctx, "workflow result is valid JSON but not an object -- the "+
+				"contract is a string containing a JSON-encoded object, so this is stored as-is "+
+				"but no consumer can rely on its shape. A result that starts with a quote is "+
+				"usually an SDK encoding a value that was already JSON",
+				"workflow_id", workflowID, "result_len", len(result),
+				"result", truncateForLog(result))
+		}
 		return result
 	}
 	if log != nil {
@@ -1119,4 +1138,24 @@ func crossTenantVerdict(exists, exec, bypass bool, fn, migration string) (bool, 
 			"missing attribute. Restore it with: ALTER ROLE cleat_dispatcher BYPASSRLS"
 	}
 	return true, ""
+}
+
+// looksLikeJSONObject reports whether a result is a JSON object.
+//
+// Structural, not a full parse: coerceResultJSON has already established the
+// value is valid JSON, so the first non-space byte decides it. A parse here
+// would cost a second decode of every workflow result on the terminal path to
+// learn one byte.
+func looksLikeJSONObject(result string) bool {
+	for i := 0; i < len(result); i++ {
+		switch result[i] {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }

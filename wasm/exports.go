@@ -591,7 +591,19 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 		buf.WriteString("\t\t\treturn []byte(\"{\\\"error\\\":\" + encodeJSONString(__e.Error()) + \"}\")\n")
 		buf.WriteString("\t\t}\n")
 		if hasResultValue {
-			buf.WriteString("\t\treturn []byte(encodeJSONString(__r))\n")
+			// Pass through, do NOT re-encode.
+			//
+			// The contract at the WASM boundary is that an entry point returns a
+			// STRING CONTAINING A JSON-ENCODED OBJECT. There is no "object" to
+			// return -- the boundary carries a length and a byte range -- so the
+			// string IS the serialised form, not a value awaiting serialisation.
+			//
+			// This used to be encodeJSONString(__r), which quoted and escaped it,
+			// turning {"ok":true} into "{\"ok\":true}". The generated suspend
+			// wrapper above has always used []byte(__r); the two disagreed, so the
+			// same workflow returning the same string produced a different result
+			// shape depending on which wrapper ran. They now agree.
+			buf.WriteString("\t\treturn []byte(__r)\n")
 		} else {
 			buf.WriteString("\t\treturn []byte(`\"ok\"`)\n")
 		}
