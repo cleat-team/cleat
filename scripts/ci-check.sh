@@ -178,8 +178,13 @@ run_step "clippy (cleat-sdk)" \
 # ===========================================================================
 section "TEST"
 
+# -p 1: ./engine/... is two database-backed packages (engine, engine/testutil)
+# sharing one database, and engine/testutil's CleanupPostgresTestData is an
+# unqualified DELETE across eleven tables. Run concurrently they delete each
+# other's fixtures and this step fails ~3 times in 8 for reasons that have
+# nothing to do with the change under test. See scripts/skip-budget.txt.
 run_step "go test (engine) ./engine/..." \
-    go test -race -count=1 ./engine/...
+    go test -race -count=1 -p 1 ./engine/...
 
 run_step "go test (wasm) ./wasm/..." \
     go test -race -count=1 ./wasm/...
