@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -25,10 +26,15 @@ import (
 // available way -- not at the claim, but one step later, as "no store for
 // tenant" on every workflow the worker picked up.
 func TestMSSQLClaim_ReturnsTenantIDAsCanonicalUUIDText(t *testing.T) {
-	db := testutil.MSSQLTestDB(t)
-	if db == nil {
-		t.Skip("CLEAT_TEST_MSSQL not set")
+	// Guard on "was a SQL Server asked for", not on "is one reachable".
+	// MSSQLTestDB falls back to a default DSN and t.Fatalf's on an unreachable
+	// server, which is right for a configured DSN and wrong for an absent one --
+	// so the check has to happen out here, as it does at every other call site.
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
 	}
+	db := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLFullSchema(t, db)
 	const tid = "11111111-1111-1111-1111-111111111111"
 
 	for _, tc := range []struct {
