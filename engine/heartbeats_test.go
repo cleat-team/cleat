@@ -172,7 +172,7 @@ func TestDurableCallWithHeartbeat_Replay_ErrorEvent(t *testing.T) {
 		history: []EventRecord{
 			{Step: 0, EventType: EventTypeHeartbeat, Service: "my-svc", Op: "my-op"},
 			{Step: 1, EventType: EventTypeCall, Service: "my-svc", Op: "my-op",
-				Request: `{"key":"val"}`, Response: "", Err: "something went wrong"},
+				Request: `{"key":"val"}`, Response: "", Err: "something went wrong", ErrNonRetryable: false},
 		},
 		stepCount: 0,
 	}
@@ -186,10 +186,90 @@ func TestDurableCallWithHeartbeat_Replay_ErrorEvent(t *testing.T) {
 		t.Errorf("errCode = %d, want 1 (cached error)", errCode)
 	}
 	if callErrorCode != callFailureCode {
-		t.Errorf("callErrorCode = %d, want %d -- a recorded service failure, classified the same as on the fresh path", callErrorCode, callFailureCode)
+		t.Errorf("callErrorCode = %d, want %d -- a recorded RETRYABLE service failure, classified the same as on the fresh path", callErrorCode, callFailureCode)
 	}
 	if s.stepCount != 2 {
 		t.Errorf("stepCount = %d, want 2 (consumed heartbeat + call)", s.stepCount)
+	}
+}
+
+// TestDurableCallWithHeartbeat_Replay_ErrorEvent_NonRetryable is the fixture
+// TestDurableCallWithHeartbeat_Replay_ErrorEvent could not be: that test left
+// ErrNonRetryable unset (the Go zero value, false), so it could not tell a
+// correct classification from a broken one that always returns callFailureCode
+// regardless of what was recorded. This test pins the other half: an event
+// recorded non-retryable must replay non-retryable.
+func TestDurableCallWithHeartbeat_Replay_ErrorEvent_NonRetryable(t *testing.T) {
+	s := &execSession{
+		isReplay: true,
+		history: []EventRecord{
+			{Step: 0, EventType: EventTypeHeartbeat, Service: "my-svc", Op: "my-op"},
+			{Step: 1, EventType: EventTypeCall, Service: "my-svc", Op: "my-op",
+				Request: `{"key":"val"}`, Response: "", Err: "bad request", ErrNonRetryable: true},
+		},
+		stepCount: 0,
+	}
+
+	result := s.DurableCallWithHeartbeat(context.Background(), nil,
+		"my-svc", "my-op", `{"key":"val"}`, 60000, 0, 0)
+
+	errCode := byte(result & 0xFF)
+	callErrorCode := byte((result >> 8) & 0xFF)
+	if errCode != 1 {
+		t.Errorf("errCode = %d, want 1 (cached error)", errCode)
+	}
+	if callErrorCode != callErrorUnknown {
+		t.Errorf("callErrorCode = %d, want %d (non-retryable) -- freshCallWithHeartbeat recorded "+
+			"ErrNonRetryable=true for this event, so replay must reproduce that classification "+
+			"instead of guessing retryable", callErrorCode, callErrorUnknown)
+	}
+	if s.stepCount != 2 {
+		t.Errorf("stepCount = %d, want 2 (consumed heartbeat + call)", s.stepCount)
+	}
+}
+
+// TestFreshAndReplayAgreeOnNonRetryableFailure_Heartbeat is the determinism
+// invariant for the heartbeat call path, mirroring
+// TestFreshAndReplayAgreeOnNonRetryableFailure in callerrors_test.go for the
+// plain DurableCall path. It replays the event freshCallWithHeartbeat actually
+// recorded rather than a hand-written literal, so the writer and the reader
+// cannot agree with themselves while disagreeing with each other.
+func TestFreshAndReplayAgreeOnNonRetryableFailure_Heartbeat(t *testing.T) {
+	// freshCallWithHeartbeat only marks ErrNonRetryable=true when the
+	// heartbeat loop itself cancelled the call (see the cancelledByWorkflow
+	// branch); an ordinary service failure always records false. Build the
+	// event directly, as freshCallWithHeartbeat would have written it, for
+	// both classes.
+	for _, tc := range []struct {
+		name            string
+		errMsg          string
+		errNonRetryable bool
+		wantCode        byte
+	}{
+		{"retryable service failure", "connection reset", false, callFailureCode},
+		{"cancelled by workflow", cancelledCallError, true, callErrorUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := EventRecord{
+				Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op",
+				Request: `{}`, Err: tc.errMsg, ErrNonRetryable: tc.errNonRetryable,
+			}
+
+			replay := &execSession{
+				engine:    NewEngine(nil, &mockCaller{}),
+				isReplay:  true,
+				history:   []EventRecord{rec},
+				stepCount: 0,
+			}
+			result := replay.DurableCallWithHeartbeat(context.Background(), nil,
+				"svc", "op", `{}`, 60000, 0, 0)
+
+			callErrorCode := byte((result >> 8) & 0xFF)
+			if callErrorCode != tc.wantCode {
+				t.Errorf("callErrorCode = %d, want %d -- replay must reproduce the classification "+
+					"recorded on the event (ErrNonRetryable=%v)", callErrorCode, tc.wantCode, tc.errNonRetryable)
+			}
+		})
 	}
 }
 
