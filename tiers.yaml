@@ -474,8 +474,12 @@ tier2:
             BYPASSRLS role (migrations/postgres/023_cross_tenant_claim.sql). FORCE ROW
             LEVEL SECURITY subjects even the table owner to RLS, so SECURITY DEFINER alone
             is not enough; the BYPASSRLS attribute is the exemption, and the migration
-            sets it rather than leaving it to a deployment step, because a missing
-            BYPASSRLS does not raise — the function simply returns fewer rows.
+            sets it rather than leaving it to a deployment step. A missing BYPASSRLS
+            fails loudly, not silently — measured 2026-08-09, both functions raise
+            "cleat.tenant_id is not set" (P0001), because 001_schema.sql's policies are
+            fail-closed through assert_tenant_set() rather than COALESCE-ing to a
+            default. An earlier version of this entry claimed the opposite; the startup
+            check reports the attribute by name, since P0001 does not.
           mssql — works. dbo.fn_tenant_filter already admits on
             `IS_ROLEMEMBER(N'cleat_admin') = 1` (migrations/mssql/012_admin_role.sql), so
             the exemption is in the predicate rather than in a role attribute. The role
@@ -503,8 +507,11 @@ tier2:
         - "sticky claims stay tenant-scoped (ClaimStickyWorkflows), so another tenant's
            sticky workflow is claimed by the general path instead and loses its worker
            affinity. Correctness is unaffected — it is still claimed exactly once"
-        - "no startup validation: a deployment that sets the flag without the grant finds
-           out on the first poll, via one WARN line, rather than at boot"
+        - "RESOLVED 2026-08-09: the worker now reports at startup, in both directions,
+           whether each cross-tenant path is actually available, and names the cause when
+           it is not. A report and not a gate, deliberately -- refusing to start would
+           contradict the degradation the feature is built on. See
+           engine.CrossTenantCapabilityChecker"
         - "mysql per-tenant-database topology would need database enumeration plus a union
            across cleat_* schemas; not implemented"
 
@@ -545,8 +552,9 @@ tier2:
         - "the widened read is only as safe as the re-scoping after it. Asserted by
            cmd/cleat-worker's TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore,
            which fails if the firing runs through the worker's own store"
-        - "no startup validation, same as cross-tenant-claim: a deployment that sets the
-           flag without applying 024 finds out on the first tick, via one WARN line"
+        - "RESOLVED 2026-08-09 alongside cross-tenant-claim's: the startup report answers
+           the two capabilities separately, so a deployment with 023 and not 024 is told
+           that workflows execute and cron does not, rather than one summary verdict"
         - "the dashboard still shows a non-default tenant's schedule as enabled whether
            or not the deployment can fire it; nothing surfaces which mode a worker is in"
 

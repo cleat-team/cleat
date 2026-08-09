@@ -1008,3 +1008,115 @@ func scanDueSchedules(rows *sql.Rows) ([]Schedule, error) {
 	}
 	return schedules, rows.Err()
 }
+
+// CrossTenantCapability reports whether a store can actually honour the
+// cross-tenant paths, and why not when it cannot.
+//
+// Both fields are answered independently because 023 and 024 are separate
+// migrations with separate grants: a deployment can execute workflows for every
+// tenant and still fire cron for only one.
+type CrossTenantCapability struct {
+	Claim           bool
+	ClaimReason     string
+	Schedules       bool
+	SchedulesReason string
+}
+
+// CrossTenantCapabilityChecker is implemented by stores that can answer "would
+// the cross-tenant paths work" WITHOUT exercising them.
+//
+// Exercising them is not an option at startup. The claim is a write: running it
+// to see whether it works would claim real workflows into a worker whose
+// dispatch loop has not started, leaving them 'running' with no executor until
+// the lease expires. So each dialect answers from its own catalog instead.
+type CrossTenantCapabilityChecker interface {
+	CheckCrossTenantCapability(ctx context.Context) CrossTenantCapability
+}
+
+// CheckCrossTenantCapability answers from the PostgreSQL catalog.
+//
+// It checks three things per function, and the third is the reason this exists
+// at all:
+//
+//	does it exist        migration not applied -- would raise 42883 at runtime
+//	may this role EXECUTE  grant not made      -- would raise 42501 at runtime
+//	does its OWNER have BYPASSRLS
+//
+// The first two are detected at runtime too, as 42883 and 42501, and answered by
+// falling back to the tenant-scoped path with a warning.
+//
+// The third is different, and it is the reason this check earns its place. A
+// function whose owner has lost BYPASSRLS is subject to the same policies as
+// its caller, and these functions are called outside beginTxWithRLS so no
+// tenant GUC is set on that connection. 001_schema.sql's policies are
+// fail-closed -- cleat.assert_tenant_set() RAISES on an unset GUC rather than
+// COALESCE-ing to a default -- so every call fails with
+//
+//	cleat.tenant_id is not set -- tenant context required for RLS-scoped query
+//
+// That is loud, which is good, and it was worth measuring rather than assuming:
+// an earlier version of this comment (and of 023's header) claimed the call
+// would quietly return fewer rows instead. It does not, and the difference is
+// the fail-closed policy choice rather than luck.
+//
+// What it is NOT is useful. P0001 names neither the function nor the attribute,
+// it does not map to the provisioning-gap sentinel, so it propagates as a hard
+// error on every tick, and an operator reading it has no path from "tenant
+// context required" to "a role lost a privilege". This check names the cause,
+// before the first tick.
+//
+// 023 and 024 set the attribute in the same migration that creates the role so
+// it cannot drift on install, but a role is a database-wide object an operator
+// can ALTER afterwards.
+func (s *PostgresStore) CheckCrossTenantCapability(ctx context.Context) CrossTenantCapability {
+	const q = `
+		WITH f AS (
+			SELECT to_regprocedure('admin.claim_workflows(text, text[], integer)') AS claim,
+			       to_regprocedure('admin.get_due_schedules()')                    AS sched
+		)
+		SELECT
+			f.claim IS NOT NULL,
+			CASE WHEN f.claim IS NOT NULL THEN has_function_privilege(f.claim, 'EXECUTE') ELSE false END,
+			COALESCE((SELECT r.rolbypassrls FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.oid = f.claim), false),
+			f.sched IS NOT NULL,
+			CASE WHEN f.sched IS NOT NULL THEN has_function_privilege(f.sched, 'EXECUTE') ELSE false END,
+			COALESCE((SELECT r.rolbypassrls FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.oid = f.sched), false)
+		FROM f
+	`
+	var claimExists, claimExec, claimBypass, schedExists, schedExec, schedBypass bool
+	if err := s.db.QueryRowContext(ctx, q).Scan(
+		&claimExists, &claimExec, &claimBypass,
+		&schedExists, &schedExec, &schedBypass); err != nil {
+		// Inconclusive is not the same as unsupported. Reported as the reason
+		// so the caller can say so rather than assert something it did not
+		// establish.
+		reason := fmt.Sprintf("could not check: %v", err)
+		return CrossTenantCapability{ClaimReason: reason, SchedulesReason: reason}
+	}
+
+	cap := CrossTenantCapability{}
+	cap.Claim, cap.ClaimReason = crossTenantVerdict(claimExists, claimExec, claimBypass,
+		"admin.claim_workflows", "migrations/postgres/023_cross_tenant_claim.sql")
+	cap.Schedules, cap.SchedulesReason = crossTenantVerdict(schedExists, schedExec, schedBypass,
+		"admin.get_due_schedules", "migrations/postgres/024_cross_tenant_schedules.sql")
+	return cap
+}
+
+func crossTenantVerdict(exists, exec, bypass bool, fn, migration string) (bool, string) {
+	switch {
+	case !exists:
+		return false, fn + " does not exist; apply " + migration
+	case !exec:
+		return false, "this connection may not EXECUTE " + fn + "; grant it as " + migration + " documents"
+	case !bypass:
+		// This one does raise at runtime -- measured, see below -- but it raises
+		// something that names neither the function nor the attribute, so the
+		// operator gets "cleat.tenant_id is not set" and no way to connect it to
+		// a role privilege. Naming it here is the whole value.
+		return false, fn + " exists and is executable, but its owner does not have BYPASSRLS, so " +
+			"it is subject to the same policies as the caller. Every call will fail with " +
+			"\"cleat.tenant_id is not set\" (P0001), which names neither this function nor the " +
+			"missing attribute. Restore it with: ALTER ROLE cleat_dispatcher BYPASSRLS"
+	}
+	return true, ""
+}

@@ -1495,3 +1495,18 @@ func (s *MySQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedu
 
 	return scanDueSchedules(rows)
 }
+
+// CheckCrossTenantCapability answers from the topology this store was built
+// for, because on MySQL that is the whole question -- there is no grant to
+// check and no policy to be exempt from.
+func (s *MySQLStore) CheckCrossTenantCapability(ctx context.Context) CrossTenantCapability {
+	if !s.perTenantDatabase {
+		// A store built directly against one shared database. Isolation is an
+		// application-level predicate, and dropping it genuinely widens.
+		return CrossTenantCapability{Claim: true, Schedules: true}
+	}
+	reason := fmt.Sprintf("this store is one tenant's database (cleat_%s); the other tenants' rows "+
+		"are not filtered out, they are in another database, so no query against this connection "+
+		"can see them", s.tenantID)
+	return CrossTenantCapability{ClaimReason: reason, SchedulesReason: reason}
+}

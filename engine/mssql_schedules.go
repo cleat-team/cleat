@@ -551,3 +551,34 @@ func (s *MSSQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedu
 	}
 	return schedules, rows.Err()
 }
+
+// CheckCrossTenantCapability answers from SQL Server's role membership.
+//
+// One question covers both paths here, unlike PostgreSQL's two functions and
+// two grants: dbo.fn_tenant_filter admits on IS_ROLEMEMBER(N'cleat_admin') and
+// is bound to every tenant-scoped table, workflow_instances and
+// workflow_schedules included. So a connection either sees across tenants for
+// both or for neither.
+//
+// There is no BYPASSRLS analogue to lose. The exemption lives in the predicate
+// itself rather than in a role attribute, so the silent-degradation failure the
+// PostgreSQL check exists for cannot arise the same way: dropping the role
+// membership shows up here, and altering the predicate is a schema change.
+func (s *MSSQLStore) CheckCrossTenantCapability(ctx context.Context) CrossTenantCapability {
+	var isMember sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT IS_ROLEMEMBER(N'cleat_admin')`).Scan(&isMember); err != nil {
+		reason := fmt.Sprintf("could not check dbo.cleat_admin membership: %v", err)
+		return CrossTenantCapability{ClaimReason: reason, SchedulesReason: reason}
+	}
+	if isMember.Int64 == 1 {
+		return CrossTenantCapability{Claim: true, Schedules: true}
+	}
+	// NULL means the role does not exist -- migration 012 was never applied --
+	// and 0 means it exists and this login is not in it. Both reach here, and
+	// applying the migration is step one of granting membership either way.
+	const reason = "this connection is not a member of dbo.cleat_admin, so dbo.fn_tenant_filter " +
+		"admits only rows matching this connection's SESSION_CONTEXT. Grant it as " +
+		"migrations/mssql/012_admin_role.sql documents: CREATE LOGIN, CREATE USER, then " +
+		"ALTER ROLE cleat_admin ADD MEMBER"
+	return CrossTenantCapability{ClaimReason: reason, SchedulesReason: reason}
+}
