@@ -23,9 +23,14 @@ import (
 
 // cronScheduleView is the JSON shape ListCrons hands the guest. It mirrors
 // cleat.CronSchedule field for field, which is the SDK type the guest
-// unmarshals into. The duplication is deliberate: engine must not import the
-// SDK package, and the wire shape is a contract either way, so it is better
-// written down twice and asserted equal in a test than inferred.
+// unmarshals into. The duplication is forced: the SDK is a separate module
+// that imports this one, so engine cannot import it back.
+//
+// Nothing in the compiler connects the two, so both sides are pinned to the
+// same literal instead: TestCronScheduleViewWireShape here, and
+// TestCronScheduleWireShapeMatchesTheEngine in the SDK. Renaming a field on
+// either side without the other fails one of them; without those two, it
+// would silently break every Go guest that calls ListCrons.
 type cronScheduleView struct {
 	ScheduleID   string `json:"schedule_id"`
 	WorkflowName string `json:"workflow_name"`
