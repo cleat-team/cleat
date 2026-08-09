@@ -8,7 +8,9 @@ those calls cannot work, in or out of the runtime.
 
 Nothing used to distinguish the two. Three cron stubs sat in the second group
 looking exactly like the first, with a message claiming they only needed a
-WASM runtime, and no test anywhere disagreed.
+WASM runtime, and no test anywhere disagreed. Those three gained a
+durable-cron interface on 2026-08-09 and moved to the first group -- this test
+is what noticed, which is the behaviour it was written for.
 
 This does not require the list to be empty. It requires it to be EXACTLY this,
 so that a call which quietly loses its binding tomorrow fails here rather than
@@ -24,16 +26,13 @@ HOST_CALLS = Path(__file__).resolve().parents[1] / "cleat_sdk" / "host_calls.py"
 # Measured 2026-08-08. Re-derive with the parsing below, or by hand:
 #   grep -oE '^def (_import_\w+)\(' cleat_sdk/host_calls.py
 #   grep -oE 'as (_import_\w+)'     cleat_sdk/host_calls.py
+# Measured 2026-08-09, after durable-cron landed: the three cron calls left this
+# set and Python can now make them.
 EXPECTED_WITHOUT_WIT_BINDING = {
-    # No durable-cron interface in wit/cleat.wit. The engine registers
-    # cleat_schedule_cron/cleat_delete_cron/cleat_list_crons, and the Go and
-    # AssemblyScript SDKs reach them; Python cannot until the WIT world gains
-    # an interface for them.
-    "_import_schedule_cron",
-    "_import_delete_cron",
-    "_import_list_crons",
-    # Same shape, unrelated to cron: the engine registers
-    # cleat_extend_timeout, but no WIT interface exposes it to Python.
+    # The engine registers cleat_extend_timeout, but no WIT interface exposes
+    # it to Python. Same shape the cron calls had until durable-cron was added
+    # to wit/cleat.wit -- so the remedy is the same one, if this is ever wanted
+    # from a Python workflow.
     "_import_cleat_extend_timeout",
 }
 
