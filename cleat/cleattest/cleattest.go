@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // TestingT is the interface required by AssertCalled and AssertNotCalled.
@@ -285,6 +286,13 @@ type TestEnv struct {
 	deferCounter   int
 	promises       map[string]promiseState // keyed by promiseID
 
+	// crons holds schedules created by ScheduleCron, keyed by schedule ID.
+	// cronCounter makes those IDs deterministic so a test can assert on
+	// them; the engine derives its own from (tenant, workflow, step), which
+	// a harness with no steps and no tenant cannot reproduce.
+	crons       map[string]cleat.CronSchedule
+	cronCounter int
+
 	childWorkflowStubs map[string]*childWorkflowStub
 	childResults       map[string]*childStubResult
 
@@ -349,6 +357,7 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		minVersionVal:            1,
 		queryState:               make(map[string]string),
 		promises:                 make(map[string]promiseState),
+		crons:                    make(map[string]cleat.CronSchedule),
 		childWorkflowStubs:       make(map[string]*childWorkflowStub),
 		childResults:             make(map[string]*childStubResult),
 		childWorkflowHandlers:    make(map[string]func(inputJSON string) (resultJSON string, err error)),
@@ -402,6 +411,9 @@ func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
 		Now:                           e.nowImpl,
 		Random:                        e.randomImpl,
 		CreatePromise:                 e.createPromiseImpl,
+		ScheduleCron:                  e.scheduleCronImpl,
+		DeleteCron:                    e.deleteCronImpl,
+		ListCrons:                     e.listCronsImpl,
 		AwaitPromise:                  e.awaitPromiseImpl,
 		RegisterUpdateHandler:         e.registerUpdateHandlerImpl,
 		RegisterQueryHandler:          e.registerQueryHandlerImpl,
@@ -650,6 +662,8 @@ func (e *TestEnv) Reset() {
 	e.randomSeq = nil
 	e.randomIdx = 0
 	e.deferCounter = 0
+	e.crons = make(map[string]cleat.CronSchedule)
+	e.cronCounter = 0
 	e.childWorkflowStubs = make(map[string]*childWorkflowStub)
 	e.childResults = make(map[string]*childStubResult)
 	e.childWorkflowHandlers = make(map[string]func(inputJSON string) (resultJSON string, err error))
@@ -1731,4 +1745,98 @@ func matchesAny(name string, names []string) bool {
 		}
 	}
 	return false
+}
+
+// Cron schedules.
+//
+// These validate with engine.ValidateCronExpr and engine.ValidateTimezone --
+// the same functions the host calls use -- rather than with rules invented
+// here. A harness that accepted an expression the engine rejects would turn a
+// production failure into a green test, which is worse than not implementing
+// the call at all.
+//
+// What is NOT reproduced: the engine derives a schedule ID from (tenant,
+// workflow, step) so that a retry after a crash addresses the same row. There
+// is no replay and no crash here, so these IDs are a simple counter, which
+// also makes them assertable.
+
+func (e *TestEnv) scheduleCronImpl(workflowName, cronExpr, timezone, inputJSON string) (string, error) {
+	if workflowName == "" {
+		return "", fmt.Errorf("schedule_cron: workflow name is empty")
+	}
+	if err := engine.ValidateCronExpr(cronExpr); err != nil {
+		return "", fmt.Errorf("schedule_cron %q: %w", workflowName, err)
+	}
+	if err := engine.ValidateTimezone(timezone); err != nil {
+		return "", fmt.Errorf("schedule_cron %q: %w", workflowName, err)
+	}
+	if inputJSON == "" {
+		inputJSON = "{}"
+	}
+	if !json.Valid([]byte(inputJSON)) {
+		return "", fmt.Errorf("schedule_cron %q: input is not valid JSON", workflowName)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cronCounter++
+	scheduleID := fmt.Sprintf("cron-%d", e.cronCounter)
+	tz := timezone
+	if tz == "" {
+		tz = engine.DefaultScheduleTimezone
+	}
+	e.crons[scheduleID] = cleat.CronSchedule{
+		ScheduleID:   scheduleID,
+		WorkflowName: workflowName,
+		CronExpr:     cronExpr,
+		Timezone:     tz,
+		Input:        inputJSON,
+		Enabled:      true,
+	}
+	return scheduleID, nil
+}
+
+// deleteCronImpl removes a schedule. Deleting one that is not there is not an
+// error, matching the host call -- at-least-once delivery means a workflow
+// retries, and the second delete must not fail.
+func (e *TestEnv) deleteCronImpl(scheduleID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.crons, scheduleID)
+	return nil
+}
+
+func (e *TestEnv) listCronsImpl() (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	ids := make([]string, 0, len(e.crons))
+	for id := range e.crons {
+		ids = append(ids, id)
+	}
+	// Sorted, because map iteration order is not stable and a workflow that
+	// walked this list would be non-deterministic -- the one thing a durable
+	// workflow must never be.
+	sort.Strings(ids)
+
+	list := make([]cleat.CronSchedule, 0, len(ids))
+	for _, id := range ids {
+		list = append(list, e.crons[id])
+	}
+	out, err := json.Marshal(list)
+	if err != nil {
+		return "", fmt.Errorf("list_crons: %w", err)
+	}
+	return string(out), nil
+}
+
+// Crons returns the schedules currently registered, for assertions.
+func (e *TestEnv) Crons() []cleat.CronSchedule {
+	listJSON, err := e.listCronsImpl()
+	if err != nil {
+		return nil
+	}
+	var list []cleat.CronSchedule
+	_ = json.Unmarshal([]byte(listJSON), &list)
+	return list
 }

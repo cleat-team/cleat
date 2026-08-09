@@ -108,6 +108,10 @@ var hostFunctions = []HostFunction{
 	// Identity
 	{"cleat_workflow_id", "WorkflowID"},
 	{"cleat_run_id", "RunID"},
+	// Cron schedules
+	{"cleat_schedule_cron", "ScheduleCron"},
+	{"cleat_delete_cron", "DeleteCron"},
+	{"cleat_list_crons", "ListCrons"},
 }
 
 // UsageInfo records which host functions are actually called by the

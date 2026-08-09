@@ -269,6 +269,28 @@ var importDefs = map[string]importDef{
 			{"id", kindOutString},
 		},
 	},
+	"cleat_schedule_cron": {
+		ImportName: "cleat_schedule_cron",
+		Params: []paramSpec{
+			{"workflowName", kindInString},
+			{"cronExpr", kindInString},
+			{"timezone", kindInString},
+			{"inputJSON", kindInString},
+			{"scheduleID", kindOutString},
+		},
+	},
+	"cleat_delete_cron": {
+		ImportName: "cleat_delete_cron",
+		Params: []paramSpec{
+			{"scheduleID", kindInString},
+		},
+	},
+	"cleat_list_crons": {
+		ImportName: "cleat_list_crons",
+		Params: []paramSpec{
+			{"result", kindOutString},
+		},
+	},
 	"cleat_json_parse": {
 		ImportName: "cleat_json_parse",
 		Params: []paramSpec{
@@ -403,6 +425,23 @@ func callErrorMessage(callName string, responseBuf []byte, responseLen uint32, c
 		return string(responseBuf[:responseLen])
 	}
 	return fmt.Sprintf("%s: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", callName, callErrorCode)
+}
+
+// hostErrMessage returns the reason a host call wrote into its output buffer.
+//
+// It is deliberately not callErrorMessage. That function's fallback prints the
+// cleat.CallErrorCode legend, which only applies to calls that pack a
+// CallErrorCode into bits 8-39. Calls that return packSimpleResult -- the cron
+// schedule calls among them -- have no such field and return 1 for every
+// failure, so printing that legend beside it would describe a rejected cron
+// expression as a timeout. That is the same mis-signalling as
+// IMPROVEMENT-PLAN.md 2.10, which is why it gets its own helper rather than a
+// fourth argument.
+func hostErrMessage(buf []byte, n uint32) string {
+	if n > 0 && int(n) <= len(buf) {
+		return string(buf[:n])
+	}
+	return "no detail reported by the host"
 }
 
 `)

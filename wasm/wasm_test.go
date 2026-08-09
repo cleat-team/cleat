@@ -829,3 +829,46 @@ func TestHostAdapterReportsCallErrorCodeNotErrCode(t *testing.T) {
 			"call as a timeout")
 	}
 }
+
+// TestCronAdaptersReportTheHostsReason is the same guard as
+// TestHostAdapterReportsCallErrorCodeNotErrCode, for the calls that have no
+// CallErrorCode at all.
+//
+// cleat_schedule_cron and cleat_list_crons return packSimpleResult: one
+// errCode that is 1 for every failure, plus the number of bytes the host wrote
+// into the output buffer -- which on failure is the reason. Printing the
+// cleat.CallErrorCode legend beside that 1, as the other adapters do, would
+// report a rejected cron expression as a *timeout* while the real message sat
+// unread in the buffer. That is IMPROVEMENT-PLAN.md 2.10 again.
+func TestCronAdaptersReportTheHostsReason(t *testing.T) {
+	usage := &UsageInfo{Used: make(map[string]bool), Funcs: hostFunctions}
+	for _, hf := range hostFunctions {
+		usage.Used[hf.ImportName] = true
+	}
+	code := string(GenerateHostAdapter("allimports", usage, "go"))
+
+	for _, want := range []string{
+		`hostErrMessage(scheduleIDBuf[:], scheduleIDLen)`,
+		`hostErrMessage(resultBuf[:], resultLen)`,
+	} {
+		if !strings.Contains(code, want) {
+			t.Errorf("generated adapter is missing %s", want)
+		}
+	}
+
+	// The helper itself lands in the memory file, alongside callErrorMessage.
+	if mem := string(GenerateMemory("allimports")); !strings.Contains(mem, "func hostErrMessage(buf []byte, n uint32) string {") {
+		t.Error("hostErrMessage is referenced by the adapter but never defined")
+	}
+
+	// The legend must not appear next to any of the three cron calls.
+	for _, call := range []string{"cleat_schedule_cron", "cleat_list_crons", "cleat_delete_cron"} {
+		bad := call + `: error %d (0=unknown 1=timeout`
+		if strings.Contains(code, bad) {
+			t.Errorf("%s prints the CallErrorCode legend, but it returns 1 for every "+
+				"failure -- this reports a rejected cron expression as a timeout", call)
+		}
+	}
+
+	syntaxCheck(t, "GenerateHostAdapter(all)", code)
+}
