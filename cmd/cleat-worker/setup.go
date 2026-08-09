@@ -957,10 +957,30 @@ type Worker struct {
 	logger *slog.Logger
 	store  engine.WorkflowStore
 
-	// storeTenantID is the tenant `store` was opened as, and therefore the
-	// only tenant this worker can execute anything for. See executeWorkflow's
-	// scope check.
+	// storeTenantID is the tenant `store` was opened as. `store` backs the
+	// dispatch, heartbeat and scheduler loops, which are worker-level and stay
+	// on it.
 	storeTenantID string
+
+	// storeFactory opens a store scoped to a particular tenant. Execution uses
+	// it; the loops above do not.
+	//
+	// When it is nil -- tests, and any embedding that never set one -- there is
+	// no way to route, so executeWorkflow falls back to `store` and refuses
+	// anything outside storeTenantID, which is what it did before routing
+	// existed.
+	storeFactory engine.StoreFactory
+
+	// tenantStores caches the result per tenant. OpenStore is cheap on
+	// PostgreSQL (same *sql.DB, a new struct) but not on MySQL or SQL Server,
+	// where it builds and caches a connection pool per tenant -- SQL Server has
+	// to, because its RLS reads SESSION_CONTEXT, set per connection. Caching
+	// here keeps the cost to once per tenant on every dialect.
+	tenantStores sync.Map // map[string]engine.WorkflowStore
+
+	// taskQueues is what `store` was opened with; a tenant-scoped store has to
+	// poll the same set or it would see a different slice of the work.
+	taskQueues []string
 
 	concurrency          int
 	maxQueued            int
@@ -1431,6 +1451,22 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 	}()
 
+	// ---- Tenant-scoped store ----
+	//
+	// Execution writes through this store, not w.store: event history, state,
+	// child workflows, schedules. Routing on wf.TenantID is what lets a worker
+	// run a tenant other than the one its dispatch loop is scoped to -- and
+	// because the store comes from OpenStore(wf.TenantID), it is correct by
+	// construction rather than by a check downstream.
+	execStore, storeErr := w.storeForTenant(wf.TenantID)
+	if storeErr != nil {
+		errMsg := fmt.Sprintf("workflow %s: no store for tenant %s: %v", wf.ID, wf.TenantID, storeErr)
+		w.logger.ErrorContext(context.Background(), "tenant store unavailable",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", storeErr)
+		w.recordTerminalFailure(wf, workflowStartTime, errMsg, engine.ErrUnknown.String(), "tenant_store")
+		return
+	}
+
 	// ---- Tenant scope check ----
 	//
 	// This worker holds ONE store, opened as storeTenantID, and every write
@@ -1452,10 +1488,16 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	//
 	// Failing the run is the right answer rather than releasing it: no
 	// correctly-scoped worker exists to pick it up, so releasing would spin.
-	if wf.TenantID != "" && w.storeTenantID != "" && wf.TenantID != w.storeTenantID {
-		errMsg := fmt.Sprintf("workflow %s belongs to tenant %s but this worker executes tenant %s; "+
-			"refusing rather than writing its history under the wrong tenant",
-			wf.ID, wf.TenantID, w.storeTenantID)
+	//
+	// Only when there is no factory to route with. With one, execStore IS
+	// wf.TenantID's store and there is nothing to refuse. Without one the old
+	// hazard is unchanged: every write would go through w.store, under
+	// storeTenantID's ID, with RLS satisfied because the store genuinely is
+	// that tenant.
+	if w.storeFactory == nil && wf.TenantID != "" && w.storeTenantID != "" && wf.TenantID != w.storeTenantID {
+		errMsg := fmt.Sprintf("workflow %s belongs to tenant %s but this worker executes tenant %s "+
+			"and has no store factory to route with; refusing rather than writing its history "+
+			"under the wrong tenant", wf.ID, wf.TenantID, w.storeTenantID)
 		w.logger.ErrorContext(context.Background(), "tenant scope violation",
 			"worker_id", w.id, "workflow_id", wf.ID,
 			"workflow_tenant_id", wf.TenantID, "worker_tenant_id", w.storeTenantID)
@@ -1468,7 +1510,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if traceID == "" {
 		traceID = generateTraceID()
 	}
-	if err := w.store.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
+	if err := execStore.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
 		w.logger.WarnContext(context.Background(), "failed to set trace_id", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 	}
 
@@ -1523,7 +1565,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 
 	// ---- Load event history ----
-	history, err := w.store.LoadEventHistory(w.ctx, wf.ID)
+	history, err := execStore.LoadEventHistory(w.ctx, wf.ID)
 	if err != nil {
 		if isConnectionError(err) {
 			w.logger.WarnContext(context.Background(), "DB down loading history", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
@@ -1549,7 +1591,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 
 	// ---- Load compaction state if present ----
 	var compactionState *engine.CompactionState
-	compactionState, err = w.store.LoadCompactionState(w.ctx, wf.ID)
+	compactionState, err = execStore.LoadCompactionState(w.ctx, wf.ID)
 	if err != nil {
 		w.logger.WarnContext(context.Background(), "failed to load compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		compactionState = nil
@@ -1647,16 +1689,16 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		childBindingPolicy = wfMeta.ChildBindingPolicy
 	}
 
-	caller := &dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL}
+	caller := &dbServiceCaller{store: execStore, workerID: w.id, benchSvcURL: *benchSvcURL}
 	engineOpts := []engine.EngineOption{
-		engine.WithSignalStore(w.store.(engine.SignalStore)),
+		engine.WithSignalStore(execStore.(engine.SignalStore)),
 		engine.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),
 		engine.WithWorkflowID(wf.ID),
 		engine.WithTraceID(traceID),
 		engine.WithTenantID(wf.TenantID),
 		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend),
-		engine.WithWorkflowStore(w.store),
-		engine.WithChildWorkflowStore(w.store),
+		engine.WithWorkflowStore(execStore),
+		engine.WithChildWorkflowStore(execStore),
 		engine.WithPluginRegistry(w.pluginRegistry),
 		engine.WithMaxRetryAttempts(w.maxRetries),
 		engine.WithSchema(w.schemaName),
@@ -1673,25 +1715,25 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
-	if cks, ok := w.store.(engine.ConcurrencyKeyStore); ok {
+	if cks, ok := execStore.(engine.ConcurrencyKeyStore); ok {
 		engineOpts = append(engineOpts, engine.WithConcurrencyKeyStore(cks))
 	}
 	// Enable event history checksum verification on replay by default.
 	// Can be disabled with --disable-checksum-verification.
 	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
-		engineOpts = append(engineOpts, engine.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, false))
+		engineOpts = append(engineOpts, engine.WithWorkflowEventVerifier(execStore.VerifyWorkflowEvents, false))
 	}
 	// Enable signal authorization if --require-signal-auth is set.
 	if w.requireSignalAuth != nil && *w.requireSignalAuth {
 		engineOpts = append(engineOpts,
 			engine.WithRequireSignalAuth(true),
-			engine.WithSignalAuthCheck(signalAuthCheckFor(w.store)),
+			engine.WithSignalAuthCheck(signalAuthCheckFor(execStore)),
 		)
 	}
 	// Enable event history checksum verification on replay by default.
 	// Can be disabled with --disable-checksum-verification.
 	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
-		engineOpts = append(engineOpts, engine.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
+		engineOpts = append(engineOpts, engine.WithWorkflowEventVerifier(execStore.VerifyWorkflowEvents, true))
 	}
 	// Always provide DB so per-step flush and adaptive flusher work.
 	engineOpts = append(engineOpts, engine.WithDB(w.db))
@@ -1713,7 +1755,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// workflow definition (from the instance) and the new definition
 	// (from the WASM binary) so incompatible transitions fail fast.
 	if len(history) > 0 {
-		oldDef, err := w.store.GetWorkflowDef(w.ctx, wf.DefName, wf.DefVersion)
+		oldDef, err := execStore.GetWorkflowDef(w.ctx, wf.DefName, wf.DefVersion)
 		if err == nil && oldDef != nil && wfMeta != nil {
 			newDef := &engine.WorkflowDef{
 				Name:       wfMeta.WorkflowName,
@@ -1729,7 +1771,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 	// Load initial event count so the engine tracks events locally.
 	if w.maxQuotaEvents > 0 {
-		if count, err := w.store.GetEventCount(w.ctx, wf.ID); err == nil {
+		if count, err := execStore.GetEventCount(w.ctx, wf.ID); err == nil {
 			engineOpts = append(engineOpts, engine.WithInitialEventCount(count))
 		}
 	}
@@ -1809,7 +1851,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// ContinueAsNew: atomically append events, create a new run, and
 		// complete the current one — all in a single database transaction.
 		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
-		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
+		newRunID, err := execStore.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
 		if errors.Is(err, engine.ErrFenceLost) {
 			// Normal and expected under reaping: another worker now owns
 			// this workflow (this one was reaped as stale and reclaimed).
@@ -1839,7 +1881,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 
 	queryStart := time.Now()
-	err = w.store.FinalizeWorkflowSegment(w.ctx, wf.ID, w.id, wf.Generation, newEvents, finalStatus, result, "", "", queryState, nextWakeAt)
+	err = execStore.FinalizeWorkflowSegment(w.ctx, wf.ID, w.id, wf.Generation, newEvents, finalStatus, result, "", "", queryState, nextWakeAt)
 	finalizeElapsed := time.Since(queryStart)
 	if errors.Is(err, engine.ErrFenceLost) {
 		// Normal and expected under reaping: another worker now owns this
@@ -2519,14 +2561,15 @@ func (w *Worker) waitForDB() {
 // ContinueAsNew and FinalizeWorkflowSegment paths): debug-log and return,
 // having done nothing. See IMPROVEMENT-PLAN.md 1.2.
 func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string) (applied, deadLettered bool) {
+	st := w.storeFor(wf)
 	ctx := context.Background()
 
 	deadLettered = strings.Contains(errMsg, "retries exhausted")
 	var err error
 	if deadLettered {
-		err = w.store.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
+		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
 	} else {
-		err = w.store.FailWorkflow(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
+		err = st.FailWorkflow(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
 	}
 
 	if errors.Is(err, engine.ErrFenceLost) {
@@ -2561,8 +2604,9 @@ func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt ti
 // no-op it is: another worker owns the workflow, so there is nothing to
 // release. See recordTerminalFailure for why this is not an error.
 func (w *Worker) releaseWorkflow(wf *engine.WorkflowInstance) {
+	st := w.storeFor(wf)
 	ctx := context.Background()
-	err := w.store.ReleaseWorkflow(ctx, wf.ID, w.id, wf.Generation, wf.NextWakeAt)
+	err := st.ReleaseWorkflow(ctx, wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 	if errors.Is(err, engine.ErrFenceLost) {
 		w.logger.DebugContext(ctx, "release: fence lost, workflow reassigned to another worker",
 			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
@@ -2759,4 +2803,49 @@ func scheduleAdvance(expr string, scheduled time.Time, loc *time.Location, now t
 
 	// Within the bound: step one interval and drop nothing.
 	return next, 0
+}
+
+// storeForTenant returns the store execution should write through for a
+// workflow belonging to tenantID.
+//
+// With no factory configured there is nothing to route with, so the caller
+// gets the worker's own store and executeWorkflow's scope check refuses
+// anything outside it. That is the pre-routing behaviour, kept deliberately
+// rather than silently degrading to "write it under whatever tenant we have".
+func (w *Worker) storeForTenant(tenantID string) (engine.WorkflowStore, error) {
+	if w.storeFactory == nil || tenantID == "" || tenantID == w.storeTenantID {
+		return w.store, nil
+	}
+	if cached, ok := w.tenantStores.Load(tenantID); ok {
+		return cached.(engine.WorkflowStore), nil
+	}
+	st, _, err := w.storeFactory.OpenStore(w.ctx, tenantID, w.taskQueues...)
+	if err != nil {
+		return nil, err
+	}
+	// LoadOrStore rather than Store: two workflows for a new tenant can arrive
+	// together, and both should end up using the same store rather than one
+	// silently replacing the other's.
+	actual, _ := w.tenantStores.LoadOrStore(tenantID, st)
+	return actual.(engine.WorkflowStore), nil
+}
+
+// storeFor is storeForTenant for the paths that cannot report an error: the
+// terminal-failure and release helpers, which run when something has already
+// gone wrong.
+//
+// executeWorkflow resolves the same tenant before any of them can run and
+// fails the workflow if it cannot, so by the time one of these is reached the
+// lookup is a cache hit. Falling back to w.store if that ever stops being true
+// is the lesser evil -- a workflow stuck in `running` forever with no record
+// of why is worse than a failure row under the wrong tenant, and the log line
+// says which happened.
+func (w *Worker) storeFor(wf *engine.WorkflowInstance) engine.WorkflowStore {
+	st, err := w.storeForTenant(wf.TenantID)
+	if err != nil {
+		w.logger.ErrorContext(context.Background(), "no tenant store on a failure path; falling back to the worker store",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		return w.store
+	}
+	return st
 }

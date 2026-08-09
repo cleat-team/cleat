@@ -830,6 +830,8 @@ func main() {
 		logger:                           logger,
 		store:                            store,
 		storeTenantID:                    defaultTenantID,
+		storeFactory:                     factory,
+		taskQueues:                       taskQueues,
 		concurrency:                      *concurrency,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,

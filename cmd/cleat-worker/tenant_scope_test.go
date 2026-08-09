@@ -28,8 +28,8 @@ type tenantScopeProbe struct {
 	failOp  string
 }
 
-func newTenantScopeWorker(t *testing.T, storeTenant string, probe *tenantScopeProbe) *Worker {
-	t.Helper()
+// probedMockStore is a mockStore whose trace and fail calls land in probe.
+func probedMockStore(probe *tenantScopeProbe) *mockStore {
 	ms := &mockStore{}
 	ms.traceWorkflowFn = func(_ context.Context, _, _ string) error {
 		probe.mu.Lock()
@@ -46,7 +46,12 @@ func newTenantScopeWorker(t *testing.T, storeTenant string, probe *tenantScopePr
 		probe.failOp = errOp
 		return nil
 	}
-	w := newTestWorker(ms)
+	return ms
+}
+
+func newTenantScopeWorker(t *testing.T, storeTenant string, probe *tenantScopeProbe) *Worker {
+	t.Helper()
+	w := newTestWorker(probedMockStore(probe))
 	w.storeTenantID = storeTenant
 	return w
 }
