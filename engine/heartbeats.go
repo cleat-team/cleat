@@ -202,11 +202,17 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 		}
 
 		if rec.Err != "" {
-			// callFailureCode, the same constant the fresh path uses, because
-			// the class was never persisted -- see the note on it. These two
-			// must agree or the same step changes retryability on replay.
+			// The classification comes off the event, matching how replayCall
+			// (durablecalls.go) handles the same concern for the plain
+			// DurableCall path. freshCallWithHeartbeat has persisted
+			// ErrNonRetryable since the cancelledByWorkflow branch was added
+			// (see the note there); this used to hardcode callFailureCode with
+			// a comment claiming the class "was never persisted", which that
+			// change made false. Both paths must derive the code from the
+			// event the same way, or the same step is retryable on the first
+			// run and non-retryable on the replay of it.
 			written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
-			return packDurableCallResult(int(written), callFailureCode, 1)
+			return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
 		}
 
 		written, _ := s.writeResult(ctx, m, responsePtr, rec.Response, responseMaxLen)
