@@ -1221,6 +1221,10 @@ func (w *Worker) Run() {
 
 	// Dispatch loop.
 	w.registerLoopFunc("dispatch", w.dispatchLoop)
+	// Before either loop runs, so the answer is in the log above the first
+	// tick rather than inside it.
+	w.reportCrossTenantCapability()
+
 	w.launchLoop("dispatch", w.dispatchLoop)
 
 	// Cron schedule loop.
@@ -2884,6 +2888,59 @@ func (w *Worker) storeFor(wf *engine.WorkflowInstance) engine.WorkflowStore {
 		return w.store
 	}
 	return st
+}
+
+// reportCrossTenantCapability logs, once at startup, which mode this worker is
+// actually in.
+//
+// Both cross-tenant paths degrade rather than fail: a missing grant narrows the
+// worker instead of stopping it, which is the right default and is what the
+// per-loop warnings say when they fire. What that leaves is an operator who set
+// --claim-across-tenants, saw nothing, and cannot tell "it is working" from "it
+// will tell me on the first tick, in a line that has already scrolled past".
+//
+// So this states the outcome in both directions, before either loop runs.
+//
+// It is a report and not a gate. Refusing to start would contradict the
+// degradation the rest of this feature is built on, and would turn a revoked
+// GRANT into an outage for the worker's own tenant, which was never affected.
+// The one thing it does that no runtime path can is catch a lost BYPASSRLS on
+// PostgreSQL: that failure does not raise, it just returns fewer rows, so
+// without this check a silently single-tenant worker looks exactly like a
+// healthy one. See engine.PostgresStore.CheckCrossTenantCapability.
+func (w *Worker) reportCrossTenantCapability() {
+	if !w.claimAcrossTenants {
+		return
+	}
+	checker, ok := w.store.(engine.CrossTenantCapabilityChecker)
+	if !ok {
+		w.logger.WarnContext(w.ctx,
+			"claim-across-tenants is set but this store cannot report whether it supports it; "+
+				"the loops will fall back and say so on their first tick",
+			"worker_id", w.id)
+		return
+	}
+
+	capability := checker.CheckCrossTenantCapability(w.ctx)
+	for _, c := range []struct {
+		what   string
+		ok     bool
+		reason string
+		effect string
+	}{
+		{"workflow claim", capability.Claim, capability.ClaimReason,
+			"only this worker's own tenant's workflows will execute"},
+		{"due-schedule read", capability.Schedules, capability.SchedulesReason,
+			"only this worker's own tenant's cron will fire"},
+	} {
+		if c.ok {
+			w.logger.InfoContext(w.ctx, "cross-tenant "+c.what+" is available",
+				"worker_id", w.id, "tenant_id", w.storeTenantID)
+			continue
+		}
+		w.logger.WarnContext(w.ctx, "cross-tenant "+c.what+" is NOT available; "+c.effect,
+			"worker_id", w.id, "tenant_id", w.storeTenantID, "reason", c.reason)
+	}
 }
 
 // dueSchedules reads the schedules that are ready to fire.

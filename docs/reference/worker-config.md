@@ -640,10 +640,36 @@ naming the reason and keeps claiming its own tenant. It does not stop claiming,
 and it does not fail to start: on a mixed fleet the flag says what the operator
 wants while the store says what is actually possible, and those can disagree.
 
-A missing grant therefore narrows a worker rather than stopping it. The
-tradeoff is that the warning is the only signal, and it is logged once per
-process -- so if you turn this on, check for it at startup rather than assuming
-silence means success.
+A missing grant therefore narrows a worker rather than stopping it.
+
+**The worker says which mode it is in at startup**, before either loop ticks, so
+you do not have to infer it from silence:
+
+```
+INFO  cross-tenant workflow claim is available
+INFO  cross-tenant due-schedule read is available
+```
+
+or, on a deployment that applied 023 but not 024:
+
+```
+INFO  cross-tenant workflow claim is available
+WARN  cross-tenant due-schedule read is NOT available; only this worker's own
+      tenant's cron will fire
+      reason=admin.get_due_schedules does not exist; apply
+             migrations/postgres/024_cross_tenant_schedules.sql
+```
+
+It is a report, not a gate -- refusing to start would contradict the degradation
+above, and would turn a revoked `GRANT` into an outage for the worker's own
+tenant, which was never affected.
+
+On PostgreSQL it also checks something no runtime error explains: whether the
+function's **owner still has `BYPASSRLS`**. Losing that attribute does fail --
+every call raises `cleat.tenant_id is not set` (P0001), because the policies are
+fail-closed -- but that message names neither the function nor the missing
+privilege, and there is no path from it to `ALTER ROLE cleat_dispatcher
+BYPASSRLS`. The startup line names it.
 
 ---
 

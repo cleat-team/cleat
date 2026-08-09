@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -300,3 +303,141 @@ func (f *fixedTenantFactory) Dialect() engine.Dialect { return engine.DialectPos
 type nopCloserT struct{}
 
 func (nopCloserT) Close() error { return nil }
+
+// ---------------------------------------------------------------------------
+// The startup report
+// ---------------------------------------------------------------------------
+
+type capabilityStore struct {
+	*mockStore
+	capability engine.CrossTenantCapability
+	mu         sync.Mutex
+	checks     int
+}
+
+func (m *capabilityStore) CheckCrossTenantCapability(context.Context) engine.CrossTenantCapability {
+	m.mu.Lock()
+	m.checks++
+	m.mu.Unlock()
+	return m.capability
+}
+
+// TestReportCrossTenantCapability_SaysWhichModeTheWorkerIsIn.
+//
+// Both cross-tenant paths degrade rather than fail, which is the right default
+// and is what makes this report necessary: an operator who set the flag and saw
+// nothing cannot tell "working" from "the warning already scrolled past". So the
+// outcome is stated in both directions, at startup, before either loop ticks.
+//
+// The unavailable case must name the reason, because the runtime error for the
+// worst version of it -- a lost BYPASSRLS -- is "cleat.tenant_id is not set",
+// which names neither the function nor the attribute.
+func TestReportCrossTenantCapability_SaysWhichModeTheWorkerIsIn(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		flag       bool
+		capability engine.CrossTenantCapability
+		wantChecks int
+		wantLevel  string
+		wantIn     []string
+	}{
+		{
+			name:       "flag off: nothing is probed and nothing is said",
+			flag:       false,
+			wantChecks: 0,
+		},
+		{
+			name:       "granted: reported available, so silence is not the only evidence",
+			flag:       true,
+			capability: engine.CrossTenantCapability{Claim: true, Schedules: true},
+			wantChecks: 1,
+			wantLevel:  "INFO",
+			wantIn:     []string{"cross-tenant workflow claim is available", "cross-tenant due-schedule read is available"},
+		},
+		{
+			name: "ungranted: reported unavailable, with the reason and the consequence",
+			flag: true,
+			capability: engine.CrossTenantCapability{
+				ClaimReason:     "admin.claim_workflows does not exist; apply 023",
+				SchedulesReason: "owner does not have BYPASSRLS",
+			},
+			wantChecks: 1,
+			wantLevel:  "WARN",
+			wantIn: []string{
+				"only this worker's own tenant's workflows will execute",
+				"only this worker's own tenant's cron will fire",
+				"BYPASSRLS",
+			},
+		},
+		{
+			name: "partially granted: the claim works and cron does not, said separately",
+			flag: true,
+			capability: engine.CrossTenantCapability{
+				Claim:           true,
+				SchedulesReason: "admin.get_due_schedules does not exist; apply 024",
+			},
+			wantChecks: 1,
+			wantIn: []string{
+				"cross-tenant workflow claim is available",
+				"cross-tenant due-schedule read is NOT available",
+				"024",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			st := &capabilityStore{mockStore: &mockStore{}, capability: tc.capability}
+			w := newTestWorker(st.mockStore)
+			defer w.cancel()
+			w.store = st
+			w.claimAcrossTenants = tc.flag
+			w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			w.reportCrossTenantCapability()
+
+			st.mu.Lock()
+			checks := st.checks
+			st.mu.Unlock()
+			if checks != tc.wantChecks {
+				t.Errorf("capability checked %d time(s), want %d", checks, tc.wantChecks)
+			}
+			out := buf.String()
+			if tc.wantChecks == 0 && out != "" {
+				t.Errorf("flag off but the worker logged: %s", out)
+			}
+			for _, want := range tc.wantIn {
+				if !strings.Contains(out, want) {
+					t.Errorf("startup report does not mention %q\n%s", want, out)
+				}
+			}
+			if tc.wantLevel != "" && !strings.Contains(out, "level="+tc.wantLevel) {
+				t.Errorf("expected a %s line, got:\n%s", tc.wantLevel, out)
+			}
+		})
+	}
+}
+
+// TestReportCrossTenantCapability_SaysSoWhenItCannotTell is the inconclusive
+// case. A store that cannot answer must not be reported as either working or
+// broken -- asserting a capability nobody established is the failure this whole
+// report exists to prevent, arriving through the report itself.
+func TestReportCrossTenantCapability_SaysSoWhenItCannotTell(t *testing.T) {
+	var buf bytes.Buffer
+	// A plain mockStore implements neither CrossTenantCapabilityChecker nor the
+	// cross-tenant paths.
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	defer w.cancel()
+	w.claimAcrossTenants = true
+	w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	w.reportCrossTenantCapability()
+
+	out := buf.String()
+	if !strings.Contains(out, "cannot report whether it supports it") {
+		t.Errorf("a store that cannot answer was not reported as such:\n%s", out)
+	}
+	if strings.Contains(out, "is available") {
+		t.Errorf("an unanswerable check was reported as available:\n%s", out)
+	}
+}

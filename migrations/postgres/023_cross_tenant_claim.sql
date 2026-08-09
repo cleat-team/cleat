@@ -17,8 +17,29 @@
 --
 -- Why a BYPASSRLS role and not just SECURITY DEFINER
 -- --------------------------------------------------
--- SECURITY DEFINER alone does NOT work here, and the failure would be silent:
--- the function would return zero rows and read as "there is no work".
+-- SECURITY DEFINER alone does NOT work here. It fails loudly rather than
+-- silently, and it is worth knowing which, because an earlier version of this
+-- comment asserted the opposite.
+--
+-- MEASURED 2026-08-09 by removing the attribute (ALTER ROLE cleat_dispatcher
+-- NOBYPASSRLS) and calling both functions: each raises
+--
+--   pq: cleat.tenant_id is not set -- tenant context required for RLS-scoped
+--   query (P0001)
+--
+-- rather than returning fewer rows. That is 001_schema.sql's doing: its
+-- policies are fail-closed through cleat.assert_tenant_set(), which RAISES on
+-- an unset GUC instead of COALESCE-ing to a default, and these functions are
+-- deliberately called outside beginTxWithRLS so no tenant GUC is ever set on
+-- that connection (set_config here is transaction-local).
+--
+-- So the loud failure is a property of the fail-closed policy choice, not luck.
+-- If a future policy is ever written with COALESCE, this becomes the silent
+-- failure the old comment described, and the startup check in
+-- PostgresStore.CheckCrossTenantCapability becomes the only thing that can see
+-- it. It reports the missing attribute by name either way, which is the useful
+-- part: P0001 says the tenant context is unset and says nothing about
+-- BYPASSRLS.
 --
 -- A SECURITY DEFINER function runs as its owner, and 001_schema.sql sets FORCE
 -- ROW LEVEL SECURITY on these tables, which subjects the table owner to the
