@@ -67,8 +67,8 @@ var mssqlPolicyTablesMissingFromTestSchema = []string{}
 // IS migrations/mssql/*.sql (2.71), the policies are there from the start and
 // this function installing its own copies means dropping the schema's -- so
 // every MSSQL test that ran after this one was running against a database
-// missing the seven policies, which is precisely the state this file exists to
-// prevent.
+// missing the (now eight, see below) policies, which is precisely the state
+// this file exists to prevent.
 //
 // Asserting rather than installing also makes the test stronger: it now fails
 // if the shipped schema stops carrying a policy, instead of quietly supplying
@@ -83,9 +83,23 @@ func enableMSSQLTenantPolicies(t *testing.T, db *sql.DB) {
 	}
 	src := string(data)
 
+	// 031 adds an eighth policy (dbo.workflow_promises, finding S1/S10's
+	// verification) in its own file rather than in 001_schema.sql, so it is
+	// invisible to the scan above unless read separately. Folding it in here
+	// means this function's "applied" set -- and therefore
+	// TestMSSQLTenantIsolation_UnderRealSecurityPolicies's assertions -- covers
+	// all eight tables the shipped schema actually protects, not the seven
+	// 001_schema.sql originally shipped.
+	promisesPath := filepath.Join("..", "migrations", "mssql", "031_workflow_promises_security_policy.sql")
+	promisesData, err := os.ReadFile(promisesPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", promisesPath, err)
+	}
+	src += "\n" + string(promisesData)
+
 	policies := mssqlPolicyRe.FindAllStringSubmatch(src, -1)
 	if len(policies) == 0 {
-		t.Fatalf("could not find any CREATE SECURITY POLICY in %s", path)
+		t.Fatalf("could not find any CREATE SECURITY POLICY in %s or %s", path, promisesPath)
 	}
 	if fn := mssqlFilterFnRe.FindString(src); fn == "" {
 		t.Fatalf("could not find dbo.fn_tenant_filter in %s -- the migration changed shape "+
@@ -293,6 +307,145 @@ func TestMSSQLTenantIsolation_UnderRealSecurityPolicies(t *testing.T) {
 	for _, wf := range list {
 		if wf.ID == wfB {
 			t.Fatalf("ListWorkflows for tenant A returned tenant B's workflow %s", wfB)
+		}
+	}
+}
+
+// TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies is the
+// live verification 031_workflow_promises_security_policy.sql's own header
+// asked for and could not get: it was written and merged "UNVERIFIED AGAINST
+// A LIVE SQL SERVER" by a stream with no SQL Server instance available.
+//
+// The thing worth being suspicious of here, spelled out in this repo's own
+// history: engine/mssql_signals_promises.go's GetPromise, ListPromises,
+// ResolvePromise and RejectPromise all carry an explicit
+// `AND tenant_id = @p` predicate of their own. A test that reads cross-tenant
+// promise data through *those* methods and finds nothing would pass whether
+// or not TenantFilter_Promises does anything at all -- exactly the shape
+// tiers.yaml already records happening once for a different table (an MSSQL
+// cross-tenant assertion that passed against a wide-open policy because the
+// Go-level filter did all the work). CreatePromise is the one write path
+// with no Go-level tenant predicate (it is a bare INSERT, tenant_id supplied
+// as a column value), which is why the read side here is done the same way --
+// raw SQL against the tenant-scoped connection pool, naming no tenant_id
+// column anywhere in the query text, so TenantFilter_Promises is the only
+// thing that can hide a row.
+func TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies(t *testing.T) {
+	dsn := os.Getenv("CLEAT_TEST_MSSQL")
+	if dsn == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
+	if testing.Short() {
+		t.Skip("Skipping MSSQL integration test in short mode")
+	}
+
+	ctx := context.Background()
+	adminDB := testutil.MSSQLTestDB(t)
+	t.Cleanup(func() { adminDB.Close() })
+	testutil.SetupMSSQLFullSchema(t, adminDB)
+	testutil.CleanupMSSQLTestData(t, adminDB)
+	t.Cleanup(func() { testutil.CleanupMSSQLTestData(t, adminDB) })
+
+	const (
+		tenantA = "cccccccc-cccc-4ccc-cccc-cccccccccccc"
+		tenantB = "dddddddd-dddd-4ddd-dddd-dddddddddddd"
+	)
+	run := uuid.New().String()[:8]
+
+	seed := func(tenant, suffix string) string {
+		t.Helper()
+		defName := "rls-promise-def-" + run + "-" + suffix
+		if _, err := adminDB.ExecContext(ctx, `
+			INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, tenant_id)
+			VALUES (@p1, 1, 0x0061736d, 1, 1, @p2)`, defName, tenant); err != nil {
+			t.Fatalf("seed workflow_def for %s: %v", suffix, err)
+		}
+		wfID := "rls-promise-wf-" + run + "-" + suffix
+		if _, err := adminDB.ExecContext(ctx, `
+			INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
+			VALUES (@p1, @p2, 1, 'ready', DATEADD(DAY, -1, SYSUTCDATETIME()), '{}', 'default', @p3)`,
+			wfID, defName, tenant); err != nil {
+			t.Fatalf("seed workflow_instance for %s: %v", suffix, err)
+		}
+		return wfID
+	}
+	wfA := seed(tenantA, "a")
+	wfB := seed(tenantB, "b")
+
+	enableMSSQLTenantPolicies(t, adminDB)
+
+	factory := NewMSSQLStoreFactory(dsn)
+	defer factory.Close()
+
+	poolA, err := factory.getOrCreateTenantPool(ctx, tenantA)
+	if err != nil {
+		t.Fatalf("getOrCreateTenantPool(A): %v", err)
+	}
+	poolB, err := factory.getOrCreateTenantPool(ctx, tenantB)
+	if err != nil {
+		t.Fatalf("getOrCreateTenantPool(B): %v", err)
+	}
+
+	storeA, closerA, err := factory.OpenStore(ctx, tenantA)
+	if err != nil {
+		t.Fatalf("OpenStore(A): %v", err)
+	}
+	defer closerA.Close()
+	storeB, closerB, err := factory.OpenStore(ctx, tenantB)
+	if err != nil {
+		t.Fatalf("OpenStore(B): %v", err)
+	}
+	defer closerB.Close()
+
+	promiseA := "rls-promise-" + run + "-a"
+	promiseB := "rls-promise-" + run + "-b"
+	if err := storeA.CreatePromise(ctx, wfA, "p", promiseA); err != nil {
+		t.Fatalf("CreatePromise(A): %v", err)
+	}
+	if err := storeB.CreatePromise(ctx, wfB, "p", promiseB); err != nil {
+		t.Fatalf("CreatePromise(B): %v", err)
+	}
+
+	for round := 0; round < 3; round++ {
+		for _, tc := range []struct {
+			name         string
+			pool         *sql.DB
+			ownPromise   string
+			otherPromise string
+		}{
+			{"A", poolA, promiseA, promiseB},
+			{"B", poolB, promiseB, promiseA},
+		} {
+			// Sanity: the tenant can see its own row through the same
+			// tenant-id-free query, so a 0 result below means "the policy
+			// filtered it out", not "this connection has no session context
+			// and sees nothing at all" (the 2.71 failure mode).
+			var own int
+			if err := tc.pool.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM workflow_promises WHERE promise_id = @p1`, tc.ownPromise).Scan(&own); err != nil {
+				t.Fatalf("round %d: tenant %s counting its own promise: %v", round, tc.name, err)
+			}
+			if own != 1 {
+				t.Fatalf("round %d: tenant %s sees %d rows for its own promise %s, want 1 -- "+
+					"under the shipped filter predicate a session with no tenant context matches no "+
+					"rows, so this would also fail if the session context were simply missing",
+					round, tc.name, own, tc.ownPromise)
+			}
+
+			// The claim under test: no Go-level tenant_id predicate anywhere
+			// in this query's text. If TenantFilter_Promises is not actually
+			// enforcing -- STATE = OFF, predicate always true, applied to the
+			// wrong table -- this returns 1, not 0.
+			var other int
+			if err := tc.pool.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM workflow_promises WHERE promise_id = @p1`, tc.otherPromise).Scan(&other); err != nil {
+				t.Fatalf("round %d: tenant %s counting the other tenant's promise: %v", round, tc.name, err)
+			}
+			if other != 0 {
+				t.Fatalf("round %d: tenant %s's connection can see the other tenant's promise %s "+
+					"(%d row(s)) through a query with no tenant_id predicate of its own -- "+
+					"TenantFilter_Promises is not enforcing", round, tc.name, tc.otherPromise, other)
+			}
 		}
 	}
 }

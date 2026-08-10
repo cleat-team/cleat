@@ -1219,6 +1219,47 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 	return totalDeleted, nil
 }
 
+// DeleteCompletedWorkflows permanently deletes workflow_instances rows in a
+// terminal, no-further-action status ('done', 'failed', 'terminated') whose
+// completed_at is older than the cutoff. 'dead_lettered' is deliberately
+// excluded -- see the interface doc (store_interface.go) and
+// DeleteDeadLetteredWorkflows above.
+//
+// Unlike PostgresStore's DeleteCompletedWorkflows, no explicit event_history
+// delete is needed here: migrations/mysql/001_schema.sql declares
+// event_history's FK to workflow_instances ON DELETE CASCADE and MySQL never
+// dropped it (only PostgreSQL did, deliberately, in
+// migrations/postgres/003_procedures.sql), so deleting the workflow_instances
+// row below cascades event_history (and workflow_signals, workflow_promises,
+// concurrency_keys, workflow_update_requests) automatically.
+func (s *MySQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalDeleted int64
+	for {
+		result, err := s.db.ExecContext(ctx, `
+			DELETE w FROM workflow_instances w
+			INNER JOIN (
+				SELECT id FROM workflow_instances
+				WHERE status IN ('done', 'failed', 'terminated')
+				  AND completed_at IS NOT NULL
+				  AND completed_at < ?
+				  AND tenant_id = ?
+				ORDER BY id
+				LIMIT 10000
+			) d ON w.id = d.id
+		`, olderThan, s.tenantID)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete completed workflows: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		totalDeleted += n
+		if n == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return totalDeleted, nil
+}
+
 // GetChildCount returns the number of active (non-terminal) child workflows
 // for the given parent workflow. Terminal statuses are excluded.
 func (s *MySQLStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {

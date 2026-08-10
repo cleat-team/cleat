@@ -45,6 +45,7 @@ type mockShardStore struct {
 	cleanupMemorySamplesFn       func(ctx context.Context, maxSamplesPerDef int) (int64, error)
 	deleteExpiredEventsFn        func(ctx context.Context, olderThan time.Time) (int64, error)
 	deleteDeadLetteredFn         func(ctx context.Context, olderThan time.Time) (int64, error)
+	deleteCompletedFn            func(ctx context.Context, olderThan time.Time) (int64, error)
 	loadMemoryEstimatesFn        func(ctx context.Context) (map[string]float64, error)
 	loadMemoryStatsFn            func(ctx context.Context) ([]WorkflowMemoryStats, error)
 	getCompactionCandidatesFn    func(ctx context.Context, threshold int, limit int) ([]string, error)
@@ -709,6 +710,17 @@ func (m *mockShardStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderT
 	m.recordCall("DeleteDeadLetteredWorkflows")
 	if m.deleteDeadLetteredFn != nil {
 		return m.deleteDeadLetteredFn(ctx, olderThan)
+	}
+	if m.err != nil {
+		return 0, m.err
+	}
+	return 0, nil
+}
+
+func (m *mockShardStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	m.recordCall("DeleteCompletedWorkflows")
+	if m.deleteCompletedFn != nil {
+		return m.deleteCompletedFn(ctx, olderThan)
 	}
 	if m.err != nil {
 		return 0, m.err
@@ -2428,6 +2440,35 @@ func TestDeleteDeadLetteredWorkflows_PartialFailure(t *testing.T) {
 	}
 	if total != 5 {
 		t.Errorf("total = %d, want 5", total)
+	}
+}
+
+func TestDeleteCompletedWorkflows_Success(t *testing.T) {
+	ss, mocks := makeShardedStore(t, 3)
+	mocks[0].deleteCompletedFn = func(ctx context.Context, olderThan time.Time) (int64, error) { return 7, nil }
+	mocks[1].deleteCompletedFn = func(ctx context.Context, olderThan time.Time) (int64, error) { return 2, nil }
+	mocks[2].deleteCompletedFn = func(ctx context.Context, olderThan time.Time) (int64, error) { return 11, nil }
+
+	total, err := ss.DeleteCompletedWorkflows(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("DeleteCompletedWorkflows failed: %v", err)
+	}
+	if total != 20 {
+		t.Errorf("total = %d, want 20", total)
+	}
+}
+
+func TestDeleteCompletedWorkflows_PartialFailure(t *testing.T) {
+	ss, mocks := makeShardedStore(t, 2)
+	mocks[0].deleteCompletedFn = func(ctx context.Context, olderThan time.Time) (int64, error) { return 7, nil }
+	mocks[1].err = errors.New("shard-1 down")
+
+	total, err := ss.DeleteCompletedWorkflows(context.Background(), time.Now())
+	if err == nil {
+		t.Fatal("expected error for partial failure")
+	}
+	if total != 7 {
+		t.Errorf("total = %d, want 7", total)
 	}
 }
 

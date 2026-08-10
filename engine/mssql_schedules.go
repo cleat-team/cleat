@@ -446,6 +446,51 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 	return totalDeleted, nil
 }
 
+// DeleteCompletedWorkflows permanently deletes workflow_instances rows in a
+// terminal, no-further-action status ('done', 'failed', 'terminated') whose
+// completed_at is older than the cutoff. 'dead_lettered' is deliberately
+// excluded -- see the interface doc (store_interface.go) and
+// DeleteDeadLetteredWorkflows above.
+//
+// No explicit event_history delete is needed here: migrations/mssql/001_schema.sql
+// declares event_history's FK to workflow_instances ON DELETE CASCADE and SQL
+// Server never dropped it (only PostgreSQL did, deliberately). Deleting the
+// workflow_instances row below cascades event_history (and workflow_signals,
+// workflow_promises, concurrency_keys, workflow_update_requests)
+// automatically.
+//
+// UNVERIFIED: no SQL Server instance was available to run this against; it
+// is written to match DeleteDeadLetteredWorkflows immediately above exactly
+// (same batching shape, same reliance on cascade), which was itself the
+// verified reference for this dialect's FK graph.
+func (s *MSSQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalDeleted int64
+	for {
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM workflow_instances
+			WHERE id IN (
+				SELECT id FROM workflow_instances
+				WHERE status IN ('done', 'failed', 'terminated')
+				  AND completed_at IS NOT NULL
+				  AND completed_at < @p1
+				  AND tenant_id = @p2
+				ORDER BY id
+				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
+			)
+		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete completed workflows: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		totalDeleted += n
+		if n == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return totalDeleted, nil
+}
+
 // scheduleInputJSON renders a schedule's input for a SQL Server text column.
 //
 // json.RawMessage is a []byte, and go-mssqldb binds a []byte as VARBINARY. The

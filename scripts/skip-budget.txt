@@ -375,7 +375,30 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # Re-derive: scripts/check-skip-budget.sh prints "job=... skipped=N budget=M"
 # in the Skip budget step of Test Go (engine) and Cluster Integration Tests.
 
-test-go/engine	473	# runner 2026-08-10: was 455; see the remediation note below
+# 2026-08-10 -- 473 -> 479, both entries, for wave 2 (#459).
+#
+# The same rule again, one PR later. Wave 2 adds stream J's SQL Server tests,
+# and the runner measured:
+#
+#   job=test-go/engine skipped=479 budget=473 (passed=3594 failed=0)
+#
+# +6 skips, +2 passes, 0 failures. The six are the SQL Server arms and
+# SQL-Server-only tests from stream J: TestMSSQLIndexes_ReadyAndActiveExist (1),
+# TestMSSQLIndexes_TenantReadyUsedByPlanner (2) and
+# TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies (2), plus
+# one dialect arm elsewhere in the wave.
+#
+# These are case (a) in scripts/check-skips.sh's taxonomy -- genuinely optional,
+# nobody asked. Each guards on `os.Getenv("CLEAT_TEST_MSSQL") == ""`, which is
+# "was it requested", not "is it reachable"; a DSN that IS set and unreachable
+# still fails through testutil.MSSQLTestDB rather than skipping. The engine job
+# configures PostgreSQL only; the SQL Server coverage runs in multi-db-ci.yml,
+# which configures it.
+#
+# Budgets are paid per PR rather than in one lump at the front, so each wave
+# carries the cost of the tests it adds and an unexplained jump stays visible.
+
+test-go/engine	479	# runner 2026-08-10: was 473; see the remediation notes below
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -456,7 +479,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	473	# same as test-go/engine, and for the same reason; see the note there
+cluster	479	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a

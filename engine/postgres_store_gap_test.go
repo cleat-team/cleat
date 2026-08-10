@@ -118,6 +118,47 @@ func TestGap_DeleteDeadLetteredWorkflows_Some(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// DeleteCompletedWorkflows
+// ---------------------------------------------------------------------------
+
+func TestGap_DeleteCompletedWorkflows(t *testing.T) {
+	db := newNoopDB(t)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	n, err := store.DeleteCompletedWorkflows(testCtx, time.Now())
+	if err != nil {
+		t.Fatalf("DeleteCompletedWorkflows: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0, got %d", n)
+	}
+}
+
+func TestGap_DeleteCompletedWorkflows_Some(t *testing.T) {
+	// Same shape as TestGap_DeleteDeadLetteredWorkflows_Some: SELECT id ...
+	// followed by two DELETEs in the same transaction (event_history
+	// explicitly, since it has no FK/CASCADE back to workflow_instances on
+	// this dialect), rather than a single DELETE ... WHERE id IN (subquery).
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT id FROM workflow_instances", data: [][]driver.Value{{"wf-1"}, {"wf-2"}, {"wf-3"}}, consume: true},
+	}, []mockExecResult{
+		{match: "DELETE FROM event_history", affected: 5, consume: true},
+		{match: "DELETE FROM workflow_instances", affected: 3, consume: true},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	n, err := store.DeleteCompletedWorkflows(testCtx, time.Now())
+	if err != nil {
+		t.Fatalf("DeleteCompletedWorkflows: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("expected 3, got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // DeleteExpiredEvents
 // ---------------------------------------------------------------------------
 

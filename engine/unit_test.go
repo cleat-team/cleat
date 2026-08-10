@@ -1598,6 +1598,10 @@ func (s *stubWorkflowStore) DeleteDeadLetteredWorkflows(ctx context.Context, old
 	return 0, nil
 }
 
+func (s *stubWorkflowStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (s *stubWorkflowStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
 	eventCh := make(chan EventRecord)
 	errCh := make(chan error, 1)

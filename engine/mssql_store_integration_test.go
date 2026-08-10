@@ -739,6 +739,80 @@ func TestMSSQLIntegration_EventHistory(t *testing.T) {
 	}
 }
 
+// TestMSSQLIntegration_EventHistory_OversizedRequest is the regression test
+// for finding S5. Before migrations/mssql/034_event_history_request_widen.sql,
+// dbo.event_history.request was NVARCHAR(255) while engine/mssql_events.go's
+// appendEventsInTxOpts base64-encodes rec.Request before writing it -- an
+// effective ceiling of ~190 raw bytes. Measured against a live SQL Server:
+// exceeding the column's width does not silently truncate, it raises
+// "String or binary data would be truncated" and the whole
+// AppendEventHistoryBatch transaction rolls back (see 034's own header for
+// the full measurement). This test writes a request well past that old
+// ceiling and asserts it is (a) accepted at all, (b) round-trips byte-for-byte
+// through LoadEventHistory, and (c) still checksum-verifies -- the specific
+// scenario flagged in the review: computeEventChecksum
+// (engine/store_promises.go) hashes the untruncated in-memory value before
+// the write, so a silent truncation (which is not what this driver/server
+// does, but the fix must not assume that) would make VerifyWorkflowEvents
+// report false corruption on every subsequent reload.
+func TestMSSQLIntegration_EventHistory_OversizedRequest(t *testing.T) {
+	store, db := setupMSSQLIntegrationTest(t)
+	ctx := context.Background()
+	deployWorkflowDef(t, store, "oversized-req-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
+
+	wfID := uuid.New().String()
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
+		VALUES (@p1, 'oversized-req-wf', 1, 'running', SYSUTCDATETIME(), '{}', 'default', '00000000-0000-0000-0000-000000000000')
+	`, wfID)
+	if err != nil {
+		t.Fatalf("insert workflow_instance: %v", err)
+	}
+
+	// 400 raw bytes -> base64.StdEncoding produces ceil(400/3)*4 = 536
+	// characters, comfortably past the old NVARCHAR(255) ceiling (which
+	// itself capped raw input at roughly 190 bytes: 255 chars / 4 * 3).
+	oversized := strings.Repeat("the request body that used to not fit. ", 10)
+	if len(oversized) < 300 {
+		t.Fatalf("test fixture too small: %d bytes", len(oversized))
+	}
+
+	rec := EventRecord{
+		Step:      0,
+		EventType: "call",
+		Service:   "oversize-svc",
+		Op:        "oversize-op",
+		Request:   oversized,
+		Response:  `{"ok":true}`,
+	}
+	if err := store.AppendEventHistory(ctx, wfID, rec); err != nil {
+		t.Fatalf("AppendEventHistory with %d-byte request: %v -- if this is "+
+			"\"String or binary data would be truncated\", migration 034 either "+
+			"did not run or was reverted", len(oversized), err)
+	}
+
+	history, err := store.LoadEventHistory(ctx, wfID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("LoadEventHistory returned %d events, want 1", len(history))
+	}
+	if history[0].Request != oversized {
+		t.Fatalf("request round-trip mismatch: got %d bytes, want %d bytes -- "+
+			"stored value was altered (truncated or otherwise) on write",
+			len(history[0].Request), len(oversized))
+	}
+
+	// The specific integrity scenario the review called out: a checksum
+	// computed over the untruncated value must still verify after reload.
+	if err := store.VerifyWorkflowEvents(ctx, wfID); err != nil {
+		t.Fatalf("VerifyWorkflowEvents after oversized request round-trip: %v -- "+
+			"this is exactly the false-corruption failure mode a silent "+
+			"truncation would cause", err)
+	}
+}
+
 func TestMSSQLIntegration_VerifyWorkflowEvents(t *testing.T) {
 	store, db := setupMSSQLIntegrationTest(t)
 	ctx := context.Background()

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"log/slog"
 	"net/http"
@@ -98,6 +99,7 @@ type mockStore struct {
 	loadMemoryStatsFn                  func(ctx context.Context) ([]engine.WorkflowMemoryStats, error)
 	queueDepthFn                       func(ctx context.Context) (int64, error)
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
+	deleteCompletedWorkflowsFn         func(ctx context.Context, olderThan time.Time) (int64, error)
 	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string, priority int) (string, error)
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
@@ -1242,6 +1244,135 @@ func TestReaperLoop_DefaultInterval(t *testing.T) {
 	_, _ = ms.ReapStaleInstances(context.Background(), 30*time.Second)
 	if capturedTimeout != 30*time.Second {
 		t.Errorf("expected timeout 30s, got %v", capturedTimeout)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// retentionLoop / runRetentionSweep tests
+//
+// Like reaperLoop above, retentionLoop's ticker is hardcoded to 24 hours, so
+// these test the extracted per-tick body (runRetentionSweep) directly rather
+// than waiting on the ticker -- the same shape TestReaperLoop_DefaultInterval
+// uses.
+// ---------------------------------------------------------------------------
+
+func TestRetentionLoop_ReturnsImmediatelyWhenBothDisabled(t *testing.T) {
+	ms := &mockStore{}
+	ms.deleteExpiredEventsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		t.Error("DeleteExpiredEvents called; retentionLoop(0, 0) should never reach the ticker")
+		return 0, nil
+	}
+	ms.deleteCompletedWorkflowsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		t.Error("DeleteCompletedWorkflows called; retentionLoop(0, 0) should never reach the ticker")
+		return 0, nil
+	}
+	w := newTestWorker(ms)
+
+	done := make(chan struct{})
+	w.wg.Add(1)
+	go func() {
+		w.retentionLoop(0, 0)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// OK: returned without needing cancellation, because both knobs are
+		// disabled and there is nothing for the loop to do.
+	case <-time.After(2 * time.Second):
+		t.Fatal("retentionLoop(0, 0) did not return immediately")
+	}
+}
+
+func TestRunRetentionSweep_CallsBothWithIndependentCutoffs(t *testing.T) {
+	ms := &mockStore{}
+	var eventsCutoff, workflowsCutoff time.Time
+	var eventsCalled, workflowsCalled bool
+	ms.deleteExpiredEventsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		eventsCalled = true
+		eventsCutoff = olderThan
+		return 4, nil
+	}
+	ms.deleteCompletedWorkflowsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		workflowsCalled = true
+		workflowsCutoff = olderThan
+		return 2, nil
+	}
+	w := newTestWorker(ms)
+
+	// Different windows on purpose: an operator can keep workflow_instances
+	// rows far longer than event_history, e.g. --retention-days=7
+	// --completed-workflow-retention-days=90. The two cutoffs must not be
+	// the same computation reused for both.
+	w.runRetentionSweep(7, 90)
+
+	if !eventsCalled {
+		t.Fatal("DeleteExpiredEvents was not called")
+	}
+	if !workflowsCalled {
+		t.Fatal("DeleteCompletedWorkflows was not called")
+	}
+	wantEvents := time.Now().Add(-7 * 24 * time.Hour)
+	wantWorkflows := time.Now().Add(-90 * 24 * time.Hour)
+	if delta := eventsCutoff.Sub(wantEvents); delta < -time.Minute || delta > time.Minute {
+		t.Errorf("events cutoff = %v, want ~%v (7 days ago)", eventsCutoff, wantEvents)
+	}
+	if delta := workflowsCutoff.Sub(wantWorkflows); delta < -time.Minute || delta > time.Minute {
+		t.Errorf("workflows cutoff = %v, want ~%v (90 days ago)", workflowsCutoff, wantWorkflows)
+	}
+	if !workflowsCutoff.Before(eventsCutoff) {
+		t.Errorf("workflows cutoff (%v) should be earlier than events cutoff (%v) given retentionDays=7 < completedWorkflowRetentionDays=90",
+			workflowsCutoff, eventsCutoff)
+	}
+}
+
+func TestRunRetentionSweep_SkipsCompletedWorkflowsWhenDisabled(t *testing.T) {
+	ms := &mockStore{}
+	ms.deleteExpiredEventsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		return 0, nil
+	}
+	ms.deleteCompletedWorkflowsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		t.Error("DeleteCompletedWorkflows called with completedWorkflowRetentionDays=0")
+		return 0, nil
+	}
+	w := newTestWorker(ms)
+
+	// completedWorkflowRetentionDays=0: this is the shipped default. Proves
+	// the off-by-default argument in docs/operations/workflow-retention.md
+	// is actually true of the code, not just the prose.
+	w.runRetentionSweep(30, 0)
+}
+
+func TestRunRetentionSweep_SkipsEventsWhenDisabled(t *testing.T) {
+	ms := &mockStore{}
+	ms.deleteExpiredEventsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		t.Error("DeleteExpiredEvents called with retentionDays=0")
+		return 0, nil
+	}
+	ms.deleteCompletedWorkflowsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		return 0, nil
+	}
+	w := newTestWorker(ms)
+
+	w.runRetentionSweep(0, 90)
+}
+
+// TestCompletedWorkflowRetentionDaysDefaultsOff is the argument in
+// docs/operations/workflow-retention.md, pinned to the flag definition:
+// --completed-workflow-retention-days deletes the workflow_instances row
+// itself (status, result, error, def_name all gone from ListWorkflows and
+// the admin dashboard permanently), which is a materially more destructive
+// default than --retention-days deleting event_history (which leaves the
+// workflow's outcome in place). See TestRequireSignalAuthDefaultsOff above
+// for the same asserted-on-the-flag-definition shape and its rationale.
+func TestCompletedWorkflowRetentionDaysDefaultsOff(t *testing.T) {
+	f := flag.Lookup("completed-workflow-retention-days")
+	if f == nil {
+		t.Fatal("completed-workflow-retention-days flag is gone; if completed-workflow retention was removed, so should this test be")
+	}
+	if got := f.DefValue; got != "0" {
+		t.Errorf("completed-workflow-retention-days defaults to %s, want 0 -- deleting a workflow's own "+
+			"record (not just its event history) must be an explicit opt-in, not shipped on", got)
 	}
 }
 
@@ -3130,6 +3261,12 @@ func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte)
 }
 func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) { return 0, nil }
 func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+func (m *mockStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	if m.deleteCompletedWorkflowsFn != nil {
+		return m.deleteCompletedWorkflowsFn(ctx, olderThan)
+	}
 	return 0, nil
 }
 func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]engine.EventRecord, error) {

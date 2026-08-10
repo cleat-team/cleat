@@ -1425,6 +1425,29 @@ func TestMySQLStore_DeleteDeadLetteredWorkflows_Error(t *testing.T) {
 	}
 }
 
+func TestMySQLStore_DeleteCompletedWorkflows_FirstBatch(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "DELETE w FROM workflow_instances", affected: 0},
+	})
+	n, err := store.DeleteCompletedWorkflows(testCtx, time.Now().Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatalf("DeleteCompletedWorkflows: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0, got %d", n)
+	}
+}
+
+func TestMySQLStore_DeleteCompletedWorkflows_Error(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "DELETE w FROM workflow_instances", err: sql.ErrConnDone},
+	})
+	_, err := store.DeleteCompletedWorkflows(testCtx, time.Now().Add(-30*24*time.Hour))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // GetWorkflowByID — null optionals
 // ---------------------------------------------------------------------------

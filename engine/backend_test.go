@@ -14,7 +14,3 @@ func TestExecResult_Fields(t *testing.T) {
 		t.Error("Suspended = false, want true")
 	}
 }
-
-func TestWazeroBackendImplementsWasmBackend(t *testing.T) {
-	var _ WasmBackend = (*wazeroBackend)(nil)
-}

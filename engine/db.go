@@ -1264,6 +1264,99 @@ func (s *PostgresStore) deleteDeadLetteredWorkflowsBatch(ctx context.Context, ol
 	return n, tx.Commit()
 }
 
+// DeleteCompletedWorkflows permanently deletes workflow_instances rows in a
+// terminal, no-further-action status ('done', 'failed', 'terminated') whose
+// completed_at is older than the cutoff. See the interface doc
+// (store_interface.go) for why 'dead_lettered' is deliberately excluded --
+// it has its own lifecycle and its own deletion path.
+//
+// This is Finding S2: DeleteExpiredEvents deletes event_history for
+// 'done'/'failed' workflows but never touches the workflow_instances row
+// itself, so that table was unbounded by anything but lifetime workflow
+// count. This is the method that actually reclaims it.
+//
+// Follows deleteDeadLetteredWorkflowsBatch's pattern exactly, including the
+// same FK-graph fix: event_history has no FK back to workflow_instances on
+// PostgreSQL (dropped deliberately by migrations/postgres/003_procedures.sql
+// because finalize_workflow_status deletes a 'done'/'failed' workflow's
+// events itself) so it must be deleted explicitly here rather than assumed
+// to cascade. That assumption is also wrong for 'terminated' workflows on
+// this dialect specifically: TerminateWorkflow does not call
+// finalize_workflow_status, so a force-terminated workflow's events are
+// never deleted by any other path either.
+func (s *PostgresStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalDeleted int64
+	for {
+		n, err := s.deleteCompletedWorkflowsBatch(ctx, olderThan)
+		if err != nil {
+			return totalDeleted, err
+		}
+		totalDeleted += n
+		if n == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return totalDeleted, nil
+}
+
+// deleteCompletedWorkflowsBatch deletes up to 10000 terminal workflow
+// instances (and their orphan-prone event_history rows) in a single
+// RLS-scoped transaction, returning how many workflow_instances rows were
+// removed.
+func (s *PostgresStore) deleteCompletedWorkflowsBatch(ctx context.Context, olderThan time.Time) (int64, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("delete completed workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE status IN ('done', 'failed', 'terminated')
+		  AND completed_at IS NOT NULL
+		  AND completed_at < $1
+		  AND tenant_id = $2
+		ORDER BY id
+		LIMIT 10000
+	`, olderThan, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("delete completed workflows: select batch: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("delete completed workflows: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("delete completed workflows: rows: %w", err)
+	}
+	rows.Close()
+
+	if len(ids) == 0 {
+		return 0, tx.Commit()
+	}
+
+	// event_history has no FK to workflow_instances on this dialect (see the
+	// doc comment above) -- must be deleted explicitly or these rows are
+	// orphaned the moment the workflow_instances row below is gone.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM event_history WHERE workflow_id = ANY($1)`, pq.Array(ids)); err != nil {
+		return 0, fmt.Errorf("delete completed workflows: delete event_history: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM workflow_instances WHERE id = ANY($1)`, pq.Array(ids))
+	if err != nil {
+		return 0, fmt.Errorf("delete completed workflows: delete instances: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n, tx.Commit()
+}
+
 // tryDecodeBase64 attempts to base64-decode s. If decoding fails (e.g. the
 // value is a legacy plaintext that was never encoded), it returns s as-is.
 // This provides backward compatibility for events stored before base64

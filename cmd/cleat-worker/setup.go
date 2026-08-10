@@ -433,43 +433,12 @@ func pluginNames(m map[string]string) string {
 // Errors during defer execution are logged but do not prevent other defers
 // from running.
 func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
-	memoryPages := uint32(0)
-	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
-		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
-		if memoryPages > 65536 {
-			w.logger.WarnContext(context.Background(), "runDefers: wasm-memory-max-mb exceeded", "worker_id", w.id)
-			memoryPages = 65536
-		}
-	}
-	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
-	if err != nil {
-		// Checked before touching rt: NewRuntime returns (nil, err) on four
-		// paths -- compiling or instantiating the WASI module, the teavm
-		// module, or the env module -- and `rt.Metrics = ...` sat above this
-		// check, so any of them panicked here instead of logging and
-		// returning. The dead `if rt != nil` guard inside this branch is what
-		// that looked like from the inside.
-		w.logger.ErrorContext(context.Background(), "runDefers: create runtime failed", "worker_id", w.id, "error", err)
-		return
-	}
-	rt.Metrics = w.Metrics
-	defer rt.Close(w.ctx)
-
-	// Register the same backends the workflow itself ran on, so its defers are
-	// fenced the same way it was.
-	//
-	// This line was added and then reverted once, and the sequence is worth
-	// keeping: on its own it changed nothing, because Engine.RunDefer did not
-	// consult backendForWasm at all -- it reached straight for the wazero
-	// Runtime. Registering backends for a lookup nobody performed would have
-	// read like a fix without being one, so it came back out
-	// (IMPROVEMENT-PLAN 3.32). RunDefer now performs that lookup, which is what
-	// makes this line do something.
-	//
-	// When the wasmtime backend is unavailable -- the CGO-less build --
-	// w.wasmtimeBackend is a nil interface, backendForWasm returns nil, and
-	// RunDefer falls back to rt below, which is the pre-existing behaviour.
-	eng := engine.NewEngine(rt,
+	// Register the same backend the workflow itself ran on, so its defers are
+	// fenced the same way it was. wasmtime is the only backend cleat has, and
+	// it is registered for every language in engine.WasmtimeLanguages, so
+	// Engine.RunDefer's backendForWasm lookup always resolves here -- there
+	// is no runtime-less fallback left to reach.
+	eng := engine.NewEngine(nil,
 		&dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL},
 		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend))
 	eng.Metrics = w.Metrics
@@ -1033,6 +1002,7 @@ type Worker struct {
 	maxRetries                       int
 	memorySampleRetention            int
 	retentionDays                    int
+	completedWorkflowRetentionDays   int
 	schemaName                       string
 	peerSchemas                      []string
 	disableChecksumVerification      *bool
@@ -1240,8 +1210,8 @@ func (w *Worker) Run() {
 	w.launchLoop("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })
 
 	// Retention loop.
-	w.registerLoopFunc("retention", func() { w.retentionLoop(w.retentionDays) })
-	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays) })
+	w.registerLoopFunc("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays) })
+	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays) })
 
 	// Update dispatch loop (Feature 3: Update Handler).
 	w.registerLoopFunc("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })
@@ -1617,38 +1587,10 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		compactionState = nil
 	}
 
-	// ---- Create engine runtime ----
-	// The wazero Runtime is only needed for non-Go languages or when the
-	// wasmtime backend is unavailable. Go workflows use the wasmtime backend
-	// which compiles and instantiates WASM independently of wazero.
-	memoryPages := uint32(0)
-	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
-		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
-		if memoryPages > 65536 {
-			w.logger.WarnContext(context.Background(), "wasm-memory-max-mb exceeded", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
-			memoryPages = 65536
-		}
-	}
-	needsWazeroRuntime := w.wasmtimeBackend == nil || !runsOnWasmtime(wasm.DetectLanguage(wasmBytes))
-	var rt *engine.Runtime
-	if needsWazeroRuntime {
-		var rtErr error
-		rt, rtErr = engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
-		if rtErr != nil {
-			// Checked before touching rt, for the reason spelled out in
-			// runDefers: NewRuntime returns (nil, err) on four paths, and the
-			// `rt.Metrics = ...` that sat above this check turned every one of
-			// them into a nil dereference. The `if rt != nil` below is the
-			// tell -- it was written to handle a case it could never reach.
-			w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("workflow %s: create runtime: %v", wf.ID, rtErr), engine.ErrUnknown.String(), "")
-			if rt != nil {
-				rt.Close(w.ctx)
-			}
-			return
-		}
-		rt.Metrics = w.Metrics
-		defer rt.Close(w.ctx)
-	}
+	// wasmtime is the only WASM backend cleat has (w.wasmtimeBackend is
+	// guaranteed non-nil -- main.go exits fatally if NewWasmtimeBackend
+	// fails), and it is registered for every language in
+	// engine.WasmtimeLanguages, so the engine never needs a Runtime here.
 
 	// Extract child version pins from WASM metadata (compile-time resolution).
 	var childVersions map[string]int
@@ -1820,7 +1762,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// Throttle cancellation polls to at most once per 100ms wall-clock
 	// to avoid a full DB transaction on every durable step.
 	engineOpts = append(engineOpts, engine.WithCancellationCheckInterval(100*time.Millisecond))
-	eng := engine.NewEngine(rt, caller, engineOpts...)
+	eng := engine.NewEngine(nil, caller, engineOpts...)
 	eng.Metrics = w.Metrics
 
 	w.execEngines.Store(wf.ID, eng)
@@ -2379,9 +2321,31 @@ func (w *Worker) memoryReloadLoop() {
 	}
 }
 
-func (w *Worker) retentionLoop(retentionDays int) {
+// retentionLoop runs the two independent retention sweeps on a shared
+// 24-hour ticker: event-history retention (retentionDays, on by default --
+// see --retention-days) and completed-workflow retention
+// (completedWorkflowRetentionDays, off by default -- see
+// --completed-workflow-retention-days). Either can be disabled independently
+// by passing 0; the loop itself only exits (does nothing, ever) if both are
+// disabled, since there is nothing left for it to do.
+//
+// Why the default differs between the two: --retention-days deletes
+// event_history rows, the step-by-step replay log of a workflow that has
+// already reached a terminal state -- the workflow's outcome (status,
+// result, error, def_name) survives untouched in workflow_instances.
+// --completed-workflow-retention-days deletes the workflow_instances row
+// itself: the record that the workflow ever ran, what it returned, and why
+// it failed, gone from ListWorkflows and the admin dashboard permanently.
+// That is a materially more destructive default to ship silently-on, so it
+// defaults to 0 (disabled) -- an operator has to opt in, having decided how
+// long their own compliance/audit requirements need a workflow's outcome
+// retrievable. Finding S2 is real (the table is unbounded by anything but
+// lifetime workflow count) but "unbounded growth" and "silently deleting
+// user-visible records by default" are different classes of problem, and
+// only one of them is safe to default on.
+func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays int) {
 	defer w.wg.Done()
-	if retentionDays <= 0 {
+	if retentionDays <= 0 && completedWorkflowRetentionDays <= 0 {
 		return
 	}
 	interval := 24 * time.Hour
@@ -2395,17 +2359,36 @@ func (w *Worker) retentionLoop(retentionDays int) {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("retention")
-			cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
-			deleted, err := w.store.DeleteExpiredEvents(w.ctx, cutoff)
-			if err != nil {
-				w.logger.ErrorContext(w.ctx, "retention: error deleting expired events", "worker_id", w.id, "error", err)
-			} else if deleted > 0 {
-				w.Metrics.RecordEventsDeleted(w.ctx, deleted)
-				w.logger.InfoContext(w.ctx, "retention: deleted expired event rows", "worker_id", w.id, "count", deleted)
-			}
-			w.Metrics.SetRetentionLastRunTimestamp(w.ctx, time.Now().Unix())
+			w.runRetentionSweep(retentionDays, completedWorkflowRetentionDays)
 		}
 	}
+}
+
+// runRetentionSweep runs one iteration of both retention sweeps. Split out
+// of retentionLoop so it is callable directly from a test without waiting on
+// the loop's 24-hour ticker.
+func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays int) {
+	if retentionDays > 0 {
+		cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		deleted, err := w.store.DeleteExpiredEvents(w.ctx, cutoff)
+		if err != nil {
+			w.logger.ErrorContext(w.ctx, "retention: error deleting expired events", "worker_id", w.id, "error", err)
+		} else if deleted > 0 {
+			w.Metrics.RecordEventsDeleted(w.ctx, deleted)
+			w.logger.InfoContext(w.ctx, "retention: deleted expired event rows", "worker_id", w.id, "count", deleted)
+		}
+	}
+	if completedWorkflowRetentionDays > 0 {
+		cutoff := time.Now().Add(-time.Duration(completedWorkflowRetentionDays) * 24 * time.Hour)
+		deleted, err := w.store.DeleteCompletedWorkflows(w.ctx, cutoff)
+		if err != nil {
+			w.logger.ErrorContext(w.ctx, "retention: error deleting completed workflows", "worker_id", w.id, "error", err)
+		} else if deleted > 0 {
+			w.Metrics.RecordWorkflowsPurged(w.ctx, deleted)
+			w.logger.InfoContext(w.ctx, "retention: deleted completed workflow rows", "worker_id", w.id, "count", deleted)
+		}
+	}
+	w.Metrics.SetRetentionLastRunTimestamp(w.ctx, time.Now().Unix())
 }
 
 func (w *Worker) memoryCleanupLoop(maxSamples int) {

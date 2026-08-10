@@ -609,6 +609,9 @@ func (m *mockCompactStore) TerminateWorkflow(ctx context.Context, workflowID, re
 func (m *mockCompactStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
+func (m *mockCompactStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
 func (m *mockCompactStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
 	eventCh := make(chan EventRecord)
 	errCh := make(chan error, 1)

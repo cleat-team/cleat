@@ -1320,6 +1320,27 @@ func (s *ShardedStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderTha
 	return total, nil
 }
 
+// DeleteCompletedWorkflows fans out to all shards and sums the deleted counts.
+func (s *ShardedStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var total int64
+	var errs []string
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		n, err := shard.Store.DeleteCompletedWorkflows(ctx, olderThan)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("shard %q: %v", shard.Config.Name, err))
+			continue
+		}
+		total += n
+	}
+	if len(errs) > 0 {
+		return total, fmt.Errorf("DeleteCompletedWorkflows errors: %s", strings.Join(errs, "; "))
+	}
+	return total, nil
+}
+
 // metricsStore is a local interface for type-asserting whether a shard's
 // underlying store supports metrics collection methods. This mirrors the
 // MetricsStore interface in cmd/cleat-worker/metrics_store.go but lives

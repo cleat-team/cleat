@@ -339,6 +339,46 @@ type WorkflowStore interface {
 	// workflow instances deleted.
 	DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
 
+	// DeleteCompletedWorkflows permanently deletes workflow_instances rows that
+	// reached a terminal, no-further-action status ('done', 'failed',
+	// 'terminated' -- NOT 'dead_lettered', which has its own lifecycle and its
+	// own deletion path, DeleteDeadLetteredWorkflows) and whose completed_at is
+	// older than the cutoff.
+	//
+	// Finding S2: nothing else in this store ever deletes a
+	// workflow_instances row. DeleteExpiredEvents deletes event_history for
+	// terminal workflows but leaves the workflow_instances row itself; this
+	// method is what actually bounds that table's size by active/recent
+	// workflow count rather than lifetime workflow count.
+	//
+	// Child rows: same FK asymmetry DeleteDeadLetteredWorkflows documents.
+	// PostgreSQL dropped the FK from event_history to workflow_instances
+	// (migrations/postgres/003_procedures.sql) deliberately, because
+	// finalize_workflow_status() deletes a 'done'/'failed' workflow's events
+	// itself -- but MoveToDeadLetterQueue does not, and neither does
+	// TerminateWorkflow, so a dead-lettered or force-terminated workflow's
+	// events are not guaranteed to already be gone when this runs. MySQL and
+	// SQL Server never dropped that FK and declare it ON DELETE CASCADE.
+	// Implementations must delete event_history explicitly (not rely on
+	// cascade) wherever the dialect does not cascade it, or those rows are
+	// orphaned the instant the workflow_instances row is gone. The four
+	// other child tables (workflow_signals, workflow_promises,
+	// concurrency_keys, workflow_update_requests) cascade on every dialect.
+	//
+	// Implementations must run tenant-scoped (this store's own tenant) and,
+	// on PostgreSQL, inside the RLS transaction context (beginTxWithRLS):
+	// workflow_instances carries FORCE ROW LEVEL SECURITY with a fail-closed
+	// policy, so a plain-pool DELETE issued by a non-superuser,
+	// non-table-owner role (the shape cleat_app has in production) does not
+	// silently affect zero rows -- it raises "cleat.tenant_id is not set".
+	//
+	// Batched like DeleteDeadLetteredWorkflows: large deletes run as
+	// repeated bounded transactions rather than one unbounded one, so this
+	// does not hold a long lock or a long-running transaction against a
+	// table millions of rows deep. Returns the total number of
+	// workflow_instances rows deleted.
+	DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
+
 	// StreamEventHistory loads event history for a workflow in pages, returning
 	// events through a channel. Events are fetched in pages of pageSize as the
 	// caller reads from the channel. The channel is closed when all events have
