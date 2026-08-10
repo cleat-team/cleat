@@ -76,6 +76,32 @@ jobs:
   dco:
     name: Developer Certificate of Origin
     runs-on: ubuntu-latest
+
+    # DCO gates *contribution*, and contribution enters at develop. A PR into
+    # main carries no new authorship: it is a release or hotfix branch whose
+    # every commit was already certified here on the way into develop. Running
+    # the job on that hop re-asks a question that was answered, against a range
+    # that under gitflow is the whole release — for v0.2.0, 443 non-merge
+    # commits with 284 of them predating the convention. It cannot go green,
+    # and nobody can make it. Measured 2026-08-10, before #463 moved the
+    # merge-base:
+    #
+    #   base=$(git merge-base origin/main origin/develop)
+    #   git rev-list --no-merges --count "$base"..origin/develop        # 443
+    #   git rev-list --no-merges "$base"..origin/develop | while read -r c; do \
+    #     [ -z "$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$c")" ] \
+    #       && echo "$c"; done | wc -l                                  # 284
+    #
+    # This is why `Developer Certificate of Origin` was also removed from
+    # main's required status checks (2026-08-10). The skip here is the other
+    # half: without it the check stays permanently red on every release PR,
+    # and a red check that is *meant* to be red trains readers to merge past
+    # red — which is the habit this repo can least afford.
+    #
+    #   gh api repos/cleat-team/cleat/branches/main/protection \
+    #     --jq .required_status_checks.contexts     # -> ["Build","Lint"]
+    if: github.event.pull_request.base.ref != 'main'
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,6 +119,29 @@ jobs:
           # mode this job spent its whole life in.
           set -euo pipefail
 
+          # Already-released history is not this PR's contribution to certify.
+          #
+          # gitflow cuts hotfix/* from main, and that branch then has to merge
+          # back into develop. Its base..head range therefore replays every
+          # commit main carries that develop does not — including 467a689, a
+          # pre-convention commit with no trailer that predates this job having
+          # teeth. Without this skip the first hotfix back-merge fails DCO on a
+          # commit nobody in the PR wrote, and there is no branch left to amend.
+          #
+          # This is the same grandfathering the job already intends one line
+          # down ("nothing behind us is re-litigated"); base..head alone only
+          # achieves it while history is a straight line. Re-derive the case:
+          #
+          #   git log --no-merges --format='%H %s' origin/develop..origin/main
+          #   git show -s --format='%(trailers:key=Signed-off-by,valueonly)' 467a689
+          #
+          # It is not a hole. A commit reaches main only through a PR from
+          # develop or a release branch, and those are checked here on the way
+          # in. Exempting what main already carries exempts what was already
+          # certified — not what is arriving now.
+          git fetch --no-tags --quiet origin main
+          RELEASED=$(git rev-parse FETCH_HEAD)
+
           # %(trailers:...) rather than `grep -q "Signed-off-by:"` over %B.
           #
           # The grep matched the string anywhere in the message, including
@@ -103,6 +152,9 @@ jobs:
           # certification. git's trailer parser reads only the trailer block,
           # which is the thing the DCO is actually about.
           FAILING=$(git log --no-merges "${BASE}..${HEAD}" --format="%H" | while read -r commit; do
+            if git merge-base --is-ancestor "$commit" "$RELEASED"; then
+              continue
+            fi
             if [ -z "$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$commit")" ]; then
               echo "  $(git log -1 --format='%h %s' "$commit")"
             fi
