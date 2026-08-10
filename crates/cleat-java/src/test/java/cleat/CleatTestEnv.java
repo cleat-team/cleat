@@ -696,17 +696,16 @@ public class CleatTestEnv {
             delegate.setQueryState(key, value);
         }
 
-        // ---- Update / Query handlers ----
+        // ---- Update handlers ----
 
         @Override
         public void registerUpdateHandler(String name) {
             delegate.registerUpdateHandler(name);
         }
 
-        @Override
-        public void registerQueryHandler(String name) {
-            delegate.registerQueryHandler(name);
-        }
+        // There is no registerQueryHandler override here (removed
+        // 2026-08-09; HostCalls no longer declares the method). See
+        // docs/determinism.md, "Why there is no RegisterQueryHandler".
 
         // ---- Plugin calls ----
 

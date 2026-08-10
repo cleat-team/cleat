@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -186,10 +185,7 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 	// Execute pg_dump.
 	dumpPath := filepath.Join(p.config.DumpDir, filename)
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "pg_dump", "-f", dumpPath, p.config.DSN)
-	cmd.Stderr = &stderr
-
-	err = cmd.Run()
+	err = runPgDump(ctx, p.config.DSN.Reveal(), dumpPath, &stderr)
 	if err != nil {
 		errMsg := stderr.String()
 		if errMsg == "" {

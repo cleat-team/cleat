@@ -59,6 +59,7 @@ type Metrics struct {
 	freshSteps              metric.Int64Counter
 	replaySteps             metric.Int64Counter
 	calls                   metric.Int64Counter
+	callRetries             metric.Int64Counter
 	replayFailures          metric.Int64Counter
 	replayChecksumFailures  metric.Int64Counter
 	ambiguousCalls          metric.Int64Counter
@@ -228,6 +229,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_calls_total: %w", err)
+	}
+
+	m.callRetries, err = meter.Int64Counter(
+		"cleat_call_retries_total",
+		metric.WithDescription("DurableCallWithRetry retry attempts (incremented once per retry, not once per attempt -- a call that succeeds on its first try contributes 0)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_call_retries_total: %w", err)
 	}
 
 	m.replayFailures, err = meter.Int64Counter(
@@ -795,6 +804,17 @@ func (m *Metrics) RecordReplayStep(ctx context.Context, defName string, extraAtt
 func (m *Metrics) RecordCall(ctx context.Context, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.calls.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordCallRetry increments the DurableCallWithRetry retry counter. Call
+// once per retry that actually happens (i.e. a failed attempt followed by
+// another attempt), not once per attempt -- so a retry storm across many
+// calls is visible as a rate, distinct from ordinary call volume, which
+// freshCallWithRetry's per-call event history does not surface anywhere
+// this metrics package can see.
+func (m *Metrics) RecordCallRetry(ctx context.Context, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.callRetries.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordReplayFailure increments the replay-failures counter.

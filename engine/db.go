@@ -232,7 +232,68 @@ func (s *PostgresStore) beginTxWithRLS(ctx context.Context) (*sql.Tx, error) {
 	return tx, nil
 }
 
-// ClaimWorkflow atomically claims a runnable workflow using SKIP LOCKED.
+// Heartbeat renews this worker's lease on one workflow instance, fenced on
+// (assigned_to, generation), and reports whether the lease still held.
+//
+// # The decision: wire it, not delete it (B4)
+//
+// This was the one per-workflow generation-checked heartbeat in the store and
+// nothing called it: cmd/cleat-worker calls only BatchHeartbeat, which by its
+// own doc comment does not check generation because it refreshes every
+// workflow this worker holds in one statement. A generation-checked function
+// nothing calls is a trap for the next reader -- it reads like a safety net
+// that is actually just dead code.
+//
+// # Where it is actually used now
+//
+// Not as the primary fencing mechanism for the two hot paths B4 found
+// unfenced. Postgres's per-step flush (engine/flush.go's insertEventSQL) and
+// all three dialects' write-ahead-intent statements
+// (engine/store_intent.go) fold the (assigned_to, generation) check directly
+// into the INSERT/UPDATE's own WHERE clause instead -- see insertEventSQL's
+// doc for why: an earlier version of this fix called Heartbeat as a separate
+// statement before every write, and a round-trip-counting measurement
+// against the real test database found that cost exactly double the round
+// trips per event (8 vs 4, tenanted path) for a guarantee that was still
+// only an argument about timing, not an atomic fact. Heartbeat's own SQL
+// did not need to change for that rewrite; the callers did.
+//
+// Heartbeat is still called from three places, all of them the case where
+// folding the check into the write statement was not available or not worth
+// it:
+//
+//   - flush.go's afterFencedInsert and store_intent.go's
+//     intentFenceOrNotPending call it as a *disambiguation* step, and only
+//     on the rare path where a fenced write's own statement reported zero
+//     rows affected -- distinguishing "the fence failed" from "the row was
+//     already terminal / not pending", which are both legitimate zero-row
+//     outcomes for different reasons. The common case (a row was actually
+//     written) never reaches this call.
+//   - engine/flush.go calls it once, upfront, before dispatching to
+//     MySQLStore's/MSSQLStore's flushEventForStep (flush_dialect.go). Those
+//     two dialects' per-step insert goes through appendEventsInTxOpts, a
+//     function also used for genuinely unfenced multi-event batch writes
+//     (FinalizeWorkflowSegment, AppendEventHistoryBatch), so folding a fence
+//     predicate into its SQL would fence those other callers too; a
+//     Heartbeat-before-write check, scoped to the one caller that needs it,
+//     was the trade made instead. See flush_dialect.go's perStepEventFlusher
+//     doc.
+//   - adaptive_flush.go's partitionFencedBatch does not call this method
+//     directly -- it runs the equivalent renewal for every distinct claim in
+//     a batch in one query -- but exists for the same reason: a single
+//     Heartbeat call cannot fence a batch spanning many workflow instances
+//     at once.
+//
+// For the two call sites that still do a Heartbeat-before-write (unlike the
+// disambiguation callers, these do incur it on every call, not just the rare
+// path): a successful Heartbeat does not just check the lease, it renews it
+// -- heartbeat_at = now(), unconditionally, for the row that matched. Since
+// ReapStaleInstances only reclaims a workflow whose heartbeat_at predates the
+// reap timeout (tens of seconds in every deployment config this repo ships),
+// the window that matters is "between the renewal and the timeout elapsing",
+// not "between the renewal and the write milliseconds later" -- which is why
+// this is safe despite being two statements rather than one, for the two
+// places it is still used that way.
 func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -1095,28 +1156,48 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 }
 
 // DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
-// whose completed_at is older than the cutoff. Child rows (event_history, signals,
-// promises, concurrency_keys, update_requests) are automatically deleted via
-// ON DELETE CASCADE.
+// whose completed_at is older than the cutoff.
+//
+// Two bugs were found and fixed here together (both discovered verifying
+// Stream I / Finding S3's tenant-deletion work, which shares this function's
+// FK-graph question):
+//
+//  1. The previous version ran its DELETE on s.db directly -- the plain
+//     pool, with no RLS context set. workflow_instances carries
+//     `FORCE ROW LEVEL SECURITY` with a fail-closed policy
+//     (cleat.assert_tenant_set()), so under a real RLS-enforcing connection
+//     (any role that is not a superuser and does not own the table -- e.g.
+//     cleat_app in production) that statement does not silently do nothing:
+//     it raises "cleat.tenant_id is not set" and the whole call errors.
+//     Verified directly against a real cleat_rls_test_role connection: the
+//     old query, run as that role with the tenant_id predicate satisfied but
+//     no set_config call preceding it, fails with exactly that error. Fixed
+//     by running inside beginTxWithRLS, which calls setRLSOnTx before any
+//     query -- the same pattern every other tenant-scoped method here uses.
+//  2. The doc comment claimed child rows -- "event_history, signals,
+//     promises, concurrency_keys, update_requests" -- are "automatically
+//     deleted via ON DELETE CASCADE". True for four of the five, but
+//     migrations/postgres/003_procedures.sql deliberately DROPs the FK from
+//     event_history to workflow_instances ("no longer needed; events are
+//     deleted on terminal") because finalize_workflow_status() deletes a
+//     workflow's events itself when it reaches 'done' or 'failed'.
+//     MoveToDeadLetterQueue does not call finalize_workflow_status -- it
+//     does a plain UPDATE ... SET status = 'dead_lettered' -- so a
+//     dead-lettered workflow's event_history rows are never deleted there
+//     either. Verified directly: seeding a dead_lettered workflow with one
+//     event_history row and running the old DELETE FROM workflow_instances
+//     query left that event_history row in place, orphaned (no
+//     workflow_instances row it can still join to) and undeletable by any
+//     later call to this function, since it only ever looks at
+//     workflow_instances.status. Fixed by deleting event_history explicitly,
+//     by the same batch of IDs, in the same transaction.
 func (s *PostgresStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_instances
-			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < $1
-				  AND tenant_id = $2
-				ORDER BY id
-				LIMIT 10000
-			)
-		`, olderThan, s.tenantID)
+		n, err := s.deleteDeadLetteredWorkflowsBatch(ctx, olderThan)
 		if err != nil {
-			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
+			return totalDeleted, err
 		}
-		n, _ := result.RowsAffected()
 		totalDeleted += n
 		if n == 0 {
 			break
@@ -1124,6 +1205,63 @@ func (s *PostgresStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderTh
 		time.Sleep(10 * time.Millisecond)
 	}
 	return totalDeleted, nil
+}
+
+// deleteDeadLetteredWorkflowsBatch deletes up to 10000 dead-lettered
+// workflow instances (and their orphan-prone event_history rows) in a
+// single RLS-scoped transaction, returning how many workflow_instances rows
+// were removed.
+func (s *PostgresStore) deleteDeadLetteredWorkflowsBatch(ctx context.Context, olderThan time.Time) (int64, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("delete dead-lettered workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE status = 'dead_lettered'
+		  AND completed_at IS NOT NULL
+		  AND completed_at < $1
+		  AND tenant_id = $2
+		ORDER BY id
+		LIMIT 10000
+	`, olderThan, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("delete dead-lettered workflows: select batch: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("delete dead-lettered workflows: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("delete dead-lettered workflows: rows: %w", err)
+	}
+	rows.Close()
+
+	if len(ids) == 0 {
+		return 0, tx.Commit()
+	}
+
+	// event_history has no FK to workflow_instances (see the doc comment
+	// above) -- must be deleted explicitly or these rows are orphaned the
+	// moment the workflow_instances row below is gone.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM event_history WHERE workflow_id = ANY($1)`, pq.Array(ids)); err != nil {
+		return 0, fmt.Errorf("delete dead-lettered workflows: delete event_history: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM workflow_instances WHERE id = ANY($1)`, pq.Array(ids))
+	if err != nil {
+		return 0, fmt.Errorf("delete dead-lettered workflows: delete instances: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n, tx.Commit()
 }
 
 // tryDecodeBase64 attempts to base64-decode s. If decoding fails (e.g. the

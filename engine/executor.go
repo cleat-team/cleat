@@ -127,8 +127,14 @@ func (e *Engine) executeWithBackend(
 	// already handled by the callErr != nil branch below. This check only
 	// catches the residual case of a backend returning callErr == nil
 	// after execCtx's deadline has already passed without detecting it
-	// itself (wazero, for example, honors ctx cancellation directly and
-	// should not need this either, but the fallback is cheap insurance).
+	// itself. It is cheap insurance, not a fencing mechanism: on wazero
+	// specifically, a compute-bound guest that never yields back to the
+	// host (a tight loop) is not interrupted by execCtx's deadline at
+	// all, so fn.Call blocks past the deadline and this check is never
+	// reached for that case either -- see CLAUDE.md, "wazero cannot be
+	// fenced for a compute-bound guest" (measured three ways, all
+	// failing, 2026-08-05). This only helps when the guest itself
+	// returns control to the host before or around the deadline.
 	//
 	// This used to be the *only* timeout enforcement wasmtime had, and it
 	// did not work: wasmtime-go does not observe ctx.Done() while fn.Call

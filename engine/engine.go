@@ -54,6 +54,7 @@ type Engine struct {
 	failOnChecksumMismatch bool
 
 	workerID               string
+	generation             int64 // generation this workerID claimed the workflow under; see WithGeneration
 	wasmInstanceTimeout    time.Duration
 	defaultWorkflowTimeout time.Duration
 
@@ -258,6 +259,36 @@ func WithWorkflowEventVerifier(fn func(ctx context.Context, workflowID string) e
 
 // WithWorkerID sets the worker instance identifier.
 func WithWorkerID(id string) EngineOption { return func(e *Engine) { e.workerID = id } }
+
+// WithGeneration sets the generation this workerID claimed the workflow
+// instance under (workflow_instances.generation at claim time).
+//
+// Paired with WithWorkerID, this is what lets the per-step flush path
+// (engine/flush.go, engine/adaptive_flush.go) and the write-ahead-intent path
+// (engine/store_intent.go) fence their writes the same way
+// CompleteWorkflow/FailWorkflow/FinalizeWorkflowSegment already fence theirs:
+// a write only lands if the claim it was made under is still current. See
+// engine.fencingEnabled.
+//
+// Deliberately not folded into WithWorkerID or inferred from it: a claimed
+// workflow's generation is never 0 (ClaimWorkflows always runs
+// `generation = generation + 1` before handing a workflow to an engine), so
+// leaving this unset (generation stays its zero value) keeps fencing off by
+// construction for every existing caller that constructs an Engine without
+// going through a claim -- tests, cleattest, embedded, and any Engine built
+// with WithWorkerID for an unrelated reason (e.g. continueAsNewHandler's
+// hand-off identity). Fencing only turns on when both the worker identity and
+// a real, non-zero generation are supplied together.
+func WithGeneration(generation int64) EngineOption {
+	return func(e *Engine) { e.generation = generation }
+}
+
+// fencingEnabled reports whether this engine has enough information to fence
+// its per-step and write-ahead-intent writes to the claim it was constructed
+// under. See WithGeneration for why both conditions are required.
+func (e *Engine) fencingEnabled() bool {
+	return e.workerID != "" && e.generation != 0 && e.workflowStore != nil
+}
 
 // WithWASMInstanceTimeout sets the per-execution WAT timeout.
 func WithWASMInstanceTimeout(d time.Duration) EngineOption {

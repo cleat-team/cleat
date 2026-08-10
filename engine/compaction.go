@@ -174,6 +174,59 @@ type CompactedEvent struct {
 	PromiseResult string `json:"prom_res,omitempty"`
 	PromiseError  string `json:"prom_err,omitempty"`
 
+	// ErrNonRetryable mirrors EventRecord.ErrNonRetryable for a call event
+	// (call or call_heartbeat -- both use EventTypeCall). Its omission here
+	// was S4a: without it, a compacted-region call classified non-retryable
+	// on first execution could only reconstruct as the Go zero value, false,
+	// and replayed as an ordinary retryable failure. omitempty is safe for
+	// this bool for the same reason it is on EventRecord itself: the zero
+	// value already matches "not recorded" / "retryable", so a missing key
+	// on decode reads back exactly as it always did pre-2.35.
+	ErrNonRetryable bool `json:"nr,omitempty"`
+
+	// TimestampMs mirrors EventRecord.TimestampMs and is set for every event
+	// type, not just the ones with a dedicated case below -- Now() during
+	// replay reads it off the *previous* history event (execSession.Now,
+	// lifecycle.go), so any compacted event with TimestampMs left at zero
+	// makes replay fall back to session-start or wall-clock time instead of
+	// the recorded virtual clock. That is engine-introduced non-determinism
+	// exactly like S4a, just triggered by Now() instead of Retryable().
+	TimestampMs int64 `json:"ts,omitempty"`
+
+	// NewVersion mirrors EventRecord.NewVersion for a continue_as_new event.
+	// ContinueAsNewWithVersion reads rec.NewVersion straight off the replayed
+	// event to decide which workflow version to restart as (lifecycle.go); a
+	// missing value silently restarts version 0 (== "current version"),
+	// which can run the wrong code for a versioned continue-as-new that fell
+	// into the compacted region.
+	NewVersion int `json:"nv,omitempty"`
+
+	// StreamChunkIndex and StreamFinish mirror the same-named EventRecord
+	// fields for a plugin_call_stream_chunk event. plugins.go reads them
+	// back during replay to reconstruct stream position and completion;
+	// without them every compacted stream chunk replays as chunk 0,
+	// unfinished.
+	StreamChunkIndex int  `json:"sci,omitempty"`
+	StreamFinish     bool `json:"scf,omitempty"`
+
+	// StateKeys mirrors EventRecord.StateKeys for a state_mutation event with
+	// StateOp=="list" (ListState). lifecycle.go's ListState replay path reads
+	// it back verbatim; the other state_mutation ops (set/increment/has)
+	// never populate it.
+	StateKeys string `json:"sks,omitempty"`
+
+	// ParentWorkflowID and ParentClosePolicy mirror the same-named
+	// EventRecord fields for a child_workflow event. Neither is read back
+	// from history during replay (children.go's replay path only consumes
+	// RunID); ParentClosePolicy is enforced against live store state when a
+	// parent terminates (store_lifecycle.go's enforceParentClosePolicy).
+	// Preserved anyway so the reconstructed event is a faithful copy rather
+	// than a replay-sufficient-but-lossy one, and so the general round-trip
+	// property test (TestEventRecordFieldsSurviveCompaction) does not need a
+	// bespoke exemption for a field that is, in fact, cheap to carry through.
+	ParentWorkflowID  string `json:"pwid,omitempty"`
+	ParentClosePolicy string `json:"pcp,omitempty"`
+
 	// Plugin call fields.
 	PluginName   string `json:"pn,omitempty"`
 	PluginFunc   string `json:"pf,omitempty"`
@@ -286,7 +339,13 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 	openChildren := make(map[string]bool) // runID -> still open
 
 	for _, ev := range events {
-		ce := CompactedEvent{Type: eventTypeToCode[ev.EventType]}
+		ce := CompactedEvent{
+			Type: eventTypeToCode[ev.EventType],
+			// TimestampMs is set for every event, not inside the per-type
+			// switch below: Now() during replay needs it regardless of
+			// which event carried it. See the field doc on CompactedEvent.
+			TimestampMs: ev.TimestampMs,
+		}
 		switch ev.EventType {
 		case EventTypeCall:
 			ce.Service = ev.Service
@@ -295,6 +354,7 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.Response = ev.Response
 			ce.Error = ev.Err
 			ce.DurationMs = ev.DurationMs
+			ce.ErrNonRetryable = ev.ErrNonRetryable
 		case EventTypeAwaitSignals:
 			ce.SignalNames = ev.SignalNames
 			ce.TimeoutMs = ev.TimeoutMs
@@ -309,6 +369,8 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.ChildName = ev.ChildName
 			ce.ChildInput = ev.ChildInput
 			ce.RunID = ev.RunID
+			ce.ParentWorkflowID = ev.ParentWorkflowID
+			ce.ParentClosePolicy = ev.ParentClosePolicy
 			openChildren[ev.RunID] = true
 		case EventTypeAwaitChild:
 			ce.RunID = ev.RunID
@@ -320,6 +382,7 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			}
 		case EventTypeContinueAsNew:
 			ce.NewInput = ev.NewInput
+			ce.NewVersion = ev.NewVersion
 		case EventTypeHeartbeat:
 			ce.Service = ev.Service
 			ce.Op = ev.Op
@@ -352,6 +415,7 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.Response = ev.StateValue
 			ce.DurationMs = ev.StateDelta
 			ce.PromiseName = ev.StateOp
+			ce.StateKeys = ev.StateKeys
 		case EventTypeRunDetached:
 			ce.ChildName = ev.DetachedName
 			ce.ChildInput = ev.DetachedInput
@@ -391,6 +455,8 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.PluginInput = ev.PluginInput
 			ce.PluginOutput = ev.PluginOutput
 			ce.PluginError = ev.PluginError
+			ce.StreamChunkIndex = ev.StreamChunkIndex
+			ce.StreamFinish = ev.StreamFinish
 		case EventTypeDurableSend:
 			ce.Service = ev.Service
 			ce.Op = ev.Op
@@ -449,6 +515,9 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 		rec := EventRecord{
 			Step:      i,
 			EventType: codeToEventType[ce.Type],
+			// TimestampMs is restored for every event, mirroring the
+			// universal (not per-type) assignment in extractCompactionState.
+			TimestampMs: ce.TimestampMs,
 		}
 		switch ce.Type {
 		case EventCodeCall:
@@ -458,6 +527,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.Response = ce.Response
 			rec.Err = ce.Error
 			rec.DurationMs = ce.DurationMs
+			rec.ErrNonRetryable = ce.ErrNonRetryable
 		case EventCodeAwaitSignals:
 			rec.SignalNames = ce.SignalNames
 			rec.TimeoutMs = ce.TimeoutMs
@@ -471,12 +541,15 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.ChildName = ce.ChildName
 			rec.ChildInput = ce.ChildInput
 			rec.RunID = ce.RunID
+			rec.ParentWorkflowID = ce.ParentWorkflowID
+			rec.ParentClosePolicy = ce.ParentClosePolicy
 		case EventCodeAwaitChild:
 			rec.Response = ce.Response
 			rec.Err = ce.Error
 			rec.RunID = ce.RunID
 		case EventCodeContinueAsNew:
 			rec.NewInput = ce.NewInput
+			rec.NewVersion = ce.NewVersion
 		case EventCodeHeartbeat:
 			rec.Service = ce.Service
 			rec.Op = ce.Op
@@ -506,6 +579,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.StateValue = ce.Response
 			rec.StateDelta = ce.DurationMs
 			rec.StateOp = ce.PromiseName
+			rec.StateKeys = ce.StateKeys
 		case EventCodeRunDetached:
 			rec.DetachedName = ce.ChildName
 			rec.DetachedInput = ce.ChildInput
@@ -545,6 +619,26 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.PluginInput = ce.PluginInput
 			rec.PluginOutput = ce.PluginOutput
 			rec.PluginError = ce.PluginError
+			rec.StreamChunkIndex = ce.StreamChunkIndex
+			rec.StreamFinish = ce.StreamFinish
+		case EventCodeDurableSend:
+			// extractCompactionState has captured Service/Op/Request for this
+			// type since it was added; this reconstruction case was simply
+			// never written, so every durable_send event in the compacted
+			// region silently reconstructed as {Step,EventType} only, losing
+			// which service/operation/payload the fire-and-forget call was
+			// for. Found by FuzzCompactionEquivalence within the first second
+			// of real mutation after the round-trip comparator was made
+			// reflection-based (see TestEventRecordFieldsSurviveCompaction).
+			rec.Service = ce.Service
+			rec.Op = ce.Op
+			rec.Request = ce.Request
+		case EventCodeDurableScheduleInvoke:
+			// Same gap as EventCodeDurableSend, plus the scheduling delay.
+			rec.Service = ce.Service
+			rec.Op = ce.Op
+			rec.Request = ce.Request
+			rec.DurationMs = ce.DurationMs
 		}
 		full = append(full, rec)
 	}

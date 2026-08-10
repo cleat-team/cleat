@@ -357,9 +357,21 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	}
 
 	// Record idempotency result within the transaction (best-effort).
+	//
+	// AND tenant_id = $3, not workflow_id alone: this UPDATE ran unscoped by
+	// tenant, so it matched any row across every tenant whose workflow_id
+	// happened to equal this one. workflow_id is generated per call
+	// (uuid.New() when the caller supplies none) so a same-tenant collision
+	// is astronomically unlikely, but a caller-supplied runID is not
+	// guaranteed unique *across* tenants the way it is guaranteed unique
+	// *within* one (StartNewRun's idempotency_keys primary key is now
+	// (key_hash, tenant_id), migrations/postgres/010). s.tenantID is set
+	// on this tx already -- beginTxWithRLS calls setRLSOnTx before any
+	// caller reaches here -- so this is a Go-level filter matching the RLS
+	// policy's own scope, not a new source of truth for it.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1`,
-		workflowID, result); err != nil {
+		`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
+		workflowID, result, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -414,9 +426,13 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	}
 
 	// Record idempotency error within the transaction (best-effort).
+	//
+	// AND tenant_id = $3: see the identical comment on the sibling UPDATE in
+	// CompleteWorkflow. s.tenantID is already set on this tx by
+	// beginTxWithRLS.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
-		workflowID, errorMsg); err != nil {
+		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
+		workflowID, errorMsg, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -522,9 +538,13 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 		return ErrFenceLost
 	}
 	// Record idempotency error within the transaction (best-effort).
+	//
+	// AND tenant_id = $3: see the identical comment on the sibling UPDATE in
+	// CompleteWorkflow. s.tenantID is already set on this tx by
+	// beginTxWithRLS.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
-		workflowID, errMsg); err != nil {
+		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
+		workflowID, errMsg, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 

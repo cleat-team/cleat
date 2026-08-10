@@ -1,10 +1,13 @@
-package migration
+package migration_test
+
+// package migration_test (external), not migration: see runner_test.go's
+// file header for why -- engine/testutil now depends on this package.
 
 import (
 	"context"
 	"testing"
 
-	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/migration"
 )
 
 // TestRunner_AppliesShippedMySQLMigrations is the MySQL twin of
@@ -38,7 +41,7 @@ func TestRunner_AppliesShippedMySQLMigrations(t *testing.T) {
 	db := newMySQLScratchDB(t, "cleat_migration_mysql_bootstrap_test")
 	ctx := context.Background()
 
-	r := NewRunner(db, engine.DialectMySQL, migrationsRoot(t))
+	r := migration.NewRunner(db, migration.DialectMySQL, migrationsRoot(t))
 	if err := r.Run(ctx); err != nil {
 		t.Fatalf("Run against the shipped MySQL migrations failed: %v\n\n"+
 			"This is the code path every cleat-worker takes at boot. If it "+
@@ -109,7 +112,7 @@ func TestRunner_SecondMySQLRunAppliesNothing(t *testing.T) {
 	ctx := context.Background()
 	root := migrationsRoot(t)
 
-	if err := NewRunner(db, engine.DialectMySQL, root).Run(ctx); err != nil {
+	if err := migration.NewRunner(db, migration.DialectMySQL, root).Run(ctx); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
 	var firstApplied string
@@ -118,7 +121,7 @@ func TestRunner_SecondMySQLRunAppliesNothing(t *testing.T) {
 		t.Fatalf("read applied_at: %v", err)
 	}
 
-	if err := NewRunner(db, engine.DialectMySQL, root).Run(ctx); err != nil {
+	if err := migration.NewRunner(db, migration.DialectMySQL, root).Run(ctx); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
 	var secondApplied string

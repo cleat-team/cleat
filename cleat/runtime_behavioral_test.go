@@ -669,7 +669,7 @@ func TestRegisterTypedUpdateHandler(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// HandleQuery / HandleUpdate on hostCallsImpl
+// HandleUpdate on hostCallsImpl
 // ---------------------------------------------------------------------------
 
 func TestHandleUpdateNotFound(t *testing.T) {
@@ -680,57 +680,6 @@ func TestHandleUpdateNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no update handler registered") {
 		t.Errorf("expected 'no update handler registered' in error, got %v", err)
-	}
-}
-
-func TestHandleQueryRegistered(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
-	h.RegisterQueryHandler("get_status", func(payloadJSON string) (string, error) {
-		return `{"status":"ok"}`, nil
-	})
-
-	result, err := h.HandleQuery("get_status", `{}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != `{"status":"ok"}` {
-		t.Errorf("expected result %q, got %q", `{"status":"ok"}`, result)
-	}
-}
-
-func TestHandleQueryNotFound(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
-	_, err := h.HandleQuery("no_such_query", `{}`)
-	if err == nil {
-		t.Fatal("expected error for unknown query handler")
-	}
-	if !strings.Contains(err.Error(), "no query handler registered") {
-		t.Errorf("expected 'no query handler registered' in error, got %v", err)
-	}
-}
-
-func TestHandleQueryDelegatesToField(t *testing.T) {
-	var capturedName, capturedPayload string
-	h := NewHostCalls(HostCallsOptions{
-		HandleQuery: func(name, payload string) (string, error) {
-			capturedName = name
-			capturedPayload = payload
-			return `{"delegated":true}`, nil
-		},
-	}).HostCallsImpl
-
-	result, err := h.HandleQuery("my_query", `{"key":"val"}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != `{"delegated":true}` {
-		t.Errorf("expected delegated result, got %q", result)
-	}
-	if capturedName != "my_query" {
-		t.Errorf("expected name 'my_query', got %q", capturedName)
-	}
-	if capturedPayload != `{"key":"val"}` {
-		t.Errorf("expected payload %q, got %q", `{"key":"val"}`, capturedPayload)
 	}
 }
 

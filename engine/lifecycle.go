@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -161,13 +162,22 @@ func (s *execSession) recordEvent(rec EventRecord) {
 		flushed := false
 		af := s.engine.getAdaptiveFlusher()
 		if af != nil {
-			done, useBatch := af.Flush(context.Background(), s.workflowID, rec, checksum)
+			done, useBatch := af.Flush(context.Background(), s.workflowID, rec, checksum, s.engine.workerID, s.engine.generation)
 			if useBatch {
 				// A blocking receive. It was a select with one case and no
 				// default, which is the same thing spelled in a way that
 				// suggests a second case was once intended or is coming.
 				if err := <-done; err != nil {
-					s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
+					if errors.Is(err, ErrFenceLost) {
+						// Expected and normal under reaping (B4): this
+						// worker's claim on the workflow was lost, so the
+						// event was not written. Not logged as an error --
+						// see engine/flush.go's flushEvent doc for why the
+						// session is not aborted here either.
+						s.engine.log().DebugContext(context.Background(), "adaptive flush: fence lost, workflow reassigned to another worker", "workflow_id", s.workflowID, "step", rec.Step)
+					} else {
+						s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
+					}
 				} else {
 					s.lastChecksum = checksum
 				}
@@ -177,7 +187,11 @@ func (s *execSession) recordEvent(rec EventRecord) {
 		if !flushed {
 			// Direct flush (low-rate mode or batch/adaptive flushers disabled)
 			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum); flushErr != nil {
-				s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
+				if errors.Is(flushErr, ErrFenceLost) {
+					s.engine.log().DebugContext(context.Background(), "flushEvent: fence lost, workflow reassigned to another worker", "workflow_id", s.workflowID, "step", rec.Step)
+				} else {
+					s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
+				}
 			} else {
 				s.lastChecksum = checksum
 			}
@@ -308,8 +322,10 @@ func (s *execSession) RunID(ctx context.Context, m api.Module, idPtr, idMaxLen u
 }
 
 func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64 {
-	// Query handlers are registered but don't produce event history entries.
-	// They are invoked out-of-band by the worker, not during replay.
+	// Retained as a harmless ABI-compatibility no-op only -- see the
+	// RegisterQueryHandler doc comment on the HostHandler interface in
+	// imports.go. Nothing reads s.queryHandlers back out to dispatch a
+	// query to it; "invoked out-of-band by the worker" was never true.
 	s.queryHandlers = append(s.queryHandlers, name)
 	return 0
 }

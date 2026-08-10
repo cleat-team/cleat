@@ -78,6 +78,18 @@ The host reports a result that is valid JSON but not an object
 result should not be destroyed, and workflows predating this contract return
 scalars — but the violation is no longer silent.
 
+Two things this contract does not yet reach, recorded rather than implied:
+
+* **Go has no typed-result path.** It has no equivalent of the `Map<String, Object>`
+  return that fixed Java (#455) or the serde struct that satisfies it in Rust, so a Go
+  workflow hand-builds its result JSON — see `testdata/basic/order.go`'s
+  `fmt.Sprintf(`{"tracking_id":%q}`, trackingID)` — and nothing enforces the contract at
+  the type level. The language most likely to be assumed correct has the weakest
+  enforcement.
+* `tiers.yaml`'s `sdk-java` entry carries the full account of how this was diagnosed,
+  including the detail that converting the result to a `Map` too eagerly regressed a
+  numeric field into a string. Worth reading before changing any SDK's return handling.
+
 **Input example** (for a Go `func PlaceOrder(h HostCalls, userID string, cart []CartItem) (string, error)`):
 ```json
 {"UserID":"user-42","Cart":[{"SKU":"SKU-001","Quantity":2}]}
@@ -682,7 +694,18 @@ Run a detached child workflow (fire-and-forget, no result expected).
 
 #### 2.25 `cleat_register_query_handler`
 
-Register a read-only query handler for the workflow.
+Records a query handler name on the host side. **No worker code ever reads
+this back out to route an external query to it** -- there is no dispatch
+path from any HTTP route, CLI command, or worker loop to a registered
+handler; the only thing that ever invoked one was each SDK's own in-process
+test harness. Every SDK's public wrapper around this call was removed
+2026-08-09 (see `docs/determinism.md`, "Why there is no
+RegisterQueryHandler"). The import is still accepted by the engine, kept as
+a no-op purely so guests already compiled against it still instantiate --
+new code should not call it and should not expect anything to happen if it
+does. Use `set_query_state` (2.27) instead: it is durable and externally
+readable via `GET /api/workflows/:id/query?key=X` regardless of whether a
+worker currently has the workflow loaded.
 
 ```
 (func (import "env" "cleat_register_query_handler")
@@ -1369,6 +1392,169 @@ Host-only extension for streaming plugin function calls. Same signature as `plug
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
+### Previously undocumented functions
+
+> Added 2026-08-09. This document said "52 host functions" while the actual
+> registered set is 59 on both backends (56 `cleat_*` exports plus
+> `plugin_call`, `plugin_call_streaming`, `set_query_state`). Re-derived with:
+>
+> ```
+> grep -oE '\.Export\("[a-zA-Z_]+"\)' engine/imports.go | sort -u | wc -l   # wazero: 59
+> grep -oE '"cleat_[a-zA-Z_]+"|"set_query_state"|"plugin_call[a-zA-Z_]*"' \
+>   engine/wasmtime_hostfuncs*.go engine/backend_wasmtime*.go | cut -d: -f2 | sort -u | wc -l   # wasmtime: 59
+> ```
+>
+> Both backends register the identical set — there is no wazero/wasmtime
+> split in what is importable, only in how it is enforced (see
+> `docs/explanation/security-model.md`). The seven functions below existed in
+> `engine/imports.go` and the wasmtime registration files with no ABI entry
+> at all. The first five are ordinary host calls; the last two
+> (`cleat_poll_work`, `cleat_complete`) are internal plumbing specific to the
+> Go `wasip1` export/dispatch protocol, not calls a workflow author invokes
+> directly — documented here for completeness, not as an integration target
+> for a new language SDK.
+
+#### 2.53 `cleat_await_any_child`
+
+Wait for the first of several child workflows to complete (race semantics).
+Companion to `cleat_await_all_children` (§2.23), which waits for all of them.
+
+```
+(func (import "env" "cleat_await_any_child")
+  (param i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `run_ids_json_ptr` | `i32` | Pointer to JSON array of candidate run IDs |
+| `run_ids_json_len` | `i32` | Length of the run IDs JSON |
+| `result_ptr` | `i32` | Output buffer for the winning child's result |
+| `result_max_len` | `i32` | Output buffer capacity |
+
+**Return packing:** same shape as `cleat_await_child` (§2.22) — `errCode` /
+`resultLen`. Implemented in `engine/children.go`
+(`(*execSession).AwaitAnyChild`).
+
+#### 2.54 `cleat_poll_child`
+
+Non-blocking check for whether a single child workflow has completed, without
+suspending. Companion to `cleat_await_child` (§2.22), which blocks.
+
+```
+(func (import "env" "cleat_poll_child")
+  (param i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `run_id_ptr` | `i32` | Child run ID pointer |
+| `run_id_len` | `i32` | Child run ID length |
+| `result_ptr` | `i32` | Output buffer for the child's result, if complete |
+| `result_max_len` | `i32` | Output buffer capacity |
+
+**Return packing:** `errCode` / `resultLen`, as `cleat_await_child`, except
+this call never suspends — an incomplete child is reported as such rather
+than blocking. Implemented in `engine/children.go`
+(`(*execSession).PollChild`).
+
+#### 2.55 `cleat_schedule_cron`
+
+Register a recurring cron trigger for a workflow. Corresponds to
+`HostCalls.ScheduleCron` and the `cron` package surfaced to Go SDK authors.
+
+```
+(func (import "env" "cleat_schedule_cron")
+  (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `workflow_name_ptr` / `_len` | `i32` | Target workflow definition name |
+| `cron_expr_ptr` / `_len` | `i32` | Cron expression |
+| `timezone_ptr` / `_len` | `i32` | IANA timezone; empty means the default timezone |
+| `input_ptr` / `_len` | `i32` | Input JSON for each triggered run |
+| `id_ptr` | `i32` | Output buffer for the new schedule ID |
+| `id_max_len` | `i32` | Output buffer capacity |
+
+**Return packing:** `errCode` / schedule-ID length, in the same 32/32 split
+used by `cleat_child_workflow_with_options` (§2.20). Implemented in
+`engine/schedules.go` (`(*execSession).ScheduleCron`).
+
+#### 2.56 `cleat_delete_cron`
+
+Remove a previously registered cron schedule by ID.
+
+```
+(func (import "env" "cleat_delete_cron")
+  (param i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `schedule_id_ptr` | `i32` | Schedule ID pointer |
+| `schedule_id_len` | `i32` | Schedule ID length |
+
+**Return packing:** `errCode` only (0 = success). Implemented in
+`engine/schedules.go` (`(*execSession).DeleteCron`).
+
+#### 2.57 `cleat_list_crons`
+
+List the calling tenant's registered cron schedules as a JSON array.
+
+```
+(func (import "env" "cleat_list_crons")
+  (param i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `out_ptr` | `i32` | Output buffer for the JSON array |
+| `out_max_len` | `i32` | Output buffer capacity |
+
+**Return packing:** `errCode` / bytes written, in the same shape as
+`cleat_call`. Implemented in `engine/schedules.go`
+(`(*execSession).ListCrons`).
+
+#### 2.58 `cleat_poll_work` (internal — Go `wasip1` dispatch protocol)
+
+Not a workflow-author-facing call. Generated Go WASM `main()` stubs call this
+to receive the entry point name and input before dispatching; the host-side
+implementation is a stub that always returns 0 (`engine/imports.go`). A new
+language SDK does not need to replicate this — it exists because of how the
+Go `wasip1` export wrapper is structured, not because of anything the ABI
+requires generally.
+
+```
+(func (import "env" "cleat_poll_work")
+  (param i32 i32 i32 i32)
+  (result i64))
+```
+
+#### 2.59 `cleat_complete` (internal — Go `wasip1` dispatch protocol)
+
+Not a workflow-author-facing call. The generated export wrapper calls this
+immediately before returning, so the worker can capture the result even if
+the Go WASI runtime subsequently calls `proc_exit` (which would otherwise
+overwrite the normal return value). `status=0` means the result is a JSON
+success payload; `status=1` means it is an error message.
+
+```
+(func (import "env" "cleat_complete")
+  (param i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `status` | `i32` | 0 = success, 1 = error |
+| `result_ptr` | `i32` | Result or error message pointer |
+| `result_len` | `i32` | Result or error message length |
+
 ---
 
 ## 3. Memory Layout
@@ -1439,6 +1625,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| — | 2026-08-09 | Documentation-only: added §2.53-2.59 for seven host functions (`cleat_await_any_child`, `cleat_poll_child`, `cleat_schedule_cron`, `cleat_delete_cron`, `cleat_list_crons`, `cleat_poll_work`, `cleat_complete`) that were registered in `engine/imports.go` and the wasmtime backend with no ABI entry at all. Updated documentation count from 52 to 59. As with the version-number note at the top of this file: no `CurrentABIVersion` bump, because nothing about the wire contract changed -- only what this document said about it. |
 | 5 | 2026-05-15 | Added Section 6: Cross-Language Determinism specification covering IEEE 754 floats, map iteration order, JSON canonicalization, GC timing, and RNG. Added cross-language replay guarantee. |
 | 4 | 2026-05-13 | Added `cleat_json_parse` (2.51) and `cleat_json_stringify` (2.52) host functions for JSON validation and normalization via the host runtime. Bumped ABI_VERSION to 4. |
 | 3 | 2026-05-09 | Expanded from 22 to 50 documented host functions. Added all missing imports: `cleat_continue_as_new_versioned`, `cleat_child_workflow_with_options`, `cleat_child_workflow_in_schema`, `cleat_send_signal_and_wait`, `cleat_reply_to_signal`, `cleat_signal_workflow`, `cleat_set_scope`, `cleat_get_scope`, `cleat_uuid`, `cleat_acquire_lock`, `cleat_release_lock`, `cleat_side_effect`, `cleat_workflow_id`, `cleat_run_id`, `cleat_resolve_promise`, `cleat_reject_promise`, `cleat_send`, `cleat_schedule_invoke`, `cleat_register_query_handler`, `cleat_run_detached`, `cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`, `cleat_list_state`, `cleat_fetch`, `plugin_call_streaming`. Reorganized into logical groups. Updated documentation count from 18 to 50. |

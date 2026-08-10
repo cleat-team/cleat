@@ -173,6 +173,27 @@ tier1:
   backend: wasmtime          # CGO required; see CLAUDE.md on why CGO_ENABLED=0 invalidates a run
   dialects: [postgres, mysql, mssql]
 
+  # dialects above is ENGINE support (package engine has an independent store
+  # implementation per dialect, exercised by tier 1). It is not CLI support.
+  #
+  # B6, found 2026-08-09: `grep -ci 'mysql\|mssql' cmd/cleat/*.go` -> 0, and
+  # cmd/cleat had ten hardcoded `sql.Open("postgres", connStr)` call sites
+  # (main.go and plugin_cmd.go), so `cleat deploy`, `versions`, `rollback`,
+  # `schedule`, `lock`, and `plugin` could never target MySQL or SQL Server --
+  # a non-Postgres DSN reached lib/pq unfiltered and failed with a confusing,
+  # dialect-blind error (e.g. `pq: SSL is not enabled on the server` for a
+  # sqlserver:// DSN). README.md claimed dialect parity at the CLI level that
+  # was never true.
+  #
+  # Decision: narrow the claim rather than build a multi-dialect CLI. Fixed by
+  # routing every sql.Open in cmd/cleat through one helper (openPostgresDB,
+  # cmd/cleat/db.go) that refuses a non-Postgres DSN with an actionable error
+  # naming the dialect and cmd/deploy-workflow as the alternative, guarded by
+  # cmd/cleat/db_open_guard_test.go so a new call site can't reintroduce a
+  # bypass. cmd/deploy-workflow (--driver postgres|mysql|mssql) remains the
+  # only multi-dialect entry point, and covers `deploy` only.
+  cli_dialects: [postgres]
+
   # The versions those dialect names mean. Added 2026-08-08, because until then this
   # file named the dialects and no version, while README.md, docs/operations/upgrading.md
   # and docs/explanation/postgresql-schema.md all claimed "PostgreSQL 14+" and
@@ -434,6 +455,26 @@ tier2:
            returning success=true. The consume poller warns once instead of skipping at
            DEBUG. A test asserted the old success=true, so it pinned the defect rather than
            catching it"
+        - "RESOLVED 2026-08-09: scheduledbackup claimed 'Scheduled PostgreSQL backups to S3'
+           and 'manual backup/restore via HTTP API and CLI commands'. Neither was true: there
+           is no restore implementation anywhere in the package, no AWS SDK dependency in the
+           repo, and s3_bucket/s3_prefix were stored in backup_config and returned by the API
+           but never read when running pg_dump, which writes to local disk (dump_dir) only.
+           An operator configuring this to satisfy an off-host backup requirement found out
+           only at restore time. Doc comments corrected; handleCreateConfig/
+           handleUpdateConfig now reject a non-empty s3_bucket or s3_prefix (400) instead of
+           silently accepting and ignoring them -- the columns stay, for existing rows, but
+           can no longer be set to anything but empty going forward. Also:
+           scheduledbackup.Config.DSN (a full connection string, commonly with a password)
+           was a plain string passed to pg_dump as a literal argv element in three places
+           (background.go, routes.go, the backup-run/backup-list CLI commands), visible via
+           ps and /proc/*/cmdline to any co-resident user. Converted to plugin.Secret; all
+           three call sites now go through runPgDump (pgdump.go), which strips any password
+           out of the DSN and passes it via the child's PGPASSWORD environment variable
+           instead. 'dsn' was not previously in
+           plugin.TestPluginCredentialFieldsUseTheSecretType's credential-name list (only
+           this one field in the whole plugins tree used it) -- added, so a future dsn-typed
+           credential field is caught automatically instead of by review"
         - "multi-DB harness job runs a t.Skip while starting three databases"
 
     - id: admin-dashboard
@@ -882,10 +923,17 @@ tier3:
 
     - id: formal-specs
       why: |
-        specs/CleatClaim.tla uses `=====` as a decorative separator, which is TLA+'s module
-        terminator — the first is at line 53 of 495, so 89% of the spec is outside the module.
-        No .cfg files exist and TLC never runs in CI. Either fix and run them, or move them to
-        docs/ as design notes.
+        Checked 2026-08-09 (`grep -n '^====\|^\\\* =' specs/CleatClaim.tla`, and
+        `find specs -iname '*.cfg'`, `grep -rn 'tlc2\.TLC' .github/workflows/`). An
+        earlier version of this entry claimed line 53 was TLA+'s `====` module
+        terminator, cutting off 89% of the 495-line spec. That was wrong: line 53 is
+        `\* =============...`, a `\*`-prefixed line *comment* used as a decorative
+        divider (the same pattern repeats at 21 other lines). The real module
+        terminator is the bare `====` on line 495, the file's last line, so the
+        module is not truncated. The narrower claim stands and is why this stays
+        tier 3: no `.cfg` file exists anywhere under `specs/`, and nothing under
+        `.github/workflows/` invokes `tlc2.TLC` — TLC never runs, in CI or otherwise.
+        Either fix that and run them, or move them to docs/ as design notes.
 
     - id: comparative-benchmarks
       why: |

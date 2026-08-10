@@ -940,11 +940,10 @@ impl TestEnv {
         let _ = name; // no-op in test mode
     }
 
-    /// Register a query handler.
-    pub fn register_query_handler(&self, name: &str) -> Result<(), String> {
-        let _ = name; // no-op in test mode
-        Ok(())
-    }
+    // There is no register_query_handler here (removed 2026-08-09). It
+    // recorded a handler name with the host but nothing ever routed an
+    // external query to it -- see docs/determinism.md, "Why there is no
+    // RegisterQueryHandler". Use set_query_state instead.
 
     // -----------------------------------------------------------------------
     // State (workflow-persisted key-value)

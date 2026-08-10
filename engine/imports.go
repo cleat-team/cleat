@@ -100,7 +100,18 @@ type HostHandler interface {
 	// DurableScheduleInvoke schedules a delayed one-shot invocation.
 	DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64
 
-	// RegisterQueryHandler registers a read-only query handler.
+	// RegisterQueryHandler records a query handler name for ABI compatibility
+	// with already-compiled guests. It does NOT make the workflow externally
+	// queryable: no worker code ever reads what this records back out and
+	// dispatches a query to it. Kept as a no-op (rather than removed from the
+	// ABI) only because removing the host import would break instantiation
+	// of guests already compiled against it -- see
+	// tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm.
+	// Every SDK's public wrapper around this call was removed 2026-08-09
+	// (see docs/determinism.md, "Why there is no RegisterQueryHandler"); do
+	// not add a new one, and do not build anything that assumes this call
+	// causes a query to be delivered later. Use SetQueryState/GetQueryState,
+	// which is: GET /api/workflows/:id/query?key=... in cmd/cleat-worker.
 	RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64
 
 	// State operations (Stream R)

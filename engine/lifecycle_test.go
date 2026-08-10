@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
+
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 )
 
 // ---------------------------------------------------------------------------
@@ -241,6 +244,63 @@ func TestDurableCallWithRetry_FreshRetriesExhausted(t *testing.T) {
 	if errCode != 1 {
 		t.Errorf("expected errCode 1 (failure), got %d", errCode)
 	}
+}
+
+// TestDurableCallWithRetry_RecordsRetryMetric pins that a retry storm is
+// visible in Prometheus, not just in event history after the fact.
+// freshCallWithRetry only ever writes one event (the final success or
+// failure) regardless of how many attempts it took, so before this metric
+// existed there was no signal anywhere that a call had been retried at all.
+//
+// 3 attempts, all failing, must record exactly 2 retries: attempt 1 fails
+// and triggers a retry (recorded), attempt 2 fails and triggers a retry
+// (recorded), attempt 3 fails and exhausts maxAttempts -- no further retry,
+// so nothing is recorded for it.
+func TestDurableCallWithRetry_RecordsRetryMetric(t *testing.T) {
+	m, err := prometheus.New(prometheus.Config{WorkerID: "test-worker"})
+	if err != nil {
+		t.Fatalf("prometheus.New: %v", err)
+	}
+	defer m.Shutdown(context.Background())
+
+	errCaller := &errorCaller{calls: 0, errMsg: "transient error"}
+	s := newTestExecSession()
+	s.engine.caller = errCaller
+	s.engine.Metrics = m
+
+	s.DurableCallWithRetry(context.Background(), nil,
+		"my-svc", "my-op", `{"key":"val"}`, 3, 1, 100, 10, "", 0, 0)
+
+	if errCaller.calls != 3 {
+		t.Fatalf("expected 3 call attempts, got %d", errCaller.calls)
+	}
+
+	rec := httptest.NewRecorder()
+	m.ServeHTTP().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+
+	line := findMetricLine(t, body, "cleat_call_retries_total")
+	if !strings.Contains(line, " 2") {
+		t.Errorf("expected cleat_call_retries_total to read 2 after 2 retries, got line: %q\nfull output:\n%s", line, body)
+	}
+}
+
+// findMetricLine returns the first non-comment line in Prometheus exposition
+// text that starts with the given metric name, or fails the test if there is
+// none -- absence is exactly the bug class this test exists to catch
+// (RecordCallRetry never being called would mean the metric is registered
+// but always reads 0, and a missing line would mean it was never registered
+// at all; both must fail loudly here rather than let a substring match on
+// "0" silently pass).
+func findMetricLine(t *testing.T, exposition, metricName string) string {
+	t.Helper()
+	for _, line := range strings.Split(exposition, "\n") {
+		if strings.HasPrefix(line, metricName+"{") || strings.HasPrefix(line, metricName+" ") {
+			return line
+		}
+	}
+	t.Fatalf("metric %q not found in exposition output:\n%s", metricName, exposition)
+	return ""
 }
 
 func TestDurableCallWithRetry_FreshNonRetryable(t *testing.T) {

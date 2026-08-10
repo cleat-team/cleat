@@ -91,8 +91,19 @@ func TestGap_DeleteDeadLetteredWorkflows(t *testing.T) {
 }
 
 func TestGap_DeleteDeadLetteredWorkflows_Some(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "DELETE FROM workflow_instances", affected: 500, consume: true},
+	// The batch now runs as SELECT id ... (to know which event_history rows
+	// need an explicit delete, since that table has no FK/CASCADE back to
+	// workflow_instances -- migrations/postgres/003_procedures.sql drops it
+	// deliberately) followed by two DELETEs in the same transaction, rather
+	// than a single DELETE ... WHERE id IN (subquery). consume: true on each
+	// match means the *second* trip around DeleteDeadLetteredWorkflows's loop
+	// sees no configured SELECT result and stops, matching a real batch that
+	// exhausts its matching rows.
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT id FROM workflow_instances", data: [][]driver.Value{{"wf-1"}, {"wf-2"}}, consume: true},
+	}, []mockExecResult{
+		{match: "DELETE FROM event_history", affected: 3, consume: true},
+		{match: "DELETE FROM workflow_instances", affected: 2, consume: true},
 	})
 	defer db.Close()
 
@@ -101,8 +112,8 @@ func TestGap_DeleteDeadLetteredWorkflows_Some(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteDeadLetteredWorkflows: %v", err)
 	}
-	if n != 500 {
-		t.Errorf("expected 500, got %d", n)
+	if n != 2 {
+		t.Errorf("expected 2, got %d", n)
 	}
 }
 

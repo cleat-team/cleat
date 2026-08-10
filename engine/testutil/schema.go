@@ -1,136 +1,27 @@
 package testutil
 
 import (
-	"context"
-	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-// schemaApplyLockKey is the advisory-lock key that serialises concurrent
-// applications of 001_schema.sql against one database. Any fixed int64 works
-// as long as every caller uses the same one; this is "cleatddl" in ASCII,
-// chosen to be recognisable in pg_locks when diagnosing a stuck test.
-const schemaApplyLockKey int64 = 0x636c65617464646c
-
-// execIgnoreDupKey executes a SQL statement, ignoring MySQL error 1061
-// (Duplicate key name) and 1060 (Duplicate column name). Other errors are
-// passed through. This allows idempotent CREATE INDEX / ALTER TABLE ADD
-// COLUMN in MySQL which does not support IF NOT EXISTS for those operations.
-func execIgnoreDupKey(t *testing.T, db *sql.DB, stmt string) {
-	t.Helper()
-	if _, err := db.Exec(stmt); err != nil {
-		msg := err.Error()
-		if !strings.Contains(msg, "Error 1061") && !strings.Contains(msg, "Error 1060") {
-			t.Fatalf("setup schema: %v", err)
-		}
-	}
-}
-
-// execMSSQLBestEffort executes a SQL statement, ignoring errors that are
-// expected in test schemas (e.g., index creation on NVARCHAR(MAX) columns).
-func execMSSQLBestEffort(t *testing.T, db *sql.DB, stmt string) {
-	t.Helper()
-	if _, err := db.Exec(stmt); err != nil {
-		msg := err.Error()
-		// NVARCHAR(MAX) columns cannot be index keys; this is expected in
-		// test schemas that use NVARCHAR(MAX) for flexibility.
-		if strings.Contains(msg, "invalid for use as a key column") {
-			return
-		}
-		t.Fatalf("setup schema: %v", err)
-	}
-}
-
-// postgresSchemaFiles locates the real, shipped PostgreSQL schema migrations,
-// applied directly by SetupMinimalSchema/SetupFullSchema for DialectPostgres
-// instead of a hand-maintained duplicate.
+// applyPostgresSchemaFile applies the real, shipped PostgreSQL migrations
+// (migrations/postgres/*.sql) to db via applyMigrations/migration.Runner --
+// the exact code path cmd/cleat-worker/main.go runs at boot.
 //
-// This file previously hand-duplicated the schema (a third copy, alongside
-// migrations/postgres/001_schema.sql and the root schema.sql) and had
-// already drifted from it twice in one session before this fix (the
-// `generation` column's nullability, and MySQL collation). Reading the real
-// migration from disk -- the same approach store_backends_procedures_test.go
-// already uses for 003_procedures.sql/004_*.sql -- makes drift structurally
-// impossible for Postgres.
-//
-// The path is computed from this source file's own location via
-// runtime.Caller rather than a hardcoded relative path, because this
-// package is exercised from two different `go test` working directories:
-// engine/ (which imports testutil) and engine/testutil/ itself
-// (testutil_test.go) -- a single ".."-relative path cannot be correct for
-// both.
-// It returns every migration that shapes a table, in version order, because
-// the schema a test runs against is all of them and not just the first.
-// 001_schema.sql is the bulk of it; 010 widens idempotency_keys' primary key
-// to (key_hash, tenant_id) (IMPROVEMENT-PLAN 3.10); 020 adds event_history's
-// intent_at, which LoadEventHistory selects on every dialect (1.4 phase D).
-//
-// The list is explicit rather than a directory glob. The other files in
-// migrations/postgres/ are not table shape: 002 seeds defaults, 003 and 004
-// define finalize_workflow_status (applied by applyPostgresProcedures in the
-// tests that exercise it), and 005 creates the cleat_app role, which
-// SetupPostgresRLSRole handles on its own terms. Globbing would drag all of
-// those into every SetupFullSchema call.
-//
-// A migration that adds or alters a column therefore has to be added here.
-// That is a maintenance cost, and the alternative -- a second, hand-written
-// copy of the DDL in Go -- is the one this function exists to avoid.
-func postgresSchemaFiles() []string {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		panic("postgresSchemaFiles: runtime.Caller failed")
-	}
-	// thisFile is .../engine/testutil/schema.go; the repo root is two
-	// levels up, and the migrations live under migrations/postgres/.
-	dir := filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations", "postgres")
-	return []string{
-		filepath.Join(dir, "001_schema.sql"),
-		filepath.Join(dir, "010_idempotency_keys_tenant_id.sql"),
-		filepath.Join(dir, "020_event_intent.sql"),
-		filepath.Join(dir, "021_schedule_timezone.sql"),
-		filepath.Join(dir, "022_schedule_policies.sql"),
-		filepath.Join(dir, "023_cross_tenant_claim.sql"),
-		filepath.Join(dir, "024_cross_tenant_schedules.sql"),
-	}
-}
-
-// applyPostgresSchemaFile reads and executes each postgresSchemaFiles() entry
-// against db, in order. lib/pq's simple query protocol accepts a whole
-// multi-statement file as a single Exec (as applyPostgresProcedures in
-// store_backends_procedures_test.go already relies on for 003/004).
-//
-// The statements are idempotent (CREATE ... IF NOT EXISTS, CREATE OR REPLACE,
-// DROP POLICY IF EXISTS ... CREATE POLICY), so this is safe to call more than
-// once against the same database **sequentially**. It is NOT safe to call
-// concurrently, and an earlier version of this comment claimed otherwise --
-// which is why the resulting flake read as mysterious rather than obvious
-// (IMPROVEMENT-PLAN §2.21). PostgreSQL's IF NOT EXISTS forms are not atomic:
-// two sessions both observe the object missing, both insert the catalog row,
-// and one loses on a unique index. Observed as
-//
-//	pq: duplicate key value violates unique constraint
-//	"pg_extension_name_index" (23505)
-//
-// from CREATE EXTENSION IF NOT EXISTS pgcrypto, though CREATE TABLE IF NOT
-// EXISTS carries the same hazard.
-//
-// Concurrency here is the norm, not the exception: `go test ./plugins/...`
-// runs distinct packages in parallel (-p defaults to NumCPU) and they all
-// point at the same CLEAT_TEST_POSTGRES database. So the apply is serialised
-// with a session-level advisory lock.
-//
-// The lock is taken on a single pinned *sql.Conn rather than on db. Advisory
-// locks belong to a session, and database/sql hands out arbitrary pooled
-// connections per call -- so locking via db could take the lock on one
-// connection and try to release it on another, which silently fails to
-// unlock and leaks the lock for the life of that connection.
+// Named for what it used to be: a hand-maintained list of files read and
+// exec'd directly, with its own advisory lock and content-fingerprint cache
+// to make repeated calls within a test binary cheap. Both of those are now
+// migration.Runner's job -- it takes its own advisory lock per call
+// (migration/runner.go's Runner.session) and its own schema_migrations table
+// makes a second Run against an already-migrated database cheap without a
+// fingerprint of file contents. Kept as a thin wrapper, rather than inlining
+// applyMigrations at each of this function's two call sites (SetupMinimalSchema
+// and the concurrency test below), so neither has to change.
 //
 // Must be called with a connection that owns (or can create) the schema --
 // migrations/postgres/001_schema.sql creates the `admin` and `cleat`
@@ -142,83 +33,7 @@ func postgresSchemaFiles() []string {
 // SetupPostgresRLSRole and OpenPostgresRLSTestDB below.
 func applyPostgresSchemaFile(t *testing.T, db *sql.DB) {
 	t.Helper()
-	paths := postgresSchemaFiles()
-	files := make([][]byte, 0, len(paths))
-	var combined []byte
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		files = append(files, data)
-		combined = append(combined, data...)
-	}
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("apply postgres schema: acquire connection: %v", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaApplyLockKey); err != nil {
-		t.Fatalf("apply postgres schema: acquire advisory lock: %v", err)
-	}
-	defer func() {
-		// Release explicitly. conn.Close() only returns the connection to the
-		// pool; the session lives on and would keep holding the lock.
-		if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, schemaApplyLockKey); err != nil {
-			t.Errorf("apply postgres schema: release advisory lock: %v", err)
-		}
-	}()
-
-	// Skip the DDL entirely when this exact schema file has already been
-	// applied to this database.
-	//
-	// The advisory lock above serialises schema application against schema
-	// application, which is not the collision that actually bites. This
-	// function used to run on *every* TestDB call -- 24 times for
-	// tests/integrity alone -- and every run takes ACCESS EXCLUSIVE on tables
-	// another package's tests are reading and writing at that moment. Go runs
-	// distinct packages in parallel against the same CLEAT_TEST_DB, so
-	// `go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...`
-	// deadlocked DDL against DML:
-	//
-	//	apply migrations/postgres/001_schema.sql: pq: deadlock detected (40P01)
-	//	append events in tx: increment event_count: pq: deadlock detected (40P01)
-	//
-	// 17 failures, every one of which passes when the suites are run one at a
-	// time -- a screen of red that means nothing, which is its own kind of
-	// false signal. Fingerprinting makes the DDL run once for a given schema
-	// file instead of once per test. IMPROVEMENT-PLAN 2.39.
-	//
-	// Tests that add their own columns (all IF NOT EXISTS) or drop objects
-	// they themselves created are unaffected: the fingerprint tracks the
-	// schema *files*, and re-applying them is exactly what those tests do not
-	// need. The fingerprint covers every file in the list, so adding one to
-	// postgresSchemaFiles re-applies the whole set once on each database.
-	fingerprint := fmt.Sprintf("%x", sha256.Sum256(combined))
-	var applied string
-	err = conn.QueryRowContext(ctx, `SELECT fingerprint FROM cleat_test_schema WHERE id = 1`).Scan(&applied)
-	if err == nil && applied == fingerprint {
-		return
-	}
-
-	// No-args Exec keeps lib/pq on the simple query protocol, which is what
-	// allows the whole multi-statement file to go in one round trip.
-	for i, data := range files {
-		if _, err := conn.ExecContext(ctx, string(data)); err != nil {
-			t.Fatalf("apply %s: %v", paths[i], err)
-		}
-	}
-
-	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS cleat_test_schema (
-		id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL)`); err != nil {
-		t.Fatalf("apply postgres schema: create fingerprint table: %v", err)
-	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO cleat_test_schema (id, fingerprint) VALUES (1, $1)
-		ON CONFLICT (id) DO UPDATE SET fingerprint = EXCLUDED.fingerprint`, fingerprint); err != nil {
-		t.Fatalf("apply postgres schema: record fingerprint: %v", err)
-	}
+	applyMigrations(t, db, DialectPostgres)
 }
 
 // SetupMinimalSchema builds the test schema for one dialect.

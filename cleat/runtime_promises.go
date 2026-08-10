@@ -137,28 +137,6 @@ func RegisterTypedUpdateHandler[TReq, TResp any](h HostCalls, name string, handl
 	)
 }
 
-func (h *HostCallsImpl) RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error)) {
-	if h.queryHandlers == nil {
-		h.queryHandlers = make(map[string]func(payloadJSON string) (resultJSON string, err error))
-	}
-	h.queryHandlers[name] = handler
-	if h.registerQueryHandler != nil {
-		h.registerQueryHandler(name)
-	}
-}
-
-// HandleQuery invokes a registered query handler by name with the given payload.
-func (h *HostCallsImpl) HandleQuery(name, payload string) (string, error) {
-	if h.handleQuery != nil {
-		return h.handleQuery(name, payload)
-	}
-	handler, ok := h.queryHandlers[name]
-	if !ok {
-		return "", fmt.Errorf("durable: no query handler registered for %q", name)
-	}
-	return handler(payload)
-}
-
 func (h *HostCallsImpl) HandleUpdate(name, payload string) (string, error) {
 	if h.handleUpdate != nil {
 		return h.handleUpdate(name, payload)

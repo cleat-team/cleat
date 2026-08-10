@@ -1,5 +1,8 @@
-package migration
+package migration_test
 
+// package migration_test (external), not migration: see runner_test.go's
+// file header for why -- engine/testutil now depends on this package.
+//
 // IMPROVEMENT-PLAN 2.71 / administrative access under Row-Level Security.
 //
 // SQL Server applies a security policy to every principal -- sysadmin, db_owner
@@ -26,7 +29,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/migration"
 )
 
 const (
@@ -106,7 +109,7 @@ func setupAdminRoleDB(t *testing.T) *sql.DB {
 	db := newMSSQLScratchDB(t, adminRoleTestDB)
 	ctx := context.Background()
 
-	if err := NewRunner(db, engine.DialectMSSQL, migrationsRoot(t)).Run(ctx); err != nil {
+	if err := migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t)).Run(ctx); err != nil {
 		t.Fatalf("apply the shipped SQL Server migrations: %v", err)
 	}
 

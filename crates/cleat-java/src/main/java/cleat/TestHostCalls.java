@@ -553,12 +553,9 @@ public class TestHostCalls {
         return CleatResult.ok(null);
     }
 
-    /**
-     * Register a query handler.
-     */
-    public void registerQueryHandler(String name) {
-        // No-op in mock mode
-    }
+    // There is no registerQueryHandler here (removed 2026-08-09). See
+    // docs/determinism.md, "Why there is no RegisterQueryHandler". Use
+    // setQueryState instead.
 
     /**
      * Run a workflow in detached mode.

@@ -386,15 +386,10 @@ export declare function import_schedule_invoke(
   delayMs: i64,
 ): i64;
 
-/**
- * 29. cleat_register_query_handler: Register a query handler.
- * (import "env" "cleat_register_query_handler") (param i32 i32) (result i64)
- */
-@external("env", "cleat_register_query_handler")
-export declare function import_cleat_register_query_handler(
-  namePtr: i32,
-  nameLen: i32,
-): i64;
+// There is no import_cleat_register_query_handler here (removed 2026-08-09).
+// It recorded a handler name with the host but nothing ever routed an
+// external query to it -- see docs/determinism.md, "Why there is no
+// RegisterQueryHandler". Use setQueryState instead.
 
 /**
  * 30. cleat_run_detached: Run a function in a detached child workflow.
@@ -1820,13 +1815,22 @@ export class HostCalls {
 
   /**
    * NOTE: There is no corresponding `get_query_state` host import in the
-   * current ABI specification (ABI.md). Query state is write-only from the
-   * workflow's perspective -- external clients read it via the workflow's
-   * query handler mechanism (`registerQueryHandler`).
+   * current ABI specification (ABI.md), and none is needed. Query state is
+   * write-only from the workflow's perspective by design: setQueryState
+   * persists it to the database, and external clients read it directly from
+   * there via `GET /api/workflows/:id/query?key=X` -- without needing the
+   * WASM guest to be running or to do anything on the read path.
    *
-   * If a future ABI version adds a `cleat_get_query_state` import, this
-   * section should be updated to include a corresponding `getQueryState`
-   * method.
+   * This is not `registerQueryHandler` (there is no such thing in this SDK;
+   * see docs/determinism.md, "Why there is no RegisterQueryHandler" -- it
+   * was removed 2026-08-09 because nothing ever routed an external query to
+   * a registered handler). setQueryState/GetQueryState is the real, wired
+   * mechanism, and it needs no host-side "get" import because the read
+   * never goes through the guest at all.
+   *
+   * If a future ABI version adds a `cleat_get_query_state` import (e.g. to
+   * let a workflow read its own previously-set query state), this section
+   * should be updated to include a corresponding `getQueryState` method.
    */
 
   // ────────────────────────────────────────────
@@ -2626,34 +2630,13 @@ export class HostCalls {
     return null;
   }
 
-  // ────────────────────────────────────────────
-  // 33. registerQueryHandler — register query handler
-  // ────────────────────────────────────────────
-
-  /**
-   * Register a query handler callback by name.
-   *
-   * In AS with --runtime stub (no closures), this uses a name-based
-   * registration pattern. The workflow must expose a named export function
-   * matching the handler name for the host to invoke when a query arrives.
-   *
-   * @param name - The query handler name.
-   * @returns An error message on failure, or null on success.
-   */
-  registerQueryHandler(name: string): string | null {
-    let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
-
-    let result: i64 = import_cleat_register_query_handler(
-      SCRATCH_BASE as i32,
-      nameLen,
-    );
-
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0) {
-      return "registerQueryHandler(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
-    }
-    return null;
-  }
+  // There is no registerQueryHandler here (removed 2026-08-09). Its doc
+  // comment claimed "the host [will] invoke [it] when a query arrives" --
+  // untrue: nothing ever routed an external query to a registered handler,
+  // in this SDK or any other. See docs/determinism.md, "Why there is no
+  // RegisterQueryHandler". Use setQueryState instead; it is durable and
+  // externally readable via GET /api/workflows/:id/query?key=X regardless
+  // of whether a worker currently has the workflow loaded.
 
   // ────────────────────────────────────────────
   // 34. runDetached — run fire-and-forget child workflow

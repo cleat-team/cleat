@@ -170,7 +170,6 @@ pub struct MockHostCalls {
     defer_counter: u64,
     child_run_id_counter: u64,
     update_handlers: Vec<String>,
-    query_handlers: Vec<String>,
     continue_as_new_called: bool,
     pub workflow_id: String,
     pub run_id: String,
@@ -209,7 +208,6 @@ impl MockHostCalls {
             defer_counter: 0,
             child_run_id_counter: 0,
             update_handlers: Vec::new(),
-            query_handlers: Vec::new(),
             continue_as_new_called: false,
             workflow_id: "test-workflow".to_string(),
             run_id: "test-run-001".to_string(),
@@ -562,12 +560,6 @@ impl MockHostCalls {
         format!("mock-uuid-{}", seed)
     }
 
-    /// Register a query handler.
-    pub fn register_query_handler(&mut self, name: &str) -> Result<(), String> {
-        self.query_handlers.push(name.to_string());
-        Ok(())
-    }
-
     /// Run a workflow in detached mode.
     pub fn run_detached(&mut self, _name: &str, _input_json: &str) -> Result<(), String> {
         Ok(())
@@ -881,7 +873,6 @@ impl MockHostCalls {
         self.signal_reply_channels.clear();
         self.signal_reply_corr_id_counter = 0;
         self.update_handlers.clear();
-        self.query_handlers.clear();
         self.sent_signals.clear();
         self.scheduled_invocations.clear();
         self.cancelled = false;

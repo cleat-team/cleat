@@ -301,11 +301,6 @@ type Lifecycle interface {
 	// validator runs first (read-only). Called during workflow init, before durable ops.
 	RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error)
 
-	// RegisterQueryHandler registers a read-only query handler that can be
-	// invoked on-demand by external callers without journaling.
-	// Queries are deterministic, read-only, and do not record events.
-	RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
-
 	// ScheduleCron creates a recurring workflow trigger from a cron expression.
 	// cronExpr is a standard 5-field cron expression, timezone is an IANA timezone
 	// name (e.g. "America/New_York"), inputJSON is the workflow input.
@@ -337,10 +332,17 @@ type StateManager interface {
 	ListState(prefix string) []string
 }
 
-// QueryHandlers provides workflow handler registration.
-type QueryHandlers interface {
+// UpdateHandlers provides workflow update-handler registration.
+//
+// There is no query-handler counterpart. Cleat previously exposed
+// RegisterQueryHandler (removed 2026-08-09; see docs/determinism.md, "Why
+// there is no RegisterQueryHandler"): it recorded a handler name but nothing
+// in the worker ever routed an external query to it, so the API always did
+// less than an SDK user reading its doc comment would expect. Use
+// SetQueryState to publish state and GetQueryState (or
+// GET /api/workflows/:id/query?key=...) to read it instead.
+type UpdateHandlers interface {
 	RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error)
-	RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
 }
 
 // CronScheduler provides durable cron schedule operations.
@@ -390,7 +392,7 @@ type RandomSource interface {
 //   - Lifecycle: versioning, child workflows, cancellation, logging, defer
 //   - Promises: durable promise operations
 //   - StateManager: durable key-value state
-//   - QueryHandlers: workflow handler registration
+//   - UpdateHandlers: workflow update-handler registration
 //   - CronScheduler: durable cron schedule operations
 //   - Scoper: virtual object instance scoping
 //   - UUIDGenerator: deterministic UUID generation
@@ -757,8 +759,6 @@ type HostCallsImpl struct {
 	minVersion                    func() int
 	setQueryState                 func(key, value string)
 	registerUpdateHandler         func(name string)
-	registerQueryHandler          func(name string)
-	handleQuery                   func(name, payload string) (string, error)
 	handleUpdate                  func(name, payload string) (string, error)
 	runDetached                   func(fn func(h HostCalls) error) error
 	now                           func() int64
@@ -786,7 +786,6 @@ type HostCallsImpl struct {
 	// State map for typed K/V operations.
 	stateMap       map[string]interface{}
 	updateHandlers map[string]updateHandlerEntry
-	queryHandlers  map[string]func(payloadJSON string) (resultJSON string, err error)
 
 	// Scope management for virtual object instances.
 	scopePrefix  string // "vo:<type>:<key>:" prefix, empty if no scope
@@ -834,8 +833,6 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		minVersion:                    opts.MinVersion,
 		setQueryState:                 opts.SetQueryState,
 		registerUpdateHandler:         opts.RegisterUpdateHandler,
-		registerQueryHandler:          opts.RegisterQueryHandler,
-		handleQuery:                   opts.HandleQuery,
 		handleUpdate:                  opts.HandleUpdate,
 		runDetached:                   opts.RunDetached,
 		now:                           opts.Now,
@@ -921,8 +918,6 @@ type HostCallsOptions struct {
 	MinVersion                    func() int
 	SetQueryState                 func(key, value string)
 	RegisterUpdateHandler         func(name string)
-	RegisterQueryHandler          func(name string)
-	HandleQuery                   func(name, payload string) (string, error)
 	HandleUpdate                  func(name, payload string) (string, error)
 	RunDetached                   func(fn func(h HostCalls) error) error
 	Now                           func() int64

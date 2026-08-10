@@ -572,7 +572,7 @@ func main() {
 		migrateDB = mdb
 	}
 
-	migrator := migration.NewRunner(migrateDB, factory.Dialect(), "migrations")
+	migrator := migration.NewRunner(migrateDB, migration.Dialect(factory.Dialect()), "migrations")
 	if err := migrator.Run(ctx); err != nil {
 		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
 		os.Exit(1)
@@ -615,7 +615,7 @@ func main() {
 				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations")
+			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), "migrations")
 			if terr = tm.Run(ctx); terr != nil {
 				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)
@@ -780,15 +780,35 @@ func main() {
 	if *wasmMemoryMaxMB > 0 {
 		wasmtimeMemoryLimitBytes = int64(*wasmMemoryMaxMB) * 1024 * 1024
 	}
-	if wt, err := engine.NewWasmtimeBackend(ctx,
+	wt, wasmtimeErr := engine.NewWasmtimeBackend(ctx,
 		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
 		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
-	); err == nil {
+	)
+	switch classifyWasmtimeFallback(wasmtimeErr) {
+	case wasmtimeAvailable:
 		wasmtimeBackend = wt
 		logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes)
-	} else {
-		logger.WarnContext(context.Background(), "wasmtime backend unavailable, using legacy wazero for Go WASM", "worker_id", workerID, "error", err)
+	case wasmtimeFallbackExpected:
+		// Expected: this binary was built with CGO_ENABLED=0. wazero is the
+		// documented fallback for that case (CLAUDE.md), not a defect, but
+		// it is still a real capability loss worth a WARN: wazero cannot
+		// fence a compute-bound guest (see --wasm-instance-timeout help).
+		logger.WarnContext(context.Background(), "wasmtime backend unavailable (binary built with CGO_ENABLED=0), using wazero for Go WASM; wazero cannot fence a compute-bound guest, so --wasm-instance-timeout will not bound a workflow stuck in a tight loop on this worker", "worker_id", workerID, "error", wasmtimeErr)
+	default: // wasmtimeFallbackUnexpected
+		// Unexpected: CGO is available, so wasmtime -- the backend of
+		// record -- should have initialized and did not. Silently running
+		// on wazero here would swap in a backend that cannot fence a
+		// compute-bound guest without anyone deciding that on purpose.
+		// Fatal by default; --allow-wazero-fallback is the explicit,
+		// auditable opt-out for an operator who has decided to accept that
+		// degradation anyway (e.g. to keep serving traffic while wasmtime
+		// is debugged).
+		if !*allowWazeroFallback {
+			logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize despite CGO being available; refusing to silently fall back to wazero, which cannot fence a compute-bound guest -- pass --allow-wazero-fallback to start anyway", "worker_id", workerID, "error", wasmtimeErr)
+			os.Exit(1)
+		}
+		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize despite CGO being available; proceeding with wazero for Go WASM because --allow-wazero-fallback was set -- a compute-bound workflow will NOT be fenced by --wasm-instance-timeout on this worker", "worker_id", workerID, "error", wasmtimeErr)
 	}
 
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
@@ -930,7 +950,19 @@ func main() {
 		mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
 
 		// Version management endpoints.
-		engine.RegisterVersionHandler(mux, store)
+		//
+		// api.scopedStore, not store: store is the process-wide connection
+		// opened at boot against the default tenant. Passing it here served
+		// every caller's GET /api/versions, listStaleAlerts, runGC,
+		// markDeprecated, and -- worst -- POST
+		// /api/versions/<name>/<v>/purge (which permanently deletes a
+		// workflow definition) from the default tenant's data regardless of
+		// who authenticated. api.scopedStore is the same per-request
+		// tenant resolution every other handler in this file uses (see
+		// server.go's storeFor/scopedStore doc comments); it refuses rather
+		// than falling back to the default tenant when a request has no
+		// authenticated tenant and --require-auth is on.
+		engine.RegisterVersionHandler(mux, api.scopedStore)
 
 		// Plugin discovery endpoint.
 		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
@@ -979,7 +1011,20 @@ func main() {
 
 		// Wrap with auth middleware if --require-auth is true.
 		if *requireAuth {
-			handler = auth.Middleware(store, true)(handler)
+			// S6: these two plugin endpoints are meant to be called by
+			// parties who cannot present a cleat API key -- an external
+			// webhook sender (plugins/webhookingest, verifies its own
+			// HMAC signature) and a third-party IdP's OAuth redirect
+			// (plugins/oauthprovider) -- so they must stay reachable
+			// without one even though --require-auth wraps the same
+			// mux/plugHandler every other plugin route goes through. See
+			// auth.Middleware's doc comment for why this is a
+			// hand-maintained list rather than something plugins declare
+			// themselves.
+			handler = auth.Middleware(store, true,
+				"POST /ingest/{source_id}",
+				"GET /oauth/{provider}/callback",
+			)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//

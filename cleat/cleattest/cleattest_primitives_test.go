@@ -335,24 +335,8 @@ func TestResolvePromiseNoOpForMissing(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2c: Update/Query Tests
+// 2c: Update Tests
 // ---------------------------------------------------------------------------
-
-func TestHandleQuery(t *testing.T) {
-	env := NewTestEnv()
-
-	env.H().RegisterQueryHandler("my_query", func(payload string) (string, error) {
-		return `{"result":"queried"}`, nil
-	})
-
-	result, err := env.HandleQuery("my_query", `{"input":"data"}`)
-	if err != nil {
-		t.Fatalf("HandleQuery failed: %v", err)
-	}
-	if result != `{"result":"queried"}` {
-		t.Fatalf("expected %q, got %q", `{"result":"queried"}`, result)
-	}
-}
 
 func TestHandleUpdate(t *testing.T) {
 	env := NewTestEnv()
@@ -369,15 +353,6 @@ func TestHandleUpdate(t *testing.T) {
 	}
 	if result != `{"result":"updated"}` {
 		t.Fatalf("expected %q, got %q", `{"result":"updated"}`, result)
-	}
-}
-
-func TestHandleQueryWithoutHandler(t *testing.T) {
-	env := NewTestEnv()
-
-	_, err := env.HandleQuery("nonexistent", "payload")
-	if err == nil {
-		t.Fatal("expected error for unregistered query handler")
 	}
 }
 
@@ -1101,7 +1076,6 @@ func TestEveryHostCallIsWired(t *testing.T) {
 		"WorkflowID":                  "returns an empty string",
 		"RunID":                       "returns an empty string",
 		"NewUUID":                     "built on Random, which is wired",
-		"HandleQuery":                 "falls back to the registered handlers",
 		"HandleUpdate":                "falls back to the registered handlers",
 		"PluginCallStreaming":         "guarded with != nil, so nil is a no-op path",
 		"AwaitSignalsWithQuorum":      "falls back to the plain await",

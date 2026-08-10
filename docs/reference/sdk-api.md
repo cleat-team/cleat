@@ -29,7 +29,7 @@ func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, erro
 - `Lifecycle` -- versioning, child workflows, cancellation, logging, defer
 - `Promises` -- durable promise operations
 - `StateManager` -- durable key-value state
-- `QueryHandlers` -- workflow handler registration
+- `UpdateHandlers` -- workflow update-handler registration
 - `CronScheduler` -- durable cron schedule operations
 - `Scoper` -- virtual object instance scoping
 - `UUIDGenerator` -- deterministic UUID generation
@@ -435,14 +435,11 @@ RegisterUpdateHandler(name string,
 Registers a handler for the named workflow update. Called during workflow
 init, before durable operations. The validator runs first (read-only).
 
----
-
-```go
-RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
-```
-
-Registers a read-only query handler that can be invoked on demand by external
-callers without journaling.
+There is no `RegisterQueryHandler` -- it was removed 2026-08-09 (see
+`docs/determinism.md`, "Why there is no RegisterQueryHandler"). It recorded a
+handler name but nothing ever routed an external query to it, so it was
+usable only inside an in-process test harness, never from a real client. Use
+`SetQueryState`, below, to publish state any caller can read.
 
 ---
 

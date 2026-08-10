@@ -183,27 +183,12 @@ func TestTestDB(t *testing.T) {
 	}
 }
 
-func TestExecIgnoreDupKey(t *testing.T) {
-	db := TestDB(t, DialectPostgres)
-	defer db.Close()
-	CleanupPostgresTestData(t, db)
-	SetupMinimalSchema(t, db, DialectPostgres)
-
-	// execIgnoreDupKey is designed for MySQL but we can verify it doesn't
-	// panic with a valid statement on PostgreSQL.
-	execIgnoreDupKey(t, db, `CREATE INDEX IF NOT EXISTS idx_testutil_test ON workflow_instances(status)`)
-}
-
-func TestExecMSSQLBestEffort(t *testing.T) {
-	db := TestDB(t, DialectPostgres)
-	defer db.Close()
-	CleanupPostgresTestData(t, db)
-	SetupMinimalSchema(t, db, DialectPostgres)
-
-	// execMSSQLBestEffort ignores MSSQL-specific errors.
-	// On PostgreSQL, a valid statement should succeed without error.
-	execMSSQLBestEffort(t, db, `CREATE INDEX IF NOT EXISTS idx_testutil_mssql_test ON workflow_instances(status)`)
-}
+// execIgnoreDupKey and execMSSQLBestEffort (and the tests that used to cover
+// them here) were removed along with the hand-written MySQL/SQL Server test
+// schemas that were their only callers: every dialect now applies the real
+// migrations/<dialect>/*.sql via migration.Runner (migrations.go), which
+// tracks applied versions in schema_migrations rather than leaning on
+// statement-level IF NOT EXISTS plus swallowed duplicate-object errors.
 
 func TestCleanupTestData(t *testing.T) {
 	db := TestDB(t, DialectPostgres)

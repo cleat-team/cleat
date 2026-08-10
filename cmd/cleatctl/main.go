@@ -16,6 +16,7 @@
 //	versions gc [--dry-run]         — run garbage collection on deprecated versions
 //	deploy workflow <name> <wasm>    — deploy a new workflow WASM binary
 //	deploy plugin <name> <wasm>      — deploy a plugin WASM binary
+//	drop-tenant <tenant-id>          — permanently delete a tenant and all its data
 package main
 
 import (
@@ -85,6 +86,8 @@ func main() {
 		runDebug(ctx, store, db, args[1:])
 	case "check-db":
 		runCheckDB(ctx, db, args[1:])
+	case "drop-tenant":
+		runDropTenant(ctx, db, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -109,6 +112,7 @@ Commands:
   replay <id> --entry-point <n>   replay a workflow's event history for diagnostics
   check-db [--verbose]            verify database connectivity and schema health
   debug <id> [--entry-point <n>] [--watch]  step-through workflow event replay
+  drop-tenant <tenant-id> [--dry-run] [--yes]  permanently delete a tenant and all its data
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)
