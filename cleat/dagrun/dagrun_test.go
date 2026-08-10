@@ -1,46 +1,14 @@
-package dag
+package dagrun
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/cleat-team/cleat/cleat"
-	"github.com/cleat-team/cleat/plugin"
 )
-
-func TestInfo(t *testing.T) {
-	p := &Plugin{}
-	info := p.Info()
-	if info.Name != "dag" {
-		t.Errorf("expected Name 'dag', got %q", info.Name)
-	}
-	if info.Version != "0.1.0" {
-		t.Errorf("expected Version '0.1.0', got %q", info.Version)
-	}
-	if info.Description == "" {
-		t.Error("expected non-empty Description")
-	}
-	if info.Author != "cleat" {
-		t.Errorf("expected Author 'cleat', got %q", info.Author)
-	}
-}
-
-func TestInit(t *testing.T) {
-	p := &Plugin{}
-	env := &plugin.Environment{}
-	err := p.Init(context.Background(), env)
-	if err != nil {
-		t.Fatalf("Init() returned error: %v", err)
-	}
-	if p.logger == nil {
-		t.Error("expected logger to be set")
-	}
-}
 
 func TestTopologicalSortLinear(t *testing.T) {
 	d := NewDAG()
@@ -616,20 +584,6 @@ func TestExecuteMultipleLevels(t *testing.T) {
 	}
 	if !strings.Contains(out, "level0") {
 		t.Errorf("d output should transitively contain level0: %s", out)
-	}
-}
-
-func TestInitWithLogger(t *testing.T) {
-	p := &Plugin{}
-	env := &plugin.Environment{
-		Logger: slog.Default(),
-	}
-	err := p.Init(context.Background(), env)
-	if err != nil {
-		t.Fatalf("Init() returned error: %v", err)
-	}
-	if p.logger == nil {
-		t.Error("expected logger to be set after Init")
 	}
 }
 

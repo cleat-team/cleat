@@ -16,7 +16,7 @@ import (
 	"fmt"
 
 	"github.com/cleat-team/cleat/cleat"
-	dagplugin "github.com/cleat-team/cleat/plugins/dag"
+	dagplugin "github.com/cleat-team/cleat/cleat/dagrun"
 )
 
 // ---- Domain types ----

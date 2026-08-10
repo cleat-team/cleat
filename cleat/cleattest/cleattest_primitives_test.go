@@ -963,7 +963,7 @@ func TestAwaitAnyChild_ReturnsRunIDAlongsideAChildError(t *testing.T) {
 		t.Fatalf("ChildWorkflow: %v", err)
 	}
 
-	// The run ID must come back even on the error path. plugins/dag/dag.go
+	// The run ID must come back even on the error path. cleat/dagrun/dagrun.go
 	// needs it to say WHICH task failed; without it the DAG could only report
 	// the child's bare message.
 	got, _, awaitErr := env.H().AwaitAnyChild([]string{runID})

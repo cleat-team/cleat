@@ -2,8 +2,17 @@ module github.com/cleat-team/cleat
 
 go 1.25.11
 
+// The root module deliberately does NOT require github.com/cleat-team/cleat/cleat
+// (the SDK module), and must not start. cleat/ requires the root module back --
+// cleat/cleattest imports engine, cleat/dagrun imports plugins/dag -- so a
+// require in this direction is a module cycle, resolvable only by a matching
+// pair of `replace` directives. `go install pkg@version` refuses any module
+// whose go.mod carries a replace, so that pair made `go install
+// github.com/cleat-team/cleat/cmd/cleat@vX` impossible for every published tag.
+// Removed 2026-08-10; see CLAUDE.md. Re-derive that the edge is still absent:
+//
+//	go list -deps ./... | grep -c cleat-team/cleat/cleat   # must be 0
 require (
-	github.com/cleat-team/cleat/cleat v0.0.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/google/uuid v1.6.0
@@ -62,4 +71,8 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace github.com/cleat-team/cleat/cleat => ./cleat
+// No replace directives, on purpose. `go install pkg@version` fails outright on
+// a module whose go.mod has any of them ("...contains one or more replace
+// directives"), and cmd/cleat, cmd/cleatctl and cmd/cleat-worker are all meant
+// to be installable that way. Adding one here re-breaks `go install` for every
+// tag cut afterwards, and the failure appears only to users, never in CI.

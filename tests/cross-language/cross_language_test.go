@@ -17,30 +17,69 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/cleat/wasmtest"
 	"github.com/cleat-team/cleat/engine"
 )
 
-// findProjectRoot walks up from the working directory to find the repo root.
+// findProjectRoot walks up from the working directory to locate the repo root.
+//
+// It looks for the go.mod declaring the ROOT module, not merely the nearest
+// go.mod. This directory is its own module (see go.mod here, and CLAUDE.md on
+// the root<->cleat/ module cycle), so "nearest go.mod" stops right here and
+// every path built on top of it -- testdata directories, migrations -- lands
+// one repo-depth too shallow.
+//
+// That failure is silent, which is why the check is on the module line rather
+// than on the file's existence: the callers below t.Skipf when their testdata
+// directory is missing, so a wrong root reads as "test data not found" and the
+// suite goes green having built and run nothing.
 func findProjectRoot(t *testing.T) string {
 	t.Helper()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
+	const rootModule = "module github.com/cleat-team/cleat\n"
 	dir := cwd
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		b, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil && strings.Contains(string(b), rootModule) {
 			return dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("could not find project root from %s", cwd)
+			t.Fatalf("could not find the repo root (a go.mod declaring %q) from %s",
+				strings.TrimSuffix(rootModule, "\n"), cwd)
 		}
 		dir = parent
 	}
+}
+
+// commandAt builds an exec.Cmd that runs in dir, with $PWD corrected to match.
+//
+// cmd.Dir on its own is not enough for the `go` command: it resolves the main
+// module from $PWD when that is set and consistent, so a child process that
+// inherits the test binary's PWD looks for a go.mod in *this* directory rather
+// than in cmd.Dir. That was harmless while this directory was part of the root
+// module. Since it became its own module (see go.mod, and CLAUDE.md on the
+// root<->cleat/ module cycle), the inherited PWD makes
+//
+//	go run <repoRoot>/cmd/cleat build ...
+//
+// fail with "directory <repoRoot>/cmd/cleat outside main module or its selected
+// dependencies" -- while cmd.Dir points at the repo root the entire time, which
+// is what makes it slow to diagnose. Measured: identical command, PWD inherited
+// fails, PWD set to dir succeeds.
+//
+// Go's exec keeps the last value for a duplicated key, so appending is enough.
+func commandAt(dir, name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PWD="+dir)
+	return cmd
 }
 
 // requireCargo skips the test if cargo is not installed.
@@ -73,9 +112,8 @@ func buildRustWasm(t *testing.T, projectRoot string) string {
 	// "crashes on fn.Call for Rust cdylib core modules", a claim this suite was
 	// structurally unable to check because it never built a cdylib. It does not
 	// reproduce, and Rust now runs on wasmtime.
-	cmd := exec.Command("cargo", "build", "--target", "wasm32-unknown-unknown", "--release")
-	cmd.Dir = rustDir
-	cmd.Env = append(os.Environ(),
+	cmd := commandAt(rustDir, "cargo", "build", "--target", "wasm32-unknown-unknown", "--release")
+	cmd.Env = append(cmd.Env,
 		"HOME="+os.Getenv("HOME"),
 		"PATH="+os.Getenv("PATH"),
 	)
@@ -99,11 +137,10 @@ func buildGoWasm(t *testing.T, projectRoot, pkgPath string) string {
 	t.Helper()
 
 	tmpDir := t.TempDir()
-	cmd := exec.Command("go", "run",
+	cmd := commandAt(projectRoot, "go", "run",
 		filepath.Join(projectRoot, "cmd", "cleat"),
 		"build", "-o", tmpDir, pkgPath,
 	)
-	cmd.Dir = projectRoot
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {

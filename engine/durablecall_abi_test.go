@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	"github.com/tetratelabs/wazero/api"
-
-	"github.com/cleat-team/cleat/cleat"
 )
 
 // The tests in this file pin the ABI contract for the five host functions whose
@@ -23,9 +21,9 @@ import (
 // wasm/adapter_metadata.go's DurableCall ResultStmts -- if the codegen changes
 // its unpacking, these tests must be updated in lockstep, and the copy is here
 // so that divergence shows up as a test edit rather than as silence.
-func decodeDurableCallResult(result int64) (responseLen uint32, callErrorCode cleat.CallErrorCode, errCode uint32) {
+func decodeDurableCallResult(result int64) (responseLen uint32, callErrorCode uint32, errCode uint32) {
 	responseLen = uint32(uint64(result) >> 40)
-	callErrorCode = cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)
+	callErrorCode = uint32((uint64(result) >> 8) & 0xFFFFFFFF)
 	errCode = uint32(result & 0xFF)
 	return
 }
@@ -39,9 +37,9 @@ func TestBadParamDurableCallIsDecodableByGuest(t *testing.T) {
 	if errCode == 0 {
 		t.Errorf("errCode = 0, so the guest would treat a refused call as success")
 	}
-	if callErrorCode != cleat.CallErrorInvalidRequest {
-		t.Errorf("callErrorCode = %d, want %d (cleat.CallErrorInvalidRequest)",
-			callErrorCode, cleat.CallErrorInvalidRequest)
+	if want := uint32(guestCodeNamed(t, "InvalidRequest")); callErrorCode != want {
+		t.Errorf("callErrorCode = %d, want %d (the guest's CallErrorInvalidRequest)",
+			callErrorCode, want)
 	}
 	if responseLen != 0 {
 		t.Errorf("responseLen = %d, want 0: nothing was written to the response buffer",
@@ -59,10 +57,10 @@ func TestErrBadParamIsNotDecodableByGuest(t *testing.T) {
 	sentinel := errBadParam
 	responseLen, callErrorCode, _ := decodeDurableCallResult(int64(sentinel))
 
-	// 0xFF000000. Not a cleat.CallErrorCode, so every `switch e.Code` on the
+	// 0xFF000000. Not a valid CallErrorCode, so every `switch e.Code` on the
 	// guest falls through to default and the structured classification that
 	// CallErrorCode exists to provide is lost.
-	if callErrorCode <= cleat.CallErrorPermissionDenied {
+	if callErrorCode <= uint32(guestCodeNamed(t, "PermissionDenied")) {
 		t.Errorf("errBadParam now decodes to the valid CallErrorCode %d; if the "+
 			"sentinel changed, badParamDurableCall may no longer be needed",
 			callErrorCode)
@@ -83,12 +81,12 @@ func TestErrBadParamIsNotDecodableByGuest(t *testing.T) {
 // adapter (wasm/adapter_component.go).
 const _cleatDefaultOutBufSize = 65536
 
-// TestCallErrorInvalidRequestMatchesGuestSDK keeps the engine-local copy of the
-// enum value honest. engine does not import cleat in non-test code, so nothing
-// but this test stops the two drifting apart.
-func TestCallErrorInvalidRequestMatchesGuestSDK(t *testing.T) {
-	if got, want := callErrorInvalidRequest, byte(cleat.CallErrorInvalidRequest); got != want {
-		t.Errorf("callErrorInvalidRequest = %d, but cleat.CallErrorInvalidRequest = %d", got, want)
+// TestCallErrorInvalidRequestMatchesGuestTable keeps the engine-local copy of
+// the enum value honest against the mirror the cleat/ module contract-tests
+// against the real SDK. See TestCallErrorConstantsMatchGuestTable.
+func TestCallErrorInvalidRequestMatchesGuestTable(t *testing.T) {
+	if got, want := callErrorInvalidRequest, guestCodeNamed(t, "InvalidRequest"); got != want {
+		t.Errorf("callErrorInvalidRequest = %d, but the guest enum says InvalidRequest = %d", got, want)
 	}
 }
 

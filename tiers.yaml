@@ -755,6 +755,25 @@ tier2:
   # that nothing reports blocks every pull request while looking like a slow check.
   # It cannot check that the job is still *required* -- that lives in branch protection,
   # not in the tree -- so the command above is the manual half.
+  #
+  # Two of the suites below are their own Go modules, and are deliberately NOT
+  # in tier2.modules above: tests/cross-language and tests/plugin-harness. They
+  # got their own go.mod on 2026-08-10 breaking the root<->cleat/ module cycle
+  # (see CLAUDE.md) -- both import the cleat/ SDK, and the root module must not,
+  # at any depth including tests. tier2.modules is the list scripts/tier2-gate.sh
+  # runs itself, and it cannot run these: they need cargo, wasm32 targets,
+  # componentize-py and a Java toolchain that tier2-gate.yml does not install.
+  # That is the same reason they are gated here rather than in tier2.packages,
+  # so the module split changes nothing about how they are verified -- only the
+  # directory `go test` is invoked from, which is now the module's own (the
+  # `working-directory:` in each job below).
+  #
+  # Re-derive that the split is real and still covered:
+  #
+  #   cd tests/plugin-harness && go vet ./...       # builds against the local tree
+  #   grep -n 'working-directory: tests/' .github/workflows/plugin-harness-ci.yml \
+  #     .github/workflows/e2e-cross-language.yml    # 5 steps, one per job below
+  #
   gated_by:
     - suite: ./tests/cross-language/...
       job: "Cross-Language WASM E2E"
@@ -864,6 +883,30 @@ tier2:
         Has its own go.mod, so the `dir: cleat, path: ./...` entry in ci.yml's test-go
         matrix does not descend into it. Measured 2026-08-07: builds and passes, and no
         workflow references it at all.
+
+    - dir: examples
+      why: >-
+        Got its own go.mod 2026-08-09/10 breaking the root<->cleat/ module cycle (see
+        CLAUDE.md): examples/* imports the cleat/ SDK, and the root module does not
+        import cleat/ at all, on purpose, so examples can no longer be part of the root
+        module. It stays under the SAME `./examples/...` entry in tier2.packages above
+        (unchanged) for the "must run" declaration -- scripts/tier2-gate.sh excludes
+        this dir's own pattern from the root `go test` invocation (which would
+        otherwise fail outright: "directory prefix examples does not contain main
+        module") and runs it here instead, into the same JSON the packages check reads.
+        Re-derive the split is real: `go list ./... | grep -c cleat-team/cleat/cleat`
+        from the repo root is 0; `cd examples && go test ./...` is green.
+
+    - dir: benchmarks/workflows
+      why: >-
+        Same cycle-break as examples/ (2026-08-09/10): benchmarks/workflows imports the
+        cleat/ SDK for its workflow functions, so it moved out of the root module.
+        Deliberately NOT added to tier2.packages: it has zero Test functions, only
+        Benchmark ones (cleat_bench_test.go, moved here from the root module's
+        benchmarks/ dir, which keeps db_bench_test.go and wasm_bench_test.go -- neither
+        imports cleat/). `go test ./...` here is a real build+run check (0 tests, not a
+        coverage claim); the actual benchmarks run in ci.yml's "Benchmarks" job
+        (working-directory: benchmarks/workflows), not this gate.
 
   known_failures: []
     # "importpath::TestName", one per line, matched exactly against `go test -json`.

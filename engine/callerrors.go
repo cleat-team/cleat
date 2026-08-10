@@ -2,19 +2,24 @@ package engine
 
 // Call error classification.
 //
-// These mirror cleat.CallErrorCode in the guest SDK, which is what a workflow
+// These mirror the guest SDK's CallErrorCode enum, which is what a workflow
 // author's `switch e.Code` and `e.Retryable()` read. They are redeclared here
-// rather than imported because engine does not depend on the cleat package;
-// engine/callerrors_test.go asserts the two agree, so they cannot drift
-// silently.
+// rather than imported because engine must not depend on the cleat/ SDK module:
+// cleat/ depends on engine, so an import in this direction is a module cycle,
+// and the pair of `replace` directives that used to resolve it is what made
+// `go install github.com/cleat-team/cleat/cmd/cleat@vX` refuse to run.
+// GuestCallErrorCodes below is the mirror, and the cleat/ module's
+// callerror_contract_test.go checks it against the real enum.
 //
-// Only the three the engine actually packs are declared. Timeout, NotFound and
-// PermissionDenied exist in the guest enum but nothing here can select them --
-// declaring them would be three constants kept alive by their own drift test,
-// which is the shape this repo has been removing rather than adding.
+// Only the three the engine actually packs are declared as constants. Timeout,
+// NotFound and PermissionDenied exist in the guest enum but nothing here can
+// select them -- declaring them as engine constants would be three values kept
+// alive by their own drift test, which is the shape this repo has been removing
+// rather than adding. They appear in GuestCallErrorCodes, because that table
+// describes the *guest's* enum rather than the engine's usage of it.
 //
-// Retryable, per cleat.CallError.Retryable(): Timeout and Unavailable. Every
-// other value -- including Unknown -- is non-retryable.
+// Retryable, per the guest's CallError.Retryable(): Timeout and Unavailable.
+// Every other value -- including Unknown -- is non-retryable.
 const (
 	// callErrorUnknown is the classification for a failure the engine itself
 	// produced -- a cancelled workflow, a replay divergence, an ambiguous
@@ -36,6 +41,57 @@ const (
 // and that is worth trying again, as opposed to a failure the engine itself
 // produced.
 const callFailureCode = callErrorUnavailable
+
+// GuestCallErrorCode describes one member of the guest SDK's CallErrorCode
+// enum as the engine understands it.
+type GuestCallErrorCode struct {
+	// Name is the constant's name with its CallError prefix stripped:
+	// "Unknown" is Go's cleat.CallErrorUnknown, Rust's CallError::Unknown,
+	// and the corresponding member in the Python, AssemblyScript and Java
+	// SDKs.
+	Name string
+	// Code is the byte the engine packs into the classification field of a
+	// durable-call result. This is wire ABI -- every guest SDK decodes it, so
+	// a member can be added but an existing value can never be changed.
+	Code byte
+	// Retryable is what the guest reports for this code: CallError.Retryable()
+	// in the Go SDK, and its equivalent elsewhere.
+	Retryable bool
+}
+
+// guestCallErrorCodes is the engine's copy of the guest SDK's CallErrorCode
+// enum, in value order.
+//
+// Exported through GuestCallErrorCodes because the engine cannot import the
+// SDK to check itself (see the comment on the constants above), so the check
+// has to run from the other side of the boundary. The cleat/ module's
+// callerror_contract_test.go asserts this table against cleat.CallError*
+// exhaustively -- every member, its value, and its retryability, in both
+// directions. Nothing else stops the two copies drifting, and a drifted code
+// is worse than no code: the guest's `switch e.Code` falls through to default,
+// so the structured classification silently degrades to "something failed".
+//
+// Retryability is part of the table rather than derived here because it is a
+// guest-side decision the engine only mirrors. It was previously not checked
+// against the SDK at all.
+var guestCallErrorCodes = []GuestCallErrorCode{
+	{Name: "Unknown", Code: 0, Retryable: false},
+	{Name: "Timeout", Code: 1, Retryable: true},
+	{Name: "Unavailable", Code: 2, Retryable: true},
+	{Name: "NotFound", Code: 3, Retryable: false},
+	{Name: "InvalidRequest", Code: 4, Retryable: false},
+	{Name: "PermissionDenied", Code: 5, Retryable: false},
+}
+
+// GuestCallErrorCodes returns the engine's copy of the guest SDK's
+// CallErrorCode enum, in value order.
+//
+// A copy, so a caller cannot edit the table the contract test reads.
+func GuestCallErrorCodes() []GuestCallErrorCode {
+	out := make([]GuestCallErrorCode, len(guestCallErrorCodes))
+	copy(out, guestCallErrorCodes)
+	return out
+}
 
 // cancelledCallError is the message a durable call reports when the workflow
 // was cancelled while the call was in flight.

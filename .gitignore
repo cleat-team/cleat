@@ -37,7 +37,17 @@ profile.cov
 # vendor/
 
 # Go workspace file
-go.work
+#
+# go.work is COMMITTED here, deliberately, against the usual advice. The usual
+# advice assumes a workspace is one developer's local convenience; this one is
+# load-bearing. The root module names the cleat/ SDK nowhere in its go.mod --
+# no require, no replace, because `go install pkg@version` refuses a module
+# with a replace and the CLIs are meant to be installable that way -- so
+# go.work is the only thing that supplies the SDK to the root module's test
+# fixtures under testdata/. Without it checked in, a fresh clone cannot run the
+# root module's tests at all. See the file's own header.
+#
+# go.work.sum stays ignored: it is derived, and `go work sync` regenerates it.
 go.work.sum
 
 # env file
