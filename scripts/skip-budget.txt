@@ -349,7 +349,33 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # DARWIN count against a RUNNER ceiling is only meaningful with the +4 offset
 # applied. "under budget by 3" means the runner will be at budget+1 and the
 # guard will trip. Local slack of 4 or less is a failure, not a pass.
-test-go/engine	455	# runner 2026-08-09: 454 + the component short-result regression test (+1)
+# 2026-08-10 -- 455 -> 473, both entries, for the remediation landed in #458.
+#
+# This is the "rule of thumb" above being paid, exactly as written: the wave
+# added dialect-parameterised tests over registeredBackends, and each costs TWO
+# skips (its mysql and mssql arms) in every PostgreSQL-only job. Measured
+# locally against the same tree, PostgreSQL only, engine package:
+#
+#   before  skipped=451  passed=3506
+#   after   skipped=475  passed=3591
+#
+# +24 skips, 0 removed, +85 passes. The 24 are the mysql/mssql arms of the
+# fencing tests (FlushEvent/WriteCallIntent/CompleteCallIntent Fence{Held,Lost},
+# stream D), completed-workflow retention (stream H), and four MSSQL-specific
+# tests from stream J. None of that coverage is lost -- those arms run in the
+# Multi-DB job, which configures both dialects.
+#
+# The runner measured 473, not the 479 that 455 + 24 would predict. The local
+# and runner numbers have never been equal (the entry above records runner
+# figures), so do not read the 6 as a specific set of tests; it is the gap
+# between the two environments plus whatever stopped skipping now that test
+# databases are built from the shipped migrations (stream A1). 473 is what the
+# runner measured on this tree, in both jobs, and that is what a budget records.
+#
+# Re-derive: scripts/check-skip-budget.sh prints "job=... skipped=N budget=M"
+# in the Skip budget step of Test Go (engine) and Cluster Integration Tests.
+
+test-go/engine	473	# runner 2026-08-10: was 455; see the remediation note below
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -430,7 +456,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	455	# same as test-go/engine, and for the same reason; see the note there
+cluster	473	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a
