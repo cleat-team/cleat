@@ -309,6 +309,41 @@ A stream is done when, and only when:
 
 ---
 
+## Open follow-up — wazero removal, part 2
+
+**Part 1 is on `develop`** (`engine/backend_wazero.go` deleted, `--allow-wazero-fallback`
+removed, worker-level fallback gone; build + vet + all three dialects + every `cmd` package
+green). **Part 2 is deliberately NOT merged** and is stashed in the `cleat-wt-W` worktree as
+`stash@{0}` — "W commit2 WIP round2".
+
+Part 2 is the wide mechanical collapse and it got roughly 85% of the way:
+
+| | at stash time | re-derive |
+|---|---|---|
+| files with `api.Module` | 21 → **3** | `grep -rl 'api\.Module' --include='*.go' engine/ wasm/ \| wc -l` |
+| files importing wazero | 8 → **4** | `grep -rl 'tetratelabs/wazero' --include='*.go' . \| grep -v node_modules \| wc -l` |
+| `//go:build cgo` files | **38** remaining | `grep -rln 'go:build cgo\|go:build !cgo' --include='*.go' . \| grep -v node_modules \| wc -l` |
+| `go.mod` requires wazero | **yes** | `grep -c wazero go.mod` |
+
+**Why it was parked rather than finished.** `go build ./...` passed but `go vet ./...` did
+not: deleting the wazero-specific test helpers removed `newTestHostFuncHarness`, `wasmI32`,
+`wasmI64`, `minimalMemoryWasm` and `engine.Runtime`/`engine.NewRuntime`, which are still
+referenced by `benchmarks/wasm_bench_test.go`, `tests/integrity/ambiguity_detection_test.go`,
+`tests/cross-language/cross_language_test.go`, `engine/json_hostfuncs_test.go` and
+`engine/lifecycle_test.go`.
+
+Each of those needs a **judgment call, not a mechanical edit**: was the test exercising
+wazero specifically (delete it), or exercising engine behaviour through a wazero harness
+(port it to wasmtime)? Getting that wrong silently deletes coverage, which is the exact
+failure class this whole review exists to catch. Finishing it under a session limit was the
+wrong trade.
+
+**Do it as its own stream**, with the full three-dialect sweep plus the `cleat/` module as
+the gate, and treat the per-test delete-or-port decision as the deliverable rather than the
+line count.
+
+---
+
 ## Explicitly not doing
 
 Recorded so they do not silently re-enter the backlog. These follow from the owner's framing:

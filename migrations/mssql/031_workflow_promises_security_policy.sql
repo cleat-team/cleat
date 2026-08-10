@@ -30,44 +30,39 @@
 -- exist). The seven are therefore left exactly as 012 last defined them.
 --
 -- ***************************************************************************
--- UNVERIFIED AGAINST A LIVE SQL SERVER.
+-- VERIFIED against a live SQL Server, 2026-08-09 (Stream J,
+-- CLEAT_TEST_MSSQL='sqlserver://sa:...@localhost:1435?database=cleat').
 --
--- No CLEAT_TEST_MSSQL instance was available to this stream when this
--- migration was written (the shared one was in use by another stream; see
--- PARALLEL-WORKSTREAMS.md). This has been reasoned through statically only:
+-- This migration ran on a fresh database built from migrations/mssql/*.sql
+-- (recorded in schema_migrations as version 31) with no manual intervention,
+-- confirming the static reasoning this comment used to carry (CREATE
+-- SECURITY POLICY shape, the implicit NVARCHAR(255)-to-UNIQUEIDENTIFIER
+-- conversion, the FK cascade interaction) was correct.
 --
---   - The CREATE SECURITY POLICY / ADD FILTER PREDICATE / WITH (STATE = ON)
---     shape, the guarded DROP-then-CREATE idempotency pattern, and the GO
---     batch separators all match the seven existing policies in
---     migrations/mssql/001_schema.sql exactly.
---   - engine/mssql_rls_enforcement_test.go's mssqlPolicyRe regex
---     (`CREATE SECURITY POLICY (dbo\.\w+)\s+ADD FILTER PREDICATE
---     dbo\.fn_tenant_filter\(tenant_id\) ON dbo\.(\w+)\s+WITH \(STATE = ON\);`)
---     is written to match this exact literal form -- no CAST, no extra
---     whitespace variation -- which is why this file does not add an
---     explicit CAST(tenant_id AS UNIQUEIDENTIFIER) despite the column being
---     NVARCHAR(255): SQL Server's implicit conversion from a
---     GUID-formatted string to UNIQUEIDENTIFIER handles it, and matching the
---     existing regex means that test (once wired to include this file --
---     see below) can discover the new policy the same way it discovers the
---     other seven, rather than needing a second pattern.
---   - dbo.workflow_promises has an FK (fk_promises_workflow, workflow_id ->
---     dbo.workflow_instances(id)) ON DELETE CASCADE, so a cascading delete
---     from workflow_instances now also has to satisfy this policy in
---     whatever session performs it, the same requirement workflow_instances'
---     own existing policy already imposes. This migration does not change
---     that requirement's shape, only extends it to one more table already
---     reachable by the same cascade.
+-- engine/testutil/mssql_schema.go no longer curates a file list at all (see
+-- engine/testutil/migrations.go's header): applyMigrations runs every file
+-- under migrations/mssql/ through the real migration.Runner, so this
+-- migration has been part of every MSSQL test's schema since that change
+-- landed, with no separate wiring step needed. The "not wired in" gap this
+-- comment used to describe closed as a side effect of that change, not
+-- because anyone edited a list here.
 --
--- NOT wired into engine/testutil/mssql_schema.go's mssqlSchemaFiles() list.
--- That file is an explicit list (same shape as postgresSchemaFiles()), owned
--- by another stream this round per PARALLEL-WORKSTREAMS.md ("engine/testutil/
--- is WS-1's this round ... WS-2 and WS-3 should ask before adding test-schema
--- columns"). Until it is added there, engine/mssql_rls_enforcement_test.go
--- will not see this policy and TestMSSQLTenantIsolation_UnderRealSecurityPolicies
--- will not exercise dbo.workflow_promises. Do not treat this migration as
--- proven until both (a) it has run against a real SQL Server and (b) that
--- wiring is done.
+-- engine/mssql_rls_enforcement_test.go's enableMSSQLTenantPolicies now reads
+-- this file in addition to 001_schema.sql, so its mssqlPolicyRe scan covers
+-- all eight tenant-scoped tables, this one included.
+--
+-- TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies is the
+-- layer-separation proof this migration's isolation claim needed: it seeds
+-- two tenants' promises via CreatePromise (the one write path with no
+-- Go-level tenant predicate -- it is a bare INSERT) and reads them back with
+-- raw SQL naming no tenant_id column anywhere in the query text, so
+-- TenantFilter_Promises is the only thing that can hide a row. Proven to
+-- fail for the right reason: with `ALTER SECURITY POLICY
+-- dbo.TenantFilter_Promises WITH (STATE = OFF)`, the test fails with "exists
+-- but is disabled, so it filters nothing", and a direct check while disabled
+-- confirmed the row *is* visible with no session context set at all
+-- (COUNT = 1), i.e. the policy -- not some other layer -- is what was hiding
+-- it. Restoring STATE = ON returns the suite to green.
 -- ***************************************************************************
 
 IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Promises')

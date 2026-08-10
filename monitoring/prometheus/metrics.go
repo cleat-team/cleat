@@ -73,6 +73,7 @@ type Metrics struct {
 	wasmCacheHits           metric.Int64Counter
 	wasmCacheMisses         metric.Int64Counter
 	eventsDeleted           metric.Int64Counter
+	workflowsPurged         metric.Int64Counter
 	backgroundLoops         metric.Int64Counter
 	backgroundLoopRestarts  metric.Int64Counter
 	reaperInstancesClaimed  metric.Int64Counter
@@ -341,6 +342,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_events_deleted_total: %w", err)
+	}
+
+	m.workflowsPurged, err = meter.Int64Counter(
+		"cleat_workflows_purged_total",
+		metric.WithDescription("Number of completed workflow_instances rows (done/failed/terminated) permanently deleted by the completed-workflow retention policy"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_workflows_purged_total: %w", err)
 	}
 
 	m.backgroundLoops, err = meter.Int64Counter(
@@ -904,6 +913,15 @@ func (m *Metrics) RecordWasmCacheMiss(ctx context.Context, extraAttrs ...attribu
 func (m *Metrics) RecordEventsDeleted(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.eventsDeleted.Add(ctx, count, metric.WithAttributes(attrs...))
+}
+
+// RecordWorkflowsPurged adds to the workflows-purged counter: how many
+// completed workflow_instances rows the completed-workflow retention policy
+// has permanently deleted, so an operator can see retention working (or
+// notice it silently doing nothing) rather than inferring it from table size.
+func (m *Metrics) RecordWorkflowsPurged(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.workflowsPurged.Add(ctx, count, metric.WithAttributes(attrs...))
 }
 
 // RecordBackgroundLoop increments the background-loops counter.

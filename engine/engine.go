@@ -94,7 +94,6 @@ type Engine struct {
 	// is AtLeastOnce, which is what shipped before and costs nothing.
 	intentOps map[string]bool
 
-	batchFlusher    *BatchFlusher          // batch flusher for higher throughput event persistence
 	flusherRegistry *TenantFlusherRegistry // per-tenant adaptive batch flushers based on step rate
 
 	cancellationCheckInterval time.Duration // throttle PollCancellation; 0 = every step
@@ -445,11 +444,6 @@ func WithNoPerStepFlush(v bool) EngineOption { return func(e *Engine) { e.noPerS
 func WithFlusherRegistry(r *TenantFlusherRegistry) EngineOption {
 	return func(e *Engine) { e.flusherRegistry = r }
 }
-
-// WithBatchFlusher sets the batch flusher for higher throughput event
-// persistence. When set, recordEvent submits events to the batch flusher
-// instead of executing individual INSERT statements.
-func WithBatchFlusher(bf *BatchFlusher) EngineOption { return func(e *Engine) { e.batchFlusher = bf } }
 
 // WithCancellationCheckInterval sets the minimum wall-clock interval between
 // PollCancellation DB queries. Zero (the default) checks on every durable step.

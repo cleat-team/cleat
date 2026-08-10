@@ -28,7 +28,12 @@ CI_FILE="${1:-$REPO_ROOT/.github/workflows/ci.yml}"
 #     the `assemblyscript` job runs `npm test`, which invokes as-pect only.
 #     Exempt here because this guard checks matrix drift, not overall coverage.
 #     Wiring that harness into CI is tracked in IMPROVEMENT-PLAN.md Phase 2.
-EXEMPT="examples testdata benchmarks tests packages"
+#   scripts                      — scripts/finddeadexports.go is a
+#     //go:build ignore helper invoked by scripts/check-dead-exports.sh via
+#     `go run`, not a package `go build ./...` or `go test ./...` ever
+#     compiles. It has no tests to run and needs no matrix entry; it is
+#     exercised by the "Dead-export code guard" lint step instead.
+EXEMPT="examples testdata benchmarks tests packages scripts"
 
 cd "$REPO_ROOT"
 

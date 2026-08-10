@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/wasm"
 )
 
@@ -43,8 +44,8 @@ func TestRealFixturesRouteToWasmtime(t *testing.T) {
 			if lang != tc.wantLang {
 				t.Errorf("DetectLanguage = %q, want %q", lang, tc.wantLang)
 			}
-			if got := runsOnWasmtime(lang); got != tc.wantWasmtime {
-				t.Errorf("runsOnWasmtime(%q) = %v, want %v", lang, got, tc.wantWasmtime)
+			if got := engine.RunsOnWasmtime(lang); got != tc.wantWasmtime {
+				t.Errorf("engine.RunsOnWasmtime(%q) = %v, want %v", lang, got, tc.wantWasmtime)
 			}
 		})
 	}
@@ -64,7 +65,7 @@ func TestRealFixturesRouteToWasmtime(t *testing.T) {
 // anyone noticing, because the suite that would have caught it built a
 // different target.
 func TestRustRunsOnWasmtime(t *testing.T) {
-	if !runsOnWasmtime("rust") {
+	if !engine.RunsOnWasmtime("rust") {
 		t.Fatal("rust is no longer routed to wasmtime; if that is deliberate, " +
 			"record why in engine.WasmtimeLanguages")
 	}
@@ -85,7 +86,7 @@ func TestRustRunsOnWasmtime(t *testing.T) {
 // comment -- and check first whether the native component path is still being
 // compiled, because that is what this actually depends on.
 func TestPythonRunsOnWasmtime(t *testing.T) {
-	if !runsOnWasmtime("python") {
+	if !engine.RunsOnWasmtime("python") {
 		t.Fatal("python is no longer routed to wasmtime; if that is deliberate, " +
 			"record why in engine.WasmtimeLanguages")
 	}
@@ -95,21 +96,23 @@ func TestPythonRunsOnWasmtime(t *testing.T) {
 // wazero is the failure mode CLAUDE.md describes as "not evidence about the
 // engine", and it would be easy to introduce by mistyping this list.
 func TestGoStillRoutesToWasmtime(t *testing.T) {
-	if !runsOnWasmtime("go") {
+	if !engine.RunsOnWasmtime("go") {
 		t.Fatal("go workflows must run on wasmtime; it is the backend of record")
 	}
 }
 
 // TestUnknownLanguageFallsBack asserts the default direction. An unrecognised
-// guest must reach wazero rather than nothing: backendForWasm returns nil for
-// an unregistered language, and the worker relies on that to build a wazero
-// Runtime instead.
+// guest must not be routed to wasmtime: backendForWasm returns nil for an
+// unregistered language, and the engine now has no other backend to try --
+// wasmtime is the only one cleat has (see IMPROVEMENT-PLAN.md 3.30), so an
+// unrecognised language fails the workflow with a clear error instead of
+// falling back to anything.
 func TestUnknownLanguageFallsBack(t *testing.T) {
 	// "python" was in this list and is now a supported language, so it no
 	// longer tests the fallback -- it would have tested the reverse.
 	for _, lang := range []string{"ruby", ""} {
-		if runsOnWasmtime(lang) {
-			t.Errorf("runsOnWasmtime(%q) = true; unrecognised guests must fall back to wazero", lang)
+		if engine.RunsOnWasmtime(lang) {
+			t.Errorf("engine.RunsOnWasmtime(%q) = true; unrecognised guests must not be routed to wasmtime", lang)
 		}
 	}
 }

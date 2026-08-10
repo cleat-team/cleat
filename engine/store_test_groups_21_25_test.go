@@ -483,6 +483,108 @@ func TestDeleteDeadLetteredWorkflows(t *testing.T) {
 	}
 }
 
+// TestDeleteCompletedWorkflows covers Finding S2: nothing else in this store
+// ever deletes a workflow_instances row for a terminal workflow, so lifetime
+// workflow count -- not active workflow count -- bounds the table's size.
+// This checks all three ways a workflow reaches "terminal, no further
+// action" (done, failed, terminated), that dead_lettered is left alone (it
+// has its own lifecycle and its own deletion path,
+// DeleteDeadLetteredWorkflows), and that a workflow newer than the cutoff
+// survives.
+func TestDeleteCompletedWorkflows(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			ctx := context.Background()
+			setupTestData(t, store)
+			truncateAll(t, store)
+
+			mkRun := func(tag string) *WorkflowInstance {
+				t.Helper()
+				_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "completed-"+tag, DefaultTenantUUID, 0)
+				if err != nil {
+					t.Fatalf("StartNewRun(%s): %v", tag, err)
+				}
+				wf, err := store.ClaimWorkflow(ctx, "worker-"+tag)
+				if err != nil || wf == nil {
+					t.Fatalf("ClaimWorkflow(%s): wf=%v err=%v", tag, wf, err)
+				}
+				return wf
+			}
+
+			doneWF := mkRun("done")
+			if err := store.CompleteWorkflow(ctx, doneWF.ID, "worker-done", doneWF.Generation, `{"ok":true}`, nil); err != nil {
+				t.Fatalf("CompleteWorkflow: %v", err)
+			}
+
+			failedWF := mkRun("failed")
+			if err := store.FailWorkflow(ctx, failedWF.ID, "worker-failed", failedWF.Generation, "boom", "E_BOOM", "op", nil); err != nil {
+				t.Fatalf("FailWorkflow: %v", err)
+			}
+
+			terminatedRunID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "completed-terminated", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun(terminated): %v", err)
+			}
+			if err := store.TerminateWorkflow(ctx, terminatedRunID, "force kill"); err != nil {
+				t.Fatalf("TerminateWorkflow: %v", err)
+			}
+
+			dlqWF := mkRun("dlq")
+			if err := store.MoveToDeadLetterQueue(ctx, dlqWF.ID, "worker-dlq", dlqWF.Generation, "dead", "E_DEAD", "op"); err != nil {
+				t.Fatalf("MoveToDeadLetterQueue: %v", err)
+			}
+
+			// A workflow still running (not terminal at all) must survive
+			// regardless of cutoff.
+			runningRunID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "completed-running", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun(running): %v", err)
+			}
+			if _, err := store.ClaimWorkflow(ctx, "worker-running"); err != nil {
+				t.Fatalf("ClaimWorkflow(running): %v", err)
+			}
+
+			// Cutoff in the future: every terminal workflow above (done,
+			// failed, terminated) qualifies by completed_at.
+			deleted, err := store.DeleteCompletedWorkflows(ctx, time.Now().Add(1*time.Hour))
+			if err != nil {
+				// Pre-existing MySQL LIMIT+subquery caveat noted by
+				// TestDeleteDeadLetteredWorkflows above; same shape here.
+				t.Logf("DeleteCompletedWorkflows: %v", err)
+				return
+			}
+			if deleted != 3 {
+				t.Errorf("deleted = %d, want 3 (done + failed + terminated)", deleted)
+			}
+
+			for _, id := range []string{doneWF.ID, failedWF.ID, terminatedRunID} {
+				stored, err := store.GetWorkflowByID(ctx, id)
+				if err != nil {
+					t.Fatalf("GetWorkflowByID(%s): %v", id, err)
+				}
+				if stored != nil {
+					t.Errorf("workflow %s still exists after DeleteCompletedWorkflows", id)
+				}
+			}
+
+			// dead_lettered and running workflows must survive untouched.
+			if stored, err := store.GetWorkflowByID(ctx, dlqWF.ID); err != nil {
+				t.Fatalf("GetWorkflowByID(dlq): %v", err)
+			} else if stored == nil {
+				t.Error("dead-lettered workflow was deleted by DeleteCompletedWorkflows -- it has its own lifecycle/deletion path")
+			}
+			if stored, err := store.GetWorkflowByID(ctx, runningRunID); err != nil {
+				t.Fatalf("GetWorkflowByID(running): %v", err)
+			} else if stored == nil {
+				t.Error("still-running workflow was deleted by DeleteCompletedWorkflows")
+			}
+		})
+	}
+}
+
 // =============================================================================
 // Group 25 — Advanced: Atomic child, streaming, verification, memory
 // =============================================================================

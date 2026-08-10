@@ -765,17 +765,18 @@ func main() {
 		logger.InfoContext(context.Background(), "WASM disk cache configured", "worker_id", workerID, "dir", *wasmCacheDir, "max_files", *wasmDiskCacheMaxFiles)
 	}
 
-	// Register the wasmtime backend for Go WASM modules. If wasmtime is not
-	// available (e.g., libwasmtime.so not found), fall back to the legacy
-	// wazero runtime by leaving the backend as nil.
-	var wasmtimeBackend engine.WasmBackend
+	// Register the wasmtime backend. wasmtime is the only WASM backend cleat
+	// has: there is no fallback to fall back to, so a construction failure
+	// is fatal. See CLAUDE.md and IMPROVEMENT-PLAN.md 3.30 for why the
+	// former wazero fallback was removed rather than kept as a degraded
+	// option -- it could not fence a compute-bound guest, so silently
+	// running on it was a safety-relevant degradation no operator asked for.
+	//
 	// Bound wasmtime execution: epoch interruption (wall-clock, primary
 	// defense against a runaway workflow hanging the worker — see
 	// IMPROVEMENT-PLAN.md 1.5) and StoreLimits (memory/table/instance
 	// ceilings), plus optional fuel-based instruction metering when
-	// --wasm-instruction-limit is set. The memory ceiling reuses
-	// --wasm-memory-max-mb, the same flag already applied to the wazero
-	// backend below, rather than inventing a parallel wasmtime-only knob.
+	// --wasm-instruction-limit is set.
 	wasmtimeMemoryLimitBytes := int64(0) // 0 => wasmtimeBackend applies its own default
 	if *wasmMemoryMaxMB > 0 {
 		wasmtimeMemoryLimitBytes = int64(*wasmMemoryMaxMB) * 1024 * 1024
@@ -785,31 +786,12 @@ func main() {
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
 		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
 	)
-	switch classifyWasmtimeFallback(wasmtimeErr) {
-	case wasmtimeAvailable:
-		wasmtimeBackend = wt
-		logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes)
-	case wasmtimeFallbackExpected:
-		// Expected: this binary was built with CGO_ENABLED=0. wazero is the
-		// documented fallback for that case (CLAUDE.md), not a defect, but
-		// it is still a real capability loss worth a WARN: wazero cannot
-		// fence a compute-bound guest (see --wasm-instance-timeout help).
-		logger.WarnContext(context.Background(), "wasmtime backend unavailable (binary built with CGO_ENABLED=0), using wazero for Go WASM; wazero cannot fence a compute-bound guest, so --wasm-instance-timeout will not bound a workflow stuck in a tight loop on this worker", "worker_id", workerID, "error", wasmtimeErr)
-	default: // wasmtimeFallbackUnexpected
-		// Unexpected: CGO is available, so wasmtime -- the backend of
-		// record -- should have initialized and did not. Silently running
-		// on wazero here would swap in a backend that cannot fence a
-		// compute-bound guest without anyone deciding that on purpose.
-		// Fatal by default; --allow-wazero-fallback is the explicit,
-		// auditable opt-out for an operator who has decided to accept that
-		// degradation anyway (e.g. to keep serving traffic while wasmtime
-		// is debugged).
-		if !*allowWazeroFallback {
-			logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize despite CGO being available; refusing to silently fall back to wazero, which cannot fence a compute-bound guest -- pass --allow-wazero-fallback to start anyway", "worker_id", workerID, "error", wasmtimeErr)
-			os.Exit(1)
-		}
-		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize despite CGO being available; proceeding with wazero for Go WASM because --allow-wazero-fallback was set -- a compute-bound workflow will NOT be fenced by --wasm-instance-timeout on this worker", "worker_id", workerID, "error", wasmtimeErr)
+	if wasmtimeErr != nil {
+		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)
+		os.Exit(1)
 	}
+	var wasmtimeBackend engine.WasmBackend = wt
+	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes)
 
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
 	var notifyCh chan struct{}
@@ -868,6 +850,7 @@ func main() {
 		tenantPools:                      tenantPools,
 		memorySampleRetention:            *memorySampleRetention,
 		retentionDays:                    *retentionDays,
+		completedWorkflowRetentionDays:   *completedWorkflowRetentionDays,
 		schemaName:                       *schemaName,
 		peerSchemas:                      parsePeerSchemas(*peerSchemas),
 		disableChecksumVerification:      disableChecksumVerification,

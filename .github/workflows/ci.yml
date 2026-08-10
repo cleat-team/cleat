@@ -97,6 +97,21 @@ jobs:
       - name: Test-only code guard
         run: scripts/check-test-only-code.sh
 
+      # Sibling to the guard above: that one catches code called only from
+      # tests (staticcheck U1000, -tests=false), but U1000 never reports
+      # exported identifiers in a non-main package at all -- it assumes a
+      # library's public API may have external callers. True for cleat/ and
+      # pluginapi/; false for engine/, plugin/, wasm/, and friends, which
+      # nothing outside this repo imports. engine/batch_flush.go and
+      # plugin/audit.go both survived the guard above for exactly that
+      # reason -- U1000 never even saw them as findings to baseline. This
+      # step greps for exported func/method names declared in those
+      # internal-only roots and flags the ones nothing in the tree, test or
+      # production, ever spells. Baseline records the existing backlog (20
+      # entries, all verified by hand -- see the commit that added it).
+      - name: Dead-export code guard
+        run: scripts/check-dead-exports.sh
+
       - name: Setup Python
         uses: actions/setup-python@v7
         with:

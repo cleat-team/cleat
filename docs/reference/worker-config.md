@@ -507,6 +507,30 @@ is set.
 |------|---------|-------------|
 | int | `30` | Days to retain completed/failed workflow event history (0 disables) |
 
+Deletes `event_history` rows for terminal workflows. The `workflow_instances`
+row itself (status, result, error, def_name) is untouched by this flag --
+see `--completed-workflow-retention-days` below to also reclaim that.
+
+---
+
+### --completed-workflow-retention-days
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` (disabled) | Days to retain `workflow_instances` rows for terminal workflows (done/failed/terminated) before permanently deleting them |
+
+Unlike `--retention-days`, this deletes the workflow's own record, not just
+its step-by-step event history: after this runs, a purged workflow no longer
+appears in `ListWorkflows` or the admin dashboard, and its outcome (result,
+error, status) is gone. Off by default -- an operator opts in after deciding
+how long their own audit/compliance requirements need a workflow's outcome
+retrievable. `dead_lettered` workflows are never affected by this flag; they
+have their own (separate, currently unwired) deletion path.
+
+Any remaining `event_history` for a purged workflow is deleted in the same
+pass. See `docs/operations/workflow-retention.md` for the full design
+(default rationale, FK/cascade behavior per dialect, batching, metrics).
+
 ---
 
 ### --redact-patterns-file
