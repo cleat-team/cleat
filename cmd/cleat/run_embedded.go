@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cleat-team/cleat/engine"
 )
@@ -22,7 +23,7 @@ func runEmbedded(args []string) {
 	entryPoint := fs.String("entry-point", "place_order", "Entry point function name")
 	inputJSON := fs.String("input", "{}", "Workflow input as JSON")
 	apiAddr := fs.String("api-addr", ":8080", "HTTP API + web UI listen address (empty to disable)")
-	target := fs.String("target", "go", "Build target: go (default), tinygo (deprecated), rust")
+	target := fs.String("target", "go", "Build target: go (default), rust")
 	fs.Parse(args)
 
 	remainder := fs.Args()
@@ -57,7 +58,7 @@ func runEmbedded(args []string) {
 		defer os.RemoveAll(outDir)
 
 		// Build the workflow.
-		runBuild(pkgPath, outDir, *target, "", false, false, false)
+		runBuild(pkgPath, outDir, *target, "", "", false, false, false, 1)
 
 		// Find the .wasm file.
 		entries, _ := os.ReadDir(outDir)
@@ -153,7 +154,7 @@ func runEmbedded(args []string) {
 		})
 		mux.HandleFunc("/result", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json.NewEncoder(w).Encode(map[string]any{
 				"result":     result,
 				"suspended":  suspended,
 				"deferrals":  deferrals,
@@ -162,7 +163,12 @@ func runEmbedded(args []string) {
 			})
 		})
 
-		srv := &http.Server{Addr: *apiAddr, Handler: mux}
+		// ReadHeaderTimeout bounds how long a client may take to send its
+		// headers. Without it a connection that opens and then dribbles bytes
+		// holds a goroutine indefinitely (gosec G112, slowloris). This is the
+		// local dev server, so the exposure is small -- but the fix is one
+		// field, and "it is only dev" is how a default ends up in production.
+		srv := &http.Server{Addr: *apiAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 				log.Printf("HTTP server: %v", err)
@@ -184,7 +190,7 @@ type logCaller struct{}
 func (c *logCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
 	log.Printf("[cleat run] %s.%s(%s)", service, operation, truncate(requestJSON, 100))
 	// Return a placeholder success response so workflows can run end-to-end.
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"ok":      true,
 		"service": service,
 		"op":      operation,

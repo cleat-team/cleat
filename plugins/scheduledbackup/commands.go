@@ -2,17 +2,17 @@ package scheduledbackup
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterCommands returns CLI subcommands for the scheduled-backup plugin.
@@ -110,10 +110,7 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 	}
 
 	var stderr bytes.Buffer
-	cmd := exec.Command("pg_dump", "-f", dumpPath, *dsn)
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := runPgDump(context.Background(), *dsn, dumpPath, &stderr); err != nil {
 		errMsg := stderr.String()
 		if errMsg == "" {
 			errMsg = err.Error()
@@ -198,7 +195,7 @@ func (p *Plugin) cliBackupList(cmds []string) error {
 		FROM backup_history h
 		WHERE h.tenant_id = $1
 	`
-	qargs := []interface{}{tenantID}
+	qargs := []any{tenantID}
 	argIdx := 2
 
 	if *configStr != "" {
@@ -208,7 +205,7 @@ func (p *Plugin) cliBackupList(cmds []string) error {
 		}
 		query += fmt.Sprintf(" AND h.config_id = $%d", argIdx)
 		qargs = append(qargs, cfgID)
-		argIdx++
+		argIdx++ //nolint:ineffassign // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
 	}
 
 	query += " ORDER BY h.started_at DESC"

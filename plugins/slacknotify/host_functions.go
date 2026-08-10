@@ -8,8 +8,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -28,10 +28,10 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 // ---- Input/output types ----
 
 type sendMessageInput struct {
-	ConfigID uuid.UUID        `json:"config_id"`
-	Channel  string           `json:"channel,omitempty"`
-	Text     string           `json:"text"`
-	Blocks   json.RawMessage  `json:"blocks,omitempty"`
+	ConfigID uuid.UUID       `json:"config_id"`
+	Channel  string          `json:"channel,omitempty"`
+	Text     string          `json:"text"`
+	Blocks   json.RawMessage `json:"blocks,omitempty"`
 }
 
 type sendMessageOutput struct {
@@ -75,7 +75,7 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 	}
 
 	// Look up the Slack config, verifying tenant ownership.
-	var webhookURL string
+	var webhookURL plugin.Secret
 	var defaultChannel *string
 	err := p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT webhook_url, default_channel
@@ -104,7 +104,7 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 		return "", fmt.Errorf("slack-notify: marshal payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewReader(payloadBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", webhookURL.Reveal(), bytes.NewReader(payloadBytes))
 	if err != nil {
 		return "", fmt.Errorf("slack-notify: create request: %w", err)
 	}

@@ -8,17 +8,25 @@
 # compilation-to-execution pipeline for each non-Go language.
 #
 # Key design decisions:
-#   - Rust and Python are first-class: build/execute failures block the CI.
-#   - AssemblyScript and Java are best-effort: their Go tests skip gracefully
-#     when the toolchain is unavailable or execution fails.
+#   - All four are first-class: build/execute failures block the CI. Java and
+#     AssemblyScript joined Rust and Python on 2026-08-06. This job had always
+#     installed Node, Java 17 and Gradle and always ran their tests -- but both
+#     Go tests degraded every failure into a skip, so "best-effort" described
+#     the tests' behaviour rather than any property of the SDKs. With the skips
+#     removed, both pass.
 #   - Each Go test handles its own WASM compilation; the CI only provides
 #     the toolchains and dependencies, avoiding redundant double-builds.
+#   - The push trigger covers main and develop only. It carried "feature/**"
+#     until 2026-08-07, which ran the whole job a second time on every push to
+#     a feature branch that already had a PR open -- the pull_request trigger
+#     covers those. `Cross-Language WASM E2E` became a required check on
+#     2026-08-06, so the duplicate was the more expensive of the two.
 # ---------------------------------------------------------------------------
 name: Cross-Language E2E
 
 on:
   push:
-    branches: [main, develop, "feature/**"]
+    branches: [main, develop]
   pull_request:
     branches: [main, develop]
 
@@ -28,6 +36,33 @@ concurrency:
 
 env:
   GO_VERSION: "1.26"
+
+  # Declares the "first-class" policy above to the tests themselves.
+  #
+  # engine/rust_workflow_test.go and engine/python_wasm_e2e_test.go need to
+  # tell "nobody asked for this toolchain" (a developer's laptop, or ci.yml's
+  # engine matrix entry, whose Setup Rust step is gated to the internal
+  # package) from "the job that promised this toolchain cannot find it". The
+  # first is a skip; the second is a silently-failed setup step and must be a
+  # failure.
+  #
+  # This is an explicit variable rather than a check on $GITHUB_WORKFLOW
+  # because that would match on this workflow's display `name:` field.
+  # Renaming a workflow is a cosmetic edit that nobody would expect to change
+  # test behaviour, and it would silently return both files to skipping --
+  # which is exactly how DURABLE_TEST_DB was renamed with nothing noticing
+  # (IMPROVEMENT-PLAN.md 2.9). A CLEAT_REQUIRE_* variable reads as
+  # load-bearing and greps to its consumers.
+  # java and assemblyscript joined rust and python on 2026-08-06, and for the
+  # same reason in both cases. This job has installed Java 17, Gradle and Node
+  # since it was written, and runs TestJava* and TestAssemblyScript* in the -run
+  # regex below -- so it was already paying for both toolchains. But
+  # engine/java_workflow_e2e_test.go and engine/as_workflow_e2e_test.go each
+  # skipped on a missing one unconditionally, and that skip is invisible here:
+  # this step's output is -v text, not the -json a skip budget reads. So in this
+  # job a missing JDK or a missing Node is a failed setup step, not an absent
+  # prerequisite, and must read as a failure.
+  CLEAT_REQUIRE_TOOLCHAINS: "rust,python,java,assemblyscript"
 
 permissions:
   contents: read
@@ -45,17 +80,29 @@ jobs:
       # Language toolchains
       # ------------------------------------------------------------------
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Setup Rust + wasm32-wasip1
+      # Both targets, and wasm32-unknown-unknown is the one that matters:
+      # `cleat build --target rust` produces that cdylib (cmd/cleat/build_rust.go),
+      # and tests/cross-language now builds the same shape rather than the
+      # wasm32-wasip1 artifact it used to, which no user runs.
+      #
+      # Adding it here was not optional and was initially missed: the suite built
+      # and passed locally on a machine that happened to have both targets
+      # installed, and failed in CI with `error[E0463]: can't find crate for
+      # 'std'`. A local pass on a richer toolchain than the runner's is not
+      # evidence the job works.
+      #
+      # wasm32-wasip1 stays for the SDK crates, which still build against it.
+      - name: Setup Rust + wasm targets
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-wasip1
+          targets: wasm32-wasip1, wasm32-unknown-unknown
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -65,7 +112,7 @@ jobs:
           node-version: "20"
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -94,11 +141,55 @@ jobs:
       # The -run regex matches only cross-language E2E tests.
       # ------------------------------------------------------------------
       - name: Run cross-language E2E tests
+        shell: bash
         run: |
+          # pipefail, for the same reason the step below it already has it:
+          # without it `tee` supplies the exit status and a failing `go test`
+          # is reported as a green step.
+          #
+          # That fix was applied to the next step and not this one, and this
+          # one was hiding a real failure -- TestPythonWasmEndToEnd had been
+          # failing on develop while this workflow reported success. It is the
+          # only job that installs componentize-py, so it is the only place
+          # that failure could ever have shown up.
+          set -o pipefail
           go test -count=1 -short=false -timeout=10m \
             -v \
             -run "TestRust|TestPython|TestAssemblyScript|TestJava" \
             ./engine/... 2>&1 | tee e2e-report.txt
+
+      # tests/cross-language was in UNWIRED_SUITES: seven tests covering
+      # Rust<->Go cross-replay -- executing under one runtime and replaying the
+      # recorded history under the other, plus divergence detection across the
+      # boundary. No job referenced it, so none of them had ever run. They pass
+      # as written; this job is the only one that installs the toolchain they
+      # need.
+      - name: Run the cross-language suite
+        shell: bash
+        # tests/cross-language is its own Go module since the root<->cleat/
+        # module cycle was broken (it imports cleat/wasmtest; the root module
+        # must not). `go test ./tests/cross-language/...` from the repo root no
+        # longer matches -- it fails with "directory prefix tests/cross-language
+        # does not contain main module or its selected dependencies" -- so the
+        # pattern is ./... from inside the module. See
+        # tests/cross-language/go.mod.
+        working-directory: tests/cross-language
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          # ../../: the report lands at the repo root, because the Skip budget
+          # step below runs scripts/check-skip-budget.sh from there.
+          go test -count=1 -short=false -timeout=10m -json \
+            ./... 2>&1 | tee ../../cross-language-report.json
+
+      # 0, and the number is the point: every test in that suite needs cargo and
+      # the wasm32-wasip1 target, which this job installs above. A skip here
+      # means the toolchain setup stopped working and the suite quietly went
+      # back to testing nothing.
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh e2e-cross-language cross-language-report.json
 
       - name: Upload test report
         if: always()

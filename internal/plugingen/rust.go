@@ -39,8 +39,8 @@ func GenerateRust(ir *IR) (string, error) {
 	buf.WriteString("}\n\n")
 
 	buf.WriteString(fmt.Sprintf("impl %s {\n", structName))
-	buf.WriteString(fmt.Sprintf("    pub fn new(host_calls: crate::HostCalls) -> Self {\n"))
-	buf.WriteString(fmt.Sprintf("        Self { host_calls }\n"))
+	buf.WriteString("    pub fn new(host_calls: crate::HostCalls) -> Self {\n")
+	buf.WriteString("        Self { host_calls }\n")
 	buf.WriteString("    }\n\n")
 
 	for _, fn := range ir.HostFunctions {
@@ -136,7 +136,7 @@ func generateRustMethod(fn HostFuncIR, ir *IR) string {
 		buf.WriteString(fmt.Sprintf("    pub async fn %s(&self, input: %s) -> Result<%s, String> {\n", fn.Name, inputRef, outputRef))
 		buf.WriteString(fmt.Sprintf("        let resp = self.host_calls.plugin_call(%q, %q, input).await?;\n", ir.PluginName, fn.Name))
 		if !isBuiltinType(fn.OutputType) && fn.OutputType != "" {
-			buf.WriteString(fmt.Sprintf("        serde_json::from_str(&resp).map_err(|e| format!(\"deserialize error: {}\", e))\n"))
+			buf.WriteString("        serde_json::from_str(&resp).map_err(|e| format!(\"deserialize error: {}\", e))\n")
 		} else {
 			buf.WriteString("        Ok(resp)\n")
 		}

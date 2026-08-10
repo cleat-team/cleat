@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/google/uuid"
 )
 
@@ -45,6 +48,7 @@ type mockStore struct {
 	completeWorkflowFn                 func(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
 	failWorkflowFn                     func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 	releaseWorkflowFn                  func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
+	moveToDeadLetterQueueFn            func(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error
 	requestCancellationFn              func(ctx context.Context, workflowID, reason string) error
 	checkCancellationFn                func(ctx context.Context, workflowID string) (bool, string, error)
 	deliverSignalFn                    func(ctx context.Context, workflowID, signalName, payload string) error
@@ -95,9 +99,14 @@ type mockStore struct {
 	loadMemoryStatsFn                  func(ctx context.Context) ([]engine.WorkflowMemoryStats, error)
 	queueDepthFn                       func(ctx context.Context) (int64, error)
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
+	deleteCompletedWorkflowsFn         func(ctx context.Context, olderThan time.Time) (int64, error)
 	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string, priority int) (string, error)
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
+	terminateWorkflowFn                func(ctx context.Context, workflowID, reason string) error
+	adminForceCompleteFn               func(ctx context.Context, workflowID string, generation int64, result string, operator string) error
+	adminForceFailFn                   func(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error
+	adminReReplayFn                    func(ctx context.Context, workflowID string, generation int64, operator string) error
 }
 
 func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID string) (*engine.WorkflowInstance, error) {
@@ -322,6 +331,10 @@ func (m *mockStore) UpdateScheduleNextRun(ctx context.Context, name string, next
 		return m.updateScheduleNextRunFn(ctx, name, nextRun)
 	}
 	return nil
+}
+
+func (m *mockStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
+	return true, nil
 }
 
 func (m *mockStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
@@ -577,7 +590,9 @@ func newTestWorker(ms *mockStore) *Worker {
 	ctx, cancel := context.WithCancel(context.Background())
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", 5, 1<<40, 1<<40)
+	testMetrics := newTestPrometheus()
 	return &Worker{
+		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
 		concurrency:         5,
@@ -602,7 +617,9 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 	ctx, cancel := context.WithCancel(context.Background())
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", concurrency, 1<<40, 1<<40)
+	testMetrics := newTestPrometheus()
 	return &Worker{
+		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
 		concurrency:         concurrency,
@@ -620,9 +637,30 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 	}
 }
 
+// newTestPrometheus creates a Metrics instance for test use. Errors are
+// silently ignored; callers that need metric recording should check.
+func newTestPrometheus() *prometheus.Metrics {
+	m, err := prometheus.New(prometheus.Config{
+		WorkerID: "test-worker",
+	})
+	if err != nil {
+		return nil
+	}
+	return m
+}
+
 // newTestAPIServer creates an apiServer with a proper maxBodySize for tests.
 func newTestAPIServer(ms *mockStore) *apiServer {
-	return &apiServer{store: ms, worker: newTestWorker(ms), maxBodySize: 1 << 20}
+	// factory serves every tenant from the same mock store, which is what these
+	// tests assumed implicitly before handlers scoped requests per tenant.
+	// Tests that care *which* tenant's store was reached build their own
+	// factory -- see twoTenantServer in tenant_isolation_test.go.
+	return &apiServer{
+		store:       ms,
+		worker:      newTestWorker(ms),
+		maxBodySize: 1 << 20,
+		factory:     &fakeStoreFactory{fallback: ms},
+	}
 }
 
 // waitForCond polls cond until it returns true or the timeout elapses.
@@ -695,7 +733,7 @@ func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 
 	// Verify the workflow was added to inflight BEFORE executeWorkflow finishes.
 	var found bool
-	w.inflight.Range(func(key, value interface{}) bool {
+	w.inflight.Range(func(key, value any) bool {
 		if key.(string) == "wf-sticky-1" {
 			found = true
 		}
@@ -812,9 +850,9 @@ func TestDispatchLoop_EmptyQueuesNoCrash(t *testing.T) {
 
 func TestDispatchLoop_AtCapacity(t *testing.T) {
 	ms := &mockStore{}
-	claimAttempts := 0
+	var claimAttempts atomic.Int32
 	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
-		claimAttempts++
+		claimAttempts.Add(1)
 		return nil, nil
 	}
 	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
@@ -823,13 +861,13 @@ func TestDispatchLoop_AtCapacity(t *testing.T) {
 
 	w := newTestWorkerWithConcurrency(ms, 1)
 
-	// Fill the inflight map to capacity.
+	// Fill the inflight map to capacity. This is a synthetic entry with no
+	// goroutine backing it, so it will never clear on its own — it must be
+	// removed explicitly below before the loop can be allowed to exit (see
+	// the shutdown drain logic in dispatchLoop, setup.go, which intentionally
+	// blocks until inflight reaches zero so real in-flight workflows finish
+	// cleanly before the worker stops claiming).
 	w.inflight.Store("wf-busy-1", &engine.WorkflowInstance{ID: "wf-busy-1", DefName: "test", DefVersion: 1})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	w.ctx = ctx
-	w.cancel = cancel
 
 	done := make(chan struct{})
 	w.wg.Add(1)
@@ -838,11 +876,31 @@ func TestDispatchLoop_AtCapacity(t *testing.T) {
 		close(done)
 	}()
 
-	<-done
+	// Let the loop run several poll cycles while at capacity, then snapshot
+	// the claim count. This is the actual property under test: while the
+	// worker is genuinely at capacity, no claims are attempted.
+	time.Sleep(50 * time.Millisecond)
+	attemptsAtCapacity := claimAttempts.Load()
+
+	// Now unwind the test: cancel and clear the synthetic in-flight entry so
+	// the loop's shutdown drain sees zero in-flight work and returns. A
+	// claim slipping in during this shutdown transition (the in-flight loop
+	// iteration that was already past its capacity check when we cancelled)
+	// doesn't violate the capacity invariant above and is intentionally not
+	// asserted on here — it's an artifact of tearing the loop down, not of
+	// being at capacity.
+	w.cancel()
+	w.inflight.Delete("wf-busy-1")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatchLoop did not stop within 2s of context cancellation")
+	}
 
 	// With capacity full, no claim attempts should happen.
-	if claimAttempts > 0 {
-		t.Errorf("expected 0 claim attempts when at capacity, got %d", claimAttempts)
+	if attemptsAtCapacity > 0 {
+		t.Errorf("expected 0 claim attempts when at capacity, got %d", attemptsAtCapacity)
 	}
 }
 
@@ -1111,8 +1169,7 @@ func TestReaperLoop_CallsReap(t *testing.T) {
 	// we verify the store method signature and default timeout.
 	_, _ = w.store.ReapStaleInstances(context.Background(), 30*time.Second)
 	if !reapCalled {
-		// The direct call is the primary assertion; this just confirms the
-		// mock was properly wired.
+		t.Fatal("store.ReapStaleInstances did not reach the mock")
 	}
 }
 
@@ -1139,7 +1196,6 @@ func TestReaperLoop_StopsOnCancel(t *testing.T) {
 
 func TestReaperLoop_HandlesResults(t *testing.T) {
 	ms := &mockStore{}
-	reapedCount := -1
 	ms.reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) {
 		return 3, nil
 	}
@@ -1188,6 +1244,135 @@ func TestReaperLoop_DefaultInterval(t *testing.T) {
 	_, _ = ms.ReapStaleInstances(context.Background(), 30*time.Second)
 	if capturedTimeout != 30*time.Second {
 		t.Errorf("expected timeout 30s, got %v", capturedTimeout)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// retentionLoop / runRetentionSweep tests
+//
+// Like reaperLoop above, retentionLoop's ticker is hardcoded to 24 hours, so
+// these test the extracted per-tick body (runRetentionSweep) directly rather
+// than waiting on the ticker -- the same shape TestReaperLoop_DefaultInterval
+// uses.
+// ---------------------------------------------------------------------------
+
+func TestRetentionLoop_ReturnsImmediatelyWhenBothDisabled(t *testing.T) {
+	ms := &mockStore{}
+	ms.deleteExpiredEventsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		t.Error("DeleteExpiredEvents called; retentionLoop(0, 0) should never reach the ticker")
+		return 0, nil
+	}
+	ms.deleteCompletedWorkflowsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		t.Error("DeleteCompletedWorkflows called; retentionLoop(0, 0) should never reach the ticker")
+		return 0, nil
+	}
+	w := newTestWorker(ms)
+
+	done := make(chan struct{})
+	w.wg.Add(1)
+	go func() {
+		w.retentionLoop(0, 0)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// OK: returned without needing cancellation, because both knobs are
+		// disabled and there is nothing for the loop to do.
+	case <-time.After(2 * time.Second):
+		t.Fatal("retentionLoop(0, 0) did not return immediately")
+	}
+}
+
+func TestRunRetentionSweep_CallsBothWithIndependentCutoffs(t *testing.T) {
+	ms := &mockStore{}
+	var eventsCutoff, workflowsCutoff time.Time
+	var eventsCalled, workflowsCalled bool
+	ms.deleteExpiredEventsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		eventsCalled = true
+		eventsCutoff = olderThan
+		return 4, nil
+	}
+	ms.deleteCompletedWorkflowsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		workflowsCalled = true
+		workflowsCutoff = olderThan
+		return 2, nil
+	}
+	w := newTestWorker(ms)
+
+	// Different windows on purpose: an operator can keep workflow_instances
+	// rows far longer than event_history, e.g. --retention-days=7
+	// --completed-workflow-retention-days=90. The two cutoffs must not be
+	// the same computation reused for both.
+	w.runRetentionSweep(7, 90)
+
+	if !eventsCalled {
+		t.Fatal("DeleteExpiredEvents was not called")
+	}
+	if !workflowsCalled {
+		t.Fatal("DeleteCompletedWorkflows was not called")
+	}
+	wantEvents := time.Now().Add(-7 * 24 * time.Hour)
+	wantWorkflows := time.Now().Add(-90 * 24 * time.Hour)
+	if delta := eventsCutoff.Sub(wantEvents); delta < -time.Minute || delta > time.Minute {
+		t.Errorf("events cutoff = %v, want ~%v (7 days ago)", eventsCutoff, wantEvents)
+	}
+	if delta := workflowsCutoff.Sub(wantWorkflows); delta < -time.Minute || delta > time.Minute {
+		t.Errorf("workflows cutoff = %v, want ~%v (90 days ago)", workflowsCutoff, wantWorkflows)
+	}
+	if !workflowsCutoff.Before(eventsCutoff) {
+		t.Errorf("workflows cutoff (%v) should be earlier than events cutoff (%v) given retentionDays=7 < completedWorkflowRetentionDays=90",
+			workflowsCutoff, eventsCutoff)
+	}
+}
+
+func TestRunRetentionSweep_SkipsCompletedWorkflowsWhenDisabled(t *testing.T) {
+	ms := &mockStore{}
+	ms.deleteExpiredEventsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		return 0, nil
+	}
+	ms.deleteCompletedWorkflowsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		t.Error("DeleteCompletedWorkflows called with completedWorkflowRetentionDays=0")
+		return 0, nil
+	}
+	w := newTestWorker(ms)
+
+	// completedWorkflowRetentionDays=0: this is the shipped default. Proves
+	// the off-by-default argument in docs/operations/workflow-retention.md
+	// is actually true of the code, not just the prose.
+	w.runRetentionSweep(30, 0)
+}
+
+func TestRunRetentionSweep_SkipsEventsWhenDisabled(t *testing.T) {
+	ms := &mockStore{}
+	ms.deleteExpiredEventsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		t.Error("DeleteExpiredEvents called with retentionDays=0")
+		return 0, nil
+	}
+	ms.deleteCompletedWorkflowsFn = func(ctx context.Context, olderThan time.Time) (int64, error) {
+		return 0, nil
+	}
+	w := newTestWorker(ms)
+
+	w.runRetentionSweep(0, 90)
+}
+
+// TestCompletedWorkflowRetentionDaysDefaultsOff is the argument in
+// docs/operations/workflow-retention.md, pinned to the flag definition:
+// --completed-workflow-retention-days deletes the workflow_instances row
+// itself (status, result, error, def_name all gone from ListWorkflows and
+// the admin dashboard permanently), which is a materially more destructive
+// default than --retention-days deleting event_history (which leaves the
+// workflow's outcome in place). See TestRequireSignalAuthDefaultsOff above
+// for the same asserted-on-the-flag-definition shape and its rationale.
+func TestCompletedWorkflowRetentionDaysDefaultsOff(t *testing.T) {
+	f := flag.Lookup("completed-workflow-retention-days")
+	if f == nil {
+		t.Fatal("completed-workflow-retention-days flag is gone; if completed-workflow retention was removed, so should this test be")
+	}
+	if got := f.DefValue; got != "0" {
+		t.Errorf("completed-workflow-retention-days defaults to %s, want 0 -- deleting a workflow's own "+
+			"record (not just its event history) must be an explicit opt-in, not shipped on", got)
 	}
 }
 
@@ -1470,59 +1655,56 @@ func TestAPISchedulesList(t *testing.T) {
 	}
 }
 
-func TestAPIMetrics(t *testing.T) {
-	t.Skip("skipping: metrics now use prometheus/promauto; TestAPIMetrics_ZeroCounts covers basic endpoint")
-
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	w := httptest.NewRecorder()
-	handleMetrics(w, req)
-
-	resp := w.Result()
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	body := string(bodyBytes)
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("metrics returned status %d, want 200", resp.StatusCode)
-	}
-
-	contentType := resp.Header.Get("Content-Type")
-	if !strings.Contains(contentType, "text/plain") {
-		t.Errorf("expected text/plain content type, got %s", contentType)
-	}
-
-	// Verify some metric values appear in output.
-	checks := []string{
-		"cleat_workflows_active 3",
-		"cleat_workflows_completed_total 10",
-		"cleat_workflows_failed_total 1",
-		"cleat_workflows_claimed_total 100",
-		"cleat_calls_total 42",
-		"cleat_replay_duration_seconds_count 5",
-	}
-	for _, check := range checks {
-		if !strings.Contains(body, check) {
-			t.Errorf("metrics body missing: %q", check)
-		}
-	}
-}
-
+// TestAPIMetrics_ZeroCounts absorbed the two assertions worth keeping from
+// TestAPIMetrics, which was deleted here.
+//
+// That test had been `t.Skip("metrics now use prometheus/promauto;
+// TestAPIMetrics_ZeroCounts covers basic endpoint")` over a live body since the
+// switch to promauto, and the body could not be revived: it asserted literal
+// values -- "cleat_workflows_active 3", "cleat_calls_total 42" -- that came
+// from a hand-rolled metrics writer which no longer exists. Deleting it is
+// right. But the replacement it named was weaker than the thing it replaced,
+// and the skip said "covers" as though it were not, which is the shape that
+// makes a skip worse than a deletion: the coverage looks accounted for.
+//
+// Two of the deleted assertions were still true and are now here:
+//
+//	Content-Type   it checked text/plain and this did not. Measured:
+//	               "text/plain; version=0.0.4; charset=utf-8". A /metrics
+//	               endpoint that answers with the wrong content type is not
+//	               scrapeable, and nothing else checks it.
+//	a metric name  it checked six by name; this checked for the substring
+//	               "cleat_", which any error message mentioning a cleat_
+//	               metric would satisfy. Only one of the six survives the
+//	               promauto rewrite as a registered name under this fixture --
+//	               cleat_replay_duration_seconds, the one the fixture records
+//	               -- so that is the one asserted, by name.
 func TestAPIMetrics_ZeroCounts(t *testing.T) {
+	old := globalWorker
+	t.Cleanup(func() { globalWorker = old })
+	m := newTestPrometheus()
+	m.RecordReplayDuration(context.Background(), time.Second)
+	globalWorker = &Worker{
+		Metrics: m,
+	}
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 	handleMetrics(w, req)
-
 	resp := w.Result()
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	body := string(bodyBytes)
 	resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("metrics returned status %d, want 200", resp.StatusCode)
 	}
-
-	if strings.Contains(body, "cleat_replay_duration_seconds{quantile") {
-		t.Error("should not include quantile when replay count is 0")
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want it to contain text/plain -- Prometheus "+
+			"will not scrape an endpoint that answers otherwise", ct)
+	}
+	// By name, and as a registered metric rather than as a loose substring.
+	if !strings.Contains(body, "# TYPE cleat_replay_duration_seconds") {
+		t.Errorf("metrics body does not register cleat_replay_duration_seconds, "+
+			"which the fixture just recorded; body was:\n%s", body)
 	}
 }
 
@@ -2316,7 +2498,7 @@ func TestAPIHealthz_Degraded(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.Code)
 	}
-	var body map[string]interface{}
+	var body map[string]any
 	json.NewDecoder(resp.Body).Decode(&body)
 	if body["degraded"] != true {
 		t.Error("expected degraded=true in healthz response under memory pressure")
@@ -2613,7 +2795,7 @@ func TestAPIGetDAG(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.NewDecoder(w.Body).Decode(&resp)
 	// Body is bytes.Buffer; no Close needed.
 	if resp["workflow_id"] != "wf-dag-1" {
@@ -2894,7 +3076,7 @@ func TestAPIDefinitions(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var defs []map[string]interface{}
+	var defs []map[string]any
 	json.NewDecoder(w.Body).Decode(&defs)
 	// Body is bytes.Buffer; no Close needed.
 	if len(defs) != 2 {
@@ -2937,7 +3119,7 @@ func TestAPIDefinitions_Empty(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var defs []map[string]interface{}
+	var defs []map[string]any
 	json.NewDecoder(w.Body).Decode(&defs)
 	// Body is bytes.Buffer; no Close needed.
 	if defs == nil {
@@ -2970,7 +3152,7 @@ func TestAPIDefinitions_WithMemoryStats(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var defs []map[string]interface{}
+	var defs []map[string]any
 	json.NewDecoder(w.Body).Decode(&defs)
 	// Body is bytes.Buffer; no Close needed.
 	if len(defs) != 1 {
@@ -3011,10 +3193,23 @@ func TestCanAcceptAPIWorkflows_Default(t *testing.T) {
 // readMemTotal tests
 // ---------------------------------------------------------------------------
 
+// readMemTotal reads /proc/meminfo, so it only works on Linux. Its caller
+// treats a false return as "memory monitoring unavailable" and disables the
+// feature rather than failing, so on other platforms the correct behaviour is
+// a clean false — which is worth asserting rather than skipping past.
 func TestReadMemTotal(t *testing.T) {
 	total, ok := readMemTotal()
+
+	if runtime.GOOS != "linux" {
+		if ok {
+			t.Errorf("readMemTotal() = (%d, true) on %s; /proc/meminfo should not exist there",
+				total, runtime.GOOS)
+		}
+		return
+	}
+
 	if !ok {
-		t.Fatal("readMemTotal() returned false — /proc/meminfo may not be available")
+		t.Fatal("readMemTotal() returned false on Linux — /proc/meminfo should be readable")
 	}
 	if total == 0 {
 		t.Error("readMemTotal() returned 0 bytes, expected > 0")
@@ -3043,6 +3238,9 @@ func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID st
 }
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+	if m.moveToDeadLetterQueueFn != nil {
+		return m.moveToDeadLetterQueueFn(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp)
+	}
 	return nil
 }
 func (m *mockStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
@@ -3065,6 +3263,12 @@ func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error)
 func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
+func (m *mockStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	if m.deleteCompletedWorkflowsFn != nil {
+		return m.deleteCompletedWorkflowsFn(ctx, olderThan)
+	}
+	return 0, nil
+}
 func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]engine.EventRecord, error) {
 	return nil, nil
 }
@@ -3072,6 +3276,27 @@ func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, p
 	return nil, nil
 }
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	if m.terminateWorkflowFn != nil {
+		return m.terminateWorkflowFn(ctx, workflowID, reason)
+	}
+	return nil
+}
+func (m *mockStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	if m.adminForceCompleteFn != nil {
+		return m.adminForceCompleteFn(ctx, workflowID, generation, result, operator)
+	}
+	return nil
+}
+func (m *mockStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	if m.adminForceFailFn != nil {
+		return m.adminForceFailFn(ctx, workflowID, generation, errorMsg, errorCode, operator)
+	}
+	return nil
+}
+func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	if m.adminReReplayFn != nil {
+		return m.adminReReplayFn(ctx, workflowID, generation, operator)
+	}
 	return nil
 }
 func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
@@ -3088,6 +3313,32 @@ func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID stri
 		return m.getAllowedSignalCallersFn(ctx, workflowID)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	return nil
+}
+func (m *mockStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	return nil
+}
+func (m *mockStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
+func (m *mockStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	return nil, nil
+}
+func (m *mockStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	return nil
+}
+func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error { return nil }
+func (m *mockStore) GetRoutingRules(ctx context.Context, workflowName string) ([]engine.RoutingRule, error) {
+	return nil, nil
+}
+func (m *mockStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	return 0, nil
+}
+func (m *mockStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
 }
 
 // ---- healthTracker unit tests ----

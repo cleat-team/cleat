@@ -152,9 +152,9 @@ func TestDecodeULEB128EdgeCases(t *testing.T) {
 
 func TestEncodeULEB128EdgeCases(t *testing.T) {
 	tests := []struct {
-		value    uint32
-		wantLen  int
-		wantHex  string
+		value   uint32
+		wantLen int
+		wantHex string
 	}{
 		{0, 1, "00"},
 		{1, 1, "01"},
@@ -350,8 +350,8 @@ func TestReadCustomSectionCorrupt(t *testing.T) {
 	t.Run("corrupt section size", func(t *testing.T) {
 		// Valid header followed by a section with truncated size encoding.
 		corrupt := wasmHeader()
-		corrupt = append(corrupt, 0x00)    // section ID (custom)
-		corrupt = append(corrupt, 0x80)    // ULEB128 size: truncated continuation
+		corrupt = append(corrupt, 0x00) // section ID (custom)
+		corrupt = append(corrupt, 0x80) // ULEB128 size: truncated continuation
 		_, err := readCustomSection(corrupt, "x")
 		if err == nil {
 			t.Error("expected error for corrupt section size")
@@ -361,10 +361,10 @@ func TestReadCustomSectionCorrupt(t *testing.T) {
 	t.Run("name overflows section", func(t *testing.T) {
 		// Build a section whose name length byte claims more bytes than the section body.
 		corrupt := wasmHeader()
-		corrupt = append(corrupt, 0x00)                                               // section ID (custom)
-		corrupt = append(corrupt, 0x05)                                               // size: 5 bytes
-		corrupt = append(corrupt, 0x0a)                                               // name length: 10 (but only 3 bytes remain)
-		corrupt = append(corrupt, []byte("abc")...)                                   // only 3 bytes of name
+		corrupt = append(corrupt, 0x00)             // section ID (custom)
+		corrupt = append(corrupt, 0x05)             // size: 5 bytes
+		corrupt = append(corrupt, 0x0a)             // name length: 10 (but only 3 bytes remain)
+		corrupt = append(corrupt, []byte("abc")...) // only 3 bytes of name
 		_, err := readCustomSection(corrupt, "x")
 		if err == nil {
 			t.Error("expected error for name overflow")
@@ -1053,14 +1053,14 @@ func TestGenerateHostAdapterWithMultiple(t *testing.T) {
 	// Multiple host functions of different types to exercise the loop.
 	usage := &UsageInfo{
 		Used: map[string]bool{
-			"cleat_call":              true,
-			"cleat_sleep":             true,
-			"cleat_await_signals":     true,
-			"cleat_log":               true,
-			"cleat_now":               true,
-			"set_query_state":         true,
-			"cleat_acquire_lock":      true,
-			"cleat_release_lock":      true,
+			"cleat_call":          true,
+			"cleat_sleep":         true,
+			"cleat_await_signals": true,
+			"cleat_log":           true,
+			"cleat_now":           true,
+			"set_query_state":     true,
+			"cleat_acquire_lock":  true,
+			"cleat_release_lock":  true,
 		},
 		Funcs: []HostFunction{
 			{ImportName: "cleat_call", FieldName: "DurableCall"},
@@ -1217,8 +1217,8 @@ func TestNeedsUnsafeEdgeCases(t *testing.T) {
 
 func TestOutBufNamesEdgeCases(t *testing.T) {
 	tests := []struct {
-		name     string
-		wantLen  int
+		name      string
+		wantLen   int
 		wantFirst string
 	}{
 		{"cleat_call_retry", 1, "responseBuf"},
@@ -1255,7 +1255,7 @@ func TestGenerateExportsEmptyEntryPoints(t *testing.T) {
 	result.EntryPoints = nil
 	defer func() { result.EntryPoints = ep }()
 
-	code := string(GenerateExports("mypkg", result, "tinygo"))
+	code := string(GenerateExports("mypkg", result, "go"))
 	for _, c := range []string{
 		"//go:build wasip1",
 		"package mypkg",
@@ -1297,4 +1297,3 @@ func TestGenerateImportsDeduplicates(t *testing.T) {
 	}
 	syntaxCheck(t, "GenerateImports(dedup)", code)
 }
-

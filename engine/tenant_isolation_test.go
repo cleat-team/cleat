@@ -8,6 +8,56 @@ import (
 	"time"
 )
 
+// Skip-guard audit (fix/audit-conditional-skips, IMPROVEMENT-PLAN.md 1.10):
+//
+// This file holds the tenant-isolation tests that are the *only* proof
+// row-level security actually works for GetWorkflowByID/ListWorkflows --
+// neither carries an application-level tenant_id filter, and cleat
+// historically connected as a superuser, which PostgreSQL exempts from RLS
+// entirely (IMPROVEMENT-PLAN.md 1.10). A skip that fires here when it
+// shouldn't means isolation goes unverified while CI stays green, so every
+// guard in this file was re-derived from scratch rather than trusted:
+//
+//   - `if !backend.Enabled() { t.Skip(...) }` (forEachBackend and the
+//     per-test loops below) is genuinely live for MySQL/MSSQL: their
+//     Enabled() reads CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL, and the loop must
+//     skip when nobody asked for that backend (e.g. ci.yml's test-go job,
+//     which sets neither var). It is provably dead for Postgres:
+//     PostgresBackend.Enabled() (store_backends_test.go) hardcodes
+//     `return true`, mirroring testutil.TestDB's own unconditional
+//     default-DSN fallback, so this branch can never fire on that leg --
+//     Postgres has no "unconfigured" state in this suite. That is
+//     intentional, not a bug: a genuinely unreachable Postgres already
+//     surfaces as a t.Fatalf inside backend.Setup() -> testutil.TestDB,
+//     which already applies the "configured but broken is Fatal, not Skip"
+//     rule this whole file is held to. The guard is left unchanged below so
+//     it stays correct for the two dialects where it does something.
+//
+//   - `backend.(MultiTenantStoreBackend)` type assertions, below, are
+//     t.Fatalf, not t.Skipf: store_backends_test.go's init() registers
+//     exactly three backends (Postgres, MySQL, MSSQL) and all three
+//     implement SetupForTenant, so this assertion cannot fail today. A
+//     failure would mean a backend was registered without tenant-isolation
+//     support -- i.e. isolation silently went untested for it -- which must
+//     stop the build, not quietly skip a subtest.
+//
+//   - TestUnauthenticatedQueryRejection's closing type switch: no
+//     registered backend ever constructs a *ShardedStore (grepped
+//     `ShardedStore{` across the repo; only sharded_store.go's own
+//     NewShardedStore and sharded_store_test.go's unit tests construct one),
+//     so that case is unreachable today -- left in place as the shape to
+//     fill in if ShardedStore is ever registered as a backend, which would
+//     also give it tenant-isolation coverage it has nowhere else in this
+//     file. Its `default:` branch is t.Fatalf, not t.Skipf: the switch has
+//     no `case *MySQLStore`, so whenever multi-db-ci.yml's test-mysql job
+//     runs this test -- the job that exists specifically to exercise MySQL
+//     -- the MySQL subtest fell into `default` and skipped itself
+//     unconditionally, every time, regardless of environment. That is a
+//     structural coverage hole (MySQL is never checked for
+//     unauthenticated-query rejection at all), not an environment-
+//     conditional skip, and this change does not fill it -- it only stops
+//     the hole from being invisible.
+
 // MultiTenantStoreBackend extends StoreBackend for backends that support
 // creating stores scoped to specific tenants (used by tenant isolation tests).
 type MultiTenantStoreBackend interface {
@@ -109,7 +159,10 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -133,7 +186,8 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
 			// Also deploy in store B (needed to create instances).
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -146,7 +200,7 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			}
 
 			// Create a workflow in store B.
-			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-isolation", 1,
+			runIDB, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
 				"iso-test-b-1", tenantB, 0)
 			if err != nil {
@@ -222,7 +276,10 @@ func TestTenantIsolation_Signals(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -245,7 +302,8 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -258,7 +316,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			}
 
 			// Create a workflow in store B.
-			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-signals", 1,
+			runIDB, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
 				"signal-test-b-1", tenantB, 0)
 			if err != nil {
@@ -313,7 +371,10 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -334,7 +395,8 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -356,7 +418,7 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 			// Create a schedule in store B.
 			if err := storeB.CreateSchedule(ctx, Schedule{
 				Name:           "schedule-b",
-				DefName:        "test-schedules",
+				DefName:        defB.Name,
 				EntryPoint:     "main",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
@@ -407,7 +469,10 @@ func TestTenantIsolation_EventHistory(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -430,7 +495,8 @@ func TestTenantIsolation_EventHistory(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -492,7 +558,10 @@ func TestTenantIsolation_Promises(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -515,7 +584,8 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -528,7 +598,7 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			}
 
 			// Create a workflow in store B.
-			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-promises", 1,
+			runIDB, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
 				"promise-test-b-1", tenantB, 0)
 			if err != nil {
@@ -592,7 +662,10 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -614,7 +687,8 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -626,7 +700,7 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 			}
 
 			// Create a workflow in store B.
-			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-reaper", 1,
+			runIDB, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 				json.RawMessage(`{}`), "reaper-b-1", tenantB, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
@@ -732,15 +806,51 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
-			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+			storeA, teardownA := mtBackend.SetupForTenant(t, tenantA)
 			defer teardownA()
-			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			storeB, teardownB := mtBackend.SetupForTenant(t, tenantB)
 			defer teardownB()
 
 			ctx := context.Background()
+
+			// concurrency_keys.workflow_id is a real foreign key into
+			// workflow_instances(id) (migrations/postgres/001_schema.sql), so
+			// every workflow_id used below must be a real, already-created
+			// instance -- not just an opaque string, as this test used to
+			// assume back when the hand-maintained test schema in
+			// engine/testutil/schema.go had no such constraint.
+			def := &WorkflowDef{
+				Name:       "test-concurrency-keys",
+				Version:    1,
+				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				ABIVersion: 1,
+				MinVersion: 1,
+			}
+			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store A: %v", err)
+			}
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
+				t.Fatalf("DeployWorkflowDef on store B: %v", err)
+			}
+			for _, wfID := range []string{"wf-a", "wf-a-2", "wf-a-3"} {
+				if _, _, err := storeA.StartNewRun(ctx, wfID, "test-concurrency-keys", 1, json.RawMessage(`{}`), "", tenantA, 0); err != nil {
+					t.Fatalf("StartNewRun(%s) on store A: %v", wfID, err)
+				}
+			}
+			for _, wfID := range []string{"wf-b"} {
+				if _, _, err := storeB.StartNewRun(ctx, wfID, defB.Name, 1, json.RawMessage(`{}`), "", tenantB, 0); err != nil {
+					t.Fatalf("StartNewRun(%s) on store B: %v", wfID, err)
+				}
+			}
 
 			// --- Part 1: Acquire/release cross-tenant isolation ---
 			// concurrency_keys has PRIMARY KEY (key_hash) alone, so two tenants
@@ -882,7 +992,10 @@ func TestTenantIsolation_ActiveInstanceCounts(t *testing.T) {
 			}
 			mtBackend, ok := backend.(MultiTenantStoreBackend)
 			if !ok {
-				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+				// Unreachable with the current backend set (see file-level
+				// comment above) -- kept as a Fatal tripwire in case a future
+				// backend is registered without SetupForTenant.
+				t.Fatalf("BUG: %s backend does not implement MultiTenantStoreBackend (SetupForTenant); tenant isolation is untested for this backend", backend.Name())
 			}
 
 			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -902,7 +1015,8 @@ func TestTenantIsolation_ActiveInstanceCounts(t *testing.T) {
 			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 				t.Fatalf("DeployWorkflowDef on store A: %v", err)
 			}
-			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+			defB := tenantBDef(def)
+			if err := storeB.DeployWorkflowDef(ctx, defB); err != nil {
 				t.Fatalf("DeployWorkflowDef on store B: %v", err)
 			}
 
@@ -916,7 +1030,7 @@ func TestTenantIsolation_ActiveInstanceCounts(t *testing.T) {
 				}
 			}
 			for i := 0; i < 2; i++ {
-				_, _, err := storeB.StartNewRun(ctx, "", "test-active-counts", 1,
+				_, _, err := storeB.StartNewRun(ctx, "", defB.Name, 1,
 					json.RawMessage(`{}`),
 					fmt.Sprintf("b-%d", i), tenantB, 0)
 				if err != nil {
@@ -938,8 +1052,9 @@ func TestTenantIsolation_ActiveInstanceCounts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetActiveInstanceCountsByVersion on store B: %v", err)
 			}
-			if countsB["test-active-counts:1"] != 2 {
-				t.Errorf("store B expected 2 active instances, got %d", countsB["test-active-counts:1"])
+			keyB := defB.Name + ":1"
+			if countsB[keyB] != 2 {
+				t.Errorf("store B expected 2 active instances under %s, got %d", keyB, countsB[keyB])
 			}
 		})
 	}
@@ -973,11 +1088,58 @@ func TestUnauthenticatedQueryRejection(t *testing.T) {
 				if err == nil {
 					t.Error("expected error for unauthenticated query, got nil")
 				}
+			case *MySQLStore:
+				// This case did not exist until the conditional-skip audit.
+				// MySQL fell through to `default:` and skipped, so the dialect
+				// was never once checked here -- including in multi-db-ci.yml's
+				// test-mysql job, which exists to test it.
+				//
+				// It matters more on MySQL than on PostgreSQL. Postgres has
+				// seven RLS policies as a database-level backstop; MySQL has
+				// none (IMPROVEMENT-PLAN.md 1.7), so a query that runs with no
+				// tenant is bounded by nothing but the Go code that built it.
+				zeroStore := *s
+				zeroStore.tenantID = ""
+				_, err := zeroStore.GetActiveInstanceCountsByVersion(context.Background())
+				if err == nil {
+					t.Error("expected error for unauthenticated query, got nil")
+				}
 			case *ShardedStore:
+				// No registered StoreBackend ever constructs a *ShardedStore
+				// (see file-level comment above), so this case is
+				// unreachable today. Left in place as the shape to fill in
+				// if ShardedStore is ever registered as a backend.
 				t.Skip("ShardedStore unauthenticated test requires base store access")
 			default:
-				t.Skipf("unauthenticated rejection test not implemented for %T", store)
+				// Was t.Skipf. This switch has no `case *MySQLStore`, so the
+				// MySQL subtest -- run for real by multi-db-ci.yml's
+				// test-mysql job -- fell in here and skipped itself every
+				// time, unconditionally, never once verifying
+				// unauthenticated-query rejection for MySQL (see file-level
+				// comment above). Fatal turns any unhandled store type,
+				// including that one, into a build failure instead of an
+				// invisible pass.
+				t.Fatalf("unauthenticated rejection test not implemented for %T", store)
 			}
 		})
 	}
+}
+
+// tenantBDef returns tenant B's own copy of a definition, under a name of its
+// own.
+//
+// These tests used to deploy one *WorkflowDef to both stores, which worked
+// only because a deploy silently overwrote whatever definition already held
+// that (name, version) -- the defect IMPROVEMENT-PLAN 3.12 closes. The primary
+// key on workflow_defs still carries no tenant, so two tenants genuinely
+// cannot hold the same name; giving B its own is what a multi-tenant
+// deployment has to do until the key changes.
+//
+// Nothing here asserts on the definition itself, so the name is fixture
+// detail. What the tests assert -- that neither tenant sees the other's
+// instances, events, signals, schedules, promises or counts -- is unchanged.
+func tenantBDef(def *WorkflowDef) *WorkflowDef {
+	b := *def
+	b.Name = def.Name + "-tenant-b"
+	return &b
 }

@@ -87,7 +87,13 @@ func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, erro
 
     // Step 4: Notify the customer (best-effort).
     _ = notifyCustomer(h, userID, trackingID)
-    return trackingID, nil
+
+    // Return a JSON OBJECT, not a bare value.
+    //
+    // A workflow's result is a string containing a JSON-encoded object -- see
+    // ABI.md. `return trackingID, nil` would hand back TRACK-123456, which is
+    // not JSON at all, and the host stores {} instead.
+    return fmt.Sprintf(`{"tracking_id":%q}`, trackingID), nil
 }
 ```
 

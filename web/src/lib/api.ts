@@ -1,10 +1,34 @@
 import type { WorkflowInstance, EventRecord, Schedule, DAGResponse, WorkflowDefInfo } from './types';
+import { getToken, notifyUnauthorized } from './auth';
 
 const BASE = '';
 
+// B5: every call in this file goes through fetchJSON, so this is the single
+// place that needs to attach credentials for the whole dashboard to work
+// against a worker running with the supported default, --require-auth=true.
+// See lib/auth.ts for where the token comes from.
+//
+// When there is no stored token, `opts` is passed to fetch() completely
+// unmodified (not even an empty headers object is added) so behavior for an
+// unauthenticated dev deployment -- and the existing tests that assert the
+// exact `undefined` second argument -- is unchanged.
 async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + url, opts);
+  const token = getToken();
+  let finalOpts = opts;
+  if (token) {
+    finalOpts = {
+      ...opts,
+      headers: {
+        ...(opts?.headers as Record<string, string> | undefined),
+        Authorization: `Bearer ${token}`,
+      },
+    };
+  }
+  const res = await fetch(BASE + url, finalOpts);
   if (!res.ok) {
+    if (res.status === 401) {
+      notifyUnauthorized();
+    }
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(body.error || res.statusText);
   }
@@ -60,7 +84,7 @@ export async function listSchedules(): Promise<Schedule[]> {
   return fetchJSON<Schedule[]>('/api/schedules');
 }
 
-export async function createSchedule(schedule: { name: string; cron: string; def_name: string; entry_point?: string; input?: string }): Promise<void> {
+export async function createSchedule(schedule: { name: string; cron: string; def_name: string; entry_point?: string; input?: string; timezone?: string }): Promise<void> {
   await fetchJSON('/api/schedules', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -41,13 +41,13 @@ type fakeKafkaConfigRow struct {
 }
 
 type fakeDBStore struct {
-	mu        sync.RWMutex
-	apiKeys   map[string]string                     // key_hash -> tenant_id
-	kafkaCfgs map[string]*fakeKafkaConfigRow        // "tenant:id" -> row
-	now       func() time.Time
-	failNextExec  bool                              // if true, next ExecContext returns error
-	failNextQuery bool                              // if true, next QueryContext returns error
-	querySkip     int                               // number of queries to let succeed before failNextQuery takes effect
+	mu            sync.RWMutex
+	apiKeys       map[string]string              // key_hash -> tenant_id
+	kafkaCfgs     map[string]*fakeKafkaConfigRow // "tenant:id" -> row
+	now           func() time.Time
+	failNextExec  bool // if true, next ExecContext returns error
+	failNextQuery bool // if true, next QueryContext returns error
+	querySkip     int  // number of queries to let succeed before failNextQuery takes effect
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -84,7 +84,7 @@ func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
 
-func (*fakeConn) Close() error { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
@@ -279,7 +279,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	defer c.store.mu.RUnlock()
 
 	switch {
-	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(query, "tenant_api_keys"):
 		return c.queryTenantByKeyHash(args)
 	case strings.Contains(query, "COALESCE(event_type"):
 		return c.queryPollConfigs()
@@ -484,7 +484,7 @@ func TestKafkaCreateConfig(t *testing.T) {
 		t.Fatalf("POST /kafka/configs: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestKafkaListConfigs(t *testing.T) {
 		t.Fatalf("GET /kafka/configs: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var configs []map[string]interface{}
+	var configs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &configs); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestKafkaDeleteConfig(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -611,18 +611,64 @@ func TestProduceHostFunction(t *testing.T) {
 	}
 	store.mu.Unlock()
 
+	// setupTestPlugin leaves RestProxyURL empty, so there is no route to Kafka
+	// at all. This used to assert success=true: the plugin logged the message
+	// and told the workflow it had been sent. A durable workflow's guarantee is
+	// that what it recorded as done actually happened, and compensation logic
+	// downstream of a produce has no way to know it is compensating for
+	// something that never occurred.
+	//
+	// The assertion is now the refusal. Note what it does NOT do: assert on
+	// wording alone. It checks the error names the setting an operator would
+	// change, because the message is the only thing that turns this from "the
+	// plugin is broken" into "the plugin is not configured".
 	input := `{"config_id":"` + cfgID + `","key":"my-key","value":"hello world","headers":{"source":"test"}}`
-	output, err := p.produce(withCallContext(context.Background()), input)
-	if err != nil {
-		t.Fatalf("produce() returned error: %v", err)
+	_, err := p.produce(withCallContext(context.Background()), input)
+	if err == nil {
+		t.Fatal("produce() reported success with no REST proxy configured; the message was " +
+			"never sent and the workflow was told it was")
 	}
+	if !strings.Contains(err.Error(), "rest_proxy_url") {
+		t.Errorf("error does not name the setting that fixes it: %v", err)
+	}
+	if !strings.Contains(err.Error(), "test-topic") {
+		t.Errorf("error does not name the topic that could not be reached: %v", err)
+	}
+}
 
+// TestProduceSucceedsWhenTheProxyIsConfigured is the false-positive half. A
+// produce that refused unconditionally would satisfy the test above and would
+// break every correctly configured deployment.
+func TestProduceSucceedsWhenTheProxyIsConfigured(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.kafka.v2+json")
+		_, _ = w.Write([]byte(`{"offsets":[{"partition":0,"offset":7}]}`))
+	}))
+	defer srv.Close()
+
+	p, _, store := setupTestPlugin(t)
+	p.config.RestProxyURL = srv.URL
+
+	cfgID := uuid.New().String()
+	store.mu.Lock()
+	store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
+		tenantID: testTenantStr, id: cfgID, name: "configured",
+		brokers: "localhost:9092", topic: "test-topic", consumerGroup: "cleat-consumer",
+		eventType: "test-topic", enabled: true, createdAt: time.Now(), updatedAt: time.Now(),
+	}
+	store.mu.Unlock()
+
+	out, err := p.produce(withCallContext(context.Background()),
+		`{"config_id":"`+cfgID+`","value":"hello"}`)
+	if err != nil {
+		t.Fatalf("produce() with a configured proxy returned: %v", err)
+	}
 	var result produceOutput
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to decode output: %v", err)
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
 	}
 	if !result.Success {
-		t.Error("expected success=true")
+		t.Error("a delivered message was not reported as a success")
 	}
 }
 
@@ -783,7 +829,7 @@ func TestKafkaCreateConfigDefaults(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -809,7 +855,7 @@ func TestKafkaCreateConfigCustomValues(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -908,8 +954,8 @@ func TestKafkaConfigTenantIsolation(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.Default(),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.Default(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -1171,7 +1217,7 @@ func TestKafkaConsumeViaRestProxy(t *testing.T) {
 		case r.Method == "GET" && strings.Contains(r.URL.Path, "/records"):
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode([]map[string]interface{}{
+			json.NewEncoder(w).Encode([]map[string]any{
 				{"topic": "test-topic", "key": nil, "value": "hello", "partition": 0, "offset": int64(1)},
 			})
 		case r.Method == "DELETE":
@@ -1183,14 +1229,14 @@ func TestKafkaConsumeViaRestProxy(t *testing.T) {
 	defer proxySrv.Close()
 
 	p := &Plugin{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
-		config: Config{RestProxyURL: proxySrv.URL},
+		config:     Config{RestProxyURL: proxySrv.URL},
 	}
 
 	c := configRow{
 		ID:            uuid.New(),
-		TenantID: testTenantID,
+		TenantID:      testTenantID,
 		Name:          "test-config",
 		Brokers:       "broker:9092",
 		Topic:         "test-topic",
@@ -1245,10 +1291,10 @@ func TestKafkaProduceViaRestProxyNonSuccess(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.Default(),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.Default(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
-		config: Config{RestProxyURL: proxySrv.URL},
+		config:     Config{RestProxyURL: proxySrv.URL},
 	}
 
 	input := `{"config_id":"` + cfgID.String() + `","value":"test"}`
@@ -1318,36 +1364,35 @@ func TestKafkaDeleteConfigExecError(t *testing.T) {
 	}
 }
 
-
 // ===========================================================================
 // publishRecord — coverage for the 0% function
 // ===========================================================================
 
 func TestKafkaPublishRecord(t *testing.T) {
-		p, _, _ := setupTestPlugin(t)
+	p, _, _ := setupTestPlugin(t)
 
-		cfg := configRow{
-			ID:            uuid.New(),
-			TenantID: testTenantID,
-			Name:          "test-publish",
-			Brokers:       "broker:9092",
-			Topic:         "test-topic",
-			ConsumerGroup: "cleat-consumer",
-			EventType:     "test-event",
-		}
+	cfg := configRow{
+		ID:            uuid.New(),
+		TenantID:      testTenantID,
+		Name:          "test-publish",
+		Brokers:       "broker:9092",
+		Topic:         "test-topic",
+		ConsumerGroup: "cleat-consumer",
+		EventType:     "test-event",
+	}
 
-		record := kafkaRecord{
-			Topic:     "test-topic",
-			Key:       "my-key",
-			Value:     "hello",
-			Partition: 0,
-			Offset:    1,
-		}
+	record := kafkaRecord{
+		Topic:     "test-topic",
+		Key:       "my-key",
+		Value:     "hello",
+		Partition: 0,
+		Offset:    1,
+	}
 
-		err := p.publishRecord(context.Background(), cfg, record)
-		if err != nil {
-			t.Fatalf("publishRecord: %v", err)
-		}
+	err := p.publishRecord(context.Background(), cfg, record)
+	if err != nil {
+		t.Fatalf("publishRecord: %v", err)
+	}
 }
 
 // ===========================================================================
@@ -1355,35 +1400,35 @@ func TestKafkaPublishRecord(t *testing.T) {
 // ===========================================================================
 
 func TestKafkaPollConfigConsumeError(t *testing.T) {
-		p, _, store := setupTestPlugin(t)
+	p, _, store := setupTestPlugin(t)
 
-		// Set RestProxyURL to an unreachable address so consumeViaRestProxy fails.
-		p.config.RestProxyURL = "http://127.0.0.1:1"
-		p.httpClient = &http.Client{Timeout: 100 * time.Millisecond}
+	// Set RestProxyURL to an unreachable address so consumeViaRestProxy fails.
+	p.config.RestProxyURL = "http://127.0.0.1:1"
+	p.httpClient = &http.Client{Timeout: 100 * time.Millisecond}
 
-		// Insert an enabled config.
-		cfgID := uuid.New().String()
-		store.mu.Lock()
-		store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
-			tenantID:      testTenantStr,
-			id:            cfgID,
-			name:          "consume-error",
-			brokers:       "broker:9092",
-			topic:         "error-topic",
-			consumerGroup: "cleat-consumer",
-			eventType:     "error-topic",
-			enabled:       true,
-			createdAt:     time.Now(),
-			updatedAt:     time.Now(),
-		}
-		store.mu.Unlock()
+	// Insert an enabled config.
+	cfgID := uuid.New().String()
+	store.mu.Lock()
+	store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
+		tenantID:      testTenantStr,
+		id:            cfgID,
+		name:          "consume-error",
+		brokers:       "broker:9092",
+		topic:         "error-topic",
+		consumerGroup: "cleat-consumer",
+		eventType:     "error-topic",
+		enabled:       true,
+		createdAt:     time.Now(),
+		updatedAt:     time.Now(),
+	}
+	store.mu.Unlock()
 
-		// pollConfigs should query enabled configs and fail at consumeViaRestProxy.
-		// The error is logged but pollConfigs should not return an error.
-		err := p.pollConfigs(context.Background())
-		if err != nil {
-			t.Fatalf("pollConfigs: %v", err)
-		}
+	// pollConfigs should query enabled configs and fail at consumeViaRestProxy.
+	// The error is logged but pollConfigs should not return an error.
+	err := p.pollConfigs(context.Background())
+	if err != nil {
+		t.Fatalf("pollConfigs: %v", err)
+	}
 }
 
 // ===========================================================================
@@ -1391,55 +1436,55 @@ func TestKafkaPollConfigConsumeError(t *testing.T) {
 // ===========================================================================
 
 func TestKafkaPollConfigConsumeAndPublish(t *testing.T) {
-		var proxySrv *httptest.Server
-		proxySrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.Method == "POST" && strings.Contains(r.URL.Path, "/consumers/"):
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(map[string]string{
-					"instance_id": "test-instance",
-					"base_uri":    proxySrv.URL + "/consumers/test-instance",
-				})
-			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/subscription"):
-				w.WriteHeader(http.StatusNoContent)
-			case r.Method == "GET" && strings.Contains(r.URL.Path, "/records"):
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode([]map[string]interface{}{
-					{"topic": "publish-topic", "key": nil, "value": "hello-world", "partition": 0, "offset": int64(42)},
-				})
-			case r.Method == "DELETE":
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				w.WriteHeader(http.StatusNotFound)
-			}
-		}))
-		defer proxySrv.Close()
-
-		p, _, store := setupTestPlugin(t)
-		p.config.RestProxyURL = proxySrv.URL
-		p.httpClient = &http.Client{Timeout: 5 * time.Second}
-
-		// Insert an enabled config.
-		cfgID := uuid.New().String()
-		store.mu.Lock()
-		store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
-			tenantID:      testTenantStr,
-			id:            cfgID,
-			name:          "consume-publish",
-			brokers:       "broker:9092",
-			topic:         "publish-topic",
-			consumerGroup: "cleat-consumer",
-			eventType:     "publish-event",
-			enabled:       true,
-			createdAt:     time.Now(),
-			updatedAt:     time.Now(),
+	var proxySrv *httptest.Server
+	proxySrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.Contains(r.URL.Path, "/consumers/"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{
+				"instance_id": "test-instance",
+				"base_uri":    proxySrv.URL + "/consumers/test-instance",
+			})
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/subscription"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/records"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"topic": "publish-topic", "key": nil, "value": "hello-world", "partition": 0, "offset": int64(42)},
+			})
+		case r.Method == "DELETE":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
 		}
-		store.mu.Unlock()
+	}))
+	defer proxySrv.Close()
 
-		err := p.pollConfigs(context.Background())
-		if err != nil {
-			t.Fatalf("pollConfigs: %v", err)
-		}
+	p, _, store := setupTestPlugin(t)
+	p.config.RestProxyURL = proxySrv.URL
+	p.httpClient = &http.Client{Timeout: 5 * time.Second}
+
+	// Insert an enabled config.
+	cfgID := uuid.New().String()
+	store.mu.Lock()
+	store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
+		tenantID:      testTenantStr,
+		id:            cfgID,
+		name:          "consume-publish",
+		brokers:       "broker:9092",
+		topic:         "publish-topic",
+		consumerGroup: "cleat-consumer",
+		eventType:     "publish-event",
+		enabled:       true,
+		createdAt:     time.Now(),
+		updatedAt:     time.Now(),
+	}
+	store.mu.Unlock()
+
+	err := p.pollConfigs(context.Background())
+	if err != nil {
+		t.Fatalf("pollConfigs: %v", err)
+	}
 }

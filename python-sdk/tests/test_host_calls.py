@@ -21,6 +21,7 @@ Test layout
    ``plugin_call``, and error handling in the ``_call`` helper.
 """
 
+from typing import ClassVar
 from unittest import mock
 
 import pytest
@@ -28,21 +29,21 @@ import pytest
 try:
     from cleat_sdk import memory
     from cleat_sdk.host_calls import (
-        HostCalls,
-        RetryPolicy,
-        SignalResult,
         ChildResult,
-        PromiseResult,
         CleatCallError,
-        CleatCallTransientError,
         CleatCallPermanentError,
         CleatCallTimeoutError,
+        CleatCallTransientError,
+        HostCalls,
+        PromiseResult,
+        RetryPolicy,
+        SignalResult,
     )
     from cleat_sdk.plugins import (
-        Plugins,
         LLMChatResult,
         LLMEmbedResult,
         LLMListModelsResult,
+        Plugins,
     )
     from cleat_sdk.test_harness import CleatTestHarness
 except ImportError as e:
@@ -538,7 +539,7 @@ class TestPollCancellation:
             h.stub_call("worker", "process", '"ok"')
 
         for batch in range(3):
-            cancelled, reason = h.poll_cancellation()
+            cancelled, _reason = h.poll_cancellation()
             assert not cancelled, f"Cancelled unexpectedly at batch {batch}"
             h.call("worker", "process", {"batch": batch})
 
@@ -770,7 +771,7 @@ class TestInfrastructure:
 class TestHostCallsMethodExistence:
     """Single-test verification that every expected ``HostCalls`` method exists."""
 
-    EXPECTED_METHODS = {
+    EXPECTED_METHODS: ClassVar[set[str]] = {
         # Core operations
         "now",
         "random",
@@ -817,7 +818,8 @@ class TestHostCallsMethodExistence:
         "reject_promise",
         # Handlers
         "register_update_handler",
-        "register_query_handler",
+        # There is no register_query_handler here (removed 2026-08-09; see
+        # docs/determinism.md, "Why there is no RegisterQueryHandler").
         # Lifecycle
         "defer",
         "continue_as_new",
@@ -1058,7 +1060,7 @@ class TestCleatCallErrorHierarchy:
 class TestPluginMethodExistence:
     """Verify every expected ``Plugins`` public method exists."""
 
-    EXPECTED_PLUGIN_METHODS = {
+    EXPECTED_PLUGIN_METHODS: ClassVar[set[str]] = {
         "blobstore_put",
         "blobstore_get",
         "await_event",
@@ -1167,9 +1169,8 @@ class TestPluginAIMethods:
             plugins._h,
             "plugin_call",
             side_effect=RuntimeError("plugin not available"),
-        ):
-            with pytest.raises(RuntimeError, match="plugin not available"):
-                plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
+        ), pytest.raises(RuntimeError, match="plugin not available"):
+            plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
 
     # --- llm_embed ---
 
@@ -1336,9 +1337,8 @@ class TestPluginErrorHandling:
             plugins._h,
             "plugin_call",
             return_value="not json",
-        ):
-            with pytest.raises(RuntimeError, match="invalid JSON"):
-                plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
+        ), pytest.raises(RuntimeError, match="invalid JSON"):
+            plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
 
     def test_non_object_response(self, plugins):
         """``_call`` raises ``RuntimeError`` when the response is not a JSON object."""
@@ -1346,9 +1346,8 @@ class TestPluginErrorHandling:
             plugins._h,
             "plugin_call",
             return_value='"just a string"',
-        ):
-            with pytest.raises(RuntimeError, match="expected a JSON object"):
-                plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
+        ), pytest.raises(RuntimeError, match="expected a JSON object"):
+            plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
 
     def test_plugin_call_runtime_error(self, host):
         """``plugin_call`` propagates ``RuntimeError`` from the WASM import stub."""

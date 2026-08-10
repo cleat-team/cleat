@@ -112,8 +112,8 @@ func TestStripCustomSection_NotFound(t *testing.T) {
 
 func TestValidate_Errors(t *testing.T) {
 	tests := []struct {
-		name  string
-		meta  Metadata
+		name   string
+		meta   Metadata
 		errMsg string
 	}{
 		{"empty name", Metadata{}, "workflow_name is empty"},
@@ -213,5 +213,210 @@ func TestReadCustomSection_NameOverflow(t *testing.T) {
 	_, err := ReadMetadata(wasm)
 	if err == nil {
 		t.Error("expected error for name overflow in readCustomSection")
+	}
+}
+
+func TestEffectivePolicy_Defaults(t *testing.T) {
+	tests := []struct {
+		name     string
+		meta     Metadata
+		expected string
+	}{
+		{
+			name:     "empty policy, no child versions -> latest",
+			meta:     Metadata{ChildBindingPolicy: ""},
+			expected: "latest",
+		},
+		{
+			name:     "empty policy, with child versions -> frozen",
+			meta:     Metadata{ChildVersions: map[string]int{"child1": 1}},
+			expected: "frozen",
+		},
+		{
+			name:     "explicit frozen",
+			meta:     Metadata{ChildBindingPolicy: "frozen"},
+			expected: "frozen",
+		},
+		{
+			name:     "explicit stable",
+			meta:     Metadata{ChildBindingPolicy: "stable"},
+			expected: "stable",
+		},
+		{
+			name:     "explicit latest",
+			meta:     Metadata{ChildBindingPolicy: "latest"},
+			expected: "latest",
+		},
+		{
+			name:     "explicit tag:canary",
+			meta:     Metadata{ChildBindingPolicy: "tag:canary"},
+			expected: "tag:canary",
+		},
+		{
+			name:     "empty policy with child versions still wins over explicit empty",
+			meta:     Metadata{ChildVersions: map[string]int{"c": 2}},
+			expected: "frozen",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.meta.EffectivePolicy()
+			if got != tc.expected {
+				t.Errorf("EffectivePolicy() = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
+// ---- DetectLanguage tests ----
+
+func TestDetectLanguage_Go(t *testing.T) {
+	// Build a WASM binary with wasi_snapshot_preview1 import (Go compiles with WASI).
+	imports := []struct{ module, name string }{
+		{"wasi_snapshot_preview1", "proc_exit"},
+	}
+	wasm := makeWasmWithImports(imports)
+	lang := DetectLanguage(wasm)
+	if lang != "go" {
+		t.Errorf("expected 'go', got %q", lang)
+	}
+}
+
+func TestDetectLanguage_Unknown(t *testing.T) {
+	// Build a WASM binary with imports that don't match any known pattern.
+	imports := []struct{ module, name string }{
+		{"custom_module", "custom_func"},
+	}
+	wasm := makeWasmWithImports(imports)
+	lang := DetectLanguage(wasm)
+	// Default should be "go" when no language-specific imports are found.
+	if lang != "go" {
+		t.Errorf("expected default 'go', got %q", lang)
+	}
+}
+
+func TestDetectLanguage_InvalidWasm(t *testing.T) {
+	lang := DetectLanguage(nil)
+	if lang != "go" {
+		t.Errorf("expected default 'go' for nil, got %q", lang)
+	}
+	lang = DetectLanguage([]byte{0x00, 0x61})
+	if lang != "go" {
+		t.Errorf("expected default 'go' for short binary, got %q", lang)
+	}
+}
+
+// ---- ReadImportModuleNames tests ----
+
+func TestReadImportModuleNames(t *testing.T) {
+	imports := []struct{ module, name string }{
+		{"env", "cleat_call"},
+		{"wasi_snapshot_preview1", "proc_exit"},
+	}
+	wasm := makeWasmWithImports(imports)
+
+	modNames, err := readImportModuleNames(wasm)
+	if err != nil {
+		t.Fatalf("readImportModuleNames failed: %v", err)
+	}
+	if len(modNames) != 2 {
+		t.Fatalf("expected 2 module names, got %d", len(modNames))
+	}
+	if modNames[0] != "env" {
+		t.Errorf("expected module[0]='env', got %q", modNames[0])
+	}
+	if modNames[1] != "wasi_snapshot_preview1" {
+		t.Errorf("expected module[1]='wasi_snapshot_preview1', got %q", modNames[1])
+	}
+}
+
+func TestReadImportModuleNames_NoImportSection(t *testing.T) {
+	wasm := memTestWasm()
+	_, err := readImportModuleNames(wasm)
+	if err == nil {
+		t.Fatal("expected error for binary with no import section")
+	}
+}
+
+func TestReadImportModuleNames_TooShort(t *testing.T) {
+	_, err := readImportModuleNames([]byte{0x00, 0x61})
+	if err == nil {
+		t.Fatal("expected error for too-short binary")
+	}
+}
+
+func TestDetectLanguage_Python(t *testing.T) {
+	// Python component binaries have component model header.
+	wasm := []byte{
+		0x00, 0x61, 0x73, 0x6d, // magic
+		0x0d, 0x00, 0x01, 0x00, // component layer
+	}
+	lang := DetectLanguage(wasm)
+	if lang != "python" {
+		t.Errorf("expected 'python', got %q", lang)
+	}
+}
+
+func TestDetectLanguage_Python_WithCleatImports(t *testing.T) {
+	// Core WASM with cleat: imports but no component header.
+	imports := []struct{ module, name string }{
+		{"cleat:host-calls/durable-call", "durable-call"},
+	}
+	wasm := makeWasmWithImports(imports)
+	lang := DetectLanguage(wasm)
+	if lang != "python" {
+		t.Errorf("expected 'python' for WIT-style imports, got %q", lang)
+	}
+}
+
+func TestDetectLanguage_Java(t *testing.T) {
+	// TeaVM-compiled Java modules import from "teavm".
+	imports := []struct{ module, name string }{
+		{"teavm", "someFunc"},
+	}
+	wasm := makeWasmWithImports(imports)
+	lang := DetectLanguage(wasm)
+	if lang != "java" {
+		t.Errorf("expected 'java', got %q", lang)
+	}
+}
+
+func TestDetectLanguage_AssemblyScript(t *testing.T) {
+	// AssemblyScript modules import env.abort.
+	imports := []struct{ module, name string }{
+		{"env", "abort"},
+	}
+	wasm := makeWasmWithImports(imports)
+	lang := DetectLanguage(wasm)
+	if lang != "assemblyscript" {
+		t.Errorf("expected 'assemblyscript', got %q", lang)
+	}
+}
+
+func TestHasWasiImports(t *testing.T) {
+	imports := []struct{ module, name string }{
+		{"wasi_snapshot_preview1", "proc_exit"},
+	}
+	wasm := makeWasmWithImports(imports)
+	if !HasWasiImports(wasm) {
+		t.Error("expected HasWasiImports to be true")
+	}
+
+	noWasi := memTestWasm()
+	if HasWasiImports(noWasi) {
+		t.Error("expected HasWasiImports to be false")
+	}
+}
+
+func TestHasImport(t *testing.T) {
+	imports := []struct{ module, name string }{
+		{"env", "cleat_call"},
+	}
+	wasm := makeWasmWithImports(imports)
+	if !HasImport(wasm, "env", "cleat_call") {
+		t.Error("expected HasImport(env, cleat_call) to be true")
+	}
+	if HasImport(wasm, "env", "nonexistent") {
+		t.Error("expected HasImport(env, nonexistent) to be false")
 	}
 }

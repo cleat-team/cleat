@@ -670,11 +670,12 @@ class CleatTestEnvTest {
     void testRegisterHandlers() {
         env.execute(h -> {
             h.registerUpdateHandler("myUpdate");
-            h.registerQueryHandler("myQuery");
             return "";
         });
         // No crash = success
     }
+    // There is no registerQueryHandler test here (removed 2026-08-09; see
+    // docs/determinism.md, "Why there is no RegisterQueryHandler").
 
     // ======================================================================
     // 31. Durable state (setState / getState / deleteState / hasState)
@@ -816,27 +817,6 @@ class CleatTestEnvTest {
 
         assertEquals("payload-data", result,
             "signalWorkflow should deliver a signal receivable by pollSignal");
-    }
-
-    // ======================================================================
-    // 38. Cron operations
-    // ======================================================================
-
-    @Test
-    void testCronOperations() {
-        String result = env.execute(h -> {
-            CleatResult<String> cronResult = h.scheduleCron(
-                "daily", "0 0 * * *", "UTC", "{}");
-            if (cronResult.isErr()) {
-                return "error";
-            }
-            String id = cronResult.getValue();
-            h.deleteCron(id);
-            return id;
-        });
-
-        assertEquals("test-schedule-id", result,
-            "scheduleCron should return a mock schedule ID");
     }
 
     // ======================================================================

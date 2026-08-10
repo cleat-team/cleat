@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func TestInfo(t *testing.T) {
@@ -185,4 +185,3 @@ func TestInitInvalidConfig(t *testing.T) {
 		t.Errorf("expected error mentioning config, got: %v", err)
 	}
 }
-

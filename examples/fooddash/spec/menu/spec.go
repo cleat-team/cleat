@@ -7,10 +7,10 @@ type LookupItemRequest struct {
 }
 
 type LookupItemResponse struct {
-	SKU         string `json:"sku"`
-	Name        string `json:"name"`
-	PriceCents  int    `json:"price_cents"`
-	Available   bool   `json:"available"`
+	SKU        string `json:"sku"`
+	Name       string `json:"name"`
+	PriceCents int    `json:"price_cents"`
+	Available  bool   `json:"available"`
 }
 
 // Client is the typed client interface for the menu service.

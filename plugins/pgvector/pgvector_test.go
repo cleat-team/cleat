@@ -13,9 +13,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // fakeConnector implements driver.Connector for testing pgvector SQL operations.
@@ -26,8 +26,8 @@ type fakeConnector struct {
 }
 
 type fakeCollection struct {
-	id       uuid.UUID
-	name     string
+	id         uuid.UUID
+	name       string
 	dimensions int
 }
 
@@ -81,7 +81,7 @@ func (c *fakeConn) Prepare(query string) (driver.Stmt, error) {
 	return &fakeStmt{fc: c.fc, query: query}, nil
 }
 
-func (c *fakeConn) Close() error            { return nil }
+func (c *fakeConn) Close() error              { return nil }
 func (c *fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
@@ -94,7 +94,7 @@ type fakeStmt struct {
 	query string
 }
 
-func (s *fakeStmt) Close() error { return nil }
+func (s *fakeStmt) Close() error  { return nil }
 func (s *fakeStmt) NumInput() int { return -1 }
 
 func (s *fakeStmt) Exec(args []driver.Value) (driver.Result, error) {
@@ -293,17 +293,17 @@ type fakeResult struct {
 }
 
 func (r fakeResult) LastInsertId() (int64, error) { return r.lastInsertID, nil }
-func (r fakeResult) RowsAffected() (int64, error)  { return r.rowsAffected, nil }
+func (r fakeResult) RowsAffected() (int64, error) { return r.rowsAffected, nil }
 
 type fakeRows struct {
-	cols    []string
-	data    [][]driver.Value
-	pos     int
-	closed  bool
+	cols   []string
+	data   [][]driver.Value
+	pos    int
+	closed bool
 }
 
-func (r *fakeRows) Columns() []string              { return r.cols }
-func (r *fakeRows) Close() error                    { r.closed = true; return nil }
+func (r *fakeRows) Columns() []string { return r.cols }
+func (r *fakeRows) Close() error      { r.closed = true; return nil }
 func (r *fakeRows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.data) {
 		return io.EOF

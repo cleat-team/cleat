@@ -3,7 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"time"
 )
@@ -123,8 +123,8 @@ func GarbageCollectVersions(ctx context.Context, store WorkflowStore, opts GCOpt
 			}
 
 			if opts.DryRun {
-				log.Printf("[cleat][gc] would purge %s v%d (created %s)",
-					def.Name, def.Version, def.CreatedAt.Format(time.RFC3339))
+				slog.InfoContext(ctx, "would purge version",
+					"name", def.Name, "version", def.Version, "created", def.CreatedAt.Format(time.RFC3339))
 				result.VersionsRemoved++
 				continue
 			}

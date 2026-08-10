@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 )
 
@@ -62,7 +63,7 @@ func FuzzCompactionEquivalence(f *testing.F) {
 	f.Add(fuzzSeed(EventCodePluginCallStreamChunk, []string{"s3", "GetObject", `{"key":"x"}`, `{"body":"..."}`, ""}, []int64{}...))
 
 	// Pair: Call + Sleep (tests split at 1-halfway).
-		f.Add(fuzzSeed(EventCodeCall, []string{"svc", "op", `{}`, `{}`, ""}))
+	f.Add(fuzzSeed(EventCodeCall, []string{"svc", "op", `{}`, `{}`, ""}))
 	// Pair: ChildWorkflow + child completing AwaitChild (tests open-children
 	// tracking and completion).
 	f.Add(append(
@@ -79,13 +80,19 @@ func FuzzCompactionEquivalence(f *testing.F) {
 	// Single ReleaseLock.
 	f.Add(fuzzSeed(EventCodeReleaseLock, []string{"lock-key-1"}, []int64{}...))
 	// Single Fetch.
-	f.Add(fuzzSeed(EventCodeFetch, []string{"GET", "https://example.com", `{"status":200}`, ""}, []int64{}...))
+	f.Add(fuzzSeed(EventCodeFetch, []string{"GET", "https://example.com", `{"Auth":"x"}`, "", `{"status":200}`, ""}, []int64{}...))
 	// Single DurableLog.
 	f.Add(fuzzSeed(EventCodeDurableLog, []string{"hello world", "info", "key=val"}, []int64{}...))
 	// Single DurableSend.
 	f.Add(fuzzSeed(EventCodeDurableSend, []string{"svc", "op", `{}`}, []int64{}...))
 	// Single DurableScheduleInvoke.
 	f.Add(fuzzSeed(EventCodeDurableScheduleInvoke, []string{"svc", "op", `{}`}, 5000))
+	// Single ScheduleCron/DeleteCron/ListCrons -- unreachable before the type
+	// byte's modulus was corrected from 27 to 30; see the comment on
+	// parseFuzzEvents' typeCode computation.
+	f.Add(fuzzSeed(EventCodeScheduleCron, []string{"order-cleanup", "0 0 * * *", "UTC", `{}`, "sched-1", `{"ok":true}`, ""}, []int64{}...))
+	f.Add(fuzzSeed(EventCodeDeleteCron, []string{"", "", "", "", "sched-1", "", ""}, []int64{}...))
+	f.Add(fuzzSeed(EventCodeListCrons, []string{"", "", "", "", "", `["sched-1"]`, ""}, []int64{}...))
 
 	// ---- fuzz target ----
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -158,7 +165,13 @@ func FuzzCompactionEquivalence(f *testing.F) {
 // Strings are length-prefixed; int64 values are written as a single byte
 // (clamped to [0, 255]).
 func fuzzSeed(typeCode byte, strs []string, ints ...int64) []byte {
-	b := []byte{typeCode}
+	// The parser reads one int64 byte for TimestampMs immediately after the
+	// type code and before any type-specific field, since every event
+	// carries a timestamp in production regardless of type (see the
+	// TimestampMs assignment in parseFuzzEvents). Seeds default it to 0;
+	// go test -fuzz mutates this byte like any other, so it still gets
+	// explored over time even though no seed below sets it explicitly.
+	b := []byte{typeCode, 0}
 	for _, s := range strs {
 		n := len(s)
 		if n > 255 {
@@ -192,23 +205,39 @@ func parseFuzzEvents(data []byte) []EventRecord {
 	r := &byteReader{data: data}
 
 	for step := 0; r.remaining() > 0; step++ {
-		typeCode := int(r.readByte()) % 27 // clamp to [0, 26]
+		// Clamp to [0, 29] -- the full EventCode* range (compaction.go). This
+		// was `% 27` (clamping to [0, 26]) until 2026-08-09, which meant
+		// EventCodeScheduleCron (27), EventCodeDeleteCron (28), and
+		// EventCodeListCrons (29) could never be generated: the fuzzer's type
+		// byte can never land on them, so three of the ~27 compacted event
+		// types went unfuzzed regardless of how long -fuzz ran. Found while
+		// auditing coverage for this same stream's compaction fix.
+		typeCode := int(r.readByte()) % 30
 
 		ev := EventRecord{
 			Step:      step,
 			EventType: codeToEventType[typeCode],
+			// TimestampMs is set on every EventRecord in production
+			// (execSession.recordEvent, lifecycle.go) regardless of event
+			// type, and is now preserved for every type through compaction
+			// (see the field doc on CompactedEvent.TimestampMs). Reading it
+			// here unconditionally, rather than per-type, is what lets the
+			// fuzzer explore it for every event kind instead of just the
+			// ones a case below happens to touch.
+			TimestampMs: r.readInt64(),
 		}
 		if ev.EventType == "" {
 			ev.EventType = EventTypeCall // unknown code, default to call
 		}
 
 		switch typeCode {
-		case EventCodeCall: // svc, op, req, resp, err (5 strings)
+		case EventCodeCall: // svc, op, req, resp, err (5 strings), nonRetryable (1 byte)
 			ev.Service = r.readString()
 			ev.Op = r.readString()
 			ev.Request = r.readString()
 			ev.Response = r.readString()
 			ev.Err = r.readString()
+			ev.ErrNonRetryable = r.readByte()%2 == 1
 		case EventCodeAwaitSignals: // sigNames (string), timeoutMs (int64)
 			ev.SignalNames = r.readString()
 			ev.TimeoutMs = r.readInt64()
@@ -218,16 +247,19 @@ func parseFuzzEvents(data []byte) []EventRecord {
 		case EventCodeDefer: // deferID, deferDesc (2 strings)
 			ev.DeferID = r.readString()
 			ev.DeferDescription = r.readString()
-		case EventCodeChildWorkflow: // childName, childInput, runID (3 strings)
+		case EventCodeChildWorkflow: // childName, childInput, runID, parentWorkflowID, parentClosePolicy (5 strings)
 			ev.ChildName = r.readString()
 			ev.ChildInput = r.readString()
 			ev.RunID = r.readString()
+			ev.ParentWorkflowID = r.readString()
+			ev.ParentClosePolicy = r.readString()
 		case EventCodeAwaitChild: // runID, resp, errMsg (3 strings)
 			ev.RunID = r.readString()
 			ev.Response = r.readString()
 			ev.Err = r.readString()
-		case EventCodeContinueAsNew: // newInput (1 string)
+		case EventCodeContinueAsNew: // newInput (1 string), newVersion (1 int64)
 			ev.NewInput = r.readString()
+			ev.NewVersion = int(r.readInt64())
 		case EventCodeHeartbeat: // svc, op (2 strings)
 			ev.Service = r.readString()
 			ev.Op = r.readString()
@@ -252,23 +284,37 @@ func parseFuzzEvents(data []byte) []EventRecord {
 			ev.PromiseError = r.readString()
 		case EventCodeUpdateHandler: // handlerName (1 string)
 			ev.UpdateHandlerName = r.readString()
-		case EventCodeStateMutation: // key, value, op (3 strings), delta (1 int64)
+		case EventCodeStateMutation: // key, value, op, stateKeys (4 strings), delta (1 int64)
 			ev.StateKey = r.readString()
 			ev.StateValue = r.readString()
 			ev.StateOp = r.readString()
 			ev.StateDelta = r.readInt64()
+			ev.StateKeys = r.readString()
 		case EventCodeRunDetached: // no string fields
-		case EventCodeFetch: // method, url, response, err (4 strings)
+		case EventCodeFetch: // method, url, headers, body, response, err (6 strings)
 			ev.FetchMethod = r.readString()
 			ev.FetchURL = r.readString()
+			ev.FetchHeaders = r.readString()
+			ev.FetchBody = r.readString()
 			ev.FetchResponse = r.readString()
 			ev.Err = r.readString()
-		case EventCodePluginCallStreamChunk: // pluginName, pluginFunc, input, output, err (5 strings)
+		case EventCodeScheduleCron, EventCodeDeleteCron, EventCodeListCrons:
+			// workflowName, expr, timezone, input, scheduleID, result, err (7 strings)
+			ev.CronWorkflowName = r.readString()
+			ev.CronExpr = r.readString()
+			ev.CronTimezone = r.readString()
+			ev.CronInput = r.readString()
+			ev.CronScheduleID = r.readString()
+			ev.CronResult = r.readString()
+			ev.Err = r.readString()
+		case EventCodePluginCallStreamChunk: // pluginName, pluginFunc, input, output, err (5 strings), chunkIndex (1 int64), finish (1 byte)
 			ev.PluginName = r.readString()
 			ev.PluginFunc = r.readString()
 			ev.PluginInput = r.readString()
 			ev.PluginOutput = r.readString()
 			ev.PluginError = r.readString()
+			ev.StreamChunkIndex = int(r.readInt64())
+			ev.StreamFinish = r.readByte()%2 == 1
 		case EventCodeSideEffect: // sideEffectResult (1 string)
 			ev.SideEffectResult = r.readString()
 		case EventCodeScopeAcquired: // scopeKey (1 string)
@@ -330,142 +376,103 @@ func (r *byteReader) readInt64() int64 {
 // ---------------------------------------------------------------------------
 // Equivalence checking
 // ---------------------------------------------------------------------------
+//
+// eventFieldsMatch used to be a hand-maintained switch, one field list per
+// EventType, checking only the fields its author knew a given event type
+// carried. That is exactly how S4a went undetected: ErrNonRetryable was
+// added to EventRecord and wired into the EventTypeCall constructors
+// (durablecalls.go, heartbeats.go), but nobody updated this switch's
+// EventTypeCall case to compare it, so a round trip that silently dropped
+// the bit still reported a match. TestCompactionRoundTripThenReplay's
+// EventTypeCall cases had run green throughout.
+//
+// It is now reflection-based instead: every exported EventRecord field is
+// compared for every event, unless the field name is listed in
+// compactionExemptFields with a reason. Adding a new field to EventRecord
+// and populating it from some event constructor is caught automatically the
+// next time a test event sets that field to a non-zero value -- no update to
+// this file is needed unless the new field genuinely cannot survive
+// compaction, in which case it must be added to compactionExemptFields
+// alongside a reason, the same way the fields below were audited.
 
-// eventFieldsMatch compares all round-tripped fields of two EventRecords and
-// returns true if they are equivalent. The comparison is type-specific: only
-// fields that are preserved through the compaction round-trip are checked.
+// compactionExemptFields lists EventRecord fields allowed to NOT survive a
+// compaction round-trip, each with the reason it cannot (or need not). Every
+// field is individually audited here as of 2026-08-09; re-derive with:
+//
+//	go doc -all github.com/cleat-team/cleat/engine.EventRecord
+//
+// and cross-check each new field against extractCompactionState /
+// buildFullHistoryFromCompaction (engine/compaction.go) before adding it.
+var compactionExemptFields = map[string]string{
+	"Step": "structural: assigned by reconstruction position (the loop index " +
+		"in buildFullHistoryFromCompaction), not carried inside CompactedEvent; " +
+		"compared explicitly by the a.Step != b.Step check below",
+	"EventType": "structural: recovered via codeToEventType, not a plain " +
+		"copied field; compared explicitly by the a.EventType != b.EventType " +
+		"check below",
+	"CreatedAt": "wall-clock time the row was inserted, documented on " +
+		"EventRecord (types.go) as being for admin timeline visualization " +
+		"only and may already be zero for events loaded without timestamps -- " +
+		"not required for deterministic replay",
+	"Pending": "derived read (json:\"-\"): computed from the intent_at/" +
+		"checksum columns at load time (store_intent.go), never itself a " +
+		"persisted value, so there is nothing for a JSONB compaction snapshot " +
+		"to carry",
+	"Idempotent": "not persisted to the event_history table in any store " +
+		"backend as of 2026-08-09 (no such column in store_event_write.go, " +
+		"mysql_events.go, or mssql_events.go: grep -rn '\"idempotent\"' " +
+		"engine/store_event_write.go engine/mysql_events.go engine/mssql_events.go " +
+		"returns nothing). The bit is already false by the time " +
+		"extractCompactionState receives the event -- it does not survive an " +
+		"ordinary restart-replay either, independent of compaction. plugins.go " +
+		"falls back to a live registry lookup for exactly this reason.",
+	"UpdatePayload": "declared on EventRecord but never assigned anywhere in " +
+		"the engine as of 2026-08-09 (grep -rn 'UpdatePayload:' engine/*.go " +
+		"outside types.go returns nothing) -- a dead field with nothing to " +
+		"lose. RegisterUpdateHandler (lifecycle.go) only ever sets " +
+		"UpdateHandlerName.",
+	"UpdateResponse": "dead field, see UpdatePayload",
+	"UpdateError":    "dead field, see UpdatePayload",
+}
+
+// eventFieldsMatch reports whether every non-exempt field of a and b is
+// equal.
 func eventFieldsMatch(a, b EventRecord) bool {
 	if a.Step != b.Step || a.EventType != b.EventType {
 		return false
 	}
-	switch a.EventType {
-	case EventTypeCall:
-		return a.Service == b.Service &&
-			a.Op == b.Op &&
-			a.Request == b.Request &&
-			a.Response == b.Response &&
-			a.Err == b.Err
-
-
-	case EventTypeAwaitSignals:
-		return a.SignalNames == b.SignalNames &&
-			a.TimeoutMs == b.TimeoutMs
-
-	case EventTypeSignalReceived:
-		return a.SignalName == b.SignalName &&
-			a.SignalPayload == b.SignalPayload
-
-	case EventTypeDefer:
-		return a.DeferID == b.DeferID &&
-			a.DeferDescription == b.DeferDescription
-
-	case EventTypeChildWorkflow:
-		return a.ChildName == b.ChildName &&
-			a.ChildInput == b.ChildInput &&
-			a.RunID == b.RunID
-
-	case EventTypeAwaitChild:
-		return a.RunID == b.RunID &&
-			a.Response == b.Response &&
-			a.Err == b.Err
-
-	case EventTypeContinueAsNew:
-		return a.NewInput == b.NewInput
-
-	case EventTypeHeartbeat:
-		return a.Service == b.Service &&
-			a.Op == b.Op
-
-	case EventTypeAwaitAllChildren:
-		// The Request field (runIDs JSON) is not preserved through
-		// compaction; only Response is needed for deterministic replay.
-		return a.Response == b.Response
-
-	case EventTypePluginCall:
-		return a.PluginName == b.PluginName &&
-			a.PluginFunc == b.PluginFunc &&
-			a.PluginInput == b.PluginInput &&
-			a.PluginOutput == b.PluginOutput &&
-			a.PluginError == b.PluginError
-
-	case EventTypeSideEffect:
-		return a.SideEffectResult == b.SideEffectResult
-
-	case EventTypeCreatePromise:
-		return a.PromiseName == b.PromiseName &&
-			a.PromiseID == b.PromiseID
-
-	case EventTypeAwaitPromise:
-		return a.PromiseID == b.PromiseID
-
-	case EventTypePromiseResolved:
-		return a.PromiseID == b.PromiseID &&
-			a.PromiseResult == b.PromiseResult
-
-	case EventTypePromiseRejected:
-		return a.PromiseID == b.PromiseID &&
-			a.PromiseError == b.PromiseError
-
-	case EventTypeUpdateHandler:
-		return a.UpdateHandlerName == b.UpdateHandlerName
-
-	case EventTypeStateMutation:
-		return a.StateKey == b.StateKey &&
-			a.StateValue == b.StateValue &&
-			a.StateDelta == b.StateDelta &&
-			a.StateOp == b.StateOp
-
-	case EventTypeRunDetached:
-		if a.DetachedName != b.DetachedName {
-			return false
-		}
-		if a.DetachedInput != b.DetachedInput {
-			return false
-		}
-		if a.DetachedRunID != b.DetachedRunID {
-			return false
-		}
-		return true
-	case EventTypeFetch:
-		return a.FetchMethod == b.FetchMethod &&
-			a.FetchURL == b.FetchURL &&
-			a.FetchResponse == b.FetchResponse &&
-			a.Err == b.Err
-	case EventTypePluginCallStreamChunk:
-		return a.PluginName == b.PluginName &&
-			a.PluginFunc == b.PluginFunc &&
-			a.PluginInput == b.PluginInput &&
-			a.PluginOutput == b.PluginOutput &&
-			a.PluginError == b.PluginError
-
-		case EventTypeAcquireLock:
-			return a.LockKey == b.LockKey &&
-				a.LockTTLMs == b.LockTTLMs &&
-				a.LockAcquired == b.LockAcquired
-
-	case EventTypeReleaseLock:
-		return a.LockKey == b.LockKey
-
-	case EventTypeScopeAcquired:
-		return a.ScopeKey == b.ScopeKey
-
-	case EventTypeDurableLog:
-		return a.Message == b.Message &&
-			a.LogLevel == b.LogLevel &&
-			a.LogKV == b.LogKV
-
-	case EventTypeDurableSend:
-		return a.Service == b.Service &&
-			a.Op == b.Op &&
-			a.Request == b.Request
-
-	case EventTypeDurableScheduleInvoke:
-		return a.Service == b.Service &&
-			a.Op == b.Op &&
-			a.Request == b.Request &&
-			a.DurationMs == b.DurationMs
+	if _, known := eventTypeToCode[a.EventType]; !known {
+		// An EventType extractCompactionState has no case for (see
+		// eventTypeToCode, compaction.go) cannot be claimed equivalent just
+		// because its fields happen to agree -- nothing here actually
+		// exercised how that type round-trips, since compaction does not
+		// know how to compact it. Preserves the pre-reflection behaviour's
+		// same refusal (TestEventFieldsMatch_AllEventTypes/Unknown_type).
+		return false
 	}
-	return false
+	return len(diffEventFields(a, b)) == 0
+}
+
+// diffEventFields returns the names of every non-exempt EventRecord field
+// that differs between a and b.
+func diffEventFields(a, b EventRecord) []string {
+	var diffs []string
+	av := reflect.ValueOf(a)
+	bv := reflect.ValueOf(b)
+	rt := av.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if _, exempt := compactionExemptFields[f.Name]; exempt {
+			continue
+		}
+		if !reflect.DeepEqual(av.Field(i).Interface(), bv.Field(i).Interface()) {
+			diffs = append(diffs, f.Name)
+		}
+	}
+	return diffs
 }
 
 // ---------------------------------------------------------------------------
@@ -535,10 +542,11 @@ func eventSummary(ev EventRecord) string {
 	}
 }
 
-// dumpEventDiff prints the differing fields between two events on t.Log.
+// dumpEventDiff prints every differing non-exempt field between two events
+// on t.Log, using the same reflection-based walk as diffEventFields so the
+// diagnostic output can never omit a field the pass/fail decision considered.
 func dumpEventDiff(t *testing.T, a, b EventRecord) {
 	t.Helper()
-	// Always print Step and Type.
 	if a.Step != b.Step {
 		t.Logf("  Step: %d vs %d", a.Step, b.Step)
 	}
@@ -546,109 +554,22 @@ func dumpEventDiff(t *testing.T, a, b EventRecord) {
 		t.Logf("  EventType: %s vs %s", a.EventType, b.EventType)
 		return
 	}
-	switch a.EventType {
-	case EventTypeCall:
-		mismatchStr("Service", a.Service, b.Service, t)
-		mismatchStr("Op", a.Op, b.Op, t)
-		mismatchStr("Request", a.Request, b.Request, t)
-		mismatchStr("Response", a.Response, b.Response, t)
-		mismatchStr("Err", a.Err, b.Err, t)
-	case EventTypeAwaitSignals:
-		mismatchStr("SignalNames", a.SignalNames, b.SignalNames, t)
-		mismatchInt("TimeoutMs", a.TimeoutMs, b.TimeoutMs, t)
-	case EventTypeSignalReceived:
-		mismatchStr("SignalName", a.SignalName, b.SignalName, t)
-		mismatchStr("SignalPayload", a.SignalPayload, b.SignalPayload, t)
-	case EventTypeDefer:
-		mismatchStr("DeferID", a.DeferID, b.DeferID, t)
-		mismatchStr("DeferDescription", a.DeferDescription, b.DeferDescription, t)
-	case EventTypeChildWorkflow:
-		mismatchStr("ChildName", a.ChildName, b.ChildName, t)
-		mismatchStr("ChildInput", a.ChildInput, b.ChildInput, t)
-		mismatchStr("RunID", a.RunID, b.RunID, t)
-	case EventTypeAwaitChild:
-		mismatchStr("RunID", a.RunID, b.RunID, t)
-		mismatchStr("Response", a.Response, b.Response, t)
-		mismatchStr("Err", a.Err, b.Err, t)
-	case EventTypeContinueAsNew:
-		mismatchStr("NewInput", a.NewInput, b.NewInput, t)
-	case EventTypeHeartbeat:
-		mismatchStr("Service", a.Service, b.Service, t)
-		mismatchStr("Op", a.Op, b.Op, t)
-	case EventTypeAwaitAllChildren:
-		mismatchStr("Response", a.Response, b.Response, t)
-	case EventTypePluginCall:
-		mismatchStr("PluginName", a.PluginName, b.PluginName, t)
-		mismatchStr("PluginFunc", a.PluginFunc, b.PluginFunc, t)
-		mismatchStr("PluginInput", a.PluginInput, b.PluginInput, t)
-		mismatchStr("PluginOutput", a.PluginOutput, b.PluginOutput, t)
-		mismatchStr("PluginError", a.PluginError, b.PluginError, t)
-	case EventTypeCreatePromise:
-		mismatchStr("PromiseName", a.PromiseName, b.PromiseName, t)
-		mismatchStr("PromiseID", a.PromiseID, b.PromiseID, t)
-	case EventTypeAwaitPromise:
-		mismatchStr("PromiseID", a.PromiseID, b.PromiseID, t)
-	case EventTypePromiseResolved:
-		mismatchStr("PromiseID", a.PromiseID, b.PromiseID, t)
-		mismatchStr("PromiseResult", a.PromiseResult, b.PromiseResult, t)
-	case EventTypePromiseRejected:
-		mismatchStr("PromiseID", a.PromiseID, b.PromiseID, t)
-		mismatchStr("PromiseError", a.PromiseError, b.PromiseError, t)
-	case EventTypeUpdateHandler:
-		mismatchStr("UpdateHandlerName", a.UpdateHandlerName, b.UpdateHandlerName, t)
-	case EventTypeStateMutation:
-		mismatchStr("StateKey", a.StateKey, b.StateKey, t)
-		mismatchStr("StateValue", a.StateValue, b.StateValue, t)
-		mismatchInt("StateDelta", a.StateDelta, b.StateDelta, t)
-		mismatchStr("StateOp", a.StateOp, b.StateOp, t)
-	case EventTypeRunDetached:
-		// No compacted fields.
-	case EventTypeFetch:
-		mismatchStr("FetchMethod", a.FetchMethod, b.FetchMethod, t)
-		mismatchStr("FetchURL", a.FetchURL, b.FetchURL, t)
-		mismatchStr("FetchResponse", a.FetchResponse, b.FetchResponse, t)
-		mismatchStr("Err", a.Err, b.Err, t)
-	case EventTypePluginCallStreamChunk:
-		mismatchStr("PluginName", a.PluginName, b.PluginName, t)
-		mismatchStr("PluginFunc", a.PluginFunc, b.PluginFunc, t)
-		mismatchStr("PluginInput", a.PluginInput, b.PluginInput, t)
-		mismatchStr("PluginOutput", a.PluginOutput, b.PluginOutput, t)
-		mismatchStr("PluginError", a.PluginError, b.PluginError, t)
-		case EventTypeSideEffect:
-			mismatchStr("SideEffectResult", a.SideEffectResult, b.SideEffectResult, t)
-		case EventTypeScopeAcquired:
-			mismatchStr("ScopeKey", a.ScopeKey, b.ScopeKey, t)
-		case EventTypeAcquireLock:
-			mismatchStr("LockKey", a.LockKey, b.LockKey, t)
-			mismatchInt("LockTTLMs", a.LockTTLMs, b.LockTTLMs, t)
-			mismatchInt("LockAcquired", int64(a.LockAcquired), int64(b.LockAcquired), t)
-		case EventTypeReleaseLock:
-			mismatchStr("LockKey", a.LockKey, b.LockKey, t)
-		case EventTypeDurableLog:
-			mismatchStr("Message", a.Message, b.Message, t)
-			mismatchStr("LogLevel", a.LogLevel, b.LogLevel, t)
-			mismatchStr("LogKV", a.LogKV, b.LogKV, t)
-		case EventTypeDurableSend:
-			mismatchStr("Service", a.Service, b.Service, t)
-			mismatchStr("Op", a.Op, b.Op, t)
-			mismatchStr("Request", a.Request, b.Request, t)
-		case EventTypeDurableScheduleInvoke:
-			mismatchStr("Service", a.Service, b.Service, t)
-			mismatchStr("Op", a.Op, b.Op, t)
-			mismatchStr("Request", a.Request, b.Request, t)
-			mismatchInt("DurationMs", a.DurationMs, b.DurationMs, t)
-	}
-}
-
-func mismatchStr(name, a, b string, t *testing.T) {
-	if a != b {
-		t.Logf("  %s: %q vs %q", name, a, b)
-	}
-}
-
-func mismatchInt(name string, a, b int64, t *testing.T) {
-	if a != b {
-		t.Logf("  %s: %d vs %d", name, a, b)
+	av := reflect.ValueOf(a)
+	bv := reflect.ValueOf(b)
+	rt := av.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if _, exempt := compactionExemptFields[f.Name]; exempt {
+			continue
+		}
+		af := av.Field(i).Interface()
+		bf := bv.Field(i).Interface()
+		if !reflect.DeepEqual(af, bf) {
+			t.Logf("  %s: %v vs %v", f.Name, af, bf)
+		}
 	}
 }
 

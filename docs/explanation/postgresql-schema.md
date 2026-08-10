@@ -5,12 +5,26 @@ roles: blob store, state store, work queue, and timer service.
 
 ## Schema File
 
-The canonical schema is in `schema.sql` at the project root. Run it against a
-PostgreSQL 14+ database before deploying workflows:
+The canonical schema is `migrations/postgres/`. Apply every file, in
+lexical order, against a PostgreSQL 16+ database before deploying workflows:
 
 ```bash
-psql -U postgres -d cleat -f schema.sql
+for f in migrations/postgres/*.sql; do psql -U postgres -d cleat -f "$f"; done
 ```
+
+All files are idempotent, so re-running them is safe.
+
+Apply **all** of them, not just `001_schema.sql`. `003_procedures.sql`
+creates `finalize_workflow_status`, which the engine calls on every workflow
+completion with no fallback — a database without it cannot finish a single
+workflow.
+
+> This document previously named a root `schema.sql` as canonical. That file
+> was a second, hand-maintained copy that had drifted into a strict subset of
+> the migrations: no stored procedures, no row-level security policies, and
+> no `admin.tenants`. It has been deleted rather than repaired, so there is
+> now exactly one source. See `engine/schema_bootstrap_test.go`, which builds
+> a database from these files and asserts the engine's requirements hold.
 
 ## Core Tables
 
@@ -275,7 +289,7 @@ CREATE TABLE workflow_update_requests (
 ### Current State
 
 Schema migrations are currently **manual**. There is no automated migration
-tool. Changes are applied by running `schema.sql` (which uses
+tool. Changes are applied by running `migrations/postgres/*.sql` (which use
 `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
 for idempotent application).
 
@@ -304,20 +318,28 @@ db.SetConnMaxLifetime(5 * time.Minute)
 For multi-tenant deployments, the worker supports sharded databases. Each
 shard has its own connection string and tenant assignment. The sharded store
 dispatches workflow operations to the correct shard by tenant ID. See
-`internal/host/sharded_store.go` and `cmd/cleat-worker/main.go` for
+`engine/sharded_store.go` and `cmd/cleat-worker/main.go` for
 implementation details.
 
 ---
 
 ## Cross-Database Type Mappings
 
-The project now supports three database backends: PostgreSQL 14+, MySQL 8.0+, and
-SQL Server 2017+. This section documents how types and SQL patterns map between
+> Corrected 2026-08-09: this section and the tables below said "SQL Server
+> 2017+" in 8 places (`grep -c 2017 docs/explanation/postgresql-schema.md`
+> before the fix). `tiers.yaml`'s `dialect_versions` states `mssql: ">=2022"`
+> -- tested against the digest pinned in `tier1-gate.yml`. There is no CI
+> matrix over database versions for any dialect; each is pinned to exactly
+> one, so 2022+ is a claim about what is verified, not a floor below which
+> things are known to break.
+
+The project now supports three database backends: PostgreSQL 16+, MySQL 8.0+, and
+SQL Server 2022+. This section documents how types and SQL patterns map between
 them.
 
 ### Data Type Mapping
 
-| PostgreSQL | MySQL 8.0+ | SQL Server 2017+ | Notes |
+| PostgreSQL | MySQL 8.0+ | SQL Server 2022+ | Notes |
 |---|---|---|---|
 | `UUID` | `CHAR(36)` | `UNIQUEIDENTIFIER` | UUIDs generated in Go via `uuid.New()`. PostgreSQL can also use `gen_random_uuid()`; MSSQL can use `NEWID()`. |
 | `TEXT` (PK or small column) | `VARCHAR(255)` | `NVARCHAR(64)` / `NVARCHAR(255)` | MySQL requires `VARCHAR` (not `TEXT`) for primary keys. MSSQL uses `NVARCHAR(64)` for UUID IDs, `NVARCHAR(255)` for names. |
@@ -336,7 +358,7 @@ them.
 
 ### Default Value Differences
 
-| PostgreSQL | MySQL 8.0+ | SQL Server 2017+ |
+| PostgreSQL | MySQL 8.0+ | SQL Server 2022+ |
 |---|---|---|
 | `now()` | `NOW(6)` | `SYSUTCDATETIME()` |
 | `gen_random_uuid()` | Go-side `uuid.New().String()` | `NEWID()` or Go-side |
@@ -346,7 +368,7 @@ them.
 
 ### Key SQL Translation Table
 
-| Operation | PostgreSQL | MySQL 8.0+ | SQL Server 2017+ |
+| Operation | PostgreSQL | MySQL 8.0+ | SQL Server 2022+ |
 |---|---|---|---|
 | Claim (skip locked) | `SELECT ... FOR UPDATE SKIP LOCKED` | `SELECT ... FOR UPDATE SKIP LOCKED` | `UPDATE ... SET ... OUTPUT INSERTED.* WHERE id IN (SELECT id FROM ... WITH (READPAST, UPDLOCK, ROWLOCK) ... OFFSET 0 ROWS FETCH NEXT N ROWS ONLY)` |
 | Upsert (no-op on conflict) | `INSERT ... ON CONFLICT DO NOTHING` | `INSERT IGNORE` | `INSERT ... SELECT ... WHERE NOT EXISTS (SELECT 1 FROM ...)` |
@@ -368,11 +390,11 @@ them.
 
 1. MySQL does not support `UPDATE ... RETURNING`. The claim pattern uses a two-step
    approach: (a) `SELECT id ... FOR UPDATE SKIP LOCKED`, then (b) `UPDATE ... WHERE id IN (...)`.
-   See `internal/host/mysql_store.go`.
+   See `engine/mysql_store.go`.
 
 ### Index Differences
 
-| Feature | PostgreSQL 14+ | MySQL 8.0+ | SQL Server 2017+ |
+| Feature | PostgreSQL 16+ | MySQL 8.0+ | SQL Server 2022+ |
 |---|---|---|---|
 | Partial indexes (WHERE clause) | Yes | **No** — partial indexes are omitted; application code adds the filter to queries | Yes — filtered indexes with deterministic predicates only |
 | Covering indexes (INCLUDE) | Yes (11+) | **No** — columns must be in the index key | Yes |
@@ -393,7 +415,7 @@ them.
 
 ### Row-Level Security Comparison
 
-| Aspect | PostgreSQL | MySQL 8.0+ | SQL Server 2017+ |
+| Aspect | PostgreSQL | MySQL 8.0+ | SQL Server 2022+ |
 |---|---|---|---|
 | Mechanism | `CREATE POLICY ... FOR ALL USING (tenant_id = current_setting('cleat.tenant_id')::uuid)` | Not available — application-layer `WHERE tenant_id = ?` on every query | `CREATE SECURITY POLICY ... ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.<table>` |
 | Session context | `current_setting('cleat.tenant_id', true)` | N/A | `SESSION_CONTEXT(N'tenant_id')` |
@@ -409,7 +431,7 @@ Each backend maintains a parallel set of migration files in:
 ```
 migrations/postgres/     -- Canonical PostgreSQL DDL
 migrations/mysql/        -- MySQL 8.0+ port (with MySQL differences documented in comments)
-migrations/mssql/        -- SQL Server 2017+ / Azure SQL port (T-SQL)
+migrations/mssql/        -- SQL Server 2022+ / Azure SQL port (T-SQL)
 ```
 
 Each MySQL migration file includes a comment block at the top documenting all
@@ -429,6 +451,63 @@ MySQL-specific deviations from the PostgreSQL original. For example, from
 
 The Go store implementations that translate queries for each backend are at:
 
-- `internal/host/store.go` — common interface and shared logic
-- `internal/host/mysql_store.go` — MySQL query translations
-- `internal/host/mssql_store.go` — MSSQL query translations
+- `engine/store.go` — common interface and shared logic
+- `engine/mysql_store.go` — MySQL query translations
+- `engine/mssql_store.go` — MSSQL query translations
+
+
+## Which role to connect as
+
+**Do not point `--db` at a superuser.** Tenant isolation depends on it.
+
+Every tenant-scoped table has row-level security enabled and `FORCE`d
+(`001_schema.sql`), and for `GetWorkflowByID` and `ListWorkflows` those policies
+are the *only* isolation there is — neither carries an application-level
+`tenant_id` filter. PostgreSQL never applies row-level security to a superuser,
+and there is no setting that changes that. A superuser connection therefore
+returns every tenant's data from those calls, however the policies are written.
+
+`005_app_role.sql` creates the role to use instead: `cleat_app`, which owns
+nothing, has no DDL rights, and is `NOSUPERUSER NOBYPASSRLS`. Ownership matters
+as much as superuser here — an owner is exempt from its own policies unless
+`FORCE` is set, so a role that owns nothing is subject to them unconditionally,
+rather than depending on a flag a later change could clear.
+
+The role is created `NOLOGIN` and without a password: a credential does not
+belong in a file that is committed, mounted into containers, and re-applied by
+every worker at boot. Give it one at deploy time:
+
+```sql
+ALTER ROLE cleat_app LOGIN PASSWORD '...';
+```
+
+`deploy/postgres/900-app-role.sh` does this for `docker-compose.cluster.yml`
+from `CLEAT_APP_PASSWORD`, and refuses to proceed if that variable is unset —
+so a missing password fails the deployment rather than quietly leaving the
+cluster on a superuser connection.
+
+Migrations still need DDL rights, so workers take two DSNs:
+
+```
+--db=postgres://cleat_app:...@host:5432/cleat        # runtime, unprivileged
+--migrate-db=postgres://owner:...@host:5432/cleat    # schema only
+```
+
+`--migrate-db` defaults to `--db`, so a deployment that has not been split
+keeps working as before.
+
+### The startup check
+
+On PostgreSQL the worker verifies at boot that its runtime connection really is
+subject to the policies, and reports every reason it is not — superuser,
+`BYPASSRLS`, row-level security switched off on a table that has policies, or
+ownership without `FORCE`. It also reports a database with no policies at all,
+which would otherwise pass every other check while isolating nothing.
+
+`--rls-check` controls what happens next:
+
+| Value | Behaviour |
+|---|---|
+| `auto` (default) | Refuse to start when `--require-auth` is set; warn otherwise |
+| `require` | Always refuse to start |
+| `off` | Skip the check |

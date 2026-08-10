@@ -18,9 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -51,13 +52,13 @@ type fakeLeaseRow struct {
 }
 
 type fakeDBStore struct {
-	mu                 sync.RWMutex
-	nextID             int64
-	configs            []fakeConfigRow
-	workflowInstances  []fakeWorkflowRow
-	apiKeys            map[string]string // key_hash_hex -> tenant_id
-	leases             map[string]fakeLeaseRow // lease_name -> lease
-	simulateErr        bool
+	mu                sync.RWMutex
+	nextID            int64
+	configs           []fakeConfigRow
+	workflowInstances []fakeWorkflowRow
+	apiKeys           map[string]string       // key_hash_hex -> tenant_id
+	leases            map[string]fakeLeaseRow // lease_name -> lease
+	simulateErr       bool
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -95,10 +96,11 @@ type fakeConn struct {
 func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
-func (*fakeConn) Close() error      { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
+
 func (*fakeTx) Commit() error   { return nil }
 func (*fakeTx) Rollback() error { return nil }
 
@@ -136,7 +138,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		return nil, fmt.Errorf("simulated db error")
 	}
 	switch {
-	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(query, "tenant_api_keys"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
@@ -290,7 +292,10 @@ func (c *fakeConn) execUpdateConfig(query string, args []driver.NamedValue) (dri
 						cfg.enabled = b
 					}
 				}
-				argIdx++
+				// Ineffectual only because this is the last SET clause. It
+				// keeps the positional counter correct so the next clause
+				// added below cannot silently reuse this one's $N.
+				argIdx++ //nolint:ineffassign // trailing counter; see above
 			}
 
 			cfg.updatedAt = time.Now()
@@ -649,8 +654,8 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -686,7 +691,7 @@ func TestConfigCreateAndGet(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("failed to decode create response: %v", err)
 	}
@@ -717,7 +722,7 @@ func TestConfigCreateAndGet(t *testing.T) {
 		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var fetched map[string]interface{}
+	var fetched map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &fetched); err != nil {
 		t.Fatalf("failed to decode get response: %v", err)
 	}
@@ -726,6 +731,77 @@ func TestConfigCreateAndGet(t *testing.T) {
 	}
 	if fetched["name"] != "test-config" {
 		t.Errorf("expected name 'test-config', got %s", fetched["name"])
+	}
+}
+
+// TestListAndGetDoNotLeakAPIKey verifies that neither the list nor the get
+// endpoint (nor create) ever returns the real Datadog API key in the
+// response body, and that there is no bypass -- redactAPIKey and its
+// ?show_api_key=true escape hatch have been removed; the plugin.Secret type
+// now redacts unconditionally.
+func TestListAndGetDoNotLeakAPIKey(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	const realKey = "dd-do-not-leak-me"
+	body := `{"name":"leak-test","api_key":"` + realKey + `"}`
+	req := authedRequest("POST", "/datadog/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("create response leaked the real api_key: %s", rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	if created["api_key"] != plugin.RedactedPlaceholder {
+		t.Errorf("create: expected api_key %q, got %v", plugin.RedactedPlaceholder, created["api_key"])
+	}
+	id := created["id"].(string)
+
+	// GET, including the former bypass query parameter -- it must no longer
+	// have any effect.
+	req = authedRequest("GET", "/datadog/configs/"+id+"?show_api_key=true", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("GET response (with ?show_api_key=true) leaked the real api_key: %s", rec.Body.String())
+	}
+	var fetched map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &fetched)
+	if fetched["api_key"] != plugin.RedactedPlaceholder {
+		t.Errorf("GET: expected api_key %q, got %v", plugin.RedactedPlaceholder, fetched["api_key"])
+	}
+
+	// LIST, also with the former bypass parameter.
+	req = authedRequest("GET", "/datadog/configs?show_api_key=true", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("LIST response (with ?show_api_key=true) leaked the real api_key: %s", rec.Body.String())
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("LIST: failed to decode: %v", err)
+	}
+	found := false
+	for _, c := range list {
+		if c["id"] == id {
+			found = true
+			if c["api_key"] != plugin.RedactedPlaceholder {
+				t.Errorf("LIST: expected api_key %q, got %v", plugin.RedactedPlaceholder, c["api_key"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected config %s in list response", id)
 	}
 }
 
@@ -752,7 +828,7 @@ func TestConfigList(t *testing.T) {
 		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var configs []map[string]interface{}
+	var configs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &configs); err != nil {
 		t.Fatalf("failed to decode list response: %v", err)
 	}
@@ -774,7 +850,7 @@ func TestConfigUpdate(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	id := created["id"].(string)
 
@@ -787,7 +863,7 @@ func TestConfigUpdate(t *testing.T) {
 		t.Fatalf("PUT: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var updated map[string]interface{}
+	var updated map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
 		t.Fatalf("failed to decode update response: %v", err)
 	}
@@ -817,7 +893,7 @@ func TestConfigDelete(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	id := created["id"].(string)
 
@@ -1047,7 +1123,7 @@ func TestCreateDefaults(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 
 	if created["site"] != "datadoghq.com" {
@@ -1164,8 +1240,8 @@ func TestDD_Run_Cancellation(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1304,8 +1380,8 @@ func TestDD_ErrorPaths_DBError_Create(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1332,8 +1408,8 @@ func TestDD_ErrorPaths_DBError_List(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1360,8 +1436,8 @@ func TestDD_ErrorPaths_DBError_Get(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1388,8 +1464,8 @@ func TestDD_ErrorPaths_DBError_Update(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1416,8 +1492,8 @@ func TestDD_ErrorPaths_DBError_Delete(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1442,8 +1518,8 @@ func TestDD_ExportMetrics_QueryError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	err := p.exportMetrics(context.Background())
@@ -1463,8 +1539,8 @@ func TestDD_ExportForConfig_QueryError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	cfg := ddConfigRow{

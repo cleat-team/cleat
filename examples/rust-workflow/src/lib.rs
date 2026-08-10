@@ -34,8 +34,18 @@ struct PlaceOrderInput {
 }
 
 /// Place an order: validate inventory, process payment, fulfill, notify.
+/// The fulfilment service's tracking response, and the workflow's result.
+///
+/// Serialize as well as Deserialize because place_order returns it: the
+/// boundary contract is a string containing a JSON-encoded object, and letting
+/// serde produce that from a typed value is how Rust satisfies it in one step.
+#[derive(Serialize, Deserialize)]
+struct Tracking {
+    tracking_id: String,
+}
+
 #[cleat_entry]
-fn place_order(h: &HostCalls, input: PlaceOrderInput) -> Result<String, String> {
+fn place_order(h: &HostCalls, input: PlaceOrderInput) -> Result<Tracking, String> {
     if input.cart.is_empty() {
         return Err("cart is empty".to_string());
     }
@@ -92,8 +102,6 @@ fn place_order(h: &HostCalls, input: PlaceOrderInput) -> Result<String, String> 
         return Err(format!("fulfillment failed: {}", e));
     }
 
-    #[derive(Deserialize)]
-    struct Tracking { tracking_id: String }
     let tracking: Tracking = serde_json::from_str(&tracking_json)
         .map_err(|e| format!("bad tracking response: {}", e))?;
 
@@ -102,7 +110,22 @@ fn place_order(h: &HostCalls, input: PlaceOrderInput) -> Result<String, String> 
         &serde_json::json!({"user_id": input.user_id, "tracking_id": tracking.tracking_id}).to_string());
 
     h.cleat_log(&format!("Order complete: {}", tracking.tracking_id));
-    Ok(tracking.tracking_id)
+
+    // Return the object, not the bare id.
+    //
+    // The boundary contract is a string containing a JSON-encoded object.
+    // Ok(tracking.tracking_id) gave serde a String, which it serialised to
+    // "TRACK-123456" -- a JSON string, not an object. Go's fixture had the same
+    // shape, so the two AGREED by both being wrong and the cross-replay result
+    // comparison passed.
+    //
+    // Rust does not need the SDK changed for this: format_cleat_result already
+    // serialises a typed value exactly once, so returning the struct produces
+    // the object directly. Go has no typed-result path, so its fixture builds
+    // the JSON text and the generated wrapper passes it through. Different
+    // routes, identical bytes -- which is what the cross-language comparison
+    // checks.
+    Ok(tracking)
 }
 
 /// A cancellation-aware entry point.

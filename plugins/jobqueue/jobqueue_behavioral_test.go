@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -47,10 +47,10 @@ type jqRow struct {
 // fakeJobQueueStore is a goroutine-safe in-memory store for the task_queue
 // table and tenant API keys.
 type fakeJobQueueStore struct {
-	mu      sync.RWMutex
-	rows    map[string]*jqRow // "tenantID:queueName:jobID" -> row
-	apiKeys map[string]string // hex(key_hash) -> tenant_id string
-	now     func() time.Time
+	mu            sync.RWMutex
+	rows          map[string]*jqRow // "tenantID:queueName:jobID" -> row
+	apiKeys       map[string]string // hex(key_hash) -> tenant_id string
+	now           func() time.Time
 	failNextExec  bool // if true, next ExecContext returns error (cleared after use)
 	failNextQuery bool // if true, next QueryContext returns error (cleared after use)
 	querySkip     int  // number of queries to let succeed before failNextQuery takes effect
@@ -609,7 +609,7 @@ func (c *fakeConn) queryListJobs(query string, args []driver.NamedValue) (driver
 	hasStatusFilter := strings.Contains(query, "AND status =")
 
 	var statusFilter string
-	var limit int64 = 50
+	var limit int64
 	if hasStatusFilter {
 		statusFilter, err = argString(args, 3)
 		if err != nil {
@@ -842,7 +842,7 @@ func TestEnqueueJob(t *testing.T) {
 		t.Fatalf("expected 201 Created, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -950,7 +950,7 @@ func TestListJobs(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var jobs []map[string]interface{}
+	var jobs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &jobs); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -985,7 +985,7 @@ func TestGetSingleJob(t *testing.T) {
 		t.Fatalf("enqueue: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var enqueueResp map[string]interface{}
+	var enqueueResp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &enqueueResp)
 	jobID := enqueueResp["job_id"].(string)
 
@@ -998,7 +998,7 @@ func TestGetSingleJob(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var jobResp map[string]interface{}
+	var jobResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &jobResp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -1027,7 +1027,7 @@ func TestCancelJob(t *testing.T) {
 		t.Fatalf("enqueue: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var enqueueResp map[string]interface{}
+	var enqueueResp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &enqueueResp)
 	jobID := enqueueResp["job_id"].(string)
 
@@ -1121,7 +1121,7 @@ func TestPollSkipsNonPending(t *testing.T) {
 	runningID := uuid.New().String()
 	completedID := uuid.New().String()
 	failedID := uuid.New().String()
-	
+
 	store.mu.Lock()
 	store.rows[rowKey(testTenantID.String(), "q", pendingID)] = &jqRow{tenantID: testTenantID.String(), queueName: "q", jobID: pendingID, status: "pending", createdAt: now}
 	store.rows[rowKey(testTenantID.String(), "q", runningID)] = &jqRow{tenantID: testTenantID.String(), queueName: "q", jobID: runningID, status: "running", createdAt: now, startedAt: &now}
@@ -1163,7 +1163,7 @@ func TestEmptyJobList(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var jobs []interface{}
+	var jobs []any
 	if err := json.Unmarshal(rec.Body.Bytes(), &jobs); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -1187,7 +1187,7 @@ func TestListWithStatusFilter(t *testing.T) {
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("enqueue %d: expected 201, got %d", i, rec.Code)
 		}
-		var resp map[string]interface{}
+		var resp map[string]any
 		json.Unmarshal(rec.Body.Bytes(), &resp)
 		jobIDs[i] = resp["job_id"].(string)
 	}
@@ -1207,7 +1207,7 @@ func TestListWithStatusFilter(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list pending: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var pendingJobs []map[string]interface{}
+	var pendingJobs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &pendingJobs); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -1227,7 +1227,7 @@ func TestListWithStatusFilter(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list failed: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var failedJobs []map[string]interface{}
+	var failedJobs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &failedJobs); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -1245,7 +1245,7 @@ func TestListWithStatusFilter(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list running: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var runningJobs []interface{}
+	var runningJobs []any
 	if err := json.Unmarshal(rec.Body.Bytes(), &runningJobs); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -1351,7 +1351,7 @@ func TestEnqueueWithEmptyPayload(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	jobID := resp["job_id"].(string)
 
@@ -1720,7 +1720,7 @@ func TestJQ_ListJobs_TenantIsolation(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("tenant1 list: expected 200, got %d", rec.Code)
 	}
-	var jobs1 []map[string]interface{}
+	var jobs1 []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &jobs1); err != nil {
 		t.Fatalf("tenant1 decode: %v", err)
 	}
@@ -1736,7 +1736,7 @@ func TestJQ_ListJobs_TenantIsolation(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("tenant2 list: expected 200, got %d", rec2.Code)
 	}
-	var jobs2 []map[string]interface{}
+	var jobs2 []map[string]any
 	if err := json.Unmarshal(rec2.Body.Bytes(), &jobs2); err != nil {
 		t.Fatalf("tenant2 decode: %v", err)
 	}
@@ -1760,7 +1760,7 @@ func TestJQ_CancelNonPendingJob(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("enqueue: expected 201, got %d", rec.Code)
 	}
-	var enqueueResp map[string]interface{}
+	var enqueueResp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &enqueueResp)
 	jobID := enqueueResp["job_id"].(string)
 
@@ -1796,7 +1796,7 @@ func TestJQ_Enqueue_AllFields(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	jobID := resp["job_id"].(string)
 

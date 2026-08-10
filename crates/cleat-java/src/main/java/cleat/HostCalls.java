@@ -25,16 +25,22 @@ import org.teavm.interop.Import;
  * expected.
  * <p>
  * <strong>Usage:</strong> Workflow entry-point methods receive a
- * {@code HostCalls} instance as their first parameter:
+ * {@code HostCalls} instance as their first parameter. Return a {@link Map},
+ * not a {@link String} holding hand-built JSON text -- the generated export
+ * wrapper calls {@link JsonHelper#stringify(Object)} on the return value, and
+ * stringifying a String that already contains JSON produces a JSON string
+ * containing JSON rather than an object:
  * <pre>{@code
  * @CleatEntry(name = "place_order")
- * public static String placeOrder(HostCalls h, String input) {
+ * public static Map<String, Object> placeOrder(HostCalls h, String input) {
  *     h.cleatLog("Processing order");
  *     CleatResult<String> reserved = h.cleatCall("inventory", "Reserve", input);
  *     if (reserved.isErr()) {
- *         return "{\"error\": \"reservation failed\"}";
+ *         return Map.of("error", "reservation failed");
  *     }
- *     return reserved.getValue();
+ *     // reserved.getValue() is itself JSON text from the host call --
+ *     // parse it so it nests as an object instead of escaped text.
+ *     return JsonHelper.parseObject(reserved.getValue());
  * }
  * }</pre>
  *
@@ -186,9 +192,6 @@ public class HostCalls {
 
     @Import(module = "env", name = "schedule_invoke")
     private static native long scheduleInvokeRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen, long delayMs);
-
-    @Import(module = "env", name = "cleat_register_query_handler")
-    private static native long cleatRegisterQueryHandlerRaw(int namePtr, int nameLen);
 
     @Import(module = "env", name = "cleat_run_detached")
     private static native long cleatRunDetachedRaw(int namePtr, int nameLen, int inputPtr, int inputLen);
@@ -1645,25 +1648,18 @@ public class HostCalls {
 
 
     // ========================================================================
-    // Query handlers
-    // ========================================================================
-
-    /**
-     * Register a handler for a named query.
-     * <p>
-     * External clients can query this workflow using the cleat query API.
-     * The registered handler name is advertised to clients.
-     *
-     * @param name the query handler name
-     */
-    public void registerQueryHandler(String name) {
-        int[] p = packStrings(name);
-        cleatRegisterQueryHandlerRaw(p[0], p[1]);
-    }
-
-    // ========================================================================
     // Detached execution
     // ========================================================================
+    //
+    // There is no registerQueryHandler here (removed 2026-08-09; previously
+    // in this section). Its doc comment claimed "External clients can query
+    // this workflow using the cleat query API. The registered handler name
+    // is advertised to clients" -- neither half was true: nothing ever
+    // advertised the name anywhere, and no worker code ever routed an
+    // external query to the handler. See docs/determinism.md, "Why there is
+    // no RegisterQueryHandler". Use setQueryState instead; it is durable and
+    // externally readable via GET /api/workflows/:id/query?key=X regardless
+    // of whether a worker currently has the workflow loaded.
 
     /**
      * Run a workflow in detached mode (fire-and-forget).

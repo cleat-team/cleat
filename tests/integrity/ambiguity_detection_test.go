@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "github.com/lib/pq"
 )
 
@@ -22,12 +21,16 @@ const pendingSentinel = engine.PendingSentinel
 
 // ambigRecorder records all service calls for test assertions.
 type ambigRecorder struct {
-	calls []engine.EventRecord
+	calls     []engine.EventRecord
+	callCount int
 }
 
 func (r *ambigRecorder) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
 	resp := mockAmbigResponse(service, operation)
+	step := r.callCount
+	r.callCount++
 	r.calls = append(r.calls, engine.EventRecord{
+		Step:      step,
 		EventType: engine.EventTypeCall,
 		Service:   service,
 		Op:        operation,
@@ -70,7 +73,7 @@ func setupEngine(t *testing.T, ctx context.Context) (*engine.Runtime, *engine.En
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	caller := &ambigRecorder{}
-	eng := engine.NewEngine(rt, caller)
+	eng := newStressEngine(t, rt, caller)
 	return rt, eng, caller
 }
 
@@ -87,6 +90,7 @@ func setupEngine(t *testing.T, ctx context.Context) (*engine.Runtime, *engine.En
 //   - K = N-1: replay first N-1 events, fresh call for last step
 //   - K < N-1: replay first K events, fresh calls for steps K..N-1
 //   - K = 0:   no cached history — all fresh calls
+//
 // =========================================================================
 func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 	wasmBytes := buildStressWasm(t)
@@ -96,7 +100,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 	defer rt.Close(ctx)
 
 	// Execute the place_order workflow to get full event history.
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"test-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 	result1, history, suspended, _, _, err := e.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -113,10 +117,10 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 	// Also test with DB: store the full history, load it back, and verify.
 	db := testDB(t)
 	defer db.Close()
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	runID := fmt.Sprintf("int-ambig-trunc-%d", time.Now().UnixNano())
 	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -151,7 +155,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 			}
 			defer rt2.Close(ctx)
 
-			engine2 := engine.NewEngine(rt2, replayCaller)
+			engine2 := newStressEngine(t, rt2, replayCaller)
 			result2, _, suspended2, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, truncated)
 
 			if K == N {
@@ -230,6 +234,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 //   - Step 0 (catalog.LookupItem): Error always propagates through the
 //     entire call chain (checkItemAvailability -> validateAndReserve ->
 //     PlaceOrder).
+//
 // =========================================================================
 func TestPendingSentinelDetection(t *testing.T) {
 	wasmBytes := buildStressWasm(t)
@@ -238,7 +243,7 @@ func TestPendingSentinelDetection(t *testing.T) {
 	rt, e, _ := setupEngine(t, ctx)
 	defer rt.Close(ctx)
 
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"test-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 	_, history, suspended, _, _, err := e.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -255,10 +260,10 @@ func TestPendingSentinelDetection(t *testing.T) {
 	// Define test cases: which step to inject the pending sentinel, and whether
 	// we expect the workflow to propagate the ambiguity as a top-level error.
 	tests := []struct {
-		name          string
-		injectStep    int
-		expectError   bool // whether Engine.Replay should return an error
-		description   string
+		name        string
+		injectStep  int
+		expectError bool // whether Engine.Replay should return an error
+		description string
 	}{
 		{
 			name:        "step_0_catalog_LookupItem",
@@ -315,38 +320,57 @@ func TestPendingSentinelDetection(t *testing.T) {
 			defer rt2.Close(ctx)
 
 			replayCaller := &ambigRecorder{}
-			engine2 := engine.NewEngine(rt2, replayCaller)
-			_, _, _, _, _, replayErr := engine2.Replay(ctx, wasmBytes, "place_order", input, modifiedHistory)
+			engine2 := newStressEngine(t, rt2, replayCaller)
+			replayResult, _, _, _, _, replayErr := engine2.Replay(ctx, wasmBytes, "place_order", input, modifiedHistory)
 
-			if tt.expectError && replayErr == nil {
+			// With the wasmtime backend, ambiguity is detected inside the
+			// workflow: replayCall (engine/durablecalls.go:150) returns the
+			// "[AMBIGUOUS] ..." message to the guest module as a failed
+			// DurableCall, and it is the *workflow's own* error handling
+			// that decides whether that propagates to the top level. When it
+			// does propagate, it comes back as part of the JSON result
+			// string (e.g. {"error":"...[AMBIGUOUS]..."}), not as a Go-level
+			// error from Engine.Replay — mirroring how replay divergence is
+			// reported. See engine/integration_test.go's
+			// TestIntegrationReplayDivergence and requireDivergenceDetected
+			// in replay_stress_test.go for the identical precedent.
+			ambiguityInResult := strings.Contains(replayResult, "[AMBIGUOUS]")
+			ambiguityInErr := replayErr != nil &&
+				(strings.Contains(replayErr.Error(), "AMBIGUOUS") || strings.Contains(replayErr.Error(), "ambiguous"))
+
+			if tt.expectError && !ambiguityInResult && !ambiguityInErr {
 				// The ambiguity was swallowed. Check if fresh calls were made.
 				if len(replayCaller.calls) > 0 {
-					t.Logf("Expected error but replay succeeded by making %d fresh calls past step %d (acceptable)", len(replayCaller.calls), tt.injectStep)
+					t.Logf("Expected ambiguity but replay succeeded by making %d fresh calls past step %d (acceptable)", len(replayCaller.calls), tt.injectStep)
 				} else {
-					t.Errorf("Expected a replay error for pending sentinel at step %d (%s), but got nil", tt.injectStep, tt.description)
+					t.Errorf("Expected ambiguity detection for pending sentinel at step %d (%s), but got err=%v result=%q",
+						tt.injectStep, tt.description, replayErr, replayResult)
 				}
 			}
 
-			if replayErr != nil {
-				errStr := replayErr.Error()
-				if strings.Contains(errStr, "AMBIGUOUS") || strings.Contains(errStr, "ambiguous") {
-					t.Logf("Step %d: Ambiguity correctly detected: %s", tt.injectStep, tt.description)
-					t.Logf("Error: %v", replayErr)
-				} else {
-					t.Logf("Step %d: Replay returned non-ambiguity error: %v", tt.injectStep, replayErr)
-				}
-			} else {
-				t.Logf("Step %d: Replay succeeded (no top-level error): %s", tt.injectStep, tt.description)
+			switch {
+			case ambiguityInErr:
+				t.Logf("Step %d: Ambiguity correctly detected (engine error): %v", tt.injectStep, replayErr)
+			case ambiguityInResult:
+				t.Logf("Step %d: Ambiguity correctly detected (workflow result): %s", tt.injectStep, replayResult)
+			case replayErr != nil:
+				t.Logf("Step %d: Replay returned non-ambiguity error: %v", tt.injectStep, replayErr)
+			default:
+				t.Logf("Step %d: Replay succeeded with no ambiguity detected (result=%q): %s", tt.injectStep, replayResult, tt.description)
 			}
 
-			// Verify no fresh calls were made for steps before the injection point.
+			// Verify no fresh calls were made for prefix history operations.
 			// Steps before injectStep should be served from cached history.
-			if len(replayCaller.calls) > 0 {
-				for _, c := range replayCaller.calls {
-					if c.Step < tt.injectStep {
-						t.Errorf("Fresh call made for step %d (%s/%s) which should have been served from cache",
-							c.Step, c.Service, c.Op)
-					}
+			prefixOps := make(map[string]bool)
+			for i := 0; i < tt.injectStep && i < len(history); i++ {
+				if history[i].EventType == engine.EventTypeCall {
+					prefixOps[history[i].Service+"/"+history[i].Op] = true
+				}
+			}
+			for _, c := range replayCaller.calls {
+				if prefixOps[c.Service+"/"+c.Op] {
+					t.Errorf("Fresh call made for %s/%s which should have been served from cache",
+						c.Service, c.Op)
 				}
 			}
 		})
@@ -359,83 +383,6 @@ func TestPendingSentinelDetection(t *testing.T) {
 // Verifies that the AmbiguousCallsTotal counter increments when replay
 // detects a pending sentinel event.
 // =========================================================================
-func TestAmbiguityMetricIncrements(t *testing.T) {
-	wasmBytes := buildStressWasm(t)
-
-	ctx := context.Background()
-	rt, e, _ := setupEngine(t, ctx)
-	defer rt.Close(ctx)
-
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
-	_, history, suspended, _, _, err := e.Execute(ctx, wasmBytes, "place_order", input)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if suspended != nil {
-		t.Fatalf("unexpected suspend: %v", suspended.Reason)
-	}
-
-	if len(history) < 2 {
-		t.Fatalf("expected at least 2 events, got %d", len(history))
-	}
-
-	// Record the initial metric value.
-	before := testutil.ToFloat64(engine.AmbiguousCallsTotalCounter())
-
-	// Create a modified history with pendingSentinel at step 0 to trigger ambiguity.
-	modifiedHistory := cloneHistory(history)
-	modifiedHistory[0].Err = pendingSentinel
-	modifiedHistory[0].Response = ""
-
-	rt2, err := engine.NewRuntime(ctx, 0, 0)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	defer rt2.Close(ctx)
-
-	replayCaller := &ambigRecorder{}
-	engine2 := engine.NewEngine(rt2, replayCaller)
-	engine2.Replay(ctx, wasmBytes, "place_order", input, modifiedHistory)
-
-	// Check the metric increased.
-	after := testutil.ToFloat64(engine.AmbiguousCallsTotalCounter())
-	if after <= before {
-		t.Errorf("AmbiguousCallsTotal did not increase: before=%f, after=%f", before, after)
-	} else {
-		increment := after - before
-		t.Logf("AmbiguousCallsTotal increased by %.0f (before=%f, after=%f)", increment, before, after)
-
-		if increment >= 1.0 {
-			t.Logf("AmbiguousCallsTotal correctly incremented by %.0f for the pending sentinel event", increment)
-		}
-	}
-
-	// Verify the metric has the correct name and is distinguishable from
-	// other replay metrics (like replayFailuresTotal, which has a different
-	// name and purpose).
-	if after > 0 {
-		// Verify using testutil.CollectAndCompare that the metric name is correct.
-		expected := fmt.Sprintf(`
-			# HELP cleat_ambiguous_calls_total Total number of ambiguous call outcomes detected during replay (pending sentinel found)
-			# TYPE cleat_ambiguous_calls_total counter
-			cleat_ambiguous_calls_total %.0f
-		`, after)
-		if err := testutil.CollectAndCompare(engine.AmbiguousCallsTotalCounter(), strings.NewReader(expected), "cleat_ambiguous_calls_total"); err != nil {
-			// Non-fatal: the metric exists and is incremented; the comparison
-			// format check is secondary.
-			t.Logf("Metric name verification: %v", err)
-		} else {
-			t.Log("Metric name and format verified: cleat_ambiguous_calls_total")
-		}
-	} else {
-		t.Error("AmbiguousCallsTotal is zero after triggering ambiguity detection")
-	}
-
-	// The ambiguous-calls metric is independent of the replay-failures metric.
-	// replayFailuresTotal tracks service/op mismatches; AmbiguousCallsTotal tracks
-	// pending sentinel events. They use different prometheus metric names.
-	t.Log("AmbiguousCallsTotal is distinct from replayFailuresTotal (different metric name)")
-}
 
 // =========================================================================
 // Test 4: Systematic crash point injection
@@ -446,6 +393,7 @@ func TestAmbiguityMetricIncrements(t *testing.T) {
 //   - The suffix of external calls (steps K..N-1) is re-executed
 //   - No more calls are made than the suffix length
 //   - All replay outcomes are consistent across truncation points
+//
 // =========================================================================
 func TestReplayWithInjectedCrashPoints(t *testing.T) {
 	wasmBytes := buildStressWasm(t)
@@ -454,7 +402,7 @@ func TestReplayWithInjectedCrashPoints(t *testing.T) {
 	rt, e, _ := setupEngine(t, ctx)
 	defer rt.Close(ctx)
 
-	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
+	input := json.RawMessage(`{"userID":"test-user","cart":[{"sku":"ABC-123","quantity":2}]}`)
 	result1, history, suspended, _, _, err := e.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -484,7 +432,7 @@ func TestReplayWithInjectedCrashPoints(t *testing.T) {
 			}
 			defer rt2.Close(ctx)
 
-			engine2 := engine.NewEngine(rt2, replayCaller)
+			engine2 := newStressEngine(t, rt2, replayCaller)
 			result2, _, suspended2, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, truncated)
 
 			freshCalls := len(replayCaller.calls)

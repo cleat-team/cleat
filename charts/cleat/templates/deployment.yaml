@@ -30,8 +30,7 @@ spec:
           args:
             - "--db=$(DATABASE_URL)"
             - "--concurrency={{ .Values.worker.concurrency }}"
-            - "--tenant-id={{ .Values.worker.tenantId }}"
-            - "--namespace={{ .Values.worker.taskQueues }}"
+            - "--task-queue={{ .Values.worker.taskQueues }}"
             - "--api-addr=:{{ .Values.api.port }}"
             - "--heartbeat={{ .Values.worker.heartbeatInterval }}"
             - "--poll={{ .Values.worker.pollInterval }}"
@@ -45,6 +44,22 @@ spec:
                   name: {{ include "cleat.fullname" . }}
                   {{- end }}
                   key: database-url
+            {{- if or .Values.auth.existingSecret .Values.auth.adminApiKey }}
+            # Consumed only by the preStop hook below, to authenticate its own
+            # call to /api/admin/drain (--require-auth defaults to true; see
+            # values.yaml's auth section for why this can't be provisioned
+            # automatically).
+            - name: CLEAT_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.auth.existingSecret }}
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "cleat.fullname" . }}-auth
+                  key: admin-api-key
+                  {{- end }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.api.port }}
@@ -67,7 +82,12 @@ spec:
                 command:
                   - /bin/sh
                   - -c
-                  - "wget -q -O- --post-data='{}' http://localhost:{{ .Values.api.port }}/api/admin/drain || true"
+                  # `|| true`: pod termination must not block on this call (an
+                  # unreachable or slow API server should not delay shutdown),
+                  # so a still-missing CLEAT_ADMIN_API_KEY (see values.yaml's
+                  # auth section) fails the same way it always silently has --
+                  # this only fixes the case where a key *is* configured.
+                  - "wget -q -O- --header=\"Authorization: Bearer ${CLEAT_ADMIN_API_KEY}\" --post-data='{}' http://localhost:{{ .Values.api.port }}/api/admin/drain || true"
           {{- with .Values.containerSecurityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}

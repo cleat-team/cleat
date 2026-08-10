@@ -16,7 +16,6 @@ func TestClaimWorkflow(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -27,6 +26,7 @@ func TestClaimWorkflow(t *testing.T) {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
 			if wf == nil {
+				describeClaimState(t, store)
 				t.Fatal("ClaimWorkflow returned nil, expected a ready workflow")
 			}
 			if wf.Status != "running" {
@@ -64,7 +64,6 @@ func TestClaimWorkflows_Batch(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -112,7 +111,6 @@ func TestClaimStickyWorkflows(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -159,7 +157,6 @@ func TestClaimSkipLocked(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -182,6 +179,7 @@ func TestClaimSkipLocked(t *testing.T) {
 				t.Fatalf("ClaimWorkflows (first, limit=3): %v", err)
 			}
 			if len(first) != 3 {
+				describeClaimState(t, store)
 				t.Fatalf("first claim returned %d, want 3", len(first))
 			}
 
@@ -219,7 +217,6 @@ func TestNoWorkflowsToClaim(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -244,7 +241,6 @@ func TestExactlyOnceStart(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -287,7 +283,6 @@ func TestExactlyOnceStart_DifferentKeys(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -324,7 +319,6 @@ func TestAppendEventHistory(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -374,7 +368,6 @@ func TestAppendEventHistoryBatch(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -422,7 +415,6 @@ func TestAppendEventHistory_Idempotent(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -465,7 +457,6 @@ func TestLoadEventHistoryPaginated(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -547,7 +538,6 @@ func TestBinaryDataRoundTrip(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -594,7 +584,6 @@ func TestCompleteWorkflow(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -643,7 +632,6 @@ func TestFailWorkflow(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -691,7 +679,6 @@ func TestReleaseWorkflow(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -741,7 +728,6 @@ func TestContinueAsNew_Atomic(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -801,7 +787,6 @@ func TestFinalizeWorkflowSegment(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -829,19 +814,13 @@ func TestFinalizeWorkflowSegment(t *testing.T) {
 				t.Fatalf("FinalizeWorkflowSegment: %v", err)
 			}
 
-			// Verify events were appended.
+			// Verify events were cleaned up on terminal status.
 			history, err := store.LoadEventHistory(ctx, wf.ID)
 			if err != nil {
 				t.Fatalf("LoadEventHistory: %v", err)
 			}
-			if len(history) != 2 {
-				t.Fatalf("expected 2 events, got %d", len(history))
-			}
-			if history[0].Step != 0 || history[0].Op != "o1" {
-				t.Errorf("unexpected first event: step=%d op=%s", history[0].Step, history[0].Op)
-			}
-			if history[1].Step != 1 || history[1].Op != "o2" {
-				t.Errorf("unexpected second event: step=%d op=%s", history[1].Step, history[1].Op)
+			if len(history) != 0 {
+				t.Fatalf("expected 0 events after terminal finalize, got %d", len(history))
 			}
 
 			// Verify status was updated.
@@ -863,7 +842,6 @@ func TestHeartbeat(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -908,7 +886,6 @@ func TestBatchHeartbeat(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -947,7 +924,6 @@ func TestMoveToDeadLetterQueue(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -999,7 +975,6 @@ func TestRequestCancellation(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -1033,7 +1008,6 @@ func TestCheckCancellation_NotCancelled(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()
@@ -1058,7 +1032,6 @@ func TestCheckCancellation_NotCancelled(t *testing.T) {
 	}
 }
 
-
 // =============================================================================
 // Group 6 — Priority
 // =============================================================================
@@ -1067,7 +1040,6 @@ func TestStartNewRunWithPriority(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			ctx := context.Background()

@@ -37,11 +37,6 @@ type Config struct {
 	Result    *analyzer.AnalysisResult
 	CallGraph *callgraph.Graph
 	Closure   *closure.Result
-
-	// Target is the compilation target ("tinygo" for Go code).
-	// The direct-call transform is skipped because TinyGo's asyncify
-	// scheduler needs function pointer indirection for goroutine switching.
-	Target string
 }
 
 // Transform modifies ASTs to automatically thread cleat.HostCalls.
@@ -502,6 +497,7 @@ func buildFuncFileMap(files []*ast.File, result *analyzer.AnalysisResult) map[st
 	}
 	return m
 }
+
 // unifiedDiff returns a unified-format diff between oldContent and newContent
 // for the given filename, or an empty string if there are no differences.
 func unifiedDiff(filename string, oldContent, newContent []byte) string {
@@ -517,8 +513,8 @@ func unifiedDiff(filename string, oldContent, newContent []byte) string {
 	}
 
 	type edit struct {
-		op    byte   // ' ', '-', '+'
-		lineN int    // line number in original (for ' ' and '-') or new (for '+')
+		op    byte // ' ', '-', '+'
+		lineN int  // line number in original (for ' ' and '-') or new (for '+')
 		text  string
 	}
 

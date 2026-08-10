@@ -345,9 +345,9 @@ func TestSanitizeIdent(t *testing.T) {
 		{"hello_world", "hello_world"},
 		{"hello-world", "hello_world"},
 		{"hello.world", "hello_world"},
-		{"123abc", "_23abc"},    // runs consume digits, but first digit is replaced with _
+		{"123abc", "_23abc"}, // runs consume digits, but first digit is replaced with _
 		{"", "empty"},
-		{"   ", "___"},          // non-alphanumeric chars become _
+		{"   ", "___"}, // non-alphanumeric chars become _
 		{"_leading", "_leading"},
 		{"abc-def_ghi", "abc_def_ghi"},
 	}
@@ -444,7 +444,6 @@ func TestGenerateGo_WithOptionalField(t *testing.T) {
 	}
 }
 
-
 // ---- getPyDefault ----
 
 func TestGetPyDefault(t *testing.T) {
@@ -495,4 +494,3 @@ func TestGetRustSerdeAttr(t *testing.T) {
 		})
 	}
 }
-

@@ -348,7 +348,7 @@ func TestJSONLogFormat(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger.InfoContext(context.Background(), "test message", "workflow_id", "wf-123", "tenant_id", "t-456")
 
-	var entry map[string]interface{}
+	var entry map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
 		t.Fatalf("log output is not valid JSON: %v\nGot: %s", err, buf.String())
 	}

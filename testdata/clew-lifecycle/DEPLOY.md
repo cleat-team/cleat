@@ -10,9 +10,8 @@
 
 ## Build
 
-The workflow is a Go WASI/WASM binary. Use TinyGo for smaller, stable binaries
-(standard Go produces larger binaries that may crash with "out of bounds memory
-access" on wazero). Build with the cleat CLI:
+The workflow is a Go WASI/WASM binary, built with the standard Go toolchain
+targeting wasip1. Build with the cleat CLI:
 
 ```sh
 cd /localssd/rcownie/cleat
@@ -20,7 +19,7 @@ go build -o /tmp/cleat ./cmd/cleat/
 
 # Build from the testdata copy (preferred — no replace directives needed):
 export PATH="/usr/local/go/bin:/usr/local/bin:$PATH"
-/tmp/cleat build --target tinygo -o workflow.wasm testdata/clew-lifecycle/
+/tmp/cleat build -o workflow.wasm testdata/clew-lifecycle/
 ```
 
 Or build from the original workflow directory with GOWORK:
@@ -36,10 +35,10 @@ use (
     /localssd/rcownie/cleat
 )
 EOF
-GOWORK=/tmp/clew-build/go.work /tmp/cleat build --target tinygo -o workflow.wasm /tmp/clew-build/workflow/
+GOWORK=/tmp/clew-build/go.work /tmp/cleat build -o workflow.wasm /tmp/clew-build/workflow/
 ```
 
-**Expected output**: `workflow.wasm` (~1.5 MB with TinyGo).
+**Expected output**: `workflow.wasm`.
 
 ### Rebuilding the worker (plugin changes)
 
@@ -154,4 +153,4 @@ Each deploy requires a new version name. Re-deploying to an existing name fails 
 The worker loads all workflow WASM into memory at startup. New versions aren't picked up until restart. In-flight workflow instances are lost on restart.
 
 ### Gap F: No standalone cleat CLI
-There is no standalone `cleat` binary for build/deploy. The WASM is built with `tinygo build -target=wasip1` from the cleat repo's toolchain. Deployment uses the `deploy-workflow` Go tool built from `cmd/deploy-workflow/`.
+There is no standalone `cleat` binary for build/deploy. The WASM is built with the standard Go toolchain (`GOOS=wasip1 GOARCH=wasm go build`) from the cleat repo's toolchain. Deployment uses the `deploy-workflow` Go tool built from `cmd/deploy-workflow/`.

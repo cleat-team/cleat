@@ -1,66 +1,80 @@
 # System Overview
 
-Cleat is a durable workflow engine on PostgreSQL. Workflows are written in
-near-standard Go, compiled to WebAssembly (WASM), stored in PostgreSQL, and
-executed by stateless worker daemons.
+> Corrected 2026-08-09: this page previously framed the whole system as "a
+> durable workflow engine on PostgreSQL" with a PostgreSQL-only diagram, and
+> is linked from README's documentation table. `tiers.yaml` grants tier-1
+> support for three dialects (`postgres`, `mysql`, `mssql`), each with an
+> independent, complete implementation of `WorkflowStore` — see
+> `docs/reference/database-backends.md`. The diagrams below still show
+> PostgreSQL as the representative backend (redrawing three near-identical
+> diagrams per dialect would be more duplication than signal), but the prose
+> no longer claims PostgreSQL is the only one. Where a dialect differs in a
+> way that matters (row-level security, `SKIP LOCKED` support, JSON types),
+> see `docs/reference/database-backends.md` and
+> `docs/explanation/security-model.md`.
+
+Cleat is a durable workflow engine that runs on PostgreSQL, MySQL, or SQL
+Server. Workflows are written in near-standard Go (or Rust, Python, Java, or
+AssemblyScript — see `tiers.yaml`), compiled to WebAssembly (WASM), stored in
+the database, and executed by stateless worker daemons.
 
 ## Architecture Diagram
 
-```
-+------------------+         +-------------------+         +-------------------+
-|  Workflow Author  |         |  CLI (cleat)      |         |  PostgreSQL 16+   |
-|  (Go / Rust)      | ------> |  build / vet /     | ------> |  workflow_defs    |
-|                   |         |  deploy / schedule |         |  (WASM blobs)     |
-|  func PlaceOrder( |         |                    |         |  workflow_inst    |
-|    h HostCalls,   |         |  Transformer       |         |  (state, queue,   |
-|    input string,  |         |  Pipeline:         |         |   timers)         |
-|  ) string { ... } |         |  - analyzer.Load   |         |  event_history    |
-|                   |         |  - callgraph.Build |         |  (ordered events) |
-+------------------+         |  - closure.Compute |         |  workflow_signals |
-        |                     |  - transform       |         |  (external events) |
-        | writes Go code      |  - wasm.Compile    |         +-------------------+
-        | with HostCalls      +-------------------+                |
-        v                            |                             |
-+------------------+                 |  stores WASM blob           |
-|  Standard Go      |                 |                             |
-|  + HostCalls      |                 v                             v
-|  interface        |         +-------------------+         +-------------------+
-|                   |         |  Worker (cleat-    |         |  Worker (cleat-   |
-|  No decorators    |         |  worker)           |         |  worker)          |
-|  No code gen      |         |                    |         |                   |
-|  (except WASM)    |         |  claim loop        |         |  claim loop       |
-+------------------+         |  SKIP LOCKED       |         |  SKIP LOCKED      |
-                             |  load WASM         |         |  load WASM        |
-                             |  replay / execute  |         |  replay / execute |
-                             |  persist events    |         |  persist events   |
-                             |                    |         |                   |
-                             |  WASM Runtime      |         |  WASM Runtime     |
-                             |  (wazero)          |         |  (wazero)         |
-                             +-------------------+         +-------------------+
-                                     |                             |
-                                     | (horizontally scale)        |
-                                     v                             v
-                             +-----------------------------------------+
-                             |  Optional: Web UI (Svelte, embedded)    |
-                             |  REST API at /api/*                     |
-                             |  Prometheus metrics at /metrics         |
-                             |  Plugin HTTP routes at /plugins/*       |
-                             +-----------------------------------------+
+PostgreSQL is shown below as the representative backend; MySQL and SQL
+Server workers follow the identical claim-loop / event-history / signals
+flow against their own schema (`docs/reference/database-backends.md`).
+
+```mermaid
+graph TD
+    WA[Workflow Author<br/>Go / Rust] -->|writes Go code| CLI[CLI cleat<br/>build / vet / deploy / schedule]
+    WA -->|writes Go code| SG[Standard Go + HostCalls<br/>No decorators, no code gen except WASM]
+    subgraph TP[Transformer Pipeline]
+        A1[analyzer.Load<br/>Go packages, AST, type resolver]
+        A2[callgraph.Build<br/>static call graph]
+        A3[closure.Compute<br/>reachability, HostCalls validation]
+        A4[transform<br/>auto-thread HostCalls, imports, exports]
+        A5[wasm.Compile<br/>Go to wasip1]
+        A1 --> A2 --> A3 --> A4 --> A5
+    end
+    CLI --> TP
+    TP -->|stores WASM blob| PG[(PostgreSQL 16+)]
+    PG -->|workflow_defs WASM blobs| W1[Worker cleat-worker<br/>claim loop SKIP LOCKED]
+    PG -->|workflow_instances state, queue, timers| W1
+    PG -->|event_history ordered events| W1
+    PG -->|workflow_signals external events| W1
+    PG -->|workflow_defs| W2[Worker cleat-worker<br/>claim loop SKIP LOCKED]
+    PG -->|workflow_instances| W2
+    PG -->|event_history| W2
+    PG -->|workflow_signals| W2
+    W1 --> WR[WASM Runtime wazero]
+    W2 --> WR
+    W1 -.->|horizontally scale| W2
+    W1 --> UI[Optional: Web UI Svelte<br/>REST API /api/*<br/>Prometheus /metrics<br/>Plugin routes /plugins/*]
+    W2 --> UI
 ```
 
 ## Components
 
 ### CLI Tools (`cmd/cleat/`)
 
-The `cleat` CLI provides five commands:
+The `cleat` CLI provides these commands (re-derived 2026-08-09 via
+`cleat --help`; this list previously said "five" and named only the first
+five below -- see `docs/reference/cli.md` for the full reference):
 
 | Command | Description |
 |---------|-------------|
 | `build` | Analyzes Go source, transforms it, compiles to `wasip1` WASM binary |
 | `vet` | Validates a workflow package without compiling -- reports entry points, threading errors, closure issues |
-| `deploy` | Uploads a compiled WASM binary to PostgreSQL |
+| `deploy` | Uploads a compiled WASM binary to the database |
 | `versions` | Lists deployed versions of a workflow, latest first |
+| `rollback` | Points a workflow name at a previously deployed version |
+| `dev` | Runs a workflow locally with live-reload (`--watch`/`-w`) |
 | `schedule` | Manages cron schedules for recurring workflow execution |
+| `run` | Builds (if needed) and executes a workflow in-process |
+| `dag` | Visualizes workflow structure |
+| `plugin` | Validates, installs, lists, updates, or uninstalls plugins |
+| `lock` | Manages the workflow definition lock file |
+| `init` | Scaffolds a new workflow project |
 
 The `cleat-gen` tool generates typed client wrappers from service specs:
 
@@ -109,19 +123,33 @@ Go `embed.FS`. The UI provides:
 - Schedule management (create, enable, disable)
 - DAG visualization of workflow structure
 
-### WASM Runtime (wazero)
+### WASM Runtime (wasmtime / wazero)
 
-Execution uses [wazero](https://wazero.io/), a zero-dependency WebAssembly
-runtime for Go. Key characteristics:
+> Corrected 2026-08-09: this section previously said execution "uses wazero"
+> and gave a stale host-function count (15). wasmtime is the backend of
+> record -- preferred automatically whenever CGO is available (the default),
+> per `cmd/cleat-worker/main.go` -- with epoch/fuel/memory limits wired;
+> wazero is the pure-Go, CGO-less fallback with no compute-bound fencing (see
+> `docs/explanation/security-model.md`). Host function count re-derived
+> 2026-08-09 via `engine/imports.go` (56 `cleat_*` exports plus `plugin_call`,
+> `plugin_call_streaming`, `set_query_state` = 59; both backends register the
+> same set -- see `ABI.md` §2).
 
-- No CGo, no external dependencies -- pure Go.
-- Implements the `wasip1` preview 1 ABI required by Go's WASM target.
-- 15 host functions registered on the `env` module (`cleat_call`,
-  `cleat_call_heartbeat`, `cleat_sleep`, `cleat_now`, etc.).
+Execution uses [wasmtime](https://wasmtime.dev/) by default (the backend of
+record) or [wazero](https://wazero.io/), a zero-dependency WebAssembly
+runtime for Go, as a CGO-less fallback. Key characteristics:
+
+- wasmtime requires CGo; wazero does not.
+- Both implement the `wasip1` preview 1 ABI required by Go's WASM target.
+- 59 host functions registered on the `env` module (`cleat_call`,
+  `cleat_call_heartbeat`, `cleat_sleep`, `cleat_now`, etc. -- full list in
+  `ABI.md` §2).
 - WASM modules are compiled once and cached in memory keyed by
   `def_name:def_version`.
 - String marshalling uses a scratch region in the module's linear memory
-  (10MB offset, 64KB output buffer default).
+  (10 MiB offset; 32 KB output buffer / 64 KB max string length by default
+  in `cleat-worker`, each configurable -- see
+  `docs/reference/worker-config.md`).
 
 See [wasm-compilation.md](wasm-compilation.md) for the compilation pipeline and
 [execution-engine.md](execution-engine.md) for the replay/checkpoint model.
@@ -130,106 +158,62 @@ See [wasm-compilation.md](wasm-compilation.md) for the compilation pipeline and
 
 ### Build and Deploy
 
-```
-Workflow Author          CLI                    PostgreSQL
-    |                     |                        |
-    | write Go code       |                        |
-    | with HostCalls      |                        |
-    |-------------------->|                        |
-    |                     |                        |
-    |                 1. analyzer.Load             |
-    |                     |  - Go packages loader   |
-    |                     |  - AST parser           |
-    |                     |  - type resolver        |
-    |                     |                        |
-    |                 2. callgraph.Build            |
-    |                     |  - static call graph    |
-    |                     |                        |
-    |                 3. closure.Compute            |
-    |                     |  - reachability closure |
-    |                     |  - HostCalls validation |
-    |                     |                        |
-    |                 4. transform                 |
-    |                     |  - auto-thread HostCalls|
-    |                     |  - add imports          |
-    |                     |  - generate exports     |
-    |                     |                        |
-    |                 5. wasm.Compile               |
-    |                     |  - Go → wasip1          |
-    |                 6. deploy                    |
-    |                     |  INSERT wasm_bytes      |
-    |                     |----------------------->|
-    |                     |                        |
-    |                     |  stored in workflow_defs|
-    |                     |  keyed (name, version)  |
+```mermaid
+sequenceDiagram
+    participant WA as Workflow Author
+    participant CLI as CLI
+    participant PG as PostgreSQL
+
+    WA->>CLI: write Go code with HostCalls
+    Note over CLI: 1. analyzer.Load<br/>Go packages loader, AST parser, type resolver
+    Note over CLI: 2. callgraph.Build<br/>static call graph
+    Note over CLI: 3. closure.Compute<br/>reachability closure, HostCalls validation
+    Note over CLI: 4. transform<br/>auto-thread HostCalls, add imports, generate exports
+    Note over CLI: 5. wasm.Compile<br/>Go to wasip1
+    Note over CLI: 6. deploy
+    CLI->>PG: INSERT wasm_bytes
+    Note over PG: stored in workflow_defs<br/>keyed (name, version)
 ```
 
 ### Execution (First Run)
 
-```
-Worker                 PostgreSQL              wazero WASM
-  |                        |                      |
-  | 1. SELECT ... FOR      |                      |
-  |    UPDATE SKIP LOCKED  |                      |
-  |    WHERE status='ready'|                      |
-  |----------------------->|                      |
-  |                        |                      |
-  | 2. Load WASM blob      |                      |
-  |----------------------->|                      |
-  | <--- wasm_bytes -------|                      |
-  |                        |                      |
-  | 3. Compile +           |                      |
-  |    instantiate module  |---------------------->|
-  |                        |                      |
-  | 4. Call entry point    |                      |
-  |    export (e.g.,       |                      |
-  |    "place_order")      |---------------------->|
-  |                        |                      |
-  | 5. Each DurableCall:   |                      |
-  |    a. Record request   |                      |
-  |    b. Execute call     |                      |
-  |    c. Store response   |                      |
-  |    d. Persist event    |                      |
-  |----------------------->|                      |
-  |                        |                      |
-  | 6. On completion:      |                      |
-  |    UPDATE status='     |                      |
-  |      completed'        |                      |
-  |----------------------->|                      |
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant PG as PostgreSQL
+    participant WZ as wazero WASM
+
+    W->>PG: 1. SELECT ... FOR UPDATE SKIP LOCKED WHERE status='ready'
+    W->>PG: 2. Load WASM blob
+    PG-->>W: wasm_bytes
+    W->>WZ: 3. Compile + instantiate module
+    W->>WZ: 4. Call entry point export (e.g., "place_order")
+    loop 5. Each DurableCall
+        Note over W: a. Record request<br/>b. Execute call<br/>c. Store response
+        W->>PG: d. Persist event
+    end
+    W->>PG: 6. UPDATE status='completed'
 ```
 
 ### Execution (Replay)
 
-```
-Worker                 PostgreSQL              wazero WASM
-  |                        |                      |
-  | 1. Claim instance      |                      |
-  |----------------------->|                      |
-  |                        |                      |
-  | 2. Load WASM +         |                      |
-  |    event history       |                      |
-  |----------------------->|                      |
-  | <-- wasm + history ----|                      |
-  |                        |                      |
-  | 3. Instantiate module  |---------------------->|
-  |                        |                      |
-  | 4. Replay entry point  |                      |
-  |    For each event:     |---------------------->|
-  |    - DurableCall at    |                      |
-  |      step N returns    |                      |
-  |      cached response   |                      |
-  |    - DurableSleep at   |                      |
-  |      step N returns    |                      |
-  |      immediately       |                      |
-  |                        |                      |
-  | 5. At first uncompleted|                      |
-  |    step: execute new   |                      |
-  |    call -> persist     |                      |
-  |    new event           |                      |
-  |----------------------->|                      |
-  |                        |                      |
-  | 6. Resume from where   |                      |
-  |    execution stopped   |                      |
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant PG as PostgreSQL
+    participant WZ as wazero WASM
+
+    W->>PG: 1. Claim instance
+    W->>PG: 2. Load WASM + event history
+    PG-->>W: wasm + history
+    W->>WZ: 3. Instantiate module
+    W->>WZ: 4. Replay entry point
+    loop For each event in history
+        Note over WZ: DurableCall at step N returns cached response
+        Note over WZ: DurableSleep at step N returns immediately
+    end
+    W->>PG: 5. Execute new call, persist new event
+    Note over W,PG: 6. Resume from where execution stopped
 ```
 
 ## Key Design Decisions
@@ -240,10 +224,11 @@ Worker                 PostgreSQL              wazero WASM
    by (name, version) let v1 workflows continue using v1 code while new
    workflows use v2 on the same worker binary.
 
-2. **PostgreSQL as sole infrastructure** -- PostgreSQL serves as blob store,
-   state store, work queue, and timer service. No separate message queue,
-   cache, or scheduler is needed. This simplifies deployment at the cost of
-   queue throughput at extreme scale.
+2. **The database as sole infrastructure** -- Whichever of PostgreSQL, MySQL,
+   or SQL Server you already run serves as blob store, state store, work
+   queue, and timer service. No separate message queue, cache, or scheduler
+   is needed. This simplifies deployment at the cost of queue throughput at
+   extreme scale.
 
 3. **Replay model, not checkpoint serialization** -- Cleat uses Temporal's
    replay approach: re-execute the workflow from step 0, but return cached

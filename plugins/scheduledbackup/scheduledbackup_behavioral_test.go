@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // =========================================================================
@@ -271,7 +271,10 @@ func TestSB_RouteErrorPaths_MissingTenant(t *testing.T) {
 	}
 	p.RegisterRoutes(p.mux)
 
-	tests := []struct{ method, path string; body []byte }{
+	tests := []struct {
+		method, path string
+		body         []byte
+	}{
 		{"POST", "/backups/configs", []byte(`{"name":"test","cron":"0 0 * * *"}`)},
 		{"GET", "/backups/configs", nil},
 		{"GET", "/backups/configs/00000000-0000-0000-0000-000000000001", nil},
@@ -556,7 +559,7 @@ func newSBDB() *sbDB {
 type sbConnector struct{ db *sbDB }
 
 func (c *sbConnector) Connect(_ context.Context) (driver.Conn, error) { return &sbConn{db: c.db}, nil }
-func (c *sbConnector) Driver() driver.Driver                           { return &sbDrv{} }
+func (c *sbConnector) Driver() driver.Driver                          { return &sbDrv{} }
 
 type sbDrv struct{}
 
@@ -578,7 +581,7 @@ func (*sbTx) Rollback() error { return nil }
 type sbResult struct{ n int64 }
 
 func (r *sbResult) LastInsertId() (int64, error) { return 0, nil }
-func (r *sbResult) RowsAffected() (int64, error)  { return r.n, nil }
+func (r *sbResult) RowsAffected() (int64, error) { return r.n, nil }
 
 type sbRows struct {
 	columns []string
@@ -587,14 +590,12 @@ type sbRows struct {
 }
 
 func (r *sbRows) Columns() []string { return r.columns }
-func (r *sbRows) Close() error       { return nil }
+func (r *sbRows) Close() error      { return nil }
 func (r *sbRows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.data) {
 		return io.EOF
 	}
-	for i, v := range r.data[r.pos] {
-		dest[i] = v
-	}
+	copy(dest, r.data[r.pos])
 	r.pos++
 	return nil
 }
@@ -928,7 +929,8 @@ func (c *sbConn) QueryContext(_ context.Context, query string, args []driver.Nam
 }
 
 // Columns: id, name, cron, s3_bucket, s3_prefix, retention_days, enabled,
-//          last_run_at, next_run_at, created_at, updated_at
+//
+//	last_run_at, next_run_at, created_at, updated_at
 var sbConfigColumns = []string{
 	"id", "name", "cron", "s3_bucket", "s3_prefix",
 	"retention_days", "enabled", "last_run_at", "next_run_at",
@@ -1039,7 +1041,8 @@ func (c *sbConn) queryDueBackups(args []driver.NamedValue) (driver.Rows, error) 
 }
 
 // Columns for history: id, config_id, filename, size_bytes, status,
-//                      started_at, completed_at, error_message, created_at
+//
+//	started_at, completed_at, error_message, created_at
 var sbHistoryColumns = []string{
 	"id", "config_id", "filename", "size_bytes", "status",
 	"started_at", "completed_at", "error_message", "created_at",
@@ -1116,7 +1119,7 @@ func sbRequest(t *testing.T, method, path string, body io.Reader) *http.Request 
 	)
 }
 
-func sbReadJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
+func sbReadJSON(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	t.Helper()
 	if err := json.NewDecoder(rec.Body).Decode(v); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -1131,7 +1134,7 @@ func TestSB_CreateConfig_Success(t *testing.T) {
 	p, _, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
 
-	body := `{"name":"daily-backup","cron":"0 9 * * *","s3_bucket":"my-bucket","s3_prefix":"backups/","retention_days":30}`
+	body := `{"name":"daily-backup","cron":"0 9 * * *","retention_days":30}`
 	rec := httptest.NewRecorder()
 	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
 	p.mux.ServeHTTP(rec, req)
@@ -1139,7 +1142,7 @@ func TestSB_CreateConfig_Success(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	sbReadJSON(t, rec, &result)
 	if result["name"] != "daily-backup" {
 		t.Errorf("want name daily-backup, got %v", result["name"])
@@ -1152,6 +1155,25 @@ func TestSB_CreateConfig_Success(t *testing.T) {
 	}
 	if _, ok := result["next_run_at"]; !ok {
 		t.Error("expected next_run_at field in response")
+	}
+}
+
+// TestSB_CreateConfig_RejectsS3Fields pins the fix for the false "Scheduled
+// PostgreSQL backups to S3" claim: a create request naming a non-empty
+// s3_bucket or s3_prefix must be rejected (400), not silently accepted.
+// This used to be part of TestSB_CreateConfig_Success's request body,
+// asserting 201 -- exactly the defect this test now guards against.
+func TestSB_CreateConfig_RejectsS3Fields(t *testing.T) {
+	p, _, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	body := `{"name":"daily-backup","cron":"0 9 * * *","s3_bucket":"my-bucket","s3_prefix":"backups/","retention_days":30}`
+	rec := httptest.NewRecorder()
+	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
+	p.mux.ServeHTTP(rec, req)
+
+	if rec.Code != 400 {
+		t.Fatalf("create with s3 fields: want 400 (not supported), got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1268,7 +1290,7 @@ func TestSB_CreateConfig_ExplicitDisabled(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	sbReadJSON(t, rec, &result)
 	if result["enabled"] != false {
 		t.Errorf("want enabled false, got %v", result["enabled"])
@@ -1757,7 +1779,7 @@ func TestSB_RunBackup_Success(t *testing.T) {
 	if rec.Code != 202 {
 		t.Fatalf("run backup: want 202, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	sbReadJSON(t, rec, &result)
 	if result["status"] != "running" {
 		t.Errorf("want status 'running', got %v", result["status"])
@@ -1816,7 +1838,7 @@ func TestSB_CRUD_FullLifecycle(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	sbReadJSON(t, rec, &created)
 	cfgID, ok := created["id"].(string)
 	if !ok || cfgID == "" {
@@ -1919,7 +1941,10 @@ func TestSB_ErrorPaths_MissingTenantWithDB(t *testing.T) {
 	p, _, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
 
-	tests := []struct{ method, path string; body []byte }{
+	tests := []struct {
+		method, path string
+		body         []byte
+	}{
 		{"POST", "/backups/configs", []byte(`{"name":"test","cron":"0 0 * * *"}`)},
 		{"GET", "/backups/configs", nil},
 		{"GET", "/backups/configs/00000000-0000-0000-0000-000000000001", nil},
@@ -2533,7 +2558,14 @@ func TestSB_DBError_RunBackup_Fetch(t *testing.T) {
 // UpdateConfig edge: s3_bucket, s3_prefix, retention_days
 // =========================================================================
 
-func TestSB_UpdateConfig_WithS3Fields(t *testing.T) {
+// TestSB_UpdateConfig_RejectsS3Fields pins the fix for the false "Scheduled
+// PostgreSQL backups to S3" claim: setting s3_bucket/s3_prefix to a
+// non-empty value must be rejected (400), not silently accepted and
+// ignored. This test used to assert the opposite -- a 200 -- which is
+// exactly the defect (an operator who set these expecting off-host storage
+// found out only at restore time, since nothing ever uploads a dump
+// anywhere).
+func TestSB_UpdateConfig_RejectsS3Fields(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
 
@@ -2551,8 +2583,43 @@ func TestSB_UpdateConfig_WithS3Fields(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
 	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("update s3 fields: want 400 (not supported), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The config must be untouched -- a rejected request is not a partial
+	// update.
+	fdb.mu.Lock()
+	got := fdb.configs[cfgID]
+	fdb.mu.Unlock()
+	if got.retentionDays != 7 {
+		t.Errorf("rejected update must not apply any field: retentionDays = %d, want unchanged 7", got.retentionDays)
+	}
+}
+
+// TestSB_UpdateConfig_RetentionDaysOnly covers the part of the old
+// TestSB_UpdateConfig_WithS3Fields that remains legitimate: retention_days
+// alone (no S3 fields) still updates normally.
+func TestSB_UpdateConfig_RetentionDaysOnly(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
+	cfgID := "00000000-0000-0000-0000-000000000552"
+	fdb.mu.Lock()
+	fdb.configs[cfgID] = &sbConfigRow{
+		id: cfgID, tenantID: tid, name: "retention-only", cron: "0 9 * * *",
+		retentionDays: 7, enabled: true,
+		createdAt: time.Now(), updatedAt: time.Now(),
+	}
+	fdb.mu.Unlock()
+
+	body := `{"retention_days":14}`
+	rec := httptest.NewRecorder()
+	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
+	p.mux.ServeHTTP(rec, req)
 	if rec.Code != 200 {
-		t.Fatalf("update s3 fields: want 200, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("update retention_days: want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var m map[string]string
 	sbReadJSON(t, rec, &m)
@@ -2621,7 +2688,7 @@ func TestSB_ListHistory_WithNullableFields(t *testing.T) {
 		t.Fatalf("list history: want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var result []map[string]interface{}
+	var result []map[string]any
 	sbReadJSON(t, rec, &result)
 	if len(result) != 3 {
 		t.Fatalf("expected 3 history entries, got %d", len(result))

@@ -3,7 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"time"
 )
@@ -23,11 +23,11 @@ type VersionMetrics struct {
 // VersionMetricsSummary is a complete summary of version metrics across all
 // workflow definitions.
 type VersionMetricsSummary struct {
-	TotalVersions   int              `json:"total_versions"`
-	ActiveVersions  int              `json:"active_versions"`
-	Deprecated      int              `json:"deprecated"`
-	TotalActiveInstances int         `json:"total_active_instances"`
-	Workflows       []VersionMetrics `json:"workflows"`
+	TotalVersions        int              `json:"total_versions"`
+	ActiveVersions       int              `json:"active_versions"`
+	Deprecated           int              `json:"deprecated"`
+	TotalActiveInstances int              `json:"total_active_instances"`
+	Workflows            []VersionMetrics `json:"workflows"`
 }
 
 // StaleVersionAlert describes a workflow version that may need attention.
@@ -158,9 +158,9 @@ func LogStaleAlerts(alerts []StaleVersionAlert) {
 	if len(alerts) == 0 {
 		return
 	}
-	log.Printf("[cleat][versions] %d stale version alert(s):", len(alerts))
+	slog.WarnContext(context.Background(), "stale version alerts", "count", len(alerts))
 	for _, a := range alerts {
-		log.Printf("[cleat][versions]   %s: %s", a.Name, a.Message)
+		slog.WarnContext(context.Background(), "stale version alert", "name", a.Name, "message", a.Message)
 	}
 }
 

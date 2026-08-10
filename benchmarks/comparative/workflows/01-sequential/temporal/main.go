@@ -67,9 +67,9 @@ func NoopActivity(ctx context.Context) (string, error) {
 func SimpleWorkflow(ctx workflow.Context, input SimpleInput) (SimpleOutput, error) {
 	// Activity options: short timeout since we're benchmarking.
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 5 * time.Second,
+		StartToCloseTimeout:    5 * time.Second,
 		ScheduleToCloseTimeout: 30 * time.Second,
-		HeartbeatTimeout:    0, // not needed for synchronous activities
+		HeartbeatTimeout:       0, // not needed for synchronous activities
 	})
 
 	for i := 0; i < input.Steps; i++ {
@@ -123,8 +123,8 @@ func runBenchmark(
 		id := atomic.AddInt64(&idSeq, 1)
 		wfID := fmt.Sprintf("bench-%s-%d", workflowName, id)
 		opts := client.StartWorkflowOptions{
-			ID:                 wfID,
-			TaskQueue:          cfg.TaskQueue,
+			ID:                  wfID,
+			TaskQueue:           cfg.TaskQueue,
 			WorkflowTaskTimeout: 10 * time.Second,
 		}
 		run, err := c.ExecuteWorkflow(context.Background(), opts, wfFn, input)

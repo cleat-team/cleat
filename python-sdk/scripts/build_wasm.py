@@ -163,7 +163,10 @@ def run_componentize_py(
               "Try simplifying the workflow or increasing the timeout.",
               file=sys.stderr)
         return False
-    except Exception as e:
+    # Deliberate: this is a build script's top-level reporter. Any failure of
+    # the toolchain becomes a readable message and a non-zero exit, not a
+    # traceback the user has to interpret.
+    except Exception as e:  # noqa: BLE001
         print(f"Error running componentize-py: {e}", file=sys.stderr)
         return False
 
@@ -238,6 +241,12 @@ def main():
         default=None,
         dest="plugin_deps",
         help="Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)",
+    )
+    parser.add_argument(
+        "--child-binding-policy",
+        default=None,
+        dest="child_binding_policy",
+        help="Child binding policy (or CLEAT_CHILD_BINDING_POLICY env var)",
     )
     parser.add_argument(
         "--skip-decompose",
@@ -338,11 +347,23 @@ def main():
         print("  This is expected for CPython-in-WASM but may affect load times.")
 
     # ---- Apply --runtime to control decomposition behavior ----
-    # --runtime wasmtime  -> decompose, keep component backup (wasmtime backend uses core WASM)
+    # --runtime wasmtime  -> no decomposition; wasmtime runs the component itself
     # --runtime wazero    -> decompose, keep only core WASM (no component)
-    # No --runtime        -> produce both (keep component + core WASM)
+    # No --runtime        -> produce both, but decomposition is best-effort
+    #
+    # The wasmtime branch used to set skip_decompose = False, with a comment
+    # reading "(wasmtime backend uses core WASM)". That stopped being true on
+    # 2026-08-05: engine/component_cgo.go hands the component straight to
+    # wasmtime's own Component Model runtime, which is how Python runs at all
+    # (IMPROVEMENT-PLAN 2.72, 1.5/2.28). Decomposing for wasmtime now produces
+    # an artifact nothing consumes, and made the build depend on a tool it does
+    # not need.
+    #
+    # The error path below still tells people to "use --runtime wasmtime to
+    # skip this step", which was false in the other direction -- that flag was
+    # the one branch guaranteed *not* to skip it. Now it is true.
     if args.runtime == "wasmtime":
-        args.skip_decompose = False
+        args.skip_decompose = True
         args.keep_component = True
     elif args.runtime == "wazero":
         args.skip_decompose = False
@@ -398,18 +419,43 @@ def main():
                         print(f"  stderr: {stderr}", file=sys.stderr)
                     sys.exit(1)
         except FileNotFoundError:
-            print("Error: wasm-tools not found", file=sys.stderr)
-            print("", file=sys.stderr)
-            print("Install wasm-tools to decompose the Component Model binary to core WASM:",
+            # Missing wasm-tools is fatal only when core WASM is the point --
+            # that is, --runtime wazero, which cannot load a component.
+            #
+            # Otherwise it is not. The component has already been built at this
+            # point, and since 2026-08-05 the component *is* the artifact the
+            # engine runs: wasmtime serves Python through its own Component
+            # Model runtime. So exiting 1 here failed a build that had already
+            # produced the thing the user asked for, on a machine missing a tool
+            # needed for an output nothing consumes.
+            #
+            # Observed rather than theorised. `cleat build --target python` in a
+            # container without wasm-tools printed "Build SUCCESS", the 18.33 MB
+            # component path, and then exited 1 -- and
+            # TestPluginCalls_Wasm_Python read that exit code as "componentize-py
+            # pipeline may need setup" and skipped. A build failure that reports
+            # success first is the worst of both.
+            if args.runtime == "wazero":
+                print("Error: wasm-tools not found, and --runtime wazero needs core WASM",
+                      file=sys.stderr)
+                print("", file=sys.stderr)
+                print("wazero cannot load a WASM Component Model binary, so decomposition",
+                      file=sys.stderr)
+                print("is required for this runtime. Install wasm-tools:", file=sys.stderr)
+                print("  cargo install wasm-tools", file=sys.stderr)
+                print("  # or on macOS:", file=sys.stderr)
+                print("  brew install wasm-tools", file=sys.stderr)
+                sys.exit(1)
+            print("  Warning: wasm-tools not found, so no core WASM module was produced.",
                   file=sys.stderr)
-            print("  cargo install wasm-tools", file=sys.stderr)
-            print("  # or on macOS:", file=sys.stderr)
-            print("  brew install wasm-tools", file=sys.stderr)
-            print("", file=sys.stderr)
-            print("Alternatively, use --skip-decompose if you don't need core WASM output.",
+            print("  The build succeeded: the output is a WASM Component Model binary,",
                   file=sys.stderr)
-            sys.exit(1)
-        except Exception as e:
+            print("  which is what the cleat engine runs Python from. Install wasm-tools",
+                  file=sys.stderr)
+            print("  (cargo install wasm-tools) only if you need core WASM as well.",
+                  file=sys.stderr)
+        # Deliberate: same reasoning as the compile step above.
+        except Exception as e:  # noqa: BLE001
             print(f"Error: component decomposition failed: {e}", file=sys.stderr)
             sys.exit(1)
 
@@ -425,6 +471,7 @@ def main():
     if stamp_abi is None and os.environ.get("CLEAT_ABI_VERSION"):
         stamp_abi = int(os.environ["CLEAT_ABI_VERSION"])
     stamp_deps = args.plugin_deps or os.environ.get("CLEAT_PLUGIN_DEPS")
+    stamp_child_binding_policy = args.child_binding_policy or os.environ.get("CLEAT_CHILD_BINDING_POLICY")
 
     # Always stamp at least the language so consumers can identify the source.
     stamp_args = [
@@ -443,6 +490,8 @@ def main():
         stamp_args.extend(["--abi-version", str(stamp_abi)])
     if stamp_deps is not None:
         stamp_args.extend(["--plugin-deps", stamp_deps])
+    if stamp_child_binding_policy is not None:
+        stamp_args.extend(["--child-binding-policy", stamp_child_binding_policy])
     if args.verbose:
         stamp_args.append("--verbose")
 

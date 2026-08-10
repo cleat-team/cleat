@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,13 +39,13 @@ type fakePDConfigRow struct {
 }
 
 type fakeDBStore struct {
-	mu       sync.RWMutex
-	apiKeys  map[string]string               // key_hash -> tenant_id
-	pdConfig map[string]*fakePDConfigRow     // "tenant:id" -> row
-	failNextExec     bool                    // next ExecContext returns error
-	failNextQuery    bool                    // next QueryContext returns error
-	failNextRefetch  int32                   // atomic: next queryPDConfigByID returns error
-	failNextScanOnList bool                  // next queryPDConfigList returns corrupt data
+	mu                 sync.RWMutex
+	apiKeys            map[string]string           // key_hash -> tenant_id
+	pdConfig           map[string]*fakePDConfigRow // "tenant:id" -> row
+	failNextExec       bool                        // next ExecContext returns error
+	failNextQuery      bool                        // next QueryContext returns error
+	failNextRefetch    int32                       // atomic: next queryPDConfigByID returns error
+	failNextScanOnList bool                        // next queryPDConfigList returns corrupt data
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -78,8 +78,8 @@ type fakeConn struct {
 func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare")
 }
-func (*fakeConn) Close() error                                     { return nil }
-func (*fakeConn) Begin() (driver.Tx, error)                        { return &fakeTx{}, nil }
+func (*fakeConn) Close() error              { return nil }
+func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
 
@@ -273,7 +273,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 
 	q := strings.ReplaceAll(query, "\n", " ")
 	switch {
-	case strings.Contains(q, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(q, "tenant_api_keys"):
 		return c.queryTenantByKeyHash(args)
 	case strings.Contains(q, "SELECT routing_key FROM pd_config") || (strings.Contains(q, "routing_key") && strings.Contains(q, "FROM pd_config") && strings.Contains(q, "enabled = true")):
 		return c.queryRoutingKey(args)
@@ -432,8 +432,8 @@ func setupTestPlugin(t *testing.T, httpClient *http.Client) (*Plugin, http.Handl
 	}
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.Default(),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.Default(),
 		httpClient: client,
 	}
 
@@ -474,15 +474,15 @@ func TestPDCreateConfig(t *testing.T) {
 		t.Fatalf("POST /pagerduty/configs: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
 	if resp["name"] != "test-config" {
 		t.Errorf("expected name 'test-config', got %q", resp["name"])
 	}
-	if resp["routing_key"] != "rk_test_123" {
-		t.Errorf("expected routing_key 'rk_test_123', got %q", resp["routing_key"])
+	if resp["routing_key"] != plugin.RedactedPlaceholder {
+		t.Errorf("expected routing_key to be redacted as %q, got %q", plugin.RedactedPlaceholder, resp["routing_key"])
 	}
 	if resp["enabled"] != true {
 		t.Error("expected enabled to be true")
@@ -533,7 +533,7 @@ func TestPDListConfigs(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var configs []map[string]interface{}
+	var configs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &configs); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -553,7 +553,7 @@ func TestPDGetConfig(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -564,10 +564,74 @@ func TestPDGetConfig(t *testing.T) {
 		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var got map[string]interface{}
+	var got map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &got)
 	if got["name"] != "get-test" {
 		t.Errorf("expected name 'get-test', got %q", got["name"])
+	}
+}
+
+// TestPDListAndGetDoNotLeakRoutingKey verifies that neither the list nor the
+// get endpoint ever returns the real routing key in the response body.
+func TestPDListAndGetDoNotLeakRoutingKey(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	const realKey = "rk_do_not_leak_me"
+	createBody := `{"name":"leak-test","routing_key":"` + realKey + `"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("create response leaked the real routing_key: %s", rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	configID := created["id"].(string)
+
+	// GET.
+	req = authedRequest("GET", "/pagerduty/configs/"+configID, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("GET response leaked the real routing_key: %s", rec.Body.String())
+	}
+	var got map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["routing_key"] != plugin.RedactedPlaceholder {
+		t.Errorf("GET: expected routing_key %q, got %q", plugin.RedactedPlaceholder, got["routing_key"])
+	}
+
+	// LIST.
+	req = authedRequest("GET", "/pagerduty/configs", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realKey) {
+		t.Errorf("LIST response leaked the real routing_key: %s", rec.Body.String())
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("LIST: failed to decode: %v", err)
+	}
+	found := false
+	for _, c := range list {
+		if c["id"] == configID {
+			found = true
+			if c["routing_key"] != plugin.RedactedPlaceholder {
+				t.Errorf("LIST: expected routing_key %q, got %q", plugin.RedactedPlaceholder, c["routing_key"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected config %s in list response", configID)
 	}
 }
 
@@ -593,7 +657,7 @@ func TestPDUpdateConfig(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -630,7 +694,7 @@ func TestPDDeleteConfig(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -703,7 +767,7 @@ func TestTriggerIncidentLifecycle(t *testing.T) {
 		t.Fatalf("create config: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -975,7 +1039,7 @@ func TestPDUpdateConfig_NoFields(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -1309,7 +1373,7 @@ func TestTriggerIncident_WithStructuredDetails(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create config: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -1356,7 +1420,7 @@ func TestResolveIncident_ConfigNotFound(t *testing.T) {
 type errReadCloser struct{}
 
 func (*errReadCloser) Read(_ []byte) (int, error) { return 0, fmt.Errorf("simulated read error") }
-func (*errReadCloser) Close() error                { return nil }
+func (*errReadCloser) Close() error               { return nil }
 
 func TestPDCreateConfig_BodyReadError(t *testing.T) {
 	_, handler, _ := setupTestPlugin(t, nil)
@@ -1384,7 +1448,7 @@ func TestPDListConfigs_Empty(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var configs []map[string]interface{}
+	var configs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &configs); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -1416,7 +1480,7 @@ func TestPDUpdateConfig_WithRoutingKey(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -1437,7 +1501,6 @@ func (s *fakeDBStore) triggerRefetchError() {
 	atomic.StoreInt32(&s.failNextRefetch, 1)
 }
 
-
 func TestPDUpdateConfig_RefetchError(t *testing.T) {
 	_, handler, store := setupTestPlugin(t, nil)
 
@@ -1448,7 +1511,7 @@ func TestPDUpdateConfig_RefetchError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -1466,8 +1529,6 @@ func TestPDUpdateConfig_RefetchError(t *testing.T) {
 	}
 }
 
-
-
 func (s *fakeDBStore) triggerListScanError() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1484,7 +1545,7 @@ func TestPDListConfigs_ScanError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 

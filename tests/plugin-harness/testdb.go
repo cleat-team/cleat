@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/plugin"
 )
 
@@ -129,11 +130,11 @@ func RunCoreMigrations(t *testing.T, db *sql.DB, dialect plugin.Dialect, schemaN
 		if err != nil {
 			t.Fatalf("RunCoreMigrations: read %s: %v", path, err)
 		}
-			sqlStr := string(sqlBytes)
-			if prefix := schemaPrefix(dialect, schemaName); prefix != "" {
-				sqlStr = prefix + ";" + "\n" + sqlStr
-			}
-			statements := splitSQL(sqlStr)
+		sqlStr := string(sqlBytes)
+		if prefix := schemaPrefix(dialect, schemaName); prefix != "" {
+			sqlStr = prefix + ";" + "\n" + sqlStr
+		}
+		statements := splitStatements(dialect, sqlStr)
 		for _, stmt := range statements {
 			if _, err := conn.ExecContext(ctx, stmt); err != nil {
 				t.Fatalf("RunCoreMigrations: execute %s: %v", f.Name(), err)
@@ -213,7 +214,7 @@ func RunPluginMigrations(t *testing.T, db *sql.DB, dialect plugin.Dialect, loade
 				continue
 			}
 
-			if err := execStatements(ctx, db, sqlStr); err != nil {
+			if err := execStatements(ctx, db, dialect, sqlStr); err != nil {
 				t.Fatalf("RunPluginMigrations: plugin %s v%d: %v", pluginName, m.Version, err)
 			}
 
@@ -236,7 +237,7 @@ func SeedPluginConfig(t *testing.T, db *sql.DB, dialect plugin.Dialect) {
 	}{
 		{
 			table: "feature_flags",
-				sql:   placeholderSQL(dialect, fmt.Sprintf("INSERT INTO feature_flags (tenant_id, id, %s, name, enabled) VALUES (%%s, %%s, %%s, %%s, %%s)", quoteIdent(dialect, "key"))),
+			sql:   placeholderSQL(dialect, fmt.Sprintf("INSERT INTO feature_flags (tenant_id, id, %s, name, enabled) VALUES (%%s, %%s, %%s, %%s, %%s)", quoteIdent(dialect, "key"))),
 			args:  []interface{}{defaultTenant, "00000000-0000-0000-0000-000000000010", "test-flag", "Test Flag", false},
 		},
 		{
@@ -336,13 +337,10 @@ func placeholderSQL(dialect plugin.Dialect, tmpl string) string {
 	case plugin.DialectPostgres:
 		// Replace each %s with $1, $2, etc.
 		var result strings.Builder
-		idx := 1
-		for _, ch := range tmpl {
-			if ch == '%' && len(tmpl) > idx-1 {
-				// Check next char
-			}
-		}
-		// Simple approach: count %s patterns and replace sequentially.
+		// The loop that used to be here scanned every rune to find '%' and did
+		// nothing with it -- an `if` with an empty body inside a `for` with no
+		// other statements. Removed rather than filled in: the split below has
+		// been doing the actual work all along.
 		parts := strings.Split(tmpl, "%s")
 		for i, p := range parts {
 			result.WriteString(p)
@@ -486,6 +484,46 @@ func selectMigrationSQL(dialect plugin.Dialect, m plugin.Migration) string {
 	}
 }
 
+// splitStatements splits a migration file's SQL text into individual
+// statements to execute, using dialect-appropriate rules.
+//
+// Both MySQL and MSSQL delegate to the production splitters in
+// migration.Runner, and for the same reason: this harness used to carry its
+// own copy for each, and each copy was wrong in the dialect's own way.
+//
+// MySQL: the local copy did not understand the DELIMITER directive, so it cut
+// migrations/mysql/003_procedures.sql's stored procedure body on the
+// semicolons inside it and sent the fragments -- plus the bare word DELIMITER,
+// which no MySQL server accepts -- to the server. Error 1064 near 'DELIMITER //'.
+//
+// MSSQL: the local copy split on every semicolon rather than only on GO batch
+// separators, which broke migrations/mssql/003_procedures.sql's CREATE OR
+// ALTER PROCEDURE into fragments the server rejected with "Incorrect syntax
+// near 'ON'". That failure was invisible until the MySQL one above was fixed,
+// because the mssql arm never got that far.
+//
+// GO is the only batch separator MSSQL recognises; everything else inside a
+// batch, semicolons included, is the server's job to parse as one unit. That
+// is the MSSQL analogue of what DELIMITER guards against in MySQL, and the
+// production splitters already got both right (migration/runner.go,
+// migration/split_test.go). The harness only needed to call them instead of
+// maintaining two divergent copies.
+//
+// PostgreSQL keeps using the local splitSQL below, which additionally
+// understands PostgreSQL's dollar-quoted strings. Production's
+// migration.Runner does not split PostgreSQL SQL at all -- it executes the
+// whole file in one statement, relying on the driver's native multi-statement
+// support -- so it is not a drop-in replacement for what this harness needs.
+func splitStatements(dialect plugin.Dialect, sql string) []string {
+	switch dialect {
+	case plugin.DialectMySQL:
+		return migration.SplitSQL(sql)
+	case plugin.DialectMSSQL:
+		return migration.SplitMSSQL(sql)
+	}
+	return splitSQL(sql)
+}
+
 // splitSQL splits SQL text on semicolons, discarding empty fragments.
 func splitSQL(sql string) []string {
 	// Split on semicolons, but skip semicolons that appear inside
@@ -520,9 +558,13 @@ func splitSQL(sql string) []string {
 		// Split on newline-bounded GO batch separator (MSSQL).
 		if !inDollar && c == '\n' {
 			j := i + 1
-			for j < n && (sql[j] == ' ' || sql[j] == '\t') { j++ }
+			for j < n && (sql[j] == ' ' || sql[j] == '\t') {
+				j++
+			}
 			k := j
-			for k < n && sql[k] != '\n' && sql[k] != '\r' && sql[k] != ';' { k++ }
+			for k < n && sql[k] != '\n' && sql[k] != '\r' && sql[k] != ';' {
+				k++
+			}
 			if isGO(j, k) {
 				// Emit any buffered statement before the GO.
 				trimmed := strings.TrimSpace(buf.String())
@@ -587,8 +629,8 @@ func splitSQL(sql string) []string {
 	return stmts
 }
 
-func execStatements(ctx context.Context, db *sql.DB, sqlStr string) error {
-	for _, stmt := range splitSQL(sqlStr) {
+func execStatements(ctx context.Context, db *sql.DB, dialect plugin.Dialect, sqlStr string) error {
+	for _, stmt := range splitStatements(dialect, sqlStr) {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}

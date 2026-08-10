@@ -206,8 +206,6 @@ is keyed by `def_name:def_version`. Performance considerations:
 - **Cold start** -- first invocation of a workflow version loads WASM from
   database (typically 1-5 MB) into memory
 - **Warm executions** -- subsequent invocations use the cached module
-- **Module size** -- TinyGo produces significantly smaller binaries
-  (`cleat build --target tinygo`)
 - **Cache eviction** -- currently unbounded; monitor worker memory usage
 
 ## Health checks

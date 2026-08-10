@@ -212,7 +212,7 @@ func TestVetJSONOutputSchema(t *testing.T) {
 	// Non-zero exit expected when errors are found.
 	_ = err
 
-	var result map[string]interface{}
+	var result map[string]any
 	if jsonErr := json.Unmarshal([]byte(out), &result); jsonErr != nil {
 		t.Fatalf("failed to parse JSON: %v\n%s", jsonErr, out)
 	}
@@ -225,7 +225,7 @@ func TestVetJSONOutputSchema(t *testing.T) {
 	}
 
 	// Verify summary keys.
-	summary, ok := result["summary"].(map[string]interface{})
+	summary, ok := result["summary"].(map[string]any)
 	if !ok {
 		t.Fatal("summary is not a JSON object")
 	}
@@ -236,12 +236,12 @@ func TestVetJSONOutputSchema(t *testing.T) {
 	}
 
 	// Verify error structure.
-	errors, ok := result["errors"].([]interface{})
+	errors, ok := result["errors"].([]any)
 	if !ok {
 		t.Fatal("errors is not a JSON array")
 	}
 	if len(errors) > 0 {
-		errMap, ok := errors[0].(map[string]interface{})
+		errMap, ok := errors[0].(map[string]any)
 		if !ok {
 			t.Fatal("first error is not a JSON object")
 		}
@@ -283,8 +283,8 @@ func TestDetectVetLang(t *testing.T) {
 			wantLang: "python",
 		},
 		{
-			name: "nonexistent_directory",
-			setup: func(t *testing.T) string { return "nonexistent-directory-12345" },
+			name:    "nonexistent_directory",
+			setup:   func(t *testing.T) string { return "nonexistent-directory-12345" },
 			wantErr: true,
 		},
 		{
@@ -418,16 +418,65 @@ func TestVetSummaryFields(t *testing.T) {
 	}
 }
 
-// TestVetPython verifies Python fixture detection.
+// TestVetPython verifies that `cleat vet --lang python` actually detects
+// py002_open's violation, rather than merely not erroring.
+//
+// This used to be: run vet, and if it returned a non-nil error, call that
+// "Python vet not available" and skip; the non-skip branch asserted nothing
+// (t.Logf only). That made the test vacuous in every environment. py002_open
+// is a fixture built specifically to contain a violation (file I/O in
+// workflow code, PY002), so the *correct* outcome -- vet finding it -- and
+// "the tooling is missing" need different, disjoint signals, and this test
+// had only one (err). Reproduced live: runVetPython (main.go) treats a
+// python3 exit status of 1 as "vet ran, found violations" and returns exit 0
+// -- finding PY002 does not make `cleat vet` exit non-zero -- but treats
+// anything that writes to stderr, e.g. `ModuleNotFoundError: No module named
+// 'cleat_sdk'`, as a real failure and returns 1. So a non-nil err here has
+// always meant "cleat_sdk was not importable," never "vet found the
+// violation and that's fine."
+//
+// It has also, in this harness, always been non-nil for a second, unrelated
+// reason: findPythonSDKDir (build_python.go) locates <repoRoot>/python-sdk
+// relative to the cleat binary's own cwd/executable directory, neither of
+// which is the repo root when the binary runs under `go test` from cmd/cleat
+// (cwd) or a TestMain-built tmpdir (exec dir) -- so cleat_sdk was never on
+// PYTHONPATH and every prior run of this test skipped for that reason, not
+// because python3 itself was absent. Setting PYTHONPATH explicitly below
+// (the same fix TestPythonRoundTripBuildAndExecute in cleat_pipeline_test.go
+// already applies to its own python subprocess) removes that false skip and
+// leaves only the real, worth-skipping condition: no python3 interpreter at
+// all.
 func TestVetPython(t *testing.T) {
-	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "python", "py002_open")
-	// Run the Python vet. It may fail if cleat_sdk is not importable.
-	out, err := runVetCmd(t, "vet", "--lang", "python", "--json", fixture)
-	if err != nil {
-		// Python vet may not be available in all test environments.
-		t.Skipf("Python vet not available: %v\n%s", err, out)
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed")
 	}
-	if strings.TrimSpace(out) != "" {
-		t.Logf("Python vet output: %s", out)
+	if testing.Short() {
+		t.Skip("Skipping vet test in short mode")
+	}
+
+	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "python", "py002_open")
+	cmd := exec.Command(cleatBinary, "vet", "--lang", "python", "--json", fixture)
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(repoRoot(t), "python-sdk"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cleat vet --lang python failed (cleat_sdk not importable, or another real "+
+			"tooling failure -- not the fixture's violation, which does not set a non-zero exit): "+
+			"%v\n%s", err, out)
+	}
+
+	var result VetOutput
+	if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
+		t.Fatalf("failed to parse JSON output: %v\n%s", jsonErr, out)
+	}
+
+	foundPY002 := false
+	for _, e := range result.Errors {
+		if e.Code == "PY002" {
+			foundPY002 = true
+			break
+		}
+	}
+	if !foundPY002 {
+		t.Errorf("expected PY002 (file I/O) violation for fixture %s, got: %s", fixture, out)
 	}
 }

@@ -8,7 +8,7 @@ import (
 
 func TestSelectorSignalWinsImmediately(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
-		DurableSleep:        func(ms int64) {},
+		DurableSleep: func(ms int64) {},
 		DurableAwaitSignals: func(names []string, timeoutMs int64) (string, string, bool, error) {
 			return "sig_a", `{"key":"val"}`, false, nil
 		},
@@ -161,7 +161,7 @@ func TestSelectorTimerOnly(t *testing.T) {
 
 func TestSelectorNilDestinations(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
-		DurableSleep:        func(ms int64) {},
+		DurableSleep: func(ms int64) {},
 		DurableAwaitSignals: func(names []string, timeoutMs int64) (string, string, bool, error) {
 			return "sig_a", "payload", false, nil
 		},
@@ -172,8 +172,8 @@ func TestSelectorNilDestinations(t *testing.T) {
 	})
 
 	sel := NewSelector(h)
-	sel.AddSignal("sig_a", nil)   // nil dest — should not panic
-	sel.AddTimer(0, nil)           // nil fired — should not panic
+	sel.AddSignal("sig_a", nil) // nil dest — should not panic
+	sel.AddTimer(0, nil)        // nil fired — should not panic
 
 	// Should not panic.
 	winner := sel.Select()

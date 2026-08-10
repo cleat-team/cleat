@@ -20,26 +20,26 @@ func wasmWithMissingImport() []byte {
 	// Type section: () -> ()
 	bin = append(bin,
 		0x01, 0x04, // Type, size 4
-		0x01,       // 1 type
-		0x60,       // functype marker
-		0x00,       // 0 params
-		0x00,       // 0 results
+		0x01, // 1 type
+		0x60, // functype marker
+		0x00, // 0 params
+		0x00, // 0 results
 	)
 	// Import section: import "env" "missing_func" (func () -> ())
 	bin = append(bin,
-		0x02,                     // Import section
-		0x14,                     // size: 1+4+13+1+1 = 20 bytes
-		0x01,                     // 1 import
-		0x03, 0x65, 0x6e, 0x76,  // module "env"
+		0x02,                   // Import section
+		0x14,                   // size: 1+4+13+1+1 = 20 bytes
+		0x01,                   // 1 import
+		0x03, 0x65, 0x6e, 0x76, // module "env"
 		0x0c, 0x6d, 0x69, 0x73, 0x73, 0x69, 0x6e, 0x67,
 		0x5f, 0x66, 0x75, 0x6e, 0x63, // field "missing_func"
-		0x00,                     // import kind: func
-		0x00,                     // type index 0
+		0x00, // import kind: func
+		0x00, // type index 0
 	)
 	// Export section: empty
 	bin = append(bin,
 		0x07, 0x01, // Export, size 1
-		0x00,       // 0 exports
+		0x00, // 0 exports
 	)
 	return bin
 }
@@ -85,29 +85,29 @@ func wasmWithoutExport() []byte {
 	// Type section: func () -> ()
 	bin = append(bin,
 		0x01, 0x04, // Type, size 4
-		0x01,       // 1 type
-		0x60,       // functype marker
-		0x00,       // 0 params
-		0x00,       // 0 results
+		0x01, // 1 type
+		0x60, // functype marker
+		0x00, // 0 params
+		0x00, // 0 results
 	)
 	// Function section: 1 function
 	bin = append(bin,
 		0x03, 0x02, // Function, size 2
-		0x01,       // 1 function
-		0x00,       // type index 0
+		0x01, // 1 function
+		0x00, // type index 0
 	)
 	// Export section: zero exports — function index 0 is not exported.
 	bin = append(bin,
 		0x07, 0x01, // Export, size 1
-		0x00,       // 0 exports
+		0x00, // 0 exports
 	)
 	// Code section: empty body (nop + end)
 	bin = append(bin,
 		0x0a, 0x04, // Code, size 4
-		0x01,       // 1 body
-		0x02,       // body size 2
-		0x00,       // 0 locals
-		0x0b,       // end
+		0x01, // 1 body
+		0x02, // body size 2
+		0x00, // 0 locals
+		0x0b, // end
 	)
 	return bin
 }
@@ -270,11 +270,11 @@ func wasmWithLargeMemory() []byte {
 	)
 	// Export section: export "memory" -> memory 0
 	bin = append(bin,
-		0x07, 0x0a,       // Export, size 10
-		0x01,             // 1 export
+		0x07, 0x0a, // Export, size 10
+		0x01,                                     // 1 export
 		0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, // "memory"
-		0x02,             // kind: memory
-		0x00,             // index 0
+		0x02, // kind: memory
+		0x00, // index 0
 	)
 	return bin
 }

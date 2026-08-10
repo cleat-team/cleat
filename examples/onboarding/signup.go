@@ -52,7 +52,9 @@ func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("registration failed: %w", err)
 	}
-	var tempUser struct{ UserID string `json:"user_id"` }
+	var tempUser struct {
+		UserID string `json:"user_id"`
+	}
 	json.Unmarshal([]byte(resp), &tempUser)
 
 	h.SetQueryState("user_id", tempUser.UserID)

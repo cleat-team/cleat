@@ -28,10 +28,10 @@ type TaskInput struct {
 
 // TaskOutput is the workflow return value.
 type TaskOutput struct {
-	TaskID          string   `json:"task_id"`
-	FinalPhase      string   `json:"final_phase"`
-	PhasesCompleted []string `json:"phases_completed"`
-	TotalPluginCalls int     `json:"total_plugin_calls"`
+	TaskID           string   `json:"task_id"`
+	FinalPhase       string   `json:"final_phase"`
+	PhasesCompleted  []string `json:"phases_completed"`
+	TotalPluginCalls int      `json:"total_plugin_calls"`
 }
 
 // PluginCallInput is the JSON payload sent to clew-executor:run_phase.

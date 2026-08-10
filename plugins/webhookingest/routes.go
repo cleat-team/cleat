@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/eventtriggers"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -38,7 +38,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -58,24 +58,24 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 // ---- types ----
 
 type webhookSourceJSON struct {
-	ID         uuid.UUID `json:"id"`
-	TenantID   uuid.UUID `json:"tenant_id"`
-	Name       string    `json:"name"`
-	SourceType string    `json:"source_type"`
-	Secret     string    `json:"secret"`
-	Enabled    bool      `json:"enabled"`
-	SignalWorkflowID string    `json:"signal_workflow_id,omitempty"`
-	SignalName       string    `json:"signal_name,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID               uuid.UUID     `json:"id"`
+	TenantID         uuid.UUID     `json:"tenant_id"`
+	Name             string        `json:"name"`
+	SourceType       string        `json:"source_type"`
+	Secret           plugin.Secret `json:"secret"`
+	Enabled          bool          `json:"enabled"`
+	SignalWorkflowID string        `json:"signal_workflow_id,omitempty"`
+	SignalName       string        `json:"signal_name,omitempty"`
+	CreatedAt        time.Time     `json:"created_at"`
+	UpdatedAt        time.Time     `json:"updated_at"`
 }
 
 type createSourceRequest struct {
-	Name       string `json:"name"`
-	SourceType string `json:"source_type"`
-	Secret           string `json:"secret,omitempty"`
-	SignalWorkflowID string `json:"signal_workflow_id,omitempty"`
-	SignalName       string `json:"signal_name,omitempty"`
+	Name             string        `json:"name"`
+	SourceType       string        `json:"source_type"`
+	Secret           plugin.Secret `json:"secret,omitempty"`
+	SignalWorkflowID string        `json:"signal_workflow_id,omitempty"`
+	SignalName       string        `json:"signal_name,omitempty"`
 }
 
 type webhookEventJSON struct {
@@ -133,13 +133,13 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	// Verify HMAC-SHA256 signature if the source has a secret configured.
-	if source.Secret != "" {
+	if source.Secret.Reveal() != "" {
 		sig := r.Header.Get("X-Hub-Signature-256")
 		if sig == "" {
 			p.writeError(w, 401, "missing signature")
 			return
 		}
-		mac := hmac.New(sha256.New, []byte(source.Secret))
+		mac := hmac.New(sha256.New, []byte(source.Secret.Reveal()))
 		mac.Write(body)
 		expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 		if !hmac.Equal([]byte(expected), []byte(sig)) {
@@ -200,14 +200,14 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// ---- Publish as an event through the event-triggers system ----
 
 	// Build event data that includes both headers and payload.
-	var payloadData interface{}
+	var payloadData any
 	if json.Valid(body) {
 		json.Unmarshal(body, &payloadData)
 	} else {
 		payloadData = string(body)
 	}
 
-	eventData := map[string]interface{}{
+	eventData := map[string]any{
 		"source_id":   sourceID.String(),
 		"source_name": source.Name,
 		"webhook_id":  eventID.String(),
@@ -231,7 +231,7 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Also deliver a signal if this source is bound to a workflow (legacy path).
 	if source.SignalWorkflowID != "" {
-		signalPayload := map[string]interface{}{
+		signalPayload := map[string]any{
 			"source_id":   sourceID.String(),
 			"event_id":    eventID.String(),
 			"event_type":  eventType,
@@ -265,7 +265,7 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	p.writeJSON(w, 201, map[string]interface{}{
+	p.writeJSON(w, 201, map[string]any{
 		"id":         eventID,
 		"event_type": eventType,
 		"received":   true,
@@ -346,7 +346,7 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	var signalWorkflowID interface{}
+	var signalWorkflowID any
 	if req.SignalWorkflowID != "" {
 		signalWorkflowID = req.SignalWorkflowID
 	}
@@ -358,7 +358,7 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
 		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret, enabled, created_at, updated_at, signal_workflow_id, signal_name)
 		VALUES ($1, $2, $3, $4, $5, true, $6, $6, $7, $8)
-	`, p.dialect), tid, id, req.Name, req.SourceType, req.Secret, now, signalWorkflowID, signalName)
+	`, p.dialect), tid, id, req.Name, req.SourceType, req.Secret.Reveal(), now, signalWorkflowID, signalName)
 	if err != nil {
 		p.logger.Error("webhook-ingest: create source", "error", err)
 		p.writeError(w, 500, "failed to create source")
@@ -370,7 +370,7 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 
 	p.logger.Info("webhook-ingest: source created", "id", id, "tenant", tid)
 
-	p.writeJSON(w, 201, map[string]interface{}{
+	p.writeJSON(w, 201, map[string]any{
 		"id":                 id,
 		"tenant_id":          tid,
 		"name":               req.Name,
@@ -470,7 +470,7 @@ func (p *Plugin) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		FROM webhook_events
 		WHERE tenant_id = $1
 	`
-	args := []interface{}{tid}
+	args := []any{tid}
 	argIdx := 2
 
 	if sourceIDStr := r.URL.Query().Get("source_id"); sourceIDStr != "" {

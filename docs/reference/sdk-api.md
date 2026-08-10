@@ -29,7 +29,7 @@ func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, erro
 - `Lifecycle` -- versioning, child workflows, cancellation, logging, defer
 - `Promises` -- durable promise operations
 - `StateManager` -- durable key-value state
-- `QueryHandlers` -- workflow handler registration
+- `UpdateHandlers` -- workflow update-handler registration
 - `CronScheduler` -- durable cron schedule operations
 - `Scoper` -- virtual object instance scoping
 - `UUIDGenerator` -- deterministic UUID generation
@@ -435,14 +435,11 @@ RegisterUpdateHandler(name string,
 Registers a handler for the named workflow update. Called during workflow
 init, before durable operations. The validator runs first (read-only).
 
----
-
-```go
-RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
-```
-
-Registers a read-only query handler that can be invoked on demand by external
-callers without journaling.
+There is no `RegisterQueryHandler` -- it was removed 2026-08-09 (see
+`docs/determinism.md`, "Why there is no RegisterQueryHandler"). It recorded a
+handler name but nothing ever routed an external query to it, so it was
+usable only inside an in-process test harness, never from a real client. Use
+`SetQueryState`, below, to publish state any caller can read.
 
 ---
 
@@ -525,6 +522,41 @@ expressions.
 ```go
 sid, _ := h.ScheduleCron("daily_report", "0 6 * * *", "America/New_York", `{}`)
 ```
+
+`cronExpr` is a standard 5-field expression. Day-of-month and day-of-week are
+**OR**ed when both are restricted, as POSIX cron specifies: `0 0 13 * 5` fires
+on the 13th *and* on every Friday, not only on Friday the 13th. `timezone` is an
+IANA name; `""` means UTC. Both are validated when the schedule is created —
+a schedule the scheduler could not act on is refused at the call, because a
+background loop has nobody to report one to later.
+
+`ListCrons` returns a JSON array, ordered by schedule ID:
+
+```json
+[{"schedule_id":"cron-…","workflow_name":"daily_report","cron_expr":"0 6 * * *",
+  "timezone":"America/New_York","input":"{}","enabled":true}]
+```
+
+**Delivery is at-least-once.** A firing may be delivered more than once; it will
+not be silently skipped. If duplicates matter to your workflow, make it
+idempotent — that is the caller's job, and it is the only guarantee worth
+offering: at-most-once is close to useless for scheduled work, and exactly-once
+is not attainable across a process boundary.
+
+`ScheduleCron` itself is safe to retry. Schedule IDs are derived from the
+calling workflow and step rather than generated randomly, so a workflow that
+creates a schedule and crashes before its event is journaled will address the
+same schedule when it replays, instead of leaving an unreferenced one firing
+forever. `DeleteCron` on an already-deleted schedule is likewise a success, not
+an error.
+
+**Availability.** Go and AssemblyScript. **Not available to Python workflows** —
+`python-sdk/wit/cleat.wit` declares no interface for these calls, so
+componentize-py generates no binding and they raise. The Rust and Java SDKs
+declare no cron surface at all. See `tiers.yaml`, `workflow-callable-cron`.
+
+The embedded and localdev runners refuse these calls: neither has a schedule
+store, so nothing there could ever fire a schedule.
 
 ---
 

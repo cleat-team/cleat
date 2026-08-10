@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // TestingT is the interface required by AssertCalled and AssertNotCalled.
@@ -25,11 +27,11 @@ type TestingT interface {
 
 // CallRecord records a single durable API call made through the test env.
 type CallRecord struct {
-	Service   string
-	Operation string
-	Request   string
-	Response  string
-	Err       error
+	Service    string
+	Operation  string
+	Request    string
+	Response   string
+	Err        error
 	RetryCount int // Number of retry attempts before this call succeeded (0 if no retry)
 }
 
@@ -284,6 +286,13 @@ type TestEnv struct {
 	deferCounter   int
 	promises       map[string]promiseState // keyed by promiseID
 
+	// crons holds schedules created by ScheduleCron, keyed by schedule ID.
+	// cronCounter makes those IDs deterministic so a test can assert on
+	// them; the engine derives its own from (tenant, workflow, step), which
+	// a harness with no steps and no tenant cannot reproduce.
+	crons       map[string]cleat.CronSchedule
+	cronCounter int
+
 	childWorkflowStubs map[string]*childWorkflowStub
 	childResults       map[string]*childStubResult
 
@@ -303,9 +312,9 @@ type TestEnv struct {
 	// childWorkflowCallHistory records all child workflow invocations.
 	childWorkflowCallHistory []ChildWorkflowCallRecord
 
-	ConcurrencyKeys           map[string]string
-	AcquireConcurrencyKeyFn   func(key, workflowID string) (bool, error)
-	ReleaseConcurrencyKeysFn  func(workflowID string)
+	ConcurrencyKeys          map[string]string
+	AcquireConcurrencyKeyFn  func(key, workflowID string) (bool, error)
+	ReleaseConcurrencyKeysFn func(workflowID string)
 
 	pluginCallStubs []*pluginCallStub
 
@@ -329,8 +338,9 @@ type TestEnv struct {
 	replayRecording bool
 
 	// ContinueAsNew tracking.
-	continued      bool
-	continuedInput string
+	continued        bool
+	continuedInput   string
+	continuedVersion int64
 
 	// clock provides simulated timeouts.
 	clock Clock
@@ -342,61 +352,82 @@ type TestEnv struct {
 // (e.g., WithRetrySimulation).
 func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 	e := &TestEnv{
-		nowMs:         time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(),
-		versionVal:    1,
-		minVersionVal: 1,
-		queryState:    make(map[string]string),
-		promises:      make(map[string]promiseState),
-		childWorkflowStubs: make(map[string]*childWorkflowStub),
-		childResults:       make(map[string]*childStubResult),
-		childWorkflowHandlers: make(map[string]func(inputJSON string) (resultJSON string, err error)),
-		retryBehaviors:       make(map[string]*retryBehavior),
+		nowMs:                    time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(),
+		versionVal:               1,
+		minVersionVal:            1,
+		queryState:               make(map[string]string),
+		promises:                 make(map[string]promiseState),
+		crons:                    make(map[string]cleat.CronSchedule),
+		childWorkflowStubs:       make(map[string]*childWorkflowStub),
+		childResults:             make(map[string]*childStubResult),
+		childWorkflowHandlers:    make(map[string]func(inputJSON string) (resultJSON string, err error)),
+		retryBehaviors:           make(map[string]*retryBehavior),
 		childWorkflowCallHistory: make([]ChildWorkflowCallRecord, 0),
-		ConcurrencyKeys: make(map[string]string),
-			signalReplyChannels: make(map[string]chan string),
+		ConcurrencyKeys:          make(map[string]string),
+		signalReplyChannels:      make(map[string]chan string),
 	}
 	for _, opt := range opts {
 		opt(e)
 	}
 	e.clock = &simClock{env: e}
-	e.h = cleat.NewHostCalls(cleat.HostCallsOptions{
-		DurableCall:                  e.durableCallImpl,
-		DurableCallWithOptions:       e.durableCallWithOptionsImpl,
-		DurableSleep:                 e.durableSleepImpl,
-		DurableAwaitSignals:          e.durableAwaitSignalsImpl,
-		DurableDefer:                 e.durableDeferImpl,
-		DurableLog:                   e.durableLogImpl,
-		PollCancellation:             e.pollCancellationImpl,
-		PollSignal:                   e.pollSignalImpl,
-		ContinueAsNew:                e.continueAsNewImpl,
-		ChildWorkflow:                e.childWorkflowImpl,
-		AwaitChild:                   e.awaitChildImpl,
-		AwaitAllChildren:             e.awaitAllChildrenImpl,
-		ChildWorkflowTyped:           e.childWorkflowTypedImpl,
-		AwaitChildTyped:              e.awaitChildTypedImpl,
-		DurableCallTypedWithHeartbeat: e.durableCallTypedWithHeartbeatImpl,
-		Version:                      e.versionImpl,
-		MinVersion:                   e.minVersionImpl,
-		SetQueryState:                e.setQueryStateImpl,
-		Now:                          e.nowImpl,
-		Random:                       e.randomImpl,
-		CreatePromise:                e.createPromiseImpl,
-		AwaitPromise:                 e.awaitPromiseImpl,
-		RegisterUpdateHandler:        e.registerUpdateHandlerImpl,
-		RegisterQueryHandler:        e.registerQueryHandlerImpl,
-		RunDetached:                  e.runDetachedImpl,
-		PluginCall: e.pluginCallImpl,
-			DurableSend:                   e.durableSendImpl,
-			ScheduleInvoke:                e.durableScheduleInvokeImpl,
-			SendSignalAndWait:            e.sendSignalAndWaitImpl,
-			ReplyToSignal:                e.replyToSignalImpl,
-			SignalWorkflow:               e.signalWorkflowImpl,
-			AcquireLock:                   e.acquireLockImpl,
-			ReleaseLock:                   e.releaseLockImpl,
-			AwaitCondition:               e.awaitConditionImpl,
-			SideEffect:                    e.sideEffectImpl,
-	})
+	e.h = cleat.NewHostCalls(e.hostCallsOptions())
 	return e
+}
+
+// hostCallsOptions is the harness's implementation of every host call.
+//
+// It is a method rather than a literal inlined into NewTestEnv so that
+// TestEveryHostCallIsWired can reflect over what it returns. A field left out
+// of this struct leaves the corresponding hook nil, and cleat/runtime_*.go
+// answers a nil hook with "can only be called from within a workflow function
+// (the HostCalls runtime was not initialized)" -- a message about workflow
+// context that says nothing about the real cause. AwaitAnyChild and PollChild
+// were missing here from the day they were added to HostCallsOptions.
+func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
+	return cleat.HostCallsOptions{
+		DurableCall:                   e.durableCallImpl,
+		DurableCallWithOptions:        e.durableCallWithOptionsImpl,
+		DurableSleep:                  e.durableSleepImpl,
+		DurableAwaitSignals:           e.durableAwaitSignalsImpl,
+		DurableDefer:                  e.durableDeferImpl,
+		DurableLog:                    e.durableLogImpl,
+		PollCancellation:              e.pollCancellationImpl,
+		PollSignal:                    e.pollSignalImpl,
+		ContinueAsNew:                 e.continueAsNewImpl,
+		ContinueAsNewWithVersion:      e.continueAsNewWithVersionImpl,
+		ResolvePromise:                e.resolvePromiseImpl,
+		RejectPromise:                 e.rejectPromiseImpl,
+		ChildWorkflow:                 e.childWorkflowImpl,
+		AwaitChild:                    e.awaitChildImpl,
+		AwaitAnyChild:                 e.awaitAnyChildImpl,
+		AwaitAllChildren:              e.awaitAllChildrenImpl,
+		PollChild:                     e.pollChildImpl,
+		ChildWorkflowTyped:            e.childWorkflowTypedImpl,
+		AwaitChildTyped:               e.awaitChildTypedImpl,
+		DurableCallTypedWithHeartbeat: e.durableCallTypedWithHeartbeatImpl,
+		Version:                       e.versionImpl,
+		MinVersion:                    e.minVersionImpl,
+		SetQueryState:                 e.setQueryStateImpl,
+		Now:                           e.nowImpl,
+		Random:                        e.randomImpl,
+		CreatePromise:                 e.createPromiseImpl,
+		ScheduleCron:                  e.scheduleCronImpl,
+		DeleteCron:                    e.deleteCronImpl,
+		ListCrons:                     e.listCronsImpl,
+		AwaitPromise:                  e.awaitPromiseImpl,
+		RegisterUpdateHandler:         e.registerUpdateHandlerImpl,
+		RunDetached:                   e.runDetachedImpl,
+		PluginCall:                    e.pluginCallImpl,
+		DurableSend:                   e.durableSendImpl,
+		ScheduleInvoke:                e.durableScheduleInvokeImpl,
+		SendSignalAndWait:             e.sendSignalAndWaitImpl,
+		ReplyToSignal:                 e.replyToSignalImpl,
+		SignalWorkflow:                e.signalWorkflowImpl,
+		AcquireLock:                   e.acquireLockImpl,
+		ReleaseLock:                   e.releaseLockImpl,
+		AwaitCondition:                e.awaitConditionImpl,
+		SideEffect:                    e.sideEffectImpl,
+	}
 }
 
 // H returns the HostCalls interface for workflow code to use.
@@ -630,6 +661,8 @@ func (e *TestEnv) Reset() {
 	e.randomSeq = nil
 	e.randomIdx = 0
 	e.deferCounter = 0
+	e.crons = make(map[string]cleat.CronSchedule)
+	e.cronCounter = 0
 	e.childWorkflowStubs = make(map[string]*childWorkflowStub)
 	e.childResults = make(map[string]*childStubResult)
 	e.childWorkflowHandlers = make(map[string]func(inputJSON string) (resultJSON string, err error))
@@ -639,7 +672,7 @@ func (e *TestEnv) Reset() {
 	e.childWorkflowCallHistory = nil
 	e.ConcurrencyKeys = make(map[string]string)
 	e.pluginCallStubs = nil
-		e.signalReplyChannels = make(map[string]chan string)
+	e.signalReplyChannels = make(map[string]chan string)
 	e.replayMode = false
 	e.replayHistory = nil
 	e.replayDivergence = 0
@@ -699,6 +732,19 @@ func (e *TestEnv) LastContinuedInput() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.continuedInput
+}
+
+// LastContinuedVersion returns the version passed to the most recent
+// ContinueAsNewWithVersion, or 0 if the workflow used plain ContinueAsNew.
+//
+// 0 is the engine's own "keep the current version" sentinel (see
+// engine/lifecycle.go), so it means "no version was pinned" rather than
+// "version zero" -- and it is also the zero value here, which makes the two
+// indistinguishable. Pair it with AssertContinued when that matters.
+func (e *TestEnv) LastContinuedVersion() int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.continuedVersion
 }
 
 // ---------------------------------------------------------------------------
@@ -976,6 +1022,51 @@ func (e *TestEnv) continueAsNewImpl(newInputJSON string) (retErr error) {
 	return
 }
 
+// continueAsNewWithVersionImpl is continueAsNewImpl plus the target version.
+//
+// engine/lifecycle.go records EventTypeContinueAsNew with NewInput and
+// NewVersion and then suspends, and documents newVersion == 0 as "keep the
+// current version". This harness has no version to keep, so it records what it
+// was asked for verbatim and lets LastContinuedVersion report it -- a test
+// asserting 0 is asserting "the workflow did not pin a version", which is the
+// distinction the engine draws.
+func (e *TestEnv) continueAsNewWithVersionImpl(newInputJSON string, newVersion int64) (retErr error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	replayKey := "ContinueAsNewWithVersion|" + newInputJSON + "|" + strconv.FormatInt(newVersion, 10)
+	if _, cachedErr, matched := e.replayLookup("ContinueAsNewWithVersion", replayKey); matched {
+		return cachedErr
+	}
+	defer func() { e.replayRecord("ContinueAsNewWithVersion", replayKey, "", retErr) }()
+
+	e.continued = true
+	e.continuedInput = newInputJSON
+	e.continuedVersion = newVersion
+	return
+}
+
+// resolvePromiseImpl is the workflow-side counterpart of the public
+// TestEnv.ResolvePromise driver method.
+//
+// It always returns nil, matching the engine: engine/promises.go records the
+// event, calls the promise store, and LOGS rather than returns a store error --
+// the host function's result is unconditionally success. A mock that surfaced
+// an error here would let a test assert a failure mode production cannot
+// produce. Resolving an unknown promise is likewise a silent no-op, because the
+// store's UPDATE matches no rows and SQL does not call that an error.
+func (e *TestEnv) resolvePromiseImpl(promiseID, value string) error {
+	e.ResolvePromise(promiseID, value)
+	return nil
+}
+
+// rejectPromiseImpl is the workflow-side counterpart of TestEnv.RejectPromise.
+// Same contract as resolvePromiseImpl above, including the nil return.
+func (e *TestEnv) rejectPromiseImpl(promiseID, errMsg string) error {
+	e.RejectPromise(promiseID, errMsg)
+	return nil
+}
+
 // RegisterChildWorkflow registers a handler function for a child workflow with the
 // given name. The handler receives the input JSON and returns the result JSON and an
 // error. This takes priority over stub results set via OnChildWorkflow.
@@ -1062,6 +1153,75 @@ func (e *TestEnv) awaitChildImpl(runID string) (resp string, retErr error) {
 	}
 	resp = `{"status":"completed"}`
 	return
+}
+
+// awaitAnyChildImpl mirrors engine/children.go's AwaitAnyChild: it polls the
+// children in SORTED runID order and returns the first one with a result.
+//
+// The sort matches the engine deliberately. cleat/dagrun/dagrun.go builds its
+// runIDs slice by ranging over a map, so the argument order is randomised on
+// every call, and engine/children.go sorts before polling so that a replay
+// after a suspend picks the same winner as the original execution. A harness
+// that honoured argument order instead would disagree with the engine about
+// which child wins.
+//
+// It is fidelity, not something the current suite pins -- measured, because
+// the first version of this comment claimed otherwise. Disabling the sort and
+// running examples/dag 20 times: 20/20 still pass. The DAG's outputs are keyed
+// by task name and its levels respect dependencies either way, so the choice
+// of winner does not change its result. TestAwaitAnyChild_PicksLowestSortedRunID
+// in this package is what actually holds the behaviour in place.
+//
+// Every child in this harness has already run to completion by the time it is
+// awaited -- childWorkflowImpl resolves it synchronously -- so "first
+// completed" degenerates to "first in sorted order" and there is no suspend
+// path to model. The per-child replay bookkeeping is awaitChildImpl's, which
+// is why this delegates to it rather than reading e.childResults directly.
+func (e *TestEnv) awaitAnyChildImpl(runIDs []string) (string, string, error) {
+	if len(runIDs) == 0 {
+		return "", "", fmt.Errorf("cleattest: AwaitAnyChild called with no run IDs")
+	}
+
+	sorted := append([]string(nil), runIDs...)
+	sort.Strings(sorted)
+
+	e.mu.Lock()
+	winner := ""
+	for _, runID := range sorted {
+		if _, ok := e.childResults[runID]; ok {
+			winner = runID
+			break
+		}
+	}
+	e.mu.Unlock()
+
+	if winner == "" {
+		// No recorded result for any of them. awaitChildImpl treats an unknown
+		// runID as a completed child with a default result rather than
+		// blocking, and this follows it: a harness that hung here would turn a
+		// mis-wired test into a timeout instead of a failure.
+		winner = sorted[0]
+	}
+
+	result, err := e.awaitChildImpl(winner)
+	return winner, result, err
+}
+
+// pollChildImpl is the non-blocking counterpart. Children resolve synchronously
+// here, so a known child is always "completed"; an unknown one is "running"
+// rather than an error, which is what lets a poll loop in a workflow terminate.
+func (e *TestEnv) pollChildImpl(runID string) (string, string, error) {
+	e.mu.Lock()
+	result, ok := e.childResults[runID]
+	e.mu.Unlock()
+
+	if !ok {
+		return "running", "", nil
+	}
+	if result.err != nil {
+		return "failed", "", result.err
+	}
+	return "completed", result.result, nil
 }
 
 func (e *TestEnv) awaitAllChildrenImpl(runIDs []string) ([]cleat.ChildResult, error) {
@@ -1194,23 +1354,6 @@ func (e *TestEnv) registerUpdateHandlerImpl(name string) {
 	_ = name // no-op for testing; SDK layer stores handler+validator in a map
 }
 
-func (e *TestEnv) registerQueryHandlerImpl(name string) {
-	_ = name // no-op for testing; hostCallsImpl stores handler in queryHandlers map
-}
-
-
-// HandleQuery invokes a registered query handler by name with the given payload.
-// If the underlying HostCalls supports it, the host-provided handler is used.
-// Otherwise, falls back to the local queryHandlers map in hostCallsImpl.
-func (e *TestEnv) HandleQuery(name, payload string) (string, error) {
-	// The h field is a *hostCallsImpl which has a HandleQuery method.
-	// Type-assert to access it; if the assertion fails, try a simpler fallback.
-	if e.h.HostCallsImpl != nil {
-		return e.h.HandleQuery(name, payload)
-	}
-	return "", fmt.Errorf("cleattest: HandleQuery not available")
-}
-
 // HandleUpdate invokes a registered update handler by name with the given payload.
 func (e *TestEnv) HandleUpdate(name, payload string) (string, error) {
 	if e.h.HostCallsImpl != nil {
@@ -1341,7 +1484,6 @@ func (e *TestEnv) replyToSignalImpl(correlationID, response string) error {
 	return nil
 }
 
-
 // signalWorkflowImpl delivers a signal to a target workflow.
 // In the test env, the target workflow is the current workflow itself.
 func (e *TestEnv) signalWorkflowImpl(targetRunID, signalName, payload string) error {
@@ -1361,7 +1503,6 @@ func (e *TestEnv) signalWorkflowImpl(targetRunID, signalName, payload string) er
 	e.mu.Unlock()
 	return nil
 }
-
 
 // ResolvePromise resolves a promise with the given result.
 func (e *TestEnv) ResolvePromise(promiseID, result string) {
@@ -1482,7 +1623,7 @@ func (e *TestEnv) sideEffectImpl(computedResult string) (resp string, retErr err
 }
 
 func (e *TestEnv) AcquireConcurrencyKey(key, workflowID string) (bool, error) {
-		if e.AcquireConcurrencyKeyFn != nil {
+	if e.AcquireConcurrencyKeyFn != nil {
 		return e.AcquireConcurrencyKeyFn(key, workflowID)
 	}
 	e.mu.Lock()
@@ -1587,4 +1728,98 @@ func matchesAny(name string, names []string) bool {
 		}
 	}
 	return false
+}
+
+// Cron schedules.
+//
+// These validate with engine.ValidateCronExpr and engine.ValidateTimezone --
+// the same functions the host calls use -- rather than with rules invented
+// here. A harness that accepted an expression the engine rejects would turn a
+// production failure into a green test, which is worse than not implementing
+// the call at all.
+//
+// What is NOT reproduced: the engine derives a schedule ID from (tenant,
+// workflow, step) so that a retry after a crash addresses the same row. There
+// is no replay and no crash here, so these IDs are a simple counter, which
+// also makes them assertable.
+
+func (e *TestEnv) scheduleCronImpl(workflowName, cronExpr, timezone, inputJSON string) (string, error) {
+	if workflowName == "" {
+		return "", fmt.Errorf("schedule_cron: workflow name is empty")
+	}
+	if err := engine.ValidateCronExpr(cronExpr); err != nil {
+		return "", fmt.Errorf("schedule_cron %q: %w", workflowName, err)
+	}
+	if err := engine.ValidateTimezone(timezone); err != nil {
+		return "", fmt.Errorf("schedule_cron %q: %w", workflowName, err)
+	}
+	if inputJSON == "" {
+		inputJSON = "{}"
+	}
+	if !json.Valid([]byte(inputJSON)) {
+		return "", fmt.Errorf("schedule_cron %q: input is not valid JSON", workflowName)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cronCounter++
+	scheduleID := fmt.Sprintf("cron-%d", e.cronCounter)
+	tz := timezone
+	if tz == "" {
+		tz = engine.DefaultScheduleTimezone
+	}
+	e.crons[scheduleID] = cleat.CronSchedule{
+		ScheduleID:   scheduleID,
+		WorkflowName: workflowName,
+		CronExpr:     cronExpr,
+		Timezone:     tz,
+		Input:        inputJSON,
+		Enabled:      true,
+	}
+	return scheduleID, nil
+}
+
+// deleteCronImpl removes a schedule. Deleting one that is not there is not an
+// error, matching the host call -- at-least-once delivery means a workflow
+// retries, and the second delete must not fail.
+func (e *TestEnv) deleteCronImpl(scheduleID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.crons, scheduleID)
+	return nil
+}
+
+func (e *TestEnv) listCronsImpl() (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	ids := make([]string, 0, len(e.crons))
+	for id := range e.crons {
+		ids = append(ids, id)
+	}
+	// Sorted, because map iteration order is not stable and a workflow that
+	// walked this list would be non-deterministic -- the one thing a durable
+	// workflow must never be.
+	sort.Strings(ids)
+
+	list := make([]cleat.CronSchedule, 0, len(ids))
+	for _, id := range ids {
+		list = append(list, e.crons[id])
+	}
+	out, err := json.Marshal(list)
+	if err != nil {
+		return "", fmt.Errorf("list_crons: %w", err)
+	}
+	return string(out), nil
+}
+
+// Crons returns the schedules currently registered, for assertions.
+func (e *TestEnv) Crons() []cleat.CronSchedule {
+	listJSON, err := e.listCronsImpl()
+	if err != nil {
+		return nil
+	}
+	var list []cleat.CronSchedule
+	_ = json.Unmarshal([]byte(listJSON), &list)
+	return list
 }

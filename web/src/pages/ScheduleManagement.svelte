@@ -12,6 +12,38 @@
   let newDefName = $state('');
   let newEntryPoint = $state('');
   let newInput = $state('');
+  let newTimezone = $state('UTC');
+
+  // The authoritative timezone list is the Go binary's tzdata, not anything
+  // baked into this bundle. When the browser exposes the IANA database we
+  // offer it as <datalist> suggestions; otherwise the input degrades to
+  // plain free text and the server is the final judge (400 on an invalid
+  // name).
+  const timezoneSuggestions: string[] = (() => {
+    try {
+      const supportedValuesOf = (Intl as unknown as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
+      return typeof supportedValuesOf === 'function' ? supportedValuesOf('timeZone') : [];
+    } catch {
+      return [];
+    }
+  })();
+
+  function formatNextRun(s: Schedule): string {
+    if (!s.next_run_at) return '-';
+    const date = new Date(s.next_run_at);
+    const tz = s.timezone || 'UTC';
+    try {
+      // Render in the schedule's own timezone (not the viewer's local
+      // timezone) so the displayed time is actually meaningful relative to
+      // the "timezone" field shown alongside it.
+      return date.toLocaleString(undefined, { timeZone: tz, timeZoneName: 'short' });
+    } catch {
+      // Should not happen -- the server validates the zone name -- but
+      // fall back to an unambiguous representation rather than silently
+      // mislabeling the time as local.
+      return `${date.toISOString()} (UTC)`;
+    }
+  }
 
   async function load() {
     loading = true;
@@ -30,9 +62,10 @@
   async function doCreate() {
     if (!newName || !newCron || !newDefName) return;
     try {
-      await createSchedule({ name: newName, cron: newCron, def_name: newDefName, entry_point: newEntryPoint || undefined, input: newInput || undefined });
+      await createSchedule({ name: newName, cron: newCron, def_name: newDefName, entry_point: newEntryPoint || undefined, input: newInput || undefined, timezone: newTimezone || undefined });
       showAdd = false;
       newName = newCron = newDefName = newEntryPoint = newInput = '';
+      newTimezone = 'UTC';
       await load();
     } catch (e: any) {
       error = e.message;
@@ -80,7 +113,7 @@
   {:else}
     <table>
       <thead>
-        <tr><th>Name</th><th>Cron</th><th>Definition</th><th>Entry Point</th><th>Enabled</th><th>Next Run</th><th>Actions</th></tr>
+        <tr><th>Name</th><th>Cron</th><th>Definition</th><th>Entry Point</th><th>Timezone</th><th>Enabled</th><th>Next Run</th><th>Actions</th></tr>
       </thead>
       <tbody>
         {#each schedules as s (s.name)}
@@ -89,12 +122,13 @@
             <td style="font-family:monospace; font-size:0.8rem;">{s.cron_expression}</td>
             <td>{s.def_name}</td>
             <td>{s.entry_point || 'default'}</td>
+            <td style="font-family:monospace; font-size:0.8rem;">{s.timezone || 'UTC'}</td>
             <td>
               <span class="badge" class:badge-completed={s.enabled} class:badge-failed={!s.enabled}>
                 {s.enabled ? 'Yes' : 'No'}
               </span>
             </td>
-            <td style="font-size:0.8rem;">{s.next_run_at ? new Date(s.next_run_at).toLocaleString() : '-'}</td>
+            <td style="font-size:0.8rem;">{formatNextRun(s)}</td>
             <td>
               <button class="btn btn-sm" style="background:#eee; margin-right:0.25rem;" onclick={() => doToggle(s)}>
                 {s.enabled ? 'Disable' : 'Enable'}
@@ -131,6 +165,20 @@
       <div class="form-group">
         <label>Input JSON (optional)</label>
         <textarea bind:value={newInput} rows={3} placeholder="Example JSON input"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Timezone</label>
+        <input type="text" bind:value={newTimezone} placeholder="UTC" list="timezone-suggestions" />
+        {#if timezoneSuggestions.length > 0}
+          <datalist id="timezone-suggestions">
+            {#each timezoneSuggestions as tz (tz)}
+              <option value={tz}></option>
+            {/each}
+          </datalist>
+        {/if}
+        <p style="color: var(--color-text-muted); font-size:0.75rem; margin: 0.25rem 0 0;">
+          IANA timezone name, e.g. "America/New_York". Defaults to UTC.
+        </p>
       </div>
       <div style="display:flex; gap: 0.5rem; justify-content: flex-end;">
         <button class="btn btn-sm" style="background:#eee;" onclick={() => showAdd = false}>Cancel</button>

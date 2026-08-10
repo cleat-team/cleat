@@ -12,7 +12,7 @@ covers conceptual mapping, API differences, code examples, and known gaps.
 | Workflow | `@cleat_entry` function | No workflow/activity distinction in Cleat |
 | Activity | `call()` | Both service calls and activities use the same API |
 | Signal | `await_signals()` / `poll_signal()` | Same semantics, different method name |
-| Query | `set_query_state()` / query handlers | Cleat uses explicit key-value state |
+| Query | `set_query_state()` + `GET /api/workflows/:id/query?key=X` | No `QueryWorkflow`-style dispatch to a live handler -- publish state explicitly, any client reads it via the REST API |
 | Child Workflow | `child_workflow()` + `await_child()` | Similar API, no `ChildWorkflowOptions` |
 | Continue-As-New | `continue_as_new()` | Identical concept |
 | Timer / Sleep | `sleep(ms)` | **Milliseconds** in Cleat vs. `time.Duration` in Temporal Go |
@@ -313,16 +313,43 @@ REST endpoints at `/api/workflows` for listing and filtering.
 - **Workaround**: Use Cleat's REST API (`GET /api/workflows?status=running&limit=50`)
   or query `workflow_instances` directly via SQL.
 
-### 6. No Side Effect Equivalent
+### 6. Side Effects — direct equivalent, same semantics
 
-Temporal has `Workflow.SideEffect` for non-deterministic code that runs once and is
-recorded. Cleat does not have an equivalent.
+Temporal's `Workflow.SideEffect` maps directly onto cleat's `SideEffect`. This
+entry previously said cleat had no equivalent and recommended routing the
+computation through a stub service; that was wrong, and the workaround is
+strictly worse than the real thing.
 
-- **Workaround**: Use `call("side_effect", "compute", {data: ...})` with a
-  stub service that runs the non-deterministic computation and records the result.
-  Or use `random()` for deterministic randomness.
+```go
+// HostCalls.SideEffect(fn func() (string, error)) (string, error)
+id, err := h.SideEffect(func() (string, error) { return uuid.NewString(), nil })
 
-### 7. Versioning Model Differences
+// or, typed:
+id, err := cleat.SideEffectTyped(h, func() (uuid.UUID, error) { return uuid.New(), nil })
+```
+
+The function runs once on first execution and its result is recorded in the
+event history; every replay afterwards returns the recorded value without
+running it again. Available in the Go SDK (`cleat/runtime.go`,
+`SideEffectTyped` in `cleat/runtime_workflow.go`), the AssemblyScript SDK
+(`sideEffect()`), and exported by both WASM backends as `cleat_side_effect`.
+
+`random()` remains available for deterministic randomness and does not need
+`SideEffect`.
+
+### 7. `IsReplaying()` has no equivalent, deliberately
+
+Temporal's `workflow.IsReplaying()` is not offered by cleat. Branching workflow
+logic on it records different events on replay than on execution, which is what
+replay exists to prevent. The one safe use -- suppressing a side effect the
+history cannot see, such as a log line or a metric -- is covered by `SideEffect`
+above, which is replay-consistent by construction rather than by the author
+remembering to check a flag.
+
+See [determinism.md](../determinism.md#why-there-is-no-isreplaying) for the full
+reasoning.
+
+### 8. Versioning Model Differences
 
 Temporal versions workflows by keeping old worker binaries running. Cleat versions
 by storing WASM blobs in the database.
@@ -332,3 +359,33 @@ by storing WASM blobs in the database.
   Rollback is a database UPDATE, not a worker re-deploy.
 - **Workaround**: Use `version()` and `min_version()` in workflow code for
   backward-compatible logic branches.
+
+### 9. `QueryWorkflow` has no equivalent -- `RegisterQueryHandler` was removed
+
+Temporal's `QueryWorkflow` routes a synchronous, read-only question to a
+handler registered inside a *running* workflow. Cleat had a same-shaped API
+(`RegisterQueryHandler` in every SDK) that turned out to be a promise the
+engine never kept: it recorded a handler name with the host and returned
+success, but no worker code ever routed an external query back to it. It
+worked only inside each SDK's in-process test harness, where the test itself
+called the handler directly. It was removed from every SDK on 2026-08-09.
+
+The gap is architectural, not an oversight to be wired up later. Cleat
+workflows do not sit resident in a worker's memory the way Temporal's do --
+they run only for the duration of a claim-execute-persist cycle, so there is
+usually no live in-memory instance for a query to reach. `SetQueryState` is
+the actual mechanism, and it fits that model: the workflow proactively
+persists queryable state to the database at points it chooses, and any
+caller can read it regardless of whether a worker currently holds the
+workflow in memory, via `GET /api/workflows/:id/query?key=X`.
+
+```go
+h.SetQueryState("order_status", "shipped")
+```
+
+```
+curl http://worker:8080/api/workflows/<id>/query?key=order_status
+```
+
+See [determinism.md](../determinism.md#why-there-is-no-registerqueryhandler)
+for the full reasoning.

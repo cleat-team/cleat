@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 	"path/filepath"
+	"sort"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -119,6 +120,15 @@ func LoadPackages(pattern string, fset *token.FileSet) (*AnalysisResult, error) 
 			result.EntryPoints = append(result.EntryPoints, fd.FullyQualifiedName())
 		}
 	}
+
+	// result.Funcs is a map, so the loop above visits it in Go's randomized
+	// iteration order and EntryPoints comes out in a different order on every
+	// run. That is not cosmetic: cmd/cleat's wasmOutputName derives the output
+	// artifact's filename from EntryPoints[0], so `cleat build` on a package
+	// with more than one entry point picked a different .wasm name each time
+	// it ran -- one of three, at random, for testdata/basic. Sorting makes the
+	// order a function of the source alone.
+	sort.Strings(result.EntryPoints)
 
 	if len(result.EntryPoints) == 0 {
 		return nil, fmt.Errorf("no workflow entry points found in %s. Entry points must be exported functions with cleat.HostCalls as the first parameter (e.g., func MyWorkflow(h cleat.HostCalls, arg string) error)", pattern)

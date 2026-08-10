@@ -46,9 +46,9 @@ file missing or changed during replay.
 
 **Why blocked**: Reflection results can differ across Go versions and build targets.
 Type identities, method sets, and struct field layouts are not guaranteed to be
-identical between Go and TinyGo, or between different Go versions. This breaks
-deterministic replay because a workflow that uses `reflect` during original
-execution may get different reflection results during replay.
+identical between different Go versions. This breaks deterministic replay
+because a workflow that uses `reflect` during original execution may get
+different reflection results during replay.
 
 **What to use instead**:
 - Type switches (`switch v.(type)`)
@@ -266,8 +266,8 @@ fn() // ERROR: E009
 if x > 0.5 { // WARNING: W002
 ```
 
-**Why**: Floating-point comparison results can differ between Go and TinyGo,
-or between CPU architectures, causing replay divergence.
+**Why**: Floating-point comparison results can differ between CPU
+architectures, causing replay divergence.
 
 **Alternative**: Use integer arithmetic or `math.Float64bits()` for exact
 bitwise comparison.
@@ -324,98 +324,7 @@ for _, k := range keys {
 
 ---
 
-## 5. TinyGo Limitations
-
-When using `cleat build --target tinygo`, additional constraints apply because
-TinyGo does not fully implement the Go standard library. Using
-`cleat build --target go` (the default) lifts all TinyGo-specific limitations:
-the full Go standard library is available, there are no JSON bugs, no Go version
-constraints beyond the project's `go.mod`, and no `.deps/` shim is required.
-See [When to Use Standard Go vs TinyGo](#when-to-use-standard-go-vs-tinygo)
-for guidance on choosing between the two targets.
-
-### Missing Standard Library Packages
-
-The following packages are **not available** under TinyGo:
-
-| Package | Status | Workaround |
-|---------|--------|------------|
-| `net` | Unimplemented | Use `h.DurableFetch()` for HTTP |
-| `net/http` | Unimplemented | Use `h.DurableFetch()` for HTTP |
-| `crypto/tls` | Partial | Avoid TLS; use plain HTTP or `h.DurableFetch()` |
-| `crypto/x509` | Unimplemented | Not needed without TLS |
-| `encoding/asn1` | Unimplemented | Avoid |
-| `encoding/gob` | Unimplemented | Use `encoding/json` or manual serialization |
-| `encoding/xml` | Unimplemented | Use `encoding/json` |
-| `html/template` | Unimplemented | Not needed in workflow code |
-| `net/url` | Partial | Use string manipulation |
-| `os/exec` | Unimplemented | Use `h.ChildWorkflow()` |
-| `os/signal` | Unimplemented | Not needed in WASM |
-| `path/filepath` | Partial | Use `path` or string manipulation |
-| `plugin` | Unimplemented | Not applicable (WASM) |
-| `reflect` | Partial | Avoid (also forbidden by cleat) |
-| `regexp` | Partial | Use string operations as workaround |
-| `runtime/debug` | Unimplemented | Avoid |
-| `runtime/pprof` | Unimplemented | Use host-level profiling |
-| `sync` | Partial (no RWMutex, Cond) | Not needed (single-threaded) |
-| `syscall` | Unimplemented | Not needed in WASM |
-| `testing` | Unimplemented | Use `cleattest.TestEnv` |
-| `text/template` | Partial | Avoid in workflow code |
-| `unsafe` | Partial | Avoid (also not recommended) |
-
-### Unsupported Go Features in TinyGo
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Goroutines | Supported (with limitations) | TinyGo uses a cooperative scheduler; blocking operations must yield |
-| Channels | Supported (with limitations) | Only works with goroutines |
-| Generics (Go 1.18+) | Partial | Basic generics work; complex constraints may fail |
-| `recover()` | Supported | Works as expected |
-| `defer` | Supported | Works as expected |
-| CGo | Not supported | WASM target disables CGo |
-| `//go:wasmimport` | Supported | Used by cleat adapter code |
-| Reflection via `interface{}` | Partial | Type assertions work; `reflect` package is limited |
-| `finalizer` | Not supported | No GC finalizers in TinyGo |
-| Plugin loading | Not supported | WASM cannot load Go plugins |
-| `go test` | Supported | But `testing` package is limited |
-| Race detector | Not supported | No runtime race detection in TinyGo |
-
-### Binary Size Comparison
-
-| Scenario | Standard Go | TinyGo | Savings |
-|----------|-------------|--------|---------|
-| Hello World (no imports) | 4 MB | 50 KB | ~98.8% |
-| Basic workflow (calls, sleep) | 5-6 MB | 80-120 KB | ~98% |
-| Workflow with JSON | 6-8 MB | 100-150 KB | ~98% |
-| Complex workflow (retries, signals) | 7-10 MB | 120-200 KB | ~98% |
-
-### Performance Characteristics
-
-| Metric | Standard Go WASM | TinyGo WASM |
-|--------|-----------------|-------------|
-| Cold start (load from DB) | 50-100 ms | 0.5-2 ms |
-| Execution speed (pure compute) | ~100% of native Go | ~50-80% of native Go |
-| Garbage collection | Full GC (stop-the-world) | Simple mark-sweep; lower latency |
-| Memory usage | 10-20 MB baseline | 100-500 KB baseline |
-
-### When to Use Standard Go vs TinyGo
-
-**Use Standard Go when:**
-- Your workflow needs full standard library compatibility
-- You depend on packages that are not implemented in TinyGo
-- You use complex generic types with advanced constraint expressions
-- Compute performance is critical (pure number crunching)
-
-**Use TinyGo when:**
-- You are starting a new workflow (it is the recommended default)
-- WASM binary size and cold start time matter
-- You deploy many workflow versions and want to minimize storage
-- Your worker environment is memory-constrained
-- You want faster build times
-
----
-
-## 6. Common Migration Patterns
+## 5. Common Migration Patterns
 
 ### Replacing `time.Now()`
 
@@ -477,6 +386,4 @@ order.UnmarshalJSON(data) // generated by cleat-gen
 ## References
 
 - [WASM Size Guide](./wasm-size-guide.md) — Binary size impact of imports
-- [TinyGo Language Support Reference](https://tinygo.org/docs/reference/lang-support/)
-- [TinyGo Standard Library Coverage](https://tinygo.org/docs/reference/stdlib/)
 - [Cleat Transformer Source (`internal/closure/closure.go`)](../internal/closure/closure.go)

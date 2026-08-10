@@ -9,7 +9,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // setupTelemetry configures OpenTelemetry tracing. If disabled is true, a no-op
@@ -21,7 +21,7 @@ func setupTelemetry(ctx context.Context, endpoint string, disabled bool, workerI
 	// Guard on empty endpoint to prevent default export to localhost:4318.
 	// Keep in sync with InitTracing() in internal/telemetry/tracing.go.
 	if endpoint == "" || disabled {
-		otel.SetTracerProvider(trace.NewNoopTracerProvider())
+		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 		return func() {}
 	}
 
@@ -31,7 +31,7 @@ func setupTelemetry(ctx context.Context, endpoint string, disabled bool, workerI
 	)
 	if err != nil {
 		slog.Warn("failed to create OTLP trace exporter, falling back to no-op", "error", err)
-		otel.SetTracerProvider(trace.NewNoopTracerProvider())
+		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 		return func() {}
 	}
 

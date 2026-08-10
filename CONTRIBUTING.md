@@ -22,14 +22,23 @@ under different terms if needed.
 
 ### How to sign (individuals)
 
-Include the following statement in your first pull request description:
+Open your pull request as normal. If you have not signed, the CLA Assistant
+bot comments on it with a link to the agreement, and the `CLA Assistant` check
+stays red until you reply on the pull request with exactly:
 
 ```
-I hereby agree to the terms of the cleat Contributor License Agreement
-(docs/cla.md).
-
-Signed-off-by: Your Name <your.email@example.com>
+I have read the cleat Contributor License Agreement and I hereby sign the CLA
 ```
+
+Your signature is then recorded in `signatures/version1/cla.json` on the
+`cla-signatures` branch, against your GitHub username and the pull request you
+signed on. You sign once; later pull requests are checked against that file.
+If the check is stale for any reason, comment `recheck`.
+
+> Until 2026-08-07 signing meant pasting a sentence into the pull request
+> description. That established nothing — a description is editable after the
+> fact and is not carried into the repository by a squash merge, so there was
+> no record of who had agreed. The signature file is that record.
 
 ### Corporate contributors
 
@@ -50,21 +59,53 @@ The DCO confirms you have the right to submit the contribution under the
 project's license. Unlike the CLA, it does not grant re-licensing rights —
 that's what the CLA is for.
 
+**This is enforced.** `DCO Check` is a required status check, and since
+2026-08-07 it can actually fail — it reads the commits your pull request adds
+and exits non-zero if any of them lacks the trailer. Before that date it
+printed a warning and passed regardless, which is why most of the history
+behind you is unsigned. It only ever looks at `base..head`, so that history
+is not your problem; your own commits are.
+
+To stop having to remember the flag, install the repo's hooks once per clone:
+
+```
+git config core.hooksPath .githooks
+```
+
+`.githooks/prepare-commit-msg` then appends the trailer from your
+`user.name` and `user.email` on every commit. It is idempotent, so it
+composes with `--signoff`, `--amend` and `git rebase --signoff` rather than
+signing anything twice.
+
+If a branch is already unsigned:
+
+```
+git rebase --signoff origin/develop   # sign every commit the branch adds
+git push --force-with-lease
+```
+
 ## Prerequisites
 
 To build and test cleat you will need:
 
+**Minimum (write and run Go workflows):**
 | Tool | Version | Required | Notes |
 |------|---------|----------|-------|
-| **Go** | 1.26+ | Yes | See `go.mod` |
-| **PostgreSQL** | 14+ (16 recommended) | Yes | For worker daemon and workflow storage |
-| **TinyGo** | Latest | No | Required only for `--target tinygo`. The default `--target go` uses the standard Go toolchain (`GOOS=wasip1 GOARCH=wasm`). |
-| **Rust toolchain** | Stable | No | For `cleat-macro` / `cleat-sdk` crates and Rust workflows |
-| **Node.js** | 20+ | No | For Svelte web UI and AssemblyScript SDK |
-| **Java** | 17+ | No | For Java SDK |
-| **MySQL** | 8.0+ (Docker) | No | Required only for MySQL backend integration tests (`CLEAT_TEST_MYSQL`) |
-| **SQL Server** | 2017+ (Docker) | No | Required only for MSSQL backend integration tests (`CLEAT_TEST_MSSQL`) |
-| **Docker** | Latest | No | For cluster integration tests |
+| Go | 1.25+ | Yes | Standard Go toolchain |
+| PostgreSQL | 14+ (16 recommended) | Yes | Or MySQL 8.0+, or SQL Server 2017+ |
+| Docker | Latest | No | Only if using Docker for the database |
+
+**Full (develop cleat itself):**
+| Tool | Version | Required | Notes |
+|------|---------|----------|-------|
+| Everything above | | Yes | |
+| Rust toolchain | Stable | No | For `cleat-macro` / `cleat-sdk` crates and Rust workflows |
+| Python 3 | 3.10+ | No | For Python SDK |
+| Java | 17+ | No | For Java SDK |
+| Node.js | 20+ | No | For Svelte web UI and AssemblyScript SDK |
+| MySQL | 8.0+ (Docker) | No | For MySQL backend integration tests |
+| SQL Server | 2017+ (Docker) | No | For MSSQL backend integration tests |
+| Docker | Latest | No | For cluster integration tests |
 
 ## Branch naming
 
@@ -75,11 +116,13 @@ one of these prefixes:
 |--------|---------|---------|
 | `feature/` | New functionality | `feature/multi-db-support` |
 | `bugfix/` | Bug fixes | `bugfix/claim-race-condition` |
+| `fix/` | CI, config, and tooling fixes | `fix/ci-token` |
+| `docs/` | Documentation only | `docs/branch-conventions` |
 | `release/` | Release preparation | `release/v1.2.0` |
 | `hotfix/` | Critical production fixes | `hotfix/worker-panic-on-nil-input` |
 
 Branch names must be lowercase, use hyphens (not underscores), and be concise
-but descriptive. The prefix must be one of the four listed above.
+but descriptive. The prefix must be one of those listed above.
 
 A CI check validates branch naming on pull requests. Branches opened by
 dependabot or with the `bot` label are exempt.
@@ -125,6 +168,17 @@ dependabot or with the `bot` label are exempt.
    be merged. This includes DCO, semantic PR title, branch naming, CLA check
    (for first-time contributors), and the AI review gates.
 
+## Quick setup
+
+For a one-command toolchain check:
+
+```bash
+make setup        # minimum: Go + PostgreSQL (for workflow authors)
+make setup-full   # everything: all languages + databases (for engine contributors)
+```
+
+Or open this repo in VS Code with the [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) extension — the `.devcontainer/` configuration provisions a complete environment automatically.
+
 ## Build from source
 
 ```bash
@@ -161,25 +215,31 @@ go install ./cmd/cleat-gen
 go test -short ./...
 
 # All tests (including integration tests that need a database)
-go test -count=1 ./...
+#
+# -p 1 is required, not tuning. Several packages are database-backed and share
+# one database; engine/testutil's CleanupPostgresTestData is an unqualified
+# DELETE across eleven tables, so packages run concurrently delete each other's
+# fixtures mid-test. The result looks like a flaky product defect and is not
+# one. See the header of scripts/skip-budget.txt.
+go test -count=1 -p 1 ./...
 
 # Tests for a specific package
 go test -count=1 -v ./internal/transform/...
 
 # Cluster integration tests (requires Docker)
 # Starts a PostgreSQL cluster via docker-compose, then runs tests
-DURABLE_TEST_DB=postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable \
-  go test -count=1 -timeout=120s ./internal/host/...
+CLEAT_TEST_DB=postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable \
+  go test -count=1 -p 1 -timeout=120s ./engine/...
 
 # MySQL backend tests (requires MySQL 8.0+ at localhost:3306)
 # Skipped if CLEAT_TEST_MYSQL is not set
 CLEAT_TEST_MYSQL=root:cleat@tcp(localhost:3306)/cleat \
-  go test -count=1 -timeout=120s ./internal/host/...
+  go test -count=1 -p 1 -timeout=120s ./engine/...
 
 # SQL Server backend tests (requires SQL Server 2017+ at localhost:1433)
 # Skipped if CLEAT_TEST_MSSQL is not set
 CLEAT_TEST_MSSQL=sqlserver://sa:CleatTest123!@localhost:1433?database=master \
-  go test -count=1 -timeout=120s ./internal/host/...
+  go test -count=1 -p 1 -timeout=120s ./engine/...
 
 # Rust crates
 cd crates/cleat-macro && cargo test
@@ -189,7 +249,7 @@ cd crates/cleat-sdk && cargo test
 cd packages/cleat-as && npm test
 ```
 
-> **Note:** The `DURABLE_TEST_DB` environment variable is used by cluster
+> **Note:** The `CLEAT_TEST_DB` environment variable is used by cluster
 > integration tests. See `docker-compose.cluster.yml` for the default Postgres,
 > MySQL, and SQL Server configurations. The compose file defines all three
 > database services for local multi-backend development.
@@ -228,7 +288,7 @@ Workflows are compiled to WebAssembly using the `cleat build` command.
 ### Go WASM
 
 ```bash
-# Compile with TinyGo (the default and only Go WASM target)
+# Compile with the standard Go toolchain (the only Go WASM target)
 cleat build -o ./out ./path/to/workflow/package
 ```
 
@@ -302,10 +362,11 @@ each gate must pass before the next begins.
 
 ### 1. Open the PR
 
-Open a pull request against the `main` branch from a branch that follows the
+Open a pull request against the `develop` branch from a branch that follows the
 [branch naming convention](#branch-naming). Use the PR template to describe
-your change. If this is your first PR to cleat, include the CLA statement in
-the description (see [How to sign](#how-to-sign-individuals)).
+your change. If you have not signed the CLA, a bot will comment on the pull
+request asking you to (see [How to sign](#how-to-sign-individuals)); there is
+nothing to prepare in advance.
 
 Keep PRs small and focused. A single concern, a single PR.
 
@@ -317,8 +378,8 @@ CI runs automatically on every push. The following checks must all pass:
 |-------|-----------------|
 | DCO | Every commit has a `Signed-off-by` line |
 | Semantic PR title | Title follows `type(scope): description` format |
-| Branch naming | Branch name follows `feature/`, `bugfix/`, `release/`, or `hotfix/` prefix convention |
-| CLA (first-time only) | First-time contributors have the ICLA statement in the PR description |
+| Branch naming | Branch name follows `feature/`, `bugfix/`, `fix/`, `docs/`, `release/`, or `hotfix/` prefix convention |
+| CLA Assistant | The author has signed the ICLA, recorded in `signatures/version1/cla.json` on the `cla-signatures` branch |
 | Lint | `go vet`, `golangci-lint`, `ruff`, `shellcheck`, `clippy` |
 | Test | Go (1.22/1.23/1.24 matrix), Python (3.10–3.12), Java, Rust, AssemblyScript |
 | Vulncheck | `govulncheck` for known vulnerabilities |
@@ -431,21 +492,59 @@ regressions before they reach production users.
 
 ## Finding work
 
-Good first issues are tagged `good-first-issue` and `help-wanted` in the
-[GitHub issue tracker](https://github.com/cleat-team/cleat/issues). The project
-uses these labels:
+The [issue tracker](https://github.com/cleat-team/cleat/issues) uses GitHub's
+default label set. The two worth filtering on:
 
-- `good-first-issue` — Well-scoped tasks with clear acceptance criteria,
-  suitable for newcomers to the codebase.
-- `help-wanted` — Contributions wanted but may require more context.
-- `area/sdk` — SDK-specific issues (Go, Rust, AssemblyScript, Java, Python).
-- `area/wasm` — WASM compilation, transformer pipeline.
-- `area/worker` — Worker daemon, polling, execution loop.
-- `area/ui` — Svelte web UI.
-- `area/docs` — Documentation improvements.
+- [`good first issue`](https://github.com/cleat-team/cleat/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+  — well-scoped tasks with clear acceptance criteria, suitable for newcomers.
+- [`help wanted`](https://github.com/cleat-team/cleat/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
+  — contributions wanted, but may need more context to pick up.
+
+Note the spaces: the names are `good first issue` and `help wanted`. Until
+2026-08-07 this section advertised them hyphenated, along with five `area/*`
+labels. None of those seven existed, so anyone who followed this list got an
+empty result page. Re-derive the real set with `gh label list`.
 
 Check the [Discussions](https://github.com/cleat-team/cleat/discussions) page for
 RFCs and design proposals that need implementation.
+
+## Documentation Standards
+
+### SDK README template
+
+All SDK READMEs should follow the template at
+`docs/contributor/SDK_README_TEMPLATE.md`. The template covers:
+
+1. Installation
+2. Quick Start (minimal example)
+3. HostCall API Reference (table format)
+4. WASM Compilation
+5. Constraints / Known Limitations
+6. Testing Guide
+7. Troubleshooting
+
+See `python-sdk/README.md` for a complete worked example that follows the
+template. When creating a new SDK or updating an existing one, use the template
+as a starting point and fill in language-specific details.
+
+### Diataxis documentation framework
+
+The project follows the
+[Diataxis](https://diataxis.fr/) framework for documentation:
+
+- **Tutorials** — Learning-oriented, step-by-step guides (in `docs/tutorials/`)
+- **How-to guides** — Goal-oriented recipes (in `docs/how-to/`)
+- **Explanation** — Understanding-oriented background (in `docs/explanation/`)
+- **Reference** — Information-oriented technical descriptions (in `docs/reference/`)
+
+New documentation should be placed in the appropriate directory. If you are
+unsure which category fits, ask in the PR review or open an issue for guidance.
+
+### New SDKs must follow the template
+
+Any new SDK added to the repository must include a README that follows the SDK
+README template. The review gate for new SDK PRs includes a check that the
+README covers all seven sections.
 
 ## Questions?
 

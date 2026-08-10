@@ -233,6 +233,12 @@ func TestAfterSignal(t *testing.T) {
 	if !timedOut {
 		t.Fatal("expected timeout before time advance")
 	}
+	// Asserted rather than dropped: ineffassign found `name` being discarded
+	// here once the cleat module started being linted. A timeout that also
+	// returned a signal name would be a real defect, and nothing said so.
+	if name != "" || payload != "" {
+		t.Fatalf("timeout returned a signal: name=%q payload=%q", name, payload)
+	}
 
 	// Advance time past the delay.
 	env.AdvanceTime(200 * time.Millisecond)
@@ -1223,9 +1229,28 @@ func TestAdvanceTimeAndDrainMultipleSleeps(t *testing.T) {
 		close(slept2)
 	}()
 
-	time.Sleep(5 * time.Millisecond)
+	// Wait for the sleeper to be registered rather than sleeping a fixed 5ms
+	// and hoping. AdvanceTimeAndDrain returns as soon as it sees zero pending
+	// sleepers, so advancing before the goroutine has registered drains
+	// nothing -- while still moving the clock forward. The sleep that
+	// registers afterwards then wants a deadline past the new now, and no
+	// further advance is coming, so it hangs until the test's timeout.
+	waitForSleeper := func(what string) {
+		t.Helper()
+		for i := 0; i < 500; i++ {
+			env.mu.Lock()
+			n := len(env.sleepRecs)
+			env.mu.Unlock()
+			if n > 0 {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s to be registered", what)
+	}
 
 	// First advance: should drain first sleep.
+	waitForSleeper("first DurableSleep")
 	env.AdvanceTimeAndDrain(1 * time.Second)
 	select {
 	case <-slept1:
@@ -1234,7 +1259,12 @@ func TestAdvanceTimeAndDrainMultipleSleeps(t *testing.T) {
 		t.Fatal("first DurableSleep did not complete")
 	}
 
-	// Second advance: should drain second sleep.
+	// Second advance: should drain second sleep. close(slept1) happens
+	// *before* the goroutine enters the second DurableSleep, so reaching here
+	// says nothing about whether that sleep is registered yet -- this is the
+	// window the original test left unguarded, and it is why the job failed
+	// intermittently under CI load while passing locally.
+	waitForSleeper("second DurableSleep")
 	env.AdvanceTimeAndDrain(1 * time.Second)
 	select {
 	case <-slept2:

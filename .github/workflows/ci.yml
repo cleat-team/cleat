@@ -5,8 +5,21 @@
 #
 # Jobs:
 #   lint              — go vet, ruff, shellcheck, clippy
-#   lint-go           — golangci-lint: errcheck, gosimple, govet, ineffassign,
-#                       staticcheck, unused, misspell, unconvert, gocyclo, gofmt
+#   lint-go           — gofmt, then golangci-lint. As of 2026-08-08 that is
+#                       six linters — govet, misspell, ineffassign, gosimple,
+#                       staticcheck, unconvert — over every .go file in the
+#                       repo, test files included. errcheck, gosec, gocyclo
+#                       and unused stay disabled, with their measured backlogs
+#                       and the reasoning in .golangci.yml.
+#
+#                       Do not restate that list here when it changes; say
+#                       where it lives. This line has been wrong twice. It
+#                       once claimed ten linters when one was running, was
+#                       corrected to "govet only", and was still saying that
+#                       three days after WS-3 enabled four more on 2026-08-05.
+#                       Re-derive rather than trust it:
+#
+#                         golangci-lint linters | sed -n '/Enabled/,/Disabled/p'
 #   vulncheck         — govulncheck ./... (Go vulnerability scanner)
 #   test-go           — matrix (go version x package group), race detector
 #   test-python       — matrix (python 3.10 / 3.11 / 3.12)
@@ -49,41 +62,212 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
+      - name: CI package-coverage guard
+        run: scripts/check-ci-package-coverage.sh
+
+      # A t.Skip is reported by `go test` as neither a pass nor a failure, and
+      # so is read as a pass. That mechanism hid four separate defects found in
+      # one session: a Postgres service with no published port (twice), a
+      # renamed DURABLE_TEST_DB, and a compose cluster whose workers were all
+      # crash-looping while the job reported success. The baseline records
+      # every skip that exists today; a new one, or a growing one, fails here.
+      - name: Conditional-skip guard
+        run: scripts/check-skips.sh
+
+      - name: ABI doc/code consistency guard
+        run: scripts/check-doc-consistency.sh
+
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
+      # Must run after Setup Go (it shells out to `go mod tidy -diff`), unlike
+      # the package-coverage guard above, which is pure bash.
+      - name: Cross-module go.mod tidiness guard
+        run: scripts/check-go-mod-tidy.sh
+
+      # Catches code that is written, tested, passing, and wired to nothing --
+      # which a test suite cannot catch, because the tests pass precisely
+      # because they are the only callers. The baseline records the existing
+      # backlog (63 entries); only new additions fail.
+      - name: Test-only code guard
+        run: scripts/check-test-only-code.sh
+
+      # Sibling to the guard above: that one catches code called only from
+      # tests (staticcheck U1000, -tests=false), but U1000 never reports
+      # exported identifiers in a non-main package at all -- it assumes a
+      # library's public API may have external callers. True for cleat/ and
+      # pluginapi/; false for engine/, plugin/, wasm/, and friends, which
+      # nothing outside this repo imports. engine/batch_flush.go and
+      # plugin/audit.go both survived the guard above for exactly that
+      # reason -- U1000 never even saw them as findings to baseline. This
+      # step greps for exported func/method names declared in those
+      # internal-only roots and flags the ones nothing in the tree, test or
+      # production, ever spells. Baseline records the existing backlog (20
+      # entries, all verified by hand -- see the commit that added it).
+      - name: Dead-export code guard
+        run: scripts/check-dead-exports.sh
+
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+
+      # A workflow file that does not parse produces a run with *no jobs* --
+      # a "startup failure" that reports red but cannot report why, and that
+      # no step inside that workflow can ever catch. ai-pr-review.yml and
+      # release-notes-check.yml were both in that state: an unindented block
+      # inside a `script:`/`run:` scalar ended it early, so neither check had
+      # ever actually run on any PR. This step catches the next one, from a
+      # workflow that does parse.
+      #
+      # (Both files were deleted on 2026-08-07: parsing turned out to be the
+      # first of four reasons release-notes-check.yml gated nothing, and
+      # ai-pr-review.yml ran for months posting only "AI review unavailable".
+      # See IMPROVEMENT-PLAN 1.12a and 1.12b. The guard below is unaffected;
+      # it walks whatever files are present. Worth keeping in mind when it
+      # next fires: a startup failure hides every other defect in the file
+      # behind it, so making a workflow parse is where the investigation
+      # starts, not where it ends.)
+      - name: Workflow files parse
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          python3 - <<'PY'
+          import glob, sys, yaml
+          bad = []
+          files = sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
+          if not files:
+              sys.exit("no workflow files found -- this check would pass vacuously")
+          for path in files:
+              try:
+                  doc = yaml.safe_load(open(path))
+              except yaml.YAMLError as e:
+                  bad.append(f"{path}: {e}")
+                  continue
+              # `on:` parses as the boolean True in YAML 1.1, which is why it
+              # is checked by identity rather than by name.
+              if not isinstance(doc, dict) or "jobs" not in doc:
+                  bad.append(f"{path}: parsed but has no top-level 'jobs:' key")
+          for b in bad:
+              print(f"::error title=Unparseable workflow::{b}")
+          print(f"checked {len(files)} workflow files, {len(bad)} broken")
+          sys.exit(1 if bad else 0)
+          PY
+
+      # Four structural guards over the workflows, each catching a CLASS that
+      # has already cost a session to find one instance of by hand:
+      #
+      #   1. every context in .github/required-checks.txt resolves to a job
+      #      that exists -- a context naming a job that is gone blocks every
+      #      PR forever, and a job renamed out from under its context stops
+      #      gating silently;
+      #   2. no required job, and no step of one, waives its own failure --
+      #      #370 and #373's shape;
+      #   3. no `services:` image on a floating tag -- #377's shape;
+      #   4. every `--filter ancestor=<ref>` names an image pinned in the same
+      #      file -- the trap found while pinning SQL Server, where that filter
+      #      matches on the pull reference, so pinning `image:` alone leaves
+      #      `docker exec` with an empty container ID.
+      #
+      # The script fails on anything it cannot analyse -- an unexpandable
+      # matrix, an unresolvable expression, an empty context list -- rather
+      # than passing. Every guard was verified by breaking what it guards and
+      # reading the message; see the PR that added it.
+      #
+      # It does NOT verify required-checks.txt against the live branch
+      # protection: that needs an admin token, which GITHUB_TOKEN is not.
+      # `scripts/check-workflow-guards.py --verify-against-api` does, for a
+      # human with one. A green Lint is not evidence that the file matches the
+      # API, and the file says so at the top.
+      #
+      # pyyaml comes from the "Workflow files parse" step above; this step must
+      # stay after it.
+      - name: Workflow integrity guards
+        run: scripts/check-workflow-guards.py
+
+      # Ruff, promoted back into this required job on 2026-08-08. It ran here
+      # before under `continue-on-error: true`, which meant it could not fail a
+      # build and -- worse -- reported `success` in the REST jobs API, so the
+      # waiver looked like a passing tool. It was moved to `Lint (advisory)`
+      # while its backlog was worked off, and the backlog is now zero.
+      #
+      # Pinned, and must match `required-version` in python-sdk/pyproject.toml.
+      # Ruff's default rule set moves between releases, so an unpinned install
+      # silently changes what this required check means; on the same tree,
+      # 0.6.9 reported 3 findings and 0.16.2 reported 260. ruff itself refuses
+      # to run on a mismatch, so the two cannot drift silently -- but bump them
+      # in the same PR, deliberately, reading the release's rule-set changes.
+      #
+      # No `continue-on-error` here, and guard 2 in check-workflow-guards.py
+      # above now fails this job if anyone adds one to a required job or any of
+      # its steps.
+      - name: Install ruff
+        run: pip install ruff==0.16.2
+
+      - name: Ruff check
+        run: ruff check python-sdk/
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
+      # Pinned to a released binary rather than apt, because ShellCheck's
+      # findings differ by version and apt's version floats with the runner
+      # image. This was not theoretical: the promotion below failed its first
+      # CI run on two findings that shellcheck 0.11.0 does not report at all --
+      # SC2317 and SC2015, in files that already carried suppressions written
+      # against the newer code names (SC2317 was split into SC2329 in 0.10). So
+      # the repo passed locally and failed in CI on the same source, which is
+      # the ruff problem fixed in #403 wearing different clothes: a linter whose
+      # strictness is set by whoever built the runner image.
+      #
+      # Bump deliberately, reading the release notes for new checks, rather than
+      # inheriting one from an image refresh.
       - name: Install lint tools
+        env:
+          SHELLCHECK_VERSION: v0.11.0
         run: |
-          pip install ruff
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
+          set -euo pipefail
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJf - -C /tmp
+          sudo install "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
 
-      - name: Go vet
-        run: CGO_ENABLED=0 go vet ./...
-
-      - name: Ruff check
-        continue-on-error: true
-        run: ruff check python-sdk/
-
+      # ShellCheck, promoted into this required job on 2026-08-08 -- the last
+      # of the two linters that ran here under `continue-on-error: true`. Its 7
+      # findings are fixed; four were SC2164, `cd "$REPO_ROOT"` with no failure
+      # branch, in guard scripts whose whole job is to inspect a particular
+      # tree.
+      #
+      # Must stay after "Install lint tools" above, which is what apt-gets
+      # shellcheck. Placed before it on the first attempt, where it failed with
+      # `shellcheck: command not found` -- a step ordered before its own
+      # dependency fails loudly, which is the good case; the bad case is the
+      # one this file is otherwise about.
       - name: ShellCheck
-        continue-on-error: true
         run: shellcheck scripts/*.sh benchmarks/*.sh
+
+      # CGO on. With CGO_ENABLED=0 this step analysed a build that is not the
+      # one we ship: `//go:build cgo` takes eight files out of ./engine/,
+      # including backend_wasmtime.go -- the backend of record -- and all four
+      # wasmtime_hostfuncs*.go, the ABI boundary CLAUDE.md names as the source
+      # of four real defects. backend_wasmtime_stub.go was vetted in its place.
+      #
+      #   comm -13 <(CGO_ENABLED=0 go list -f '{{$d:=.Dir}}{{range .GoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}' ./... | sort) \
+      #            <(CGO_ENABLED=1 go list -f '{{$d:=.Dir}}{{range .GoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}' ./... | sort)
+      #
+      # Verified 2026-08-07 by injecting `fmt.Sprintf("%d", "not-an-int")` into
+      # backend_wasmtime.go: CGO_ENABLED=0 vet reported nothing, CGO_ENABLED=1
+      # reported it. Vet is clean across ./... with CGO on, so this costs
+      # nothing to switch on.
+      - name: Go vet
+        run: CGO_ENABLED=1 go vet ./...
 
       - name: Clippy (cleat-macro)
         working-directory: crates/cleat-macro
@@ -93,23 +277,161 @@ jobs:
         working-directory: crates/cleat-sdk
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Clippy (cleat-test)
+        working-directory: crates/cleat-test
+        run: cargo clippy --all-targets -- -D warnings
+
   # -------------------------------------------------------------------------
-  # Lint Go (golangci-lint — disabled: action doesn't support Go 1.26 yet)
+  # The `Lint (advisory)` job stood here from 2026-08-07 to 2026-08-08.
+  #
+  # It existed because Ruff and ShellCheck ran inside the required `Lint` job
+  # under `continue-on-error: true` -- a required check running two linters
+  # whose verdict was discarded, which is #370 and #373's shape one level
+  # down. Worse, the REST jobs API reports `steps[].conclusion: success` for
+  # any step carrying that waiver, so reading it showed two passing tools. It
+  # did not; running them showed 260 and 7 findings respectively.
+  #
+  # A separate non-required job was the honest interim: it goes red visibly on
+  # the PR rather than hiding inside a green required check, while its backlog
+  # is worked off. Both backlogs are now zero and both linters are steps in
+  # `Lint` above, so the job is deleted rather than left as a permanent green
+  # -- a job with nothing left to advise is the same defect in a new costume.
+  # (It had in fact gone permanently RED on develop while ShellCheck's 7 sat
+  # unfixed, which is equally uninformative and is what prompted finishing it.)
+  #
+  # Kept as a comment rather than deleted outright because `git log` does not
+  # answer "why is there no advisory job" for someone about to add one back.
   # -------------------------------------------------------------------------
-  # lint-go:
-  #   name: Go Lint (golangci-lint)
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Setup Go
-  #       uses: actions/setup-go@v5
-  #       with:
-  #         go-version: "1.26"
-  #     - name: golangci-lint
-  #       uses: golangci/golangci-lint-action@v6
-  #       with:
-  #         version: latest
-  #         args: --timeout=5m ./...
+  # -------------------------------------------------------------------------
+  # Lint Go (golangci-lint)
+  # -------------------------------------------------------------------------
+  lint-go:
+    runs-on: ubuntu-latest
+    env:
+      # CGO on, for the reason given on the Go vet step above: at 0, the eight
+      # `//go:build cgo` files in ./engine/ are not part of the build, so
+      # golangci-lint never reads the wasmtime backend or its host functions.
+      # This is a required status check, and it was reporting on a build that
+      # does not ship.
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+      # gofmt as its own step, not as a golangci-lint linter.
+      #
+      # This file's header comment has listed gofmt among the enabled linters
+      # for as long as it has existed, and it was never enabled: .golangci.yml
+      # only ever *disables* linters, and gofmt is not in golangci-lint's
+      # default set (errcheck, gosimple, govet, ineffassign, staticcheck,
+      # unused). So the gate did not exist, and cmd/cleat-worker/config.go sat
+      # unformatted on develop with CI green.
+      #
+      # Run directly rather than by adding gofmt to .golangci.yml, because
+      # that config excludes ".*_test\.go$" from every linter -- which would
+      # leave the majority of the repo's Go files outside the check that is
+      # being added to catch exactly this.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l . | grep -v '/testdata/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            echo >&2
+            echo "Run: gofmt -w <file>" >&2
+            exit 1
+          fi
+          echo "OK: all Go files are gofmt-clean."
+
+      # --timeout, because golangci-lint's default is one minute and this job
+      # has been finishing inside it only by virtue of a warm build cache.
+      #
+      # Measured 2026-08-06. On develop the whole job -- checkout, setup-go,
+      # gofmt, `go install`, and the run -- takes 75s, because
+      # actions/setup-go restores GOCACHE and golangci-lint re-analyses almost
+      # nothing. On a cold cache, on this runner, it does not finish:
+      #
+      #   level=error msg="Timeout exceeded: try increasing it by passing --timeout option"
+      #   ##[error]Process completed with exit code 4.
+      #
+      # "On this runner" is load-bearing and was checked rather than assumed.
+      # The same cold run on an M-series Mac takes 16s:
+      #
+      #   GOCACHE=$(mktemp -d) CGO_ENABLED=0 GOTOOLCHAIN=local \
+      #     golangci-lint run ./...        # 16s, exit 0
+      #
+      # So the margin is a property of ubuntu-latest, not of the tree, and no
+      # local run can tell you whether this job is close to its limit. That is
+      # itself the argument for not leaving the limit at the default.
+      #
+      # The way it surfaced is the reason this is worth fixing rather than
+      # working around. PR #325 bumps
+      # actions/setup-go from v5 to v7, and v7 computes a different cache key,
+      # so it cannot read what v5 wrote. Same runner, same Go 1.25.12, same
+      # `cache: true`:
+      #
+      #   v5:  Cache hit for: setup-go-Linux-x64-ubuntu24-go-1.25.12-f850121d...
+      #   v7:  Cache is not found
+      #
+      # GitHub Actions only writes a cache from the default branch, so a PR run
+      # cannot seed the v7 key -- and lint-go is a required check, so the bump
+      # cannot land to seed it either. The bump was therefore permanently
+      # unmergeable, failing on a check that says nothing about its diff, and
+      # the failure reads exactly like a flake: re-running produced the same
+      # error twice, which is the only reason it was not treated as one.
+      #
+      # 5m is chosen against the observed cold run rather than as a round
+      # number: it exceeded 60s and the step as a whole ran 112s including
+      # `go install`, so 5m leaves room for a slower runner without being so
+      # large that a genuinely hung lint sits there for the job's full budget.
+      #
+      # The deeper point is that a lint gate whose pass depends on a cache hit
+      # is one eviction away from a red build on an unchanged tree. The timeout
+      # should bound the analysis, not the cache.
+      # `./...` STOPS AT MODULE BOUNDARIES, which is why this loops.
+      #
+      # This step ran `golangci-lint run ./...` from the repo root until
+      # 2026-08-08, and Go's `./...` does not descend into a nested module. So
+      # `cleat/` -- the PUBLIC SDK module, the one external users import -- and
+      # `cleat/backendkit` had never been linted by anything, while a required
+      # check called `lint-go` went green. Exactly the gap #408 fixed for
+      # govulncheck, in the job whose entire purpose is linting.
+      #
+      # The module list is derived the same way `scripts/check-go-mod-tidy.sh`
+      # and the govulncheck step below derive theirs. Three copies of one find
+      # is one too many, but making them agree by construction is a refactor of
+      # its own; what matters here is that this one does not invent a fourth
+      # set of exclusions. benchmarks/comparative/* is excluded for the reason
+      # check-go-mod-tidy.sh gives: those modules deliberately pin old
+      # competitor releases and are not ours to keep clean.
+      #
+      # Cost, measured 2026-08-08 on an M-series Mac with a cold lint cache:
+      # cleat/ 3.5s (47 files), cleat/backendkit 1.6s (6 files), against the
+      # root module's 764 files. The --timeout is per-invocation, so the loop
+      # does not eat into the root module's budget.
+      - name: golangci-lint (all first-party modules)
+        run: |
+          set -uo pipefail
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.7
+          cfg="$PWD/.golangci.yml"
+          mods="$(find . -name go.mod \
+                    -not -path './node_modules/*' -not -path '*/node_modules/*' \
+                    -not -path './.claude/*' \
+                    -not -path './benchmarks/comparative/*' |
+                  sed 's|/go\.mod$||; s|^\./||; s|^$|.|' | sort)"
+          if [ -z "$mods" ]; then
+            echo "::error title=lint-go::found no go.mod at all -- this lint would pass vacuously" >&2
+            exit 1
+          fi
+          echo "linting modules:"; echo "$mods" | sed 's/^/  /'
+          rc=0
+          for m in $mods; do
+            echo "::group::golangci-lint $m"
+            ( cd "$m" && golangci-lint run --timeout=5m -c "$cfg" ./... ) || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
 
   # -------------------------------------------------------------------------
   # Vulnerability check (govulncheck)
@@ -121,12 +443,67 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      # CGO on, as above. A vulnerability scan that excludes the CGo path is
+      # scanning something other than what ships -- and wasmtime is reached
+      # through CGo, so at 0 this never traced a call into it.
+      #
+      # Measured 2026-08-07 on ./engine/: CGO_ENABLED=0 and CGO_ENABLED=1 give
+      # identical output today, so this changes no current finding. It is
+      # preventive rather than a fix for a live miss, and worth saying so
+      # rather than implying it caught something.
+      # EVERY first-party module, not just the root one. `./...` stops at a
+      # module boundary, so `govulncheck ./...` run from the repo root reached
+      # 0 of the 8 packages in cleat/ and 0 of the 1 in cleat/backendkit --
+      # both of which have their own go.mod and their own dependency sets.
+      # Verified 2026-08-08:
+      #
+      #   go list ./... | grep -c 'cleat-team/cleat/cleat'   -> 0
+      #
+      # This is the shape tiers.yaml grew a `modules:` list for, and the same
+      # one that let wasm-demo sit un-compiled for three months (item 2 of
+      # plans/ci-integrity-followup-plan.md): a separate module is invisible to
+      # every command that walks the root one, and nothing says so.
+      #
+      # PREVENTIVE, NOT A CATCH -- stated plainly, the same way the CGO note
+      # above is. Running it against the two uncovered modules on 2026-08-08
+      # found only GO-2026-5856 (crypto/tls, fixed in go1.26.5), which is a
+      # standard-library finding the root module reports too and which CI's
+      # `go-version: stable` toolchain does not have. No module-specific
+      # vulnerability was hiding here today. What was missing was the coverage.
+      #
+      # benchmarks/comparative/** is excluded deliberately: those modules pin
+      # specific competitor releases (Temporal, DBOS) for like-for-like
+      # measurement, so their dependency sets are meant to be old and are not
+      # shipped. check-go-mod-tidy.sh exempts them for the same reason.
+      #
+      # The loop fails if it finds no modules at all, because a scan that
+      # silently covers nothing is what this whole job exists to not be.
+      - name: govulncheck (all first-party modules)
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          set -uo pipefail
+          mods="$(find . -name go.mod \
+                    -not -path './node_modules/*' -not -path '*/node_modules/*' \
+                    -not -path './.claude/*' \
+                    -not -path './benchmarks/comparative/*' |
+                  sed 's|/go\.mod$||; s|^\./||; s|^$|.|' | sort)"
+          if [ -z "$mods" ]; then
+            echo "::error title=govulncheck::found no go.mod at all -- this scan would pass vacuously" >&2
+            exit 1
+          fi
+          echo "scanning modules:"; echo "$mods" | sed 's/^/  /'
+          rc=0
+          for m in $mods; do
+            echo "::group::govulncheck $m"
+            ( cd "$m" && go run golang.org/x/vuln/cmd/govulncheck@latest ./... ) || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
 
   # -------------------------------------------------------------------------
   # Test Go (matrix: Go version x package group)
@@ -136,49 +513,130 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: cleat
+        # Required. This job runs directly on the runner, not inside a
+        # container, so the service's network is not shared with it -- without
+        # an explicit host port mapping the container is simply unreachable,
+        # and no amount of fixing the DSN helps. Combined with the localhost
+        # -> ::1 issue and testutil.TestDB's t.Skipf, this job declared a
+        # Postgres service, never once connected to it, and reported green for
+        # its entire existence.
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
     env:
-      CLEAT_TEST_DB: postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable
+      # 127.0.0.1, NOT localhost. On GitHub runners localhost resolves to ::1
+      # first, while a service container publishes its port on IPv4 only, so
+      # the connection is refused. testutil.TestDB used to turn that refusal
+      # into a t.Skipf -- so this job spun up a Postgres service, never reached
+      # it, skipped every Postgres-backed test, and reported green.
+      #
+      # TestDB now makes that distinction itself, per dialect: unconfigured is
+      # a skip, configured-but-unreachable is a failure naming the redacted
+      # DSN. (The requireBackendReachable preflight that f9bce35 bolted onto
+      # one file was made redundant by that and has been removed.) Because this
+      # variable is set here, a Postgres that stops being reachable now fails
+      # this job instead of emptying it.
+      CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+      # tests/crash needs the owner DSN explicitly: it applies the migrations
+      # itself (including 005_app_role.sql) and grants cleat_app a login, then
+      # points the worker at cleat_app. Same database as CLEAT_TEST_DB.
+      CLEAT_CRASH_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
     strategy:
       fail-fast: false
       matrix:
         go-version: ["1.26"]
         package:
+          # cleat/ is a SEPARATE Go module (see the replace directive in
+          # go.mod), so `go test ./cleat/...` from the repo root fails with
+          # "main module does not contain package". It must run from inside
+          # that module. This entry silently failed at setup for its entire
+          # existence, masked by the missing pipefail.
           - name: core
-            path: ./cleat/...
+            dir: cleat
+            path: ./...
+          - name: engine
+            path: ./engine/...
+            # -p 1: ./engine/... is two packages, engine and engine/testutil,
+            # and `go test` runs packages in parallel by default. Both point at
+            # the one database this job provides, and testutil's own tests call
+            # CleanupPostgresTestData -- an unqualified DELETE FROM eleven
+            # tables including workflow_defs and workflow_instances -- so in
+            # parallel they delete each other's fixtures mid-test. The cluster
+            # job below already runs this same path with -p 1 for exactly this
+            # reason; this entry did not, and the failures it produces are
+            # timing-dependent (a workflow that vanishes between two statements,
+            # a foreign key to a definition deleted since it was deployed) and
+            # so read as flakes rather than as one cause. See IMPROVEMENT-PLAN
+            # 2.60d, which is the underlying fix.
+            flags: -p 1
+          - name: wasm
+            path: ./wasm/... ./wasmrw/...
           - name: internal
             path: ./internal/...
           - name: plugins
             path: ./plugins/...
+          - name: support
+            path: ./plugin/... ./pluginapi/... ./auth/... ./migration/... ./monitoring/...
           - name: commands
             path: ./cmd/...
+          # tests/ is otherwise not in this matrix -- cluster/scale/soak need
+          # infrastructure and plugin-harness and cross-language have their own
+          # workflows. manifests needs nothing but a Go toolchain, and it is the
+          # only thing that checks the shipped deployment manifests against the
+          # binary they start.
+          - name: manifests
+            path: ./tests/manifests/...
+          # integrity needs exactly what this job already provides: a
+          # PostgreSQL service (CLEAT_TEST_DB, above) and CGO for the wasmtime
+          # backend, which -race turns on anyway. It is where replay
+          # determinism, checksum-chain verification, WAL corruption detection
+          # and the durable-call ambiguity detector are tested -- 68 tests that
+          # no job had ever run. Its budget is 0: everything in it runs here.
+          - name: integrity
+            path: ./tests/integrity/...
+          # upgrade needs the same PostgreSQL service and nothing else. Its
+          # subject is what survives a version change: schema migration without
+          # data loss, an in-flight workflow keeping its old WASM version, and a
+          # rolling worker restart neither losing work nor executing anything
+          # twice.
+          - name: upgrade
+            path: ./tests/upgrade/...
+          # scale needs the same PostgreSQL service. It is not a benchmark
+          # gate -- it asserts correctness under concurrency (every workflow
+          # reaches a terminal state, no workflow is claimed twice), and its
+          # throughput numbers are logged, not asserted, so it does not fail on
+          # a slow runner.
+          - name: scale
+            path: ./tests/scale/...
+          # crash is §2.4. It needs the same PostgreSQL service, plus the
+          # ability to CREATE/ALTER a role: it runs a real cleat-worker
+          # subprocess on the shipped two-DSN configuration (--db as the
+          # unprivileged cleat_app, --migrate-db as the owner) and SIGKILLs it
+          # mid-DurableCall. Running it as the owner instead would silently
+          # disable RLS, which is the class of defect it exists to catch.
+          #
+          # NOTE (WS-2 -> WS-3): .github/workflows/ is WS-3's under
+          # PARALLEL-WORKSTREAMS.md. Added here rather than left unwired,
+          # because check-ci-package-coverage.sh correctly refuses a suite no
+          # job runs and UNWIRED_SUITES is how the last set of dead suites
+          # accumulated. Move or restructure it freely.
+          - name: crash
+            path: ./tests/crash/...
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go-version }}
-
-      - name: Install TinyGo (WASM compilation)
-        if: matrix.package.name == 'internal' && matrix.go-version == '1.26'
-        run: |
-          TINYGO_VER=$(curl -sSfL https://api.github.com/repos/tinygo-org/tinygo/releases/latest | jq -r .tag_name)
-          if [ -z "$TINYGO_VER" ] || [ "$TINYGO_VER" = "null" ]; then
-            TINYGO_VER="v0.41.1"
-          fi
-          TINYGO_SHORT="${TINYGO_VER#v}"
-          curl -sSfL "https://github.com/tinygo-org/tinygo/releases/download/${TINYGO_VER}/tinygo${TINYGO_SHORT}.linux-amd64.tar.gz" -o /tmp/tinygo.tar.gz && \
-            sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz && \
-            echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
 
       - name: Setup Rust + wasm32-wasip1 (Rust WASM tests)
         if: matrix.package.name == 'internal'
@@ -187,76 +645,29 @@ jobs:
           targets: wasm32-wasip1
 
       - name: Run tests
-        run: go test -race -count=1 -json "${{ matrix.package.path }}" 2>&1 | tee test-report.json
+        shell: bash
+        working-directory: ${{ matrix.package.dir || '.' }}
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          # Unquoted on purpose: some matrix entries list several package patterns
+          # and rely on word splitting. Values are controlled by this file only.
+          go test -race -count=1 ${{ matrix.package.flags }} -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
 
-      - name: Warn on skipped tests
+      # A warning here was not enough. This job spun up a Postgres service it
+      # could not reach, skipped every Postgres-backed test, emitted exactly
+      # this warning, and reported green for its entire existence -- nobody
+      # reads a warning on a green job. The budget makes it a failure.
+      #
+      # Budgets live in scripts/skip-budget.txt, one line per job key. The
+      # check also fails when the report is missing or contains no test results
+      # at all, because a test step that died before producing output has
+      # skipped everything, which is the strongest form of the same bug.
+      - name: Skip budget
         if: always()
-        run: |
-          if [ -f test-report.json ]; then
-            SKIP_COUNT=$(grep -c '"Action":"skip"' test-report.json || echo 0)
-            if [ "$SKIP_COUNT" -gt 0 ]; then
-              echo "::warning title=Skipped Tests (${{ matrix.package.name }})::${SKIP_COUNT} test(s) were skipped. Verify that all test dependencies (PostgreSQL, TinyGo, Rust/cargo) are available."
-            fi
-          fi
-
-  # -------------------------------------------------------------------------
-  # Test Go with TinyGo (dedicated job)
-  #
-  # Installs TinyGo and runs the full WASM test suite, including the
-  # TinyGo compilation integration test in engine/. The job fails
-  # if TinyGo is unavailable or the TinyGo build path breaks — tests that
-  # would otherwise silently t.Skip() are forced to run.
-  # -------------------------------------------------------------------------
-  test-tinygo:
-    if: false  # Temporarily skipped; Go version issues being explored on another branch
-    name: Test Go with TinyGo
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: cleat
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      CLEAT_TEST_DB: postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-
-      - name: Install TinyGo
-        run: |
-          TINYGO_VER=$(curl -sSfL https://api.github.com/repos/tinygo-org/tinygo/releases/latest | jq -r .tag_name)
-          if [ -z "$TINYGO_VER" ] || [ "$TINYGO_VER" = "null" ]; then
-            TINYGO_VER="v0.41.1"
-          fi
-          TINYGO_SHORT="${TINYGO_VER#v}"
-          curl -sSfL "https://github.com/tinygo-org/tinygo/releases/download/${TINYGO_VER}/tinygo${TINYGO_SHORT}.linux-amd64.tar.gz" -o /tmp/tinygo.tar.gz && \
-            sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz && \
-            echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
-
-      - name: Verify TinyGo
-        run: tinygo version
-
-      - name: Test WASM build pipeline (wasm)
-        run: go test -race -count=1 ./wasm/...
-
-      - name: Test WASM runtime + TinyGo compilation (engine)
-        run: go test -race -count=1 -timeout=180s ./engine/...
-
-      - name: Test closure validator (internal/closure)
-        run: go test -race -count=1 ./internal/closure/...
-
-      - name: Test analyzer (internal/analyzer)
-        run: go test -race -count=1 ./internal/analyzer/...
+        working-directory: ${{ matrix.package.dir || '.' }}
+        run: ${{ github.workspace }}/scripts/check-skip-budget.sh 'test-go/${{ matrix.package.name }}' test-report.json
 
   # -------------------------------------------------------------------------
   # Test Python (matrix: 3.10 / 3.11 / 3.12)
@@ -264,7 +675,19 @@ jobs:
   test-python:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # No continue-on-error. With it, this job could not fail the build, so the
+    # Python SDK's own unit tests were advisory across all three versions -- and
+    # they are the only thing that tests the SDK's Python-side behaviour at all.
+    # The Cross-Language E2E job proves that a Python workflow compiles and
+    # executes on wasmtime; it does not run this suite.
+    #
+    # Measured 2026-08-06 on a clean checkout: 442 passed, 1 skipped. The one
+    # skip is tests/test_wasm_compilation.py's "componentize-py not installed",
+    # and this job installs componentize-py -- so on the runner it should be 443
+    # passed, 0 skipped. Re-derive (note: measured under 3.14, since that is
+    # what this machine has; the matrix below is 3.10-3.12):
+    #   python3 -m venv /tmp/v && /tmp/v/bin/pip install -q "./python-sdk[dev]"
+    #   cd python-sdk && /tmp/v/bin/python -m pytest -q -rs
     strategy:
       fail-fast: false
       matrix:
@@ -273,7 +696,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -294,12 +717,18 @@ jobs:
   test-java:
     name: Java Tests
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # No continue-on-error. It was here, so this job could not fail the build,
+    # and nobody had reason to look at it: measured 2026-08-06 on a clean
+    # checkout, `gradle test` in crates/cleat-java runs 280 tests with 0
+    # failures and 0 skips, so the exemption was protecting nothing. Re-derive:
+    #   cd crates/cleat-java && gradle test --no-daemon
+    #   grep -ho 'tests="[0-9]*"' build/test-results/test/*.xml |
+    #     awk -F'"' '{s+=$2} END{print s}'
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -316,7 +745,13 @@ jobs:
   # -------------------------------------------------------------------------
   test-assemblyscript:
     name: AssemblyScript Tests
-    continue-on-error: true
+    # No continue-on-error. Measured 2026-08-06 on a clean checkout, `npm test`
+    # in packages/cleat-as runs 106 assertions across three spec files, 106
+    # passing -- so the exemption was protecting nothing, and meanwhile the one
+    # job that could report an AssemblyScript regression could not fail. Note
+    # `npm ci` has to run first: as-pect is a devDependency and `asp` is not on
+    # PATH without it, which is why this cannot be reproduced by running npm
+    # test alone in a checkout.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -333,6 +768,87 @@ jobs:
       - name: Run tests
         working-directory: packages/cleat-as
         run: npm test
+
+  # -------------------------------------------------------------------------
+  # Web Dashboard
+  #
+  # NOTHING RAN THIS BEFORE 2026-08-08. `grep -ln web .github/workflows/*.yml`
+  # matched exactly one file, release.yml, and its step is a no-op -- it does
+  # `cd cmd/cleat-worker/web && if [ -f package.json ]`, and that directory
+  # contains only a prebuilt `dist/`, so it has always taken the else branch.
+  # So the Svelte admin dashboard shipped with no build, no test and no type
+  # check of any kind, while `web/` carried 4 test files and 79 real tests that
+  # nobody ran.
+  #
+  # Two defects were sitting in it, both found the moment anything looked:
+  #
+  #   * src/App.svelte referenced `{id1}`/`{id2}` in markup. Svelte parses
+  #     `{...}` as a live expression, so that was not placeholder text -- it
+  #     named two variables that do not exist. svelte-check: 2 errors.
+  #   * vite.config.ts built into `../cmd/durable-worker/web/dist`, a
+  #     directory that does not exist in this repo. The real one is
+  #     cmd/cleat-worker. `npm run build` created the wrong tree and left the
+  #     shipped one untouched.
+  #
+  # Both fixed in the same PR as this job. Measured cost of the whole job:
+  # under 15s (npm ci ~7s cold, check ~1.5s, test ~1s, build ~0.4s).
+  #
+  # WHAT THIS JOB DOES NOT DO, STATED SO IT IS NOT MISTAKEN FOR MORE:
+  #
+  #   * It builds to a THROWAWAY directory, not to cmd/cleat-worker/web/dist.
+  #     That bundle is committed and has not been regenerated since 2026-06-06
+  #     (fbaf7506, the same commit that broke outDir). Whether CI should
+  #     rebuild and diff it is a release-process decision, not a lint one, and
+  #     release.yml already has the cleanliness check that would enforce it
+  #     once its build step is made real. Left alone deliberately.
+  #   * 5 of 25 source files have any test coverage (cost.ts, api.ts,
+  #     StatusBadge, SummaryCard). This job catches build breaks, type errors
+  #     and regressions in those four. It would pass through a runtime
+  #     regression in Dashboard, WorkflowDetail, ScheduleManagement or
+  #     WorkflowCompare -- there is no browser or e2e test.
+  #   * svelte-check reports 13 a11y warnings today. `npm run check` fails on
+  #     errors, not warnings, so those do not gate. They are real and unfixed.
+  # -------------------------------------------------------------------------
+  test-web:
+    name: Web Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      # Before build and test, because it is the one that found a real defect
+      # and its failures are the most specific.
+      - name: Type check (svelte-check)
+        working-directory: web
+        run: npm run check
+
+      - name: Test
+        working-directory: web
+        run: npm test
+
+      # Into RUNNER_TEMP rather than the configured outDir: this step asks
+      # "does the dashboard build", and answering it must not entangle the
+      # committed cmd/cleat-worker/web/dist bundle. See the note above.
+      - name: Build
+        working-directory: web
+        run: npx vite build --outDir "$RUNNER_TEMP/web-dist" --emptyOutDir
+
+      # A build that emits nothing exits 0. Cheapest possible guard against
+      # this job going green on an empty output.
+      - name: Build produced something
+        run: |
+          set -euo pipefail
+          test -f "$RUNNER_TEMP/web-dist/index.html" \
+            || { echo "::error title=Web Dashboard::build produced no index.html" >&2; exit 1; }
+          echo "built: $(find "$RUNNER_TEMP/web-dist" -type f | wc -l) files"
 
   # -------------------------------------------------------------------------
   # Test Rust
@@ -356,6 +872,16 @@ jobs:
         working-directory: crates/cleat-sdk
         run: cargo test
 
+      # crates/cleat-test had no CI coverage of any kind before 2026-08-07 -- not this
+      # job, and no clippy step either -- despite carrying 57 passing tests. That is how
+      # an absurd_extreme_comparisons defect (`Duration::as_millis() <= 0`, where the
+      # return type is u128) survived in it: nothing in CI ever compiled the crate.
+      #
+      #   grep -rn "cleat-test" .github/workflows/
+      - name: Test cleat-test
+        working-directory: crates/cleat-test
+        run: cargo test
+
       - name: Verify WASM compilation
         working-directory: crates/cleat-sdk
         run: cargo build --target wasm32-wasip1 --release
@@ -366,7 +892,15 @@ jobs:
   test-assemblyscript-wasm:
     name: AssemblyScript WASM Build
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # continue-on-error removed 2026-08-07. It was protecting nothing: measured on
+    # develop run 31193028xxx, every one of this job's steps -- Install SDK
+    # dependencies, Install example dependencies, Build example WASM, Verify WASM output
+    # exists and is non-empty, Inspect WASM exports -- reported success. A job that
+    # cannot fail while passing anyway is indistinguishable from one that is broken and
+    # forgiven, which is the whole reason nobody could tell what this repo tested.
+    #
+    #   gh run view <id> --json jobs \
+    #     --jq '.jobs[]|select(.name=="AssemblyScript WASM Build")|.steps[]|"\(.conclusion)\t\(.name)"'
     steps:
       - uses: actions/checkout@v4
 
@@ -425,7 +959,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
@@ -434,13 +968,22 @@ jobs:
           go test -fuzz=FuzzWASMMetadata -fuzztime=30s -run=^$ ./wasm/...
           go test -fuzz=FuzzULEB128 -fuzztime=30s -run=^$ ./wasm/...
 
-      - name: Warn on skipped tests
+      # 2>&1 rather than the warn-only version's 2>/dev/null, which discarded
+      # the very output that would explain why a run produced no tests and then
+      # reported "0 skipped". The budget check treats a report with no test
+      # results at all as a failure, so that output has to be kept.
+      #
+      # Two steps, not one: a single `run:` block aborts on the first failing
+      # command, so a failing go test would skip the check entirely. Splitting
+      # them lets `if: always()` guarantee the budget is evaluated either way,
+      # without `|| true` throwing away the exit status.
+      - name: Collect wasm test report
         if: always()
-        run: |
-          SKIP_COUNT=$(go test -json -count=1 ./wasm/... 2>/dev/null | grep -c '"Action":"skip"' || echo 0)
-          if [ "$SKIP_COUNT" -gt 0 ]; then
-            echo "::warning title=Skipped Tests (fuzz)::${SKIP_COUNT} test(s) were skipped."
-          fi
+        run: go test -json -count=1 ./wasm/... > fuzz-report.json 2>&1
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh fuzz fuzz-report.json
 
   # -------------------------------------------------------------------------
   # Benchmarks (push to main only)
@@ -456,12 +999,26 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
       - name: Run benchmarks
         run: go test -bench=. -benchmem -benchtime=30s ./benchmarks/ | tee bench-output.txt
+
+      # benchmarks/workflows is its own module (github.com/cleat-team/cleat/
+      # benchmarks/workflows) -- it imports the cleat/ SDK, which the root
+      # module does not (see CLAUDE.md on the module cycle) -- so `go test
+      # ./benchmarks/...` from the root no longer reaches it; `...` stops at
+      # a nested module boundary the same way it already did for cleat/.
+      # This is where BenchmarkSimpleWorkflow, BenchmarkFanOutWorkflow,
+      # BenchmarkSagaWorkflow and BenchmarkLLMCallWorkflow moved when
+      # cleat_bench_test.go moved out of the root module's benchmarks/ dir.
+      # Appended (tee -a) to the same bench-output.txt so both halves land in
+      # one trend-tracking upload.
+      - name: Run SDK workflow benchmarks (benchmarks/workflows module)
+        working-directory: benchmarks/workflows
+        run: go test -bench=. -benchmem -benchtime=30s ./... | tee -a ../../bench-output.txt
 
       - name: Upload benchmark artifact
         uses: actions/upload-artifact@v4
@@ -487,17 +1044,16 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -512,7 +1068,7 @@ jobs:
           targets: wasm32-wasip1
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -537,9 +1093,13 @@ jobs:
           npm ci
           npm run build
 
+      # `|| echo "non-blocking"` used to swallow the exit status here, which
+      # made this step incapable of reporting anything but success. The Java
+      # build is not flaky -- it is the same `gradle build` the Java Tests job
+      # runs green -- so the escape hatch only served to hide a real break.
       - name: Build Java
         working-directory: crates/cleat-java
-        run: gradle build || echo "[!] Java build failed (non-blocking)"
+        run: gradle build
 
       - name: Install Python SDK
         working-directory: python-sdk
@@ -560,12 +1120,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -602,49 +1162,319 @@ jobs:
     name: Cluster Integration Tests
     runs-on: ubuntu-latest
     env:
-      CLEAT_TEST_DB: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+      # A database of the tests' own, on the same server as the cluster but
+      # not the one the workers use.
+      #
+      # This job's purpose is to prove the cluster comes up and stays up. It
+      # was also pointing `go test ./engine/...` at the cluster's own
+      # database, so the store tests -- which create rows and then assert on
+      # exactly those rows -- shared a table with four live workers claiming
+      # from it. TestClaimWorkflow found its ready workflow already `running`;
+      # TestListWorkflows_ByStatus found nothing ready; TestClaimSkipLocked
+      # asked for 3 and got 10. Those tests are correct and the setup was not:
+      # they assume exclusive ownership of the table, which no test sharing a
+      # database with a running cluster can have.
+      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat_tests?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
-      - name: Build cleat-worker binary
-        run: go build -o cleat-worker ./cmd/cleat-worker
+      # The third job that sweeps ./engine/... unfiltered -- see "Run
+      # integration tests" below -- and therefore the third that builds a Java
+      # WASM component it has no interest in. The other two are multi-db-ci's
+      # test-mysql and test-mssql, where the reasoning is written out in full.
+      #
+      # Worth stating for this one specifically: it is a required check whose
+      # name is Cluster Integration Tests, so a Maven Central 429 fails the
+      # branch on something with no relationship to clusters, integration, or
+      # the diff. That is what makes the cache worth adding rather than
+      # shrugging at.
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
 
+      # No host-binary build step here. It produced ./cleat-worker with
+      # CGO_ENABLED=0 and nothing in this job ever ran it -- the cluster runs
+      # containers. Worse, sitting directly above the image build it read as
+      # though CGO_ENABLED=0 were the shipped configuration, which is the
+      # belief that let 2.28 survive. The image build below is the real one.
       - name: Build Docker image
         run: docker build -t cleat-worker:latest .
 
-      - name: Start cluster
-        run: docker compose -f docker-compose.cluster.yml up -d
+      - name: Start Postgres and apply the schema
+        run: docker compose -f docker-compose.cluster.yml up -d postgres
 
       - name: Wait for cluster readiness
+        shell: bash
         run: |
-          echo "Waiting for Postgres to be healthy..."
-          for i in $(seq 1 30); do
-            if docker exec cleat-postgres pg_isready -U cleat -d cleat &>/dev/null; then
-              echo "Postgres is ready."
+          # pg_isready alone is not a readiness signal for this job. During
+          # initialisation the postgres entrypoint runs a temporary server on
+          # a local socket to execute /docker-entrypoint-initdb.d, so
+          # `docker exec ... pg_isready` reports ready while the schema is
+          # still being applied -- or was never applied at all. The tests then
+          # fail with a bare "relation \"workflow_defs\" does not exist",
+          # which says nothing about why.
+          #
+          # So wait on the actual precondition: the schema exists.
+          # No pg_isready pre-loop: it returns ready within a fraction of a
+          # second because the entrypoint's temporary init-time server is
+          # already listening, so it buys nothing and reads as a real check.
+          # The schema poll below subsumes it -- psql simply fails until the
+          # server is genuinely up.
+          #
+          # 180s, not 60s. Applying the full migration set takes appreciably
+          # longer than the single small schema.sql this job used to mount,
+          # and a 60s budget expired while 003/004 were still executing.
+          echo "Waiting for the initdb migrations to produce a usable schema..."
+          ok=""
+          probe_out=""
+          for i in $(seq 1 90); do
+            # Exit status, not output matching. psql exits non-zero if the
+            # relation or function is missing, so there is no dependence on how
+            # to_regclass/to_regproc spell "absent" (both return NULL rather
+            # than erroring, including for an ambiguous name -- which made an
+            # earlier `IS NOT NULL` formulation silently never become true).
+            if probe_out="$(docker exec cleat-postgres psql -U cleat -d cleat \
+                 -v ON_ERROR_STOP=1 -tAc \
+                 "SELECT count(*) FROM workflow_defs;
+                  SELECT 'finalize_workflow_status'::regproc;" 2>&1)"; then
+              ok=1
               break
             fi
             sleep 2
           done
-          echo "Waiting for workers to register..."
-          sleep 10
+
+          if [ -z "$ok" ]; then
+            echo "::error title=Cluster schema missing::Postgres came up without the cleat schema."
+            echo
+            echo "docker-compose.cluster.yml mounts ./deploy/postgres into"
+            echo "/docker-entrypoint-initdb.d, and ./migrations/postgres into"
+            echo "/opt/cleat/migrations; 100-apply-migrations.sh applies the latter. The"
+            echo "entrypoint only runs initdb.d on a FIRST initialisation of an empty data"
+            echo "directory, and if a script fails it exits -- with restart:"
+            echo "unless-stopped the container then comes back up on the now-non-empty"
+            echo "directory and skips them entirely, which looks like a database that"
+            echo "started fine and has no tables."
+            echo
+            echo "--- last probe output ---"
+            echo "${probe_out:-(no output captured)}"
+            echo
+            echo "--- what the container sees in /docker-entrypoint-initdb.d ---"
+            docker exec cleat-postgres ls -la /docker-entrypoint-initdb.d/ || true
+            echo
+            echo "--- and in /opt/cleat/migrations ---"
+            docker exec cleat-postgres ls -la /opt/cleat/migrations/ || true
+            echo
+            echo "--- postgres container log ---"
+            docker logs cleat-postgres 2>&1 | tail -80 || true
+            exit 1
+          fi
+          echo "Schema is present."
+
+          # Only now start the workers. Previously the whole cluster came up at
+          # once, so the workers connected while initdb was still running and
+          # raced it -- the postgres log filled with "relation
+          # \"tenant_api_keys\" does not exist" and duplicate-key errors on
+          # pg_type from concurrent DDL, and their contention slowed the
+          # migrations further.
+          docker compose -f docker-compose.cluster.yml up -d
+
+          # Assert the cluster actually came up.
+          #
+          # This step used to be `sleep 10` and nothing else, so the job called
+          # itself "Cluster Integration Tests" while every worker was in a
+          # crash-restart loop, and the only symptom was three unrelated-looking
+          # store tests failing. A job that cannot tell the difference between a
+          # running cluster and no cluster at all is not testing a cluster.
+          #
+          # Each service has a healthcheck in docker-compose.cluster.yml; wait
+          # for every one of them to reach "healthy" rather than assuming a
+          # fixed delay is enough.
+          # The test database, separate from the cluster's own (see
+          # CLEAT_TEST_DB above). Left empty: engine/testutil builds the
+          # schema from migrations/postgres/ on first use.
+          #
+          # Checked before creating rather than `|| true`, so that a genuine
+          # failure to create it is not swallowed along with "already exists".
+          if ! docker exec cleat-postgres psql -U cleat -d cleat -tAc \
+                 "SELECT 1 FROM pg_database WHERE datname = 'cleat_tests'" | grep -q 1; then
+            docker exec cleat-postgres psql -v ON_ERROR_STOP=1 -U cleat -d cleat \
+              -c "CREATE DATABASE cleat_tests"
+          fi
+
+          echo "Waiting for workers to become healthy..."
+          SERVICES="cleat-worker-1 cleat-worker-2 cleat-worker-3 cleat-dashboard"
+          DEADLINE=$(( SECONDS + 120 ))
+          while :; do
+            UNHEALTHY=""
+            for svc in $SERVICES; do
+              STATE="$(docker inspect -f '{{.State.Status}}:{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$svc" 2>/dev/null || echo "missing:missing")"
+              case "$STATE" in
+                running:healthy) ;;
+                *) UNHEALTHY="$UNHEALTHY $svc($STATE)" ;;
+              esac
+            done
+            [ -z "$UNHEALTHY" ] && break
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error title=Cluster workers unhealthy::Not healthy after 120s:$UNHEALTHY"
+              echo
+              echo "Worker logs follow. A worker that exits at boot is usually a"
+              echo "schema or migration problem, not a test problem."
+              for svc in $SERVICES; do
+                echo "--- $svc ---"
+                docker logs --tail=60 "$svc" 2>&1 || true
+              done
+              exit 1
+            fi
+            sleep 3
+          done
+          echo "All workers healthy."
+
+          # Assert the property, do not infer it. --rls-check=auto refuses to
+          # start when --require-auth is set and the connection bypasses
+          # row-level security, so a healthy worker implies RLS is enforced --
+          # but that is a chain of reasoning through two defaults, either of
+          # which could change. The worker says so directly; check that it did.
+          #
+          # This is the whole point of the deployment: the compose file
+          # connects workers as cleat_app rather than the superuser that owns
+          # the schema, because PostgreSQL never applies RLS to a superuser and
+          # RLS is the only tenant isolation GetWorkflowByID and ListWorkflows
+          # have (IMPROVEMENT-PLAN 1.10).
+          # Retried, because a single `docker logs` read is not a reliable
+          # witness. Observed twice on 2026-08-03: the grep below reported
+          # cleat-worker-3 had not logged the line at 14:05:53.445, and the
+          # `docker logs --tail=40` dump in this very failure branch printed
+          # that exact line 9ms later, from a write timestamped 14:05:46.992 --
+          # six seconds before the grep. The same flake hit cleat-dashboard on
+          # develop (99543da0). Whether docker logs returned truncated output
+          # or failed outright, piping it straight into grep cannot tell the
+          # difference between "the line is absent" and "the read did not work"
+          # -- an error message on stderr just fails to match.
+          #
+          # So: capture the output, so a failed read is a failed read, and give
+          # it a bounded number of attempts. A worker that genuinely never
+          # reports RLS still fails the job, roughly 20s later than before.
+          for svc in $SERVICES; do
+            RLS_OK=0
+            for _ in $(seq 1 10); do
+              if LOGS="$(docker logs "$svc" 2>&1)" &&
+                 printf '%s' "$LOGS" | grep -q "row-level security is enforced on this connection"; then
+                RLS_OK=1
+                break
+              fi
+              sleep 2
+            done
+            if [ "$RLS_OK" -ne 1 ]; then
+              echo "::error title=RLS not enforced::$svc did not report row-level security as enforced."
+              echo "The worker is on a connection exempt from the tenant isolation policies,"
+              echo "so GetWorkflowByID and ListWorkflows return every tenant's data."
+              echo "Checked 10 times over ~20s, so this is not the log-read race"
+              echo "that produced false failures before 2026-08-03."
+              docker logs --tail=40 "$svc" 2>&1 || true
+              exit 1
+            fi
+          done
+          echo "All workers report row-level security enforced."
+
+          # A worker that boots, dies and is restarted by `restart:
+          # unless-stopped` can be momentarily healthy. Restarts mean the
+          # cluster is not stable, so fail on any.
+          for svc in $SERVICES; do
+            RESTARTS="$(docker inspect -f '{{.RestartCount}}' "$svc")"
+            if [ "$RESTARTS" -ne 0 ]; then
+              echo "::error title=Worker restarting::$svc has restarted $RESTARTS time(s); it is crash-looping."
+              docker logs --tail=60 "$svc" 2>&1 || true
+              exit 1
+            fi
+          done
+
+      # IMPROVEMENT-PLAN 2.5, and the end-to-end regression test for 2.28.
+      # Runs before the integration tests because it is the only step in this
+      # job that puts real work through the running containers -- everything
+      # else proves the cluster comes up, not that it executes anything.
+      #
+      # CLEAT_TEST_DB, overriding the job-wide value, for the same reason the
+      # "Cluster suite" step below overrides it: clusterDB() in
+      # exhaustion_test.go now reads CLEAT_TEST_POSTGRES / CLEAT_TEST_DB with
+      # the same precedence as engine/testutil.TestDB, so without this
+      # override it would inherit the job-wide cleat_tests database -- a
+      # database with no worker consuming its queue, against which the test
+      # would just time out. It has to point at the database the cluster's
+      # own workers actually serve.
+      #
+      # -json, teed to its own report: this suite gets its own skip-budget
+      # check below, separate from the ./engine/... one. Because a DSN is
+      # always configured here, clusterDB() can only Fatal on an unreachable
+      # database, never skip -- so the budget is 0, and a skip appearing
+      # under it means the override above stopped taking effect.
+      - name: Resource exhaustion — runaway workflow is terminated
+        shell: bash
+        env:
+          CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout=300s -json ./tests/exhaustion/... 2>&1 | tee exhaustion-report.json
+
+      - name: Skip budget — resource exhaustion
+        if: always()
+        run: scripts/check-skip-budget.sh cluster/exhaustion exhaustion-report.json
+
+      # After the exhaustion step, not before: TestKillPostgresAndRestart stops
+      # and restarts the postgres container, and TestFullClusterRestart releases
+      # and re-claims work. Both restore what they touch, but there is no reason
+      # to run them upstream of a test that depends on a settled cluster.
+      #
+      # The suite claims on queue-cluster-tests-{1,2,3}, which no worker in
+      # docker-compose.cluster.yml serves, so it does not race the live workers
+      # for the rows it inserts.
+      - name: Cluster suite — claiming, failover and replay against the live cluster
+        # The cluster's OWN database, overriding the job-wide CLEAT_TEST_DB.
+        #
+        # That variable points at cleat_tests, a separate database this job
+        # keeps for ./engine/... precisely so those tests do not share a table
+        # with four live workers. This suite wants the opposite: it restarts the
+        # postgres container, kills workers and asserts on failover, so it has
+        # to be looking at the database the cluster actually runs on. Against
+        # cleat_tests every test failed with `relation "workflow_defs" does not
+        # exist` -- nothing builds a schema there until engine/testutil does,
+        # and this package does not use it.
+        env:
+          CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
+        run: go test -count=1 -timeout=300s ./tests/cluster/...
 
       - name: Run integration tests
-        run: go test -count=1 -timeout=120s -json ./engine/... 2>&1 | tee test-report.json
-
-      - name: Warn on skipped tests
-        if: always()
+        shell: bash
         run: |
-          if [ -f test-report.json ]; then
-            SKIP_COUNT=$(grep -c '"Action":"skip"' test-report.json || echo 0)
-            if [ "$SKIP_COUNT" -gt 0 ]; then
-              echo "::warning title=Skipped Tests (cluster)::${SKIP_COUNT} test(s) were skipped. Verify that CLEAT_TEST_DB and PostgreSQL are configured."
-            fi
-          fi
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          # -p 1: ./engine/... is two packages, engine and engine/testutil,
+          # and `go test` runs packages in parallel by default. Both build
+          # their schema in, and wipe rows from, the one database this job
+          # gives them -- so in parallel they race on the DDL in
+          # 001_schema.sql (observed: a duplicate key on pg_extension_name_index,
+          # and a deadlock) and delete each other's fixtures mid-test. That
+          # was invisible while they shared the cluster's already-migrated
+          # database and only appeared once this job got one of its own.
+          go test -p 1 -count=1 -timeout=180s -json ./engine/... 2>&1 | tee test-report.json
+
+      # This job brings up a real four-worker cluster and a real database, so
+      # it has asked for everything its tests need: any skip here means
+      # something it provisioned did not arrive. That is a failure, not a
+      # warning -- this job previously reported success while every worker in
+      # the compose file was crash-looping.
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh cluster test-report.json
 
       - name: Cluster logs (on failure)
         if: failure()

@@ -3,6 +3,140 @@
 Java SDK providing the `cleat` package with WASM ABI bindings for writing
 durable workflows that compile via [TeaVM](https://teavm.org/) to WebAssembly.
 
+## Installation
+
+### Maven
+
+The SDK is published to Maven Central as `com.cleat:cleat-java`. Add the
+dependency to your `pom.xml`:
+
+```xml
+<dependency>
+    <groupId>com.cleat</groupId>
+    <artifactId>cleat-java</artifactId>
+    <version>0.1.0</version>
+</dependency>
+```
+
+TeaVM dependencies are also required for compilation:
+
+```xml
+<dependency>
+    <groupId>org.teavm</groupId>
+    <artifactId>teavm-classlib</artifactId>
+    <version>0.10.2</version>
+</dependency>
+<dependency>
+    <groupId>org.teavm</groupId>
+    <artifactId>teavm-jso-apis</artifactId>
+    <version>0.10.2</version>
+</dependency>
+```
+
+### Gradle
+
+```kotlin
+dependencies {
+    annotationProcessor("com.cleat:cleat-java:0.1.0")
+    implementation("com.cleat:cleat-java:0.1.0")
+}
+```
+
+For complete TeaVM build configuration, see the [Build setup](#build-setup) section.
+
+## Quick start
+
+Define a workflow by creating a class with a public static method annotated
+with `@CleatEntry`. The annotation processor generates WASM export wrappers
+automatically.
+
+```java
+package com.example;
+
+import cleat.HostCalls;
+import cleat.CleatEntry;
+
+public class GreetingWorkflow {
+
+    @CleatEntry
+    public static String hello(HostCalls hc, String name) {
+        hc.cleatLog("Hello workflow started for " + name);
+        CleatResult<String> response = hc.cleatCall(
+            "greeter", "Greet",
+            "{\"name\": \"" + name + "\"}");
+        if (response.isErr()) {
+            return "{\"error\": \"" + response.getError() + "\"}";
+        }
+        hc.cleatLog("Got response: " + response.getValue());
+        return response.getValue();
+    }
+}
+```
+
+The `@CleatEntry` annotation triggers `CleatEntryProcessor`, which generates
+WASM export wrappers conforming to the Cleat ABI
+`(argsPtr, argsLen, outPtr, maxOutLen) -> i64`. During TeaVM compilation,
+the Java bytecode is translated to WebAssembly. On replay, completed calls
+return cached results instead of re-executing.
+
+Compile the workflow with Gradle:
+
+```bash
+./gradlew build
+# Output: build/wasm/workflow.wasm
+```
+
+## HostCalls overview
+
+The `HostCalls` class wraps all WASM host function imports, grouped by
+category. Each method returns a `CleatResult<T>` that encodes success or
+failure:
+
+### Workflow Identity
+- `String currentWorkflowId()` -- the current workflow's unique ID
+- `String currentRunId()` -- the current run's unique ID
+
+### Time & Random
+- `long now()` -- wall-clock time in ms since epoch
+- `long random()` -- deterministic random value (same on replay)
+- `int version()` -- workflow definition version
+- `int minVersion()` -- minimum supported version
+
+### Durable Execution
+- `CleatResult<String> cleatCall(String service, String operation, String request)` -- recorded API call
+- `CleatResult<Void> cleatSleepMs(long timeoutMs)` -- suspend for a duration
+- `void cleatLog(String message)` -- emit a log message
+- `CleatResult<FetchResult> cleatFetch(String method, String url, String headers, String body)` -- durable HTTP fetch
+- `CleatResult<Void> cleatSend(String service, String operation, String request)` -- fire-and-forget
+- `CleatResult<Void> scheduleInvokeMs(String service, String operation, String request, long delayMs)` -- delayed one-shot invoke
+
+### Signals & Events
+- `CleatResult<AwaitSignalsResult> awaitSignalsMs(String[] signalNames, long timeoutMs)` -- wait for external signals
+- `CleatResult<String> pollSignal(String signalName)` -- non-blocking signal check
+- `CleatResult<Boolean> pollCancellation()` -- check for cancellation
+- `CleatResult<Void> signalWorkflow(String targetRunId, String signalName, String payload)` -- signal another workflow
+
+### Child Workflows
+- `CleatResult<String> childWorkflow(String name, String input)` -- start child, returns run ID
+- `CleatResult<String> awaitChild(String runId)` -- await a single child
+- `CleatResult<String> awaitAllChildren(String[] runIds)` -- await multiple children concurrently
+
+### State & Promises
+- `void setQueryState(String key, String value)` -- set externally queryable state
+- `CleatResult<String> getState(String key)` -- read workflow state
+- `CleatResult<Void> setState(String key, String value)` -- set workflow state
+- `CleatResult<Void> deleteState(String key)` -- delete a state key
+- `CleatResult<Long> incrState(String key, long delta)` -- atomically increment a numeric key
+- `CleatResult<String> createPromise(String name)` -- create a durable promise
+- `CleatResult<AwaitPromiseResult> awaitPromiseMs(String promiseId, long timeoutMs)` -- await a promise
+
+### Plugin Calls
+- `CleatResult<String> pluginCall(String pluginName, String functionName, String input)` -- call a host plugin function
+
+All methods are deterministic and replayed from event history on subsequent
+executions. Side effects (calls, sleeps, logs) are recorded in the workflow
+event history and replayed consistently.
+
 ## TeaVM constraints
 
 TeaVM's WASM backend translates Java bytecode to WebAssembly, but does not

@@ -86,15 +86,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/google/uuid"
 )
 
 // WorkflowFunc is a workflow entry point. The context provides HostCalls
@@ -104,10 +106,10 @@ type WorkflowFunc func(ctx *Context) error
 // Context provides HostCalls and manages input/output for a single
 // workflow execution.
 type Context struct {
-	h               cleat.HostCalls
-	Input           string
-	Output          string
-	childWorkflows  map[string]WorkflowFunc
+	h              cleat.HostCalls
+	Input          string
+	Output         string
+	childWorkflows map[string]WorkflowFunc
 }
 
 // H returns the HostCalls interface for the current execution.
@@ -120,9 +122,9 @@ type Option func(*Runner)
 
 // Runner is an in-process workflow runner.
 type Runner struct {
-	mu         sync.RWMutex
-	workflows  map[string]WorkflowFunc
-	now        time.Time
+	mu        sync.RWMutex
+	workflows map[string]WorkflowFunc
+	now       time.Time
 }
 
 // New creates a new embedded Runner. The simulated clock starts at
@@ -166,6 +168,10 @@ func (r *Runner) ExecuteWorkflow(ctx context.Context, name, inputJSON string) (s
 	}
 
 	err := fn(wfCtx)
+	// Defers run after the body and before the output is read, which is the
+	// order Go's own defer uses -- a defer may adjust what the workflow
+	// returns, and in this runner it is a plain closure that can.
+	exec.runDeferFuncs()
 	return wfCtx.Output, err
 }
 
@@ -190,11 +196,11 @@ func (r *Runner) ExecuteWorkflowTyped(ctx context.Context, name string, input, o
 
 // execution holds the per-run state.
 type execution struct {
-	runner      *Runner
-	wfID        string
-	wfRunID     string
-	startTime   time.Time
-	mu          sync.Mutex
+	runner    *Runner
+	wfID      string
+	wfRunID   string
+	startTime time.Time
+	mu        sync.Mutex
 
 	// call history
 	calls []cleat.CallResult
@@ -215,8 +221,8 @@ type execution struct {
 	// child workflow results
 	childResults map[string]*childResult
 
-		// lock state (in-memory concurrency keys)
-		locks map[string]string
+	// lock state (in-memory concurrency keys)
+	locks map[string]string
 
 	// cleanup functions (LIFO)
 	deferFuncs []func()
@@ -240,10 +246,10 @@ type signalWaiter struct {
 }
 
 type promiseState struct {
-	name    string
-	status  string // "pending", "resolved", "rejected"
-	result  string
-	errMsg  string
+	name   string
+	status string // "pending", "resolved", "rejected"
+	result string
+	errMsg string
 }
 
 type childResult struct {
@@ -254,8 +260,8 @@ type childResult struct {
 func newExecution(r *Runner, workflowID, inputJSON string) *execution {
 	return &execution{
 		runner:       r,
-		wfID:        workflowID,
-		wfRunID:     uuid.New().String(),
+		wfID:         workflowID,
+		wfRunID:      uuid.New().String(),
 		startTime:    r.now,
 		promises:     make(map[string]*promiseState),
 		childResults: make(map[string]*childResult),
@@ -265,30 +271,55 @@ func newExecution(r *Runner, workflowID, inputJSON string) *execution {
 
 func (e *execution) hostCalls() cleat.HostCalls {
 	return cleat.NewHostCalls(cleat.HostCallsOptions{
-		DurableCall:            e.durableCall,
-		DurableSleep:           e.durableSleep,
-		DurableAwaitSignals:    e.durableAwaitSignals,
-		DurableDefer:           e.durableDefer,
-		DurableDeferFunc:       e.durableDeferFunc,
-		DurableLog:             e.durableLog,
-		PollCancellation:       e.pollCancellation,
-		PollSignal:             e.pollSignal,
-		Now:                    e.now,
-		Random:                 e.random,
-		CreatePromise:          e.createPromise,
-		AwaitPromise:           e.awaitPromise,
-		ChildWorkflow:          e.childWorkflow,
-		AwaitChild:             e.awaitChild,
-		WorkflowID:             e.workflowID,
-		RunID:                  e.runID,
-		SendSignalAndWait:      e.sendSignalAndWait,
-		ReplyToSignal:          e.replyToSignal,
-		SignalWorkflow:         e.signalWorkflow,
-		AcquireLock:             e.acquireLock,
-		ReleaseLock:            e.releaseLock,
-		AwaitCondition:         e.awaitCondition,
-		SideEffect:              e.sideEffect,
-		})
+		DurableCall:         e.durableCall,
+		DurableSleep:        e.durableSleep,
+		DurableAwaitSignals: e.durableAwaitSignals,
+		DurableDefer:        e.durableDefer,
+		DurableDeferFunc:    e.durableDeferFunc,
+		DurableLog:          e.durableLog,
+		PollCancellation:    e.pollCancellation,
+		PollSignal:          e.pollSignal,
+		Now:                 e.now,
+		Random:              e.random,
+		CreatePromise:       e.createPromise,
+		AwaitPromise:        e.awaitPromise,
+		ChildWorkflow:       e.childWorkflow,
+		AwaitChild:          e.awaitChild,
+		WorkflowID:          e.workflowID,
+		RunID:               e.runID,
+		SendSignalAndWait:   e.sendSignalAndWait,
+		ReplyToSignal:       e.replyToSignal,
+		SignalWorkflow:      e.signalWorkflow,
+		AcquireLock:         e.acquireLock,
+		ReleaseLock:         e.releaseLock,
+		AwaitCondition:      e.awaitCondition,
+		SideEffect:          e.sideEffect,
+		ScheduleCron:        e.scheduleCron,
+		DeleteCron:          e.deleteCron,
+		ListCrons:           e.listCrons,
+	})
+}
+
+// Cron schedules are wired to an explicit refusal rather than left nil.
+//
+// A nil hook answers with "the HostCalls runtime was not initialized",
+// which is about workflow context and reads as the caller's fault. The
+// truth is narrower and worth saying: this runner executes a workflow in
+// process and has no schedule store behind it, so a schedule created here
+// would have nothing to fire it. Returning success for a cron that can
+// never run would be worse than failing.
+const errNoScheduleStore = "the embedded runner has no schedule store: cron schedules need a worker with a database (see cmd/cleat-worker)"
+
+func (e *execution) scheduleCron(_, _, _, _ string) (string, error) {
+	return "", errors.New(errNoScheduleStore)
+}
+
+func (e *execution) deleteCron(_ string) error {
+	return errors.New(errNoScheduleStore)
+}
+
+func (e *execution) listCrons() (string, error) {
+	return "", errors.New(errNoScheduleStore)
 }
 
 func (e *execution) acquireLock(key string, ttlMs int64) (bool, error) {
@@ -327,20 +358,20 @@ func (e *execution) awaitCondition(predicate func() bool, pollInterval, timeout 
 		time.Sleep(pollInterval)
 	}
 }
-	func (e *execution) sideEffect(computedResult string) (string, error) {
-		// In embedded mode, there's no replay, so computedResult IS authoritative.
-		return computedResult, nil
-	}
+func (e *execution) sideEffect(computedResult string) (string, error) {
+	// In embedded mode, there's no replay, so computedResult IS authoritative.
+	return computedResult, nil
+}
 
-	func (e *execution) workflowID() string {
-		return e.wfID
-	}
+func (e *execution) workflowID() string {
+	return e.wfID
+}
 
-	func (e *execution) runID() string {
-		return e.wfRunID
-	}
+func (e *execution) runID() string {
+	return e.wfRunID
+}
 
-	func (e *execution) now() int64 {
+func (e *execution) now() int64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.runner.now.UnixMilli()
@@ -507,6 +538,48 @@ func (e *execution) durableDeferFunc(fn func()) (string, error) {
 	id := fmt.Sprintf("def-fn-%d", e.deferCount)
 	e.deferFuncs = append(e.deferFuncs, fn)
 	return id, nil
+}
+
+// runDeferFuncs invokes the closures registered by DurableDeferFunc, most
+// recent first.
+//
+// Until 2026-08-05 nothing did. durableDeferFunc appended to e.deferFuncs and
+// that field had no reader anywhere in non-test code, so every closure passed
+// to DurableDeferFunc was collected and dropped: the caller got a defer ID back
+// and no cleanup, silently. This runner is documented for "integration testing
+// and simple single-binary deployments", so the failure mode was a test suite
+// reporting that cleanup worked when it had never been invoked.
+//
+// LIFO, matching Go's defer, which is the model the API is named after -- and
+// the order matters for cleanup, since resources are released in the reverse of
+// the order they were acquired.
+//
+// A panicking defer is logged and the rest still run. That differs from Go,
+// where a panic in a defer propagates, and it is deliberate: cleanup is
+// best-effort here, and one failed release should not strand the others. It is
+// also what the WASM path does (engine/flush.go's runDefers), so the two agree.
+//
+// This runner executes Go closures with their lexical context intact, so it
+// already has the "full context" half of what a defer is for. What it lacked
+// was the other half: running at all. The WASM path has the opposite problem
+// and IMPROVEMENT-PLAN 3.35 is the design for it.
+func (e *execution) runDeferFuncs() {
+	e.mu.Lock()
+	fns := e.deferFuncs
+	e.deferFuncs = nil
+	e.mu.Unlock()
+
+	for i := len(fns) - 1; i >= 0; i-- {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Warn("embedded: defer panicked",
+						"workflow_id", e.wfID, "run_id", e.wfRunID, "index", i, "panic", r)
+				}
+			}()
+			fns[i]()
+		}()
+	}
 }
 
 func (e *execution) durableLog(message string) {

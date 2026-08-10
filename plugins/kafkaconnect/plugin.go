@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -41,6 +42,10 @@ type Plugin struct {
 	config     Config
 	env        *plugin.Environment
 	dialect    plugin.Dialect
+
+	// unconfiguredOnce keeps the consume-loop warning to one line. It is a
+	// static property of the configuration, and the poller runs on a ticker.
+	unconfiguredOnce sync.Once
 }
 
 // Config holds optional configuration for the kafka-connect plugin.

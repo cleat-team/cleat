@@ -373,9 +373,9 @@ export declare function import_cleat_send(
 
 /**
  * 28. schedule_invoke: Schedule a one-shot delayed invocation.
- * (import "env" "schedule_invoke") (param i32 i32 i32 i32 i32 i32 i64) (result i64)
+ * (import "env" "cleat_schedule_invoke") (param i32 i32 i32 i32 i32 i32 i64) (result i64)
  */
-@external("env", "schedule_invoke")
+@external("env", "cleat_schedule_invoke")
 export declare function import_schedule_invoke(
   svcPtr: i32,
   svcLen: i32,
@@ -386,15 +386,10 @@ export declare function import_schedule_invoke(
   delayMs: i64,
 ): i64;
 
-/**
- * 29. cleat_register_query_handler: Register a query handler.
- * (import "env" "cleat_register_query_handler") (param i32 i32) (result i64)
- */
-@external("env", "cleat_register_query_handler")
-export declare function import_cleat_register_query_handler(
-  namePtr: i32,
-  nameLen: i32,
-): i64;
+// There is no import_cleat_register_query_handler here (removed 2026-08-09).
+// It recorded a handler name with the host but nothing ever routed an
+// external query to it -- see docs/determinism.md, "Why there is no
+// RegisterQueryHandler". Use setQueryState instead.
 
 /**
  * 30. cleat_run_detached: Run a function in a detached child workflow.
@@ -528,9 +523,9 @@ export declare function import_cleat_release_lock(
 
 /**
  * 39. schedule_cron: Register a recurring cron-triggered workflow.
- * (import "env" "schedule_cron") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
+ * (import "env" "cleat_schedule_cron") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
  */
-@external("env", "schedule_cron")
+@external("env", "cleat_schedule_cron")
 export declare function import_schedule_cron(
   workflowNamePtr: i32,
   workflowNameLen: i32,
@@ -546,9 +541,9 @@ export declare function import_schedule_cron(
 
 /**
  * 40. delete_cron: Remove a previously registered cron schedule.
- * (import "env" "delete_cron") (param i32 i32) (result i64)
+ * (import "env" "cleat_delete_cron") (param i32 i32) (result i64)
  */
-@external("env", "delete_cron")
+@external("env", "cleat_delete_cron")
 export declare function import_delete_cron(
   scheduleIdPtr: i32,
   scheduleIdLen: i32,
@@ -556,9 +551,9 @@ export declare function import_delete_cron(
 
 /**
  * 41. list_crons: List all registered cron schedules.
- * (import "env" "list_crons") (param i32 i32) (result i64)
+ * (import "env" "cleat_list_crons") (param i32 i32) (result i64)
  */
-@external("env", "list_crons")
+@external("env", "cleat_list_crons")
 export declare function import_list_crons(
   outPtr: i32,
   outMaxLen: i32,
@@ -1820,13 +1815,22 @@ export class HostCalls {
 
   /**
    * NOTE: There is no corresponding `get_query_state` host import in the
-   * current ABI specification (ABI.md). Query state is write-only from the
-   * workflow's perspective -- external clients read it via the workflow's
-   * query handler mechanism (`registerQueryHandler`).
+   * current ABI specification (ABI.md), and none is needed. Query state is
+   * write-only from the workflow's perspective by design: setQueryState
+   * persists it to the database, and external clients read it directly from
+   * there via `GET /api/workflows/:id/query?key=X` -- without needing the
+   * WASM guest to be running or to do anything on the read path.
    *
-   * If a future ABI version adds a `cleat_get_query_state` import, this
-   * section should be updated to include a corresponding `getQueryState`
-   * method.
+   * This is not `registerQueryHandler` (there is no such thing in this SDK;
+   * see docs/determinism.md, "Why there is no RegisterQueryHandler" -- it
+   * was removed 2026-08-09 because nothing ever routed an external query to
+   * a registered handler). setQueryState/GetQueryState is the real, wired
+   * mechanism, and it needs no host-side "get" import because the read
+   * never goes through the guest at all.
+   *
+   * If a future ABI version adds a `cleat_get_query_state` import (e.g. to
+   * let a workflow read its own previously-set query state), this section
+   * should be updated to include a corresponding `getQueryState` method.
    */
 
   // ────────────────────────────────────────────
@@ -2626,34 +2630,13 @@ export class HostCalls {
     return null;
   }
 
-  // ────────────────────────────────────────────
-  // 33. registerQueryHandler — register query handler
-  // ────────────────────────────────────────────
-
-  /**
-   * Register a query handler callback by name.
-   *
-   * In AS with --runtime stub (no closures), this uses a name-based
-   * registration pattern. The workflow must expose a named export function
-   * matching the handler name for the host to invoke when a query arrives.
-   *
-   * @param name - The query handler name.
-   * @returns An error message on failure, or null on success.
-   */
-  registerQueryHandler(name: string): string | null {
-    let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
-
-    let result: i64 = import_cleat_register_query_handler(
-      SCRATCH_BASE as i32,
-      nameLen,
-    );
-
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0) {
-      return "registerQueryHandler(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
-    }
-    return null;
-  }
+  // There is no registerQueryHandler here (removed 2026-08-09). Its doc
+  // comment claimed "the host [will] invoke [it] when a query arrives" --
+  // untrue: nothing ever routed an external query to a registered handler,
+  // in this SDK or any other. See docs/determinism.md, "Why there is no
+  // RegisterQueryHandler". Use setQueryState instead; it is durable and
+  // externally readable via GET /api/workflows/:id/query?key=X regardless
+  // of whether a worker currently has the workflow loaded.
 
   // ────────────────────────────────────────────
   // 34. runDetached — run fire-and-forget child workflow
@@ -2909,52 +2892,30 @@ export class HostCalls {
   }
 
   // ────────────────────────────────────────────
-  // 43. isReplaying — check if workflow is in replay
+  // 43. isReplaying — deliberately NOT offered
   // ────────────────────────────────────────────
-
-  /**
-   * Check whether the current workflow execution is replaying.
-   *
-   * **IMPORTANT:** There is no direct `cleat_is_replaying` host import
-   * in the current ABI. This method ALWAYS returns `false`.
-   *
-   * To detect replay at runtime, use the `cleatSleep` return-value pattern:
-   *
-   * ```ts
-   * // cleatSleep returns `true` on fresh execution (should suspend).
-   * // On replay it returns `false` immediately (sleep already completed).
-   * let isReplay = !host.cleatSleepMs(1); // 1ms sleep, non-zero
-   * ```
-   *
-   * A zero-duration variant also works and does not advance the timer:
-   *
-   * ```ts
-   * let isReplay = !host.cleatSleepMs(0); // 0ms sleep, no-op on both paths
-   * ```
-   *
-   * **Caveat:** Any non-zero sleep (including 1ms) is recorded in the event
-   * history. Use this pattern sparingly and only for diagnostics/debugging.
-   * The zero-duration variant avoids history bloat.
-   *
-   * This method is a placeholder for future host-side support. When a
-   * `cleat_is_replaying` import is added to the ABI, this method will
-   * delegate to it.
-   *
-   * @returns `false` (always — requires future host-side support).
-   */
-  isReplaying(): bool {
-    // TODO(#as-sdk): Replace body with `return import_cleat_is_replaying();`
-    //                once the Go host exports `cleat_is_replaying` and the
-    //                ABI entry is added in:
-    //                  1. runtime/host.go — add export
-    //                  2. abi/abi.go       — add ABI constant and hook
-    //                  3. This file       — add @external import above
-    //                Target ABI version: 0.2.0
-    //
-    // Until then, consumers should use cleatSleepMs(0) as the workaround
-    // documented in the JSDoc above.
-    return false;
-  }
+  //
+  // This SDK used to expose isReplaying(): bool. It was hardcoded `return
+  // false` with a TODO, and no host call backing it existed in the engine for
+  // any SDK -- so every "only on first execution" branch fired on every replay
+  // too, silently defeating its own purpose. Nothing failed, because a constant
+  // is consistent between execute and replay; you just got duplicate logs,
+  // duplicate metrics and duplicate notifications after each worker restart.
+  //
+  // Removed rather than implemented. The engine does know whether it is
+  // replaying (execSession.isReplay), so wiring it up was possible -- but a raw
+  // replay flag is a determinism footgun: a workflow that branches its LOGIC on
+  // it records different events on replay than it did on execution, which is
+  // precisely what replay exists to prevent.
+  //
+  // The one legitimate use -- not repeating a side effect on replay -- is what
+  // sideEffect() is for. It records the result on first execution and returns
+  // the recorded one afterwards, so the value is replay-consistent by
+  // construction rather than by the author remembering to check a flag:
+  //
+  //   let id = h.sideEffect(generateRequestId());  // computed once, replayed after
+  //
+  // See docs/determinism.md, "Why there is no isReplaying()".
 
   // ────────────────────────────────────────────
   // 44. currentRunId — get current run ID

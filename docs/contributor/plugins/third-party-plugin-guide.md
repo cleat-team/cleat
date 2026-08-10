@@ -805,8 +805,7 @@ to load it with a clear error message.
 - **No `os/exec`**: You cannot spawn subprocesses.
 - **No CGO**: C dependencies don't compile.
 - **No `syscall/js`**: That's for browser WASM, not WASI.
-- **File size**: Go WASM binaries are 2-5 MB due to the Go runtime. Consider
-  TinyGo for smaller binaries (though TinyGo has its own limitations).
+- **File size**: Go WASM binaries are 2-5 MB due to the Go runtime.
 
 ### Performance
 

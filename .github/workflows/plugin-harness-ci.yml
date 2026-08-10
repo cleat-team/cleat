@@ -1,5 +1,18 @@
 name: Plugin Harness Tests
 
+# CGO on, everywhere in this file. It was "0" in all four jobs, which does not
+# skip a check -- NewWasmtimeBackend is behind //go:build cgo, so disabling CGO
+# removes the primary backend and runs everything on wazero. The same defect
+# 2.70 fixed in multi-db-ci.yml, in a second workflow.
+#
+# Here it had a visible cost: TestPluginCalls_Wasm_Go skipped unconditionally on
+# a "wazero v1.11.1 nil Sys context panic", and that panic only happens because
+# the job forced wazero. With CGO on the test passes, so the skip is gone and
+# the primary language has WASM integration coverage again.
+#
+# Measured before changing it -- CGO on: PASS; CGO off: the exact nil-pointer
+# dereference the skip described.
+
 on:
   push:
     branches: [main, develop]
@@ -10,6 +23,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege token, added 2026-08-07. Without a `permissions:` key a
+# workflow inherits the repository default, which can be read/write for every
+# scope -- so a compromised action or dependency in any job here would hold a
+# writable GITHUB_TOKEN. CodeQL flagged all 4 jobs in this file
+# (actions/missing-workflow-permissions). Every job here only checks out code
+# and runs tests, so read is all they need; re-derive with
+#
+#   grep -nE 'gh (pr|issue|api)|github-script|upload-artifact|packages:|id-token' .github/workflows/plugin-harness-ci.yml
+#
+# and widen this block, not the repository default, if that ever stops being
+# true.
+permissions:
+  contents: read
+
 jobs:
   # --------------------------------------------------------------------------
   # Layer 1 — cleattest-based SDK tests (fast, no infra needed)
@@ -19,45 +46,149 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - name: Check tools
-        run: make tools-tinygo
-      - run: go test -race -count=1 -timeout=120s ./tests/plugin-harness/... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+        run: make tools-go
+      # tests/plugin-harness is its own Go module since the
+      # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
+      # cleat/wasmtest; the root module must not). `go test
+      # ./tests/plugin-harness/...` from the repo root no longer matches -- it
+      # fails with "directory prefix tests/plugin-harness does not contain main
+      # module or its selected dependencies" -- so the pattern is ./... from
+      # inside the module instead. See tests/plugin-harness/go.mod.
+      - run: go test -count=1 -timeout=120s ./... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+        working-directory: tests/plugin-harness
+        env:
+          CGO_ENABLED: "1"
 
   # --------------------------------------------------------------------------
-  # Layer 2 — WASM integration (compiled Go workflow via TinyGo)
+  # Layer 2 — WASM integration (compiled Go workflow via standard Go wasip1)
   # --------------------------------------------------------------------------
   test-layer2:
-    name: Layer 2 — WASM Integration (TinyGo)
+    name: Layer 2 — WASM Integration
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - name: Install TinyGo (latest)
+      # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
+      # compiles for the former (cmd/cleat/build_rust.go). Without it
+      # TestPluginCalls_Wasm_Rust skips, and it is the only test anywhere that
+      # runs the Rust build path users actually invoke.
+      - name: Setup Rust + wasm32-unknown-unknown
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # componentize-py, so TestPluginCalls_Wasm_Python runs instead of
+      # skipping. It was the last skip in this job, and it stopped being a
+      # justified one when Python moved onto wasmtime (IMPROVEMENT-PLAN 2.72):
+      # while Python ran on a fallback runtime that could not instantiate it,
+      # building a component here would have proved nothing about the routing.
+      # Now it proves the routing.
+      #
+      # It is worth the ~13s: the Python workflow exercises *every* plugin host
+      # function, streaming included, and asserts execute and replay produce
+      # identical results. No other test covers the plugin surface from a
+      # Component Model guest. Verified on linux before wiring it up -- 17
+      # plugin results, execute and replay identical.
+      #
+      # wasm-tools is deliberately NOT installed. `cleat build --target python`
+      # no longer needs it: the component is what the engine runs, and
+      # requiring a tool for an output nothing consumes is what made this test
+      # skip in the first place. Leaving it out keeps that honest.
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install componentize-py and the Python SDK
         run: |
-          TINYGO_VER=$(curl -sSfL https://api.github.com/repos/tinygo-org/tinygo/releases/latest | jq -r .tag_name)
-          if [ -z "$TINYGO_VER" ] || [ "$TINYGO_VER" = "null" ]; then
-            TINYGO_VER="v0.41.1"
-          fi
-          TINYGO_SHORT="${TINYGO_VER#v}"
-          curl -sSfL "https://github.com/tinygo-org/tinygo/releases/download/${TINYGO_VER}/tinygo${TINYGO_SHORT}.linux-amd64.tar.gz" -o /tmp/tinygo.tar.gz
-          sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz
-          echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
-      - run: go test -count=1 -timeout=300s ./tests/plugin-harness/... -run 'TestPluginCalls_Wasm'
+          pip install --upgrade pip
+          pip install componentize-py
+          pip install -e python-sdk
+      # TestPluginCalls_Wasm_Java runs a Gradle build of
+      # tests/plugin-harness/testdata/javaworkflow, and this job had no Java
+      # setup at all -- it ran against whatever JDK and Gradle the runner image
+      # happened to ship, with no dependency cache. So every run resolved
+      # org.teavm:* from Maven Central cold, and on 2026-08-06 Maven Central
+      # answered 403 Forbidden and failed the job. Nothing in the repo had
+      # changed; three concurrent PRs were enough to trip the rate limit.
+      #
+      # gradle/actions/setup-gradle restores ~/.gradle/caches, where resolved
+      # artifacts live, and ~/.gradle/wrapper/dists. Both matter here:
+      # tests/plugin-harness/testdata/javaworkflow ships a gradlew pinned to
+      # 7.6.4 and cmd/cleat/build_java.go prefers the wrapper over system
+      # gradle, so a cold run downloaded the Gradle distribution as well as
+      # every TeaVM artifact. A warm run makes neither request.
+      #
+      # Note its default: it writes the cache only from the default branch and
+      # reads it elsewhere, so PR runs are served by develop's cache rather
+      # than each seeding its own.
+      #
+      # This does not make a cold run immune -- a cache miss still resolves
+      # from Maven Central, and Gradle does not retry a 403. It removes the
+      # request from the common path rather than making the uncommon path
+      # robust. The every-run cold fetch was the part worth fixing first.
+      #
+      # Java 17 to match the other four jobs that build this SDK, rather than
+      # inheriting the runner image's default, which can change without us.
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+      # -json into a report, and a skip budget over it. Without that, this step
+      # ran `go test` with no -v, so a skipped language and a passing one looked
+      # identical in the log -- which is how TestPluginCalls_Wasm_Go sat
+      # unconditionally skipped and TestPluginCalls_Wasm_Rust skipped for want
+      # of a toolchain, in a job whose name says WASM Integration.
+      #
+      # The budget is the enforcement: if either regresses to skipping, this
+      # fails rather than going quietly green.
+      - name: Run WASM integration tests
+        shell: bash
+        # tests/plugin-harness is its own Go module since the root<->cleat/
+        # module cycle was broken (it imports cleat/cleattest and cleat/wasmtest;
+        # the root module must not). `go test ./tests/plugin-harness/...` from
+        # the repo root no longer matches -- it fails with "directory prefix
+        # tests/plugin-harness does not contain main module or its selected
+        # dependencies" -- so the pattern is ./... from inside the module.
+        # See tests/plugin-harness/go.mod.
+        working-directory: tests/plugin-harness
+        run: |
+          # pipefail: without it tee supplies the exit status and a failing
+          # `go test` reports as a green step.
+          set -o pipefail
+          # ../../: the report has to land at the repo root, because the
+          # Skip budget step below runs scripts/check-skip-budget.sh from
+          # there. Written from inside the module (see working-directory).
+          go test -count=1 -timeout=600s -json \
+            ./... -run 'TestPluginCalls_Wasm' \
+            2>&1 | tee ../../wasm-integration-report.json
+        env:
+          # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
+          # when a C compiler is present and 0 otherwise, so relying on the
+          # default silently reinstates the wazero-only run on a runner without
+          # gcc. Pinned, that case fails loudly.
+          CGO_ENABLED: "1"
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh plugin-harness/wasm wasm-integration-report.json
 
   # --------------------------------------------------------------------------
-  # Layer 3 — Multi-DB (real databases, TinyGo-compiled workflow)
+  # Layer 3 — Multi-DB (real databases, standard Go wasip1 workflow)
   # --------------------------------------------------------------------------
   test-multi-db:
     name: Layer 3 — Multi-DB
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat
@@ -70,7 +201,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       mysql:
-        image: mysql:8.4
+        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
@@ -82,7 +213,11 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
+        # a required check. Full rationale, the re-derive commands, and why the
+        # `ancestor=` filter had to move with it: tier1-gate.yml's mssql
+        # service. Bump all six sites together or `Lint` fails the PR.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
@@ -94,26 +229,48 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
       CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=master
       CLEAT_TEST_SKIP_REAL_SERVICES: '1'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - name: Install TinyGo (latest)
-        run: |
-          TINYGO_VER=$(curl -sSfL https://api.github.com/repos/tinygo-org/tinygo/releases/latest | jq -r .tag_name)
-          if [ -z "$TINYGO_VER" ] || [ "$TINYGO_VER" = "null" ]; then
-            TINYGO_VER="v0.41.1"
-          fi
-          TINYGO_SHORT="${TINYGO_VER#v}"
-          curl -sSfL "https://github.com/tinygo-org/tinygo/releases/download/${TINYGO_VER}/tinygo${TINYGO_SHORT}.linux-amd64.tar.gz" -o /tmp/tinygo.tar.gz
-          sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz
-          echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
-      - run: go test -count=1 -timeout=600s ./tests/plugin-harness/... -run 'TestPluginCalls_MultiDB'
+      # This job is currently vacuous, and the budget below is what says so.
+      #
+      # It provisions PostgreSQL, MySQL and SQL Server, sets all three DSNs,
+      # and then runs exactly one test -- TestPluginCalls_MultiDB -- whose
+      # first statement is an unconditional t.Skip for a wazero v1.11.1 nil Sys
+      # context panic. So three database containers start, nothing is tested,
+      # and the job reports success. Every dialect claim this job is supposed
+      # to back is currently unverified by it.
+      #
+      # The budget is 1 rather than 0 so the state is recorded rather than
+      # breaking the build on a known upstream bug -- the same treatment as the
+      # 89-entry deadcode baseline and the 63-entry test-only-code baseline.
+      # Drop it to 0 when the skip is removed. It cannot grow silently.
+      # No `|| true` here. Redirecting to a file keeps go test's exit status as
+      # the step's exit status, so a real failure still fails the job; the
+      # budget step below runs regardless via `if: always()`.
+      # tests/plugin-harness is its own Go module since the
+      # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
+      # cleat/wasmtest; the root module must not). `go test
+      # ./tests/plugin-harness/...` from the repo root no longer matches -- it
+      # fails with "directory prefix tests/plugin-harness does not contain main
+      # module or its selected dependencies" -- so the pattern is ./... from
+      # inside the module instead. See tests/plugin-harness/go.mod.
+      # ../../test-report.json: the Skip budget step below runs from the repo
+      # root, so the report must land there rather than inside the module.
+      - run: go test -count=1 -timeout=600s -json ./... -run 'TestPluginCalls_MultiDB' > ../../test-report.json 2>&1
+        working-directory: tests/plugin-harness
+        env:
+          CGO_ENABLED: "1"
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh plugin-harness/multi-db test-report.json
 
   # --------------------------------------------------------------------------
   # Blobstore S3 round-trip (MinIO)
@@ -123,7 +280,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat
@@ -136,7 +293,43 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       minio:
-        image: quay.io/minio/minio:latest
+        # Pinned by digest, not by tag, and not to `latest`.
+        #
+        # `Blobstore S3 Round-Trip` is a required status check. `:latest` on a
+        # required check means a third party can turn every PR in this repo red
+        # by publishing a release, at a moment unrelated to anything we did --
+        # and the failure would land on whichever PR happened to be open, whose
+        # author would have no reason to suspect the image. That is the shape of
+        # the actions/setup-go v7 cache-key change that made #325 permanently
+        # unmergeable (tiers.yaml records it), arriving through a different door.
+        #
+        # The digest below is what `:latest` resolved to when this was pinned on
+        # 2026-08-07, so this is the image the job had already been green on --
+        # RELEASE.2025-09-07T16-13-09Z, which quay has carried as `latest` since
+        # 2025-09-07. Pinning it is a no-op today and a guarantee tomorrow.
+        #
+        # By digest rather than by the RELEASE tag because MinIO republishes
+        # hotfix tags against old releases (RELEASE.2024-08-03...hotfix.ca75c7346
+        # was pushed in March 2026), so a release tag is not by itself a promise
+        # that the bytes are fixed. Re-derive both:
+        #
+        #   curl -s 'https://quay.io/api/v1/repository/minio/minio/tag/?onlyActiveTags=true' \
+        #     | python3 -c "import json,sys; [print(t['name'], t['manifest_digest']) \
+        #       for t in json.load(sys.stdin)['tags'] if t['name']=='latest']"
+        #
+        # This is a pin to be bumped deliberately, not a fossil: renovate.json
+        # extends config:recommended, whose github-actions manager reads service
+        # image fields, so a newer digest arrives as a reviewable PR that must go
+        # green before it lands -- which is the whole difference from `:latest`.
+        #
+        # The larger version of the same problem was mcr.microsoft.com/mssql/
+        # server:2022-latest, which this comment used to record as not done.
+        # Done on 2026-08-07: it is pinned by digest at six sites, and the
+        # rationale is in tier1-gate.yml's mssql service. That one had a wrinkle
+        # this one did not -- four `docker ps --filter ancestor=` lookups name
+        # the image too, and they match on the pull reference, so pinning only
+        # `image:` would have left them matching nothing.
+        image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
@@ -149,7 +342,7 @@ jobs:
           --health-retries 5
         command: server /data
     env:
-      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
+      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
       CLEAT_TEST_S3_ENDPOINT: http://localhost:9000
       CLEAT_TEST_S3_ACCESS_KEY: minioadmin
       CLEAT_TEST_S3_SECRET_KEY: minioadmin
@@ -157,7 +350,17 @@ jobs:
       CLEAT_TEST_S3_USE_SSL: 'false'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - run: go test -count=1 -timeout=120s -v ./tests/plugin-harness/... -run 'TestBlobstore_S3'
+      # tests/plugin-harness is its own Go module since the
+      # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
+      # cleat/wasmtest; the root module must not). `go test
+      # ./tests/plugin-harness/...` from the repo root no longer matches -- it
+      # fails with "directory prefix tests/plugin-harness does not contain main
+      # module or its selected dependencies" -- so the pattern is ./... from
+      # inside the module instead. See tests/plugin-harness/go.mod.
+      - run: go test -count=1 -timeout=120s -v ./... -run 'TestBlobstore_S3'
+        working-directory: tests/plugin-harness
+        env:
+          CGO_ENABLED: "1"

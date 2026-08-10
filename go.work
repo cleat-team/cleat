@@ -1,0 +1,43 @@
+// The workspace exists so that the root module's TESTS compile against the
+// cleat/ SDK sitting next to them, rather than against a published snapshot of
+// it from the module proxy.
+//
+// Background. The root module must not `replace` the SDK -- `go install
+// pkg@version` refuses any module whose go.mod carries a replace directive, and
+// cmd/cleat, cmd/cleatctl and cmd/cleat-worker are all meant to be installable
+// that way. But the root module's test fixtures legitimately import the SDK:
+// testdata/ is 21 directories of workflow code written the way a user writes
+// it, which is the only way to test a tool whose job is compiling exactly that.
+// So the root go.mod names the SDK nowhere at all -- no require, no replace --
+// and this file is what supplies it to those tests, from ./cleat in this tree.
+//
+// A `require` was considered and rejected. It would also work, and it would be
+// worse: with one, a build outside the workspace silently resolves the SDK to
+// the proxy's last published pseudo-version, and every drift test compares this
+// tree against a snapshot of itself. Without one, the same build fails with a
+// message naming the package it cannot find.
+//
+// What is NOT here is the old module cycle. The root module's PRODUCTION graph
+// has no SDK dependency at all, and that is checked rather than asserted:
+//
+//	go list -deps ./... | grep -c cleat-team/cleat/cleat   # must be 0
+//
+// engine/callerrors.go, plugins/dag and cmd/cleat were each rewritten to make
+// that true. This file only affects tests; `go install` ignores go.work
+// entirely.
+//
+// TestSDKResolvesToThisTree in engine/ fails if the SDK ever resolves to
+// anywhere but ./cleat, and TestRootModuleDoesNotDependOnSDK fails if a
+// production package starts importing it again. Both were checked against a
+// deliberately broken tree, not just asserted.
+go 1.25.11
+
+use (
+	.
+	./benchmarks/workflows
+	./cleat
+	./cleat/backendkit
+	./examples
+	./tests/cross-language
+	./tests/plugin-harness
+)

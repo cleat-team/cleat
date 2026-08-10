@@ -294,7 +294,7 @@ func TestGeminiChatDefaultBaseURL(t *testing.T) {
 				"finishReason": "STOP",
 			}},
 			"usageMetadata": map[string]int{
-				"promptTokenCount": 1,
+				"promptTokenCount":     1,
 				"candidatesTokenCount": 1,
 				"totalTokenCount":      2,
 			},

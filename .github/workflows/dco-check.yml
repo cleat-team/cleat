@@ -9,25 +9,68 @@
 #
 #   git commit --signoff
 #
+# or, once and for all, by installing the repo's hooks:
+#
+#   git config core.hooksPath .githooks
+#
 # To fix commits that are missing the trailer:
 #   git commit --amend --signoff              (latest commit)
 #   git rebase --signoff HEAD~N               (last N commits)
+#
+# ---------------------------------------------------------------------------
+# Until 2026-08-07 this job printed a warning and exited 0 on unsigned
+# commits, so it could not fail:
+#
+#   if [ -n "$FAILING" ]; then echo "...WARNING..."; fi   # no exit 1
+#   if [ -z "$FAILING" ]; then echo "passed"; fi          # returns 0 either way
+#
+# It was a *required* status check on develop the whole time, with 37 successes
+# and no failure in its recorded history, while 95 of the last 100 non-merge
+# commits on develop carried no Signed-off-by at all. Re-derive both numbers:
+#
+#   gh run list --workflow=dco-check.yml --limit 40 --json conclusion \
+#     --jq '.[].conclusion' | sort | uniq -c
+#   git log --no-merges -100 --format=%H develop | while read -r c; do \
+#     [ -z "$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$c")" ] \
+#       && echo "$c"; done | wc -l
+#
+# The only five signed commits in that window were dependabot's — the one
+# author the CLA check was rejecting.
+#
+# This job now exits 1. It reads only the commits the pull request adds
+# (base..head), so nothing behind us is re-litigated; the 95 stay as they are.
+#
+# It also stops asking the wrong question. See the trailer note on the check
+# itself: the old predicate grepped the whole message for the substring, so a
+# commit that merely mentions "Signed-off-by:" satisfied it.
 # ---------------------------------------------------------------------------
 name: DCO Check
 
+# pull_request only. The push trigger this job used to carry re-checked the
+# squash commit *after* it had already landed on develop, which is both
+# un-actionable (there is no branch left to amend) and redundant: the repo
+# squashes with squash_merge_commit_message=COMMIT_MESSAGES, so the trailers
+# from the branch commits are carried into the squash body verbatim. That is
+# not an assumption — dependabot's five signed PRs are on develop as five
+# signed squash commits. Re-derive with:
+#
+#   gh api repos/cleat-team/cleat --jq .squash_merge_commit_message
+#
+# The push trigger also had a latent bug: it used github.event.before as the
+# base, which is all-zeros on a branch's first push and would have made
+# `git log 000..HEAD` fail rather than report anything useful.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  push:
-    branches: [main, develop]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Reduced from `pull-requests: write`, which this job never used — it posts
+# no comment and sets no label. It reads git history and nothing else.
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   dco:
@@ -36,29 +79,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # The full history: base..head is not reachable from a shallow clone.
           fetch-depth: 0
 
       - name: Check DCO
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          # Determine the commit range to check
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
-          else
-            BASE="${{ github.event.before }}"
-            HEAD="${{ github.event.after }}"
-          fi
+          # pipefail matters here. Without it, a `git log` that fails on a bad
+          # range yields an empty FAILING, which reads as "every commit is
+          # signed" — a green that measured nothing, which is the exact failure
+          # mode this job spent its whole life in.
+          set -euo pipefail
 
-          # Find commits that lack Signed-off-by
-          FAILING=$(git log --no-merges "${BASE}..${HEAD}" --format="%H" | while read commit; do
-            if ! git log -1 --format="%B" "$commit" | grep -q "Signed-off-by:"; then
+          # %(trailers:...) rather than `grep -q "Signed-off-by:"` over %B.
+          #
+          # The grep matched the string anywhere in the message, including
+          # inside prose or a fenced command. The commit that introduced this
+          # job's exit 1 quotes the old one-liner in its own body, so it
+          # contains the text "Signed-off-by:" while carrying no trailer at
+          # all — under the old predicate it certifies itself by talking about
+          # certification. git's trailer parser reads only the trailer block,
+          # which is the thing the DCO is actually about.
+          FAILING=$(git log --no-merges "${BASE}..${HEAD}" --format="%H" | while read -r commit; do
+            if [ -z "$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$commit")" ]; then
               echo "  $(git log -1 --format='%h %s' "$commit")"
             fi
           done)
 
           if [ -n "$FAILING" ]; then
             echo "============================================"
-            echo "  DCO CHECK — WARNING"
+            echo "  DCO CHECK — FAILED"
             echo "============================================"
             echo ""
             echo "The following commits are missing Signed-off-by:"
@@ -69,9 +121,11 @@ jobs:
             echo "  git rebase --signoff HEAD~N          # fix the last N commits"
             echo "  git push --force-with-lease          # push the fix"
             echo ""
+            echo "To stop having to remember:"
+            echo "  git config core.hooksPath .githooks  # once, per clone"
+            echo ""
             echo "For details: https://developercertificate.org/"
+            exit 1
           fi
 
-          if [ -z "$FAILING" ]; then
-            echo "All commits have Signed-off-by. DCO check passed."
-          fi
+          echo "All commits have Signed-off-by. DCO check passed."

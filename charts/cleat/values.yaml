@@ -12,10 +12,13 @@ image:
 worker:
   # -- Max concurrent workflow executions (--concurrency).
   concurrency: 10
-  # -- Tenant ID for RLS and isolation (--tenant-id).
-  tenantId: "00000000-0000-0000-0000-000000000000"
-  # -- Namespace / task queue to claim from (--namespace).
+  # -- Task queue to claim work from (--task-queue). Comma-separated for several.
   taskQueues: "default"
+  # Note: there is deliberately no tenantId here. cleat-worker has no
+  # --tenant-id flag (it never had one), so the value this chart used to pass
+  # made every pod exit 2 at flag parsing. Tenancy is resolved per request via
+  # --tenant-resolver, which defaults to single-tenant; this chart does not
+  # expose it yet.
   # -- Heartbeat interval for claimed workflow instances (--heartbeat).
   heartbeatInterval: "5s"
   # -- Poll interval when no work is available (--poll).
@@ -39,6 +42,35 @@ postgres:
 api:
   # -- Port for the HTTP API, health checks, and metrics endpoint.
   port: 8080
+
+# -- Auth configuration for the worker's HTTP API.
+#
+# cleat-worker's supported configuration defaults to --require-auth=true
+# (tiers.yaml does not grant support for --require-auth=false), which
+# rejects every request without a valid API key except /healthz and
+# /metrics. That includes the preStop drain hook this chart runs on every
+# pod shutdown (templates/deployment.yaml) -- POST /api/admin/drain. Without
+# a key configured here, that hook 401s, the failure is swallowed by the
+# hook's own `|| true` (needed so a slow/unreachable API server does not
+# block pod termination), and pods terminate without ever draining in-flight
+# work.
+#
+# Generate a key against your database once, out of band -- there is no way
+# for the chart to provision one for you, since cleat-worker only mints a
+# specific key value when told to write it to a real tenant_api_keys row:
+#   cleat-worker --db "$DATABASE_URL" --generate-api-key "00000000-0000-0000-0000-000000000000"
+# Then either paste the result into adminApiKey below (the chart creates a
+# Secret for it) or store it in your own Secret and set existingSecret +
+# existingSecretKey instead.
+auth:
+  # -- An API key with permission to call /api/admin/drain. Ignored if
+  # existingSecret is set.
+  adminApiKey: ""
+  # -- Name of an existing Secret containing the admin API key. When set,
+  # the chart will not create its own auth Secret.
+  existingSecret: ""
+  # -- Key within existingSecret holding the admin API key.
+  existingSecretKey: "admin-api-key"
 
 # -- Container resource requests and limits.
 resources:

@@ -83,8 +83,8 @@ func TestIsHTTPURL(t *testing.T) {
 	}{
 		{"http://example.com", true},
 		{"https://example.com", true},
-		{"HTTP://example.com", false},   // case-sensitive check
-		{"HTTPS://example.com", false},  // case-sensitive check
+		{"HTTP://example.com", false},  // case-sensitive check
+		{"HTTPS://example.com", false}, // case-sensitive check
 		{"/local/path", false},
 		{"relative/path.yaml", false},
 		{"file:///tmp/test.yaml", false},

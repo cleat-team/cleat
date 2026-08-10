@@ -9,13 +9,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -34,7 +33,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -50,6 +49,14 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 }
 
 // backupConfig represents a single backup_config row.
+//
+// S3Bucket and S3Prefix are vestigial: dumps are written to local disk only
+// (Plugin.config.DumpDir) and there is no code anywhere in this package that
+// uploads one, despite the column names implying otherwise. The columns are
+// kept (rather than dropped in a migration) so existing rows still decode,
+// but handleCreateConfig and handleUpdateConfig now reject any attempt to
+// set either to a non-empty value -- see the S3 upload is not implemented
+// error there -- so from here on they can only ever read back as "".
 type backupConfig struct {
 	ID            uuid.UUID  `json:"id"`
 	Name          string     `json:"name"`
@@ -118,6 +125,10 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 		p.writeError(w, 400, "cron is required")
 		return
 	}
+	if req.S3Bucket != "" || req.S3Prefix != "" {
+		p.writeError(w, 400, "s3_bucket/s3_prefix are not supported: this plugin writes backups to local disk only (dump_dir) and does not upload them anywhere -- configure an off-host copy of dump_dir by another means")
+		return
+	}
 
 	now := time.Now()
 	next := nextRun(req.Cron, now)
@@ -150,7 +161,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 
 	p.logger.Info("scheduledbackup: config created", "id", id, "tenant", tid, "name", req.Name)
 
-	p.writeJSON(w, 201, map[string]interface{}{
+	p.writeJSON(w, 201, map[string]any{
 		"id":          id,
 		"name":        req.Name,
 		"cron":        req.Cron,
@@ -259,6 +270,10 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		p.writeError(w, 400, "invalid JSON body")
 		return
 	}
+	if (req.S3Bucket != nil && *req.S3Bucket != "") || (req.S3Prefix != nil && *req.S3Prefix != "") {
+		p.writeError(w, 400, "s3_bucket/s3_prefix are not supported: this plugin writes backups to local disk only (dump_dir) and does not upload them anywhere -- configure an off-host copy of dump_dir by another means")
+		return
+	}
 
 	// Fetch the existing config to determine cron and enabled state.
 	var currentCron string
@@ -301,7 +316,7 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Build dynamic UPDATE query.
 	query := `UPDATE backup_config SET updated_at = now()`
-	args := []interface{}{}
+	args := []any{}
 	argIdx := 1
 
 	if req.Name != nil {
@@ -406,7 +421,7 @@ func (p *Plugin) handleListHistory(w http.ResponseWriter, r *http.Request) {
 		FROM backup_history
 		WHERE tenant_id = $1
 	`
-	args := []interface{}{tid}
+	args := []any{tid}
 	argIdx := 2
 
 	if configIDStr != "" {
@@ -417,7 +432,7 @@ func (p *Plugin) handleListHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		query += fmt.Sprintf(" AND config_id = $%d", argIdx)
 		args = append(args, configID)
-		argIdx++
+		argIdx++ //nolint:ineffassign // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
 	}
 
 	query += " ORDER BY started_at DESC"
@@ -509,7 +524,7 @@ func (p *Plugin) handleRunBackup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return 202 immediately and run backup in background.
-	p.writeJSON(w, 202, map[string]interface{}{
+	p.writeJSON(w, 202, map[string]any{
 		"history_id": historyID,
 		"config_id":  id,
 		"status":     "running",
@@ -524,10 +539,7 @@ func (p *Plugin) runBackupAsync(configID, historyID, tenantID uuid.UUID, filenam
 	dumpPath := filepath.Join(p.config.DumpDir, filename)
 
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(context.Background(), "pg_dump", "-f", dumpPath, p.config.DSN)
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	err := runPgDump(context.Background(), p.config.DSN.Reveal(), dumpPath, &stderr)
 	if err != nil {
 		errMsg := stderr.String()
 		if errMsg == "" {

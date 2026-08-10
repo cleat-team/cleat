@@ -15,7 +15,6 @@ func TestDeliverSignal(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -52,7 +51,6 @@ func TestDeliverSignalWakesWorkflow(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -113,7 +111,6 @@ func TestPollAndClaimSignal(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -160,7 +157,6 @@ func TestPollSignal_NotDelivered(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -190,7 +186,6 @@ func TestPollSignal_NonDestructive(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -244,7 +239,6 @@ func TestStartChildWorkflow(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -288,7 +282,6 @@ func TestGetChildResult_Completed(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -344,7 +337,6 @@ func TestGetChildResult_NotCompleted(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -387,7 +379,6 @@ func TestReapStaleInstances(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -441,7 +432,6 @@ func TestListWorkflows_ByStatus(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -473,6 +463,7 @@ func TestListWorkflows_ByStatus(t *testing.T) {
 				t.Fatalf("ListWorkflows(status=ready): %v", err)
 			}
 			if len(readyResults) < 1 {
+				describeClaimState(t, store)
 				t.Fatal("ListWorkflows(status=ready): expected at least 1 result")
 			}
 
@@ -605,7 +596,6 @@ func TestListWorkflows_InputContains(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -653,7 +643,6 @@ func TestGetWorkflowByID(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -700,7 +689,6 @@ func TestCreateSchedule(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -728,7 +716,6 @@ func TestGetDueSchedules(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -767,7 +754,6 @@ func TestUpdateScheduleNextRun(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -815,7 +801,6 @@ func TestSetScheduleEnabled(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -860,7 +845,6 @@ func TestDeleteSchedule(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)

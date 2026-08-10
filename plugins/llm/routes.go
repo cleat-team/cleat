@@ -17,7 +17,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":    "ok",
 			"plugin":    "llm",
 			"version":   "0.1.0",
@@ -34,7 +34,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(out))
+		_, _ = w.Write([]byte(out))
 	})
 
 	return nil

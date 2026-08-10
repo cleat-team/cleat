@@ -15,13 +15,11 @@ Large WASM binaries affect cleat in three ways:
 2. **Module cache memory** — Each cached module occupies RAM in the worker
 3. **Storage** — `workflow_defs.wasm_bytes` stores each deployed version
 
-A "hello world" workflow compiled with TinyGo is approximately **50-100 KB**.
-
 ---
 
 ## Go Features That Cause Bloat
 
-TinyGo WASM binaries include the Go runtime, garbage collector,
+Go WASM binaries include the Go runtime, garbage collector,
 and all transitively-referenced packages. The following features
 can still add significant weight:
 
@@ -41,36 +39,27 @@ can still add significant weight:
 
 ### Cumulative Effect
 
-| Import Set | Standard Go Size | TinyGo Size |
-|------------|-----------------|-------------|
-| No imports (hello world) | ~4 MB | ~50 KB |
-| `fmt` only | ~5 MB | ~60 KB |
-| `encoding/json` | ~6 MB | ~80 KB |
-| `reflect` + `fmt` + `encoding/json` | ~8 MB | ~120 KB |
-| `net/http` | ~10 MB | ~300 KB |
-| Full workflow (calls, sleep, signals) | ~6-8 MB | ~100-200 KB |
+| Import Set | Standard Go Size |
+|------------|-----------------|
+| No imports (hello world) | ~4 MB |
+| `fmt` only | ~5 MB |
+| `encoding/json` | ~6 MB |
+| `reflect` + `fmt` + `encoding/json` | ~8 MB |
+| `net/http` | ~10 MB |
+| Full workflow (calls, sleep, signals) | ~6-8 MB |
 
 ---
 
-## Standard Go vs TinyGo Size Comparison
-
-### Build Targets
-
-| Target | Command | Typical Size | Cold Start (1 Gbps) | Cache Memory |
-|--------|---------|-------------|---------------------|--------------|
-| Standard Go | `cleat build` | 4-10 MB | 40-100 ms | 4-10 MB |
-| TinyGo | `cleat build --target tinygo` | 50-200 KB | 0.5-2 ms | 50-200 KB |
-
-### Actual Size Measurements
+## Actual Size Measurements
 
 Builds from the cleat test suite:
 
-| Workflow | Standard Go | TinyGo | Reduction |
-|----------|-------------|--------|-----------|
-| `testdata/basic/order.go` (basic order workflow) | 5.2 MB | 92 KB | 98.2% |
-| `testdata/vet-checks/go` | 4.8 MB | 78 KB | 98.4% |
-| Rust workflow (`examples/rust-workflow`) | 1.2 MB (wasm) | N/A | N/A |
-| AssemblyScript workflow (`examples/as-workflow`) | 13 KB | N/A | N/A |
+| Workflow | Standard Go |
+|----------|-------------|
+| `testdata/basic/order.go` (basic order workflow) | 5.2 MB |
+| `testdata/vet-checks/go` | 4.8 MB |
+| Rust workflow (`examples/rust-workflow`) | 1.2 MB (wasm) |
+| AssemblyScript workflow (`examples/as-workflow`) | 13 KB |
 
 ---
 
@@ -105,7 +94,6 @@ Size breakdown by package:
 Recommendations:
   - Remove "reflect" import: saves ~2 MB
   - Replace "encoding/json" with "github.com/goccy/go-json": saves ~500 KB
-  - Use --target tinygo: reduces total size by ~95%
 ```
 
 > **Note**: The `--size-report` flag is available in cleat v0.4+.
@@ -114,23 +102,7 @@ Recommendations:
 
 ## Best Practices for Minimizing Binary Size
 
-### 1. Compilation Target
-
-The default target is `--target go` (standard Go toolchain). For smaller
-binaries, use `--target tinygo`:
-
-```bash
-# Standard Go (full stdlib, larger binary)
-cleat build ./workflow/
-
-# TinyGo (smaller binary, limited stdlib)
-cleat build --target tinygo ./workflow/
-```
-
-See [Workflow Go Constraints](./workflow-go-constraints.md) for library
-compatibility details for each target.
-
-### 2. Audit Your Imports
+### 1. Audit Your Imports
 
 Run `cleat vet` to see which packages your workflow imports. Remove unnecessary
 imports, especially:
@@ -141,7 +113,7 @@ imports, especially:
   `github.com/json-iterator/go`, or manual serialization for simple types)
 - `regexp` → use `strings.Contains()` / `strings.HasPrefix()` where possible
 
-### 3. Use Build Tags for Debug Code
+### 2. Use Build Tags for Debug Code
 
 ```go
 // workflow.go
@@ -168,7 +140,7 @@ package main
 func debugLog(string) {} // no-op, no import overhead
 ```
 
-### 4. Avoid Large Initialization Tables
+### 3. Avoid Large Initialization Tables
 
 Package-level `var` declarations with large literal data (e.g., lookup tables
 with hundreds of entries) are included in the binary even if only a small subset
@@ -182,7 +154,6 @@ resource.
 | Runtime | Hello World | Typical Workflow | Notes |
 |---------|-------------|------------------|-------|
 | cleat (Go, wasip1) | ~4 MB | 6-10 MB | Bundles Go runtime |
-| cleat (TinyGo) | ~50 KB | 100-200 KB | Minimal runtime |
 | cleat (Rust) | ~1-2 MB | 2-4 MB | Rust std is smaller |
 | cleat (AssemblyScript) | ~5 KB | 10-50 KB | Minimal overhead |
 
@@ -191,6 +162,5 @@ resource.
 ## References
 
 - [Workflow Go Constraints](./workflow-go-constraints.md)
-- [TinyGo Known Limitations](https://tinygo.org/docs/reference/lang-support/)
 - [WASM Binary Toolkit (wabt)](https://github.com/WebAssembly/wabt) — for manual binary inspection
 - [Twiggy](https://github.com/rustwasm/twiggy) — WASM binary size profiler (Rust)

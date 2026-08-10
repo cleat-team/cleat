@@ -37,7 +37,17 @@ profile.cov
 # vendor/
 
 # Go workspace file
-go.work
+#
+# go.work is COMMITTED here, deliberately, against the usual advice. The usual
+# advice assumes a workspace is one developer's local convenience; this one is
+# load-bearing. The root module names the cleat/ SDK nowhere in its go.mod --
+# no require, no replace, because `go install pkg@version` refuses a module
+# with a replace and the CLIs are meant to be installable that way -- so
+# go.work is the only thing that supplies the SDK to the root module's test
+# fixtures under testdata/. Without it checked in, a fresh clone cannot run the
+# root module's tests at all. See the file's own header.
+#
+# go.work.sum stays ignored: it is derived, and `go work sync` regenerates it.
 go.work.sum
 
 # env file
@@ -101,3 +111,56 @@ ports-round2/*/build/
 crates/cleat-java/.gradle/
 crates/cleat-java/build/
 examples/*/node_modules/
+
+# Gradle build artifacts anywhere (these were being swept into commits from
+# examples/ because the rules above were path-specific).
+.gradle/
+**/.gradle/
+examples/*/build/
+
+# CI test-report artifacts (go test -json | tee ...), written into the repo
+# root by the workflow steps that check skip budgets.
+*-report.json
+tier-gate.log
+
+# scripts/tier2-gate.sh output
+tier2-gate.log
+tier2-gate.json
+.tier2-verdict
+
+# ---------------------------------------------------------------------------
+# Untracked 2026-08-09 (hotfix/rotate-committed-credential).
+#
+# Every path below was ALREADY matched by a rule in this file -- `node_modules/`
+# at line 66 covers all 445 node_modules entries, `/cleat-worker` at line 13
+# covers the root binary. They stayed tracked anyway, because .gitignore does
+# not apply to a path git is already tracking: the rule was added after the
+# file, and was a silent no-op from the day it landed.
+#
+# So the rules below are not the fix. `git rm --cached` was the fix; these
+# exist to stop the same files coming back. If you add an ignore rule for
+# something that is already committed, `git rm --cached` it in the same commit
+# or you have changed nothing.
+# ---------------------------------------------------------------------------
+
+# Agent/orchestration scratch state. Not referenced by Makefile, CI, or go.mod
+# (verified: `git grep -l task_state -- Makefile .github/workflows` is empty).
+clew-agent.json
+clew-executor.plugin
+task_state/
+plans/
+prompts/
+projects/
+session-*.json
+
+# Build products. 332 MB of these were tracked in HEAD, including binaries
+# built on three different machines (Mach-O arm64 and ELF x86-64 side by side).
+bin/
+cmd/cleat-worker/cleat-worker
+/durable-worker
+/durable-bench
+
+# Unreferenced root-level demos carrying `//go:build ignore`, so `go build ./...`
+# never saw them and nothing noticed they were dead.
+/ast_transform_demo.go
+/ast_transform_demo_v2.go

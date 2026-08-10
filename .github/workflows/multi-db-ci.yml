@@ -13,18 +13,100 @@
 #   CLEAT_TEST_POSTGRES — PostgreSQL connection string (fallback CLEAT_TEST_DB)
 #   CLEAT_TEST_MYSQL    — MySQL connection string
 #   CLEAT_TEST_MSSQL    — SQL Server connection string
+#
+# `Test MySQL` and `Test SQL Server` became required status checks on develop on
+# 2026-08-07. Re-derive:
+#
+#   gh api repos/cleat-team/cleat/branches/develop/protection/required_status_checks \
+#     --jq '.contexts[]' | grep -E 'MySQL|SQL Server'
+#
+# They had run on every PR since they were written and gated none of them. That
+# is not the same as MySQL and SQL Server being unmeasured -- `Tier 1 Gate` and
+# `Tier 2 Gate` are required and both run all three dialects -- but a failure
+# named `Test SQL Server` says what broke, and the same failure inside a tier
+# gate says a tier is red. This workflow's history at the time: 51 success,
+# 2 failure, 7 cancelled over the last 60 runs. Neither failure was
+# infrastructure -- one was a work-in-progress fix branch, the other is the
+# timing assertion described below. Re-derive:
+#
+#   gh run list --workflow=multi-db-ci.yml --limit 60 \
+#     --json conclusion,status --jq '[.[] | select(.status=="completed")] |
+#     group_by(.conclusion) | map({conclusion: .[0].conclusion, n: length})'
+#
+# That second failure was a wall-clock-dependent assertion in
+# TestConcurrencyKeyTTLKeepsSubSecondPrecision, not a defect in SQL Server
+# support; it was fixed in #374 before these became required, because a required
+# check that fails on a slow runner teaches everyone to re-run it.
+#
+# The push trigger covers main and develop only. It carried "feature/**" until
+# 2026-08-07, which ran all three jobs a second time on every push to a feature
+# branch that already had a PR open -- the pull_request trigger covers those, and
+# the concurrency group keys on github.ref, which differs between the two events
+# and so does not dedupe them. Measured before the change: 17 of the last 200
+# runs were feature-branch pushes, at 200s + 216s + 95s of runner time apiece,
+# each with its own MySQL and SQL Server service containers. Re-derive:
+#
+#   gh run list --workflow=multi-db-ci.yml --limit 200 --json event,headBranch \
+#     --jq '[.[] | select(.event=="push" and (.headBranch|startswith("feature/")))] | length'
+#
+# The cost this trades away is pre-PR signal on a feature branch with no PR open
+# yet -- accepted by the owner on 2026-08-07, on the same grounds as #372, which
+# removed the identical trigger from e2e-cross-language.yml. The grounds are
+# stronger here: two of these jobs now block a merge, so the run that matters is
+# the pull_request one.
+#
+# `Plugin Migrations`, the third job here, is deliberately NOT required -- see
+# the note above that job.
+#
+# Both jobs Fatal rather than skip when their database is unreachable
+# (engine/testutil's MySQLTestDB and MSSQLTestDB ping and t.Fatalf), so a
+# service container that fails to come up reads as a failure and not as a green
+# that measured nothing. That is the property that makes requiring them worth
+# anything; if either helper is ever changed to skip on a failed ping, these
+# should stop being required on the same day.
 # ---------------------------------------------------------------------------
 name: Multi-DB CI
 
 on:
   push:
-    branches: [main, develop, "feature/**"]
+    branches: [main, develop]
   pull_request:
     branches: [main, develop]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# CGO is load-bearing here, not incidental. Every step in this file used to run
+# `CGO_ENABLED=0 go test`, which does not merely skip a check: `NewWasmtimeBackend`
+# is behind `//go:build cgo`, so disabling CGO removes the primary backend from the
+# binary and silently runs everything on wazero, the fallback with the known bug tail.
+#
+# Measured on 2026-08-04: `go test -list` reports 2401 tests in ./engine/ with
+# CGO_ENABLED=0 against 2557 with CGO on. The 156-test difference is the entire
+# TestClosure_* family -- the real WASM host-function execution paths -- plus 28
+# wasmtime-specific tests. A workflow whose whole purpose is validating MySQL and
+# SQL Server under workflow execution was compiling those tests out.
+#
+# Set explicitly rather than left to default. Go's default is 1 only when a C
+# compiler is present and 0 otherwise, so the default silently reintroduces exactly
+# the failure mode above on a runner without gcc. Pinned to 1, that case fails loudly.
+env:
+  CGO_ENABLED: 1
+
+# Least-privilege token, added 2026-08-07. Without a `permissions:` key a
+# workflow inherits the repository default, which can be read/write for every
+# scope -- so a compromised action or dependency in any job here would hold a
+# writable GITHUB_TOKEN. CodeQL flagged all 3 jobs in this file
+# (actions/missing-workflow-permissions). Every job here only checks out code
+# and runs tests, so read is all they need; re-derive with
+#
+#   grep -nE 'gh (pr|issue|api)|github-script|upload-artifact|packages:|id-token' .github/workflows/multi-db-ci.yml
+#
+# and widen this block, not the repository default, if that ever stops being
+# true.
+permissions:
+  contents: read
 
 # ===========================================================================
 # JOBS
@@ -38,7 +120,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mysql:
-        image: mysql:8.4
+        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
@@ -55,12 +137,74 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
+      # Java and Gradle, in a job about databases, because `./engine/...`
+      # below is unfiltered and TestJavaWorkflowExecute lives in ./engine.
+      #
+      # It did not used to run here. It skipped unconditionally on a missing
+      # toolchain until that skip was removed (#347), and ubuntu-latest ships
+      # a gradle on PATH -- so the test went from never running to running in
+      # every job that sweeps ./engine/..., none of which had ever set up
+      # Java. This job and test-mssql are two of them. Each then resolved
+      # org.teavm:* from Maven Central cold, on every push, and Maven Central
+      # answered:
+      #
+      #   Could not GET '.../teavm-gradle-plugin-0.10.2.pom'.
+      #   Received status code 429 from server: Too Many Requests
+      #
+      # Same defect #352 fixed in plugin-harness-ci.yml's Layer 2, in the two
+      # jobs nobody thought to look at, because their names say MySQL and SQL
+      # Server. Un-skipping a test changes which jobs pay for its toolchain,
+      # and `./engine/...` is how it spreads -- so the fix belongs everywhere
+      # that pattern appears, not only where the workflow name mentions the
+      # language.
+      #
+      # test-plugin-migrations, the third job in this file, does not need it:
+      # it filters with `-run TestPluginMigrations` and `-run MultiBackend`,
+      # neither of which matches.
+      #
+      # setup-gradle restores ~/.gradle/caches and ~/.gradle/wrapper/dists.
+      # Both matter: tests/plugin-harness/testdata/javaworkflow ships a
+      # gradlew pinned to 7.6.4 and cmd/cleat/build_java.go prefers the
+      # wrapper, so a cold run fetches the Gradle distribution as well as
+      # every TeaVM artifact.
+      #
+      # This does not make a cold run immune -- a cache miss still resolves
+      # from Maven Central and Gradle does not retry a 429. It takes the
+      # request off the common path. The redundancy is real and deliberate for
+      # now: e2e-cross-language.yml already covers the Java e2e and these two
+      # jobs pay ~30s each to cover it again. Narrowing the -run pattern here
+      # is the other fix, and it would also stop these jobs covering the rest
+      # of ./engine against a real database, which is their whole point.
+      #
+      # Java 17 to match the five other jobs that build this SDK, rather than
+      # inheriting the runner image's default, which can change without us.
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      # ./migration/... alongside ./engine/...: this is the only job with a
+      # live MySQL, and until IMPROVEMENT-PLAN 3.13 nothing anywhere had ever
+      # applied migrations/mysql/*.sql. The Runner could not parse its own
+      # shipped files, so no worker could bootstrap a MySQL schema, and every
+      # MySQL test path built its schema from engine/testutil's Go copy
+      # instead -- which is why nothing noticed. The regression test for that
+      # lives in ./migration/ and needs a real MySQL to mean anything.
+      # -p 1: this invocation names three database-backed packages -- engine,
+      # engine/testutil and migration -- against one database. Without it Go
+      # runs them concurrently, and engine/testutil's CleanupPostgresTestData
+      # is an unqualified DELETE across eleven tables, so they delete each
+      # other's fixtures mid-test. Measured on develop 2026-08-09 with just two
+      # of those packages: 3 failures in 8 runs, none in 8 with -p 1.
       - name: Run tests
-        run: go test -race -count=1 -timeout=300s ./engine/...
+        run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
 
   # -------------------------------------------------------------------------
   # Test SQL Server backend
@@ -68,42 +212,61 @@ jobs:
   test-mssql:
     name: Test SQL Server
     runs-on: ubuntu-latest
+    services:
+      mssql:
+        # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
+        # a required check. Full rationale, the re-derive commands, and why the
+        # `ancestor=` filters had to move with it: tier1-gate.yml's mssql
+        # service. Bump all six sites together or `Lint` fails the PR.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
     env:
-      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=master
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start SQL Server
+      - name: Create cleat database
         run: |
-          docker run -d --name mssql \
-            -e 'ACCEPT_EULA=Y' \
-            -e 'MSSQL_SA_PASSWORD=CleatTest123!' \
-            -p 1433:1433 \
-            mcr.microsoft.com/mssql/server:2022-latest \
-            || docker run -d --name mssql \
-              -e 'ACCEPT_EULA=Y' \
-              -e 'MSSQL_SA_PASSWORD=CleatTest123!' \
-              -p 1433:1433 \
-              mcr.microsoft.com/mssql/server:2022-latest
-          for i in $(seq 1 30); do
-            if docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C >/dev/null 2>&1; then
-              echo "SQL Server ready"
-              exit 0
-            fi
-            echo "Waiting for SQL Server... ($i/30)"
-            sleep 2
-          done
-          echo "SQL Server failed to start"
-          docker logs mssql
-          exit 1
+          docker exec $(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89") /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
+      # The second of the two jobs that sweep ./engine/... unfiltered, so the
+      # same Java toolchain and the same Gradle cache. See the long note in
+      # test-mysql above for why a SQL Server job builds a Java WASM
+      # component at all.
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      # ./migration/... alongside ./engine/...: this is the only job with a
+      # live SQL Server, and the migration tests that assert the shipped
+      # .sql files can actually be applied (IMPROVEMENT-PLAN 3.10's upgrade
+      # path, 3.13) need a real server to mean anything.
+      # -p 1: this invocation names three database-backed packages -- engine,
+      # engine/testutil and migration -- against one database. Without it Go
+      # runs them concurrently, and engine/testutil's CleanupPostgresTestData
+      # is an unqualified DELETE across eleven tables, so they delete each
+      # other's fixtures mid-test. Measured on develop 2026-08-09 with just two
+      # of those packages: 3 failures in 8 runs, none in 8 with -p 1.
       - name: Run tests
-        run: go test -race -count=1 -timeout=300s ./engine/...
+        run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
 
   # -------------------------------------------------------------------------
   # Plugin migration smoke test (all three backends)
@@ -116,13 +279,34 @@ jobs:
   #
   # Unlike the per-backend jobs above (test-mysql, test-mssql), this job
   # does NOT run the full WorkflowStore suite — only plugin migration tests.
+  #
+  # Not a required status check, and the two above are, as of 2026-08-07. The
+  # asymmetry is deliberate. Both of this job's steps are already gated
+  # elsewhere on all three dialects: TestPluginMigrations lives in ./engine/,
+  # a tier-1 package that the required `Tier 2 Gate`'s sibling `Tier 1 Gate`
+  # sweeps with all three DSNs set and no matching entry in tiers.yaml's
+  # exclude_tests, and ./plugins/... is a tier-2 package under `Tier 2 Gate`.
+  # Requiring this job would gate the same assertions a second time.
+  #
+  # What test-mysql and test-mssql add over the tier gates is different: they run
+  # with only ONE dialect's DSN set, which is the configuration a single-backend
+  # deployment actually has. This job sets all three, exactly as the gates do.
   # -------------------------------------------------------------------------
   test-plugin-migrations:
     name: Plugin Migrations
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        # Required, and the only service here that was missing it. A job
+        # running directly on the runner does not share the service
+        # network, so without a published port the container is simply
+        # unreachable. The mysql and mssql services below already
+        # --publish in their options; postgres did not, so every
+        # postgres subtest in this workflow skipped itself and the job
+        # reported green without ever connecting.
+        ports:
+          - 5432:5432
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -133,7 +317,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       mysql:
-        image: mysql:8.4
+        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
@@ -145,7 +329,11 @@ jobs:
           --health-start-period 60s
           --publish 3306:3306
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
+        # a required check. Full rationale, the re-derive commands, and why the
+        # `ancestor=` filters had to move with it: tier1-gate.yml's mssql
+        # service. Bump all six sites together or `Lint` fails the PR.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
@@ -159,17 +347,21 @@ jobs:
     env:
       CLEAT_TEST_POSTGRES: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
       CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
-      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=cleat
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
+      - name: Create cleat database on MSSQL
+        run: |
+          docker exec $(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89" -q) /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
+
       - name: Run plugin migration tests
-        run: go test -race -count=1 -timeout=300s -run TestPluginMigrations ./engine/...
+        run: go test -count=1 -p 1 -timeout=600s -run TestPluginMigrations ./engine/...
 
       - name: Run plugin behavioral tests (all backends)
-        run: go test -race -count=1 -timeout=600s -run 'MultiBackend' ./plugins/...
+        run: go test -count=1 -timeout=900s -run 'MultiBackend' ./plugins/...

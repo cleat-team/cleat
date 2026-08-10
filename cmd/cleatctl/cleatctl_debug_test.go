@@ -39,7 +39,9 @@ type mockWorkflowInstanceRows struct {
 	closed   bool
 }
 
-func (d *mockWorkflowInstanceDriver) Open(_ string) (driver.Conn, error) { return nil, errors.New("unused") }
+func (d *mockWorkflowInstanceDriver) Open(_ string) (driver.Conn, error) {
+	return nil, errors.New("unused")
+}
 
 func (c *mockWorkflowInstanceConnector) Connect(_ context.Context) (driver.Conn, error) {
 	return &mockWorkflowInstanceConn{instance: c.instance, err: c.err}, nil
@@ -49,11 +51,13 @@ func (c *mockWorkflowInstanceConnector) Driver() driver.Driver { return &mockWor
 func (c *mockWorkflowInstanceConn) Prepare(_ string) (driver.Stmt, error) {
 	return &mockWorkflowInstanceStmt{instance: c.instance, err: c.err}, nil
 }
-func (c *mockWorkflowInstanceConn) Close() error                       { return nil }
-func (c *mockWorkflowInstanceConn) Begin() (driver.Tx, error)          { return nil, errors.New("no tx") }
-func (s *mockWorkflowInstanceStmt) Close() error                       { return nil }
-func (s *mockWorkflowInstanceStmt) NumInput() int                      { return -1 }
-func (s *mockWorkflowInstanceStmt) Exec(_ []driver.Value) (driver.Result, error) { return nil, errors.New("no exec") }
+func (c *mockWorkflowInstanceConn) Close() error              { return nil }
+func (c *mockWorkflowInstanceConn) Begin() (driver.Tx, error) { return nil, errors.New("no tx") }
+func (s *mockWorkflowInstanceStmt) Close() error              { return nil }
+func (s *mockWorkflowInstanceStmt) NumInput() int             { return -1 }
+func (s *mockWorkflowInstanceStmt) Exec(_ []driver.Value) (driver.Result, error) {
+	return nil, errors.New("no exec")
+}
 
 func (s *mockWorkflowInstanceStmt) Query(_ []driver.Value) (driver.Rows, error) {
 	if s.err != nil {
@@ -67,7 +71,7 @@ func (r *mockWorkflowInstanceRows) Columns() []string {
 		"result", "error", "error_code", "error_op", "assigned_to", "next_wake_at",
 		"tenant_id", "created_at", "generation"}
 }
-func (r *mockWorkflowInstanceRows) Close() error      { r.closed = true; return nil }
+func (r *mockWorkflowInstanceRows) Close() error { r.closed = true; return nil }
 
 func (r *mockWorkflowInstanceRows) Next(dest []driver.Value) error {
 	if r.err != nil {
@@ -326,9 +330,9 @@ func TestFormatEvent_Signal(t *testing.T) {
 func TestFormatEvent_Truncate(t *testing.T) {
 	longStr := strings.Repeat("x", 200)
 	ev := engine.EventRecord{
-		Step:     0,
+		Step:      0,
 		EventType: "Activity",
-		Request:  longStr,
+		Request:   longStr,
 	}
 	result := formatEvent(ev)
 	if strings.Contains(result, longStr) {
@@ -823,8 +827,8 @@ func TestDebugState_ReadCommand_StateNoData(t *testing.T) {
 
 func TestDebugState_ReadCommand_Events(t *testing.T) {
 	ds := &debugState{
-		cmdCh:  make(chan engine.ReplayStepAction, 1),
-		quit:   make(chan struct{}),
+		cmdCh: make(chan engine.ReplayStepAction, 1),
+		quit:  make(chan struct{}),
 		events: []engine.EventRecord{
 			{Step: 0, EventType: "Activity", Service: "svc", Op: "op"},
 			{Step: 1, EventType: "Sleep"},
@@ -937,5 +941,129 @@ func TestReplayStepActionConstants(t *testing.T) {
 	// Verify the engine constants have the expected relative values.
 	if engine.ReplayNext >= engine.ReplayQuit {
 		t.Error("ReplayNext should come before ReplayQuit (iota)")
+	}
+}
+
+// =========================================================================
+// DisplayStep edge cases — event types not previously covered
+// =========================================================================
+
+func TestDebugState_DisplayStep_StateOp(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "State", StateOp: "put", StateKey: "mykey"},
+	}
+	ds := &debugState{events: events}
+	info := debugStepInfo{step: 0, event: &events[0], qs: map[string]string{}}
+
+	stdout := captureStdout(t, func() {
+		ds.displayStep(info)
+	})
+
+	if !strings.Contains(stdout, "state_op=put") {
+		t.Errorf("expected 'state_op=put', got: %s", stdout)
+	}
+	if !strings.Contains(stdout, "key=mykey") {
+		t.Errorf("expected 'key=mykey', got: %s", stdout)
+	}
+}
+
+func TestDebugState_DisplayStep_DetachedName(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "Detached", DetachedName: "background-task"},
+	}
+	ds := &debugState{events: events}
+	info := debugStepInfo{step: 0, event: &events[0], qs: map[string]string{}}
+
+	stdout := captureStdout(t, func() {
+		ds.displayStep(info)
+	})
+
+	if !strings.Contains(stdout, "detached=background-task") {
+		t.Errorf("expected 'detached=background-task', got: %s", stdout)
+	}
+}
+
+func TestDebugState_DisplayStep_FetchURL(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "Fetch", FetchURL: "https://api.example.com", FetchMethod: "POST"},
+	}
+	ds := &debugState{events: events}
+	info := debugStepInfo{step: 0, event: &events[0], qs: map[string]string{}}
+
+	stdout := captureStdout(t, func() {
+		ds.displayStep(info)
+	})
+
+	if !strings.Contains(stdout, "fetch=POST https://api.example.com") {
+		t.Errorf("expected 'fetch=POST https://api.example.com', got: %s", stdout)
+	}
+}
+
+func TestDebugState_DisplayStep_PromiseID(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "Promise", PromiseID: "prom-abc-123"},
+	}
+	ds := &debugState{events: events}
+	info := debugStepInfo{step: 0, event: &events[0], qs: map[string]string{}}
+
+	stdout := captureStdout(t, func() {
+		ds.displayStep(info)
+	})
+
+	if !strings.Contains(stdout, "promise=prom-abc-123") {
+		t.Errorf("expected 'promise=prom-abc-123', got: %s", stdout)
+	}
+}
+
+func TestFormatRemainingEvents_StateOp(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "State", StateOp: "put", StateKey: "config"},
+	}
+	result := formatRemainingEvents(events, 0)
+	if !strings.Contains(result, "state_op=put") {
+		t.Errorf("expected 'state_op=put', got: %s", result)
+	}
+	if !strings.Contains(result, "key=config") {
+		t.Errorf("expected 'key=config', got: %s", result)
+	}
+}
+
+func TestFormatEvent_WithError(t *testing.T) {
+	ev := engine.EventRecord{
+		Step:      0,
+		EventType: "Activity",
+		Service:   "svc",
+		Op:        "fail",
+		Err:       "connection refused",
+	}
+	result := formatEvent(ev)
+	if !strings.Contains(result, "err=connection refused") {
+		t.Errorf("expected 'err=connection refused', got: %s", result)
+	}
+}
+
+func TestFormatEvent_Fetch(t *testing.T) {
+	ev := engine.EventRecord{
+		Step:        0,
+		EventType:   "Fetch",
+		FetchURL:    "https://api.example.com/data",
+		FetchMethod: "GET",
+	}
+	result := formatEvent(ev)
+	if !strings.Contains(result, "type=Fetch") {
+		t.Errorf("expected 'type=Fetch', got: %s", result)
+	}
+}
+
+func TestFormatEvent_StateOp(t *testing.T) {
+	ev := engine.EventRecord{
+		Step:      0,
+		EventType: "State",
+		StateOp:   "put",
+		StateKey:  "myvar",
+	}
+	result := formatEvent(ev)
+	if !strings.Contains(result, "type=State") {
+		t.Errorf("expected 'type=State', got: %s", result)
 	}
 }

@@ -7,7 +7,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"math"
 	"sync"
 	"time"
@@ -59,6 +59,15 @@ type MemoryController struct {
 	recoveryInterval  time.Duration
 
 	defEstimates map[string]float64 // def_name -> EWMA mean bytes
+
+	logger *slog.Logger
+}
+
+func (c *MemoryController) log() *slog.Logger {
+	if c.logger != nil {
+		return c.logger
+	}
+	return slog.Default()
 }
 
 // NewMemoryController creates a MemoryController that reads memory via the
@@ -112,7 +121,7 @@ func (c *MemoryController) Tick(ctx context.Context) {
 
 	qd, err := c.store.QueueDepth(ctx)
 	if err != nil {
-		log.Printf("[worker %s] queue depth query failed: %v", c.workerID, err)
+		c.log().WarnContext(context.Background(), "queue depth query failed", "worker_id", c.workerID, "error", err)
 		qd = 0
 	}
 
@@ -181,7 +190,7 @@ func (c *MemoryController) RecordWorkflowMemory(ctx context.Context, defName str
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := c.store.RecordWorkflowMemorySample(ctx, defName, int64(deltaBytes)); err != nil {
-			log.Printf("[worker %s] record memory sample for %s: %v", c.workerID, defName, err)
+			c.log().WarnContext(context.Background(), "record memory sample failed", "worker_id", c.workerID, "workflow", defName, "error", err)
 		}
 	}()
 }

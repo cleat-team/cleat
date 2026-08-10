@@ -24,3 +24,8 @@ export const ABI_VERSION: i32 = 4;
  *  Example: '{"llm":">=1.2.0","blobstore":"~2.0.0"}'
  */
 export const PLUGIN_DEPS: string = "{}";
+
+/** Child workflow version binding policy.
+ *  Values: "", "frozen", "stable", "latest", or "tag:<name>"
+ */
+export const CHILD_BINDING_POLICY: string = "";

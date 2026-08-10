@@ -2,7 +2,6 @@
 // for the cleat workflow transformer.
 //
 // Supported wasm compilation targets:
-//   - "tinygo"       — TinyGo wasip1 (deprecated, use "go" instead)
 //   - "go"           — Standard Go wasip1 (go build with GOOS=wasip1 GOARCH=wasm)
 //   - "rust"         — Rust via cargo + wasm32-wasip1
 //   - "java"         — Java via Gradle + TeaVM
@@ -20,7 +19,7 @@ import (
 )
 
 // GoTarget identifies the standard Go WASM compilation target.
-// Uses GOOS=wasip1 GOARCH=wasm go build instead of TinyGo.
+// Uses GOOS=wasip1 GOARCH=wasm go build.
 const GoTarget = "go"
 
 // PythonTarget identifies the Python WASM compilation target.
@@ -106,6 +105,13 @@ var hostFunctions = []HostFunction{
 	{"cleat_release_lock", "ReleaseLock"},
 	// SideEffect
 	{"cleat_side_effect", "SideEffect"},
+	// Identity
+	{"cleat_workflow_id", "WorkflowID"},
+	{"cleat_run_id", "RunID"},
+	// Cron schedules
+	{"cleat_schedule_cron", "ScheduleCron"},
+	{"cleat_delete_cron", "DeleteCron"},
+	{"cleat_list_crons", "ListCrons"},
 }
 
 // UsageInfo records which host functions are actually called by the

@@ -11,6 +11,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/microsoft/go-mssqldb"
 
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
 
@@ -54,8 +55,23 @@ var pluginTestBackends = []pluginTestBackend{
 		dialect: plugin.DialectPostgres,
 		setup: func(t *testing.T) (*sql.DB, func()) {
 			t.Helper()
-			db := testutil.TestDB(t, testutil.DialectPostgres)
-			return db, func() { db.Close() }
+			// A database of its own, built from migrations/postgres/.
+			//
+			// This test asserts that RunMigrations *creates* each plugin's
+			// tables, and RunMigrations is idempotent: it skips any version
+			// already recorded in plugin_migrations. Sharing the CLEAT_TEST_DB
+			// database therefore made the assertion vacuous the moment
+			// anything else had migrated it -- and once the workers in
+			// docker-compose.cluster.yml could boot (they could not before
+			// 9f7b4a1), they did exactly that, on the same database the
+			// cluster CI job runs this test against. The test then reported
+			// every plugin table as "not created" when in truth it had asked
+			// for no work to be done.
+			//
+			// Starting from an unmigrated database is what makes the
+			// assertion mean what it says.
+			db := engine.BootstrapScratchDB(t, "cleat_plugin_migrations_test")
+			return db, func() {}
 		},
 		enabled: func() bool { return true },
 	},
@@ -154,6 +170,20 @@ func tableExists(ctx context.Context, db *sql.DB, dialect plugin.Dialect, tableN
 func TestPluginMigrations_AllDialects(t *testing.T) {
 	for _, backend := range pluginTestBackends {
 		t.Run(backend.name, func(t *testing.T) {
+			// This guard is live for mysql/mssql: their enabled() reads
+			// CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL, correctly skipping when
+			// nobody asked for that backend (e.g. in ci.yml's test-go job,
+			// which sets neither var) and running for real in
+			// multi-db-ci.yml's test-plugin-migrations, which sets all
+			// three. It is provably dead for postgres: that entry's
+			// enabled() (above) hardcodes `return true`, mirroring
+			// PostgresBackend.Enabled() in store_backends_test.go, so this
+			// branch can never fire on that leg -- the real "is postgres
+			// actually reachable" check lives entirely inside
+			// backend.setup() -> engine.BootstrapScratchDB, which already
+			// distinguishes configured-but-unreachable (Fatal) from
+			// nothing-configured (Skip). Kept, unchanged, because it is
+			// still the correct gate for mysql/mssql.
 			if !backend.enabled() {
 				t.Skipf("%s not available: set CLEAT_TEST_%s or start a local instance",
 					backend.name, strings.ToUpper(backend.name))

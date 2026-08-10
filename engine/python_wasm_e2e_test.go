@@ -30,12 +30,33 @@ import (
 //   - Python 3.10+
 //   - cleat-sdk installed          (pip install -e python-sdk/)
 func TestPythonWasmEndToEnd(t *testing.T) {
+	// Unskipped 2026-08-05. This was the acceptance test IMPROVEMENT-PLAN 2.72
+	// named for whichever component instantiation path was fixed first, and the
+	// native one (component_cgo.go) is now compiled into ordinary builds rather
+	// than gated behind a tag nothing set. See engine.go's WasmtimeLanguages
+	// comment for what that changed and what it did not.
+	//
+	// It had been failing on develop invisibly, because the workflow step
+	// running it piped `go test` into `tee` without `set -o pipefail` -- so
+	// tee's exit status was the step's. That is fixed too; without it this
+	// test could pass or fail here and CI would report the same either way.
 
-ctx := context.Background()
+	ctx := context.Background()
 
 	// ---- Check prerequisites ----
+	//
+	// toolchainRequired (defined in rust_workflow_test.go, which documents the
+	// reasoning) applies here too: e2e-cross-language.yml installs
+	// componentize-py and wasm-tools via pip/cargo, declares "python" in
+	// CLEAT_REQUIRE_TOOLCHAINS, and states in its own header that Python is
+	// first-class ("build/execute failures block CI"), while ci.yml's engine
+	// matrix entry runs this package with none of that installed. A skip here
+	// is only legitimate when nobody asked for these tools.
 	pythonWasm := newPythonWasmTestHelper(t)
 	if !pythonWasm.toolsAvailable() {
+		if toolchainRequired("python") {
+			t.Fatalf("Python WASM prerequisites not met, but %s declares python, so this job installs componentize-py/wasm-tools and treats Python as first-class: %s", requireToolchainEnv, pythonWasm.missingTools())
+		}
 		t.Skip("Python WASM prerequisites not met: " + pythonWasm.missingTools())
 	}
 
@@ -73,14 +94,24 @@ ctx := context.Background()
 
 	caller := &mockCaller{}
 	var engineOpts []EngineOption
-	if true {
-		if wt, wtErr := NewWasmtimeBackend(ctx); wtErr == nil {
-			engineOpts = append(engineOpts, WithBackend("python", wt))
-			t.Log("wasmtime backend registered for python")
-		} else {
-			t.Logf("wasmtime backend not available: %v (falling back to wazero)", wtErr)
-		}
+	// Register exactly the languages the worker registers. This used to be an
+	// unconditional `if true` block wiring WithBackend("python", wt), forcing a
+	// routing the product did not use; reading WasmtimeLanguages instead means
+	// this test exercises what ships. Python is now in that list, so this test
+	// moved onto wasmtime without an edit here -- which was the point of
+	// writing it this way (IMPROVEMENT-PLAN 2.72).
+	//
+	// Not a skip if the backend is missing: a wasmtime backend that fails to
+	// construct is a real failure now that every language routes to it, and
+	// falling back to wazero here would quietly test a configuration nothing
+	// ships and report it as a pass.
+	wt, wtErr := NewWasmtimeBackend(ctx)
+	if wtErr != nil {
+		t.Fatalf("NewWasmtimeBackend: %v (every language in WasmtimeLanguages, "+
+			"python included, routes here -- there is no fallback left to test)", wtErr)
 	}
+	engineOpts = append(engineOpts, WithBackends(WasmtimeLanguages, wt))
+	t.Logf("wasmtime registered for %v", WasmtimeLanguages)
 	engine := NewEngine(rt, caller, engineOpts...)
 
 	// ---- Step 4: Execute the workflow ----
@@ -135,7 +166,7 @@ ctx := context.Background()
 	}
 
 	// Verify the result is valid JSON.
-	var resultData interface{}
+	var resultData any
 	if err := json.Unmarshal([]byte(result), &resultData); err != nil {
 		t.Errorf("result is not valid JSON: %v (raw: %s)", err, result)
 	}
@@ -479,15 +510,6 @@ func (h *pythonWasmTestHelper) decomposeComponent(t *testing.T, wasmPath string)
 	}
 
 	return outputPath
-}
-
-// skipIfNoDecompose skips the test when wasm-tools component decompose is
-// not available (removed in wasm-tools >= ~1.230).
-func (h *pythonWasmTestHelper) skipIfNoDecompose(t *testing.T) {
-	t.Helper()
-	t.Skip("wasm-tools component decompose not available — removed in wasm-tools >= 1.230. " +
-		"The engine requires decomposed core WASM. Install older wasm-tools or implement " +
-		"native Component Model support in the wasmtime backend.")
 }
 
 // findRepoRoot locates the repository root by finding go.mod.

@@ -3,10 +3,10 @@
 // MSSQL). These tests complement the existing in-memory fake-driver tests
 // in kvstore_test.go and are kept in a separate file to keep them distinct.
 //
-// When a backend lacks dialect-specific migration SQL (e.g. UpMySQL or
-// UpMSSQL is empty), the test skips with a descriptive message rather than
-// failing. Currently the kvstore plugin only has a PostgreSQL migration, so
-// only the postgres backend exercises real queries.
+// migrations.go provides full UpMySQL and UpMSSQL DDL alongside the
+// PostgreSQL Up field, so every backend testutil.NewPluginTestBackends
+// returns exercises real queries -- there is no dialect this suite still
+// needs to skip.
 package kvstore
 
 import (
@@ -41,16 +41,6 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 			p := &Plugin{}
 			ctx := context.Background()
 
-			// Check whether this dialect has migration SQL. The kvstore plugin
-			// currently only provides a PostgreSQL migration (the Up field). For
-			// MySQL and MSSQL the plugin has no dialect-specific DDL, so
-			// RunMigrations skips it and the table is never created.
-			if be.Dialect == testutil.DialectMySQL || be.Dialect == testutil.DialectMSSQL {
-				if !pluginHasDialectMigration(p, be.Dialect) {
-					t.Skipf("kvstore plugin does not have %s migrations yet", be.Name)
-				}
-			}
-
 			// Run plugin migrations to create the kv_store table.
 			pluginDialect := plugin.Dialect(string(be.Dialect))
 			loaded := []*plugin.LoadedPlugin{
@@ -69,6 +59,16 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 			}
 
 			// Initialise the plugin with the real database connection.
+			//
+			// p.dialect is load-bearing and was previously left unset. The
+			// plugin builds its SQL with plugin.Rebind(query, p.dialect), and
+			// Rebind passes a query through unchanged for a dialect it does
+			// not recognise -- so with the zero value the plugin sent
+			// PostgreSQL $1 placeholders to MySQL and SQL Server. Every
+			// backend subtest then failed against an object no deployment
+			// produces: Init sets this field, and the test built the plugin
+			// field by field instead.
+			p.dialect = pluginDialect
 			p.db = &engine.SQLDBAdapter{DB: be.DB}
 			p.mux = http.NewServeMux()
 			p.logger = slog.Default()
@@ -121,35 +121,15 @@ func cleanupKVStore(t *testing.T, p *Plugin) {
 	if p.db == nil {
 		return
 	}
+	// Rebound like every other query the plugin issues: an unrebound $1 is
+	// an unknown column on MySQL and a money literal on SQL Server.
 	_, err := p.db.Exec(context.Background(),
-		`DELETE FROM kv_store WHERE tenant_id = $1`, testTenantID)
+		plugin.Rebind(`DELETE FROM kv_store WHERE tenant_id = $1`, p.dialect), testTenantID)
 	if err != nil {
-		// Log rather than fail — the table may not exist on backends that
-		// were not properly set up.
-		t.Logf("cleanup: %v", err)
+		// Not a log: every scenario below counts rows, so a cleanup that did
+		// not happen silently invalidates the assertions that follow it.
+		t.Fatalf("cleanup: clearing kv_store for tenant %s failed: %v", testTenantID, err)
 	}
-}
-
-// pluginHasDialectMigration returns true if the plugin has at least one
-// migration with dialect-specific DDL (UpMySQL or UpMSSQL) for the given
-// dialect. For PostgreSQL we always return true since the Up field is the
-// default and is always populated.
-func pluginHasDialectMigration(p *Plugin, dialect testutil.Dialect) bool {
-	for _, m := range p.Migrations() {
-		var ddl string
-		switch dialect {
-		case testutil.DialectMySQL:
-			ddl = m.UpMySQL
-		case testutil.DialectMSSQL:
-			ddl = m.UpMSSQL
-		default:
-			return true // PostgreSQL always has the Up field
-		}
-		if ddl != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // beReq creates an HTTP request authenticated with the test tenant ID. The
@@ -166,7 +146,7 @@ func beReq(method, target string, body []byte) *http.Request {
 // ---------------------------------------------------------------------------
 
 // stringify is a convenience for formatting map assertions.
-func stringify(v interface{}) string {
+func stringify(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
@@ -192,7 +172,7 @@ func backendPutGetDelete(t *testing.T, mux *http.ServeMux) {
 		)
 	}
 
-	var putResp map[string]interface{}
+	var putResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &putResp); err != nil {
 		t.Fatalf("decode PUT response: %v", err)
 	}
@@ -215,7 +195,7 @@ func backendPutGetDelete(t *testing.T, mux *http.ServeMux) {
 		)
 	}
 
-	var getResp map[string]interface{}
+	var getResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &getResp); err != nil {
 		t.Fatalf("decode GET response: %v", err)
 	}
@@ -270,7 +250,7 @@ func backendVersionIncrement(t *testing.T, mux *http.ServeMux) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT 1: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp1 map[string]interface{}
+	var resp1 map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp1)
 	v1 := int(resp1["version"].(float64))
 
@@ -281,7 +261,7 @@ func backendVersionIncrement(t *testing.T, mux *http.ServeMux) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT 2: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp2 map[string]interface{}
+	var resp2 map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp2)
 	v2 := int(resp2["version"].(float64))
 
@@ -318,7 +298,7 @@ func backendListAll(t *testing.T, mux *http.ServeMux) {
 		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST decode: %v", err)
 	}
@@ -366,7 +346,7 @@ func backendListWithPrefix(t *testing.T, mux *http.ServeMux) {
 		t.Fatalf("LIST with prefix: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST decode: %v", err)
 	}

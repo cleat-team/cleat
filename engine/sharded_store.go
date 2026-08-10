@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,6 +42,11 @@ type Shard struct {
 type ShardedStore struct {
 	shards []*Shard
 	mu     sync.RWMutex
+
+	// claimCursor rotates the shard a claim starts from. Claims walk shards in
+	// order and stop once the budget is spent, so a fixed starting point would
+	// drain shard 0 first and starve the tail under sustained load.
+	claimCursor atomic.Uint64
 }
 
 // NewShardedStore creates a ShardedStore from pre-constructed WorkflowStore
@@ -171,44 +177,69 @@ func (s *ShardedStore) ClaimWorkflow(ctx context.Context, workerID string) (*Wor
 // ClaimWorkflows claims up to limit runnable workflows across all shards.
 // Iterates through shards collecting workflows until limit is reached or shards exhausted.
 func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	return s.claimAcrossShards(ctx, workerID, limit, "claim_workflows",
+		func(sh *Shard, budget int) ([]*WorkflowInstance, error) {
+			return sh.Store.ClaimWorkflows(ctx, workerID, budget)
+		})
+}
+
+// claimAcrossShards walks shards in order, spending a decreasing budget, and
+// stops as soon as the budget is exhausted.
+//
+// It used to fan out to every shard concurrently with the *full* limit and then
+// truncate the merged slice. The return value respected the limit, which is why
+// nothing noticed -- but the rows beyond it had already been updated to
+// status='running' with assigned_to set to this worker, in their own shards, in
+// committed transactions. Truncating a slice does not release them: they were
+// claimed by a worker that would never execute them and stayed that way until
+// the lease or heartbeat reaper took them back. With S shards and limit L, one
+// poll could strand (S-1)*L workflows. See IMPROVEMENT-PLAN 2.17.
+//
+// Sequential is not the cost it looks like. When work is available the first
+// shard usually fills the budget and the loop stops after one round-trip --
+// fewer than the fan-out made. The serial walk only happens when shards are
+// empty, which is exactly when claim latency does not matter.
+func (s *ShardedStore) claimAcrossShards(ctx context.Context, workerID string, limit int, op string,
+	claim func(sh *Shard, budget int) ([]*WorkflowInstance, error)) ([]*WorkflowInstance, error) {
+
+	if limit <= 0 {
+		return nil, nil
+	}
+
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
-
-	type shardResult struct {
-		wfs  []*WorkflowInstance
-		err  error
-		name string
+	if len(shards) == 0 {
+		return nil, nil
 	}
 
-	resultCh := make(chan shardResult, len(shards))
-	var wg sync.WaitGroup
-
-	for _, shard := range shards {
-		wg.Add(1)
-		go func(sh *Shard) {
-			defer wg.Done()
-			wfs, err := sh.Store.ClaimWorkflows(ctx, workerID, limit)
-			resultCh <- shardResult{wfs: wfs, err: err, name: sh.Config.Name}
-		}(shard)
-	}
-
-	wg.Wait()
-	close(resultCh)
+	start := int(s.claimCursor.Add(1)-1) % len(shards)
 
 	var all []*WorkflowInstance
-	for res := range resultCh {
-		if res.err != nil {
-			return nil, fmt.Errorf("shard %q: %w", res.name, res.err)
+	for i := 0; i < len(shards); i++ {
+		budget := limit - len(all)
+		if budget <= 0 {
+			break
 		}
-		all = append(all, res.wfs...)
+		sh := shards[(start+i)%len(shards)]
+		wfs, err := claim(sh, budget)
+		if err != nil {
+			return nil, fmt.Errorf("shard %q: %w", sh.Config.Name, err)
+		}
+		// A shard that returns more than it was asked for has already
+		// committed those rows, so this cannot be silently truncated: it is a
+		// bug in that store, and the whole point of 2.17 was that the excess
+		// is invisible from the return value.
+		if len(wfs) > budget {
+			return nil, fmt.Errorf("%s: shard %q returned %d workflows for a budget of %d; "+
+				"the excess is already claimed in that shard and will be stranded",
+				op, sh.Config.Name, len(wfs), budget)
+		}
+		all = append(all, wfs...)
 	}
 
 	if len(all) == 0 {
 		return nil, nil
-	}
-	if len(all) > limit {
-		all = all[:limit]
 	}
 	return all, nil
 }
@@ -217,46 +248,10 @@ func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID string, limi
 // Sticky workflows use idx_instances_sticky for low-contention claiming.
 // Iterates through shards collecting workflows until limit is reached or shards exhausted.
 func (s *ShardedStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
-
-	type shardResult struct {
-		wfs  []*WorkflowInstance
-		err  error
-		name string
-	}
-
-	resultCh := make(chan shardResult, len(shards))
-	var wg sync.WaitGroup
-
-	for _, shard := range shards {
-		wg.Add(1)
-		go func(sh *Shard) {
-			defer wg.Done()
-			wfs, err := sh.Store.ClaimStickyWorkflows(ctx, workerID, limit)
-			resultCh <- shardResult{wfs: wfs, err: err, name: sh.Config.Name}
-		}(shard)
-	}
-
-	wg.Wait()
-	close(resultCh)
-
-	var all []*WorkflowInstance
-	for res := range resultCh {
-		if res.err != nil {
-			return nil, fmt.Errorf("shard %q: %w", res.name, res.err)
-		}
-		all = append(all, res.wfs...)
-	}
-
-	if len(all) == 0 {
-		return nil, nil
-	}
-	if len(all) > limit {
-		all = all[:limit]
-	}
-	return all, nil
+	return s.claimAcrossShards(ctx, workerID, limit, "claim_sticky_workflows",
+		func(sh *Shard, budget int) ([]*WorkflowInstance, error) {
+			return sh.Store.ClaimStickyWorkflows(ctx, workerID, budget)
+		})
 }
 
 // LoadEventHistory routes by workflow ID.
@@ -285,7 +280,6 @@ func (s *ShardedStore) AppendEventHistoryBatch(ctx context.Context, workflowID s
 	}
 	return shard.Store.AppendEventHistoryBatch(ctx, workflowID, recs)
 }
-
 
 // LoadWASM tries each shard (WASM definitions are replicated across all shards).
 func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
@@ -823,6 +817,96 @@ func (s *ShardedStore) GetAllowedSignalCallers(ctx context.Context, workflowID s
 	return shard.Store.GetAllowedSignalCallers(ctx, workflowID)
 }
 
+// PickVersionByRouting checks A/B routing rules for the given workflow name.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return 0, nil
+	}
+	return shard.Store.PickVersionByRouting(ctx, workflowName)
+}
+
+// ResolveVersionByTag resolves a tag to a workflow definition version.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return 0, nil
+	}
+	return shard.Store.ResolveVersionByTag(ctx, workflowName, tag)
+}
+
+// SetWorkflowTag assigns a tag to a specific version.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return fmt.Errorf("set_workflow_tag: no shard available")
+	}
+	return shard.Store.SetWorkflowTag(ctx, workflowName, version, tag)
+}
+
+// RemoveWorkflowTag deletes a tag assignment.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return fmt.Errorf("remove_workflow_tag: no shard available")
+	}
+	return shard.Store.RemoveWorkflowTag(ctx, workflowName, tag)
+}
+
+// GetWorkflowTag returns the version for a given tag.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return 0, fmt.Errorf("get_workflow_tag: no shard available")
+	}
+	return shard.Store.GetWorkflowTag(ctx, workflowName, tag)
+}
+
+// GetWorkflowTags returns all tag -> version mappings for a workflow.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return nil, fmt.Errorf("get_workflow_tags: no shard available")
+	}
+	return shard.Store.GetWorkflowTags(ctx, workflowName)
+}
+
+// SetRoutingRule creates a routing rule for a workflow version.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return fmt.Errorf("set_routing_rule: no shard available")
+	}
+	return shard.Store.SetRoutingRule(ctx, workflowName, targetVersion, weight)
+}
+
+// RemoveRoutingRule deletes a routing rule by ID.
+// Delegates to the shard determined by the rule ID.
+func (s *ShardedStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	shard := s.getShard(ruleID)
+	if shard == nil {
+		return fmt.Errorf("remove_routing_rule: no shard available")
+	}
+	return shard.Store.RemoveRoutingRule(ctx, ruleID)
+}
+
+// GetRoutingRules returns all routing rules for a workflow.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return nil, fmt.Errorf("get_routing_rules: no shard available")
+	}
+	return shard.Store.GetRoutingRules(ctx, workflowName)
+}
+
 // CreatePromise routes by workflow ID.
 func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	shard := s.getShard(workflowID)
@@ -1236,6 +1320,27 @@ func (s *ShardedStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderTha
 	return total, nil
 }
 
+// DeleteCompletedWorkflows fans out to all shards and sums the deleted counts.
+func (s *ShardedStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var total int64
+	var errs []string
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		n, err := shard.Store.DeleteCompletedWorkflows(ctx, olderThan)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("shard %q: %v", shard.Config.Name, err))
+			continue
+		}
+		total += n
+	}
+	if len(errs) > 0 {
+		return total, fmt.Errorf("DeleteCompletedWorkflows errors: %s", strings.Join(errs, "; "))
+	}
+	return total, nil
+}
+
 // metricsStore is a local interface for type-asserting whether a shard's
 // underlying store supports metrics collection methods. This mirrors the
 // MetricsStore interface in cmd/cleat-worker/metrics_store.go but lives
@@ -1361,4 +1466,62 @@ func (s *ShardedStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []by
 		}
 	}
 	return uuid.Nil, fmt.Errorf("tenant not found for API key")
+}
+
+// AdminForceComplete marks a workflow as done, bypassing worker ownership.
+func (s *ShardedStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("admin force-complete: no shard for workflow %s", workflowID)
+	}
+	return shard.Store.AdminForceComplete(ctx, workflowID, generation, result, operator)
+}
+
+// AdminForceFail marks a workflow as failed, bypassing worker ownership.
+func (s *ShardedStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("admin force-fail: no shard for workflow %s", workflowID)
+	}
+	return shard.Store.AdminForceFail(ctx, workflowID, generation, errorMsg, errorCode, operator)
+}
+
+// AdminReReplay replays a workflow's event history for debugging.
+func (s *ShardedStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("admin re-replay: no shard for workflow %s", workflowID)
+	}
+	return shard.Store.AdminReReplay(ctx, workflowID, generation, operator)
+}
+
+// ClaimDueSchedule claims on the shard that holds the schedule.
+//
+// Unlike UpdateScheduleNextRun, this deliberately does NOT fan out to every
+// shard. The CAS is what decides who owns a firing instant, and a fan-out
+// would report "claimed" if any shard's row matched -- turning a
+// single-winner election into a poll. Schedules are replicated across shards,
+// so the first shard whose row still holds expectedNextRun is the winner and
+// the rest are already-advanced copies.
+func (s *ShardedStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+
+	claimed := false
+	var lastErr error
+	for _, shard := range shards {
+		ok, err := shard.Store.ClaimDueSchedule(ctx, name, expectedNextRun, newNextRun, runID)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if ok {
+			claimed = true
+		}
+	}
+	if !claimed && lastErr != nil {
+		return false, lastErr
+	}
+	return claimed, nil
 }

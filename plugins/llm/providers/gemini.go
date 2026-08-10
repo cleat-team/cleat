@@ -27,8 +27,8 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text            string                  `json:"text,omitempty"`
-	FunctionCall    *geminiFunctionCall     `json:"functionCall,omitempty"`
+	Text             string                  `json:"text,omitempty"`
+	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
 }
 
@@ -68,8 +68,8 @@ type geminiResponse struct {
 }
 
 type geminiCandidate struct {
-	Content       geminiContent `json:"content"`
-	FinishReason  string        `json:"finishReason"`
+	Content      geminiContent `json:"content"`
+	FinishReason string        `json:"finishReason"`
 }
 
 type geminiUsage struct {

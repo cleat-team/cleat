@@ -2,16 +2,16 @@ package eventtriggers
 
 import (
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterRoutes registers HTTP handlers for the event-triggers plugin.
@@ -30,9 +30,9 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 // ---- types ----
 
 type publishEventRequest struct {
-	ID        string                 `json:"id"`
-	EventType string                 `json:"event_type"`
-	Data      map[string]interface{} `json:"data"`
+	ID        string         `json:"id"`
+	EventType string         `json:"event_type"`
+	Data      map[string]any `json:"data"`
 }
 
 type publishEventResponse struct {
@@ -64,7 +64,7 @@ type subscriptionJSON struct {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -120,7 +120,7 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Data == nil {
-		req.Data = make(map[string]interface{})
+		req.Data = make(map[string]any)
 	}
 
 	// Dispatch through the core publish pipeline — stores the event,
@@ -138,13 +138,13 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 
 // mergeInputAndTemplate builds the workflow input JSON by starting with the
 // subscription's input_template and overlaying the published event data.
-func mergeInputAndTemplate(tmpl json.RawMessage, eventData map[string]interface{}) (json.RawMessage, error) {
+func mergeInputAndTemplate(tmpl json.RawMessage, eventData map[string]any) (json.RawMessage, error) {
 	// Start with input_template as base.
-	base := make(map[string]interface{})
+	base := make(map[string]any)
 	if len(tmpl) > 0 {
 		if err := json.Unmarshal(tmpl, &base); err != nil {
 			// If template is not a JSON object, ignore it.
-			base = make(map[string]interface{})
+			base = make(map[string]any)
 		}
 	}
 
@@ -323,9 +323,9 @@ func (p *Plugin) handleDeleteSubscription(w http.ResponseWriter, r *http.Request
 // ---- POST /api/events/{event_id}/retry ----
 
 type retryEventResponse struct {
-	Status      string `json:"status"`
-	EventID     string `json:"event_id"`
-	WorkflowsStarted int `json:"workflows_started"`
+	Status           string `json:"status"`
+	EventID          string `json:"event_id"`
+	WorkflowsStarted int    `json:"workflows_started"`
 }
 
 // handleRetryEvent replays a dead-lettered or failed event by resetting its
@@ -384,9 +384,9 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse event data back into map for dispatch.
-	var eventData map[string]interface{}
+	var eventData map[string]any
 	if err := json.Unmarshal(eventDataRaw, &eventData); err != nil {
-		eventData = make(map[string]interface{})
+		eventData = make(map[string]any)
 	}
 
 	// Re-dispatch to matching subscriptions.

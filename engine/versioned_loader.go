@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 
@@ -38,10 +38,10 @@ type lruListEntry struct {
 
 // CacheStats exposes cache performance for observability.
 type CacheStats struct {
-	Size   int   `json:"size"`
-	MaxSize int  `json:"max_size"`
-	Hits   int64 `json:"hits"`
-	Misses int64 `json:"misses"`
+	Size    int   `json:"size"`
+	MaxSize int   `json:"max_size"`
+	Hits    int64 `json:"hits"`
+	Misses  int64 `json:"misses"`
 }
 
 // ---------------------------------------------------------------------------
@@ -60,8 +60,8 @@ type CacheStats struct {
 // Thread-safety: the LRU cache is protected by a mutex. Compiled modules
 // themselves are safe for concurrent instantiation per wazero guarantees.
 type WorkflowLoader struct {
-	db  *sql.DB
-	rt  *Runtime
+	db *sql.DB
+	rt *Runtime
 
 	mu      sync.Mutex
 	cache   map[defKey]*cacheEntry
@@ -105,8 +105,9 @@ func NewWorkflowLoader(db *sql.DB, rt *Runtime, diskCache *WasmDiskCache, maxSiz
 // not support compiled module serialization.
 //
 // SQL: SELECT wasm_bytes, abi_version, plugin_deps, min_version
-//      FROM workflow_defs
-//      WHERE name = $1 AND version = $2 AND NOT deprecated
+//
+//	FROM workflow_defs
+//	WHERE name = $1 AND version = $2 AND NOT deprecated
 func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wazero.CompiledModule, error) {
 	key := defKey{Name: name, Version: version}
 
@@ -160,10 +161,11 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 // If the definition already exists, it is updated (upsert semantics).
 //
 // SQL: INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version)
-//      VALUES ($1, $2, $3, $4, $5, $6)
-//      ON CONFLICT (name, version) DO UPDATE SET
-//        wasm_bytes = $3, abi_version = $4, plugin_deps = $5, min_version = $6,
-//        deprecated = false, created_at = now()
+//
+//	VALUES ($1, $2, $3, $4, $5, $6)
+//	ON CONFLICT (name, version) DO UPDATE SET
+//	  wasm_bytes = $3, abi_version = $4, plugin_deps = $5, min_version = $6,
+//	  deprecated = false, created_at = now()
 func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, wasmBytes []byte, pluginDeps map[string]string, minVersion int) error {
 	pluginDepsJSON, err := json.Marshal(pluginDeps)
 	if err != nil {
@@ -185,8 +187,8 @@ func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, w
 		return fmt.Errorf("deploy %s v%d: %w", name, version, err)
 	}
 
-	log.Printf("[workflow-loader] Deployed %s v%d (%d bytes, %d plugins, min_ver=%d)",
-		name, version, len(wasmBytes), len(pluginDeps), minVersion)
+	slog.InfoContext(ctx, "workflow deployed",
+		"name", name, "version", version, "size_bytes", len(wasmBytes), "plugins", len(pluginDeps), "min_version", minVersion)
 	return nil
 }
 
@@ -211,7 +213,7 @@ func (l *WorkflowLoader) Deprecate(ctx context.Context, name string, version int
 	key := defKey{Name: name, Version: version}
 	l.cacheRemove(key)
 
-	log.Printf("[workflow-loader] Deprecated %s v%d", name, version)
+	slog.InfoContext(ctx, "workflow deprecated", "name", name, "version", version)
 	return nil
 }
 
@@ -219,7 +221,8 @@ func (l *WorkflowLoader) Deprecate(ctx context.Context, name string, version int
 // ordered by version descending.
 //
 // SQL: SELECT name, version, wasm_bytes, abi_version, plugin_deps, min_version, created_at, deprecated
-//      FROM workflow_defs WHERE name = $1 ORDER BY version DESC
+//
+//	FROM workflow_defs WHERE name = $1 ORDER BY version DESC
 func (l *WorkflowLoader) ListVersions(ctx context.Context, name string) ([]WorkflowDef, error) {
 	rows, err := l.db.QueryContext(ctx, `
 		SELECT name, version, wasm_bytes, abi_version, plugin_deps, min_version, created_at, deprecated
@@ -257,8 +260,9 @@ func (l *WorkflowLoader) ListVersions(ctx context.Context, name string) ([]Workf
 // are safe to garbage-collect or deprecate.
 //
 // SQL: SELECT def_name, def_version FROM workflow_instances
-//      WHERE status IN ('ready', 'running')
-//      GROUP BY def_name, def_version
+//
+//	WHERE status IN ('ready', 'running')
+//	GROUP BY def_name, def_version
 func (l *WorkflowLoader) ActiveVersions(ctx context.Context) (map[string][]int, error) {
 	rows, err := l.db.QueryContext(ctx, `
 		SELECT def_name, def_version
@@ -292,7 +296,8 @@ func (l *WorkflowLoader) ActiveVersions(ctx context.Context) (map[string][]int, 
 // exists.
 //
 // SQL: SELECT COALESCE(MAX(version), 0) FROM workflow_defs
-//      WHERE name = $1 AND NOT deprecated
+//
+//	WHERE name = $1 AND NOT deprecated
 func (l *WorkflowLoader) ResolveLatestVersion(ctx context.Context, name string) (int, error) {
 	var version int
 	err := l.db.QueryRowContext(ctx, `

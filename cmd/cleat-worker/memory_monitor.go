@@ -6,7 +6,8 @@ package main
 
 import (
 	"bufio"
-	"log"
+	"context"
+	"log/slog"
 	"math"
 	"os"
 	"runtime"
@@ -32,6 +33,15 @@ type MemoryMonitor struct {
 	lastReading   *MemoryInfo
 	lastReadAt    time.Time
 	mu            sync.RWMutex
+
+	logger *slog.Logger
+}
+
+func (m *MemoryMonitor) log() *slog.Logger {
+	if m.logger != nil {
+		return m.logger
+	}
+	return slog.Default()
 }
 
 // NewMemoryMonitor probes for the best available memory source and returns a
@@ -242,7 +252,7 @@ func (m *MemoryMonitor) Read() MemoryInfo {
 
 	info, err := m.readFn()
 	if err != nil {
-		log.Printf("memory monitor: read failed: %v", err)
+		m.log().WarnContext(context.Background(), "memory monitor read failed", "error", err)
 		if m.lastReading != nil {
 			return *m.lastReading
 		}
@@ -259,7 +269,7 @@ func (m *MemoryMonitor) Read() MemoryInfo {
 func (m *MemoryMonitor) SampleUsage() uint64 {
 	info, err := m.readFn()
 	if err != nil {
-		log.Printf("memory monitor: sample failed: %v", err)
+		m.log().WarnContext(context.Background(), "memory monitor sample failed", "error", err)
 		return 0
 	}
 	return info.UsedBytes

@@ -36,18 +36,14 @@ Because every external interaction is recorded for durability, that same data pr
 - **P2:** Queries, schema evolution, scheduling/CRON, child workflows
 - **P3:** Multi-tenancy, workflow prioritization, history compaction
 
-### Demo code (runnable, in wasm-demo/)
-- `host/main.go` — Host runtime with checkpoint/replay, crash simulation, resume. Demonstrated correct replay with deterministic behavior.
-- `worker/failover_worker.go` — Worker with DB failover handling: connection error detection, pause/resume, ownership verification, idempotent operations.
-- `worker/versioned_loader.go` — Worker loading different WASM versions from the DB for different workflow instances.
-- `cluster/design.go` — Data model and queue design walkthrough.
-- `cluster/versioning/main.go` — Versioning problem analysis.
-- `cluster/observability/main.go` — Built-in observability analysis.
-- `cluster/performance/main.go` — Performance and cost analysis.
-- `cluster/resilience/main.go` — PostgreSQL resilience analysis.
-- `ast_transform_demo.go`, `ast_transform_demo_v2.go` — Early AST transformation experiments (superseded by the WASM approach).
-
-All demos are standalone Go programs with simulated DB/APIs — no external dependencies beyond the Go standard library. Available at `/localssd/rcownie/cleat/wasm-demo/`.
+### Demo code — deleted 2026-08-07
+`wasm-demo/` held pre-implementation design sketches (simulated DB/APIs, no real WASM
+execution) for versioned loading, checkpoint/replay, and worker failover. It never
+compiled — `WorkflowInstance`/`Worker` were declared twice in package `worker` since the
+repo's initial commit — and every concept it sketched has since been built for real, with
+tests: `engine/versioned_loader.go` + `engine/store_versioning.go` (versioned WASM
+loading), `engine/` checkpoint/replay and worker failover handling. Deleted rather than
+fixed or parked; see `tiers.yaml`'s note above `tier1.modules`.
 
 ### Design document
 `/localssd/rcownie/cleat/cleat-execution-design.md` — 9 sections covering the full design with comparisons to Temporal, Azure Durable Functions, AWS Step Functions, Restate, and Inngest.
@@ -68,4 +64,3 @@ All demos are standalone Go programs with simulated DB/APIs — no external depe
 
 ## Key files
 - `/localssd/rcownie/cleat/cleat-execution-design.md` — The full design document.
-- `/localssd/rcownie/cleat/wasm-demo/` — Runnable demo code.

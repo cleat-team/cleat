@@ -1,0 +1,1003 @@
+# tiers.yaml — what cleat claims to support.
+#
+# This file is the source of truth for support status. Docs are downstream of it:
+# do not claim support in prose that this file does not grant.
+#
+# It exists because every previous attempt to record status in prose rotted within days.
+# `docs/review-status.md` declares the project production-ready off a stale audit;
+# `README.md` has claimed backend parity that was not true; `IMPROVEMENT-PLAN.md` has
+# carried a fixed heading over unfixed prose for four sessions running. Status has to be
+# a property CI checks, not a sentence someone wrote.
+#
+# ---------------------------------------------------------------------------
+# STATUS: the four product calls this file was drafted waiting on -- D1 through D4 --
+# were all decided by the owner on 2026-08-06 and are recorded at the bottom. Entries
+# settled that way carry `decision: DECIDED <date>`; entries with no `decision:` key were
+# assigned on measurement alone and need no product call.
+#
+# ENFORCED since 2026-08-07 by `.github/workflows/tier1-gate.yml`, which runs
+# `scripts/tier-gate.sh` on every push and pull request to main and develop. Tier 1 is
+# therefore a property CI checks rather than a claim about what we intend to hold
+# ourselves to -- which is what the rest of this header is for.
+#
+# The gate is deliberately strict, and that is the point rather than an oversight: no
+# continue-on-error, no known-failure list, and it refuses to run at all when a
+# precondition is missing rather than running and reporting a green that measured
+# nothing. Widening it to accommodate a failure is the one change that would make it
+# worthless.
+#
+# First green, on the commit that wired it up:
+#   ran=6595 pass=6593 fail=0 skip=2   (both TestHelperProcess, allowlisted)
+#   tier 1 green: 6593 passed, 0 failed, 0 skipped, on all of: postgres mysql mssql
+# ---------------------------------------------------------------------------
+
+meta:
+  drafted: 2026-08-06
+  # Re-derive everything in `baseline` with:
+  #   scripts/tier-gate.sh --measure
+  baseline:
+    measured: 2026-08-06
+    command: >-
+      CLEAT_TEST_POSTGRES=... CLEAT_TEST_MYSQL=... CLEAT_TEST_MSSQL=...
+      go test -count=1 -p 1 ./...
+    result: 52 packages pass, 3 fail, 24 have no test files
+    engine_package: 3846 tests, 3842 pass, 0 fail, 4 skip, 60s
+    # The same engine command with no CLEAT_TEST_* set: 2544 tests, 166 skip, 16s,
+    # and it also printed `ok`. That delta is why this file exists.
+    failing:
+      - package: examples/dag
+        # The cause recorded here on 2026-08-06 read "code defect — AwaitAnyChild
+        # called outside a workflow context", taken from the error message. That was
+        # wrong: cleat/cleattest never wired AwaitAnyChild into HostCallsOptions, so
+        # the hook was nil and the message was the harness's, not the caller's. The
+        # measurement (this package failed) stands and keeps its date; the diagnosis
+        # did not survive being checked. Fixed 2026-08-08.
+        cause: cleat/cleattest never implemented the AwaitAnyChild host call
+        item: IMPROVEMENT-PLAN.md §3.14
+        kind: real
+        resolved: 2026-08-08
+      - package: tests/exhaustion
+        cause: cluster compose stack not running; DSN expects user `cleat`
+        kind: environmental
+      - package: tests/plugin-harness
+        cause: Java/Gradle toolchain absent
+        kind: environmental
+    # One real code failure in the entire tree. The core is not broken; it was
+    # unprovable, which is a different problem with a different fix.
+
+# ---------------------------------------------------------------------------
+
+tier1:
+  name: core
+  contract: |
+    Must pass. A skip is a failure. If anything here is not green on every backend and
+    dialect named below, that is a release blocker. No known-failure list — tier 1 has
+    no known failures by definition.
+  rules:
+    skips_allowed: false
+    known_failures_allowed: false
+    dialects_must_connect: true   # assert the connection, do not infer it from `ok`
+
+  # The only permitted exception to skips_allowed, and it is not a test.
+  # TestHelperProcess is the standard Go idiom where a test re-invokes its own binary
+  # as a subprocess; the outer invocation always skips. Every entry here must be a
+  # non-test, not merely an inconvenient test. The gate still prints them.
+  # Do NOT add a genuine test here to make the gate pass -- demote it to tier 2 instead.
+  skip_allowlist:
+    - TestHelperProcess
+
+  # D5, DECIDED 2026-08-06: the tier-1 gate filters lower-tier tests out; it does not
+  # provision their toolchains.
+  #
+  # tier1.packages lists ./engine/..., ./wasm/... and ./cmd/..., and those packages also
+  # contain the Rust, Java and AssemblyScript integration tests -- tier 2 -- and
+  # TestComponentPythonBinary, which covers the parked component *decomposition* path,
+  # tier 3. `go test ./engine/...` sweeps all of them in, each skips for want of a
+  # toolchain, and tier 1 forbids skips. So the gate reported 14 non-allowlisted skips
+  # that no test fix could remove.
+  #
+  # The alternative was a runner carrying Rust, Node, a JDK, Gradle, componentize-py and
+  # wasm-tools together. Measured on the Cross-Language E2E job, which is the closest
+  # thing that exists: the setup actions themselves are nearly free (11s for all five,
+  # they are cached), but `cargo install wasm-tools` compiles from source and the
+  # toolchain install step runs 2m20s; the job totals 5m13s. The container route costs
+  # disk instead -- scripts/docker/python-toolchain.Dockerfile is already 1.4 GB with
+  # only Go, Python and wasm-tools in it.
+  #
+  # Those numbers are affordable. The reason not to is what tier 1 would then depend on.
+  # Its contract is "must pass; a skip is a failure; that is a release blocker", so
+  # provisioning makes crates.io, npm, Maven Central and PyPI release blockers. That is
+  # not hypothetical -- on 2026-08-06 alone, three CI failures had nothing to do with the
+  # diff that hit them: Maven Central answered 429 and failed a two-file change to a
+  # MySQL mock test; Maven Central answered 403 on the plugin harness; and
+  # actions/setup-go v7 changed its cache key, which made #325 fail a required lint check
+  # it could never pass. Each looked like a flake. Under a provisioned tier-1 gate each
+  # would have been a release blocker.
+  #
+  # And it is incoherent with the tier system: tier 1 declares languages [go, python], so
+  # requiring tier-2 toolchains to *run the tier-1 gate* makes tier 1 no more available
+  # than tier 2, which is the opposite of what tiering is for.
+  #
+  # Filtering has one real cost and it is the dangerous one: `go test -skip` removes a
+  # test with no `--- SKIP` line, so an excluded test is invisible rather than merely
+  # unrun. That is the "green result that measured nothing" shape CLAUDE.md opens with.
+  # scripts/tier-gate.sh therefore enumerates what each pattern matched, by name, on
+  # every run, and fails on a pattern that matches nothing -- so this list cannot rot
+  # into a place to hide a failing test.
+  #
+  # Anchored regexes, matched against `go test -list`. Each entry names its tier.
+  exclude_tests:
+    # tier 2 -- rust. engine/rust_workflow_test.go; needs cargo + wasm32-unknown-unknown.
+    - "^TestRustWorkflow"
+    # tier 2 -- java. engine/java_workflow_e2e_test.go; needs a JDK and Gradle.
+    - "^TestJavaWorkflowExecute$"
+    # tier 2 -- assemblyscript. engine/as_workflow_e2e_test.go and the npx-based
+    # transform/vet checks; all need node.
+    - "^TestAssemblyScriptWorkflowExecute$"
+    - "^TestASTransform$"
+    - "^TestVetAS$"
+    # tier 3 -- component decomposition. wasm/component_test.go. Not a language gap: it
+    # reads a hardcoded /tmp/test_python.wasm, so it has never run anywhere but the
+    # machine it was written on, and it asserts 14 modules and a ~12 MB first module --
+    # properties of one componentize-py version.
+    #
+    # Deliberately NOT deleted as "superseded by TestPythonWasmEndToEnd", which this
+    # file previously suggested and which is wrong: both ParseComponentBundle callers in
+    # the engine are on the decomposition fallback path, and the Python e2e takes the
+    # native component path, so it never reaches the parser. This is the only test that
+    # parses a real componentize-py bundle. Excluded because the path it covers is
+    # parked, not because the test is worthless.
+    - "^TestComponentPythonBinary$"
+
+  # D2, DECIDED 2026-08-06: python joins go at tier 1.
+  #
+  # The objection was never that Python did not work -- it was that nothing could prove
+  # it did. Both halves of that are now answered:
+  #
+  #   * Execution. e2e-cross-language.yml declares python in CLEAT_REQUIRE_TOOLCHAINS,
+  #     so TestPythonWasmEndToEnd and TestPythonComponentExecutionFence Fatal rather than
+  #     skip there, under pipefail. That job is blocking. Measured locally in the Linux
+  #     container 2026-08-06: all three real Python tests PASS, building an 18.3 MB
+  #     component and executing it on wasmtime.
+  #   * The SDK's own suite. test-python carried continue-on-error, so 442 tests across
+  #     3.10/3.11/3.12 were advisory. Removed in #348, on the measurement that the suite
+  #     is 442 pass / 1 skip and the one skip is componentize-py, which that job installs.
+  #
+  # A tier-1 language must have a toolchain precondition in scripts/tier-gate.sh, for the
+  # same reason a tier-1 dialect must have a DSN check: absent, its tests skip and the run
+  # still prints ok. Python's is componentize-py AND wasm-tools, checked independently.
+  #
+  # Consequence, and it is real: this gate can no longer pass natively on macOS, because
+  # componentize-py dies there on a Darwin kernel guard. Run it in the container.
+  languages: [go, python]
+  backend: wasmtime          # CGO required; see CLAUDE.md on why CGO_ENABLED=0 invalidates a run
+  dialects: [postgres, mysql, mssql]
+
+  # dialects above is ENGINE support (package engine has an independent store
+  # implementation per dialect, exercised by tier 1). It is not CLI support.
+  #
+  # B6, found 2026-08-09: `grep -ci 'mysql\|mssql' cmd/cleat/*.go` -> 0, and
+  # cmd/cleat had ten hardcoded `sql.Open("postgres", connStr)` call sites
+  # (main.go and plugin_cmd.go), so `cleat deploy`, `versions`, `rollback`,
+  # `schedule`, `lock`, and `plugin` could never target MySQL or SQL Server --
+  # a non-Postgres DSN reached lib/pq unfiltered and failed with a confusing,
+  # dialect-blind error (e.g. `pq: SSL is not enabled on the server` for a
+  # sqlserver:// DSN). README.md claimed dialect parity at the CLI level that
+  # was never true.
+  #
+  # Decision: narrow the claim rather than build a multi-dialect CLI. Fixed by
+  # routing every sql.Open in cmd/cleat through one helper (openPostgresDB,
+  # cmd/cleat/db.go) that refuses a non-Postgres DSN with an actionable error
+  # naming the dialect and cmd/deploy-workflow as the alternative, guarded by
+  # cmd/cleat/db_open_guard_test.go so a new call site can't reintroduce a
+  # bypass. cmd/deploy-workflow (--driver postgres|mysql|mssql) remains the
+  # only multi-dialect entry point, and covers `deploy` only.
+  cli_dialects: [postgres]
+
+  # The versions those dialect names mean. Added 2026-08-08, because until then this
+  # file named the dialects and no version, while README.md, docs/operations/upgrading.md
+  # and docs/explanation/postgresql-schema.md all claimed "PostgreSQL 14+" and
+  # docs/explanation/architecture.md claimed "16+". Four docs, two answers, and nothing
+  # upstream of them to be wrong about -- which is the exact failure this file exists to
+  # prevent, in the one place nobody had looked.
+  #
+  # DECIDED 2026-08-08: the claim is 16+, matching what CI has always actually run. 14+
+  # was never tested by anything. Nothing in the codebase needs 16 -- the Postgres-
+  # specific SQL is `FOR UPDATE SKIP LOCKED` (9.5), LISTEN/NOTIFY, and gen_random_uuid()
+  # via pgcrypto, and there is no runtime version check anywhere (grep for
+  # `server_version` returns nothing). So this is a claim about what is *verified*, not
+  # about what would happen to work. A floor nobody exercises is the claim most likely to
+  # be false, and lowering the claim to what CI runs is cheaper and more honest than
+  # adding a 14 arm to a matrix that does not exist.
+  #
+  # There is no CI matrix over database versions for ANY dialect; each is pinned to
+  # exactly one. If that changes, this is the key to widen.
+  dialect_versions:
+    postgres: ">=16"     # tested against 16.14, digest-pinned at twelve sites
+    mysql: ">=8.0"       # tested against 8.4, tag-pinned (not digest) -- see below
+    mssql: ">=2022"      # tested against the digest pinned in tier1-gate.yml
+
+  # D1, DECIDED 2026-08-06. The rule: multi-tenancy requires database-enforced RLS.
+  # PostgreSQL and SQL Server have it; MySQL has no row-level security feature at all
+  # (CREATE POLICY is a syntax error on 8.4). A view + stored-function + WITH CHECK OPTION
+  # emulation was prototyped and works, but costs 6.1x on full scans versus SQL Server's
+  # +20% for native RLS -- see IMPROVEMENT-PLAN.md 1.7 for the measurement. Emulating a
+  # missing engine feature at 6x is a worse product than stating which engines have it.
+  tenancy:
+    multi_tenant: [postgres, mssql]   # mssql cleared 2026-08-06 by #333
+    single_tenant: [postgres, mysql, mssql]
+
+  # Cleared 2026-08-06. Kept as history rather than deleted: what the blocker
+  # predicted and what actually happened differ in a way worth recording.
+  #
+  # It said the test schema defined none of the seven security policies, so
+  # ~220 MSSQL tests ran with no backstop. #345 landed the cleat_admin
+  # principal and #333 built the schema from migrations/mssql/*.sql, which put
+  # the policies in front of the tests for the first time.
+  #
+  # The prediction was that this would show whether isolation works. What it
+  # actually showed first was that the *tests* had never been subject to it:
+  # 26 subtests across nine top-level tests went red, and every one was a
+  # verification path that had only ever worked by bypassing the fence.
+  # PostgreSQL's test role is SUPERUSER BYPASSRLS -- checked, not assumed --
+  # so the same code was unfenced on one dialect and fenced on the other, and
+  # the hand-written schema had hidden that on both.
+  #
+  # TestCascadeDelete is the one to remember: its DELETE matched no rows, so
+  # nothing cascaded, and of the five child-table assertions three failed and
+  # two *passed* -- their rows were still there and the same policy hid them
+  # from the count. A green result measuring nothing, which is the failure
+  # CLAUDE.md opens with.
+  #
+  # Now: 3888 pass / 0 fail / 3 skip on a from-scratch database with all three
+  # DSNs set, over ./engine/... ./migration/... (CI's scope). Re-derive with
+  #   CLEAT_TEST_POSTGRES=... CLEAT_TEST_MYSQL=... CLEAT_TEST_MSSQL=... \
+  #     go test -count=1 -p 1 -timeout=30m ./engine/... ./migration/...
+  blockers: []
+
+  # Packages in the root module.
+  packages:
+    - ./engine/...
+    - ./wasm/...
+    - ./wasmrw/...
+    - ./plugin/...
+    - ./auth/...
+    - ./internal/...
+    - ./cmd/...
+    - ./pluginapi/...
+    - ./tests/integrity/...
+    - ./tests/upgrade/...
+    - ./tests/crash/...
+
+  # Separate Go modules. `cleat/` has its own go.mod (with a replace directive), so
+  # `go test ./cleat/...` from the repo root fails with "main module does not contain
+  # package" -- it must run from inside the module. ci.yml's matrix already does this
+  # via a `dir:` entry, and its comment records that the entry silently failed at setup
+  # for its entire existence, masked by a missing pipefail. The first draft of this file
+  # made the same mistake: it listed ./cleat/... as a root package, and the gate then
+  # exited non-zero with zero failing tests, which is how it was caught.
+  modules:
+    - dir: cleat
+      path: ./...
+  # Measured green on three dialects 2026-08-06: root packages 5901 pass / 0 fail;
+  # cleat module 8 packages ok.
+
+tier2:
+  name: frontier
+  contract: |
+    Must run. May fail, against `known_failures` below — a list that can only shrink
+    without a written justification in the PR. Anything here is honestly describable as
+    "works, with known gaps, and here is the plan"; nothing here may be described as
+    production-ready.
+  rules:
+    skips_allowed: true        # only for genuine environmental preconditions
+    known_failures_allowed: true
+
+  components:
+    - id: multi-tenancy-mysql
+      status: NOT SUPPORTED — single-tenant only    # D1, decided 2026-08-06
+      why: |
+        MySQL has no row-level security feature, so isolation would be application-layer
+        only, with no database backstop behind a missed `tenant_id` filter. The emulation
+        that does exist costs 6.1x on scans (measured; see IMPROVEMENT-PLAN.md §1.7).
+        This is a documented product boundary, not an open engineering item — README and
+        docs/reference/multi-tenancy.md must say so plainly.
+
+    - id: sdk-rust
+      why: Complete SDK, 6401 LOC, and the only non-Go language with cross-language tests.
+      open_items: ["tests/cross-language covers only Go↔Rust"]
+
+    # sdk-python was here. D2 promoted it to tier 1 on 2026-08-06 -- see the block above
+    # tier1.languages for the evidence. These two open items travel with it and are the
+    # reason its promotion is to tier 1 with named gaps rather than a clean bill:
+    #   * §3.31 residual — the component *decomposition* path has never once succeeded.
+    #     Python executes via the native component path; decomposition is a separate,
+    #     parked code path (see tier 3).
+    #   * wasm/component_test.go's TestComponentPythonBinary skips on a hardcoded
+    #     /tmp/test_python.wasm, so it has never run anywhere but the machine it was
+    #     written on, and it asserts exactly 14 modules and a ~12 MB first module --
+    #     properties of one componentize-py version. Rebuild it from the real toolchain
+    #     in a job that has one, or delete it as superseded by TestPythonWasmEndToEnd.
+    #     It is a test-design bug, not a toolchain gap, and not a tier-1 blocker.
+
+    - id: sdk-java
+      decision: DECIDED 2026-08-06    # D4 -- promoted from tier 3 on measurement; see #347
+      why: |
+        Moved up from tier 3 on 2026-08-06. The tier-3 assessment said its harness test
+        "fails on toolchain setup", and that was wrong in an instructive way: the test ran
+        `gradle wasm`, and the TeaVM plugin has never registered a task by that name. The
+        failure was degraded to t.Skipf, along with "WASM not found", "NewRuntime failed"
+        and "Execute failed" -- so the test reported the same thing whether Java worked,
+        was absent, or was broken. Java was parked on the output of a test that could not
+        distinguish those cases.
+
+        Measured once it could fail (#347): TeaVM compiles examples/saga-java-port to a
+        324 KB module, wasmtime executes it, and the history is
+        accounts.Withdraw -> accounts.Deposit with status completed and the release_funds
+        compensation registered. crates/cleat-java's own suite is 280 tests, 0 failures,
+        0 skips. e2e-cross-language.yml had been installing Java 17 and Gradle and running
+        TestJava* all along -- the toolchain was paid for; only the test was blindfolded.
+
+        Tier 2 and not tier 1, deliberately. One day's evidence promotes a component out
+        of "nobody is proving this works"; it does not establish the record tier 1 asks
+        for. Revisit after the open items below.
+      open_items:
+        - "no cross-language replay coverage — tests/cross-language is Go↔Rust only,
+           so nothing checks that a Java guest replays a history the Go host recorded"
+        - "RESOLVED 2026-08-09: the workflow result came back double-encoded TWICE, and the
+           comparison recorded here was also wrong. The whole result was a JSON string
+           containing JSON -- CleatEntryProcessor emits JsonHelper.stringify(result) for
+           any non-void return and MoneyTransfer returned a String it had already
+           hand-built as JSON, the idiom JsonHelper's own javadoc recommended -- and
+           withdraw_ref/deposit_ref were themselves JSON-in-a-string because the workflow
+           embedded a host call's JSON response into a string field.
+           Fixed by returning Map<String, Object> from the entry point (stringify
+           serialises a Map correctly, once) and parsing nested host-call responses with
+           JsonHelper.parseObject. The contract this conforms to is the ABI's, and it is
+           language-agnostic: an entry point returns a STRING CONTAINING A JSON-ENCODED
+           OBJECT. There is no 'object' at the WASM boundary, only a length and bytes,
+           which is why every SDK invented its own answer and they diverged.
+           Verified by engine.TestJavaWorkflowExecute, which asserts the object shape and
+           that amount is a NUMBER -- converting the result to a Map first regressed 100
+           to \"100\", and asserting only field presence did not catch it.
+           Go was fixed separately the same day; see the entry below"
+        - "RESOLVED 2026-08-09 for Go: the generated dispatch wrapper called
+           encodeJSONString(__r), re-encoding a string that was already the serialized
+           form, while the suspend wrapper passed it through -- the same workflow produced
+           a different shape depending on which ran. It now passes through in both, and
+           ABI.md states the contract once at the boundary where it belongs: an entry point
+           returns a string containing a JSON-encoded object. Go and Rust fixtures returned
+           bare scalars and AGREED by both being wrong, which is why the cross-language
+           result comparison passed; both now return objects by different routes (Go builds
+           the JSON text, Rust returns a typed struct serde serialises once) and the
+           comparison is bit-identical. coerceResultJSON now reports a valid-but-non-object
+           result instead of accepting it silently -- that acceptance is what hid this in
+           three SDKs"
+        - "RESOLVED 2026-08-09: JsonHelper.stringify fell through to obj.toString() for any
+           unsupported type, producing non-JSON like com.example.Foo@1a2b3c. json.Valid then
+           rejected it and coerceResultJSON replaced the whole result with {} plus one log
+           line, so a workflow returning a POJO lost its result silently. It now throws,
+           naming the shapes it does support"
+        - "examples/saga-java-port/ISSUES.md lists 13 findings, 4 of them MINOR
+           SDK gaps still open: no saga abstraction, JsonHelper.parse only supports
+           String.class, no getQueryState, durableDefer takes a description not a closure"
+
+    - id: sdk-assemblyscript
+      decision: DECIDED 2026-08-06    # D4 -- see open_items; same shape as Java was
+      why: |
+        Moved up from tier 3 on 2026-08-06, on the same kind of measurement and with the
+        same caveat as Java. Measured that day: TestAssemblyScriptWorkflowExecute PASSES
+        on wasmtime -- inventory.Reserve -> payments.Charge -> shipping.CreateShipment ->
+        notifications.SendEmail, four calls in order -- and the SDK's own as-pect suite is
+        106/106 across three spec files.
+
+        It has since had #347's treatment (#350): the six best-effort t.Skipf sites are
+        failures, the one legitimate environmental skip goes through
+        toolchainRequired("assemblyscript"), the AssemblyScript Tests job no longer
+        carries continue-on-error, and it is first-class in e2e-cross-language.yml's
+        CLEAT_REQUIRE_TOOLCHAINS.
+
+        Making it able to fail found two real defects the same day, which is the argument
+        for tier 2 rather than tier 1 far better than any list of open items:
+
+          * No data flowed between the saga's steps. examples/as-workflow read
+            reservationID / totalCents / chargeID out of responses spelling them
+            reservation_id / total_cents / charge_id, so payments.Charge was invoked for
+            zero and the result carried an empty reservation_id. The test asserted only
+            "result non-empty" and the call sequence, so it passed throughout.
+          * The example could not be installed from a clean checkout at all.
+            package-lock.json recorded its two `file:` devDependencies in a form `npm ci`
+            refuses, and had for as long as the file has been in that shape. Invisible
+            because it reached a best-effort skip, and because node_modules is untracked
+            -- anyone who had ever run `npm install` there kept a working tree.
+
+        Both are fixed, and the e2e now asserts each value that has to survive a hop.
+        Tier 1 wants a record, not a good day; revisit after the open item below.
+      open_items:
+        - "RESOLVED 2026-08-09: isReplaying() removed rather than implemented. It was hardcoded
+           `return false` with no host call behind it in any SDK, so every 'only on first
+           execution' branch fired on every replay -- duplicate logs, metrics and
+           notifications after each worker restart, with nothing failing. A raw replay flag
+           is a determinism footgun regardless: branching workflow LOGIC on it records
+           different events on replay than on execution. sideEffect() already covers the one
+           safe use and is replay-consistent by construction. Documented in
+           docs/determinism.md and the Temporal migration guide, which had never mentioned
+           it despite Temporal's own IsReplaying() being a well-known footgun"
+
+    - id: plugins
+      why: 21 built-in, all with unit tests; 10 covered by the integration harness.
+      open_items:
+        - "RESOLVED 2026-08-09 for the read paths: webhookingest and notifications (HMAC keys),
+           pagerdutyalert (routing key), slacknotify (webhook URL) and datadogexport (API key)
+           returned their credential unredacted from list and get. datadogexport DID redact
+           and the redaction was defeated by ?show_api_key=true with no authorization behind
+           it, which is why the fix is a type (plugin.Secret) and not a helper: a convention
+           you must remember is one the next author forgets. Guarded by
+           plugin.TestPluginCredentialFieldsUseTheSecretType"
+        - "process-config credentials are still plain strings: blobstore SecretAccessKey,
+           email SendGridAPIKey, llm ProviderConfig.APIKey, slacknotify SlackSigningSecret,
+           oauthprovider ClientSecret. None is returned by any endpoint, so none is part of
+           the leak above; the exposure is the logging path. Converting them was attempted
+           and backed out of that change -- plugin.Secret deliberately does not round-trip
+           through json.Marshal, and six llm test helpers build Environment.Config by
+           marshaling a Config struct, which production never does. Allowlisted with that
+           reason in the guard"
+        - "no retry/backoff on outbound HTTP in the alerting plugins -- but read this before
+           adding any. slacknotify, pagerdutyalert, email and datadogexport register as
+           NON-idempotent (RegisterFunc, not RegisterIdempotentFunc), correctly: a Slack post
+           cannot safely be repeated. A failed host call surfaces to the workflow, where the
+           author's retry policy applies, which is the layer that owns durability. Naive
+           retry here would double-send on a timeout that the remote actually accepted. The
+           only defensible version retries errors that are provably pre-send (DNS failure,
+           connection refused) and never a timeout. Assessed 2026-08-09"
+        - "RESOLVED 2026-08-09: kafkaconnect.produce() now refuses when no REST proxy is
+           configured, naming the setting and the topic, instead of logging the message and
+           returning success=true. The consume poller warns once instead of skipping at
+           DEBUG. A test asserted the old success=true, so it pinned the defect rather than
+           catching it"
+        - "RESOLVED 2026-08-09: scheduledbackup claimed 'Scheduled PostgreSQL backups to S3'
+           and 'manual backup/restore via HTTP API and CLI commands'. Neither was true: there
+           is no restore implementation anywhere in the package, no AWS SDK dependency in the
+           repo, and s3_bucket/s3_prefix were stored in backup_config and returned by the API
+           but never read when running pg_dump, which writes to local disk (dump_dir) only.
+           An operator configuring this to satisfy an off-host backup requirement found out
+           only at restore time. Doc comments corrected; handleCreateConfig/
+           handleUpdateConfig now reject a non-empty s3_bucket or s3_prefix (400) instead of
+           silently accepting and ignoring them -- the columns stay, for existing rows, but
+           can no longer be set to anything but empty going forward. Also:
+           scheduledbackup.Config.DSN (a full connection string, commonly with a password)
+           was a plain string passed to pg_dump as a literal argv element in three places
+           (background.go, routes.go, the backup-run/backup-list CLI commands), visible via
+           ps and /proc/*/cmdline to any co-resident user. Converted to plugin.Secret; all
+           three call sites now go through runPgDump (pgdump.go), which strips any password
+           out of the DSN and passes it via the child's PGPASSWORD environment variable
+           instead. 'dsn' was not previously in
+           plugin.TestPluginCredentialFieldsUseTheSecretType's credential-name list (only
+           this one field in the whole plugins tree used it) -- added, so a future dsn-typed
+           credential field is caught automatically instead of by review"
+        - "multi-DB harness job runs a t.Skip while starting three databases"
+
+    - id: admin-dashboard
+      decision: DECIDED 2026-08-06    # D3 -- the dashboard must authenticate
+      why: |
+        Wired to a real API and reasonably tested at the lib layer, but `web/src/lib/api.ts`
+        never sends an Authorization header -- it sets Content-Type and nothing else, at
+        every one of its call sites. cleat-worker defaults --require-auth=true.
+
+        D3 is decided: the dashboard must authenticate. cleat runs on cloud instances and
+        the dashboard connects from somewhere else, so "local dev only, never exposed" was
+        never the shipping story -- which settles it. Two consequences follow, and the
+        second is the one that costs something:
+
+          * The "run it against --require-auth=false" configuration is not a supported
+            deployment. It is an ungated admin surface reachable from wherever the worker
+            is reachable, and no doc or manifest may present it as a way to use the
+            dashboard.
+          * Authentication is a feature that does not exist yet, not a header to add. The
+            open question is where the credential comes from -- an operator-pasted API
+            key held in the browser, or a real login flow -- and they are different
+            amounts of work. Until one is built and the dashboard sends it, this is a
+            component that cannot function against a correctly-configured worker.
+
+        Tier 2 with a named gap rather than tier 3, because the gap is now a tracked
+        feature with a decided direction rather than an open question about intent. It
+        does not move to tier 1 until it authenticates against a worker running the
+        default --require-auth=true.
+      open_items:
+        - "web/src/lib/api.ts sends no Authorization header at any call site"
+        - "no credential acquisition path exists — decide operator-pasted API key vs
+           login flow before building it; cross-origin is the normal case, so CORS on
+           the worker's API and token storage in the browser both need answering"
+        - "docs and deployment manifests still imply the dashboard works as shipped"
+
+    - id: workflow-callable-cron
+      status: SUPPORTED in go, assemblyscript and python
+      why: |
+        Added 2026-08-08. A workflow can register, remove and list recurring triggers for
+        other workflows: cleat_schedule_cron / cleat_delete_cron / cleat_list_crons, on
+        both WASM backends, journaled and replayed.
+
+        The reason this was tier 2 — tier 1 declares languages [go, python], and Python
+        could not make these calls — was resolved on 2026-08-09 by adding a durable-cron
+        interface to python-sdk/wit/cleat.wit and its mapping to
+        wasm/component_rewrite.go. test_dead_stubs.py now reports only
+        cleat_extend_timeout without a WIT binding, down from four. Rust and Java still
+        declare no cron surface, which tier 1's [go, python] does not require.
+
+        The gate coverage now exists too: engine.TestPythonCronEndToEnd compiles a real
+        component from python-sdk/examples/cron_workflow.py — which CALLS all three, so a
+        declared-but-unwired binding fails it — and runs it through wasmtime's Component
+        Model path against a Postgres-backed store, asserting the schedule ID round trip,
+        what list_crons observed, and that the store is empty after delete_cron. It lives
+        in ./engine/, so scripts/tier-gate.sh runs it and a skip there fails the gate.
+
+        STILL TIER 2 for the OTHER reason in this entry: rust and java declare no cron
+        surface. Tier 1 declares languages [go, python], so that does not block promotion
+        on its own terms — but this entry covers the whole guest-facing door, and moving
+        it while two of five SDKs cannot open it would overstate what is supported. The
+        Python half is now enforced rather than asserted, which was the gap worth closing.
+
+        The scheduler underneath is not what is scoped here — the schedule store, the
+        timezone evaluation and the firing loop live in ./engine/... and ./cmd/..., both
+        tier-1 packages. What is tier 2 is the guest-facing door onto it.
+
+        DELIVERY IS AT-LEAST-ONCE, and that is a promise, not an artefact. A firing may be
+        delivered more than once (a worker that starts a run and dies before recording the
+        claim will start it again); it will not be silently skipped. Making a duplicate
+        harmless is the workflow author's job. At-most-once is close to useless for
+        scheduled work, and exactly-once is not attainable across a process boundary, so
+        it is not offered under any name. Enforced by
+        engine.ClaimDueSchedule's compare-and-swap plus a
+        cron:<tenant>:<schedule>:<instant> idempotency key at admission (#428), and by
+        deriving schedule IDs from (tenant, workflow, step) so a retried ScheduleCron
+        addresses the same row rather than orphaning one (#430).
+      open_items:
+        - "RESOLVED 2026-08-09: python-sdk/wit/cleat.wit gains a durable-cron interface and
+           wasm/component_rewrite.go the matching env mapping, so the three calls work from
+           a componentized Python workflow. Verified by building a component that actually
+           CALLS them (componentize-py 0.25.0, linux/arm64 container): it builds, and the
+           binary contains the durable-cron import names where a baseline build contains
+           none. Guarded by wasm.TestEveryImportedWitFunctionHasAnEnvMapping"
+        - "rust and java SDKs declare no cron surface at all"
+        - "a non-default tenant's schedules fire ONLY with --claim-across-tenants set and
+           the database-side grants made. By default the worker opens exactly one
+           default-tenant store and GetDueSchedules reads through it, so those schedules
+           are stored, listed and never fired -- the default-topology behaviour recorded
+           in engine.TestScheduleLoop_OnlySeesItsOwnTenantsSchedules, which still passes
+           because the RLS it asserts is unchanged. Both halves are now behind that one
+           flag: cross-tenant-claim below executes the runs, cross-tenant-schedules
+           enqueues them"
+
+    - id: cross-tenant-claim
+      status: SUPPORTED on postgres and mssql, both behind a deployment grant — NOT on mysql
+      why: |
+        Added 2026-08-09. `--claim-across-tenants` makes a worker's dispatch loop claim
+        runnable work for every tenant in one query instead of only its own, so the cost
+        of a tick is one round trip rather than one per tenant. Each claimed workflow then
+        executes against a store scoped to its OWN tenant (cmd/cleat-worker's
+        storeForTenant), so the widened view lasts exactly as long as the claim.
+
+        Tier 2 and not tier 1 because it cannot be green on every dialect, which is what
+        tier 1 requires:
+
+          postgres — works. admin.claim_workflows, a SECURITY DEFINER function owned by a
+            BYPASSRLS role (migrations/postgres/023_cross_tenant_claim.sql). FORCE ROW
+            LEVEL SECURITY subjects even the table owner to RLS, so SECURITY DEFINER alone
+            is not enough; the BYPASSRLS attribute is the exemption, and the migration
+            sets it rather than leaving it to a deployment step. A missing BYPASSRLS
+            fails loudly, not silently — measured 2026-08-09, both functions raise
+            "cleat.tenant_id is not set" (P0001), because 001_schema.sql's policies are
+            fail-closed through assert_tenant_set() rather than COALESCE-ing to a
+            default. An earlier version of this entry claimed the opposite; the startup
+            check reports the attribute by name, since P0001 does not.
+          mssql — works. dbo.fn_tenant_filter already admits on
+            `IS_ROLEMEMBER(N'cleat_admin') = 1` (migrations/mssql/012_admin_role.sql), so
+            the exemption is in the predicate rather than in a role attribute. The role
+            ships with NO MEMBERS; granting it is a deployment decision.
+          mysql — does NOT work, and cannot without a different mechanism. MySQLStoreFactory
+            gives each tenant its own physical database (cleat_<tenant_id>), so there is no
+            predicate to drop: the other tenants' rows are not filtered out, they are in
+            another database. The store returns ErrCrossTenantClaimUnsupported and the
+            worker falls back to the per-tenant claim with one WARN line.
+
+            The code path also functions against ONE shared MySQL database, and the tests
+            cover that shape — but read it as test scaffolding, not a supported
+            deployment. multi-tenancy-mysql is NOT SUPPORTED regardless of topology: the
+            objection is the absence of RLS, not the arrangement of databases. Sharing one
+            database would put every tenant behind an application-level predicate with no
+            backstop, which is exactly what that policy refuses.
+
+        OFF BY DEFAULT, and that is deliberate. Every path needs a grant the deployment
+        has to make, and both grants ship unmade. A worker that is told to claim across
+        tenants but cannot warns once and claims its own tenant — it does not fail
+        dispatch, because a missing GRANT should narrow the worker rather than stop it.
+
+        WHAT THIS BUYS AND WHAT IT COSTS. It is a deliberate step outside RLS: for the
+        duration of one query the claim sees every tenant's ready rows. That is the point
+        — the alternative is polling N tenants per tick — but it means a bug in the claim
+        path has a blast radius of every tenant rather than one. It is confined to a single
+        statement that reads and writes only workflow_instances' claim columns, and
+        nothing downstream of it runs unscoped.
+      open_items:
+        - "sticky claims stay tenant-scoped (ClaimStickyWorkflows), so another tenant's
+           sticky workflow is claimed by the general path instead and loses its worker
+           affinity. Correctness is unaffected — it is still claimed exactly once"
+        - "RESOLVED 2026-08-09: the worker now reports at startup, in both directions,
+           whether each cross-tenant path is actually available, and names the cause when
+           it is not. A report and not a gate, deliberately -- refusing to start would
+           contradict the degradation the feature is built on. See
+           engine.CrossTenantCapabilityChecker"
+        - "mysql is NOT a gap here, and this item used to say it was. multi-tenancy-mysql
+           records the policy: no multi-tenancy on a database without row-level security,
+           because isolation would be application-layer only with no backstop behind a
+           missed tenant_id filter — 'a documented product boundary, not an open
+           engineering item'. So there is nothing to implement for MySQL, and the store
+           refusing with ErrCrossTenantClaimUnsupported is the correct terminal behaviour
+           rather than a placeholder. Corrected 2026-08-09 after the framing was
+           questioned"
+
+    - id: cross-tenant-schedules
+      status: SUPPORTED on postgres and mssql, both behind a deployment grant — NOT on mysql
+      why: |
+        Added 2026-08-09, and it is the other half of cross-tenant-claim rather than a
+        feature in its own right. That one lets a worker CLAIM another tenant's runnable
+        workflow; this one is what ever enqueues one. Without it a non-default tenant's
+        cron schedule is stored, listed in the dashboard, shown as enabled with a
+        next_run_at, and never fires — so the claim had nothing to find.
+
+        Same flag (--claim-across-tenants), same three-dialect story, same tier and for
+        the same reason: it cannot be green on MySQL's shipped topology. See
+        cross-tenant-claim for the mechanism per dialect; the differences are:
+
+          postgres — a SECOND migration, 024_cross_tenant_schedules.sql, granting
+            EXECUTE on admin.get_due_schedules. Deliberately separate from 023: a
+            deployment can have one and not the other, and each failure names its own
+            file so an operator is not told to apply a migration they already have.
+          mssql — no new migration. 012's dbo.cleat_admin role is bound to every table
+            fn_tenant_filter covers, and workflow_schedules is one of them.
+          mysql — refuses with ErrCrossTenantClaimUnsupported on the factory topology,
+            exactly as the claim does.
+
+        THE EXEMPTION HERE IS NARROWER THAN 023's, and deliberately: SELECT on one table,
+        no UPDATE. 023's function must read and write in one statement because a
+        non-atomic claim hands the same workflow to two workers. This one only reads —
+        the advance is still ClaimDueSchedule, a compare-and-swap through the caller's
+        own tenant-scoped store, under RLS. That also means no FOR UPDATE SKIP LOCKED
+        (PostgreSQL requires UPDATE privilege for it), which costs a wasted round trip
+        when two workers race and changes no outcome: the CAS decides, as it always did.
+
+        AT-LEAST-ONCE IS UNCHANGED. Nothing here touches the delivery guarantee — the
+        same CAS and the same cron:<tenant>:<schedule>:<instant> idempotency key decide
+        it, and both run scoped to the schedule's own tenant.
+      open_items:
+        - "the widened read is only as safe as the re-scoping after it. Asserted by
+           cmd/cleat-worker's TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore,
+           which fails if the firing runs through the worker's own store"
+        - "RESOLVED 2026-08-09 alongside cross-tenant-claim's: the startup report answers
+           the two capabilities separately, so a deployment with 023 and not 024 is told
+           that workflows execute and cron does not, rather than one summary verdict"
+        - "the dashboard still shows a non-default tenant's schedule as enabled whether
+           or not the deployment can fire it; nothing surfaces which mode a worker is in"
+
+    - id: backend-wazero
+      why: |
+        The CGO-less fallback and nothing else (settled 2026-08-05). Cannot be fenced for a
+        compute-bound guest — measured three ways, all failing. Never the backend of record.
+
+    - id: cluster-and-scale
+      why: >-
+        tests/cluster, tests/scale, tests/soak, tests/exhaustion — need compose stacks.
+        tests/exhaustion is gated (see tier2.gated_by) as of 2026-08-07 — clusterDB() now
+        reads CLEAT_TEST_POSTGRES / CLEAT_TEST_DB with the same skip-when-unconfigured,
+        fail-when-configured-but-unreachable split as engine/testutil.TestDB, instead of
+        hardcoding a DSN and hard-failing when the stack was absent.
+
+  # What the gate runs. Read by scripts/tier2-gate.sh; the components above are prose and
+  # nothing could execute them, which is why tier 2 spent its whole life as a claim.
+  #
+  # Deliberately NOT here:
+  #   ./monitoring/...   monitoring/prometheus is the only Go package under it and has no
+  #                      _test.go file at all (measured 2026-08-07). Listing it would make
+  #                      the gate permanently red on "ran zero tests" for a condition
+  #                      nobody is about to change. It is named here so the absence is on
+  #                      the record rather than achieved by omission.
+  #   ./benchmarks/...   tier 3 (comparative-benchmarks).
+  #   ./tests/exhaustion/...   Needs a real four-worker cluster (docker-compose.cluster.yml),
+  #                            not the bare PostgreSQL service tier2-gate.yml runs -- the same
+  #                            reason tests/cross-language and tests/plugin-harness are not
+  #                            here either. As of 2026-08-07 it is covered by `gated_by`
+  #                            below instead, against ci.yml's "Cluster Integration Tests"
+  #                            job, which already builds the image and brings the cluster up.
+  #   ./tests/soak/...         Behind `//go:build soak_test`, so `go test ./tests/...`
+  #                            reports "matched no packages" -- not "no test files".
+  #                            Measured 2026-08-07: with `-tags soak_test SOAK_DURATION=15s`
+  #                            it passes (7222/7222 workflows). Gating it needs a tag and a
+  #                            duration, which is a workflow decision, not a manifest one.
+  #   ./tests/cross-language/  Covered by `gated_by` below instead, and deliberately so.
+  #   ./tests/plugin-harness/  #368 said these were "deferred to the next PR" because they
+  #                            need the Rust+Java+AssemblyScript toolchain. That was wrong
+  #                            about the reason: dedicated jobs already run both, with a
+  #                            skip budget of ZERO. Pulling them in here would be a
+  #                            downgrade -- tier2.rules.skips_allowed is true, so this gate
+  #                            tolerates a skip that check-skip-budget.sh fails on -- plus
+  #                            about five minutes of duplicated toolchain install per run.
+  #                            The gap was never that they do not run. It was that nothing
+  #                            blocked on the result.
+  packages:
+    - ./plugins/...
+    - ./examples/...
+    - ./migration/...
+    - ./tests/manifests/...
+    - ./tests/cluster/...
+    - ./tests/scale/...
+
+  # Tier-2 suites gated by a dedicated job rather than by scripts/tier2-gate.sh, because
+  # that job already enforces something STRICTER than this gate would.
+  #
+  # Both entries below run under `scripts/check-skip-budget.sh <name> <report.json>` with a
+  # budget of 0, and e2e-cross-language.yml additionally sets
+  # CLEAT_REQUIRE_TOOLCHAINS=rust,python,java,assemblyscript so an absent toolchain is a
+  # Fatal rather than a skip. tier2.rules.skips_allowed is true, so routing these through
+  # tier2-gate.sh would permit skips that their own jobs currently fail on.
+  #
+  # These jobs have run green on develop on every commit measured 2026-08-07 (93722c1,
+  # 59a55b7, a21de13, fcf82e0, 422ad6a) and were made required status checks on the same
+  # day. Re-derive both halves:
+  #
+  #   gh run list --workflow=e2e-cross-language.yml --branch develop --limit 6 \
+  #     --json conclusion,headSha --jq '.[]|"\(.conclusion) \(.headSha[0:7])"'
+  #   gh api repos/cleat-team/cleat/branches/develop/protection/required_status_checks \
+  #     --jq '.contexts[]'
+  #
+  # scripts/tier2-gate.sh asserts that every `job:` named here still exists in some file
+  # under .github/workflows/. That is the anti-rot check: a renamed job would otherwise
+  # leave this mapping claiming coverage that no longer exists, and a required context
+  # that nothing reports blocks every pull request while looking like a slow check.
+  # It cannot check that the job is still *required* -- that lives in branch protection,
+  # not in the tree -- so the command above is the manual half.
+  #
+  # Two of the suites below are their own Go modules, and are deliberately NOT
+  # in tier2.modules above: tests/cross-language and tests/plugin-harness. They
+  # got their own go.mod on 2026-08-10 breaking the root<->cleat/ module cycle
+  # (see CLAUDE.md) -- both import the cleat/ SDK, and the root module must not,
+  # at any depth including tests. tier2.modules is the list scripts/tier2-gate.sh
+  # runs itself, and it cannot run these: they need cargo, wasm32 targets,
+  # componentize-py and a Java toolchain that tier2-gate.yml does not install.
+  # That is the same reason they are gated here rather than in tier2.packages,
+  # so the module split changes nothing about how they are verified -- only the
+  # directory `go test` is invoked from, which is now the module's own (the
+  # `working-directory:` in each job below).
+  #
+  # Re-derive that the split is real and still covered:
+  #
+  #   cd tests/plugin-harness && go vet ./...       # builds against the local tree
+  #   grep -n 'working-directory: tests/' .github/workflows/plugin-harness-ci.yml \
+  #     .github/workflows/e2e-cross-language.yml    # 5 steps, one per job below
+  #
+  gated_by:
+    - suite: ./tests/cross-language/...
+      job: "Cross-Language WASM E2E"
+      workflow: .github/workflows/e2e-cross-language.yml
+      why: >-
+        Seven Go<->Rust cross-replay tests: execute under one runtime, replay the recorded
+        history under the other, and detect divergence across the boundary. Needs cargo
+        plus wasm32-unknown-unknown, which this job installs and tier2-gate.yml does not.
+    - suite: ./tests/exhaustion/...
+      job: "Cluster Integration Tests"
+      workflow: .github/workflows/ci.yml
+      why: >-
+        IMPROVEMENT-PLAN 2.5/2.29: deploys a real, unbounded WASM workflow into the live
+        four-worker cluster this job's earlier steps build and bring up, and asserts the
+        execution fence terminates it while the worker stays healthy and goes on to
+        complete an ordinary workflow. Needs real cleat-worker containers enforcing
+        --wasm-instance-timeout, which tier2-gate.yml's bare PostgreSQL service cannot
+        provide. Gated at a skip budget of 0 (scripts/skip-budget.txt, key
+        "cluster/exhaustion") -- the step sets CLEAT_TEST_DB explicitly, so the test can
+        only pass or Fatalf, never skip, in this job.
+    - suite: ./tests/plugin-harness/...
+      job: "Layer 1 — SDK (cleattest)"
+      workflow: .github/workflows/plugin-harness-ci.yml
+    - suite: ./tests/plugin-harness/...
+      job: "Layer 2 — WASM Integration"
+      workflow: .github/workflows/plugin-harness-ci.yml
+      why: >-
+        The Go, Rust, AssemblyScript and Python guest plugins. Its skip budget is what
+        keeps a missing toolchain from reading as a pass.
+    - suite: ./tests/plugin-harness/...
+      job: "Layer 3 — Multi-DB"
+      workflow: .github/workflows/plugin-harness-ci.yml
+      why: >-
+        Runs TestPluginCalls_MultiDB, which is the ONLY test under ./tests/... that touches
+        MySQL or SQL Server. Measured 2026-08-07: it carries an unconditional t.Skip for a
+        wazero v1.11.1 nil-Sys-context panic, so that coverage is currently absent behind a
+        green ok. Gating the job does not fix that -- see the open item on backend-wazero --
+        but it stops the next regression here from being invisible too.
+    - suite: ./tests/plugin-harness/...
+      job: "Blobstore S3 Round-Trip"
+      workflow: .github/workflows/plugin-harness-ci.yml
+      why: >-
+        Self-contained; brings up postgres and minio as service containers. Note the minio
+        image is pinned to :latest, which is a real fragility now that this gates merges.
+
+    # The three non-Go SDKs. These are tier-2 COMPONENTS (sdk-rust, sdk-java,
+    # sdk-assemblyscript above) rather than Go packages, so tier2-gate.sh cannot run them
+    # -- it drives `go test -json` and these need cargo, gradle and npm.
+    #
+    # Every one of them was already tested on every pull request and none of it gated.
+    # Measured 2026-08-07: the only required check touching Rust, Java or AssemblyScript
+    # was `Build`, and Build only BUILDS them -- it never runs cargo test, gradle test or
+    # npm test. So a PR could merge to develop with any SDK's tests red.
+    #
+    # Green on develop across the eight consecutive commits measured that day (416a1a4,
+    # 93722c1, 59a55b7, a21de13, fcf82e0, 422ad6a, a04a4fe, 47bb6b6), so requiring them
+    # adds no new failure mode -- it only stops merging past one. Re-derive:
+    #
+    #   gh run list --workflow=ci.yml --branch develop --limit 8 \
+    #     --json databaseId --jq '.[].databaseId' | while read r; do
+    #       gh run view "$r" --json jobs --jq '[.jobs[]
+    #         |select(.name=="Test Rust" or .name=="Java Tests" or .name=="AssemblyScript Tests")
+    #         |"\(.name)=\(.conclusion)"]|join("  ")'; done
+    - suite: crates/cleat-sdk, crates/cleat-macro
+      job: "Test Rust"
+      workflow: .github/workflows/ci.yml
+      why: >-
+        cargo test for both crates plus the wasm32-wasip1 release build. Note it does NOT
+        cover crates/cleat-test, which is why an absurd_extreme_comparisons defect sat in
+        that crate unlinted -- see the open item on sdk-rust.
+    - suite: crates/cleat-java
+      job: "Java Tests"
+      workflow: .github/workflows/ci.yml
+      why: gradle test. Measured 2026-08-07 - 280 tests, 0 failures, 0 skipped.
+    - suite: packages/cleat-as
+      job: "AssemblyScript Tests"
+      workflow: .github/workflows/ci.yml
+
+    # NOT gated, and deliberately named rather than silently omitted:
+    #
+    #   ecosystem-ci.yml's "Rust SDK Integration" and "Java SDK Integration" duplicate
+    #   what ci.yml's "Test Rust" and "Java Tests" already run. Requiring both would
+    #   double the registry exposure for the same signal, and D5's whole argument is
+    #   about how much registry surface a blocking check should have.
+    #
+    #   "AssemblyScript WASM Build" (ci.yml) and "AssemblyScript SDK Integration"
+    #   (ecosystem-ci.yml) both carried continue-on-error until 2026-08-07. It was
+    #   removed -- measured, every step in both was already passing -- so they can now
+    #   fail. They are left unrequired for the same duplicate-coverage reason: they
+    #   should be able to fail visibly first, and be promoted only if that proves useful.
+
+  # Separate Go modules, tested from inside their own directory -- `go test ./cleat/...`
+  # from the root fails with "main module does not contain package".
+  #
+  # wasm-demo/ (module cleat-wasm-demo) was here as a documented exclusion until
+  # 2026-08-07: it had never compiled, not even in the repo's initial commit --
+  # WorkflowInstance, Worker and main were each declared twice in package `worker`,
+  # across worker/versioned_loader.go and worker/failover_worker.go. Both files were
+  # pre-implementation design sketches (see prompts/versioning_plan.md, 2026-05-07);
+  # the real thing they sketched has since been built for real, with tests, as
+  # engine/versioned_loader.go and engine/store_versioning.go. Deleted rather than
+  # fixed or parked -- nothing referenced it, and fixing it would mean maintaining a
+  # second, worse, untested copy of code that already exists for real.
+  modules:
+    - dir: cleat/backendkit
+      why: >-
+        Has its own go.mod, so the `dir: cleat, path: ./...` entry in ci.yml's test-go
+        matrix does not descend into it. Measured 2026-08-07: builds and passes, and no
+        workflow references it at all.
+
+    - dir: examples
+      why: >-
+        Got its own go.mod 2026-08-09/10 breaking the root<->cleat/ module cycle (see
+        CLAUDE.md): examples/* imports the cleat/ SDK, and the root module does not
+        import cleat/ at all, on purpose, so examples can no longer be part of the root
+        module. It stays under the SAME `./examples/...` entry in tier2.packages above
+        (unchanged) for the "must run" declaration -- scripts/tier2-gate.sh excludes
+        this dir's own pattern from the root `go test` invocation (which would
+        otherwise fail outright: "directory prefix examples does not contain main
+        module") and runs it here instead, into the same JSON the packages check reads.
+        Re-derive the split is real: `go list ./... | grep -c cleat-team/cleat/cleat`
+        from the repo root is 0; `cd examples && go test ./...` is green.
+
+    - dir: benchmarks/workflows
+      why: >-
+        Same cycle-break as examples/ (2026-08-09/10): benchmarks/workflows imports the
+        cleat/ SDK for its workflow functions, so it moved out of the root module.
+        Deliberately NOT added to tier2.packages: it has zero Test functions, only
+        Benchmark ones (cleat_bench_test.go, moved here from the root module's
+        benchmarks/ dir, which keeps db_bench_test.go and wasm_bench_test.go -- neither
+        imports cleat/). `go test ./...` here is a real build+run check (0 tests, not a
+        coverage claim); the actual benchmarks run in ci.yml's "Benchmarks" job
+        (working-directory: benchmarks/workflows), not this gate.
+
+  known_failures: []
+    # "importpath::TestName", one per line, matched exactly against `go test -json`.
+    # Flat strings rather than nested package/tests blocks so the gate can read this with
+    # awk: pyyaml is not installed on the runners, and a gate that cannot parse its own
+    # manifest is worse than a manifest that repeats a prefix.
+    #
+    # THIS LIST MAY ONLY SHRINK. Adding to it needs a written justification in the PR
+    # (tier2.contract). scripts/tier2-gate.sh enforces both directions -- a failure not
+    # listed here fails the gate, and an entry here that no longer fails ALSO fails the
+    # gate, because a stale entry is a false statement that hides the next regression in
+    # the same test.
+    #
+    # EMPTY as of 2026-08-08, and the gate is what forced it.
+    #
+    # The six entries that were here were the examples/dag tests, recorded 2026-08-07
+    # as failing with "durable: AwaitAnyChild can only be called from within a workflow
+    # function (the HostCalls runtime was not initialized)". That message was taken at
+    # face value and the cause recorded as the example calling AwaitAnyChild outside a
+    # workflow. It was not. cleat/cleattest never wired AwaitAnyChild into
+    # HostCallsOptions, so the hook was nil for every TestEnv and the error was the
+    # harness's, not the caller's. Fixed in the PR that empties this list.
+    #
+    # Worth keeping in mind the next time an entry is added here: this list recorded a
+    # diagnosis, not just a symptom, and the diagnosis was wrong for a day. The symptom
+    # (which tests fail) is what the gate checks; the cause is prose and rots like any
+    # other prose.
+
+tier3:
+  name: parked
+  contract: |
+    Not built, not shipped, not claimed. Excluded from the default build, or deleted.
+    Parking is not a judgement about value — it is a statement that nobody is currently
+    proving it works, so nothing may depend on it or advertise it.
+  rules:
+    in_default_build: false
+    may_appear_in_docs_as_supported: false
+
+  components:
+    # sdk-java and sdk-assemblyscript were here. Both moved to tier 2 on 2026-08-06.
+    #
+    # Worth recording why they were ever here, because the mistake is repeatable: both
+    # were parked on the output of their own e2e tests, and both of those tests degraded
+    # every failure into a skip. Java's additionally invoked a Gradle task that has never
+    # existed. A test that cannot fail cannot support a parking decision either -- it
+    # reports the same thing about a working SDK and a broken one. Neither SDK changed;
+    # only what we could see about them did.
+    #
+    # The general lesson for this file: before parking anything, check whether the
+    # evidence for parking it came from a check capable of returning a different answer.
+
+    - id: component-decomposition-path
+      why: |
+        Wired, reached, and has never once successfully executed a workflow. §3.31's
+        recommendation is to fix componentGetFunc's nil parent export index and then delete
+        this path, rather than write a test for it.
+
+    - id: formal-specs
+      why: |
+        Checked 2026-08-09 (`grep -n '^====\|^\\\* =' specs/CleatClaim.tla`, and
+        `find specs -iname '*.cfg'`, `grep -rn 'tlc2\.TLC' .github/workflows/`). An
+        earlier version of this entry claimed line 53 was TLA+'s `====` module
+        terminator, cutting off 89% of the 495-line spec. That was wrong: line 53 is
+        `\* =============...`, a `\*`-prefixed line *comment* used as a decorative
+        divider (the same pattern repeats at 21 other lines). The real module
+        terminator is the bare `====` on line 495, the file's last line, so the
+        module is not truncated. The narrower claim stands and is why this stays
+        tier 3: no `.cfg` file exists anywhere under `specs/`, and nothing under
+        `.github/workflows/` invokes `tlc2.TLC` — TLC never runs, in CI or otherwise.
+        Either fix that and run them, or move them to docs/ as design notes.
+
+    - id: comparative-benchmarks
+      why: |
+        benchmarks/COMPARISON.md is entirely TBD; the Temporal and DBOS harnesses are written
+        but have never been run. Real numbers would be an asset — until then this is a claim
+        with nothing behind it.
+
+# ---------------------------------------------------------------------------
+# Decisions. Each changes what the gate enforces.
+#
+#   D1  DECIDED 2026-08-06. Multi-tenancy requires database-enforced RLS. PostgreSQL and
+#       SQL Server have it; MySQL is documented single-tenant-only. See tier1.tenancy.
+#   D2  DECIDED 2026-08-06. Python is tier 1, with a toolchain precondition in the gate.
+#       See the block above tier1.languages.
+#   D3  DECIDED 2026-08-06. The dashboard must authenticate. cleat runs on cloud
+#       instances and the dashboard connects from elsewhere, so running it against
+#       --require-auth=false is not a supported deployment. See admin-dashboard above:
+#       this makes authentication a feature to build, not a header to add.
+#   D4  DECIDED 2026-08-06. Java and AssemblyScript are tier 2, not parked. Both were
+#       parked on the output of tests that could not fail; see the note in tier 3.
+#
+# All four decisions are settled. New ones go here with the same shape: what was
+# decided, on what date, and what it changes about what the gate enforces.
+# ---------------------------------------------------------------------------

@@ -381,7 +381,7 @@ deterministic replay.
 
 ## PostgreSQL major version upgrade
 
-Cleat requires PostgreSQL 14+. When upgrading PostgreSQL to a new major version,
+Cleat requires PostgreSQL 16+. When upgrading PostgreSQL to a new major version,
 follow this procedure.
 
 ### Procedure
@@ -513,7 +513,9 @@ within 60 seconds, and they replay from their event history.
 
 Before upgrading PostgreSQL, verify:
 
-- [ ] The new PostgreSQL version is 14+ (cleat requirement)
+- [ ] The new PostgreSQL version is 16+ (cleat requirement, per `tiers.yaml`'s
+      `dialect_versions` -- corrected 2026-08-09; this checklist disagreed
+      with the "PostgreSQL 16+" stated earlier in this same file)
 - [ ] The `pg_upgrade` path from your current version to the target version
       is supported (see [PostgreSQL documentation](https://www.postgresql.org/docs/current/pgupgrade.html))
 - [ ] All workers have been drained

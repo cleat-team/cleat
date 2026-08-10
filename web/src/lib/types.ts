@@ -61,6 +61,9 @@ export interface Schedule {
   next_run_at: string;
   created_at: string;
   updated_at: string;
+  // IANA timezone name (e.g. "America/New_York"). Never empty -- the server
+  // normalises an omitted/empty value to "UTC".
+  timezone: string;
 }
 
 // ── Cost observability types ──────────────────

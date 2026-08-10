@@ -20,7 +20,7 @@ import (
 //   - "path/to/dir/"          — a directory (looks for .py files)
 //
 // runtime specifies the target WASM runtime: "wasmtime", "wazero", or "" for both.
-func runBuildPython(pattern, outDir, runtime string) {
+func runBuildPython(pattern, outDir, runtime, channel string) {
 	pyFile := ""
 	funcName := ""
 
@@ -101,6 +101,11 @@ func runBuildPython(pattern, outDir, runtime string) {
 	fmt.Printf("  Compiling Python to WASM via componentize-py...\n")
 	fmt.Printf("  Entry: %s\n", entry)
 
+	if channel != "" {
+		os.Setenv("CLEAT_CHILD_BINDING_POLICY", channel)
+		defer os.Unsetenv("CLEAT_CHILD_BINDING_POLICY")
+	}
+
 	if err := wasm.BuildPythonWasmWithRuntime(entry, wasmOutput, runtime, false); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: componentize-py failed: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Make sure the Python file has a @cleat_entry decorated function.\n")
@@ -135,15 +140,15 @@ func runBuildPython(pattern, outDir, runtime string) {
 }
 
 // detectEntryFunction uses the proper Python AST-based detector from
-// cleat_sdk.vet (``--detect-entry`` flag) to find the ``@cleat_entry``
+// cleat_sdk.vet (“--detect-entry“ flag) to find the “@cleat_entry“
 // decorated function in a .py file.
 //
-// It shells out to ``python3 -m cleat_sdk.vet --detect-entry <file>``,
+// It shells out to “python3 -m cleat_sdk.vet --detect-entry <file>“,
 // which handles:
 //   - AST-based parsing (not fragile string scanning)
 //   - Commented-out decorator filtering
 //   - Multi-line decorator arguments
-//   - ``async def`` detection and rejection
+//   - “async def“ detection and rejection
 //   - Multiple entry function error reporting
 func detectEntryFunction(pyFile string) (string, error) {
 	// Find the python-sdk directory so we can set PYTHONPATH.

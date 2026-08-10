@@ -70,7 +70,7 @@ Every shard must have the full cleat schema.  Use the same migration scripts
 you use for a single-node deployment:
 
 ```bash
-psql "$SHARD_CONN_STR" < schema.sql
+for f in migrations/postgres/*.sql; do psql "$SHARD_CONN_STR" -f "$f"; done
 ```
 
 ### 2. Write a Shard Configuration File

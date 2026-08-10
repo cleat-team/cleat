@@ -135,7 +135,7 @@ func generateGoMethod(fn HostFuncIR, ir *IR) string {
 		if !isBuiltinType(fn.OutputType) && fn.OutputType != "" {
 			buf.WriteString(fmt.Sprintf("    resp, err := p.client.PluginCall(ctx, %q, %q, input)\n", ir.PluginName, fn.Name))
 			buf.WriteString("    if err != nil {\n")
-			buf.WriteString(fmt.Sprintf("        return nil, err\n"))
+			buf.WriteString("        return nil, err\n")
 			buf.WriteString("    }\n")
 			buf.WriteString(fmt.Sprintf("    var out %s\n", fn.OutputType))
 			buf.WriteString("    if err := json.Unmarshal(resp, &out); err != nil {\n")

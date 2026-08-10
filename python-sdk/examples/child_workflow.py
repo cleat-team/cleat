@@ -2,7 +2,8 @@
 
 import json
 from dataclasses import dataclass
-from cleat_sdk import HostCalls, cleat_entry, ChildResult
+
+from cleat_sdk import ChildResult, HostCalls, cleat_entry
 
 
 @dataclass

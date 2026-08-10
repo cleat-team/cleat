@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func TestInfo(t *testing.T) {
@@ -249,7 +249,7 @@ func (*fakeKafkaConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeKafkaConn: unexpected Prepare call")
 }
 
-func (*fakeKafkaConn) Close() error    { return nil }
+func (*fakeKafkaConn) Close() error              { return nil }
 func (*fakeKafkaConn) Begin() (driver.Tx, error) { return &fakeKafkaTx{}, nil }
 
 type fakeKafkaTx struct{}
@@ -491,7 +491,7 @@ func TestHandleCreateConfig(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestHandleCreateConfigDefaults(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp["consumer_group"] != "cleat-consumer" {
 		t.Errorf("expected default consumer_group 'cleat-consumer', got %q", resp["consumer_group"])
@@ -590,7 +590,7 @@ func TestHandleListConfigs(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []interface{}
+	var results []any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestHandleDeleteConfig(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	id := resp["id"].(string)
 

@@ -14,34 +14,34 @@ import (
 // Flag represents a single feature flag with its targeting rules and rollout
 // configuration.
 type Flag struct {
-	ID               string          `json:"id"`
-	TenantID         string          `json:"tenant_id"`
-	Key              string          `json:"key"`
-	Name             string          `json:"name,omitempty"`
-	Description      string          `json:"description,omitempty"`
-	Enabled          bool            `json:"enabled"`
-	Rules            json.RawMessage `json:"rules,omitempty"`
-	RolloutPercentage int            `json:"rollout_percentage"`
+	ID                string          `json:"id"`
+	TenantID          string          `json:"tenant_id"`
+	Key               string          `json:"key"`
+	Name              string          `json:"name,omitempty"`
+	Description       string          `json:"description,omitempty"`
+	Enabled           bool            `json:"enabled"`
+	Rules             json.RawMessage `json:"rules,omitempty"`
+	RolloutPercentage int             `json:"rollout_percentage"`
 }
 
 // Rule is a single targeting rule with attribute, operator, and value.
 type Rule struct {
-	Attribute string      `json:"attribute"`
-	Operator  string      `json:"operator"`
-	Value     interface{} `json:"value"`
+	Attribute string `json:"attribute"`
+	Operator  string `json:"operator"`
+	Value     any    `json:"value"`
 }
 
 // EvaluationContext holds the context for evaluating a feature flag, including
 // the user ID and arbitrary attributes.
 type EvaluationContext struct {
-	UserID     string                 `json:"user_id"`
-	Attributes map[string]interface{} `json:"attributes,omitempty"`
+	UserID     string         `json:"user_id"`
+	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
 // EvaluationResult is the result of evaluating a feature flag.
 type EvaluationResult struct {
-	Enabled   bool              `json:"enabled"`
-	Key       string            `json:"key"`
+	Enabled    bool              `json:"enabled"`
+	Key        string            `json:"key"`
 	Evaluation *EvaluationDetail `json:"evaluation,omitempty"`
 }
 
@@ -54,9 +54,9 @@ type EvaluationDetail struct {
 
 // MatchedRule describes which rule matched during evaluation.
 type MatchedRule struct {
-	Attribute string      `json:"attribute"`
-	Operator  string      `json:"operator"`
-	Value     interface{} `json:"value"`
+	Attribute string `json:"attribute"`
+	Operator  string `json:"operator"`
+	Value     any    `json:"value"`
 }
 
 // hashPercentage computes a stable hash-based percentage for rollout
@@ -72,7 +72,7 @@ func hashPercentage(keys ...string) int {
 
 // evaluateRules checks whether the given context matches all rules (AND logic).
 // If there are no rules, it returns true (match by default).
-func evaluateRules(rules []Rule, ctx map[string]interface{}) (*MatchedRule, bool) {
+func evaluateRules(rules []Rule, ctx map[string]any) (*MatchedRule, bool) {
 	for _, rule := range rules {
 		attrVal, ok := ctx[rule.Attribute]
 		if !ok {
@@ -97,7 +97,7 @@ func evaluateRules(rules []Rule, ctx map[string]interface{}) (*MatchedRule, bool
 }
 
 // evaluateRule checks a single rule against an attribute value.
-func evaluateRule(rule Rule, attrVal interface{}) bool {
+func evaluateRule(rule Rule, attrVal any) bool {
 	strVal := fmt.Sprintf("%v", attrVal)
 
 	switch rule.Operator {
@@ -112,7 +112,7 @@ func evaluateRule(rule Rule, attrVal interface{}) bool {
 		}
 		return strings.Contains(strVal, ruleStr)
 	case "in":
-		arr, ok := rule.Value.([]interface{})
+		arr, ok := rule.Value.([]any)
 		if !ok {
 			return false
 		}
@@ -123,7 +123,7 @@ func evaluateRule(rule Rule, attrVal interface{}) bool {
 		}
 		return false
 	case "not_in":
-		arr, ok := rule.Value.([]interface{})
+		arr, ok := rule.Value.([]any)
 		if !ok {
 			return true // if not an array, treat as not-in (no match possible)
 		}
@@ -141,7 +141,7 @@ func evaluateRule(rule Rule, attrVal interface{}) bool {
 // parseRules parses a JSONB rules array into a slice of Rule structs.
 // Returns an empty slice if the input is nil or empty.
 func parseRules(raw json.RawMessage) ([]Rule, error) {
-	if raw == nil || len(raw) == 0 {
+	if len(raw) == 0 {
 		return []Rule{}, nil
 	}
 	// Normalize JSON array — wrap single objects in an array if needed.
@@ -175,7 +175,7 @@ func EvaluateFlag(flag *Flag, ctx EvaluationContext) EvaluationResult {
 	}
 
 	// Build context map from user_id and attributes.
-	contextMap := make(map[string]interface{})
+	contextMap := make(map[string]any)
 	if ctx.UserID != "" {
 		contextMap["user_id"] = ctx.UserID
 	}

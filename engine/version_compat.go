@@ -16,10 +16,11 @@ func ValidateVersionCompatibility(oldDef, newDef *WorkflowDef) error {
 		return fmt.Errorf("old workflow definition is nil")
 	}
 
-	// The new version must be strictly greater than the old version.
-	if newDef.Version <= oldDef.Version {
+	// The new version must be >= the old version (replaying with the
+	// same version is allowed — the workflow is just resuming).
+	if newDef.Version < oldDef.Version {
 		return fmt.Errorf(
-			"new version %d must be greater than old version %d",
+			"new version %d must be >= old version %d",
 			newDef.Version, oldDef.Version,
 		)
 	}

@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // Lease name for leader election. The plugin with an active lease is the sole
@@ -94,7 +94,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 type ddConfigRow struct {
 	ID            uuid.UUID
 	TenantID      uuid.UUID
-	APIKey        string
+	APIKey        plugin.Secret
 	Site          string
 	MetricsPrefix string
 }
@@ -279,7 +279,7 @@ func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("DD-API-KEY", cfg.APIKey)
+	req.Header.Set("DD-API-KEY", cfg.APIKey.Reveal())
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.httpClient.Do(req)

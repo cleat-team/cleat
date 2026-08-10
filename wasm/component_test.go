@@ -16,8 +16,8 @@ func handCraftedComponent() []byte {
 	var buf []byte
 
 	// Magic + layer
-	buf = append(buf, 0x00, 0x61, 0x73, 0x6d)       // "\0asm"
-	buf = append(buf, 0x0d, 0x00, 0x01, 0x00)       // component layer
+	buf = append(buf, 0x00, 0x61, 0x73, 0x6d) // "\0asm"
+	buf = append(buf, 0x0d, 0x00, 0x01, 0x00) // component layer
 
 	// A tiny valid core WASM module that we'll embed.
 	// It has no imports, no exports, just a single empty function body.
@@ -45,10 +45,10 @@ func handCraftedComponent() []byte {
 	// Section 2: core instance (Instantiate module 0, no args)
 	buf = append(buf, 0x02) // section ID
 	instPayload := []byte{
-		0x01,       // count: 1 instance
-		0x00,       // discriminator: Instantiate
-		0x00,       // module_index: 0
-		0x00,       // args: empty vec
+		0x01, // count: 1 instance
+		0x00, // discriminator: Instantiate
+		0x00, // module_index: 0
+		0x00, // args: empty vec
 	}
 	buf = append(buf, encodeULEB128(uint32(len(instPayload)))...)
 	buf = append(buf, instPayload...)
@@ -56,12 +56,12 @@ func handCraftedComponent() []byte {
 	// Section 11 (0x0b): component export
 	buf = append(buf, 0x0b) // section ID
 	exportPayload := []byte{
-		0x01,             // count: 1 export
-		0x00, 0x03,       // name length: 3 (big-endian)
+		0x01,       // count: 1 export
+		0x00, 0x03, // name length: 3 (big-endian)
 		0x72, 0x75, 0x6e, // "run"
-		0x01,             // sort: func
-		0x00,             // index: 0
-		0x00,             // no type reference
+		0x01, // sort: func
+		0x00, // index: 0
+		0x00, // no type reference
 	}
 	buf = append(buf, encodeULEB128(uint32(len(exportPayload)))...)
 	buf = append(buf, exportPayload...)
@@ -148,15 +148,15 @@ func TestComponentWithImports(t *testing.T) {
 	// Section 10 (0x0a): component import — "wasi:cli/environment@0.2.0"
 	buf = append(buf, 0x0a)
 	importPayload := []byte{
-		0x01,                                           // count: 1
-		0x00, 0x1a,                                     // name length: 26 (big-endian)
+		0x01,       // count: 1
+		0x00, 0x1a, // name length: 26 (big-endian)
 		0x77, 0x61, 0x73, 0x69, 0x3a, 0x63, 0x6c, 0x69, // "wasi:cli"
 		0x2f,                                           // "/"
 		0x65, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, // "environm"
-		0x65, 0x6e, 0x74,                               // "ent"
-		0x40, 0x30, 0x2e, 0x32, 0x2e, 0x30,             // "@0.2.0"
-		0x05,                                           // sort (instance)
-		0x00,                                           // type index: 0
+		0x65, 0x6e, 0x74, // "ent"
+		0x40, 0x30, 0x2e, 0x32, 0x2e, 0x30, // "@0.2.0"
+		0x05, // sort (instance)
+		0x00, // type index: 0
 	}
 	buf = append(buf, encodeULEB128(uint32(len(importPayload)))...)
 	buf = append(buf, importPayload...)
@@ -164,12 +164,12 @@ func TestComponentWithImports(t *testing.T) {
 	// Section 11 (0x0b): component export — "run"
 	buf = append(buf, 0x0b)
 	exportPayload := []byte{
-		0x01,             // count: 1
-		0x00, 0x03,       // name length: 3
+		0x01,       // count: 1
+		0x00, 0x03, // name length: 3
 		0x72, 0x75, 0x6e, // "run"
-		0x01,             // sort: func
-		0x00,             // index: 0
-		0x00,             // no type
+		0x01, // sort: func
+		0x00, // index: 0
+		0x00, // no type
 	}
 	buf = append(buf, encodeULEB128(uint32(len(exportPayload)))...)
 	buf = append(buf, exportPayload...)
@@ -269,5 +269,193 @@ func TestComponentPythonBinary(t *testing.T) {
 	} else {
 		t.Logf("  first import: %q", bundle.ImportModules[0])
 		t.Logf("  total imports: %d", len(bundle.ImportModules))
+	}
+}
+
+// ---- PatchEmptyImportModuleName tests ----
+
+func TestPatchEmptyImportModuleName_NoImports(t *testing.T) {
+	// WASM with no import section — should return original bytes unchanged.
+	wasm := memTestWasm()
+	result := PatchEmptyImportModuleName(wasm, "env")
+	if len(result) != len(wasm) {
+		t.Errorf("expected same length, got %d vs %d", len(result), len(wasm))
+	}
+	// Verify the returned binary is still valid WASM.
+	if len(result) < 8 || string(result[0:4]) != "\x00asm" {
+		t.Error("result is not valid WASM")
+	}
+}
+
+func TestPatchEmptyImportModuleName_AllNamed(t *testing.T) {
+	// All imports have non-empty module names — should return original unchanged.
+	wasm := makeWasmWithImports([]struct{ module, name string }{
+		{"env", "cleat_call"},
+		{"wasi_snapshot_preview1", "proc_exit"},
+	})
+	result := PatchEmptyImportModuleName(wasm, "replacement")
+	if len(result) != len(wasm) {
+		t.Errorf("expected same length for all-named imports, got %d vs %d", len(result), len(wasm))
+	}
+	// Verify the import module names were preserved (not corrupted).
+	names, err := readImportModuleNames(result)
+	if err != nil {
+		t.Fatalf("readImportModuleNames: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("readImportModuleNames: %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("expected 2 imports, got %d", len(names))
+	}
+	if names[0] != "env" {
+		t.Errorf("expected first import module 'env', got %q", names[0])
+	}
+	if names[1] != "wasi_snapshot_preview1" {
+		t.Errorf("expected second import module 'wasi_snapshot_preview1', got %q", names[1])
+	}
+}
+
+func TestPatchEmptyImportModuleName_EmptyNames(t *testing.T) {
+	// Build a WASM binary with an import section containing an empty module name.
+	content := encodeULEB128(1) // count: 1 import
+	// Module name: length 0 (empty)
+	content = append(content, encodeULEB128(0)...)
+	// Field name: "durable-call"
+	content = append(content, encodeULEB128(uint32(len("durable-call")))...)
+	content = append(content, []byte("durable-call")...)
+	// Kind: func
+	content = append(content, 0x00)
+	// Type index: 0
+	content = append(content, encodeULEB128(0)...)
+
+	size := encodeULEB128(uint32(len(content)))
+	section := []byte{2}
+	section = append(section, size...)
+	section = append(section, content...)
+	wasm := memTestWasm(section)
+
+	result := PatchEmptyImportModuleName(wasm, "replacement")
+	if len(result) == len(wasm) {
+		t.Error("expected modified length for empty module name import")
+	}
+
+	// Verify the empty module name was replaced.
+	modNames, err := readImportModuleNames(result)
+	if err != nil {
+		t.Fatalf("readImportModuleNames failed: %v", err)
+	}
+	if len(modNames) != 1 {
+		t.Fatalf("expected 1 module name, got %d", len(modNames))
+	}
+	if modNames[0] != "replacement" {
+		t.Errorf("expected module name 'replacement', got %q", modNames[0])
+	}
+}
+
+// ---- parseCoreInstanceSection tests ----
+
+func TestParseCoreInstanceSection_Truncated(t *testing.T) {
+	// Build a component binary with a truncated core instance section payload.
+	var buf []byte
+	// Magic + component layer
+	buf = append(buf, 0x00, 0x61, 0x73, 0x6d)
+	buf = append(buf, 0x0d, 0x00, 0x01, 0x00)
+	// Section 2: core instance — truncated payload (only count, no instance data)
+	instPayload := []byte{
+		0x01, // count: 1 instance
+		// Missing discriminator and rest
+	}
+	buf = append(buf, 0x02)
+	buf = append(buf, encodeULEB128(uint32(len(instPayload)))...)
+	buf = append(buf, instPayload...)
+
+	_, err := ParseComponentBundle(buf)
+	if err == nil {
+		t.Fatal("expected error for truncated core instance section")
+	}
+}
+
+// ---- parseComponentExportSection tests ----
+
+func TestParseComponentExportSection_Default(t *testing.T) {
+	// Build a component binary with various export sorts to test default handling.
+	var buf []byte
+	// Magic + component layer
+	buf = append(buf, 0x00, 0x61, 0x73, 0x6d)
+	buf = append(buf, 0x0d, 0x00, 0x01, 0x00)
+
+	// A tiny core module (needed for the bundle to parse).
+	coreModule := []byte{
+		0x00, 0x61, 0x73, 0x6d, // magic
+		0x01, 0x00, 0x00, 0x00, // version 1
+		// Type section: empty func type
+		0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+		// Function section: one function
+		0x03, 0x02, 0x01, 0x00,
+		// Export section: export function 0 as "run"
+		0x07, 0x05, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00,
+		// Code section: empty body
+		0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
+	}
+	// Section 1: core module
+	buf = append(buf, 0x01)
+	buf = append(buf, encodeULEB128(uint32(len(coreModule)))...)
+	buf = append(buf, coreModule...)
+
+	// Section 2: core instance
+	buf = append(buf, 0x02)
+	instPayload := []byte{
+		0x01, // count: 1
+		0x00, // Instantiate
+		0x00, // module index: 0
+		0x00, // args: empty
+	}
+	buf = append(buf, encodeULEB128(uint32(len(instPayload)))...)
+	buf = append(buf, instPayload...)
+
+	// Section 11 (0x0b): component export — with a table export (sort=0x02, default case)
+	buf = append(buf, 0x0b)
+	exportPayload := []byte{
+		0x02,       // count: 2 exports
+		0x00, 0x03, // name length: 3
+		0x72, 0x75, 0x6e, // "run"
+		0x01,       // sort: func
+		0x00,       // index: 0
+		0x00,       // no type reference
+		0x00, 0x05, // name length: 5
+		0x74, 0x61, 0x62, 0x6c, 0x65, // "table"
+		0x02, // sort: table (uses default case in parser)
+		0x01, // index: 1
+	}
+	buf = append(buf, encodeULEB128(uint32(len(exportPayload)))...)
+	buf = append(buf, exportPayload...)
+
+	bundle, err := ParseComponentBundle(buf)
+	if err != nil {
+		t.Fatalf("ParseComponentBundle failed: %v", err)
+	}
+
+	// Verify both exports are present.
+	exp, ok := bundle.Exports["run"]
+	if !ok {
+		t.Fatal("expected export 'run'")
+	}
+	if exp.Kind != 0x01 {
+		t.Errorf("expected export kind 0x01, got 0x%02x", exp.Kind)
+	}
+	if exp.ExportIndex != 0 {
+		t.Errorf("expected ExportIndex 0, got %d", exp.ExportIndex)
+	}
+
+	exp2, ok := bundle.Exports["table"]
+	if !ok {
+		t.Fatal("expected export 'table'")
+	}
+	if exp2.Kind != 0x02 {
+		t.Errorf("expected export kind 0x02, got 0x%02x", exp2.Kind)
+	}
+	if exp2.ExportIndex != 1 {
+		t.Errorf("expected ExportIndex 1, got %d", exp2.ExportIndex)
 	}
 }

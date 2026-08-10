@@ -3,9 +3,9 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,7 +33,7 @@ func TestIntegrationFullPipeline(t *testing.T) {
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-full-%d", time.Now().UnixNano())
 	defName := "test-place-order"
-	input := `{"UserID":"user-42","Cart":[{"SKU":"SKU-001","Quantity":2}]}`
+	input := `{"userID":"user-42","cart":[{"sku":"SKU-001","quantity":2}]}`
 
 	// Build WASM binary from testdata/basic.
 	wasmPath := buildTestWasm(t)
@@ -72,7 +72,7 @@ func TestIntegrationFullPipeline(t *testing.T) {
 
 	// ---- Step 1: Execute the workflow ----
 	caller := &mockCaller{}
-	engine := NewEngine(rt, caller)
+	engine := NewEngine(rt, caller, withWasmtimeBackend(t))
 
 	result, history, suspended, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", json.RawMessage(input))
 	if err != nil {
@@ -132,14 +132,14 @@ func TestIntegrationFullPipeline(t *testing.T) {
 		if rec.Op != loadedHistory[i].Op {
 			t.Errorf("step %d Op: expected %q, got %q", i, rec.Op, loadedHistory[i].Op)
 		}
-		if rec.Response != loadedHistory[i].Response {
+		if normalizeJSON(rec.Response) != normalizeJSON(loadedHistory[i].Response) {
 			t.Errorf("step %d Response: expected %q, got %q", i, rec.Response, loadedHistory[i].Response)
 		}
 	}
 
 	// ---- Step 5: Replay from the loaded event history ----
 	replayCaller := &mockCaller{}
-	engine2 := NewEngine(rt, replayCaller)
+	engine2 := NewEngine(rt, replayCaller, withWasmtimeBackend(t))
 	result2, _, suspended2, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", json.RawMessage(input), loadedHistory)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
@@ -149,7 +149,7 @@ func TestIntegrationFullPipeline(t *testing.T) {
 	}
 
 	// ---- Step 6: Verify replay produced the same result ----
-	if result != result2 {
+	if normalizeJSON(result) != normalizeJSON(result2) {
 		t.Errorf("replay result mismatch: original=%q, replay=%q", result, result2)
 	}
 
@@ -186,7 +186,7 @@ func TestIntegrationMultiStepSleep(t *testing.T) {
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-multistep-%d", time.Now().UnixNano())
 	defName := "test-multistep"
-	input := `{"OrderID":"ord-123"}`
+	input := `{"orderID":"ord-123"}`
 
 	wasmPath := buildTestWasm(t)
 	wasmBytes, err := os.ReadFile(wasmPath)
@@ -219,7 +219,7 @@ func TestIntegrationMultiStepSleep(t *testing.T) {
 
 	// Execute the cancel_order workflow (refund + release = 2 service calls).
 	caller := &mockCaller{}
-	engine := NewEngine(rt, caller)
+	engine := NewEngine(rt, caller, withWasmtimeBackend(t))
 
 	result, history, suspended, _, _, err := engine.Execute(ctx, wasmBytes, "cancel_order", json.RawMessage(input))
 	if err != nil {
@@ -249,13 +249,13 @@ func TestIntegrationMultiStepSleep(t *testing.T) {
 
 	// Replay from loaded history.
 	replayCaller := &mockCaller{}
-	engine2 := NewEngine(rt, replayCaller)
+	engine2 := NewEngine(rt, replayCaller, withWasmtimeBackend(t))
 	result2, _, _, _, _, err := engine2.Replay(ctx, wasmBytes, "cancel_order", json.RawMessage(input), loadedHistory)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
 
-	if result != result2 {
+	if normalizeJSON(result) != normalizeJSON(result2) {
 		t.Errorf("replay result mismatch: %q vs %q", result, result2)
 	}
 	if len(replayCaller.calls) > 0 {
@@ -290,7 +290,7 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-signal-%d", time.Now().UnixNano())
 	defName := "test-signal"
-	input := `{"UserID":"user-42","Cart":[{"SKU":"ABC-123","Quantity":2}]}`
+	input := `{"userID":"user-42","cart":[{"sku":"ABC-123","quantity":2}]}`
 
 	wasmPath := buildTestWasm(t)
 	wasmBytes, err := os.ReadFile(wasmPath)
@@ -324,7 +324,7 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 
 	// ---- Step 1: Execute a basic workflow to completion ----
 	caller := &mockCaller{}
-	engine := NewEngine(rt, caller)
+	engine := NewEngine(rt, caller, withWasmtimeBackend(t))
 
 	result, history, suspended, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", json.RawMessage(input))
 	if err != nil {
@@ -342,25 +342,37 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 	}
 
 	// ---- Step 3: Poll the signal back (atomic claim + delete) ----
-	payload, found, err := store.PollSignal(ctx, runID, "payment_confirmed")
+	//
+	// This step exercises "atomic claim + delete", so it must call
+	// PollAndClaimSignal, not PollSignal. Those are two distinct
+	// SignalStore methods with two distinct, documented contracts:
+	// PollSignal "checks for a delivered signal" (a plain, repeatable read
+	// -- see TestPollSignal_NonDestructive in
+	// store_test_groups_6_10_test.go and PostgresStore.PollSignal's doc
+	// comment in store_signals.go) while PollAndClaimSignal "atomically
+	// checks for AND CLAIMS" it (consumes it). This test used to call
+	// PollSignal for both steps 3 and 4 and assert the consuming behavior
+	// on it, which happened to pass only because PostgresStore.PollSignal
+	// used to be implemented as a bug-for-bug copy of PollAndClaimSignal.
+	payload, found, err := store.PollAndClaimSignal(ctx, runID, "payment_confirmed")
 	if err != nil {
-		t.Fatalf("PollSignal: %v", err)
+		t.Fatalf("PollAndClaimSignal: %v", err)
 	}
 	if !found {
-		t.Error("expected PollSignal to find the delivered signal")
+		t.Error("expected PollAndClaimSignal to find the delivered signal")
 	}
-	if payload != signalPayload {
+	if normalizeJSON(payload) != normalizeJSON(signalPayload) {
 		t.Errorf("signal payload mismatch: expected=%q, got=%q", signalPayload, payload)
 	}
 	t.Logf("Signal delivered and polled successfully: %s", payload)
 
-	// ---- Step 4: Polling the same signal again returns not-found (consumed) ----
-	_, found, err = store.PollSignal(ctx, runID, "payment_confirmed")
+	// ---- Step 4: Claiming the same signal again returns not-found (consumed) ----
+	_, found, err = store.PollAndClaimSignal(ctx, runID, "payment_confirmed")
 	if err != nil {
-		t.Fatalf("second PollSignal: %v", err)
+		t.Fatalf("second PollAndClaimSignal: %v", err)
 	}
 	if found {
-		t.Error("expected second PollSignal to return not-found (signal was consumed)")
+		t.Error("expected second PollAndClaimSignal to return not-found (signal was consumed)")
 	}
 
 	// ---- Step 5: Persist the execution history ----
@@ -378,12 +390,12 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 	}
 
 	replayCaller := &mockCaller{}
-	engine2 := NewEngine(rt, replayCaller)
+	engine2 := NewEngine(rt, replayCaller, withWasmtimeBackend(t))
 	result2, _, _, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", json.RawMessage(input), loadedHistory)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if result != result2 {
+	if normalizeJSON(result) != normalizeJSON(result2) {
 		t.Errorf("replay result mismatch: %q vs %q", result, result2)
 	}
 	if len(replayCaller.calls) > 0 {
@@ -413,7 +425,7 @@ func TestIntegrationReplayDivergence(t *testing.T) {
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-divergence-%d", time.Now().UnixNano())
 	defName := "test-divergence"
-	input := `{"UserID":"user-42","Cart":[{"SKU":"ABC-123","Quantity":2}]}`
+	input := `{"userID":"user-42","cart":[{"sku":"ABC-123","quantity":2}]}`
 
 	wasmPath := buildTestWasm(t)
 	wasmBytes, err := os.ReadFile(wasmPath)
@@ -446,7 +458,7 @@ func TestIntegrationReplayDivergence(t *testing.T) {
 
 	// ---- Step 1: Execute to completion ----
 	caller := &mockCaller{}
-	engine := NewEngine(rt, caller)
+	engine := NewEngine(rt, caller, withWasmtimeBackend(t))
 	_, history, _, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", json.RawMessage(input))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -477,12 +489,18 @@ func TestIntegrationReplayDivergence(t *testing.T) {
 
 	// ---- Step 5: Attempt replay with tampered history ----
 	replayCaller := &mockCaller{}
-	engine2 := NewEngine(rt, replayCaller)
-	_, _, _, _, _, err = engine2.Replay(ctx, wasmBytes, "place_order", json.RawMessage(input), loadedHistory)
-	if err == nil {
+	engine2 := NewEngine(rt, replayCaller, withWasmtimeBackend(t))
+	divResult, _, _, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", json.RawMessage(input), loadedHistory)
+	// With wasmtime, divergence is detected within the workflow and returned
+	// as the result (the engine does not surface it as an error).
+	if err == nil && !strings.Contains(divResult, "replay divergence") {
 		t.Error("expected divergence error from tampered history, got nil")
-	} else {
-		t.Logf("Divergence correctly detected: %v", err)
+	}
+	if err != nil {
+		t.Logf("Divergence correctly detected (engine error): %v", err)
+	}
+	if strings.Contains(divResult, "replay divergence") {
+		t.Logf("Divergence correctly detected (workflow result): %s", divResult)
 	}
 
 	// Verify NO real calls were made during the failed replay attempt.
@@ -522,9 +540,30 @@ func TestIntegrationNewEventTypesPersistenceRoundTrip(t *testing.T) {
 
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
+		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
 	store := NewPostgresStore(db)
+
+	// event_history.workflow_id is a real foreign key into
+	// workflow_instances(id) (migrations/postgres/001_schema.sql), so a real
+	// instance must exist before appending events for it -- unlike the old
+	// hand-maintained test schema in engine/testutil/schema.go, which used to
+	// explicitly drop this FK "so tests insert events without workflow
+	// instances".
+	def := &WorkflowDef{
+		Name:       "int-new-events-workflow",
+		Version:    1,
+		WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1,
+		MinVersion: 1,
+	}
+	if err := store.DeployWorkflowDef(ctx, def); err != nil {
+		t.Fatalf("DeployWorkflowDef: %v", err)
+	}
+	if _, _, err := store.StartNewRun(ctx, runID, "int-new-events-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0); err != nil {
+		t.Fatalf("StartNewRun: %v", err)
+	}
 
 	// Create one EventRecord for each of the 7 new event types.
 	events := []EventRecord{
@@ -640,76 +679,73 @@ func TestIntegrationNewEventTypesPersistenceRoundTrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRLSTenantIsolation verifies that Row-Level Security correctly isolates
-// workflow instances between tenants. This test must hit the actual store, not
-// mock it -- it uses a real PostgreSQL database.
+// workflow instances between tenants. This test must hit the actual store,
+// not mock it -- it uses a real PostgreSQL database.
+//
+// This used to build its own ad hoc RLS policy at runtime
+// (`CREATE POLICY cleat_rls_test ...`) over the plain superuser/owner
+// connection that testDB(t) returns. That connection bypasses RLS
+// unconditionally -- Postgres never applies RLS to a superuser, and bypasses
+// it for the owning role too unless FORCE ROW LEVEL SECURITY is set -- so
+// the test always saw every row regardless of the policy it had just
+// created, and "tenant A: expected 1 workflow, got 2" was the inevitable
+// result the moment CLEAT_TEST_DB pointed at a real (superuser) Postgres
+// instead of being skipped. It also hand-duplicated a policy that the real
+// migrations/postgres/001_schema.sql now already defines (tenant_isolation_instances).
+//
+// Fixed to do what the test name promises: exercise the *real* schema
+// (including its real RLS policy) through a connection that cannot bypass
+// RLS -- see testutil.OpenPostgresRLSTestDB -- and to create its fixture
+// data through the store (which sets the `cleat.tenant_id` session variable
+// the real policy checks), not through raw SQL that bypasses the store layer
+// entirely.
 func TestRLSTenantIsolation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping RLS integration test in short mode")
 	}
 
-	db := testDB(t)
-	defer db.Close()
+	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
+	defer adminDB.Close()
+	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
+	testutil.CleanupPostgresTestData(t, adminDB)
+
+	appDB := testutil.OpenPostgresRLSTestDB(t, adminDB)
+	defer appDB.Close()
+	// Deferred after appDB.Close() so it runs first (defers are LIFO) --
+	// i.e. before either connection closes, not after both.
+	defer testutil.CleanupPostgresTestData(t, adminDB)
 
 	ctx := context.Background()
-
-	// Ensure tenant_id column exists on workflow_instances. testDB creates the
-	// column via ALTER TABLE ADD COLUMN IF NOT EXISTS, but a previous test that
-	// used setupFullTestSchema may have dropped and recreated the table without
-	// the column, so we add it here to be safe.
-	if _, err := db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS tenant_id TEXT`); err != nil {
-		t.Fatalf("add tenant_id column: %v", err)
-	}
-
-	// Enable RLS on workflow_instances.
-	if _, err := db.Exec(`ALTER TABLE workflow_instances ENABLE ROW LEVEL SECURITY`); err != nil {
-		t.Fatalf("enable RLS: %v", err)
-	}
-
-	// Create the tenant isolation policy. When the cleat.tenant_id session
-	// variable is set (via set_config), the policy filters rows by tenant_id.
-	// If the variable is not set, it falls back to the default tenant UUID.
-	if _, err := db.Exec(`DROP POLICY IF EXISTS cleat_rls_test ON workflow_instances`); err != nil {
-		t.Fatalf("drop existing policy: %v", err)
-	}
-	if _, err := db.Exec(`CREATE POLICY cleat_rls_test ON workflow_instances
-		FOR ALL
-		USING (tenant_id = COALESCE(current_setting('cleat.tenant_id', true), '00000000-0000-0000-0000-000000000000')::text)`); err != nil {
-		t.Fatalf("create RLS policy: %v", err)
-	}
-
-	// Cleanup: disable RLS (DDL, not subject to RLS), drop the policy, then
-	// delete test rows. Using t.Cleanup ensures this runs even on t.Fatalf.
-	t.Cleanup(func() {
-		db.Exec(`ALTER TABLE workflow_instances DISABLE ROW LEVEL SECURITY`)
-		db.Exec(`DROP POLICY IF EXISTS cleat_rls_test ON workflow_instances`)
-		db.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'rls-test-%'`)
-	})
 
 	// Create two tenants with different UUIDs.
 	tenantA := "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
 	tenantB := "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
 
-	runID_A := fmt.Sprintf("rls-test-a-%d", time.Now().UnixNano())
-	runID_B := fmt.Sprintf("rls-test-b-%d", time.Now().UnixNano())
+	storeA := NewPostgresStore(appDB).WithTenant(tenantA)
+	storeB := NewPostgresStore(appDB).WithTenant(tenantB)
 
-	// Insert workflow instances for both tenants using direct SQL. INSERT
-	// bypasses the RLS USING clause, so this works regardless of the current
-	// RLS session variable. Set next_wake_at in the past so ClaimWorkflows
-	// immediately qualifies them.
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, next_wake_at)
-		VALUES ($1, 'wf-tenant-a', 1, 'ready', '{}', $2, now() - interval '1 hour')`,
-		runID_A, tenantA); err != nil {
-		t.Fatalf("insert tenant A workflow: %v", err)
+	def := &WorkflowDef{
+		Name:       "rls-test-workflow",
+		Version:    1,
+		WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1,
+		MinVersion: 1,
+	}
+	if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
+		t.Fatalf("DeployWorkflowDef: %v", err)
 	}
 
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, next_wake_at)
-		VALUES ($1, 'wf-tenant-b', 1, 'ready', '{}', $2, now() - interval '1 hour')`,
-		runID_B, tenantB); err != nil {
-		t.Fatalf("insert tenant B workflow: %v", err)
+	runIDA := fmt.Sprintf("rls-test-a-%d", time.Now().UnixNano())
+	runIDB := fmt.Sprintf("rls-test-b-%d", time.Now().UnixNano())
+
+	if _, _, err := storeA.StartNewRun(ctx, runIDA, "rls-test-workflow", 1, json.RawMessage(`{}`), "", tenantA, 0); err != nil {
+		t.Fatalf("StartNewRun tenant A: %v", err)
+	}
+	if _, _, err := storeB.StartNewRun(ctx, runIDB, "rls-test-workflow", 1, json.RawMessage(`{}`), "", tenantB, 0); err != nil {
+		t.Fatalf("StartNewRun tenant B: %v", err)
 	}
 
 	// ---- Test 1: Tenant A's store should only see tenant A's workflow ----
-	storeA := NewPostgresStore(db).WithTenant(tenantA)
 	wfsA, err := storeA.ClaimWorkflows(ctx, "worker-a", 10)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows tenant A: %v", err)
@@ -718,15 +754,15 @@ func TestRLSTenantIsolation(t *testing.T) {
 	if len(wfsA) != 1 {
 		t.Errorf("tenant A: expected 1 workflow, got %d", len(wfsA))
 	} else {
-		if wfsA[0].ID != runID_A {
-			t.Errorf("tenant A: expected workflow %q, got %q", runID_A, wfsA[0].ID)
+		if wfsA[0].ID != runIDA {
+			t.Errorf("tenant A: expected workflow %q, got %q", runIDA, wfsA[0].ID)
 		}
 		if wfsA[0].TenantID != tenantA {
 			t.Errorf("tenant A: expected tenant_id %q, got %q", tenantA, wfsA[0].TenantID)
 		}
 		// Verify tenant A did NOT see tenant B's workflow.
 		for _, wf := range wfsA {
-			if wf.ID == runID_B {
+			if wf.ID == runIDB {
 				t.Error("tenant A should not see tenant B's workflow")
 			}
 		}
@@ -738,7 +774,6 @@ func TestRLSTenantIsolation(t *testing.T) {
 	}
 
 	// ---- Test 2: Tenant B's store should only see tenant B's workflow ----
-	storeB := NewPostgresStore(db).WithTenant(tenantB)
 	wfsB, err := storeB.ClaimWorkflows(ctx, "worker-b", 10)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows tenant B: %v", err)
@@ -747,65 +782,72 @@ func TestRLSTenantIsolation(t *testing.T) {
 	if len(wfsB) != 1 {
 		t.Errorf("tenant B: expected 1 workflow, got %d", len(wfsB))
 	} else {
-		if wfsB[0].ID != runID_B {
-			t.Errorf("tenant B: expected workflow %q, got %q", runID_B, wfsB[0].ID)
+		if wfsB[0].ID != runIDB {
+			t.Errorf("tenant B: expected workflow %q, got %q", runIDB, wfsB[0].ID)
 		}
 		if wfsB[0].TenantID != tenantB {
 			t.Errorf("tenant B: expected tenant_id %q, got %q", tenantB, wfsB[0].TenantID)
 		}
 		// Verify tenant B did NOT see tenant A's workflow.
 		for _, wf := range wfsB {
-			if wf.ID == runID_A {
+			if wf.ID == runIDA {
 				t.Error("tenant B should not see tenant A's workflow")
 			}
 		}
 	}
 
-	t.Log("RLS tenant isolation test passed")
+	// Only claim success, not merely "the test function reached the end" --
+	// t.Failed() reflects every t.Error/t.Errorf recorded above. Logging
+	// unconditionally here was the exact defect class this investigation was
+	// looking for: integration_test.go used to print "RLS tenant isolation
+	// test passed" even on a run that had just recorded two isolation
+	// failures above.
+	if !t.Failed() {
+		t.Log("RLS tenant isolation test passed")
+	}
 }
 
-
-// TestIntegrationWorkflowMaxDuration verifies that the WithDefaultWorkflowTimeout
-// option cancels execution when a workflow exceeds its wall-clock duration limit.
+// TestIntegrationWorkflowMaxDuration verifies that WithDefaultWorkflowTimeout
+// stops a workflow that exceeds its wall-clock duration limit.
+//
+// This test was skipped for a long time because it never exercised its subject,
+// and the two reasons are worth keeping written down.
+//
+// The workload was testdata/basic's LongRunning, which looped on
+// h.DurableCall("noop", "", ""). The empty operation name was rejected by the
+// host on the first iteration, so the loop body never ran and the call returned
+// in ~200ms regardless of the iteration count. Retuning the count could not fix
+// that. It is fixed at the source now (see IMPROVEMENT-PLAN.md 2.10), but
+// LongRunning is still the wrong workload here: each durable call records an
+// event costing ~2.9 KB of host memory, so spinning one for a whole second
+// means ~170k calls and ~500 MB of heap.
+//
+// It also once passed on CI for a reason unrelated to its subject: `go test
+// -race` slowed *instantiation* past the 1s budget, the trap reported 999.9ms,
+// and the assertion was satisfied without the guest ever running long. The
+// budget covers instantiation as well as execution, so that will happen to any
+// limit tight enough for startup to consume it.
+//
+// So: the workload is testdata/spin, a pure arithmetic loop that allocates
+// nothing and never enters the host, and the limit is set well clear of
+// instantiation. The assertions below check that the fence fired *and* that the
+// guest actually ran until it did -- an early return is the failure this test
+// exists to catch.
 func TestIntegrationWorkflowMaxDuration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	defer db.Close()
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
-
+	// No database: Execute takes the WASM bytes directly, so the workflow_defs
+	// and workflow_instances rows this test used to insert were never read.
+	// Dropping them takes the test out of the "needs PostgreSQL" class.
 	ctx := context.Background()
-	runID := fmt.Sprintf("int-timeout-%d", time.Now().UnixNano())
-	defName := "test-timeout-workflow"
 
-	// Build WASM from testdata/basic (includes LongRunning export).
-	wasmPath := buildTestWasm(t)
+	wasmPath := buildFixtureWasm(t, "spin")
 	wasmBytes, err := os.ReadFile(wasmPath)
 	if err != nil {
 		t.Fatalf("read WASM: %v", err)
 	}
-
-	// Insert workflow definition.
-	if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points) VALUES ($1, $2, $3, $4)`,
-		defName, 1, wasmBytes, `{long_running}`); err != nil {
-		t.Fatalf("insert workflow_defs: %v", err)
-	}
-
-	// Insert a workflow instance in 'ready' status.
-	// 500000 HostCall iterations takes ~5s wall-clock time, beyond the 1s timeout.
-	input := `{"iterations":500000}`
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input) VALUES ($1, $2, $3, $4, $5)`,
-		runID, defName, 1, "ready", input); err != nil {
-		t.Fatalf("insert workflow_instances: %v", err)
-	}
-
-	defer func() {
-		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
-		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
-		db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
-	}()
 
 	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
@@ -813,16 +855,74 @@ func TestIntegrationWorkflowMaxDuration(t *testing.T) {
 	}
 	defer rt.Close(ctx)
 
-	// Create engine with a 1-second timeout (well below 5s execution time).
-	engine := NewEngine(rt, &mockCaller{}, WithDefaultWorkflowTimeout(1*time.Second))
+	// 2s rather than 1s so that instantiation (~175ms here, more under -race)
+	// is a small fraction of the budget and the guest is certain to get a long
+	// spin in. Iterations are set to something no machine finishes: measured at
+	// ~5.5e8 iterations/sec, 1e11 would take roughly three minutes.
+	const limit = 2 * time.Second
+	const iterations = 100000000000
 
-	_, _, _, _, _, err = engine.Execute(ctx, wasmBytes, "long_running", json.RawMessage(input))
+	engine := NewEngine(rt, &mockCaller{}, withWasmtimeBackend(t), WithDefaultWorkflowTimeout(limit))
+
+	start := time.Now()
+	res, _, _, _, _, err := engine.Execute(ctx, wasmBytes, "spin",
+		json.RawMessage(fmt.Sprintf(`{"iterations":%d}`, iterations)))
+	elapsed := time.Since(start)
+
 	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("expected context.DeadlineExceeded, got: %v", err)
+		t.Fatalf("expected the execution-time limit to fire, got nil after %v (result %s)",
+			elapsed, res)
 	}
 
-	t.Log("Workflow max duration integration test passed")
+	// Identify the trap precisely rather than accepting any error. Matching on
+	// loose substrings is how the previous version of this assertion accepted
+	// "error 1" -- which is not a timeout signal at all -- as evidence of a
+	// timeout.
+	if !isExecutionInterruptTrap(err) {
+		t.Fatalf("expected a wasmtime interrupt trap (epoch interruption), got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "execution time limit exceeded") {
+		t.Errorf("trap was an interrupt but the error does not name the limit: %v", err)
+	}
+
+	// The assertion that catches the original defect. When the workload
+	// returned early -- LongRunning bailing out on its first iteration --
+	// elapsed was ~200ms. Requiring the guest to have run for essentially the
+	// whole budget is what distinguishes "the fence stopped a long workload"
+	// from "the workload stopped by itself".
+	//
+	// The lower bound allows two epoch ticks of slack because the deadline is
+	// expressed in whole ticks: configureStore computes
+	// uint64(timeout / epochTickInterval), which truncates, so a 2s budget is
+	// enforced at 1.95s. One tick for that, one for scheduling jitter.
+	// 100ms = two 50ms epoch ticks. Spelled as a literal because
+	// epochTickInterval lives behind //go:build cgo and this file compiles
+	// without it; TestEpochTickIntervalMatchesDurationTestSlack pins the two
+	// together so the literal cannot drift.
+	const tickSlack = 100 * time.Millisecond
+	minElapsed := limit - tickSlack
+	if elapsed < minElapsed {
+		t.Errorf("execution stopped after %v, before the %v limit could plausibly "+
+			"have fired (expected at least %v). The guest returned early instead "+
+			"of running long -- the fence is not what stopped it.",
+			elapsed, limit, minElapsed)
+	}
+
+	// And the other direction: the fence must actually cut execution off,
+	// rather than the workload happening to finish.
+	if maxElapsed := limit + 10*time.Second; elapsed > maxElapsed {
+		t.Errorf("execution took %v, well past the %v limit; the fence did not "+
+			"interrupt promptly", elapsed, limit)
+	}
+}
+
+// normalizeJSON unmarshals and re-marshals a JSON string to produce a
+// canonical form for comparison, ignoring key ordering and whitespace.
+func normalizeJSON(s string) string {
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return s
+	}
+	compacted, _ := json.Marshal(v)
+	return string(compacted)
 }

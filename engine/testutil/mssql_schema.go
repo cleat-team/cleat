@@ -4,249 +4,112 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
-// SetupMSSQLMinimalSchema creates the core tables needed for MSSQLStore tests.
-// These are the minimum tables required: workflow_defs, workflow_instances, event_history, workflow_signals.
+// SetupMSSQLMinimalSchema builds the SQL Server test schema by applying the
+// real, shipped migrations (migrations/mssql/*.sql) via applyMigrations --
+// the exact code path cmd/cleat-worker/main.go runs at boot. "Minimal" is a
+// historical name; see SetupMSSQLFullSchema.
 func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
-
-	statements := []string{
-		// workflow_defs
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_defs')
-         CREATE TABLE workflow_defs (
-             name NVARCHAR(900) NOT NULL,
-             version INTEGER NOT NULL,
-             wasm_bytes VARBINARY(MAX) NOT NULL,
-             entry_points NVARCHAR(MAX) NOT NULL DEFAULT '[]',
-             min_version INTEGER NOT NULL DEFAULT 0,
-             abi_version INTEGER NOT NULL DEFAULT 1,
-             plugin_deps NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             deprecated BIT NOT NULL DEFAULT 0,
-             task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
-             max_history_length INTEGER NOT NULL DEFAULT 0,
-             dag_spec NVARCHAR(MAX) DEFAULT NULL,
-             tenant_id UNIQUEIDENTIFIER,
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             PRIMARY KEY (name, version)
-         )`,
-
-		// workflow_instances
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_instances')
-         CREATE TABLE workflow_instances (
-             id NVARCHAR(900) NOT NULL PRIMARY KEY,
-             def_name NVARCHAR(900) NOT NULL,
-             def_version INTEGER NOT NULL,
-             status NVARCHAR(MAX) NOT NULL DEFAULT 'ready',
-             input NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             assigned_to NVARCHAR(MAX),
-             heartbeat_at DATETIMEOFFSET,
-             next_wake_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             completed_at DATETIMEOFFSET,
-             cancellation_requested BIT NOT NULL DEFAULT 0,
-             cancellation_reason NVARCHAR(MAX),
-             result NVARCHAR(MAX),
-             error_msg NVARCHAR(MAX),
-             error_code NVARCHAR(MAX),
-             error_op NVARCHAR(MAX),
-             parent_workflow_id NVARCHAR(MAX),
-             parent_close_policy NVARCHAR(MAX) DEFAULT 'ABANDON',
-             query_state NVARCHAR(MAX) DEFAULT '{}',
-             task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
-             trace_id NVARCHAR(MAX),
-             sticky_worker_id NVARCHAR(MAX),
-             compaction_state NVARCHAR(MAX),
-             compacted_at DATETIMEOFFSET,
-             compaction_step INTEGER,
-             plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             tenant_id UNIQUEIDENTIFIER,
-             priority INTEGER NOT NULL DEFAULT 0,
-             generation BIGINT NOT NULL DEFAULT 0,
-             FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
-         )`,
-
-		// event_history
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_history')
-         CREATE TABLE event_history (
-             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
-             step INTEGER NOT NULL,
-             event_type NVARCHAR(MAX) NOT NULL DEFAULT 'call',
-             service NVARCHAR(MAX),
-             operation NVARCHAR(MAX),
-             request NVARCHAR(MAX),
-             response NVARCHAR(MAX),
-             error NVARCHAR(MAX),
-             duration_ms BIGINT,
-             signal_names NVARCHAR(MAX),
-             timeout_ms BIGINT,
-             signal_name NVARCHAR(MAX),
-             signal_payload NVARCHAR(MAX),
-             defer_description NVARCHAR(MAX),
-             defer_id NVARCHAR(MAX),
-             child_name NVARCHAR(MAX),
-             child_input NVARCHAR(MAX),
-             run_id NVARCHAR(MAX),
-             new_input NVARCHAR(MAX),
-             plugin_name NVARCHAR(MAX),
-             plugin_func NVARCHAR(MAX),
-             plugin_input NVARCHAR(MAX),
-             plugin_output NVARCHAR(MAX),
-             plugin_error NVARCHAR(MAX),
-             promise_name NVARCHAR(MAX),
-             promise_id NVARCHAR(MAX),
-             promise_result NVARCHAR(MAX),
-             promise_error NVARCHAR(MAX),
-             payload NVARCHAR(MAX),
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             checksum NVARCHAR(MAX),
-             tenant_id UNIQUEIDENTIFIER,
-             PRIMARY KEY (workflow_id, step)
-         )`,
-
-		// workflow_signals
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_signals')
-         CREATE TABLE workflow_signals (
-             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
-             signal_name NVARCHAR(900) NOT NULL,
-             payload NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             delivered_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             tenant_id UNIQUEIDENTIFIER,
-             PRIMARY KEY (workflow_id, signal_name)
-         )`,
-	}
-
-	for i, stmt := range statements {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("setup MSSQL minimal schema: statement %d: %v", i, err)
-		}
-	}
+	applyMSSQLSchemaFile(t, db)
 }
 
-// SetupMSSQLFullSchema creates all tables needed for full WorkflowStore testing.
-// Includes schedules, concurrency_keys, promises, update_requests, idempotency_keys,
-// memory stats, and plugin_defs.
+// SetupMSSQLFullSchema is SetupMSSQLMinimalSchema. Kept as a separate name
+// because call sites across the repo use both; there is only ever one SQL
+// Server test schema now, the shipped one, so the distinction the two names
+// used to draw no longer exists.
 func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
-	SetupMSSQLMinimalSchema(t, db)
+	applyMSSQLSchemaFile(t, db)
+}
 
-	statements := []string{
-		// workflow_schedules
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_schedules')
-         CREATE TABLE workflow_schedules (
-             name NVARCHAR(900) NOT NULL PRIMARY KEY,
-             def_name NVARCHAR(900) NOT NULL,
-             entry_point NVARCHAR(MAX) NOT NULL DEFAULT '',
-             cron_expression NVARCHAR(MAX) NOT NULL,
-             input NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             enabled BIT NOT NULL DEFAULT 1,
-             next_run_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             last_run_at DATETIMEOFFSET,
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             tenant_id UNIQUEIDENTIFIER
-         )`,
+// applyMSSQLSchemaFile applies the shipped SQL Server migrations
+// (migrations/mssql/*.sql) via applyMigrations/migration.Runner, then checks
+// that the security policies those migrations install are still standing.
+//
+// This file used to hand-write ~330 lines of CREATE TABLE plus half a dozen
+// migrateMSSQL* helpers that re-derived individual ALTER TABLE statements
+// already present in migrations/mssql/. That copy had fallen behind the
+// shipped files it was meant to approximate -- it never carried
+// 021_schedule_timezone.sql or 022_schedule_policies.sql as migrations
+// (patching their effect in by hand instead, in
+// migrateMSSQLWorkflowDefsTenantID), and it never carried
+// 031_workflow_promises_security_policy.sql at all, so no test in the repo
+// could observe dbo.workflow_promises' tenant policy existing or failing to
+// (that migration's own header names this exact gap). Applying the real
+// directory removes the maintenance burden of keeping the copy current, not
+// merely the copy's past mistakes.
+//
+// requireMSSQLPoliciesIntact runs on every call, cheaply (one COUNT against a
+// catalogue view): migration.Runner treats a migration it has already
+// recorded as done regardless of what has since happened to the objects that
+// migration created, so a database that lost its security policies to
+// something else (an earlier version of mssql_rls_enforcement_test.go used to
+// drop them on cleanup) can never heal itself through the Runner alone, and
+// every tenant-scoped MSSQL test after that would silently run without the
+// backstop IMPROVEMENT-PLAN 2.71 is about. Once migrations/mssql/001_schema.sql
+// has been recorded as applied -- which is true after every successful call
+// here, first or repeat -- the seven base policies (eight, once 031 is
+// recorded) must exist; if they do not, something other than this package
+// removed them, and the test database needs to be dropped and recreated
+// rather than silently continuing without a backstop.
+func applyMSSQLSchemaFile(t *testing.T, db *sql.DB) {
+	t.Helper()
+	applyMigrations(t, db, DialectMSSQL)
+	requireMSSQLPoliciesIntact(t, db)
+}
 
-		// concurrency_keys
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'concurrency_keys')
-         CREATE TABLE concurrency_keys (
-             key_hash VARBINARY(900) NOT NULL PRIMARY KEY,
-             key_text NVARCHAR(MAX) NOT NULL,
-             workflow_id NVARCHAR(900) NOT NULL,
-             acquired_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             expires_at DATETIMEOFFSET NOT NULL,
-             tenant_id NVARCHAR(128)
-         )`,
-
-		// workflow_promises
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_promises')
-         CREATE TABLE workflow_promises (
-             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
-             promise_id NVARCHAR(900) NOT NULL,
-             tenant_id NVARCHAR(255) NOT NULL,
-             priority INTEGER NOT NULL DEFAULT 0,
-             promise_name NVARCHAR(MAX) NOT NULL,
-             status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
-             result NVARCHAR(MAX),
-             error_msg NVARCHAR(MAX),
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             resolved_at DATETIMEOFFSET,
-             PRIMARY KEY (workflow_id, promise_id)
-         )`,
-
-		// workflow_update_requests
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_update_requests')
-         CREATE TABLE workflow_update_requests (
-             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
-             update_name NVARCHAR(900) NOT NULL,
-             priority INTEGER NOT NULL DEFAULT 0,
-             payload NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             promise_id NVARCHAR(MAX),
-             status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
-             result NVARCHAR(MAX),
-             error_msg NVARCHAR(MAX),
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             completed_at DATETIMEOFFSET,
-             PRIMARY KEY (workflow_id, update_name)
-         )`,
-
-		// idempotency_keys
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'idempotency_keys')
-         CREATE TABLE idempotency_keys (
-             key_hash VARBINARY(900) NOT NULL PRIMARY KEY,
-             workflow_id NVARCHAR(MAX) NOT NULL,
-             result NVARCHAR(MAX),
-             error_msg NVARCHAR(MAX),
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             expires_at DATETIMEOFFSET NOT NULL DEFAULT DATEADD(DAY, 7, SYSUTCDATETIME())
-         )`,
-
-		// workflow_memory_samples (ID column uses IDENTITY, not as PK since it's BIGINT IDENTITY instead of BIGSERIAL)
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_samples')
-         CREATE TABLE workflow_memory_samples (
-             id BIGINT IDENTITY(1,1) PRIMARY KEY,
-             def_name NVARCHAR(MAX) NOT NULL,
-             sample_bytes BIGINT NOT NULL,
-             recorded_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME()
-         )`,
-
-		// workflow_memory_stats
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_stats')
-         CREATE TABLE workflow_memory_stats (
-             def_name NVARCHAR(900) NOT NULL PRIMARY KEY,
-             mean_bytes FLOAT(53) NOT NULL DEFAULT 0,
-             sample_count INTEGER NOT NULL DEFAULT 0,
-             alpha FLOAT(53) NOT NULL DEFAULT 0.3,
-             updated_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME()
-         )`,
-
-		// plugin_defs
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'plugin_defs')
-         CREATE TABLE plugin_defs (
-             name NVARCHAR(900) NOT NULL,
-             version NVARCHAR(900) NOT NULL,
-             wasm_bytes VARBINARY(MAX),
-             config NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             deprecated BIT NOT NULL DEFAULT 0,
-             PRIMARY KEY (name, version)
-         )`,
+// requireMSSQLPoliciesIntact fails loudly, with a fix, when the migrations
+// are recorded as applied but the security policies they install are not
+// present. See applyMSSQLSchemaFile's doc comment for why this can happen and
+// why the Runner cannot detect or repair it on its own.
+func requireMSSQLPoliciesIntact(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var policies int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sys.security_policies`).Scan(&policies); err != nil {
+		t.Fatalf("check security policies: %v", err)
 	}
-
-	for i, stmt := range statements {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("setup MSSQL full schema: statement %d: %v", i, err)
-		}
+	if policies > 0 {
+		return
 	}
+	var dbName string
+	_ = db.QueryRow(`SELECT DB_NAME()`).Scan(&dbName)
+	t.Fatalf("the SQL Server test database %q has the shipped migrations recorded as applied "+
+		"but no security policies, so something dropped them and the migration runner will not "+
+		"reinstall them (IMPROVEMENT-PLAN 2.71).\n\n"+
+		"Every tenant-scoped test in this binary would run without a backstop.\n\n"+
+		"Drop it once and re-run:\n\n"+
+		"    DROP DATABASE %s; CREATE DATABASE %s;\n", dbName, dbName, dbName)
 }
 
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.
 // Uses DELETE with table existence checks. Order respects FK constraints.
+//
+// Deletes through an administrative connection, because on a database built
+// from the shipped migrations the tenant filter predicate applies to every
+// principal -- sa included. A plain pool with no session context matches no
+// rows at all, so every DELETE here removed nothing and reported no error, and
+// the rows stayed to collide with the next test's fixtures. That was §2.71's
+// blocker; MSSQLAdminDB returns db unchanged when the database has no policies.
 func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 	t.Helper()
+	db = MSSQLAdminDB(t, db)
 
 	// Order matters due to FK constraints — delete child tables first.
+	//
+	// Entries may be schema-qualified, and tenant_api_keys has to be: this
+	// branch drops the duplicate dbo pair, so the only such table left is
+	// admin.tenant_api_keys. Unqualified, the DELETE resolved against the
+	// connecting principal's default schema and failed with "Invalid object
+	// name" -- while the existence check above it passed, because sys.tables is
+	// keyed on name alone and happily found the admin one.
 	tables := []string{
+		"admin.tenant_api_keys",
+		"workflow_tags",
+		"workflow_routing",
 		"workflow_update_requests",
 		"workflow_promises",
 		"workflow_signals",
@@ -262,14 +125,23 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 	}
 
 	for _, table := range tables {
+		// Split "admin.tenant_api_keys" so the existence check can match on
+		// schema as well as name. Checking on name alone is what let the
+		// unqualified entry look present and then fail to delete.
+		schema, name := "dbo", table
+		if i := strings.IndexByte(table, '.'); i >= 0 {
+			schema, name = table[:i], table[i+1:]
+		}
 		var exists int
-		err := db.QueryRow("SELECT COUNT(1) FROM sys.tables WHERE name = @p1", table).Scan(&exists)
+		err := db.QueryRow(`SELECT COUNT(1) FROM sys.tables t
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = @p1 AND t.name = @p2`, schema, name).Scan(&exists)
 		if err != nil {
 			t.Logf("cleanup: check table %s: %v", table, err)
 			continue
 		}
 		if exists > 0 {
-			if _, err := db.Exec(fmt.Sprintf("DELETE FROM [%s]", table)); err != nil {
+			if _, err := db.Exec(fmt.Sprintf("DELETE FROM [%s].[%s]", schema, name)); err != nil {
 				t.Logf("cleanup: delete from %s: %v", table, err)
 			}
 		}

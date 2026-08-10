@@ -1,6 +1,22 @@
 package engine
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrFenceLost is returned by the generation-fenced workflow lifecycle
+// methods (CompleteWorkflow, FailWorkflow, MoveToDeadLetterQueue,
+// ContinueAsNew, FinalizeWorkflowSegment) when the fencing UPDATE affected
+// zero rows -- i.e. the (workflow_id, worker_id, generation) tuple the
+// caller presented no longer matches the row in the database. This happens
+// when a worker stalls long enough to be reaped (ReapStaleInstances resets
+// status/assigned_to and bumps generation) and is then reclaimed by another
+// worker before the stalled worker's segment finishes and tries to persist
+// its result. It is an expected, normal occurrence under reaping -- callers
+// should treat it as "someone else now owns this workflow" and return
+// cleanly rather than retrying or surfacing it as a failure.
+var ErrFenceLost = errors.New("fence lost: workflow reassigned to another worker (generation mismatch)")
 
 // ErrorCode classifies errors for retry decisions.
 type ErrorCode int

@@ -28,7 +28,7 @@ Design notes
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 
 class CleatCheckpointer:
@@ -55,7 +55,7 @@ class CleatCheckpointer:
     # Checkpoint retrieval
     # ------------------------------------------------------------------
 
-    def get_tuple(self, config: dict[str, Any]) -> Optional[Any]:
+    def get_tuple(self, config: dict[str, Any]) -> Any | None:
         """Get a checkpoint tuple from cleat state.
 
         Parameters
@@ -76,7 +76,10 @@ class CleatCheckpointer:
         key = f"langgraph_ckpt_{thread_id}"
         try:
             data = self._h.get_state(key, dict)
-        except Exception:
+        # Deliberate: a checkpoint that cannot be read is reported as absent, so
+        # langgraph starts a fresh thread rather than propagating a host error
+        # into a caller that has no way to act on it.
+        except Exception:  # noqa: BLE001
             return None
 
         if not data:
@@ -191,7 +194,9 @@ class CleatCheckpointer:
         prefix = f"langgraph_write_{thread_id}_"
         try:
             keys = self._h.list_state(prefix)
-        except Exception:
+        # Deliberate: same reasoning as get_tuple above -- unreadable state
+        # reads as empty state.
+        except Exception:  # noqa: BLE001
             return []
 
         writes: list[Any] = []
@@ -200,7 +205,9 @@ class CleatCheckpointer:
                 raw = self._h.get_state(k, dict)
                 if raw:
                     writes.append(raw)
-            except Exception:
+            # Deliberate: skip the one key that will not decode rather than
+            # lose every other pending write for this thread.
+            except Exception:  # noqa: BLE001
                 pass
         return writes
 
@@ -210,11 +217,11 @@ class CleatCheckpointer:
 
     def list(
         self,
-        config: Optional[dict[str, Any]],
+        config: dict[str, Any] | None,
         *,
-        filter: Optional[dict[str, Any]] = None,
-        before: Optional[dict[str, Any]] = None,
-        limit: Optional[int] = None,
+        filter: dict[str, Any] | None = None,
+        before: dict[str, Any] | None = None,
+        limit: int | None = None,
     ) -> list[Any]:
         """List checkpoints for a thread.
 
@@ -244,7 +251,8 @@ class CleatCheckpointer:
         prefix = f"langgraph_ckpt_{thread_id}"
         try:
             keys = self._h.list_state(prefix)
-        except Exception:
+        # Deliberate: an unlistable prefix reads as no checkpoints.
+        except Exception:  # noqa: BLE001
             return []
 
         results: list[Any] = []
@@ -255,7 +263,9 @@ class CleatCheckpointer:
                     ckpt_tuple = self._deserialize_checkpoint_tuple(raw)
                     if ckpt_tuple is not None:
                         results.append(ckpt_tuple)
-            except Exception:
+            # Deliberate: one corrupt checkpoint must not hide the rest of the
+            # thread's history, which is what the caller is iterating for.
+            except Exception:  # noqa: BLE001
                 pass
 
         # Sort by checkpoint_id descending (newest first).
@@ -274,7 +284,7 @@ class CleatCheckpointer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _get_thread_id(config: dict[str, Any]) -> Optional[str]:
+    def _get_thread_id(config: dict[str, Any]) -> str | None:
         """Extract ``thread_id`` from a LangGraph config."""
         if not isinstance(config, dict):
             return None
@@ -346,12 +356,12 @@ class CleatCheckpointer:
             """Duck-typed CheckpointTuple."""
 
             __slots__ = (
-                "config",
                 "checkpoint",
+                "checkpoint_id",
+                "config",
                 "metadata",
                 "parent_config",
                 "pending_writes",
-                "checkpoint_id",
             )
 
         result = _CkptTuple()

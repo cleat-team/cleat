@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -116,7 +116,7 @@ func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
 
-func (*fakeConn) Close() error { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
@@ -767,7 +767,7 @@ func createTestWebhook(t *testing.T, handler http.Handler, url, secret string) u
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("createTestWebhook: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("createTestWebhook: failed to decode: %v", err)
 	}
@@ -876,7 +876,8 @@ func TestRegisterRoutes(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestCreateAndGetWebhook creates a webhook via the HTTP route and then
-// retrieves it, verifying all fields are preserved.
+// retrieves it, verifying non-secret fields are preserved and the HMAC
+// secret is redacted rather than echoed back.
 func TestCreateAndGetWebhook(t *testing.T) {
 	p, store := setupTestPlugin(t)
 	handler := buildHandler(t, p, store)
@@ -892,18 +893,76 @@ func TestCreateAndGetWebhook(t *testing.T) {
 		t.Fatalf("GET webhook: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("GET webhook: failed to decode: %v", err)
 	}
 	if resp["url"] != "https://example.com/hook" {
 		t.Errorf("expected url %q, got %q", "https://example.com/hook", resp["url"])
 	}
-	if resp["secret"] != "my-secret" {
-		t.Errorf("expected secret %q, got %q", "my-secret", resp["secret"])
+	if resp["secret"] != plugin.RedactedPlaceholder {
+		t.Errorf("expected secret to be redacted as %q, got %q", plugin.RedactedPlaceholder, resp["secret"])
 	}
 	if resp["enabled"] != true {
 		t.Errorf("expected enabled=true, got %v", resp["enabled"])
+	}
+}
+
+// TestListAndGetWebhooksDoNotLeakSecret verifies that neither the list nor
+// the get endpoint ever returns the real HMAC secret in the response body --
+// not as the "secret" field value, and not anywhere else in the body (which
+// would catch a future regression that renamed the field but kept leaking
+// the raw value).
+func TestListAndGetWebhooksDoNotLeakSecret(t *testing.T) {
+	p, store := setupTestPlugin(t)
+	handler := buildHandler(t, p, store)
+
+	const realSecret = "super-secret-hmac-key"
+	id := createTestWebhook(t, handler, "https://example.com/hook", realSecret)
+
+	// GET /webhooks/{id}
+	req := authedRequest("GET", "/webhooks/"+id.String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET webhook: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) {
+		t.Errorf("GET response leaked the real secret: %s", rec.Body.String())
+	}
+	var getResp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &getResp); err != nil {
+		t.Fatalf("GET webhook: failed to decode: %v", err)
+	}
+	if getResp["secret"] != plugin.RedactedPlaceholder {
+		t.Errorf("GET: expected secret %q, got %q", plugin.RedactedPlaceholder, getResp["secret"])
+	}
+
+	// GET /webhooks (list)
+	req = authedRequest("GET", "/webhooks", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST webhooks: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) {
+		t.Errorf("LIST response leaked the real secret: %s", rec.Body.String())
+	}
+	var listResp []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("LIST webhooks: failed to decode: %v", err)
+	}
+	found := false
+	for _, w := range listResp {
+		if w["id"] == id.String() {
+			found = true
+			if w["secret"] != plugin.RedactedPlaceholder {
+				t.Errorf("LIST: expected secret %q, got %q", plugin.RedactedPlaceholder, w["secret"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected webhook %s in list response", id)
 	}
 }
 
@@ -922,7 +981,7 @@ func TestListWebhooks(t *testing.T) {
 		t.Fatalf("LIST webhooks: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var list []interface{}
+	var list []any
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("LIST: failed to decode: %v", err)
 	}
@@ -960,7 +1019,7 @@ func TestUpdateWebhook(t *testing.T) {
 		t.Fatalf("UPDATE webhook: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp["url"] != "https://updated.example.com" {
 		t.Errorf("expected updated url %q, got %q", "https://updated.example.com", resp["url"])
@@ -1025,7 +1084,7 @@ func TestHostFunctionSendWebhook(t *testing.T) {
 		t.Fatalf("sendWebhook: %v", err)
 	}
 
-	var out map[string]interface{}
+	var out map[string]any
 	if err := json.Unmarshal([]byte(output), &out); err != nil {
 		t.Fatalf("sendWebhook output: failed to decode: %v", err)
 	}
@@ -1154,14 +1213,14 @@ func TestWebhookDelivery(t *testing.T) {
 	past := now.Add(-1 * time.Hour)
 	deliveryID := uuid.New()
 	store.deliveries = append(store.deliveries, &testDelivery{
-		id:           deliveryID,
-		webhookID:    webhookID,
-		eventType:    "test.event",
-		payload:      []byte(`{"msg":"hello"}`),
-		status:       "pending",
-		attemptCount: 0,
+		id:            deliveryID,
+		webhookID:     webhookID,
+		eventType:     "test.event",
+		payload:       []byte(`{"msg":"hello"}`),
+		status:        "pending",
+		attemptCount:  0,
 		nextAttemptAt: &past,
-		createdAt:    past,
+		createdAt:     past,
 	})
 	store.mu.Unlock()
 
@@ -1243,7 +1302,7 @@ func TestListDeliveries(t *testing.T) {
 		t.Fatalf("LIST deliveries: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var deliveries []interface{}
+	var deliveries []any
 	if err := json.Unmarshal(rec.Body.Bytes(), &deliveries); err != nil {
 		t.Fatalf("LIST deliveries: failed to decode: %v", err)
 	}
@@ -1328,7 +1387,6 @@ func (r *testFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFun
 	r.funcs[opts.Name] = opts
 	return nil
 }
-
 
 // ---- joinSetClauses tests ----
 

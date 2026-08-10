@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -26,7 +26,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -130,7 +130,7 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 		"sequence", sequence,
 	)
 
-	p.writeJSON(w, 201, map[string]interface{}{
+	p.writeJSON(w, 201, map[string]any{
 		"stream_id": streamID,
 		"sequence":  sequence,
 	})
@@ -274,7 +274,7 @@ func (p *Plugin) handleSSE(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 
-				payload, _ := json.Marshal(map[string]interface{}{
+				payload, _ := json.Marshal(map[string]any{
 					"sequence": seq,
 					"event":    event,
 				})

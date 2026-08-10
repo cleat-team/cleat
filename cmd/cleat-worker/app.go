@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -15,7 +14,13 @@ import (
 // StartAPIServer creates and starts the HTTP API server with the given
 // configuration, worker, and plugin chain. It runs in a background goroutine
 // and shuts down when ctx is cancelled.
-func StartAPIServer(cfg *Config, w *Worker, plugMux, plugHandler http.Handler, plugList interface{}, db *sql.DB) {
+//
+// factory is what lets handlers scope each request to the tenant that
+// authenticated it; without it an authenticated request cannot be served at all
+// (storeFor refuses rather than falling back to the default tenant). It is a
+// parameter rather than a Config field because Config holds flag-derived values
+// and this is a live dependency.
+func StartAPIServer(cfg *Config, w *Worker, plugMux, plugHandler http.Handler, plugList any, db *sql.DB, factory engine.StoreFactory) {
 	if cfg.APIAddr == "" {
 		return
 	}
@@ -25,6 +30,9 @@ func StartAPIServer(cfg *Config, w *Worker, plugMux, plugHandler http.Handler, p
 		worker:      w,
 		maxBodySize: cfg.MaxBodySize,
 		db:          db,
+		factory:     factory,
+		taskQueues:  cfg.TaskQueues,
+		requireAuth: cfg.RequireAuth,
 	}
 
 	mux := plugMux
@@ -52,9 +60,9 @@ func StartAPIServer(cfg *Config, w *Worker, plugMux, plugHandler http.Handler, p
 	}
 
 	go func() {
-		log.Printf("[worker %s] HTTP API listening on %s", w.id, cfg.APIAddr)
+		w.logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", w.id, "addr", cfg.APIAddr)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-			log.Printf("[worker %s] HTTP server error: %v", w.id, err)
+			w.logger.ErrorContext(context.Background(), "HTTP server error", "worker_id", w.id, "error", err)
 		}
 	}()
 
@@ -76,17 +84,29 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
 	mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
 	mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
+
+	// Instance inspection endpoints (always on behind auth).
+	mux.HandleFunc("/api/instances/", api.handleInstancesRoutes)
+
+	// Admin API endpoints. Destructive operations are additionally gated
+	// behind --enable-admin-api at request time in handleAdminRoutes (see
+	// api_admin.go), so the route itself can always be registered.
+	mux.HandleFunc("/api/admin/instances/", api.handleAdminRoutes)
 	return mux
 }
 
 // ---- Dead Letter Queue handlers ----
 
 func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodGet {
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
-	workflows, err := s.store.ListWorkflows(r.Context(), engine.WorkflowFilter{Status: "dead_lettered", Limit: 100})
+	workflows, err := st.ListWorkflows(r.Context(), engine.WorkflowFilter{Status: "dead_lettered", Limit: 100})
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -122,8 +142,12 @@ func (s *apiServer) handleDeadLetters(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	// Fetch the dead-lettered workflow instance.
-	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -138,7 +162,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	}
 
 	// Create a new run from the dead-lettered workflow's definition and input.
-	versions, verr := s.store.ListVersions(r.Context(), wf.DefName)
+	versions, verr := st.ListVersions(r.Context(), wf.DefName)
 	if verr != nil {
 		s.writeError(w, 500, verr.Error())
 		return
@@ -148,7 +172,11 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	runID, alreadyExisted, serr := s.store.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, "", engine.DefaultTenantUUID, 0)
+	// s.tenantFor, not engine.DefaultTenantUUID: reprocessing a dead-lettered
+	// workflow re-created it under the default tenant regardless of whose
+	// workflow it was, so a tenant's own retry moved its run into another
+	// tenant's scope.
+	runID, alreadyExisted, serr := st.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, "", s.tenantFor(r), 0)
 	if serr != nil {
 		s.writeError(w, 500, serr.Error())
 		return
@@ -162,6 +190,10 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 }
 
 func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
 		Reason string `json:"reason"`
 	}
@@ -169,7 +201,7 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 		r.Body = http.MaxBytesReader(w, r.Body, int64(1<<10)) // 1 KB
 		json.NewDecoder(r.Body).Decode(&req)
 	}
-	if err := s.store.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
+	if err := st.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
@@ -177,11 +209,15 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 }
 
 func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodPost {
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
-	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -194,7 +230,7 @@ func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, 400, "workflow is not dead-lettered, status="+wf.Status)
 		return
 	}
-	if err := s.store.RetryWorkflow(r.Context(), id); err != nil {
+	if err := st.RetryWorkflow(r.Context(), id); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // PublishEvent stores an event, dispatches it to matching subscriptions,
@@ -19,13 +19,13 @@ import (
 // through the HTTP API.
 func PublishEvent(
 	ctx context.Context,
-db plugin.PluginDB,
+	db plugin.PluginDB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	eventID uuid.UUID,
 	tenantID uuid.UUID,
 	eventType string,
-	eventData map[string]interface{},
+	eventData map[string]any,
 ) (int, error) {
 	eventDataJSON, err := json.Marshal(eventData)
 	if err != nil {
@@ -76,13 +76,13 @@ db plugin.PluginDB,
 // errors are logged but do not halt processing).
 func triggerMatchingWorkflows(
 	ctx context.Context,
-db plugin.PluginDB,
+	db plugin.PluginDB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	eventID uuid.UUID,
 	tenantID uuid.UUID,
 	eventType string,
-	eventData map[string]interface{},
+	eventData map[string]any,
 ) (int, error) {
 	rows, err := db.Query(ctx, plugin.Rebind(`
 		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, enabled, created_at, max_retries
@@ -111,6 +111,18 @@ db plugin.PluginDB,
 		if sub.FilterExpr != "" && sub.FilterExpr != "true" {
 			ok, err := EvaluateFilter(sub.FilterExpr, eventData)
 			if err != nil {
+				// CodeQL go/clear-text-logging (alert #14) flags this: eventData
+				// here can be built from inbound webhook HTTP headers
+				// (plugins/webhookingest/routes.go), and eventData is a
+				// parameter to EvaluateFilter, so the tool conservatively
+				// treats err as tainted by header content. It never actually
+				// is: every error path in filter.go's tokenizer, parser, and
+				// evaluator (EvaluateFilter, evalPath, compareValues,
+				// matchOperators, etc.) only formats the filter expression's
+				// own tokens/paths/operators and Go type names (%T) into its
+				// error strings — none of them interpolate an eventData
+				// value. Verified by reading every fmt.Errorf in that file.
+				// Dismissed as a false positive; see alert #14.
 				logger.Error("event-triggers: filter evaluation error",
 					"subscription_id", sub.ID,
 					"filter_expr", sub.FilterExpr,
@@ -164,7 +176,7 @@ db plugin.PluginDB,
 // an event has been successfully stored.
 func signalAwaiters(
 	ctx context.Context,
-db plugin.PluginDB,
+	db plugin.PluginDB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	tenantID uuid.UUID,

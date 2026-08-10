@@ -1,8 +1,17 @@
 # Database Backends
 
+> Corrected 2026-08-09: every `internal/host/...` path below has been
+> `engine/...` since commit `3eeb74e` (2026-06-01) — see CLAUDE.md's note on
+> paths in older commits. This included four `go test ./internal/host/...`
+> commands that could not run at all. Also corrected the PostgreSQL minimum
+> version (was "14+", `tiers.yaml` grants `>=16` as of 2026-08-08) and the
+> `WorkflowStore` method count (was "74", actually 97 as of 2026-08-09 —
+> `awk '/type WorkflowStore interface/,/^}/' engine/store_interface.go | grep
+> -cE '^\s+[A-Za-z][A-Za-z0-9_]*\('`).
+
 Cleat's durable workflow engine runs on three production-quality relational
 database backends. All three provide the full `WorkflowStore` interface
-(74 methods) behind a common `StoreFactory` abstraction — application code
+(97 methods) behind a common `StoreFactory` abstraction — application code
 never needs to know which database is in use. Choose the backend that fits
 your existing infrastructure.
 
@@ -10,14 +19,14 @@ your existing infrastructure.
 
 ## 1. Overview
 
-The `WorkflowStore` interface (`internal/host/db.go`) defines every operation
+The `WorkflowStore` interface (`engine/db.go`) defines every operation
 the engine needs: workflow lifecycle, event history, signals, scheduling,
 promises, concurrency control, version management, memory statistics, and
 tenant isolation. Each backend has a complete implementation:
 
-- **PostgreSQLStore** (`internal/host/db.go`) — the original implementation
-- **MySQLStore** (`internal/host/mysql_store.go`) — MySQL 8.0+, MariaDB 10.6+
-- **MSSQLStore** (`internal/host/mssql_store.go`) — SQL Server 2017+, Azure SQL
+- **PostgreSQLStore** (`engine/db.go`) — the original implementation
+- **MySQLStore** (`engine/mysql_store.go`) — MySQL 8.0+, MariaDB 10.6+
+- **MSSQLStore** (`engine/mssql_store.go`) — SQL Server 2022+, Azure SQL
 
 Each backend also has a `StoreFactory` that encapsulates connection management,
 schema setup, and tenant isolation:
@@ -40,16 +49,16 @@ type StoreFactory interface {
 
 | Backend | Minimum Version | Recommended Version | Notes |
 |---------|----------------|---------------------|-------|
-| PostgreSQL | 14 | 16 | RLS, `SKIP LOCKED`, `gen_random_uuid()`, and `JSONB` all available since 9.5+. 14+ ensures pgcrypto support. |
+| PostgreSQL | 16 | 16 | RLS, `SKIP LOCKED`, `gen_random_uuid()`, and `JSONB` all available since 9.5+, and nothing in the codebase checks `server_version`. `tiers.yaml` (DECIDED 2026-08-08) states the claim as 16+ because that is what CI has ever actually tested, not because anything below it is known to fail — see `tiers.yaml`'s `dialect_versions` comment for the full reasoning. |
 | MySQL | 8.0 | 8.4 | `SKIP LOCKED` requires 8.0+. `NOW(6)` for microsecond precision. |
 | MariaDB | 10.6 | 11.x | Tested alongside MySQL 8.4. Supports `SKIP LOCKED`. Does not support RLS. |
-| SQL Server | 2017 | 2022 | `STRING_SPLIT` (used for task queue filtering) requires compatibility level 130 (2016+). Azure SQL Database fully supported. |
+| SQL Server | 2022 | 2022 | `ISJSON(x, VALUE)` — used by the payload CHECK constraints so a JSON scalar is accepted, as PostgreSQL and MySQL do — requires 2022. Azure SQL Database fully supported. See IMPROVEMENT-PLAN §3.18. |
 
 ---
 
 ## 3. Feature Comparison
 
-| Capability | PostgreSQL | MySQL 8.0+ / MariaDB | SQL Server 2017+ |
+| Capability | PostgreSQL | MySQL 8.0+ / MariaDB | SQL Server 2022+ |
 |------------|-----------|----------------------|-------------------|
 | **Tenant isolation** | RLS via `set_config()` + `CREATE POLICY` | Separate database per tenant (application-level `WHERE tenant_id = ?`) | RLS via `sp_set_session_context()` + `CREATE SECURITY POLICY` |
 | **Atomic claim read** | `UPDATE ... RETURNING *` (single statement) | SELECT + UPDATE + SELECT (three statements in a transaction) | `UPDATE ... OUTPUT INSERTED.*` (single statement) |
@@ -361,7 +370,7 @@ This is a true database-enforced security boundary.
 **How it works:**
 
 1. **Session setup**: Each transaction calls `set_config('cleat.tenant_id', $1, true)`
-   (`internal/host/db.go`, `setRLSOnTx`). This sets a session-local variable
+   (`engine/db.go`, `setRLSOnTx`). This sets a session-local variable
    scoped to the current transaction.
 
 2. **RLS policies**: Migration `002_tenant_foundation.sql` enables RLS on all
@@ -424,7 +433,7 @@ table-valued function (TVF) that checks `SESSION_CONTEXT()`.
 
 **How it works:**
 
-1. **Connection-level setup**: The `tenantSessionConnector` (`internal/host/mssql_store.go`)
+1. **Connection-level setup**: The `tenantSessionConnector` (`engine/mssql_store.go`)
    wraps every new connection and calls
    `EXEC sp_set_session_context @key=N'tenant_id', @value=N'<tenantID>'`
    at connection open time.
@@ -782,8 +791,8 @@ Azure SQL automatically manages tempdb and most system-level settings. Focus on:
 
 ### How Tests Detect Backends
 
-Tests in `internal/host/...` use environment variables via the `TestDB` helper
-in `internal/host/testutil/schema.go`:
+Tests in `engine/...` use environment variables via the `TestDB` helper
+in `engine/testutil/schema.go`:
 
 | Backend | Environment Variable | Default |
 |---------|---------------------|---------|
@@ -811,15 +820,15 @@ docker compose -f docker-compose.cluster.yml up -d postgres mysql mssql
 ```bash
 # PostgreSQL (always runs if PostgreSQL is available)
 CLEAT_TEST_POSTGRES="postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
-  go test -count=1 -timeout=300s ./internal/host/...
+  go test -count=1 -timeout=300s ./engine/...
 
 # MySQL
 CLEAT_TEST_MYSQL="root:cleat@tcp(127.0.0.1:3306)/cleat?parseTime=true&multiStatements=true" \
-  go test -count=1 -timeout=300s ./internal/host/...
+  go test -count=1 -timeout=300s ./engine/...
 
 # SQL Server
 CLEAT_TEST_MSSQL="sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master&connection+timeout=30" \
-  go test -count=1 -timeout=300s ./internal/host/...
+  go test -count=1 -timeout=300s ./engine/...
 ```
 
 **Run against all three backends:**
@@ -828,7 +837,7 @@ CLEAT_TEST_MSSQL="sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master&co
 CLEAT_TEST_POSTGRES="postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
 CLEAT_TEST_MYSQL="root:cleat@tcp(127.0.0.1:3306)/cleat?parseTime=true&multiStatements=true" \
 CLEAT_TEST_MSSQL="sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master&connection+timeout=30" \
-  go test -race -count=1 -timeout=300s ./internal/host/...
+  go test -race -count=1 -timeout=300s ./engine/...
 ```
 
 ### CI Workflow
@@ -865,7 +874,7 @@ and on pull requests targeting `main`.
 
 ### Test Infrastructure Reference
 
-Test helpers are in `internal/host/testutil/schema.go`:
+Test helpers are in `engine/testutil/schema.go`:
 
 | Function | Description |
 |----------|-------------|

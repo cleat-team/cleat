@@ -20,11 +20,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
-		"github.com/cleat-team/cleat/engine"
-	)
+	"github.com/google/uuid"
+)
 
 // ---------------------------------------------------------------------------
 // In-memory event store (replaces PostgreSQL entirely for testing)
@@ -39,12 +39,12 @@ type eventRow struct {
 }
 
 type fakeEventStore struct {
-	mu          sync.RWMutex
-	events      []eventRow // appended in order
-	apiKeys     map[string]string // key_hash_hex -> tenant_id string
-	failOnExec  bool  // when true, ExecContext returns an error
-	failOnRead  bool  // when true, read queries return an error
-	failOnAppend bool // when true, INSERT queries return an error
+	mu           sync.RWMutex
+	events       []eventRow        // appended in order
+	apiKeys      map[string]string // key_hash_hex -> tenant_id string
+	failOnExec   bool              // when true, ExecContext returns an error
+	failOnRead   bool              // when true, read queries return an error
+	failOnAppend bool              // when true, INSERT queries return an error
 }
 
 func newFakeEventStore() *fakeEventStore {
@@ -83,7 +83,7 @@ func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
 
-func (*fakeConn) Close() error { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
@@ -539,7 +539,7 @@ func TestAppendAndRead(t *testing.T) {
 		t.Fatalf("APPEND: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var appendResp map[string]interface{}
+	var appendResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &appendResp); err != nil {
 		t.Fatalf("APPEND: failed to decode: %v", err)
 	}
@@ -558,7 +558,7 @@ func TestAppendAndRead(t *testing.T) {
 		t.Fatalf("READ: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("READ: failed to decode: %v", err)
 	}
@@ -587,7 +587,7 @@ func TestMultipleEvents(t *testing.T) {
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("APPEND %d: expected 201, got %d: %s", i, rec.Code, rec.Body.String())
 		}
-		var resp map[string]interface{}
+		var resp map[string]any
 		json.Unmarshal(rec.Body.Bytes(), &resp)
 		if resp["sequence"].(float64) != float64(i+1) {
 			t.Errorf("APPEND %d: expected sequence %d, got %v", i, i+1, resp["sequence"])
@@ -599,7 +599,7 @@ func TestMultipleEvents(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &results)
 	if len(results) != 3 {
 		t.Fatalf("READ: expected 3 events, got %d", len(results))
@@ -632,7 +632,7 @@ func TestReadFromSequence(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &events)
 	if len(events) != 2 {
 		t.Fatalf("READ from_seq=1: expected 2 events, got %d: %+v", len(events), events)
@@ -669,7 +669,7 @@ func TestEmptyStream(t *testing.T) {
 		t.Fatalf("READ empty stream: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var events []interface{}
+	var events []any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("READ: failed to decode: %v", err)
 	}
@@ -803,7 +803,7 @@ func TestAppendDuplicateEvents(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &events)
 	if len(events) != 2 {
 		t.Fatalf("READ: expected 2 events (current behavior, no idempotency), got %d", len(events))
@@ -889,7 +889,7 @@ func TestHandleReadInvalidFromSequence(t *testing.T) {
 		t.Fatalf("READ with invalid from_sequence: expected 200, got %d", rec.Code)
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("READ: failed to decode: %v", err)
 	}
@@ -919,7 +919,7 @@ func TestHandleReadInvalidLimit(t *testing.T) {
 		t.Fatalf("READ with invalid limit: expected 200, got %d", rec.Code)
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("READ: failed to decode: %v", err)
 	}
@@ -950,7 +950,7 @@ func TestHandleReadLimitTooHigh(t *testing.T) {
 		t.Fatalf("READ with high limit: expected 200, got %d", rec.Code)
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("READ: failed to decode: %v", err)
 	}
@@ -981,7 +981,7 @@ func TestHandleReadFromZero(t *testing.T) {
 		t.Fatalf("READ from_seq=0: expected 200, got %d", rec.Code)
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &events)
 	if len(events) != 2 {
 		t.Errorf("from_seq=0: expected 2 events, got %d", len(events))
@@ -1006,7 +1006,7 @@ func TestHandleReadNegativeFromSequence(t *testing.T) {
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &events)
 	if len(events) != 1 {
 		t.Errorf("from_seq=-5: expected 1 event, got %d", len(events))
