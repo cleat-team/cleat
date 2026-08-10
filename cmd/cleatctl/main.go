@@ -17,6 +17,7 @@
 //	deploy workflow <name> <wasm>    — deploy a new workflow WASM binary
 //	deploy plugin <name> <wasm>      — deploy a plugin WASM binary
 //	drop-tenant <tenant-id>          — permanently delete a tenant and all its data
+//	revoke-api-key [flags]           — revoke a cleat API key (credential rotation)
 package main
 
 import (
@@ -88,6 +89,8 @@ func main() {
 		runCheckDB(ctx, db, args[1:])
 	case "drop-tenant":
 		runDropTenant(ctx, db, args[1:])
+	case "revoke-api-key":
+		runRevokeAPIKey(ctx, db, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -113,6 +116,7 @@ Commands:
   check-db [--verbose]            verify database connectivity and schema health
   debug <id> [--entry-point <n>] [--watch]  step-through workflow event replay
   drop-tenant <tenant-id> [--dry-run] [--yes]  permanently delete a tenant and all its data
+  revoke-api-key [--key-id|--key-hash|--key-stdin|--list]  revoke an API key
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)
