@@ -36,6 +36,26 @@ When publishing results, include:
 - **Go**: `go version` output
 - **PostgreSQL** (if applicable): version, config (`shared_buffers`, `max_connections`)
 
+### Recommended hardware
+
+For reproducible results, use a dedicated instance with no other workloads:
+
+- **AWS i4i.2xlarge** (8 vCPUs, 64 GB RAM, 1 x 950 GB NVMe SSD) or equivalent
+  bare-metal machine
+- **CPU**: Intel Xeon (Ice Lake) at 3.5 GHz sustained, Turbo Boost disabled
+- **RAM**: 64 GB DDR4
+- **Disk**: NVMe SSD with XFS or ext4
+- **OS**: Ubuntu 22.04 LTS or later, kernel 6.x
+- **Go**: 1.25+
+- **PostgreSQL**: 16.x with `shared_buffers = 16GB`, `work_mem = 64MB`
+
+Disable CPU frequency scaling and Turbo Boost before benchmarking:
+
+```bash
+sudo cpupower frequency-set --governor performance
+echo 0 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
+```
+
 ## Metrics collected
 
 Each benchmark reports (via `testing.B.ReportMetric`):
@@ -107,6 +127,120 @@ Additional metrics to collect manually:
   sudo cpupower frequency-set --governor performance
   echo 0 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
   ```
+
+## How to contribute new benchmark scenarios
+
+New benchmark scenarios follow a four-step process:
+
+### 1. Define the workflow pattern
+
+Create a new file in `benchmarks/workflows/` that implements the pattern.
+Follow the conventions in existing benchmarks:
+
+- The workflow must accept a `*testing.B` and a configuration parameter.
+- Use the `engine.NewEngine()` API (or the in-process test harness) to
+  isolate framework overhead.
+- Register all service calls as no-op stubs that return immediately.
+- Name the file after the pattern (e.g. `accumulator.go`, `nested.go`).
+
+```go
+// Example skeleton:
+func BenchmarkAccumulator(b *testing.B, steps int) {
+    for i := 0; i < b.N; i++ {
+        // ... workflow logic ...
+    }
+}
+```
+
+### 2. Register the scenario
+
+Add the new benchmark function to the test table in `benchmarks/bench_test.go`.
+Follow the existing pattern of defining configurations (step counts,
+fan-out sizes, etc.):
+
+```go
+// In benchmarks/bench_test.go
+{"Accumulator", "%s/steps=%d", []int{10, 100}},
+```
+
+### 3. Port to comparison frameworks
+
+For Temporal and DBOS comparisons, port the same pattern to each framework's
+SDK:
+
+- **Temporal**: `benchmarks/comparative/workflows/<pattern>/temporal/`
+- **DBOS**: `benchmarks/comparative/workflows/<pattern>/dbos/`
+
+Include a short README per comparison directory with framework-specific
+build and run instructions.
+
+### 4. Run and validate
+
+Execute the new benchmark and verify the output format:
+
+```bash
+go test -bench=BenchmarkAccumulator -benchtime=10s ./benchmarks/
+```
+
+Ensure the output includes `wf/s` and `steps/s` metrics. Verify that ported
+Temporal and DBOS versions produce structurally identical results (same
+configuration parameters, same measurement windows, same concurrency model).
+
+## Result interpretation and variance troubleshooting
+
+### Reading the metrics
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `wf/s` | End-to-end throughput for the whole workflow. Higher is better. |
+| `steps/s` | Durable API call throughput. Higher means the framework handles per-call overhead efficiently. |
+| `ns/op` | Wall-clock time per workflow. Lower is better. |
+| `B/op` | Memory allocated per workflow. High values may indicate history-buffer bloat. |
+
+### Expected variance
+
+- **Within-run** (< 2%): normal jitter from Go GC and OS scheduling.
+- **Between-run** (2-5%): expected when runs are not perfectly isolated.
+  Run 3 times and report the median.
+- **Between-machine** (5-20%): differences in CPU model, RAM speed, or
+  PostgreSQL configuration. Normalise by including full hardware specs
+  (see [Hardware to record](#hardware-to-record)).
+- **Between-day** (10-30%): OS updates, autovacuum, or SSD wear. Re-run
+  the full suite if publishing comparative results.
+
+### Troubleshooting high variance
+
+If variance exceeds 5% across three consecutive runs:
+
+1. **Check CPU governance**: `cpupower frequency-info` should show
+   `performance` governor. Turbo Boost must be disabled.
+2. **Check thermal throttling**: `sensors` or `turbostat` should not show
+   frequency drops during the benchmark window.
+3. **Check PostgreSQL activity**: Run `SELECT * FROM pg_stat_activity`
+   during the benchmark. Autovacuum or concurrent queries add noise.
+4. **Check background processes**: `top`, `iotop`, and `nethogs` should
+   show only the benchmark and PostgreSQL processes.
+5. **Pin to dedicated cores**: `taskset -c 0-3` for the benchmark and
+   `taskset -c 4-7` for PostgreSQL. This eliminates context-switching.
+6. **Increase benchmark time**: From 30s to 60s or 120s. Longer windows
+   smooth out GC pauses and OS scheduling jitter.
+7. **Add warm-up**: Include 10-30 seconds of warm-up before the measurement
+   window to stabilise JIT compilation and database query plans.
+
+If variance persists, consider whether the benchmark pattern itself is
+allocation-heavy (many string concatenations, large JSON payloads), making
+it more sensitive to GC pressure.
+
+### Reporting results
+
+When publishing results, include:
+
+- Raw output from all three runs (not just the median).
+- Hardware specs using the [checklist above](#hardware-to-record).
+- The Cleat engine commit SHA under test.
+- PostgreSQL configuration (`shared_buffers`, `work_mem`, `max_connections`).
+- Any deviation from standard methodology (different `-benchtime`,
+  different concurrency settings).
 
 ## Expected output
 

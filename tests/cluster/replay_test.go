@@ -54,6 +54,7 @@ func TestCrashMidWorkflowReplay(t *testing.T) {
 
 	// Create a workflow instance.
 	runID := fmt.Sprintf("replay-test-crash-%d", time.Now().UnixNano())
+	EnsureDef(t, db, "replay-workflow", 1)
 	_, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 		VALUES ($1, 'replay-workflow', 1, 'ready', '{}', 'default')
@@ -126,6 +127,7 @@ func TestReplayProducesSameHistory(t *testing.T) {
 
 	// Create a workflow.
 	runID := fmt.Sprintf("replay-test-identical-%d", time.Now().UnixNano())
+	EnsureDef(t, db, "replay-identical", 1)
 	_, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 		VALUES ($1, 'replay-identical', 1, 'ready', '{}', 'default')
@@ -207,8 +209,8 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 	v2WASM := []byte("mock-wasm-v2")
 
 	_, err := db.Exec(`
-		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
-		VALUES ('versioned-workflow', 1, $1, ARRAY['place_order'], 'default')
+		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ('versioned-workflow', 1, $1, ARRAY['place_order'])
 		ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = $1
 	`, v1WASM)
 	if err != nil {
@@ -216,8 +218,8 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 	}
 
 	_, err = db.Exec(`
-		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
-		VALUES ('versioned-workflow', 2, $1, ARRAY['place_order'], 'default')
+		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ('versioned-workflow', 2, $1, ARRAY['place_order'])
 		ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = $1
 	`, v2WASM)
 	if err != nil {

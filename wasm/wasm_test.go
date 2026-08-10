@@ -1,8 +1,8 @@
 package wasm
 
 import (
-	"go/parser"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"strings"
 	"testing"
@@ -168,7 +168,7 @@ func TestGenerateImportsAllHostFunctions(t *testing.T) {
 func TestGenerateMemory(t *testing.T) {
 	code := string(GenerateMemory("mypkg"))
 	for _, c := range []string{"//go:build wasip1", "package mypkg",
-		`import "unsafe"`, "func readString(", "func stringPtr("} {
+		`"unsafe"`, "func readString(", "func stringPtr("} {
 		if !strings.Contains(code, c) {
 			t.Errorf("expected: %s", c)
 		}
@@ -183,7 +183,7 @@ func TestGenerateHostAdapterBasic(t *testing.T) {
 	usage := AnalyzeUsage(result, cr)
 	code := string(GenerateHostAdapter("basic", usage, "go"))
 	for _, c := range []string{"//go:build wasip1", "package basic",
-		`"fmt"`, `"unsafe"`, `"github.com/cleat-team/cleat/cleat"`,
+		`"unsafe"`, `"github.com/cleat-team/cleat/cleat"`,
 		"func makeHostCalls() cleat.HostCalls {",
 		"DurableCall: func(service string, operation string, requestJSON string) (string, error)",
 	} {
@@ -208,7 +208,7 @@ func TestGenerateHostAdapterNoUnusedFields(t *testing.T) {
 func TestGenerateExportsBasic(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
-	code := string(GenerateExports("basic", result, "tinygo"))
+	code := string(GenerateExports("basic", result, "go"))
 	for _, c := range []string{"//go:build wasip1", "package basic",
 		"func writeJSONOut", "func writeErrorOut",
 		"//go:wasmexport place_order",
@@ -223,44 +223,27 @@ func TestGenerateExportsBasic(t *testing.T) {
 func TestGenerateExportsPlaceOrderUnmarshalsArgs(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
-	code := string(GenerateExports("basic", result, "tinygo"))
-	// The TinyGo target uses extractJSONString for all params (no json.Unmarshal).
+	code := string(GenerateExports("basic", result, "go"))
+	// UserID is a simple string: extracted via extractJSONString.
 	if !strings.Contains(code, `UserID := extractJSONString`) {
 		t.Error("expected UserID extraction in generated code")
 	}
-	if !strings.Contains(code, `Cart := extractJSONString`) {
-		t.Error("expected Cart extraction in generated code")
+	// Cart is []CartItem (complex type): deserialized via json.Unmarshal.
+	if !strings.Contains(code, "json.Unmarshal") {
+		t.Error("expected json.Unmarshal for Cart in generated code")
 	}
 }
 
 func TestGenerateExportsSyntaxValid(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
-	syntaxCheck(t, "GenerateExports", string(GenerateExports("basic", result, "tinygo")))
-}
-
-func TestGenerateExportsErrorsZeroArgEntryPoints(t *testing.T) {
-	result, cr := loadErrors(t)
-	_ = cr
-	code := string(GenerateExports("errors", result, "tinygo"))
-	// BadWithGoroutine, BadWithFuncValue, BadWithFloatCondition have no params
-	// beyond h — their generated code should suppress args parsing.
-	if !strings.Contains(code, "_ = argsPtr") {
-		t.Error("expected args suppression for zero-arg entry points")
-	}
-	if !strings.Contains(code, "_ = argsLen") {
-		t.Error("expected argsLen suppression for zero-arg entry points")
-	}
-	// void-return entry points should not have result variables.
-	if !strings.Contains(code, "BadWithGoroutine(h)") {
-		t.Error("expected void call for BadWithGoroutine")
-	}
+	syntaxCheck(t, "GenerateExports", string(GenerateExports("basic", result, "go")))
 }
 
 func TestGenerateExportsErrorsOnlyReturn(t *testing.T) {
 	result, cr := loadErrors(t)
 	_ = cr
-	code := string(GenerateExports("errors", result, "tinygo"))
+	code := string(GenerateExports("errors", result, "go"))
 	// BadWithInterfaceDispatch returns only error — no result marshal.
 	if !strings.Contains(code, "__susResultErr") {
 		t.Error("expected __susResultErr assignment")
@@ -343,8 +326,8 @@ func TestCapitalize(t *testing.T) {
 func TestNeedsFmt(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_call": true},
 		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
-	if !needsFmt(usage) {
-		t.Error("cleat_call adapter uses fmt.Sprintf")
+	if needsFmt(usage) {
+		t.Error("cleat_call adapter no longer uses fmt.Sprintf directly")
 	}
 	usage2 := &UsageInfo{Used: map[string]bool{"cleat_sleep": true},
 		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleep"}}}
@@ -541,10 +524,10 @@ func TestBitPackingAwaitSignals(t *testing.T) {
 	}{
 		{0, 0, false, 0},
 		{1, 0, false, 0},
-		{0xFFFF, 0, false, 0},   // max 16-bit signalNameLen
-		{0, 0xFFFF, false, 0},    // max 16-bit payloadLen
-		{0, 0, true, 0},          // timedOut set
-		{0, 0, false, 0xFFFF},    // max 16-bit errCode
+		{0xFFFF, 0, false, 0},          // max 16-bit signalNameLen
+		{0, 0xFFFF, false, 0},          // max 16-bit payloadLen
+		{0, 0, true, 0},                // timedOut set
+		{0, 0, false, 0xFFFF},          // max 16-bit errCode
 		{0xABCD, 0x1234, true, 0x5678}, // all fields non-zero
 	}
 	for _, tt := range tests {
@@ -560,7 +543,7 @@ func TestBitPackingAwaitSignals(t *testing.T) {
 		// Extract using adapter.go DurableAwaitSignals ResultStmts.
 		signalNameLen := uint32(uint64(packed) >> 48)
 		payloadLen := uint32((uint64(packed) >> 32) & 0xFFFF)
-		timedOut := uint32((uint64(packed) >> 16) & 0xFFFF) != 0
+		timedOut := uint32((uint64(packed)>>16)&0xFFFF) != 0
 		errCode := uint32(uint64(packed) & 0xFFFF)
 
 		if signalNameLen != tt.signalNameLen {
@@ -588,8 +571,8 @@ func TestBitPackingSleep(t *testing.T) {
 	tests := []struct {
 		sleepStatus byte
 	}{
-		{0},   // normal return
-		{1},   // suspend sentinel
+		{0},    // normal return
+		{1},    // suspend sentinel
 		{0xFF}, // any non-zero value
 	}
 	for _, tt := range tests {
@@ -618,8 +601,8 @@ func TestDecodeExportResult(t *testing.T) {
 		{0, 0},
 		{0, 1},
 		{1, 0},
-		{0xFFFFFFFF, 0},          // max errCode
-		{0, 0xFFFFFFFF},          // max actualLen -- sets bit 63
+		{0xFFFFFFFF, 0}, // max errCode
+		{0, 0xFFFFFFFF}, // max actualLen -- sets bit 63
 		{0xDEAD, 0xBEEF},
 	}
 	for _, tt := range tests {
@@ -738,7 +721,7 @@ func TestOutBufNamesUnknownImport(t *testing.T) {
 func TestGenerateExportBasic(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
-	code := string(GenerateExports("basic", result, "tinygo"))
+	code := string(GenerateExports("basic", result, "go"))
 	if !strings.Contains(code, "writeJSONOut") {
 		t.Error("expected writeJSONOut function")
 	}
@@ -791,7 +774,7 @@ func TestGenerateExportsResultOnlyReturn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPackages(e009_init): %v", err)
 	}
-	code := string(GenerateExports("main", result, "tinygo"))
+	code := string(GenerateExports("main", result, "go"))
 	if !strings.Contains(code, "__r := Workflow(h)") {
 		t.Error("expected result-only assignment for Workflow")
 	}
@@ -804,7 +787,7 @@ func TestGenerateExportsNilEntryPoint(t *testing.T) {
 		EntryPoints: []string{"nonexistent"},
 		Funcs:       map[string]*analyzer.FuncDecl{},
 	}
-	code := string(GenerateExports("main", result, "tinygo"))
+	code := string(GenerateExports("main", result, "go"))
 	if !strings.Contains(code, "package main") {
 		t.Error("expected valid output even with nil entry point")
 	}
@@ -818,4 +801,74 @@ func TestCollectHostCallsCallsNilBody(t *testing.T) {
 	info := &UsageInfo{}
 	collectHostCallsCalls(fd, info)
 	// Should not panic when Ast is nil.
+}
+
+// TestHostAdapterReportsCallErrorCodeNotErrCode pins which of the two decoded
+// codes reaches the error message.
+//
+// The generated adapter decodes two separate fields: callErrorCode (bits 8-39,
+// a cleat.CallErrorCode) and errCode (bits 0-7, a "did it fail" flag that is 1
+// for essentially every failure). callErrorMessage's legend enumerates
+// CallErrorCode values, so passing errCode made the message contradict the
+// CallError.Code beside it -- a refused durable call reported Code 4 (invalid
+// request) and then said "error 1", which the legend reads as a *timeout*.
+// That is the same mis-signalling IMPROVEMENT-PLAN.md 2.10 is about, on the
+// human-readable side rather than the structured one.
+func TestHostAdapterReportsCallErrorCodeNotErrCode(t *testing.T) {
+	result, cr := loadBasic(t)
+	usage := AnalyzeUsage(result, cr)
+	code := string(GenerateHostAdapter("basic", usage, "go"))
+
+	want := `callErrorMessage("cleat_call", responseBuf, responseLen, uint32(callErrorCode))`
+	if !strings.Contains(code, want) {
+		t.Errorf("generated adapter does not pass callErrorCode to callErrorMessage.\nwant substring: %s", want)
+	}
+	if strings.Contains(code, `callErrorMessage("cleat_call", responseBuf, responseLen, errCode)`) {
+		t.Error("generated adapter passes errCode to callErrorMessage; the legend in " +
+			"that message describes CallErrorCode values, so this reports a refused " +
+			"call as a timeout")
+	}
+}
+
+// TestCronAdaptersReportTheHostsReason is the same guard as
+// TestHostAdapterReportsCallErrorCodeNotErrCode, for the calls that have no
+// CallErrorCode at all.
+//
+// cleat_schedule_cron and cleat_list_crons return packSimpleResult: one
+// errCode that is 1 for every failure, plus the number of bytes the host wrote
+// into the output buffer -- which on failure is the reason. Printing the
+// cleat.CallErrorCode legend beside that 1, as the other adapters do, would
+// report a rejected cron expression as a *timeout* while the real message sat
+// unread in the buffer. That is IMPROVEMENT-PLAN.md 2.10 again.
+func TestCronAdaptersReportTheHostsReason(t *testing.T) {
+	usage := &UsageInfo{Used: make(map[string]bool), Funcs: hostFunctions}
+	for _, hf := range hostFunctions {
+		usage.Used[hf.ImportName] = true
+	}
+	code := string(GenerateHostAdapter("allimports", usage, "go"))
+
+	for _, want := range []string{
+		`hostErrMessage(scheduleIDBuf[:], scheduleIDLen)`,
+		`hostErrMessage(resultBuf[:], resultLen)`,
+	} {
+		if !strings.Contains(code, want) {
+			t.Errorf("generated adapter is missing %s", want)
+		}
+	}
+
+	// The helper itself lands in the memory file, alongside callErrorMessage.
+	if mem := string(GenerateMemory("allimports")); !strings.Contains(mem, "func hostErrMessage(buf []byte, n uint32) string {") {
+		t.Error("hostErrMessage is referenced by the adapter but never defined")
+	}
+
+	// The legend must not appear next to any of the three cron calls.
+	for _, call := range []string{"cleat_schedule_cron", "cleat_list_crons", "cleat_delete_cron"} {
+		bad := call + `: error %d (0=unknown 1=timeout`
+		if strings.Contains(code, bad) {
+			t.Errorf("%s prints the CallErrorCode legend, but it returns 1 for every "+
+				"failure -- this reports a rejected cron expression as a timeout", call)
+		}
+	}
+
+	syntaxCheck(t, "GenerateHostAdapter(all)", code)
 }

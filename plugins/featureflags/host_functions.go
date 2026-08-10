@@ -3,12 +3,12 @@ package featureflags
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -64,14 +64,14 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		name              sql.NullString
 		description       sql.NullString
 		enabled           bool
-		rulesJSON         []byte
+		rulesJSON         plugin.JSONColumn
 		rolloutPercentage int
 	)
 
 	err := p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT id, tenant_id, key, name, description, enabled, rules, rollout_percentage
+			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage
 			FROM feature_flags
-			WHERE tenant_id = $1 AND key = $2
+			WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
 		`, p.dialect), cc.TenantID, input.Key).Scan(
 		&id, &tenantID, &key, &name, &description,
 		&enabled, &rulesJSON, &rolloutPercentage,
@@ -90,13 +90,23 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		Name:              name.String,
 		Description:       description.String,
 		Enabled:           enabled,
-		Rules:             rulesJSON,
+		Rules:             rulesJSON.Raw,
 		RolloutPercentage: rolloutPercentage,
 	}
 
 	result := EvaluateFlag(flake, input.Context)
 
-	output := evaluateFlagOutput{
+	// S1016 suggests evaluateFlagOutput(result), since the two structs are
+	// field-for-field identical today. Kept as a literal on purpose: this type
+	// is the host call's wire contract, and writing the fields out is what
+	// stops a field added to the internal EvaluationResult from silently
+	// appearing in a plugin's published output.
+	//
+	// If they are meant to be one type, the fix is to delete
+	// evaluateFlagOutput and marshal EvaluationResult directly. A conversion
+	// is the worst of the two: it keeps both names, so the wire format still
+	// looks independent, while coupling them so it is not.
+	output := evaluateFlagOutput{ //nolint:gosimple // deliberate: wire contract, see above
 		Enabled:    result.Enabled,
 		Key:        result.Key,
 		Evaluation: result.Evaluation,

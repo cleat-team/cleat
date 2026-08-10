@@ -110,5 +110,5 @@ func PlaceOrder(h cleat.HostCalls, input PlaceOrderInput) (string, error) {
 	})
 	h.DurableCall("notifications", "SendEmail", string(notifyReq))
 
-	return tracking.TrackingID, nil
+	return fmt.Sprintf(`{"tracking_id":%q}`, tracking.TrackingID), nil
 }

@@ -17,10 +17,13 @@ func TestFaultNetworkPartition(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
+	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-network-partition-%d", time.Now().UnixNano())
-	db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID)
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
+		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
+		t.Fatalf("insert test instance: %v", err)
+	}
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -85,10 +88,13 @@ func TestFaultSlowNetwork(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
+	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-slow-network-%d", time.Now().UnixNano())
-	db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID)
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
+		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
+		t.Fatalf("insert test instance: %v", err)
+	}
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow first.

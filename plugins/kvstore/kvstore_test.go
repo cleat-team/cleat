@@ -20,10 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -61,11 +61,12 @@ func kvStoreKey(tid uuid.UUID, key string) string {
 // ---------------------------------------------------------------------------
 
 type fakeConnector struct {
-	store *fakeKVStore
+	store       *fakeKVStore
+	failPattern string // if non-empty, queries containing this string return an error
 }
 
 func (c *fakeConnector) Connect(_ context.Context) (driver.Conn, error) {
-	return &fakeConn{store: c.store}, nil
+	return &fakeConn{store: c.store, failPattern: c.failPattern}, nil
 }
 
 func (c *fakeConnector) Driver() driver.Driver {
@@ -79,15 +80,21 @@ func (*fakeDrv) Open(_ string) (driver.Conn, error) {
 }
 
 type fakeConn struct {
-	store *fakeKVStore
+	store       *fakeKVStore
+	failPattern string // if non-empty, queries containing this string return an error
 }
 
 func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
 
-func (*fakeConn) Close() error { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
+
+// shouldFail checks whether the query should return an error for DB error path tests.
+func (c *fakeConn) shouldFail(query string) bool {
+	return c.failPattern != "" && strings.Contains(query, c.failPattern)
+}
 
 type fakeTx struct{}
 
@@ -97,12 +104,21 @@ func (*fakeTx) Rollback() error { return nil }
 // --- ExecContext ---
 
 func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if c.shouldFail(query) {
+		return nil, fmt.Errorf("fakeConn: injected error")
+	}
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
 
 	switch {
 	case strings.Contains(query, "DELETE FROM kv_store"):
 		return c.execDelete(args)
+	case strings.Contains(query, "INSERT INTO kv_store"):
+		// MySQL upsert / MSSQL merge path: insert/update and return number of rows.
+		return c.execInsertUpdate(args)
+	case strings.Contains(query, "UPDATE kv_store"):
+		// MySQL If-Match path: update and return rows affected count.
+		return c.execUpdate(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec query: %s", query)
 	}
@@ -110,7 +126,23 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 
 // --- QueryContext ---
 
-func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+// normalizeKVQuery strips identifier quoting so these fakes match on the shape
+// of the SQL rather than on which dialect's quote characters it carries. The
+// plugin quotes `key` (a reserved word in MySQL and SQL Server) via
+// plugin.QuoteIdent, and matching the raw text broke the moment it did.
+func normalizeKVQuery(query string) string {
+	q := query
+	for _, ch := range []string{`"`, "`", "[", "]"} {
+		q = strings.ReplaceAll(q, ch, "")
+	}
+	return q
+}
+
+func (c *fakeConn) QueryContext(_ context.Context, rawQuery string, args []driver.NamedValue) (driver.Rows, error) {
+	query := normalizeKVQuery(rawQuery)
+	if c.shouldFail(query) {
+		return nil, fmt.Errorf("fakeConn: injected error")
+	}
 	switch {
 	case strings.Contains(query, "INSERT INTO kv_store"):
 		c.store.mu.Lock()
@@ -124,7 +156,11 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-	case strings.Contains(query, "AND key = $2"):
+	case strings.Contains(query, "SELECT version FROM kv_store"):
+		c.store.mu.RLock()
+		defer c.store.mu.RUnlock()
+		return c.queryVersion(args)
+	case strings.Contains(query, "AND key ="):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryByKey(args)
@@ -162,6 +198,81 @@ func (c *fakeConn) execDelete(args []driver.NamedValue) (driver.Result, error) {
 		return &fakeResult{rowsAffected: 0}, nil
 	}
 	delete(c.store.data, sk)
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+// execInsertUpdate handles MySQL/MSSQL Exec paths for upsert (not RETURNING).
+func (c *fakeConn) execInsertUpdate(args []driver.NamedValue) (driver.Result, error) {
+	tidStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := uuid.Parse(tidStr)
+	if err != nil {
+		return nil, err
+	}
+	key, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	value, err := argBytes(args, 3)
+	if err != nil {
+		return nil, err
+	}
+
+	sk := kvStoreKey(tid, key)
+	now := time.Now().UTC()
+
+	existing, ok := c.store.data[sk]
+	if ok {
+		existing.value = value
+		existing.version++
+		existing.updatedAt = now
+	} else {
+		c.store.data[sk] = &kvRow{
+			tenantID:  tid,
+			key:       key,
+			value:     value,
+			version:   1,
+			createdAt: now,
+			updatedAt: now,
+		}
+	}
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+// execUpdate handles MySQL/MSSQL Exec paths for conditional update (If-Match).
+func (c *fakeConn) execUpdate(args []driver.NamedValue) (driver.Result, error) {
+	value, err := argBytes(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tidStr, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := uuid.Parse(tidStr)
+	if err != nil {
+		return nil, err
+	}
+	key, err := argString(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	expectedVersion, err := argInt64(args, 4)
+	if err != nil {
+		return nil, err
+	}
+
+	sk := kvStoreKey(tid, key)
+	existing, ok := c.store.data[sk]
+	if !ok || int64(existing.version) != expectedVersion {
+		return &fakeResult{rowsAffected: 0}, nil
+	}
+
+	existing.value = value
+	existing.version++
+	existing.updatedAt = time.Now().UTC()
 	return &fakeResult{rowsAffected: 1}, nil
 }
 
@@ -299,6 +410,33 @@ func (c *fakeConn) queryByKey(args []driver.NamedValue) (driver.Rows, error) {
 	}, nil
 }
 
+// queryVersion handles SELECT version FROM kv_store queries (MySQL path).
+func (c *fakeConn) queryVersion(args []driver.NamedValue) (driver.Rows, error) {
+	tidStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := uuid.Parse(tidStr)
+	if err != nil {
+		return nil, err
+	}
+	key, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	sk := kvStoreKey(tid, key)
+	row, ok := c.store.data[sk]
+	if !ok {
+		return &fakeRows{columns: []string{"version"}}, nil
+	}
+
+	return &fakeRows{
+		columns: []string{"version"},
+		data:    [][]driver.Value{{int64(row.version)}},
+	}, nil
+}
+
 func (c *fakeConn) queryListWithPrefix(args []driver.NamedValue) (driver.Rows, error) {
 	tidStr, err := argString(args, 1)
 	if err != nil {
@@ -329,7 +467,8 @@ func (c *fakeConn) queryListWithPrefix(args []driver.NamedValue) (driver.Rows, e
 		return results[i].key < results[j].key
 	})
 
-	return c.buildListRows(results)
+	// Apply limit from arg 3.
+	return c.limitAndBuildRows(results, args, 3)
 }
 
 func (c *fakeConn) queryList(args []driver.NamedValue) (driver.Rows, error) {
@@ -353,7 +492,8 @@ func (c *fakeConn) queryList(args []driver.NamedValue) (driver.Rows, error) {
 		return results[i].key < results[j].key
 	})
 
-	return c.buildListRows(results)
+	// Apply limit from arg 2.
+	return c.limitAndBuildRows(results, args, 2)
 }
 
 func (c *fakeConn) buildListRows(rows []*kvRow) (driver.Rows, error) {
@@ -369,6 +509,16 @@ func (c *fakeConn) buildListRows(rows []*kvRow) (driver.Rows, error) {
 		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil
+}
+
+// limitAndBuildRows applies an optional LIMIT from the given arg ordinal.
+func (c *fakeConn) limitAndBuildRows(rows []*kvRow, args []driver.NamedValue, limitOrdinal int) (driver.Rows, error) {
+	lim, err := argInt64(args, limitOrdinal)
+	if err == nil && lim > 0 && int(lim) < len(rows) {
+		rows = rows[:lim]
+	}
+	rowsResult, _ := c.buildListRows(rows)
+	return rowsResult, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -391,14 +541,21 @@ func argString(args []driver.NamedValue, ordinal int) (string, error) {
 	return "", fmt.Errorf("arg %d not found", ordinal)
 }
 
+// argBytes accepts either representation a JSON argument may arrive as.
+// plugin.JSONColumn deliberately yields a string rather than []byte (a []byte
+// becomes VARBINARY on SQL Server), and a fake that insists on one form tests
+// the plumbing rather than the plugin.
 func argBytes(args []driver.NamedValue, ordinal int) ([]byte, error) {
 	for _, a := range args {
 		if a.Ordinal == ordinal {
-			b, ok := a.Value.([]byte)
-			if !ok {
-				return nil, fmt.Errorf("arg %d: want []byte, got %T", ordinal, a.Value)
+			switch v := a.Value.(type) {
+			case []byte:
+				return v, nil
+			case string:
+				return []byte(v), nil
+			default:
+				return nil, fmt.Errorf("arg %d: want []byte or string, got %T", ordinal, a.Value)
 			}
-			return b, nil
 		}
 	}
 	return nil, fmt.Errorf("arg %d not found", ordinal)
@@ -587,7 +744,7 @@ func TestPutGetDelete(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var putResp map[string]interface{}
+	var putResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &putResp); err != nil {
 		t.Fatalf("PUT: failed to decode response: %v", err)
 	}
@@ -606,7 +763,7 @@ func TestPutGetDelete(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var getResp map[string]interface{}
+	var getResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &getResp); err != nil {
 		t.Fatalf("GET: failed to decode response: %v", err)
 	}
@@ -648,7 +805,7 @@ func TestPutVersionIncrement(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT 1: expected 201, got %d", rec.Code)
 	}
-	resp1 := map[string]interface{}{}
+	resp1 := map[string]any{}
 	json.Unmarshal(rec.Body.Bytes(), &resp1)
 	v1 := int(resp1["version"].(float64))
 
@@ -659,7 +816,7 @@ func TestPutVersionIncrement(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT 2: expected 200 (updated), got %d", rec.Code)
 	}
-	resp2 := map[string]interface{}{}
+	resp2 := map[string]any{}
 	json.Unmarshal(rec.Body.Bytes(), &resp2)
 	v2 := int(resp2["version"].(float64))
 
@@ -690,7 +847,7 @@ func TestListAll(t *testing.T) {
 		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST: failed to decode: %v", err)
 	}
@@ -737,7 +894,7 @@ func TestListWithPrefix(t *testing.T) {
 		t.Fatalf("LIST with prefix: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST: failed to decode: %v", err)
 	}
@@ -859,7 +1016,7 @@ func TestPutWithIfMatch(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	var putResp map[string]interface{}
+	var putResp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &putResp)
 	version := int(putResp["version"].(float64))
 

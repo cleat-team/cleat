@@ -35,7 +35,7 @@ func (e *PanicError) Unwrap() error { return nil }
 // and do not need this tracker because a WASM crash cannot take down
 // the worker. The tracker exists for Go-compiled plugins only.
 type PluginHealthTracker struct {
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 	unhealthy map[string]error // plugin name -> fatal error
 }
 

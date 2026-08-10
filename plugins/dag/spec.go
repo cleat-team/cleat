@@ -22,11 +22,17 @@ type TaskSpec struct {
 	Contract    string   `json:"contract,omitempty"`
 }
 
-// TaskFunc is the signature for a DAG task function.
-type TaskFunc func(ctx *TaskContext) (string, error)
-
-// LoadFromJSON decodes a JSON DAG spec and constructs a *DAG.
-func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
+// ParseSpec decodes a JSON DAG spec and structurally validates it: valid
+// JSON, at least one task, no duplicate task names, and every parent
+// reference names a declared task.
+//
+// It does not resolve task functions or build a runtime DAG -- this
+// package is host-side (used by `cleat dag validate` and code generation,
+// neither of which needs the SDK). Function resolution and runtime DAG
+// construction are guest-side, in cleat/dagrun.LoadFromJSON, which calls
+// ParseSpec for this half and adds its own registry check on top. See this
+// package's doc comment for the full split and why.
+func ParseSpec(r io.Reader) (*DAGSpec, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("dag: read spec: %w", err)
@@ -55,15 +61,6 @@ func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
 		seen[ts.Name] = true
 	}
 
-	// Validate: all fn values exist in the registry.
-	if registry != nil {
-		for _, ts := range spec.Tasks {
-			if _, ok := registry[ts.Fn]; !ok {
-				return nil, fmt.Errorf("dag: task %q references unknown function %q", ts.Name, ts.Fn)
-			}
-		}
-	}
-
 	// Validate: all parents reference declared task names.
 	for _, ts := range spec.Tasks {
 		for _, parent := range ts.Parents {
@@ -73,22 +70,7 @@ func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
 		}
 	}
 
-	// Build the DAG.
-	d := NewDAG()
-	for _, ts := range spec.Tasks {
-		var fn func(ctx *TaskContext) (string, error)
-		if registry != nil {
-			if f, ok := registry[ts.Fn]; ok {
-				fn = f
-			}
-		}
-		d.AddTask(ts.Name, ts.Parents, fn, ts.Priority)
-		d.tasks[ts.Name].WorkflowName = ts.Fn
-		d.tasks[ts.Name].Description = ts.Description
-		d.tasks[ts.Name].Contract = ts.Contract
-	}
-
-	return d, nil
+	return &spec, nil
 }
 
 // parseDAGSpec parses a JSON DAG spec string into a DAGSpec.

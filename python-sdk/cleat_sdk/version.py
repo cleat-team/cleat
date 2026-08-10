@@ -22,6 +22,10 @@ ABI_VERSION = 1
 # Example: {"llm": ">=1.2.0", "blobstore": "~2.0.0"}
 PLUGIN_DEPS = {}
 
+# CHILD_BINDING_POLICY is the child workflow version binding policy.
+# Values: "", "frozen", "stable", "latest", or "tag:<name>"
+CHILD_BINDING_POLICY = ""
+
 # SDK_LANGUAGE identifies the SDK that produced this module.
 SDK_LANGUAGE = "python"
 

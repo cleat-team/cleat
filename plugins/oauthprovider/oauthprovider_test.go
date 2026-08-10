@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func TestInfo(t *testing.T) {
@@ -210,7 +210,7 @@ func TestFormatProviderURL(t *testing.T) {
 
 // fakeSessionDB provides a minimal fake DB for testing extractSession.
 type fakeSessionStore struct {
-	mu     sync.Mutex
+	mu       sync.Mutex
 	sessions map[string]*testSessionRow // token_hash -> row
 }
 
@@ -251,8 +251,8 @@ func (*fakeSessionConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeSessionConn: unexpected Prepare call")
 }
 
-func (*fakeSessionConn) Close() error                        { return nil }
-func (*fakeSessionConn) Begin() (driver.Tx, error)           { return &fakeSessionTx{}, nil }
+func (*fakeSessionConn) Close() error              { return nil }
+func (*fakeSessionConn) Begin() (driver.Tx, error) { return &fakeSessionTx{}, nil }
 
 type fakeSessionTx struct{}
 
@@ -310,8 +310,8 @@ type fakeSessionRows struct {
 	pos  int
 }
 
-func (r *fakeSessionRows) Columns() []string              { return r.cols }
-func (r *fakeSessionRows) Close() error                    { return nil }
+func (r *fakeSessionRows) Columns() []string { return r.cols }
+func (r *fakeSessionRows) Close() error      { return nil }
 func (r *fakeSessionRows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.data) {
 		return io.EOF
@@ -334,8 +334,8 @@ func TestExtractSessionValid(t *testing.T) {
 
 	store.mu.Lock()
 	store.sessions[tokenHash] = &testSessionRow{
-		id:       sessionID,
-		tenantID: tenantID,
+		id:        sessionID,
+		tenantID:  tenantID,
 		userEmail: sql.NullString{String: "user@example.com", Valid: true},
 		expiresAt: sql.NullTime{Time: time.Now().Add(1 * time.Hour), Valid: true},
 	}

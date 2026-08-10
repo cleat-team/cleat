@@ -34,12 +34,12 @@ func New() plugin.Plugin {
 // Plugin implements inbound webhook ingestion with source management,
 // HMAC verification, and workflow-accessible event polling.
 type Plugin struct {
-db     plugin.PluginDB
-	mux    *http.ServeMux
-	logger *slog.Logger
+	db      plugin.PluginDB
+	mux     *http.ServeMux
+	logger  *slog.Logger
 	dialect plugin.Dialect
-	config Config
-	env    *plugin.Environment
+	config  Config
+	env     *plugin.Environment
 }
 
 // Config controls webhook-ingest plugin behaviour.

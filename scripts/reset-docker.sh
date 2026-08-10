@@ -7,7 +7,6 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 CONTAINERD_DIR="/localssd/var/lib/containerd"
-DOCKER_DIR="/var/lib/docker"
 
 echo "=== 1. Stopping Docker and containerd ==="
 sudo systemctl stop docker || true

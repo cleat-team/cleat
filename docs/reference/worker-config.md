@@ -192,7 +192,16 @@ Auto-generates an API key on first startup if no keys exist.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `true` | Require signal authorization for cross-workflow signals |
+| bool | `false` | Require signal authorization for cross-workflow signals |
+
+> **Not usable yet.** Nothing in cleat can write `allowed_signals` — there is no
+> API, CLI verb or SDK call that sets it — and the check denies when the list is
+> empty. Enabling this flag therefore denies *every* cross-workflow, plugin and
+> external signal, with no supported way to permit one. It defaulted to `true`
+> until 2026-08-05, which is why it now defaults to `false`. The instructions
+> below describe the intended behaviour and are accurate about the mechanism;
+> they are not followable until the list can be populated.
+> See IMPROVEMENT-PLAN §3.15.
 
 When enabled, a workflow or external caller can only signal a target
 workflow if its identity appears in the target's `allowed_signals` list.
@@ -205,7 +214,8 @@ Applies to WASM `cleat_signal_workflow`, `SendSignalAndWait`, plugin
   `allowed_signals` to permit them.
 - An empty `allowed_signals` means deny all (fail-secure).
 
-Set to `false` to disable signal authorization (backward compatible).
+Set to `true` to enable signal authorization. Until `allowed_signals` can be
+populated, that denies every signal.
 
 ---
 
@@ -440,9 +450,12 @@ execute. Set to `0` for no limit. Enforced via a wazero function listener.
 
 ### --wasm-output-buffer-size
 
+> Corrected 2026-08-09: was documented as `1048576` (1 MiB). The actual
+> `flag.Int` default in `cmd/cleat-worker/config.go:119` is `32768` (32 KB).
+
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `1048576` (1 MiB) | WASM output buffer size in bytes |
+| int | `32768` (32 KB) | WASM output buffer size in bytes |
 
 Controls the size of the buffer used to read output from WASM guest modules.
 Larger values support workflows that produce more output data.
@@ -451,9 +464,12 @@ Larger values support workflows that produce more output data.
 
 ### --wasm-max-string-len
 
+> Corrected 2026-08-09: was documented as `1048576` (1 MiB). The actual
+> `flag.Int` default in `cmd/cleat-worker/config.go:120` is `65536` (64 KB).
+
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `1048576` (1 MiB) | Maximum WASM string parameter length in bytes |
+| int | `65536` (64 KB) | Maximum WASM string parameter length in bytes |
 
 Limits the length of string parameters passed to WASM guest functions.
 Strings longer than this are truncated before reaching the guest.
@@ -491,6 +507,30 @@ is set.
 |------|---------|-------------|
 | int | `30` | Days to retain completed/failed workflow event history (0 disables) |
 
+Deletes `event_history` rows for terminal workflows. The `workflow_instances`
+row itself (status, result, error, def_name) is untouched by this flag --
+see `--completed-workflow-retention-days` below to also reclaim that.
+
+---
+
+### --completed-workflow-retention-days
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` (disabled) | Days to retain `workflow_instances` rows for terminal workflows (done/failed/terminated) before permanently deleting them |
+
+Unlike `--retention-days`, this deletes the workflow's own record, not just
+its step-by-step event history: after this runs, a purged workflow no longer
+appears in `ListWorkflows` or the admin dashboard, and its outcome (result,
+error, status) is gone. Off by default -- an operator opts in after deciding
+how long their own audit/compliance requirements need a workflow's outcome
+retrievable. `dead_lettered` workflows are never affected by this flag; they
+have their own (separate, currently unwired) deletion path.
+
+Any remaining `event_history` for a purged workflow is deleted in the same
+pass. See `docs/operations/workflow-retention.md` for the full design
+(default rationale, FK/cascade behavior per dialect, batching, metrics).
+
 ---
 
 ### --redact-patterns-file
@@ -527,7 +567,12 @@ during bulk replay operations).
 
 ## Resource Quotas
 
-Per-workflow-instance resource limits. Set to `0` for unlimited.
+Resource limits. Set to `0` for unlimited.
+
+The first three are per workflow instance. `--max-quota-schedules` is per
+tenant, because a cron schedule outlives the run that created it -- counting
+schedules against that run would let a workflow create its limit, exit, and be
+started again.
 
 ### --max-quota-events
 
@@ -559,6 +604,102 @@ When exceeded, further child start attempts fail with a quota error.
 
 Limits the number of distinct concurrency keys a single workflow can register.
 When exceeded, further key registrations fail with a quota error.
+
+---
+
+### --max-quota-schedules
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` | Max cron schedules per tenant (0 = unlimited) |
+
+Limits how many cron schedules a tenant may hold, counted across every workflow
+in that tenant rather than per run -- see the note at the top of this section.
+When exceeded, `ScheduleCron` fails with a quota error naming the current count
+and the limit; the workflow itself keeps running.
+
+Only reached through the `ScheduleCron` host call. Schedules created with
+`cleat schedule create` or through the admin API are counted against the quota
+but are not refused by it.
+
+---
+
+## Multi-Tenancy
+
+### --claim-across-tenants
+
+| Type | Default | Description |
+|------|---------|-------------|
+| bool | `false` | Claim runnable work for every tenant in one query instead of only this worker's own |
+
+A worker holds one store, scoped to one tenant, and by default its dispatch
+loop claims through it. That claim only ever returns rows for that one tenant --
+enforced by row-level security on PostgreSQL and SQL Server, and by an explicit
+`tenant_id` predicate on MySQL -- which means a non-default tenant's workflows
+never execute.
+
+Their **schedules** are the other half, and this flag covers both. The firing
+loop reads due schedules through the same widened path, then re-scopes to the
+schedule's own tenant before starting the run and before advancing the schedule
+-- so a non-default tenant's cron fires, and the run it starts is recorded under
+that tenant.
+
+With this set, the claim sees every tenant in a single query. Each claimed
+workflow then executes against a store scoped to its **own** tenant, so the
+widened view lasts exactly as long as the claim; everything downstream of it --
+event history, state, child workflows, schedules -- is tenant-scoped again
+immediately.
+
+The alternative would be polling each tenant separately, one query per tenant
+per tick. This is one query per tick regardless of tenant count, which is the
+point.
+
+**It requires a database-side grant, and it is off by default because of that.**
+Turning it on should be a deliberate act rather than something an upgrade does
+for you.
+
+| dialect | what the deployment must do |
+|---------|-----------------------------|
+| PostgreSQL | Apply **both** `023_cross_tenant_claim.sql` and `024_cross_tenant_schedules.sql` as a superuser. 023 creates `cleat_dispatcher` (`NOLOGIN BYPASSRLS`) to own the claim function; 024 adds the due-schedule read to the same role. They are separate grants on purpose — with 023 alone, workflows execute but cron never fires, and the warning names the file you are missing. |
+| SQL Server | Add the worker's principal to the `cleat_admin` database role -- see `012_admin_role.sql`, which documents the exact statements. The role ships with no members. One grant covers both the claim and the schedule read: `fn_tenant_filter` is bound to every table involved. |
+| MySQL | **Not supported on the default topology.** `MySQLStoreFactory` gives each tenant its own physical database (`cleat_<tenant_id>`), so there is no predicate to drop -- the other tenants' rows are not filtered out, they are in another database. The worker warns once and claims its own tenant. A MySQL deployment pointed at a *single shared* database does work, since there isolation really is just a `tenant_id` predicate. |
+
+If the flag is set but the store cannot claim across tenants -- wrong dialect,
+wrong topology, or the grant was never made -- the worker logs one warning
+naming the reason and keeps claiming its own tenant. It does not stop claiming,
+and it does not fail to start: on a mixed fleet the flag says what the operator
+wants while the store says what is actually possible, and those can disagree.
+
+A missing grant therefore narrows a worker rather than stopping it.
+
+**The worker says which mode it is in at startup**, before either loop ticks, so
+you do not have to infer it from silence:
+
+```
+INFO  cross-tenant workflow claim is available
+INFO  cross-tenant due-schedule read is available
+```
+
+or, on a deployment that applied 023 but not 024:
+
+```
+INFO  cross-tenant workflow claim is available
+WARN  cross-tenant due-schedule read is NOT available; only this worker's own
+      tenant's cron will fire
+      reason=admin.get_due_schedules does not exist; apply
+             migrations/postgres/024_cross_tenant_schedules.sql
+```
+
+It is a report, not a gate -- refusing to start would contradict the degradation
+above, and would turn a revoked `GRANT` into an outage for the worker's own
+tenant, which was never affected.
+
+On PostgreSQL it also checks something no runtime error explains: whether the
+function's **owner still has `BYPASSRLS`**. Losing that attribute does fail --
+every call raises `cleat.tenant_id is not set` (P0001), because the policies are
+fail-closed -- but that message names neither the function nor the missing
+privilege, and there is no path from it to `ALTER ROLE cleat_dispatcher
+BYPASSRLS`. The startup line names it.
 
 ---
 

@@ -1,14 +1,16 @@
 package plugin_test
+
 import (
-	"testing"
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/internal/plugingen"
+	"github.com/cleat-team/cleat/plugin"
+	"testing"
 )
+
 // TestManifestRoundTrip verifies: manifest --> IR --> code generation -->
 // structurally valid output for all languages.
 func TestManifestRoundTrip(t *testing.T) {
 	// Load the LLM plugin manifest.
-	m, err := plugin.LoadManifest("../../plugins/llm/plugin.json")
+	m, err := plugin.LoadManifest("../plugins/llm/plugin.json")
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
@@ -45,10 +47,11 @@ func TestManifestRoundTrip(t *testing.T) {
 		t.Logf("%s output: %d bytes", lang, len(code))
 	}
 }
+
 // TestManifestRoundTrip_HelloWorld is the same test but for the example
 // third-party plugin manifest to ensure community plugins work too.
 func TestManifestRoundTrip_HelloWorld(t *testing.T) {
-	m, err := plugin.LoadManifest("../../examples/third-party-plugin/plugin.json")
+	m, err := plugin.LoadManifest("../examples/third-party-plugin/plugin.json")
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
@@ -81,6 +84,7 @@ func TestManifestRoundTrip_HelloWorld(t *testing.T) {
 		t.Logf("%s output: %d bytes", lang, len(code))
 	}
 }
+
 // TestCapabilityEnforcementEndToEnd verifies the full capability enforcement
 // pipeline: defaults --> validate --> limits.
 func TestCapabilityEnforcementEndToEnd(t *testing.T) {
@@ -104,6 +108,7 @@ func TestCapabilityEnforcementEndToEnd(t *testing.T) {
 		t.Errorf("expected no violation: %v", err)
 	}
 }
+
 // TestMinimalManifest validates a minimal (no host functions) plugin manifest.
 func TestMinimalManifest(t *testing.T) {
 	m := &plugin.Manifest{

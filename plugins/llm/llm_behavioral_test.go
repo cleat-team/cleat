@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/llm/providers"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -563,7 +563,7 @@ func TestLLM_HealthEndpoint(t *testing.T) {
 		t.Fatalf("health: want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
 		t.Fatalf("decode health response: %v", err)
 	}
@@ -575,12 +575,12 @@ func TestLLM_HealthEndpoint(t *testing.T) {
 		t.Errorf("expected plugin 'llm', got %v", result["plugin"])
 	}
 
-	providers, ok := result["providers"].(map[string]interface{})
+	providers, ok := result["providers"].(map[string]any)
 	if !ok {
 		t.Fatal("expected providers map in health response")
 	}
 
-	openaiInfo, ok := providers["openai"].(map[string]interface{})
+	openaiInfo, ok := providers["openai"].(map[string]any)
 	if !ok {
 		t.Fatal("expected openai provider info")
 	}
@@ -591,7 +591,7 @@ func TestLLM_HealthEndpoint(t *testing.T) {
 		t.Error("expected openai to have api key")
 	}
 
-	anthropicInfo, ok := providers["anthropic"].(map[string]interface{})
+	anthropicInfo, ok := providers["anthropic"].(map[string]any)
 	if !ok {
 		t.Fatal("expected anthropic provider info")
 	}
@@ -616,7 +616,7 @@ func TestLLM_HealthEndpoint_NoProviders(t *testing.T) {
 		t.Fatalf("health: want 200, got %d", rec.Code)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.NewDecoder(rec.Body).Decode(&result)
 	if result["status"] != "ok" {
 		t.Errorf("expected status 'ok', got %v", result["status"])
@@ -649,9 +649,9 @@ func TestLLM_ModelsEndpoint_AllProviders(t *testing.T) {
 		t.Fatalf("models: want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.NewDecoder(rec.Body).Decode(&result)
-	providers, ok := result["providers"].(map[string]interface{})
+	providers, ok := result["providers"].(map[string]any)
 	if !ok {
 		t.Fatal("expected providers map in models response")
 	}
@@ -681,12 +681,12 @@ func TestLLM_ModelsEndpoint_SpecificProvider(t *testing.T) {
 		t.Fatalf("models: want 200, got %d", rec.Code)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.NewDecoder(rec.Body).Decode(&result)
 	if result["provider"] != "openai" {
 		t.Errorf("expected provider 'openai', got %v", result["provider"])
 	}
-	models, ok := result["models"].([]interface{})
+	models, ok := result["models"].([]any)
 	if !ok {
 		t.Fatal("expected models array")
 	}
@@ -854,7 +854,7 @@ func TestLLM_Chat_WithTools(t *testing.T) {
 	containedTools := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Capture request to verify tools are included
-		var bodyMap map[string]interface{}
+		var bodyMap map[string]any
 		json.NewDecoder(r.Body).Decode(&bodyMap)
 		if _, ok := bodyMap["tools"]; ok {
 			containedTools = true
@@ -885,10 +885,10 @@ func TestLLM_Chat_WithTools(t *testing.T) {
 			Function: providers.ToolFunction{
 				Name:        "calculator",
 				Description: "Performs arithmetic",
-				Parameters: map[string]interface{}{
+				Parameters: map[string]any{
 					"type": "object",
-					"properties": map[string]interface{}{
-						"expr": map[string]interface{}{"type": "string"},
+					"properties": map[string]any{
+						"expr": map[string]any{"type": "string"},
 					},
 				},
 			},
@@ -1018,9 +1018,9 @@ func TestLLM_ModelsEndpoint_NoProviders(t *testing.T) {
 		t.Fatalf("models: want 200, got %d", rec.Code)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.NewDecoder(rec.Body).Decode(&result)
-	providers, ok := result["providers"].(map[string]interface{})
+	providers, ok := result["providers"].(map[string]any)
 	if !ok {
 		t.Fatal("expected providers map")
 	}

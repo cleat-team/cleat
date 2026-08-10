@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -26,7 +27,7 @@ type costCommand struct {
 }
 
 func runCost(args []string) {
-	fs := flag.NewFlagSet("cost", flag.ExitOnError)
+	fs := flag.NewFlagSet("cost", flag.ContinueOnError)
 	c := &costCommand{
 		workload:      10,
 		avgDuration:   3.0,
@@ -43,7 +44,11 @@ func runCost(args []string) {
 	fs.IntVar(&c.replication, "replication", c.replication, "Storage replication factor (1=single, 2=multi-AZ)")
 	fs.StringVar(&c.provider, "provider", c.provider, "Cloud provider: aws, gcp, self")
 	fs.IntVar(&c.concurrency, "concurrency", c.concurrency, "Worker concurrency")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing flags: %v\n", err)
+		osExit(1)
+		return
+	}
 
 	fmt.Println(c.Format())
 }
@@ -125,7 +130,7 @@ func (c *costCommand) Format() string {
 	b.WriteString(fmt.Sprintf("  Storage:               $%.0f/month\n", est.StorageMonthlyCost))
 	b.WriteString(fmt.Sprintf("  Workers (%s):          $%.0f/month (x%d instances)\n",
 		est.WorkerInstanceType, est.WorkerMonthlyCost, est.WorkerCount))
-	b.WriteString(fmt.Sprintf("  ----------------------------------------\n"))
+	b.WriteString("  ----------------------------------------\n")
 	b.WriteString(fmt.Sprintf("  Total:                 $%.0f/month\n", est.TotalMonthlyCost))
 
 	return b.String()

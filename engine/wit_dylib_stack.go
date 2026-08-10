@@ -37,7 +37,7 @@ import (
 type witDylibValueKind int
 
 const (
-	witKindEmpty  witDylibValueKind = iota
+	witKindEmpty witDylibValueKind = iota
 	witKindI32
 	witKindI64
 	witKindF32
@@ -172,18 +172,9 @@ func (s *witDylibState) initialize(mem *wasmtime.Memory, store wasmtime.Storelik
 	}
 	s.metadata = &witDylibMetadata{counts: counts}
 
-	// Diagnostic: dump first 64 u32s.
-	dumpU32s(data, int(metadataPtr), 64, "wit_dylib metadata")
-	fmt.Printf("wit_dylib: metadata counts: %v\n", counts)
-
 	// Parse export function entries from the metadata.
 	exportFuncs := s.parseExportFuncs(raw, counts[:])
 	s.exportFuncs = exportFuncs
-
-	fmt.Printf("wit_dylib: parsed %d export functions\n", len(exportFuncs))
-	for i, ef := range exportFuncs {
-		fmt.Printf("wit_dylib:   export[%d] name=%q elem=%d\n", i, ef.funcName, ef.syncElemIndex)
-	}
 
 	return nil
 }
@@ -228,11 +219,8 @@ func (s *witDylibState) parseExportFuncs(raw []byte, counts []uint32) []witDylib
 
 	// Try parsing at the computed offset. Fall back to scanning if out of bounds.
 	if exportOff < 0 || exportOff+numExportFuncs*20 > len(raw) {
-		fmt.Printf("wit_dylib: computed export offset %d out of bounds, scanning instead\n", exportOff)
 		return s.scanForExportFuncs(raw, numExportFuncs)
 	}
-
-	fmt.Printf("wit_dylib: export funcs at offset %d, count=%d\n", exportOff, numExportFuncs)
 
 	funcs := s.tryParseExportFuncs(raw, exportOff, numExportFuncs)
 	if len(funcs) > 0 {
@@ -240,7 +228,6 @@ func (s *witDylibState) parseExportFuncs(raw []byte, counts []uint32) []witDylib
 	}
 
 	// Try relaxed scanning fallback.
-	fmt.Printf("wit_dylib: falling back to string-scanning for export funcs\n")
 	return s.scanForExportFuncs(raw, numExportFuncs)
 }
 
@@ -270,9 +257,6 @@ func (s *witDylibState) tryParseExportFuncs(raw []byte, exportOff, count int) []
 				funcName:      name,
 				syncElemIndex: syncIdx,
 			})
-		} else {
-			fmt.Printf("wit_dylib: export[%d] type_id=%d nameOff=%d nameLen=%d sync=%d (unresolved)\n",
-				i, typeID, nameOff, nameLen, syncIdx)
 		}
 	}
 	return funcs
@@ -642,31 +626,6 @@ func (s *witDylibState) popRecord(ctx int32) int32 {
 // ---------------------------------------------------------------------------
 // Diagnostic helpers
 // ---------------------------------------------------------------------------
-
-// dumpU32s prints the first n u32 values starting at baseOff in data.
-func dumpU32s(data []byte, baseOff int, n int, label string) {
-	maxCount := (len(data) - baseOff) / 4
-	if maxCount <= 0 {
-		fmt.Printf("%s: no data at offset %d\n", label, baseOff)
-		return
-	}
-	if n > maxCount {
-		n = maxCount
-	}
-	fmt.Printf("%s: first %d u32s at offset %d:\n", label, n, baseOff)
-	for i := 0; i < n; i++ {
-		if i%8 == 0 {
-			fmt.Printf("  [%4d]", baseOff+i*4)
-		}
-		fmt.Printf(" %08x", binary.LittleEndian.Uint32(data[baseOff+4*i:]))
-		if i%8 == 7 {
-			fmt.Println()
-		}
-	}
-	if n%8 != 0 {
-		fmt.Println()
-	}
-}
 
 // isAllASCII returns true if all bytes in b are printable ASCII characters
 // (space 0x20 through tilde 0x7E).

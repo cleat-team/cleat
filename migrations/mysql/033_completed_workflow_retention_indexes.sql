@@ -1,0 +1,37 @@
+-- cleat migration 033 (mysql): index for the ListWorkflows Status filter
+--
+-- Companion to migrations/postgres/033_completed_workflow_retention_indexes.sql
+-- (see that file for the full reasoning; this one covers only what differs
+-- on this dialect).
+--
+-- 1. Retention (DeleteCompletedWorkflows, status IN ('done','failed','terminated')):
+--    nothing to add here. 001_schema.sql already declares
+--    `idx_instances_terminal_completed ON workflow_instances(tenant_id, status, completed_at)`
+--    as a plain (non-partial) index -- MySQL has no equivalent of PostgreSQL's
+--    partial-index WHERE clause, so unlike the PostgreSQL copy (which had to
+--    be widened from a 2-status to a 3-status predicate to remain usable),
+--    this index already serves any status value, 'terminated' included, with
+--    no migration needed.
+--
+-- 2. ListWorkflows' Status filter (tenant_id = ? AND status = ? ORDER BY
+--    created_at DESC LIMIT ?): idx_instances_created_at is
+--    (tenant_id, created_at) with no status column, so a status-filtered
+--    list still has to walk tenant_id's full created_at order filtering
+--    status row by row. Added below.
+CREATE INDEX idx_instances_tenant_status_created ON workflow_instances(tenant_id, status, created_at);
+
+-- 3. Trigram/substring-search index on error_msg (ErrorContains filter):
+--    deliberately not added. MySQL's LIKE '%text%' is equally unindexable
+--    by a plain B-tree as PostgreSQL's ILIKE, but MySQL's only index type
+--    that accelerates substring matching is FULLTEXT, which does natural-
+--    language/boolean-mode word matching, not arbitrary substring matching
+--    -- different semantics from the LIKE query ErrorContains actually
+--    issues (engine/mysql_ops.go ListWorkflows), so adding one would not
+--    make the existing query faster, only add write cost for a mismatched
+--    capability. Left unindexed; ErrorContains and the general Search
+--    filter's error_msg branch scan on this dialect exactly as before.
+--
+-- 4. InputContains / Search's input,result branches: same reasoning as the
+--    PostgreSQL migration -- unindexable free-text search over serialized
+--    JSON, and the general Search filter cannot benefit from indexing any
+--    one branch while another remains a table scan. Not added here either.

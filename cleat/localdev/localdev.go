@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -18,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/google/uuid"
 )
 
 // ConcurrencyKeyTTL is the default TTL for concurrency key acquisitions in localdev.
@@ -33,8 +34,48 @@ type ServiceCaller interface {
 	Call(ctx context.Context, service, operation, requestJSON string) (responseJSON string, err error)
 }
 
+// PluginCaller invokes plugin functions during local development.
+// This mirrors the engine's plugin call mechanism so that workflows that
+// use plugins (e.g., llm, blobstore, pagerduty-alert) can run locally
+// without WASM compilation.
+//
+// Implementations should call the appropriate plugin's function and
+// return the JSON result. The context carries deadlines and cancellation
+// from the workflow execution.
+type PluginCaller interface {
+	CallPlugin(ctx context.Context, pluginName, functionName, inputJSON string) (responseJSON string, err error)
+}
+
 // ChildWorkflowRunner executes a child workflow by name.
-// Implementations should run the child synchronously and return its result.
+//
+// In local dev mode, child workflows can be executed via this interface.
+// When no ChildWorkflowRunner is configured, child workflow calls return
+// immediately with a stub run ID and await methods return a default
+// completed result. This allows testing workflows that invoke children
+// without needing the child implementation.
+//
+// Implementations should run the named child workflow synchronously and
+// return its JSON result. The context carries cancellation and deadlines
+// from the parent workflow execution.
+//
+// Usage:
+//
+//	type MyChildRunner struct{}
+//
+//	func (r *MyChildRunner) RunChild(ctx context.Context, name, inputJSON string) (string, error) {
+//	    switch name {
+//	    case "notify":
+//	        return runNotify(ctx, inputJSON)
+//	    case "charge":
+//	        return runCharge(ctx, inputJSON)
+//	    default:
+//	        return "", fmt.Errorf("unknown child workflow: %s", name)
+//	    }
+//	}
+//
+//	runner := localdev.NewLocalRunner(
+//	    localdev.WithChildWorkflowRunner(&MyChildRunner{}),
+//	)
 type ChildWorkflowRunner interface {
 	RunChild(ctx context.Context, name string, inputJSON string) (resultJSON string, err error)
 }
@@ -70,6 +111,12 @@ type Option func(*LocalRunner)
 // If not set, DurableCall returns an error.
 func WithServiceCaller(caller ServiceCaller) Option {
 	return func(r *LocalRunner) { r.caller = caller }
+}
+
+// WithPluginCaller sets the PluginCaller for making plugin calls.
+// If not set, PluginCall returns an error.
+func WithPluginCaller(caller PluginCaller) Option {
+	return func(r *LocalRunner) { r.pluginCaller = caller }
 }
 
 // WithLogWriter sets the writer for DurableLog and event logging.
@@ -138,11 +185,12 @@ type localPromise struct {
 type LocalRunner struct {
 	mu sync.RWMutex
 
-	h         cleat.HostCalls
-	caller    ServiceCaller
-	logWriter io.Writer
-	signalCh  chan Signal
-	events    []Event
+	h            cleat.HostCalls
+	caller       ServiceCaller
+	pluginCaller PluginCaller
+	logWriter    io.Writer
+	signalCh     chan Signal
+	events       []Event
 
 	childRunner  ChildWorkflowRunner
 	childResults map[string]childResult
@@ -158,7 +206,7 @@ type LocalRunner struct {
 	cancelReason  string
 
 	startTime   time.Time
-	pendingSigs []Signal // signals buffered while no one is listening
+	pendingSigs []Signal                 // signals buffered while no one is listening
 	promises    map[string]*localPromise // durable promises keyed by promiseID
 
 	concurrencyKey  string
@@ -168,14 +216,14 @@ type LocalRunner struct {
 // NewLocalRunner creates a new LocalRunner with the given options.
 func NewLocalRunner(opts ...Option) *LocalRunner {
 	r := &LocalRunner{
-		logWriter:     os.Stderr,
-		signalCh:      make(chan Signal, 100),
-		startTime:     time.Now(),
-		versionVal:    1,
-		minVersionVal: 1,
-		queryState:    make(map[string]string),
-		childResults:  make(map[string]childResult),
-		promises:      make(map[string]*localPromise),
+		logWriter:       os.Stderr,
+		signalCh:        make(chan Signal, 100),
+		startTime:       time.Now(),
+		versionVal:      1,
+		minVersionVal:   1,
+		queryState:      make(map[string]string),
+		childResults:    make(map[string]childResult),
+		promises:        make(map[string]*localPromise),
 		concurrencyKeys: make(map[string]string),
 	}
 	for _, o := range opts {
@@ -208,13 +256,38 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		AwaitPromise:                  r.awaitPromiseImpl,
 		RegisterUpdateHandler:         r.registerUpdateHandler,
 		RunDetached:                   r.runDetached,
-		PluginCall:                   r.pluginCallImpl,
+		PluginCall:                    r.pluginCallImpl,
 		AcquireLock:                   r.acquireLockImpl,
 		ReleaseLock:                   r.releaseLockImpl,
-		AwaitCondition:               r.awaitConditionImpl,
+		AwaitCondition:                r.awaitConditionImpl,
 		SideEffect:                    r.sideEffect,
+		ScheduleCron:                  r.scheduleCron,
+		DeleteCron:                    r.deleteCron,
+		ListCrons:                     r.listCrons,
 	})
 	return r
+}
+
+// Cron schedules are wired to an explicit refusal rather than left nil.
+//
+// A nil hook answers with "the HostCalls runtime was not initialized",
+// which is about workflow context and reads as the caller's fault. The
+// truth is narrower: LocalRunner keeps its event history in memory and has
+// no schedule store, so a schedule created here would have nothing to fire
+// it. Reporting success for a cron that can never run would be worse than
+// failing.
+const errNoScheduleStore = "localdev has no schedule store: cron schedules need a worker with a database (see cmd/cleat-worker)"
+
+func (r *LocalRunner) scheduleCron(_, _, _, _ string) (string, error) {
+	return "", errors.New(errNoScheduleStore)
+}
+
+func (r *LocalRunner) deleteCron(_ string) error {
+	return errors.New(errNoScheduleStore)
+}
+
+func (r *LocalRunner) listCrons() (string, error) {
+	return "", errors.New(errNoScheduleStore)
 }
 
 // H returns the HostCalls interface for use by workflow code.
@@ -578,7 +651,6 @@ func (r *LocalRunner) durableCallTypedWithHeartbeat(service, operation string, r
 	return json.Unmarshal([]byte(resp), result)
 }
 
-
 func (r *LocalRunner) version() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -693,7 +765,44 @@ func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) 
 }
 
 func (r *LocalRunner) pluginCallImpl(pluginName, functionName, inputJSON string) (string, error) {
-	return "", fmt.Errorf("localdev: PluginCall is not available in local dev mode (plugin %q, function %q)", pluginName, functionName)
+	r.mu.Lock()
+	caller := r.pluginCaller
+	r.mu.Unlock()
+
+	if caller == nil {
+		return "", fmt.Errorf("localdev: no PluginCaller configured, cannot call plugin %q function %q", pluginName, functionName)
+	}
+
+	ctx := context.Background()
+	callStart := time.Now()
+	resp, err := caller.CallPlugin(ctx, pluginName, functionName, inputJSON)
+	callElapsed := time.Since(callStart)
+
+	evt := Event{
+		Type:      "plugin_call",
+		Service:   pluginName,
+		Operation: functionName,
+		Request:   inputJSON,
+		Elapsed:   callElapsed.String(),
+	}
+	if err != nil {
+		evt.Err = err.Error()
+	} else {
+		evt.Response = resp
+	}
+
+	r.mu.Lock()
+	r.events = append(r.events, evt)
+	r.mu.Unlock()
+
+	r.logEvent("[%.3fs] plugin %s.%s", r.elapsed().Seconds(), pluginName, functionName)
+	if err != nil {
+		r.logEvent("  -> error: %s", err)
+	} else {
+		r.logEvent("  -> %s", truncate(resp, 200))
+	}
+
+	return resp, err
 }
 
 // ---------------------------------------------------------------------------
@@ -756,7 +865,7 @@ func (r *LocalRunner) sideEffect(computedResult string) (string, error) {
 	return computedResult, nil
 }
 
-	func (r *LocalRunner) ReleaseConcurrencyKeys(workflowID string) {
+func (r *LocalRunner) ReleaseConcurrencyKeys(workflowID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for k, v := range r.concurrencyKeys {

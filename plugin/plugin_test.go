@@ -189,7 +189,7 @@ func TestConstructorCalledOnce(t *testing.T) {
 
 	// Verify a second Discover() calls the constructor again.
 	callCount = 0
-	plugins, err = Discover()
+	_, err = Discover()
 	if err != nil {
 		t.Fatalf("second Discover failed: %v", err)
 	}

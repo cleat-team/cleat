@@ -20,10 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -31,16 +31,16 @@ import (
 // ---------------------------------------------------------------------------
 
 type webhookSourceRow struct {
-	id              string
-	tenantID        string
-	name            string
-	sourceType      string
-	secret          string
-	enabled         bool
+	id               string
+	tenantID         string
+	name             string
+	sourceType       string
+	secret           string
+	enabled          bool
 	signalWorkflowID string
-	signalName      string
-	createdAt       time.Time
-	updatedAt       time.Time
+	signalName       string
+	createdAt        time.Time
+	updatedAt        time.Time
 }
 
 type webhookEventRow struct {
@@ -59,17 +59,17 @@ type webhookEventRow struct {
 }
 
 type fakeDBStore struct {
-	mu      sync.RWMutex
-	sources []webhookSourceRow
-	events  []webhookEventRow
-	apiKeys map[string]string // key_hash_hex -> tenant_id
-	failNextQuery    bool
-	failNextExec     bool
-	querySkip        int
-	execSkip         int
-	corruptNextScan  bool
-	corruptScanSkip  int
-	failNextRowsErr  bool
+	mu              sync.RWMutex
+	sources         []webhookSourceRow
+	events          []webhookEventRow
+	apiKeys         map[string]string // key_hash_hex -> tenant_id
+	failNextQuery   bool
+	failNextExec    bool
+	querySkip       int
+	execSkip        int
+	corruptNextScan bool
+	corruptScanSkip int
+	failNextRowsErr bool
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -106,10 +106,11 @@ type fakeConn struct {
 func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
-func (*fakeConn) Close() error      { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
+
 func (*fakeTx) Commit() error   { return nil }
 func (*fakeTx) Rollback() error { return nil }
 
@@ -182,7 +183,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	}
 
 	switch {
-	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(query, "tenant_api_keys") && strings.Contains(query, "tenant_id"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
@@ -630,7 +631,11 @@ func (c *fakeConn) queryAwaitEvents(query string, args []driver.NamedValue) (dri
 				results = filtered
 			}
 		}
-		nextArg++
+		// Ineffectual only because this is the last clause. Keeping it is what
+		// makes the next filter added below read the right $N instead of
+		// silently reusing this one's. Same reasoning as the //nolint'd
+		// increments in this plugin's own host_functions.go.
+		nextArg++ //nolint:ineffassign // trailing counter; see above
 	}
 
 	// Sort by received_at DESC, take first
@@ -909,14 +914,18 @@ func (*rowsErrFakeRows) Err() error { return fmt.Errorf("simulated rows iteratio
 
 type rowsErrConnector struct{ store *fakeDBStore }
 
-func (c *rowsErrConnector) Connect(_ context.Context) (driver.Conn, error) { return &rowsErrConn{store: c.store}, nil }
+func (c *rowsErrConnector) Connect(_ context.Context) (driver.Conn, error) {
+	return &rowsErrConn{store: c.store}, nil
+}
 func (c *rowsErrConnector) Driver() driver.Driver { return &rowsErrDrv{} }
 
 type rowsErrConn struct{ store *fakeDBStore }
 
-func (*rowsErrConn) Prepare(_ string) (driver.Stmt, error) { return nil, fmt.Errorf("rowsErrConn: unexpected Prepare") }
-func (*rowsErrConn) Close() error                           { return nil }
-func (*rowsErrConn) Begin() (driver.Tx, error)              { return nil, fmt.Errorf("rowsErrConn: no tx") }
+func (*rowsErrConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("rowsErrConn: unexpected Prepare")
+}
+func (*rowsErrConn) Close() error              { return nil }
+func (*rowsErrConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("rowsErrConn: no tx") }
 func (c *rowsErrConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	// For processBatch query, return rows that fail with rows.Err().
 	if strings.Contains(query, "SELECT e.id, e.source_id, e.event_type") {
@@ -1021,7 +1030,7 @@ func TestCreateSource(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -1055,10 +1064,78 @@ func TestCreateSource(t *testing.T) {
 		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var fetched map[string]interface{}
+	var fetched map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &fetched)
 	if fetched["name"] != "github-webhook" {
 		t.Errorf("expected name 'github-webhook', got %s", fetched["name"])
+	}
+}
+
+// TestListAndGetSourcesDoNotLeakSecret verifies that neither the list nor
+// the get endpoint (nor create) ever returns the real HMAC secret in the
+// response body.
+func TestListAndGetSourcesDoNotLeakSecret(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	const realSecret = "do-not-leak-this-hmac-secret"
+	body := `{"name":"github-webhook","source_type":"github","secret":"` + realSecret + `"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) {
+		t.Errorf("create response leaked the real secret: %s", rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	if created["secret"] != plugin.RedactedPlaceholder {
+		t.Errorf("create: expected secret %q, got %v", plugin.RedactedPlaceholder, created["secret"])
+	}
+	id := created["id"].(string)
+
+	// GET.
+	req = authedRequest("GET", "/ingest/sources/"+id, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) {
+		t.Errorf("GET response leaked the real secret: %s", rec.Body.String())
+	}
+	var fetched map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &fetched)
+	if fetched["secret"] != plugin.RedactedPlaceholder {
+		t.Errorf("GET: expected secret %q, got %v", plugin.RedactedPlaceholder, fetched["secret"])
+	}
+
+	// LIST.
+	req = authedRequest("GET", "/ingest/sources", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) {
+		t.Errorf("LIST response leaked the real secret: %s", rec.Body.String())
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("LIST: failed to decode: %v", err)
+	}
+	found := false
+	for _, s := range list {
+		if s["id"] == id {
+			found = true
+			if s["secret"] != plugin.RedactedPlaceholder {
+				t.Errorf("LIST: expected secret %q, got %v", plugin.RedactedPlaceholder, s["secret"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected source %s in list response", id)
 	}
 }
 
@@ -1075,7 +1152,7 @@ func TestCreateSourceDefaults(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	if created["source_type"] != "generic" {
 		t.Errorf("expected default source_type 'generic', got %s", created["source_type"])
@@ -1096,7 +1173,7 @@ func TestIngestWebhookPayload(t *testing.T) {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
@@ -1110,7 +1187,7 @@ func TestIngestWebhookPayload(t *testing.T) {
 		t.Fatalf("ingest: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var ingestResp map[string]interface{}
+	var ingestResp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &ingestResp)
 	if ingestResp["received"] != true {
 		t.Errorf("expected received=true, got %v", ingestResp["received"])
@@ -1146,7 +1223,7 @@ func TestIngestWebhookPayload(t *testing.T) {
 		t.Fatalf("list events: expected 200, got %d", rec.Code)
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &events)
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event in list, got %d", len(events))
@@ -1169,7 +1246,7 @@ func TestIngestWithHMACVerification(t *testing.T) {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
@@ -1200,7 +1277,7 @@ func TestIngestInvalidHMAC(t *testing.T) {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
@@ -1228,7 +1305,7 @@ func TestIngestMissingHMAC(t *testing.T) {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
@@ -1388,7 +1465,7 @@ func TestAwaitWebhookHostFunction(t *testing.T) {
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	input, _ := json.Marshal(map[string]interface{}{
+	input, _ := json.Marshal(map[string]any{
 		"source_id":  sourceID.String(),
 		"event_type": "push",
 	})
@@ -1397,7 +1474,7 @@ func TestAwaitWebhookHostFunction(t *testing.T) {
 		t.Fatalf("awaitWebhook: %v", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("failed to decode output: %v", err)
 	}
@@ -1436,7 +1513,7 @@ func TestAwaitWebhookNoEvents(t *testing.T) {
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	input, _ := json.Marshal(map[string]interface{}{
+	input, _ := json.Marshal(map[string]any{
 		"source_id": uuid.New().String(),
 	})
 	output, err := p.awaitWebhook(ctx, string(input))
@@ -1444,7 +1521,7 @@ func TestAwaitWebhookNoEvents(t *testing.T) {
 		t.Fatalf("awaitWebhook: %v", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal([]byte(output), &result)
 	if result["found"] != false {
 		t.Errorf("expected found=false, got %v", result["found"])
@@ -1463,7 +1540,7 @@ func TestSourceDelete(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	id := created["id"].(string)
 
@@ -1512,7 +1589,7 @@ func TestCreateSourceMissingName(t *testing.T) {
 		t.Fatalf("expected 400 for missing name, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp["error"] == nil {
 		t.Error("expected error message in response")
@@ -1546,7 +1623,7 @@ func TestCreateSourceWithSignalBinding(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	if created["signal_workflow_id"] != "wf-001" {
 		t.Errorf("expected signal_workflow_id 'wf-001', got %v", created["signal_workflow_id"])
@@ -1571,7 +1648,7 @@ func TestListEventsWithFilters(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create source 1: expected 201, got %d", rec.Code)
 	}
-	var src1 map[string]interface{}
+	var src1 map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &src1)
 	sourceID1 := src1["id"].(string)
 
@@ -1582,7 +1659,7 @@ func TestListEventsWithFilters(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create source 2: expected 201, got %d", rec.Code)
 	}
-	var src2 map[string]interface{}
+	var src2 map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &src2)
 	sourceID2 := src2["id"].(string)
 
@@ -1613,7 +1690,7 @@ func TestListEventsWithFilters(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list events: expected 200, got %d", rec.Code)
 	}
-	var events []map[string]interface{}
+	var events []map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &events)
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events, got %d", len(events))
@@ -1674,7 +1751,7 @@ func TestIngestNonJSONBody(t *testing.T) {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
@@ -1823,7 +1900,13 @@ func TestListSourcesHandler(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for list sources, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var sources []webhookSourceJSON
+	// Unmarshal into map[string]any rather than webhookSourceJSON: the
+	// response's "secret" field is always the literal RedactedPlaceholder,
+	// and Secret.UnmarshalJSON deliberately rejects that literal, so decoding
+	// a redacted response back into webhookSourceJSON is not possible (nor
+	// should it be -- that type is for producing responses, not consuming
+	// them).
+	var sources []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
 		t.Fatalf("unmarshal sources: %v", err)
 	}
@@ -1983,13 +2066,13 @@ func TestRetryEventSignalDeliveryFailure(t *testing.T) {
 
 	eventID := uuid.New()
 	store.events = append(store.events, webhookEventRow{
-		id:        eventID.String(),
-		tenantID:  testTenantStr,
-		eventType: "webhook",
-		payload:   `{"test":true}`,
+		id:         eventID.String(),
+		tenantID:   testTenantStr,
+		eventType:  "webhook",
+		payload:    `{"test":true}`,
 		receivedAt: time.Now().Add(-30 * time.Second),
-		processed: false,
-		status:    "pending",
+		processed:  false,
+		status:     "pending",
 	})
 
 	db := sql.OpenDB(&fakeConnector{store: store})
@@ -2143,7 +2226,7 @@ func TestWH_GetSource_QueryError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
@@ -2222,7 +2305,7 @@ func TestWH_DeleteSource_ExecError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
@@ -2306,15 +2389,18 @@ func TestWH_ListSources_TenantIsolation(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("tenant 1 list: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var sources []webhookSourceJSON
+	// Unmarshal into map[string]any: the response's "secret" field is always
+	// the literal RedactedPlaceholder, which Secret.UnmarshalJSON refuses to
+	// parse back into a webhookSourceJSON.
+	var sources []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(sources) != 1 {
 		t.Fatalf("expected 1 source for tenant 1, got %d", len(sources))
 	}
-	if sources[0].Name != "tenant-1-source" {
-		t.Errorf("expected 'tenant-1-source', got %s", sources[0].Name)
+	if sources[0]["name"] != "tenant-1-source" {
+		t.Errorf("expected 'tenant-1-source', got %s", sources[0]["name"])
 	}
 
 	// Tenant 2 lists sources.
@@ -2331,8 +2417,8 @@ func TestWH_ListSources_TenantIsolation(t *testing.T) {
 	if len(sources) != 1 {
 		t.Fatalf("expected 1 source for tenant 2, got %d", len(sources))
 	}
-	if sources[0].Name != "tenant-2-source" {
-		t.Errorf("expected 'tenant-2-source', got %s", sources[0].Name)
+	if sources[0]["name"] != "tenant-2-source" {
+		t.Errorf("expected 'tenant-2-source', got %s", sources[0]["name"])
 	}
 }
 
@@ -2386,7 +2472,7 @@ func TestWH_Ingest_SourceLookupError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
@@ -2420,7 +2506,7 @@ func TestWH_Ingest_EventInsertError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
@@ -2912,7 +2998,7 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	input, _ := json.Marshal(map[string]interface{}{
+	input, _ := json.Marshal(map[string]any{
 		"source_id": uuid.New().String(),
 	})
 	_, err := p.awaitWebhook(ctx, string(input))
@@ -2959,7 +3045,7 @@ func TestWH_AwaitWebhook_ExecError(t *testing.T) {
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	input, _ := json.Marshal(map[string]interface{}{
+	input, _ := json.Marshal(map[string]any{
 		"event_type": "push",
 	})
 	output, err := p.awaitWebhook(ctx, string(input))
@@ -2967,7 +3053,7 @@ func TestWH_AwaitWebhook_ExecError(t *testing.T) {
 		t.Fatalf("expected no error even when exec fails, got: %v", err)
 	}
 	// The event should still be returned even if marking as processed fails.
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("failed to decode output: %v", err)
 	}
@@ -3045,7 +3131,7 @@ func TestWH_ListEvents_ScanError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create source: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 

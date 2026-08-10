@@ -18,7 +18,7 @@ func TestLatencyP50(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	const numSamples = 100
@@ -28,7 +28,7 @@ func TestLatencyP50(t *testing.T) {
 		// Create a workflow instance for this sample.
 		id := fmt.Sprintf("scale-lat-p50-%d-%d", i, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
@@ -74,7 +74,7 @@ func TestLatencyP99(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	const numSamples = 200
@@ -93,7 +93,7 @@ func TestLatencyP99(t *testing.T) {
 
 			id := fmt.Sprintf("scale-lat-p99-%d-%d", idx, time.Now().UnixNano())
 			_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-				VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+				VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 			if err != nil {
 				t.Errorf("create workflow %d: %v", idx, err)
 				return
@@ -151,7 +151,7 @@ func TestLatencyUnderConcurrency(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	concurrencyLevels := []int{1, 5, 10, 25, 50}
@@ -170,7 +170,7 @@ func TestLatencyUnderConcurrency(t *testing.T) {
 
 					id := fmt.Sprintf("scale-lat-conc-%d-%d-%d", conc, idx, time.Now().UnixNano())
 					_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-						VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+						VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 					if err != nil {
 						t.Errorf("create workflow: %v", err)
 						return

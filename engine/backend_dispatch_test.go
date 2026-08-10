@@ -295,62 +295,6 @@ func TestEngineDispatchReplay(t *testing.T) {
 
 var _ WasmBackend = (*mockBackend)(nil)
 
-// ---------------------------------------------------------------------------
-// Ensure wazeroBackend compiles and implements WasmBackend (also verified by
-// compile-time check in backend_wazero.go), creating one verifies that
-// NewWazeroBackend works end-to-end.
-// ---------------------------------------------------------------------------
-
-func TestNewWazeroBackend(t *testing.T) {
-	ctx := context.Background()
-	backend, err := NewWazeroBackend(ctx)
-	if err != nil {
-		t.Fatalf("NewWazeroBackend: %v", err)
-	}
-	defer func() {
-		if cerr := backend.Close(ctx); cerr != nil {
-			t.Errorf("Close: %v", cerr)
-		}
-	}()
-
-	if backend.Name() != "wazero" {
-		t.Errorf("expected name 'wazero', got %q", backend.Name())
-	}
-}
-
-// TestEngineWithWazeroBackend verifies that an Engine can be created with a
-// wazeroBackend and execute a minimal WASM module (expecting call failure
-// due to missing exports, but not a backend dispatch failure).
-func TestEngineWithWazeroBackend(t *testing.T) {
-	ctx := context.Background()
-	wazeroB, err := NewWazeroBackend(ctx)
-	if err != nil {
-		t.Fatalf("NewWazeroBackend: %v", err)
-	}
-	defer wazeroB.Close(ctx)
-
-	caller := &mockCaller{}
-
-	// Need a Runtime for NewEngine (it is required even when using backends).
-	rt, err := NewRuntime(ctx, 0, 0)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	defer rt.Close(ctx)
-
-	engine := NewEngine(rt, caller, WithBackend("go", wazeroB))
-
-	wasmBytes := wasmWithoutLanguage()
-	input := json.RawMessage(`{}`)
-	_, _, _, _, _, err = engine.Execute(ctx, wasmBytes, "entry", input)
-	// Expect an error because the bare module has no "entry" export.
-	if err == nil {
-		t.Error("expected error from executing a bare WASM module (no exports)")
-	} else {
-		t.Logf("Engine.Execute with wazeroBackend correctly failed: %v", err)
-	}
-}
-
 func TestWasmDetectLanguageInvalidBinary(t *testing.T) {
 	// An invalid WASM binary should return "go" (the default).
 	lang := wasm.DetectLanguage([]byte{0x00, 0x00, 0x00, 0x00})

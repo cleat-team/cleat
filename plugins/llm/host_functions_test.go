@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/llm/providers"
+	"github.com/google/uuid"
 )
 
 // fakeLLMServer returns an httptest server that mimics an OpenAI-compatible API.
@@ -75,8 +75,8 @@ func fakeOllamaServer(t *testing.T) *httptest.Server {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"message":          map[string]string{"role": "assistant", "content": "Hello from mock Ollama"},
-			"done":             true,
+			"message":           map[string]string{"role": "assistant", "content": "Hello from mock Ollama"},
+			"done":              true,
 			"prompt_eval_count": 5,
 			"eval_count":        3,
 		})
@@ -423,7 +423,7 @@ func TestListModelsSpecificProvider(t *testing.T) {
 	}
 
 	var result struct {
-		Models   []struct {
+		Models []struct {
 			Name   string  `json:"name"`
 			Cost1K float64 `json:"cost_per_1k_tokens"`
 		} `json:"models"`

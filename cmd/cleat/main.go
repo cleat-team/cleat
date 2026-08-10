@@ -13,7 +13,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -23,14 +22,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/internal/analyzer"
 	"github.com/cleat-team/cleat/internal/callgraph"
 	"github.com/cleat-team/cleat/internal/closure"
-	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/internal/transform"
 	"github.com/cleat-team/cleat/wasm"
 )
@@ -38,20 +39,22 @@ import (
 var dbConnStr string
 var dbCredProviderName = "env"
 var dbCredPath string
+var buildTenantID string
 
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
+	flag.StringVar(&buildTenantID, "tenant", "", "tenant UUID for build-time resolution (default: zero UUID for single-tenant)")
 	flag.StringVar(&dbCredProviderName, "db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
 	flag.StringVar(&dbCredPath, "db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init> [flags] <args>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init|version> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
-		fmt.Fprintf(os.Stderr, "  cleat dev [--input <json>] [--entry-point <name>] <package>\n")
-		fmt.Fprintf(os.Stderr, "  cleat schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>]\n")
+		fmt.Fprintf(os.Stderr, "  cleat dev [--input <json>] [--entry-point <name>] [--concurrency-key <key>] [--watch] <package>\n")
+		fmt.Fprintf(os.Stderr, "  cleat schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>] [--timezone <iana-zone>]\n")
 		fmt.Fprintf(os.Stderr, "  cleat schedule list\n")
 		fmt.Fprintf(os.Stderr, "  cleat schedule delete <name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat schedule enable <name>\n")
@@ -59,6 +62,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cleat run [--wasm <file>] [--entry-point <name>] [--input <json>] [--api-addr <addr>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat plugin <validate|install|list|update|uninstall> [flags]\n")
 		fmt.Fprintf(os.Stderr, "  cleat lock [--db <conn>] [--update] <package>\n")
+		fmt.Fprintf(os.Stderr, "  cleat version\n")
 		fmt.Fprintf(os.Stderr, "Common flags:\n")
 		fmt.Fprintf(os.Stderr, "  --db <connstr>  PostgreSQL connection string\n")
 		fmt.Fprintf(os.Stderr, "Example: cleat build -o ./out ./testdata/basic/\n")
@@ -69,6 +73,20 @@ func main() {
 	// init doesn't require a second argument (pattern)
 	if len(args) >= 1 && args[0] == "init" {
 		runInit(flag.Args()[1:])
+		return
+	}
+	// version doesn't take a package argument either. docs/tutorials/quick-start.md
+	// has documented `cleat version` since before this subcommand existed;
+	// main's switch below never had a case for it, so it fell through to
+	// "Error: missing command or package argument" or "Unknown command".
+	//
+	// --version is deliberately not handled here: flag.Parse() above already
+	// rejects an unregistered "-version"/"--version" flag before flag.Args()
+	// is ever produced, so a check on args[0] here would be unreachable dead
+	// code. Making --version itself work would mean registering it as a real
+	// top-level flag, which is more than this fix needs.
+	if len(args) >= 1 && args[0] == "version" {
+		runVersion()
 		return
 	}
 	if len(args) < 2 {
@@ -90,18 +108,35 @@ func main() {
 		var diffOut bool
 		var sizeReport bool
 		var runtime string
+		var buildChannel string
+		var workflowVersion int
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
-		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), tinygo (deprecated), rust, java, assemblyscript, python")
+		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
+		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, assemblyscript, python")
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: produce both)")
+		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
 		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
 		fs.Parse(os.Args[2:])
-		if !isValidTarget(target) {
-			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript, python\n", target)
+		if target == "tinygo" {
+			fmt.Fprintf(os.Stderr, "Error: TinyGo support was removed; use the default Go/wasip1 target (--target go, or omit --target).\n")
 			os.Exit(1)
+		}
+		if !isValidTarget(target) {
+			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, rust, java, assemblyscript, python\n", target)
+			os.Exit(1)
+		}
+		// Default channel: when --db is provided, default to "stable".
+		// When no --db, default to "latest" (current behavior, backwards compatible).
+		if buildChannel == "" {
+			if dbConnStr != "" || os.Getenv("CLEAT_DATABASE_URL") != "" {
+				buildChannel = "stable"
+			} else {
+				buildChannel = "latest"
+			}
 		}
 		remainder := fs.Args()
 		if len(remainder) > 0 {
@@ -109,9 +144,9 @@ func main() {
 		}
 		if entry != "" {
 			// Use --entry as the pattern for Python builds.
-			runBuild(entry, outDir, target, runtime, jsonOut, diffOut, sizeReport)
+			runBuild(entry, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, workflowVersion)
 		} else {
-			runBuild(pattern, outDir, target, runtime, jsonOut, diffOut, sizeReport)
+			runBuild(pattern, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport, workflowVersion)
 		}
 	case "vet":
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
@@ -180,42 +215,42 @@ func main() {
 		runLock(flag.Args()[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
-		fmt.Fprintf(os.Stderr, "Valid commands: build, vet, deploy, versions, rollback, dev, schedule, run, dag, plugin, lock, init\n")
+		fmt.Fprintf(os.Stderr, "Valid commands: build, vet, deploy, versions, rollback, dev, schedule, run, dag, plugin, lock, init, version\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 }
 
-func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut bool, sizeReport bool) {
+func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, diffOut bool, sizeReport bool, workflowVersion int) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildJava(pattern, outDir)
+		runBuildJava(pattern, outDir, channel)
 		return
 	}
 	if target == "assemblyscript" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildAssemblyScript(pattern, outDir)
+		runBuildAssemblyScript(pattern, outDir, channel)
 		return
 	}
 	if target == "rust" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildRust(pattern, outDir)
+		runBuildRust(pattern, outDir, channel)
 		return
 	}
 	if target == wasm.PythonTarget {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildPython(pattern, outDir, runtime)
+		runBuildPython(pattern, outDir, runtime, channel)
 		return
 	}
-	result, cg, cr, threadingErrs, usage, tr := analyze(pattern, target)
+	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = cg
 
 	if jsonOut {
@@ -359,20 +394,15 @@ func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut boo
 	logBuildProgress("  Build directory: %s\n", jsonOut, outDir)
 
 	// Run go mod tidy in the build directory to generate go.sum entries
-	// before compilation. For TinyGo, the .deps/ tree provides the cleat module
-	// locally via replace directives. For standard Go, the replace points
-	// directly to the project root.
+	// before compilation. The replace directive points directly to the
+	// project root.
 	tidyCmd := exec.Command("go", "mod", "tidy")
 	tidyCmd.Dir = outDir
-	if target == "tinygo" {
-		if tinygoGoroot := os.Getenv("CLEAT_TINYGO_GOROOT"); tinygoGoroot != "" {
-			tidyCmd.Env = append(os.Environ(),
-				"GOROOT="+tinygoGoroot,
-				"PATH="+tinygoGoroot+"/bin:"+os.Getenv("PATH"),
-				"GOTOOLCHAIN=local",
-			)
-		}
-	}
+	tidyCmd.Env = append(os.Environ(),
+		"GONOSUMCHECK=*",
+		"GONOSUMDB=*",
+		"GOPRIVATE=*",
+	)
 	if out, err := tidyCmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running go mod tidy in build directory: %v\n%s\n", err, out)
 		os.Exit(1)
@@ -380,50 +410,22 @@ func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut boo
 
 	wasmPath := filepath.Join(outDir, wasmFile)
 
-	if target == "go" {
-		// Standard Go wasip1 compilation.
-		logBuildProgress("  Compiling WASM module (go/wasip1)...\n", jsonOut)
-		cmd := exec.Command("go", "build",
-			"-o", wasmPath,
-			".",
-		)
-		cmd.Env = os.Environ()
-		cmd.Env = append(cmd.Env,
-			"GOOS=wasip1",
-			"GOARCH=wasm",
-		)
-		cmd.Dir = outDir
+	// Standard Go wasip1 compilation.
+	logBuildProgress("  Compiling WASM module (go/wasip1)...\n", jsonOut)
+	buildCmd := exec.Command("go", "build",
+		"-o", wasmPath,
+		".",
+	)
+	buildCmd.Env = os.Environ()
+	buildCmd.Env = append(buildCmd.Env,
+		"GOOS=wasip1",
+		"GOARCH=wasm",
+	)
+	buildCmd.Dir = outDir
 
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error compiling WASM module:\n%s\n", string(out))
-			os.Exit(1)
-		}
-	} else {
-		// TinyGo wasip1 compilation.
-		logBuildProgress("  Compiling WASM module (tinygo)...\n", jsonOut)
-		cmd := exec.Command("tinygo", "build",
-			"-target=wasip1",
-			"-o", wasmPath,
-			".",
-		)
-		cmd.Env = os.Environ()
-		if tinygoGoroot := os.Getenv("CLEAT_TINYGO_GOROOT"); tinygoGoroot != "" {
-			cmd.Env = append(cmd.Env, "GOROOT="+tinygoGoroot)
-			cmd.Env = append(cmd.Env, "PATH="+tinygoGoroot+"/bin:"+os.Getenv("PATH"))
-		} else if goroot := os.Getenv("GOROOT"); goroot != "" {
-			cmd.Env = append(cmd.Env, "GOROOT="+goroot)
-		}
-		if tinygoroot := os.Getenv("TINYGOROOT"); tinygoroot != "" {
-			cmd.Env = append(cmd.Env, "TINYGOROOT="+tinygoroot)
-		}
-		cmd.Dir = outDir
-
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error compiling WASM module:\n%s\n", string(out))
-			os.Exit(1)
-		}
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error compiling WASM module:\n%s\n", string(out))
+		os.Exit(1)
 	}
 
 	fi, err := os.Stat(wasmPath)
@@ -442,18 +444,19 @@ func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut boo
 	// Resolve child workflow versions from lock file or database.
 	var childVersions map[string]int
 	if len(usage.Children) > 0 {
-		childVersions = resolveBuildChildVersions(usage.Children, jsonOut)
+		childVersions = resolveBuildChildVersions(usage.Children, channel, jsonOut)
 	}
 
 	workflowName := wasmOutputName(result)
 	meta := &wasm.Metadata{
 		WorkflowName:         workflowName,
-		WorkflowVersion:      1,
+		WorkflowVersion:      workflowVersion,
 		ABIVersion:           wasm.CurrentABIVersion,
 		MinCompatibleVersion: wasm.CurrentABIVersion,
 		Language:             "go",
 		PluginDeps:           derivePluginDeps(usage),
 		ChildVersions:        childVersions,
+		ChildBindingPolicy:   channel,
 	}
 	wasmWithMeta, err := wasm.WriteMetadata(wasmBytes, meta)
 	if err != nil {
@@ -476,12 +479,10 @@ func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut boo
 	// functions from the "env" module that the closure analysis did
 	// not predict. These could indicate a bug in the closure analysis
 	// or unused imports the developer should investigate.
-	if target == "tinygo" || target == "go" {
-		if orphans := wasm.FindCleatOrphanedImports(wasmBytes, usage.Used); len(orphans) > 0 {
-			fmt.Println()
-			for _, orphan := range orphans {
-				fmt.Fprintf(os.Stderr, "  Warning: %s\n", orphan)
-			}
+	if orphans := wasm.FindCleatOrphanedImports(wasmBytes, usage.Used); len(orphans) > 0 {
+		fmt.Println()
+		for _, orphan := range orphans {
+			fmt.Fprintf(os.Stderr, "  Warning: %s\n", orphan)
 		}
 	}
 }
@@ -500,7 +501,7 @@ func printSizeReport(wasmPath string, totalSize int64, result *analyzer.Analysis
 	fmt.Printf("  Target: %s\n", target)
 
 	// Estimate package contributions based on known typical sizes.
-	// These are approximate and based on measurements of TinyGo wasip1 builds.
+	// These are approximate and based on measurements of Go wasip1 builds.
 	type pkgSize struct {
 		name string
 		size int64
@@ -614,7 +615,7 @@ func printSizeReport(wasmPath string, totalSize int64, result *analyzer.Analysis
 }
 
 func runVet(pattern string, jsonOut bool, ciOut bool) int {
-	result, _, cr, threadingErrs, usage, tr := analyze(pattern, "go")
+	result, _, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = usage
 	_ = tr
 
@@ -752,20 +753,20 @@ func detectVetLang(dir string) (string, error) {
 		return "as", nil
 	}
 
-		// Fallback: check source file extensions.
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			switch {
-			case strings.HasSuffix(e.Name(), ".go"):
-				return "go", nil
-			case strings.HasSuffix(e.Name(), ".rs"):
-				return "rust", nil
-			case strings.HasSuffix(e.Name(), ".java"):
-				return "java", nil
-			}
+	// Fallback: check source file extensions.
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
 		}
+		switch {
+		case strings.HasSuffix(e.Name(), ".go"):
+			return "go", nil
+		case strings.HasSuffix(e.Name(), ".rs"):
+			return "rust", nil
+		case strings.HasSuffix(e.Name(), ".java"):
+			return "java", nil
+		}
+	}
 
 	return "", fmt.Errorf("could not auto-detect language in %s. Use --lang to specify", dir)
 }
@@ -846,87 +847,86 @@ func runVetPython(dir string, jsonOut bool) int {
 
 // runVetAS performs a basic vet check on AssemblyScript source files.
 // AssemblyScript vetting is currently limited; full AST analysis is planned.
+// runVetAS vets an AssemblyScript workflow by compiling it with the cleat
+// transform and no code generation.
+//
+// It used to vet nothing. It walked the tree counting .as/.ts files, resolved
+// node and the transform path, discarded both (`_ = nodePath`, and a
+// `transformFile` candidate search whose result was never read), printed
+// "Scanned N file(s)" and returned 0 -- on every path, for every input. A
+// workflow calling Math.random() inside a durable function passed vet, and so
+// did one with no AssemblyScript in it at all. See IMPROVEMENT-PLAN.md 2.43.
+//
+// What makes vetting possible now is 2.42: the transform's E001-E005
+// determinism checks used to be console.error() and nothing else, so even
+// `cleat build` exited 0 on a violation. They throw from afterParse now, which
+// is what makes asc fail. Running asc with --noEmit gets the whole check --
+// parse, transform, diagnostics -- without writing a .wasm.
+//
+// A missing toolchain is an error rather than a pass. `cleat build` already
+// exits 1 when npx is absent, and a vet that returns 0 because it could not
+// look is the exact defect being fixed here.
 func runVetAS(dir string) int {
 	if dir == "" {
 		dir = "."
 	}
 
-	// Check for package.json.
 	if _, err := os.Stat(filepath.Join(dir, "package.json")); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: no package.json found in %s\n", dir)
+		fmt.Fprintf(os.Stderr, "AssemblyScript workflows are npm projects; run 'cleat vet' from the project root or pass its path.\n")
 		return 1
+	}
+
+	entry := filepath.Join(dir, "assembly", "index.ts")
+	if _, err := os.Stat(entry); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: no assembly/index.ts found in %s\n", dir)
+		fmt.Fprintf(os.Stderr, "This is the entry point 'cleat build --target assemblyscript' compiles; vet checks the same one.\n")
+		return 1
+	}
+
+	if _, err := exec.LookPath("npx"); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: npx not found, so the AssemblyScript vet cannot run. Install Node.js: https://nodejs.org\n")
+		fmt.Fprintf(os.Stderr, "Reporting this rather than passing: a vet that cannot run its checks has not vetted anything.\n")
+		return 1
+	}
+
+	// Mirrors runBuildAssemblyScript: the transform is resolved from
+	// node_modules as @cleat/transform, so it has to be installed to run.
+	if _, err := os.Stat(filepath.Join(dir, "node_modules")); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Installing npm dependencies...\n")
+		cmd := exec.Command("npm", "install")
+		cmd.Dir = dir
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: npm install failed: %v\n", err)
+			return 1
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Vetting AssemblyScript project in %s...\n", dir)
-	fmt.Fprintf(os.Stderr, "Note: AssemblyScript vetting is experimental. Checking transform-level validation.\n")
 
-	// Check for the cleat-as package transform validation.
-	asDir := filepath.Join(dir, "packages", "cleat-as")
-	if _, err := os.Stat(asDir); os.IsNotExist(err) {
-		// The transform may be at the AS project level; check for assembly/ dir.
-		asDir = dir
-	}
+	// --noEmit runs parse and the transform, including the E001-E005
+	// determinism diagnostics, without producing a .wasm. Everything else
+	// matches the build invocation so vet and build agree about what compiles.
+	cmd := exec.Command("npx",
+		"asc", filepath.Join("assembly", "index.ts"),
+		"--runtime", "stub",
+		"--transform", "@cleat/transform",
+		"--noEmit",
+	)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
 
-	// Find .as files.
-	var asFiles []string
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if d.Name() == "node_modules" || d.Name() == ".git" || strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(path, ".as") || strings.HasSuffix(path, ".ts") {
-			asFiles = append(asFiles, path)
-		}
-		return nil
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error scanning AS files: %v\n", err)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nAssemblyScript vet failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Determinism violations are reported above as E001-E005.\n")
 		return 1
 	}
 
-	if len(asFiles) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: no .as or .ts source files found in %s\n", dir)
-		return 0
-	}
-
-	// Run the AS transform's vet validation via Node.js if available.
-	nodePath, err := exec.LookPath("node")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: node not found, skipping AssemblyScript vet transform.\n")
-		fmt.Fprintf(os.Stderr, "Scanned %d file(s) — no pattern-based checks available for AS yet.\n", len(asFiles))
-		return 0
-	}
-
-	// Check if the transform's afterParse validation is available.
-	transformFile := filepath.Join(dir, "packages", "cleat-as", "transform", "index.js")
-	if _, err := os.Stat(transformFile); os.IsNotExist(err) {
-		// Fall back to looking relative to the repo root.
-		candidates := []string{
-			filepath.Join("packages", "cleat-as", "transform", "index.js"),
-			filepath.Join(dir, "..", "packages", "cleat-as", "transform", "index.js"),
-		}
-		found := false
-		for _, c := range candidates {
-			if _, statErr := os.Stat(c); statErr == nil {
-				transformFile = c
-				found = true
-				break
-			}
-		}
-		if !found {
-			fmt.Fprintf(os.Stderr, "Scanned %d file(s) — AS transform validation unavailable.\n", len(asFiles))
-			return 0
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "Scanned %d file(s) — use 'cleat build' for full AS validation.\n", len(asFiles))
-
-	_ = nodePath
+	fmt.Fprintf(os.Stderr, "AssemblyScript vet passed.\n")
 	return 0
 }
 
@@ -996,7 +996,7 @@ func runDeploy(args []string) {
 		return
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
@@ -1008,13 +1008,19 @@ func runDeploy(args []string) {
 		os.Exit(1)
 	}
 
-	var version int
-	err = db.QueryRow("SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_defs WHERE name = $1", name).Scan(&version)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
-		os.Exit(1)
+	// Use the version embedded in WASM metadata if available; otherwise
+	// auto-increment.  Deploying the same version multiple times updates
+	// the existing row (idempotent).
+	version := 1
+	if metaErr == nil && meta.WorkflowVersion > 0 {
+		version = meta.WorkflowVersion
+	} else {
+		err = db.QueryRow("SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_defs WHERE name = $1", name).Scan(&version)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
+			os.Exit(1)
+		}
 	}
-
 
 	// Build the SQL with metadata columns if available.
 	abiVersion := 1
@@ -1029,7 +1035,15 @@ func runDeploy(args []string) {
 	}
 
 	_, err = db.Exec(
-		"INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)",
+		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+		 ON CONFLICT (name, version) DO UPDATE SET
+		   wasm_bytes = EXCLUDED.wasm_bytes,
+		   abi_version = EXCLUDED.abi_version,
+		   plugin_deps = EXCLUDED.plugin_deps,
+		   min_version = EXCLUDED.min_version,
+		   entry_points = EXCLUDED.entry_points,
+		   task_queue = EXCLUDED.task_queue`,
 		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag,
 	)
 	if err != nil {
@@ -1045,7 +1059,7 @@ func runDeploy(args []string) {
 	}
 }
 
-func analyze(pattern, target string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {
+func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {
 	fset := token.NewFileSet()
 
 	result, err := analyzer.LoadPackages(pattern, fset)
@@ -1073,7 +1087,6 @@ func analyze(pattern, target string) (*analyzer.AnalysisResult, *callgraph.Graph
 		Result:    result,
 		CallGraph: cg,
 		Closure:   cr,
-		Target:    target,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error in AST transformation: %v\n", err)
@@ -1086,7 +1099,7 @@ func analyze(pattern, target string) (*analyzer.AnalysisResult, *callgraph.Graph
 // buildJSONDiagnostics builds a JSON representation of all diagnostics.
 // logBuildProgress prints a build progress message. In JSON output mode,
 // the message goes to stderr so stdout contains only the JSON diagnostics.
-func logBuildProgress(format string, jsonOut bool, args ...interface{}) {
+func logBuildProgress(format string, jsonOut bool, args ...any) {
 	if jsonOut {
 		fmt.Fprintf(os.Stderr, format, args...)
 	} else {
@@ -1094,62 +1107,61 @@ func logBuildProgress(format string, jsonOut bool, args ...interface{}) {
 	}
 }
 
+// vetJSONOutput builds a VetOutput from analysis results.
+func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadingErrs []closure.ThreadingError) VetOutput {
+	var out VetOutput
+	out.Errors = make([]VetResult, 0)
+	out.Warnings = make([]VetResult, 0)
 
-	// vetJSONOutput builds a VetOutput from analysis results.
-	func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadingErrs []closure.ThreadingError) VetOutput {
-		var out VetOutput
-		out.Errors = make([]VetResult, 0)
-		out.Warnings = make([]VetResult, 0)
+	// Threading errors.
+	for _, te := range threadingErrs {
+		out.Errors = append(out.Errors, VetResult{
+			File:    lookupFile(result, te.FuncName),
+			Line:    te.Line,
+			Column:  0,
+			Message: te.Message,
+			Chain:   te.Chain,
+		})
+	}
 
-		// Threading errors.
-		for _, te := range threadingErrs {
+	// Validation errors.
+	for funcName, errs := range cr.Errors {
+		for _, e := range errs {
 			out.Errors = append(out.Errors, VetResult{
-				File:    lookupFile(result, te.FuncName),
-				Line:    te.Line,
-				Column:  0,
-				Message: te.Message,
-				Chain:   te.Chain,
+				Code:       e.Code,
+				File:       lookupFile(result, funcName),
+				Line:       e.Line,
+				Column:     0,
+				Message:    e.Message,
+				Suggestion: e.Suggestion,
 			})
 		}
-
-		// Validation errors.
-		for funcName, errs := range cr.Errors {
-			for _, e := range errs {
-				out.Errors = append(out.Errors, VetResult{
-					Code:       e.Code,
-					File:       lookupFile(result, funcName),
-					Line:       e.Line,
-					Column:     0,
-					Message:    e.Message,
-					Suggestion: e.Suggestion,
-				})
-			}
-		}
-
-		// Warnings.
-		for funcName, warns := range cr.Warnings {
-			for _, w := range warns {
-				out.Warnings = append(out.Warnings, VetResult{
-					Code:       w.Code,
-					File:       lookupFile(result, funcName),
-					Line:       w.Line,
-					Column:     0,
-					Message:    w.Message,
-					Suggestion: w.Suggestion,
-				})
-			}
-		}
-
-		// Summary.
-		out.Summary = VetSummary{
-			Functions:      result.NumFuncs,
-			DurableLeaves:  result.NumDurableLeaves,
-			DurableClosure: result.NumDurableClosure,
-			Pure:           result.NumPure,
-		}
-
-		return out
 	}
+
+	// Warnings.
+	for funcName, warns := range cr.Warnings {
+		for _, w := range warns {
+			out.Warnings = append(out.Warnings, VetResult{
+				Code:       w.Code,
+				File:       lookupFile(result, funcName),
+				Line:       w.Line,
+				Column:     0,
+				Message:    w.Message,
+				Suggestion: w.Suggestion,
+			})
+		}
+	}
+
+	// Summary.
+	out.Summary = VetSummary{
+		Functions:      result.NumFuncs,
+		DurableLeaves:  result.NumDurableLeaves,
+		DurableClosure: result.NumDurableClosure,
+		Pure:           result.NumPure,
+	}
+
+	return out
+}
 
 // lookupFile returns the base filename for a function by its fully-qualified name.
 func lookupFile(result *analyzer.AnalysisResult, funcName string) string {
@@ -1163,7 +1175,6 @@ func lookupFile(result *analyzer.AnalysisResult, funcName string) string {
 	}
 	return ""
 }
-
 
 func formatDurableLeaves(result *analyzer.AnalysisResult, cr *closure.Result) string {
 	var names []string
@@ -1212,6 +1223,30 @@ func derivePluginDeps(usage *wasm.UsageInfo) map[string]string {
 	return nil
 }
 
+// runVersion implements "cleat version". docs/tutorials/quick-start.md has
+// told new users to run this as an install smoke test since before the
+// subcommand existed; main's switch had no case for it, so it fell through
+// to "missing command or package argument" or "Unknown command: version".
+//
+// There is no build-time ldflags version injection in this repo (checked:
+// no -X github.com/cleat-team/cleat/... in Makefile or CI), so this reports
+// what runtime/debug actually knows about the running binary rather than a
+// hand-maintained string that would drift the same way the tiers.yaml intro
+// warns prose status does. For a binary built with `go install
+// .../cmd/cleat@<version>`, Main.Version is that version (e.g. "v0.1.0",
+// matching quick-start.md's example); for a binary built from a local
+// checkout with plain `go build`, module version information isn't
+// embedded and Main.Version reads "(devel)" -- reported as such rather than
+// papered over.
+func runVersion() {
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info.Main.Version == "" {
+		fmt.Printf("cleat (devel) (%s)\n", runtime.Version())
+		return
+	}
+	fmt.Printf("cleat %s (%s)\n", info.Main.Version, runtime.Version())
+}
+
 // getDBConnStr returns the database connection string using the configured
 // credential provider. It checks --db first, then the provider, then
 // CLEAT_DATABASE_URL.
@@ -1241,7 +1276,7 @@ func runVersions(name string) {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
@@ -1288,7 +1323,7 @@ func runRollback(name string, version int) {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
@@ -1330,7 +1365,7 @@ func runSchedule(args []string) {
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
@@ -1356,16 +1391,47 @@ func runSchedule(args []string) {
 		defName := fs.String("def", "", "workflow definition name")
 		entryPoint := fs.String("entry-point", "", "entry point function name")
 		inputJSON := fs.String("input", "{}", "workflow input JSON")
+		timezone := fs.String("timezone", engine.DefaultScheduleTimezone,
+			"IANA timezone the cron expression is evaluated in (e.g. America/New_York)")
+		misfire := fs.String("misfire-policy", engine.MisfireCatchUp,
+			"what a firing missed during an outage means: catch_up or skip")
+		catchUp := fs.Int("catch-up-limit", engine.DefaultCatchUpLimit,
+			"how many owed firings catch_up delivers before resuming in the future")
+		overlap := fs.String("overlap-policy", engine.OverlapAllow,
+			"what happens when the previous run is still going: allow or skip")
 		fs.Parse(remainder)
 
 		fsArgs := fs.Args()
 		if len(fsArgs) < 1 || *cronExpr == "" || *defName == "" {
-			fmt.Fprintf(os.Stderr, "Usage: cleat schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>]\n")
+			fmt.Fprintf(os.Stderr, "Usage: cleat schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>] [--timezone <iana-zone>]\n")
 			os.Exit(1)
 		}
 		name := fsArgs[0]
 
-		nextRun := engine.NextCronTime(*cronExpr, time.Now())
+		// Reject at the point of entry. Both of these used to be accepted and
+		// then silently degrade much later, inside the scheduler: an
+		// unparseable expression fell back to firing daily, and an unknown
+		// zone fell back to UTC. Neither had anywhere to report itself from
+		// there.
+		if err := engine.ValidateCronExpr(*cronExpr); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := engine.ValidateTimezone(*timezone); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := engine.ValidateMisfirePolicy(*misfire); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := engine.ValidateOverlapPolicy(*overlap); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		loc, _ := engine.LoadScheduleLocation(*timezone)
+		nextRun := engine.NextCronTimeIn(*cronExpr, time.Now(), loc)
 		sch := engine.Schedule{
 			Name:           name,
 			DefName:        *defName,
@@ -1374,14 +1440,18 @@ func runSchedule(args []string) {
 			Input:          json.RawMessage(*inputJSON),
 			Enabled:        true,
 			NextRunAt:      nextRun,
+			Timezone:       *timezone,
+			MisfirePolicy:  *misfire,
+			CatchUpLimit:   *catchUp,
+			OverlapPolicy:  *overlap,
 		}
 
 		if err := store.CreateSchedule(ctx, sch); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating schedule: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Created schedule %q: %s every %s (next at %s)\n",
-			name, *defName, *cronExpr, nextRun.Format(time.RFC3339))
+		fmt.Printf("Created schedule %q: %s every %s (%s) (next at %s)\n",
+			name, *defName, *cronExpr, loc, nextRun.In(loc).Format(time.RFC3339))
 
 	case "list":
 		schedules, err := store.ListSchedules(ctx)
@@ -1393,15 +1463,21 @@ func runSchedule(args []string) {
 			fmt.Println("No schedules found.")
 			return
 		}
-		fmt.Printf("%-20s %-20s %-20s %-7s %s\n", "NAME", "DEFINITION", "CRON", "ENABLED", "NEXT RUN")
+		// NEXT RUN is rendered in the schedule's own zone, and TIMEZONE is
+		// shown next to it. A next-run time printed in UTC beside a cron
+		// expression written for America/New_York is the operator-facing
+		// version of the bug the timezone column fixes: both are correct and
+		// they do not look like they agree.
+		fmt.Printf("%-20s %-20s %-20s %-7s %-20s %s\n", "NAME", "DEFINITION", "CRON", "ENABLED", "TIMEZONE", "NEXT RUN")
 		for _, sch := range schedules {
 			enabled := "no"
 			if sch.Enabled {
 				enabled = "yes"
 			}
-			fmt.Printf("%-20s %-20s %-20s %-7s %s\n",
-				sch.Name, sch.DefName, sch.CronExpression, enabled,
-				sch.NextRunAt.Format(time.RFC3339))
+			loc, _ := engine.LoadScheduleLocation(sch.Timezone)
+			fmt.Printf("%-20s %-20s %-20s %-7s %-20s %s\n",
+				sch.Name, sch.DefName, sch.CronExpression, enabled, loc,
+				sch.NextRunAt.In(loc).Format(time.RFC3339))
 		}
 
 	case "delete":
@@ -1445,7 +1521,7 @@ func runSchedule(args []string) {
 
 func isValidTarget(t string) bool {
 	valid := map[string]bool{
-		"tinygo": true, "go": true, "rust": true,
+		"go": true, "rust": true,
 		"java": true, "assemblyscript": true, "python": true,
 	}
 	return valid[t]
@@ -1467,16 +1543,29 @@ func formatSize(n int64) string {
 }
 
 // resolveBuildChildVersions resolves child workflow versions for a build.
-// Priority: 1) --db flag / CLEAT_DATABASE_URL (queries DB, writes lock file),
-// 2) existing cleat.lock file, 3) warn and return nil (dynamic runtime resolution).
-func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[string]int {
+// Priority: 1) --db flag / CLEAT_DATABASE_URL (creates a tenant-scoped store,
+// resolves via store methods, writes lock file), 2) existing cleat.lock file,
+// 3) warn and return nil (dynamic runtime resolution).
+//
+// When a DB connection is available, resolution goes through the store's
+// tenant-aware methods (ResolveLatestVersion, ResolveVersionByTag) rather than
+// raw SQL. This ensures proper tenant isolation — the --tenant flag (or
+// CLEAT_TENANT_ID env var) scopes all queries to the correct tenant.
+func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut bool) map[string]int {
 	connStr := dbConnStr
 	if connStr == "" {
 		connStr = os.Getenv("CLEAT_DATABASE_URL")
 	}
+	tenantID := buildTenantID
+	if tenantID == "" {
+		tenantID = os.Getenv("CLEAT_TENANT_ID")
+	}
+	if tenantID == "" {
+		tenantID = engine.DefaultTenantUUID
+	}
 
 	if connStr != "" {
-		db, err := sql.Open("postgres", connStr)
+		db, err := openPostgresDB(connStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: cannot connect to database: %v\n", err)
 			os.Exit(1)
@@ -1486,7 +1575,10 @@ func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[strin
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		resolved, err := wasm.ResolveChildVersionsFromDB(ctx, db, children)
+		// Use the tenant-scoped store so all queries are isolated.
+		store := engine.NewPostgresStore(db).WithTenant(tenantID)
+
+		resolved, err := resolveChildVersionsFromStore(ctx, store, children, channel)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: resolving child workflow versions: %v\n", err)
 			os.Exit(1)
@@ -1499,6 +1591,7 @@ func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[strin
 		}
 		lf := &wasm.LockFile{
 			Version: wasm.LockFileVersion,
+			Policy:  channel,
 			Entries: entries,
 		}
 		if err := wasm.WriteLockFile(".", lf); err != nil {
@@ -1509,8 +1602,8 @@ func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[strin
 		return resolved
 	}
 
-	// No DB connection: try existing lock file.
-	if lf, err := wasm.ReadLockFile("."); err == nil && lf.Version == wasm.LockFileVersion {
+	// No DB connection: try existing lock file (v1 or v2).
+	if lf, err := wasm.ReadLockFile("."); err == nil && (lf.Version == wasm.LockFileVersion || lf.Version == 1) {
 		result := make(map[string]int, len(lf.Entries))
 		for name, entry := range lf.Entries {
 			result[name] = entry.Version
@@ -1525,11 +1618,42 @@ func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[strin
 	return nil
 }
 
+// resolveChildVersionsFromStore resolves child workflow versions using the
+// tenant-scoped store. If channel is "latest" or empty, uses ResolveLatestVersion.
+// Otherwise resolves via ResolveVersionByTag, falling back to ResolveLatestVersion
+// if the tag is not found.
+func resolveChildVersionsFromStore(ctx context.Context, store engine.WorkflowStore, children map[string]bool, channel string) (map[string]int, error) {
+	result := make(map[string]int, len(children))
+	for name := range children {
+		var v int
+		var err error
+		if channel == "" || channel == "latest" {
+			v, err = store.ResolveLatestVersion(ctx, name)
+		} else {
+			v, err = store.ResolveVersionByTag(ctx, name, channel)
+			if err != nil {
+				// Tag not found — fall back to latest.
+				v, err = store.ResolveLatestVersion(ctx, name)
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve child %q: %w", name, err)
+		}
+		if v == 0 {
+			return nil, fmt.Errorf("child workflow %q has no non-deprecated versions deployed", name)
+		}
+		result[name] = v
+	}
+	return result, nil
+}
+
 // runLock implements the "cleat lock" subcommand.
 func runLock(args []string) {
 	fs := flag.NewFlagSet("lock", flag.ExitOnError)
 	lockDB := fs.String("db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
 	lockUpdate := fs.Bool("update", false, "re-resolve all child versions from database")
+	lockChannel := fs.String("channel", "stable", "channel for version resolution: stable, latest, canary, or custom tag")
+	lockTenant := fs.String("tenant", "", "tenant UUID for scoped resolution (default: zero UUID)")
 	fs.Parse(args)
 
 	connStr := *lockDB
@@ -1540,6 +1664,13 @@ func runLock(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: --db flag or CLEAT_DATABASE_URL required\n")
 		fmt.Fprintf(os.Stderr, "Usage: cleat lock [--db <conn>] [--update] <package>\n")
 		os.Exit(1)
+	}
+	tenantID := *lockTenant
+	if tenantID == "" {
+		tenantID = os.Getenv("CLEAT_TENANT_ID")
+	}
+	if tenantID == "" {
+		tenantID = engine.DefaultTenantUUID
 	}
 
 	var children map[string]bool
@@ -1562,7 +1693,7 @@ func runLock(args []string) {
 			os.Exit(1)
 		}
 		pattern := remainder[0]
-		_, _, _, _, usage, _ := analyze(pattern, "go")
+		_, _, _, _, usage, _ := analyze(pattern)
 		children = usage.Children
 	}
 
@@ -1571,7 +1702,7 @@ func runLock(args []string) {
 		return
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	db, err := openPostgresDB(connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot connect to database: %v\n", err)
 		os.Exit(1)
@@ -1581,7 +1712,9 @@ func runLock(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	resolved, err := wasm.ResolveChildVersionsFromDB(ctx, db, children)
+	// Use the tenant-scoped store so all queries are isolated.
+	store := engine.NewPostgresStore(db).WithTenant(tenantID)
+	resolved, err := resolveChildVersionsFromStore(ctx, store, children, *lockChannel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: resolving child workflow versions: %v\n", err)
 		os.Exit(1)
@@ -1593,6 +1726,7 @@ func runLock(args []string) {
 	}
 	lf := &wasm.LockFile{
 		Version: wasm.LockFileVersion,
+		Policy:  *lockChannel,
 		Entries: entries,
 	}
 	if err := wasm.WriteLockFile(".", lf); err != nil {

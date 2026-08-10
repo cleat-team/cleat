@@ -6,35 +6,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 )
 
-var (
-	httpRequestsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "cleat_apps_http_requests_total",
-			Help: "Total number of HTTP requests handled by the backend.",
-		},
-		[]string{"method", "path", "status"},
-	)
-	httpRequestDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "cleat_apps_http_request_duration_seconds",
-			Help:    "HTTP request duration in seconds.",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"method", "path"},
-	)
-)
-
-func init() {
-	prometheus.MustRegister(httpRequestsTotal, httpRequestDuration)
-}
-
-// MetricsMiddleware records request counts and durations for Prometheus.
+// MetricsMiddleware records request counts and durations via OpenTelemetry.
 // URL paths are normalized to avoid PII leakage and label cardinality explosion.
-func MetricsMiddleware() func(http.Handler) http.Handler {
+// If metrics is nil, the middleware is a no-op.
+func MetricsMiddleware(metrics *prometheus.Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -42,15 +20,17 @@ func MetricsMiddleware() func(http.Handler) http.Handler {
 			next.ServeHTTP(rw, r)
 
 			path := normalizePath(r.URL.Path)
-			httpRequestsTotal.WithLabelValues(r.Method, path, strconv.Itoa(rw.statusCode)).Inc()
-			httpRequestDuration.WithLabelValues(r.Method, path).Observe(time.Since(start).Seconds())
+			if metrics != nil {
+				metrics.RecordHTTPRequest(r.Context(), r.Method, path, strconv.Itoa(rw.statusCode))
+				metrics.RecordHTTPRequestDuration(r.Context(), time.Since(start), r.Method, path)
+			}
 		})
 	}
 }
 
-// MetricsHandler returns an http.Handler that serves Prometheus metrics.
-func MetricsHandler() http.Handler {
-	return promhttp.Handler()
+// MetricsHandler returns an http.Handler that serves Prometheus metrics via OTel.
+func MetricsHandler(metrics *prometheus.Metrics) http.Handler {
+	return metrics.ServeHTTP()
 }
 
 // normalizePath replaces ID segments in the URL path with ":id" to prevent

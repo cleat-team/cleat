@@ -1,0 +1,49 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# Append the DCO Signed-off-by trailer, so `git commit` behaves like
+# `git commit --signoff` without anyone having to remember the flag.
+#
+# Install once per clone:
+#
+#   git config core.hooksPath .githooks
+#
+# Git does not track .git/hooks, which is why this lives in the tree and is
+# opted into by config rather than installed automatically. Nothing here is
+# load-bearing for CI: .github/workflows/dco-check.yml is what actually fails
+# a pull request whose commits lack the trailer. This hook only saves you the
+# `git rebase --signoff` afterwards.
+# ---------------------------------------------------------------------------
+set -eu
+
+MSG_FILE=$1
+SOURCE=${2-}
+
+# Leave alone the cases where the message is not the author's to certify, or
+# where git will rewrite it anyway:
+#   merge    — the trailer belongs on the commits being merged, not the merge
+#   squash   — likewise; the constituent commits carry their own
+# An amend arrives with SOURCE=commit and IS ours to re-sign, so it is not
+# excluded here; the --if-exists guard below keeps that idempotent.
+case "$SOURCE" in
+	merge|squash) exit 0 ;;
+esac
+
+NAME=$(git config user.name || true)
+EMAIL=$(git config user.email || true)
+
+if [ -z "$NAME" ] || [ -z "$EMAIL" ]; then
+	echo "prepare-commit-msg: cannot sign off — git config user.name and" >&2
+	echo "user.email must both be set. The DCO certifies who you are, so" >&2
+	echo "there is no sensible default to fall back to." >&2
+	exit 1
+fi
+
+# git interpret-trailers rather than `>> "$MSG_FILE"`: it places the trailer in
+# the commit's trailer block, after the body and alongside any Co-Authored-By,
+# instead of gluing a line onto whatever the message happened to end with.
+# --if-exists doNothing makes this idempotent, so `git commit --signoff`, an
+# amend, and a rebase --signoff all stay single-signed.
+git interpret-trailers \
+	--if-exists doNothing \
+	--trailer "Signed-off-by: $NAME <$EMAIL>" \
+	--in-place "$MSG_FILE"

@@ -2,14 +2,48 @@ name: Ecosystem CI
 on:
   pull_request:
     branches: [main, develop]
+    # Every job in this file tests an SDK, and until 2026-08-09 none of the SDK
+    # source trees was listed here. The filter named cleat/, internal/, cmd/ and
+    # the go module files -- so "Python SDK Integration" ran on everything
+    # EXCEPT python-sdk/, "Rust SDK Integration" on everything except crates/,
+    # and so on. Each job was triggered by every change but its own.
+    #
+    # It was silent, too: an untriggered job is absent from the PR's check list
+    # rather than pending, so the PR reads as fully green with four fewer checks
+    # than it should have. Caught on #432, which changes the AssemblyScript and
+    # Python SDKs and ran neither of their jobs.
+    #
+    # Only python-sdk consumes cmd/cleat; rust, java and assemblyscript test
+    # their own tree alone. GitHub filters paths per workflow, not per job, so
+    # this is the union -- an AS change runs all four. That is the cost of
+    # keeping them in one file, and it is cheaper than the gap was.
     paths:
       - "cleat/**"
       - "internal/**"
       - "cmd/**"
+      - "crates/**"
+      - "packages/cleat-as/**"
+      - "python-sdk/**"
       - "go.mod"
       - "go.sum"
+      # So a change to the filter itself is checked by the filter itself.
+      - ".github/workflows/ecosystem-ci.yml"
   push:
     branches: [main, develop]
+
+# Least-privilege token, added 2026-08-07. Without a `permissions:` key a
+# workflow inherits the repository default, which can be read/write for every
+# scope -- so a compromised action or dependency in any job here would hold a
+# writable GITHUB_TOKEN. CodeQL flagged all 4 jobs in this file
+# (actions/missing-workflow-permissions). Every job here only checks out code
+# and runs tests, so read is all they need; re-derive with
+#
+#   grep -nE 'gh (pr|issue|api)|github-script|upload-artifact|packages:|id-token' .github/workflows/ecosystem-ci.yml
+#
+# and widen this block, not the repository default, if that ever stops being
+# true.
+permissions:
+  contents: read
 
 jobs:
   python-sdk:
@@ -17,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install cleat
@@ -49,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -60,7 +94,10 @@ jobs:
 
   assemblyscript-sdk:
     name: AssemblyScript SDK Integration
-    continue-on-error: true
+    # continue-on-error removed 2026-08-07, for the same reason as ci.yml's
+    # AssemblyScript WASM Build: measured on develop, its only substantive step
+    # ("Test AS SDK") reported success. The flag was forgiving a job that had nothing
+    # to forgive.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

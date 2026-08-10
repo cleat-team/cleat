@@ -193,9 +193,6 @@ mod imports {
         // schedule_invoke - ABI 2.34, three strings in, i64 delay
         pub fn schedule_invoke(svc_ptr: *const u8, svc_len: u32, op_ptr: *const u8, op_len: u32, req_ptr: *const u8, req_len: u32, delay_ms: i64) -> i64;
 
-        // cleat_register_query_handler - ABI 2.35, one string in
-        pub fn cleat_register_query_handler(name_ptr: *const u8, name_len: u32) -> i64;
-
         // cleat_run_detached - ABI 2.36, two strings in
         pub fn cleat_run_detached(name_ptr: *const u8, name_len: u32, input_ptr: *const u8, input_len: u32) -> i64;
 
@@ -663,6 +660,14 @@ impl HostCalls {
         (result, timed_out, None)
     }
 
+    // There is no register_query_handler here (removed 2026-08-09, previously
+    // ABI 2.35 / cleat_register_query_handler). It recorded a handler name
+    // with the host but nothing ever routed an external query to it -- see
+    // docs/determinism.md, "Why there is no RegisterQueryHandler". Use
+    // set_query_state instead, which any caller can read via
+    // GET /api/workflows/:id/query?key=X regardless of whether a worker
+    // currently has the workflow loaded.
+
     /// Register an update handler. Mirrors Go's RegisterUpdateHandler (ABI 2.22).
     pub fn register_update_handler(&self, name: &str) {
         unsafe {
@@ -996,20 +1001,6 @@ impl HostCalls {
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("schedule_invoke(service=\"{}\", operation=\"{}\") failed: host error code {}. Check that the service and operation are valid.", service, operation, err_code));
-        }
-        Ok(())
-    }
-
-    /// Register a query handler by name. Mirrors Go's RegisterQueryHandler.
-    pub fn register_query_handler(&self, name: &str) -> Result<(), String> {
-        let result = unsafe {
-            imports::cleat_register_query_handler(
-                name.as_ptr(), name.len() as u32,
-            )
-        };
-        let (_extra, err_code) = memory::decode_simple_result(result);
-        if err_code != 0 {
-            return Err(format!("register_query_handler(name=\"{}\") failed: host error code {}. Check that the query handler name is valid.", name, err_code));
         }
         Ok(())
     }

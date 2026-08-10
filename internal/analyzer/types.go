@@ -21,11 +21,11 @@ type Package struct {
 
 // FuncDecl represents a function or method with its resolved type information.
 type FuncDecl struct {
-	Name    string        // simple name (e.g. "PlaceOrder")
-	Pkg     *Package      // the package this function belongs to
-	Ast     *ast.FuncDecl // the AST node
-	Type    *types.Signature // the type-checked signature
-	RecvType types.Type    // non-nil for methods (the receiver type)
+	Name     string           // simple name (e.g. "PlaceOrder")
+	Pkg      *Package         // the package this function belongs to
+	Ast      *ast.FuncDecl    // the AST node
+	Type     *types.Signature // the type-checked signature
+	RecvType types.Type       // non-nil for methods (the receiver type)
 
 	// IsExported is true for capitalized function names.
 	IsExported bool
@@ -50,15 +50,15 @@ type FuncDecl struct {
 
 // AnalysisResult holds the complete analysis of a workflow package.
 type AnalysisResult struct {
-	TargetPkg  *Package
-	UserPkgs   []*Package
-	Funcs      map[string]*FuncDecl // keyed by fully-qualified name
+	TargetPkg   *Package
+	UserPkgs    []*Package
+	Funcs       map[string]*FuncDecl // keyed by fully-qualified name
 	EntryPoints []string             // fully-qualified names of entry points
 
 	// Module information.
-	ModulePath  string // e.g., "github.com/cleat-team/cleat"
-	ModuleDir   string // absolute path to module root (where go.mod lives)
-	GoVersion   string // e.g., "1.26" from go.mod
+	ModulePath string // e.g., "github.com/cleat-team/cleat"
+	ModuleDir  string // absolute path to module root (where go.mod lives)
+	GoVersion  string // e.g., "1.26" from go.mod
 
 	// Statistics
 	NumFuncs          int

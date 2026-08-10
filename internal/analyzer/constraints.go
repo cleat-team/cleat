@@ -38,20 +38,20 @@ var knownGOOS = map[string]bool{
 
 // knownGOARCH records GOARCH values that act as build constraints.
 var knownGOARCH = map[string]bool{
-	"386":       true,
-	"amd64":     true,
-	"arm":       true,
-	"arm64":     true,
-	"loong64":   true,
-	"mips":      true,
-	"mipsle":    true,
-	"mips64":    true,
-	"mips64le":  true,
-	"ppc64":     true,
-	"ppc64le":   true,
-	"riscv64":   true,
-	"s390x":     true,
-	"wasm":      true,
+	"386":      true,
+	"amd64":    true,
+	"arm":      true,
+	"arm64":    true,
+	"loong64":  true,
+	"mips":     true,
+	"mipsle":   true,
+	"mips64":   true,
+	"mips64le": true,
+	"ppc64":    true,
+	"ppc64le":  true,
+	"riscv64":  true,
+	"s390x":    true,
+	"wasm":     true,
 }
 
 // MatchWasmBuildConstraint checks whether a Go source file should be included

@@ -8,6 +8,105 @@ workflows that compile to WebAssembly.  Re-exports from `assembly/index.ts`:
 - `cleat-entry.ts` -- `@cleatEntry` marker decorator for workflow entry points
 - `plugins.ts` -- Typed convenience wrappers for all 8 plugins (18 functions)
 
+## Installation
+
+```bash
+npm install @cleat/sdk
+```
+
+Or from source:
+
+```bash
+cd packages/cleat-as/
+npm link
+```
+
+The SDK also provides a transform plugin that generates ABI-compatible WASM
+export wrappers from `@cleatEntry`-decorated functions:
+
+```bash
+npm install @cleat/transform
+```
+
+See the [Import resolution](#scoped-package-import-resolution-in-as-02732) section for
+AssemblyScript compiler configuration.
+
+## Quick start
+
+Define a workflow by importing `HostCalls` and decorating your entry-point
+function with `@cleatEntry`. The transform plugin generates the WASM export
+wrapper automatically.
+
+```ts
+import { HostCalls, cleatEntry } from "@cleat/sdk";
+
+@cleatEntry
+export function helloWorkflow(h: HostCalls, name: string): string {
+    h.cleatLog("Hello workflow started for " + name);
+    let resp = h.cleatCall("greeter", "Greet",
+        '{"name": "' + name + '"}');
+    h.cleatLog("Got response: " + resp);
+    return resp;
+}
+```
+
+The `@cleatEntry` decorator triggers the cleat transform plugin, which
+generates an ABI-compatible wrapper
+`(argsPtr: usize, argsLen: i32, outPtr: usize, maxOutLen: i32) => i64`.
+On replay, completed calls return cached results instead of re-executing.
+
+Compile the workflow with the AS compiler and the transform plugin:
+
+```bash
+npx asc assembly/index.ts --target release \
+    --transform ./node_modules/@cleat/transform/index.js \
+    -o dist/workflow.wasm
+```
+
+## HostCalls overview
+
+The `HostCalls` class wraps all WASM host function imports, grouped by category:
+
+### Workflow Identity
+- `currentWorkflowId(): string` -- the current workflow's unique ID
+- `currentRunId(): string` -- the current run's unique ID
+
+### Time & Random
+- `now(): i64` -- wall-clock time in ms since epoch
+- `random(): i64` -- deterministic random value (same on replay)
+- `version(): i32` -- workflow definition version
+
+### Durable Execution
+- `cleatCall(service: string, operation: string, request: string): CleatCallOutcome` -- recorded API call
+- `cleatCallWithTimeout(service: string, operation: string, request: string, timeoutMs: i64): CleatCallOutcome` -- call with timeout
+- `cleatSleep(durationMs: i64): void` -- suspend for a duration (survives restarts)
+- `log(message: string): void` -- emit a log message
+- `cleatFetch(url: string, method: string, headers: string, body: string): string` -- durable HTTP fetch via host
+- `cleatSend(service: string, operation: string, request: string): void` -- fire-and-forget (no response)
+
+### Signals & Events
+- `awaitSignals(signalNames: string[], timeoutMs: i64): SignalResult` -- wait for external signals
+- `pollSignal(name: string): string` -- non-blocking signal check
+- `pollCancellation(): string` -- check for cancellation
+
+### Child Workflows
+- `childWorkflow(name: string, input: string): string` -- start child workflow, returns run ID
+- `awaitChild(runId: string): string` -- await a single child, returns result JSON
+- `awaitAllChildren(runIds: string[]): string` -- await multiple children concurrently
+
+### State & Promises
+- `setQueryState(key: string, value: string): void` -- set externally queryable state
+- `createPromise(name: string): string` -- create a durable promise, returns promise ID
+- `awaitPromise(promiseId: string, timeoutMs: i64): PromiseResult` -- await a promise with timeout
+- `resolvePromise(promiseId: string, value: string): void` -- resolve a promise
+
+### Plugin Calls
+- `pluginCall(pluginName: string, functionName: string, input: string): CleatCallOutcome` -- call a host plugin function
+
+All methods are deterministic and replayed from event history on subsequent
+executions. Side effects (calls, sleeps, logs) are recorded in the workflow
+event history.
+
 ## Unit Differences (Cleat vs. Other Frameworks)
 
 Cleat uses **milliseconds** for all time-related host calls. This is important when porting workflows from other frameworks:

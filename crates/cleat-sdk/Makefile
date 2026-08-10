@@ -15,6 +15,7 @@ WORKFLOW_VERSION         ?= 0
 MIN_COMPATIBLE_VERSION   ?= 1
 ABI_VERSION              ?= 1
 PLUGIN_DEPS              ?= {}
+CHILD_BINDING_POLICY     ?=
 
 .PHONY: all wasm wasm-stamped check test clean help
 
@@ -47,7 +48,8 @@ wasm-stamped: wasm
 		--version $(WORKFLOW_VERSION) \
 		--min-version $(MIN_COMPATIBLE_VERSION) \
 		--abi-version $(ABI_VERSION) \
-		--plugin-deps '$(PLUGIN_DEPS)'
+		--plugin-deps '$(PLUGIN_DEPS)' \
+		--child-binding-policy '$(CHILD_BINDING_POLICY)'
 	@echo "Metadata stamped."
 
 # ------------------------------------------------------------------

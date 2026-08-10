@@ -24,7 +24,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	n := numConcurrentWorkflows()
@@ -35,7 +35,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("scale-maxwf-%d-%d", i, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
@@ -65,11 +65,17 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 		wg.Add(1)
 		go func(workerID string) {
 			defer wg.Done()
-			for wfID := range workCh {
+			// The channel is a work counter, not an assignment: ClaimWorkflow
+			// decides which workflow this worker gets. This loop used to take
+			// wfID from the channel, claim some other workflow, and then write
+			// to wfID -- operating on a workflow it did not hold, with a
+			// hardcoded generation of 0. Every completion lost the fence, and
+			// the test reported the fence working as an error.
+			for range workCh {
 				// Claim the workflow.
 				wf, err := store.ClaimWorkflow(ctx, workerID)
 				if err != nil {
-					errCh <- fmt.Errorf("claim %s: %w", wfID, err)
+					errCh <- fmt.Errorf("claim by %s: %w", workerID, err)
 					continue
 				}
 				if wf == nil {
@@ -81,14 +87,14 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 					{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "start", Request: `{}`, Response: `{"ok":true}`},
 					{Step: 1, EventType: engine.EventTypeCall, Service: "svc", Op: "process", Request: `{}`, Response: `{"ok":true}`},
 				}
-				if err := store.AppendEventHistoryBatch(ctx, wfID, events); err != nil {
-					errCh <- fmt.Errorf("append events to %s: %w", wfID, err)
+				if err := store.AppendEventHistoryBatch(ctx, wf.ID, events); err != nil {
+					errCh <- fmt.Errorf("append events to %s: %w", wf.ID, err)
 					continue
 				}
 
 				// Complete the workflow.
-				if err := store.CompleteWorkflow(ctx, wfID, workerID, 0, `{"status":"success"}`, nil); err != nil {
-					errCh <- fmt.Errorf("complete %s: %w", wfID, err)
+				if err := store.CompleteWorkflow(ctx, wf.ID, workerID, wf.Generation, `{"status":"success"}`, nil); err != nil {
+					errCh <- fmt.Errorf("complete %s: %w", wf.ID, err)
 				}
 			}
 		}(fmt.Sprintf("worker-%d", w))
@@ -147,7 +153,7 @@ func TestConcurrentWorkflowMemory(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	n := numConcurrentWorkflows()
@@ -162,7 +168,7 @@ func TestConcurrentWorkflowMemory(t *testing.T) {
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("scale-mem-%d-%d", i, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}

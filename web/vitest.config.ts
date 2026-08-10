@@ -16,6 +16,17 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // jsdom's default document origin is `about:blank`, which the Web
+    // Storage spec treats as opaque -- `window.localStorage` is present but
+    // every call throws a SecurityError there. lib/auth.ts (the API key
+    // storage backing the dashboard's Authorization header, see B5 in
+    // WORKSTREAM.md) needs a real, working localStorage in tests, so give
+    // jsdom a concrete origin.
+    environmentOptions: {
+      jsdom: {
+        url: 'http://localhost:3000',
+      },
+    },
     globals: true,
     include: ['src/**/*.test.ts', 'src/**/*.test.svelte'],
     setupFiles: ['src/setup.ts'],

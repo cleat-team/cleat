@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -27,17 +27,17 @@ import (
 // ---------------------------------------------------------------------------
 
 type ffRow struct {
-	id, key, name, desc string
-	enabled             bool
-	rules               string
-	rolloutPct          int
+	id, key, name, desc  string
+	enabled              bool
+	rules                string
+	rolloutPct           int
 	createdAt, updatedAt time.Time
 }
 
 type ffDB struct {
-	mu   sync.RWMutex
-	byID   map[string]*ffRow // id -> row
-	byKey  map[string]*ffRow // "tenant:key" -> row
+	mu    sync.RWMutex
+	byID  map[string]*ffRow // id -> row
+	byKey map[string]*ffRow // "tenant:key" -> row
 }
 
 func newFFDB() *ffDB {
@@ -52,7 +52,7 @@ func newFFDB() *ffDB {
 type ffConnector struct{ db *ffDB }
 
 func (c *ffConnector) Connect(_ context.Context) (driver.Conn, error) { return &ffConn{db: c.db}, nil }
-func (c *ffConnector) Driver() driver.Driver                           { return &ffDrv{} }
+func (c *ffConnector) Driver() driver.Driver                          { return &ffDrv{} }
 
 type ffDrv struct{}
 
@@ -68,13 +68,13 @@ func (*ffConn) Begin() (driver.Tx, error)             { return &ffTx{}, nil }
 
 type ffTx struct{}
 
-func (*ffTx) Commit() error { return nil }
+func (*ffTx) Commit() error   { return nil }
 func (*ffTx) Rollback() error { return nil }
 
 type fakeResult struct{ n int64 }
 
 func (r *fakeResult) LastInsertId() (int64, error) { return 0, nil }
-func (r *fakeResult) RowsAffected() (int64, error)  { return r.n, nil }
+func (r *fakeResult) RowsAffected() (int64, error) { return r.n, nil }
 
 type fakeRows struct {
 	columns []string
@@ -82,15 +82,13 @@ type fakeRows struct {
 	pos     int
 }
 
-func (r *fakeRows) Columns() []string              { return r.columns }
-func (r *fakeRows) Close() error                    { return nil }
+func (r *fakeRows) Columns() []string { return r.columns }
+func (r *fakeRows) Close() error      { return nil }
 func (r *fakeRows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.data) {
 		return io.EOF
 	}
-	for i, v := range r.data[r.pos] {
-		dest[i] = v
-	}
+	copy(dest, r.data[r.pos])
 	r.pos++
 	return nil
 }
@@ -101,11 +99,16 @@ func ffArgS(args []driver.NamedValue, ordinal int) (string, error) {
 	for _, a := range args {
 		if a.Ordinal == ordinal {
 			switch v := a.Value.(type) {
-			case string: return v, nil
-			case []byte: return string(v), nil
-			case uuid.UUID: return v.String(), nil
-			case [16]byte: return fmt.Sprintf("%x", v), nil
-			default: return fmt.Sprintf("%v", v), nil
+			case string:
+				return v, nil
+			case []byte:
+				return string(v), nil
+			case uuid.UUID:
+				return v.String(), nil
+			case [16]byte:
+				return fmt.Sprintf("%x", v), nil
+			default:
+				return fmt.Sprintf("%v", v), nil
 			}
 		}
 	}
@@ -127,7 +130,7 @@ func (c *ffConn) ExecContext(_ context.Context, query string, args []driver.Name
 	c.db.mu.Lock()
 	defer c.db.mu.Unlock()
 
-	q := strings.ReplaceAll(query, "\n", " ")
+	q := normalizeFFQuery(query)
 	switch {
 	case strings.Contains(q, "INSERT INTO feature_flags"):
 		return c.execInsert(args)
@@ -158,8 +161,10 @@ func (c *ffConn) execInsert(args []driver.NamedValue) (driver.Result, error) {
 	}
 	rollout := 0
 	switch v := rolloutVal.(type) {
-	case int64: rollout = int(v)
-	case float64: rollout = int(v)
+	case int64:
+		rollout = int(v)
+	case float64:
+		rollout = int(v)
 	}
 	nowT := time.Now()
 	if t, ok := now.(time.Time); ok {
@@ -225,11 +230,24 @@ func (c *ffConn) execDelete(args []driver.NamedValue) (driver.Result, error) {
 
 // ---- QueryContext ----
 
+// normalizeFFQuery flattens a query for substring matching and strips
+// identifier quoting, so these fakes match on the shape of the SQL rather than
+// on which dialect's quote characters it happens to carry. The plugin quotes
+// `key` (a reserved word in MySQL and SQL Server) via plugin.QuoteIdent, and
+// matching the raw text made these tests fail the moment it did.
+func normalizeFFQuery(query string) string {
+	q := strings.ReplaceAll(query, "\n", " ")
+	for _, ch := range []string{`"`, "`", "[", "]"} {
+		q = strings.ReplaceAll(q, ch, "")
+	}
+	return q
+}
+
 func (c *ffConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.db.mu.RLock()
 	defer c.db.mu.RUnlock()
 
-	q := strings.ReplaceAll(query, "\n", " ")
+	q := normalizeFFQuery(query)
 	switch {
 	case strings.Contains(q, "FROM feature_flags") && strings.Contains(q, "WHERE tenant_id") && strings.Contains(q, "AND key") && strings.Contains(q, "created_at"):
 		return c.queryByTenantAndKey10(args)
@@ -351,7 +369,7 @@ func newFFRequest(method, path string, body io.Reader) *http.Request {
 	)
 }
 
-func readJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
+func readJSON(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	t.Helper()
 	if err := json.NewDecoder(rec.Body).Decode(v); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -631,7 +649,10 @@ func TestFF_ErrorPaths_NotFound(t *testing.T) {
 	p, _, _ := newFFPlugin(t)
 	missingID := "00000000-0000-0000-0000-000000000099"
 
-	tests := []struct{ method, path, body string; want int }{
+	tests := []struct {
+		method, path, body string
+		want               int
+	}{
 		{"GET", "/features/flags/" + missingID, "", 404},
 		{"PUT", "/features/flags/" + missingID, `{"enabled":true}`, 404},
 		{"DELETE", "/features/flags/" + missingID, "", 404},
@@ -892,7 +913,7 @@ func TestFF_EvaluateFlag_DBLookup_Disabled(t *testing.T) {
 	}
 	fdb.mu.Unlock()
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{	TenantID: tid.String()})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: tid.String()})
 	out, err := p.evaluateFlag(ctx, `{"key":"disabled_flag"}`)
 	if err != nil {
 		t.Fatalf("evaluateFlag: %v", err)
@@ -914,7 +935,7 @@ func TestFF_EvaluateFlag_DBLookup_Enabled(t *testing.T) {
 	}
 	fdb.mu.Unlock()
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{	TenantID: tid.String()})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: tid.String()})
 	out, err := p.evaluateFlag(ctx, `{"key":"enabled_flag","context":{"user_id":"user1"}}`)
 	if err != nil {
 		t.Fatalf("evaluateFlag: %v", err)

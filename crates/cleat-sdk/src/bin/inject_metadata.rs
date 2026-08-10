@@ -25,13 +25,14 @@ fn main() {
             r#"Usage: inject_metadata <wasm-file> [options]
 
 Options:
-  --name <name>         Workflow name (or CLEAT_WORKFLOW_NAME env var)
-  --version <n>         Workflow version (or CLEAT_WORKFLOW_VERSION env var)
-  --min-version <n>     Min compatible version (or CLEAT_MIN_COMPATIBLE_VERSION env var)
-  --abi-version <n>     ABI version (or CLEAT_ABI_VERSION env var)
-  --plugin-deps <json>  Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)
-  --output, -o <file>   Output WASM path (default: overwrite input)
-  --read                Read and display metadata instead of writing
+  --name <name>                 Workflow name (or CLEAT_WORKFLOW_NAME env var)
+  --version <n>                 Workflow version (or CLEAT_WORKFLOW_VERSION env var)
+  --min-version <n>             Min compatible version (or CLEAT_MIN_COMPATIBLE_VERSION env var)
+  --abi-version <n>             ABI version (or CLEAT_ABI_VERSION env var)
+  --plugin-deps <json>          Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)
+  --child-binding-policy <str>  Child binding policy (or CLEAT_CHILD_BINDING_POLICY env var)
+  --output, -o <file>           Output WASM path (default: overwrite input)
+  --read                        Read and display metadata instead of writing
 "#
         );
         std::process::exit(0);
@@ -46,6 +47,7 @@ Options:
     let mut min_version = None;
     let mut abi_version = None;
     let mut plugin_deps = None;
+    let mut child_binding_policy: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -73,6 +75,10 @@ Options:
             "--plugin-deps" => {
                 i += 1;
                 plugin_deps = Some(args[i].clone());
+            }
+            "--child-binding-policy" => {
+                i += 1;
+                child_binding_policy = Some(args[i].clone());
             }
             "--read" => {}
             s if !s.starts_with("--") => {
@@ -144,12 +150,17 @@ Options:
     let deps_map: std::collections::HashMap<String, String> =
         serde_json::from_str(&deps_str).unwrap_or_default();
 
+    let resolved_child_binding_policy = child_binding_policy
+        .or_else(|| env::var("CLEAT_CHILD_BINDING_POLICY").ok())
+        .unwrap_or_default();
+
     let meta = serde_json::json!({
         "workflow_name": resolved_name,
         "workflow_version": resolved_version,
         "min_compatible_version": resolved_min_version,
         "abi_version": resolved_abi_version,
         "plugin_deps": deps_map,
+        "child_binding_policy": resolved_child_binding_policy,
         "sdk_language": "rust",
         "language": "rust",
         "sdk_version": "0.1.0",

@@ -319,9 +319,6 @@ export class MockHostCalls {
   /** Registered update handler names. */
   updateHandlers: string[] = [];
 
-  /** Registered query handler names. */
-  queryHandlers: string[] = [];
-
   /** Registered deferred action descriptions. */
   deferredActions: string[] = [];
 
@@ -979,17 +976,9 @@ export class MockHostCalls {
     return null;
   }
 
-  // ────────────────────────────────────────────
-  // 33. registerQueryHandler
-  // ────────────────────────────────────────────
-
-  /**
-   * Register a query handler by name.
-   */
-  registerQueryHandler(name: string): string | null {
-    this.queryHandlers.push(name);
-    return null;
-  }
+  // There is no registerQueryHandler here (removed 2026-08-09). See
+  // docs/determinism.md, "Why there is no RegisterQueryHandler". Use
+  // setQueryState instead.
 
   // ────────────────────────────────────────────
   // 34. runDetached
@@ -1346,7 +1335,6 @@ export class MockHostCalls {
     this.scheduledInvocations = [];
     this.sentSignals = [];
     this.updateHandlers = [];
-    this.queryHandlers = [];
     this.cancelled = false;
     this.cancelReason = "";
     this.retrySimCount = 0;

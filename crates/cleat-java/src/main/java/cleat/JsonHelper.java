@@ -19,10 +19,23 @@ import java.util.Map;
  * generates export wrappers that handle JSON serialization/deserialization
  * through this helper.
  * <p>
- * <strong>Usage recommendation:</strong> Define workflow entry-point methods
- * that accept and return {@link String} (representing JSON).  Parse and
- * construct structured data manually using this class for simple cases, or
- * use {@link #parseObject(String)} to deserialize JSON into POJOs.
+ * <strong>Usage recommendation:</strong> Workflow entry-point methods should
+ * accept a {@link String} input (representing JSON; {@link #parse} only
+ * supports String, Map, List, and the boxed primitive target types), but
+ * should <em>return</em> a {@link Map} (or {@link List}) built with
+ * {@link #parseObject(String)} / manual {@code Map} construction -- not a
+ * {@link String} that already holds JSON text.
+ * <p>
+ * This matters because the generated export wrapper always calls
+ * {@link #stringify(Object)} on whatever the entry point returns. If the
+ * return value is already a JSON string, {@code stringify} quotes and
+ * escapes it like any other string, producing a JSON string <em>containing</em>
+ * JSON (e.g. {@code "{\"status\":\"ok\"}"}) instead of the object
+ * ({@code {"status":"ok"}}) a caller expects. Returning a {@code Map}
+ * sidesteps the problem entirely: {@link #stringify(Object)} serializes a
+ * {@code Map} exactly once, and a nested value that is itself the parsed
+ * result of a host call (via {@link #parseObject(String)}) stays a nested
+ * object instead of being embedded as escaped text.
  */
 public final class JsonHelper {
 
@@ -429,9 +442,27 @@ public final class JsonHelper {
             return stringifyList((List<Object>) obj);
         }
         if (obj instanceof Boolean || obj instanceof Number) {
+            // Correct: JSON numbers and booleans are their toString form.
             return obj.toString();
         }
-        return obj.toString();
+        // Anything else used to fall through to obj.toString(), which for an
+        // ordinary POJO produces "com.example.Result@1a2b3c" -- not JSON.
+        //
+        // That was worse than it looks. The engine's only gate is json.Valid
+        // (coerceResultJSON), so a workflow returning a POJO had its result
+        // silently replaced with {} and one log line. The value was gone, and
+        // nothing on the Java side had said anything was wrong.
+        //
+        // Throwing instead tells the author at the point of the mistake. The
+        // message names the supported shapes rather than only the problem,
+        // because "unsupported type" without them just moves the guessing.
+        throw new IllegalArgumentException(
+            "JsonHelper.stringify cannot serialise " + obj.getClass().getName()
+                + ". Supported: String, Map, List, Boolean, Number, null. "
+                + "Returning this from a workflow would have produced "
+                + "non-JSON text, which the host replaces with {} -- the result "
+                + "would be lost silently. Build a Map (or return JSON text as "
+                + "a String) instead.");
     }
 
     /**

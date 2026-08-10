@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -56,7 +56,7 @@ func InitTracing(ctx context.Context, endpoint, serviceName string) (func(contex
 	otel.SetTracerProvider(tp)
 	Tracer = tp.Tracer("cleat")
 
-	log.Printf("telemetry: exporting traces to %s", endpoint)
+	slog.InfoContext(context.Background(), "telemetry exporting traces", "endpoint", endpoint)
 	return tp.Shutdown, nil
 }
 
@@ -107,7 +107,7 @@ func spanContextFromTraceID(traceID string) (trace.SpanContext, error) {
 	copy(tid[:], b)
 
 	var sid trace.SpanID
-	rand.Read(sid[:])
+	_, _ = rand.Read(sid[:])
 
 	return trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    tid,

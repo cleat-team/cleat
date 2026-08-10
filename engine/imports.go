@@ -20,6 +20,18 @@ func handlerFromContext(ctx context.Context) HostHandler {
 	return ctx.Value(handlerContextKey{}).(HostHandler)
 }
 
+// handlerFromContextOrNil is handlerFromContext for callers that can be given a
+// context without one.
+//
+// handlerFromContext asserts unchecked, which is right inside a host function:
+// reaching one without a session is a bug, and a panic is the honest report.
+// RunDefer is not that -- defers legitimately run with no session today (see
+// IMPROVEMENT-PLAN 3.32), so it needs to ask rather than assume.
+func handlerFromContextOrNil(ctx context.Context) HostHandler {
+	h, _ := ctx.Value(handlerContextKey{}).(HostHandler)
+	return h
+}
+
 // HostHandler is the per-execution session interface. Each method corresponds
 // to one host function import from //go:wasmimport env <name>.
 type HostHandler interface {
@@ -88,7 +100,18 @@ type HostHandler interface {
 	// DurableScheduleInvoke schedules a delayed one-shot invocation.
 	DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64
 
-	// RegisterQueryHandler registers a read-only query handler.
+	// RegisterQueryHandler records a query handler name for ABI compatibility
+	// with already-compiled guests. It does NOT make the workflow externally
+	// queryable: no worker code ever reads what this records back out and
+	// dispatches a query to it. Kept as a no-op (rather than removed from the
+	// ABI) only because removing the host import would break instantiation
+	// of guests already compiled against it -- see
+	// tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm.
+	// Every SDK's public wrapper around this call was removed 2026-08-09
+	// (see docs/determinism.md, "Why there is no RegisterQueryHandler"); do
+	// not add a new one, and do not build anything that assumes this call
+	// causes a query to be delivered later. Use SetQueryState/GetQueryState,
+	// which is: GET /api/workflows/:id/query?key=... in cmd/cleat-worker.
 	RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64
 
 	// State operations (Stream R)
@@ -106,10 +129,15 @@ type HostHandler interface {
 	Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64
 
 	// JsonParse validates and normalizes a JSON string via the host's encoding/json.
-	JsonParse(ctx context.Context, m api.Module, jsonPtr, jsonLen, outPtr, outMaxLen uint32) int64
+	JsonParse(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64
 
 	// JsonStringify validates and re-serializes a JSON string via the host's encoding/json.
-	JsonStringify(ctx context.Context, m api.Module, ptr, len, outPtr, outMaxLen uint32) int64
+	JsonStringify(ctx context.Context, m api.Module, input string, outPtr, outMaxLen uint32) int64
+
+	// Cron schedules
+	ScheduleCron(ctx context.Context, m api.Module, workflowName, cronExpr, timezone, inputJSON string, idPtr, idMaxLen uint32) int64
+	DeleteCron(ctx context.Context, m api.Module, scheduleID string) int64
+	ListCrons(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64
 }
 
 // registerHostFunctions registers all cleat_* imports on the "env" host module.
@@ -121,15 +149,17 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		service, ok := readServiceName(mem, svcPtr, svcLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		op, ok := readServiceName(mem, opPtr, opLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		// readWasmPayload, not readWasmStringValidated: a durable call that
+		// takes no arguments passes "" here and must be allowed.
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.DurableCall(ctx, m, service, op, req, respPtr, respMaxLen))
 	}).Export("cleat_call")
@@ -152,7 +182,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 	// cleat_log: (ptr,len) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module, msgPtr, msgLen uint32) uint64 {
 		mem := m.Memory()
-		msg, ok := readWasmStringValidated(mem, msgPtr, msgLen, MaxWasmStringLen)
+		msg, ok := readWasmPayload(mem, msgPtr, msgLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -173,7 +203,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		descPtr, descLen, deferIDPtr, deferIDMaxLen uint32) uint64 {
 		mem := m.Memory()
-		desc, ok := readWasmStringValidated(mem, descPtr, descLen, MaxWasmStringLen)
+		desc, ok := readWasmPayload(mem, descPtr, descLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -258,34 +288,36 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_with_options")
 
-		// cleat_child_workflow_in_schema: (ptr,len x4, i64, i64, ptr,len, ptr,maxLen) -> i64
-		// Creates a child workflow in a different PostgreSQL schema for cross-instance cooperation.
-		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-			schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
-			policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
-			mem := m.Memory()
-			targetSchema, ok := readServiceName(mem, schemaPtr, schemaLen)
-			if !ok {
-				return errBadParam
-			}
-			wfName, ok := readServiceName(mem, namePtr, nameLen)
-			if !ok {
-				return errBadParam
-			}
-			wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
-			if !ok {
-				return errBadParam
-			}
-			parentClosePolicy := ""
-			if policyLen > 0 {
-				var ok bool
-				parentClosePolicy, ok = readServiceName(mem, policyPtr, policyLen)
-				if !ok {
-					return errBadParam
-				}
-			}
-			return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
-		}).Export("cleat_child_workflow_in_schema")
+	// cleat_child_workflow_in_schema: (ptr,len x4, i64, i64, ptr,len, ptr,maxLen) -> i64
+	// Creates a child workflow in a different PostgreSQL schema for cross-instance cooperation.
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
+		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
+		mem := m.Memory()
+		// An empty targetSchema means "the local schema" -- see
+		// ChildWorkflowInSchema in children.go.
+		targetSchema, ok := readOptionalServiceName(mem, schemaPtr, schemaLen)
+		if !ok {
+			return errBadParam
+		}
+		wfName, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
+		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		// An empty policy means the default. This was already handled here
+		// with an inline policyLen > 0 guard; the helper says the same thing
+		// and is what the wasmtime side now uses too, where the guard was
+		// missing entirely.
+		parentClosePolicy, ok := readOptionalServiceName(mem, policyPtr, policyLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
+	}).Export("cleat_child_workflow_in_schema")
 
 	// cleat_await_child: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -308,19 +340,21 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		service, ok := readServiceName(mem, svcPtr, svcLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		op, ok := readServiceName(mem, opPtr, opLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		nonRetryableErrorsJSON, ok := readWasmStringValidated(mem, nonRetryPtr, nonRetryLen, MaxWasmStringLen)
+		// An empty non-retryable-errors list is the common case: most calls
+		// name no non-retryable errors at all.
+		nonRetryableErrorsJSON, ok := readWasmPayload(mem, nonRetryPtr, nonRetryLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.DurableCallWithRetry(ctx, m, service, op, req,
 			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
@@ -348,7 +382,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		val, ok := readWasmStringValidated(mem, valPtr, valLen, MaxWasmStringLen)
+		val, ok := readWasmPayload(mem, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -364,15 +398,15 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		service, ok := readServiceName(mem, svcPtr, svcLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		op, ok := readServiceName(mem, opPtr, opLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.DurableCallWithHeartbeat(ctx, m, service, op, req, heartbeatIntervalMs, respPtr, respMaxLen))
 	}).Export("cleat_call_heartbeat")
@@ -423,15 +457,16 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		pluginName, ok := readServiceName(mem, pluginNamePtr, pluginNameLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		funcName, ok := readServiceName(mem, funcNamePtr, funcNameLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
+		// Empty input is legitimate: plenty of plugin functions take none.
+		inputJSON, ok := readWasmPayload(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.PluginCallStreaming(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
 	}).Export("plugin_call_streaming")
@@ -446,15 +481,16 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		mem := m.Memory()
 		pluginName, ok := readServiceName(mem, pluginNamePtr, pluginNameLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		funcName, ok := readServiceName(mem, funcNamePtr, funcNameLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
-		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
+		// Empty input is legitimate: plenty of plugin functions take none.
+		inputJSON, ok := readWasmPayload(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
-			return errBadParam
+			return uint64(badParamDurableCall)
 		}
 		return uint64(h.PluginCall(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
 	}).Export("plugin_call")
@@ -507,7 +543,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, MaxWasmStringLen)
+		payload, ok := readWasmPayload(mem, payloadPtr, payloadLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -523,7 +559,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		response, ok := readWasmStringValidated(mem, respPtr, respLen, MaxWasmStringLen)
+		response, ok := readWasmPayload(mem, respPtr, respLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -543,7 +579,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, MaxWasmStringLen)
+		payload, ok := readWasmPayload(mem, payloadPtr, payloadLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -556,11 +592,13 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		prevScopePtr, prevScopeMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		objType, ok := readServiceName(mem, objTypePtr, objTypeLen)
+		// Both empty is the documented "clear the scope" call -- see
+		// freshSetScope in scope.go.
+		objType, ok := readOptionalServiceName(mem, objTypePtr, objTypeLen)
 		if !ok {
 			return errBadParam
 		}
-		instKey, ok := readServiceName(mem, instKeyPtr, instKeyLen)
+		instKey, ok := readOptionalServiceName(mem, instKeyPtr, instKeyLen)
 		if !ok {
 			return errBadParam
 		}
@@ -579,7 +617,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		seedPtr, seedLen, uuidPtr, uuidMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		seed, ok := readWasmStringValidated(mem, seedPtr, seedLen, MaxWasmStringLen)
+		seed, ok := readWasmPayload(mem, seedPtr, seedLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -615,7 +653,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		resultPtr, resultLen, outPtr, outMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		result, ok := readWasmStringValidated(mem, resultPtr, resultLen, MaxWasmStringLen)
+		result, ok := readWasmPayload(mem, resultPtr, resultLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -643,7 +681,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		value, ok := readWasmStringValidated(mem, valPtr, valLen, MaxWasmStringLen)
+		value, ok := readWasmPayload(mem, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -659,7 +697,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		errMsg, ok := readWasmStringValidated(mem, errPtr, errLen, MaxWasmStringLen)
+		errMsg, ok := readWasmPayload(mem, errPtr, errLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -679,7 +717,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -699,7 +737,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := readWasmPayload(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -743,7 +781,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		value, ok := readWasmStringValidated(mem, valPtr, valLen, MaxWasmStringLen)
+		value, ok := readWasmPayload(mem, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -803,7 +841,9 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		prefixPtr, prefixLen, keysPtr, keysMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		prefix, ok := readWasmStringValidated(mem, prefixPtr, prefixLen, MaxWasmStringLen)
+		// An empty prefix lists every key: ListState filters with
+		// strings.HasPrefix, and HasPrefix(k, "") is true for all k.
+		prefix, ok := readWasmPayload(mem, prefixPtr, prefixLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -824,30 +864,87 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		if !ok {
 			return errBadParam
 		}
-		headersJSON, ok := readWasmStringValidated(mem, headersPtr, headersLen, MaxWasmStringLen)
+		headersJSON, ok := readWasmPayload(mem, headersPtr, headersLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
-		body, ok := readWasmStringValidated(mem, bodyPtr, bodyLen, MaxWasmStringLen)
+		body, ok := readWasmPayload(mem, bodyPtr, bodyLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
 		return uint64(h.Fetch(ctx, m, method, url, headersJSON, body, responsePtr, responseMaxLen))
 	}).Export("cleat_fetch")
 
-		// cleat_json_parse: (ptr,len, ptr,maxLen) -> i64
-		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-			jsonPtr, jsonLen, outPtr, outMaxLen uint32) uint64 {
-			return uint64(handlerFromContext(ctx).JsonParse(ctx, m, jsonPtr, jsonLen, outPtr, outMaxLen))
-		}).Export("cleat_json_parse")
+	// cleat_schedule_cron: (ptr,len x4, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		wfPtr, wfLen, cronPtr, cronLen, tzPtr, tzLen, inputPtr, inputLen,
+		idPtr, idMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		workflowName, ok := readServiceName(mem, wfPtr, wfLen)
+		if !ok {
+			return errBadParam
+		}
+		cronExpr, ok := readWasmStringValidated(mem, cronPtr, cronLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		// The timezone is optional -- "" means DefaultScheduleTimezone --
+		// so it is read as a payload, not as a required string.
+		timezone, ok := readWasmPayload(mem, tzPtr, tzLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		inputJSON, ok := readWasmPayload(mem, inputPtr, inputLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(h.ScheduleCron(ctx, m, workflowName, cronExpr, timezone, inputJSON, idPtr, idMaxLen))
+	}).Export("cleat_schedule_cron")
 
-		// cleat_json_stringify: (ptr,len, ptr,maxLen) -> i64
-		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-			ptr, len, outPtr, outMaxLen uint32) uint64 {
-			return uint64(handlerFromContext(ctx).JsonStringify(ctx, m, ptr, len, outPtr, outMaxLen))
-		}).Export("cleat_json_stringify")
+	// cleat_delete_cron: (ptr,len) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		idPtr, idLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		scheduleID, ok := readServiceName(m.Memory(), idPtr, idLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(h.DeleteCron(ctx, m, scheduleID))
+	}).Export("cleat_delete_cron")
 
-		// cleat_poll_work supplies entry point + input to Go wasip1
+	// cleat_list_crons: (ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		outPtr, outMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		return uint64(h.ListCrons(ctx, m, outPtr, outMaxLen))
+	}).Export("cleat_list_crons")
+
+	// cleat_json_parse: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		jsonPtr, jsonLen, outPtr, outMaxLen uint32) uint64 {
+		// The wrapper reads the input, as every other host function's does.
+		// packSimpleResult(1) rather than errBadParam: these two report
+		// failure as "not valid JSON", which is what an unreadable argument
+		// amounts to here, and it is what the guest decodes.
+		input, ok := readWasmStringValidated(m.Memory(), jsonPtr, jsonLen, MaxWasmStringLen)
+		if !ok {
+			return uint64(packSimpleResult(1))
+		}
+		return uint64(handlerFromContext(ctx).JsonParse(ctx, m, input, outPtr, outMaxLen))
+	}).Export("cleat_json_parse")
+
+	// cleat_json_stringify: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		ptr, len, outPtr, outMaxLen uint32) uint64 {
+		input, ok := readWasmStringValidated(m.Memory(), ptr, len, MaxWasmStringLen)
+		if !ok {
+			return uint64(packSimpleResult(1))
+		}
+		return uint64(handlerFromContext(ctx).JsonStringify(ctx, m, input, outPtr, outMaxLen))
+	}).Export("cleat_json_stringify")
+
+	// cleat_poll_work supplies entry point + input to Go wasip1
 	// modules via their _start/main path. Normal Go WASM builds call this
 	// from main() to receive work before dispatching to the entry point.
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -855,27 +952,27 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return 0
 	}).Export("cleat_poll_work")
 
-		// cleat_complete signals workflow completion with a result or error.
-		// This is called by the WASM export wrapper BEFORE returning, so the
-		// worker can capture the result even if the Go WASI runtime subsequently
-		// calls proc_exit (which would overwrite the normal return value).
-		// status=0 means success (result is JSON), status=1 means error (result is error message).
-		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-			status uint32, resultPtr uint32, resultLen uint32) uint64 {
-			mem := m.Memory()
-			result := readWasmString(mem, resultPtr, resultLen)
-			// Store in context for CallExportWithSuspend to retrieve.
-			r := ctx.Value(&cleatCompleteKey)
-			if r != nil {
-				c := r.(*cleatComplete)
-				if status == 0 {
-					c.Result = &result
-				} else {
-					c.Error = &result
-				}
+	// cleat_complete signals workflow completion with a result or error.
+	// This is called by the WASM export wrapper BEFORE returning, so the
+	// worker can capture the result even if the Go WASI runtime subsequently
+	// calls proc_exit (which would overwrite the normal return value).
+	// status=0 means success (result is JSON), status=1 means error (result is error message).
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		status uint32, resultPtr uint32, resultLen uint32) uint64 {
+		mem := m.Memory()
+		result := readWasmString(mem, resultPtr, resultLen)
+		// Store in context for CallExportWithSuspend to retrieve.
+		r := ctx.Value(&cleatCompleteKey)
+		if r != nil {
+			c := r.(*cleatComplete)
+			if status == 0 {
+				c.Result = &result
+			} else {
+				c.Error = &result
 			}
-			return 0
-		}).Export("cleat_complete")
+		}
+		return 0
+	}).Export("cleat_complete")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

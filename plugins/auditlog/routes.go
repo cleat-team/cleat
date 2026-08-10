@@ -7,24 +7,24 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // auditEvent represents a single audit event for JSON serialisation.
 type auditEvent struct {
-	ID         uuid.UUID              `json:"id"`
-	TenantID   uuid.UUID              `json:"tenant_id"`
-	Timestamp  time.Time              `json:"timestamp"`
-	Method     string                 `json:"method"`
-	Path       string                 `json:"path"`
-	StatusCode int                    `json:"status_code"`
-	UserID     string                 `json:"user_id"`
-	IPAddress  string                 `json:"ip_address"`
-	UserAgent  string                 `json:"user_agent"`
-	DurationMs int                    `json:"duration_ms"`
-	Metadata   map[string]interface{} `json:"metadata"`
+	ID         uuid.UUID      `json:"id"`
+	TenantID   uuid.UUID      `json:"tenant_id"`
+	Timestamp  time.Time      `json:"timestamp"`
+	Method     string         `json:"method"`
+	Path       string         `json:"path"`
+	StatusCode int            `json:"status_code"`
+	UserID     string         `json:"user_id"`
+	IPAddress  string         `json:"ip_address"`
+	UserAgent  string         `json:"user_agent"`
+	DurationMs int            `json:"duration_ms"`
+	Metadata   map[string]any `json:"metadata"`
 }
 
 // handleQueryEvents handles GET /audit/events.
@@ -44,7 +44,7 @@ func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 				FROM audit_events
 				WHERE tenant_id = $1
 			`
-	args := []interface{}{tid}
+	args := []any{tid}
 	argIdx := 2
 
 	if method := q.Get("method"); method != "" {
@@ -121,7 +121,7 @@ func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)

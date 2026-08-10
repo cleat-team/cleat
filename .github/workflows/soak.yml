@@ -1,0 +1,125 @@
+# ---------------------------------------------------------------------------
+# Soak test
+#
+# tests/soak drives the real PostgresStore lifecycle continuously for hours and
+# checks for leaks and degradation. It is gated behind the `soak_test` build
+# tag, so `go vet ./tests/soak/...` reports no packages at all and
+# `go test ./...` never compiles it -- it was unwired twice over, and had never
+# run.
+#
+# Deliberately not a PR gate. An hour of wall-clock on every pull request would
+# be absurd, and a leak detector is a trend instrument: a single noisy run
+# should not block a merge.
+# ---------------------------------------------------------------------------
+name: Soak Test
+
+on:
+  schedule:
+    # Mondays at 06:00 UTC, as the suite's own doc comment suggests.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Soak duration (Go duration string, e.g. 30m, 1h, 4h). Max ~4h on hosted runners."
+        required: false
+        default: "1h"
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: Soak
+    runs-on: ubuntu-latest
+    # A backstop on the runner, not the test's own budget: the step below
+    # computes a -timeout from SOAK_DURATION, and the test refuses to start if
+    # that timeout does not exceed its duration.
+    #
+    # 330 minutes because GitHub-hosted runners cap a job at 360 and silently
+    # cancel past it. The duration input therefore cannot usefully exceed ~4h
+    # here -- a 24h soak needs a self-hosted runner, and the step below refuses
+    # to start one it knows the runner will kill rather than let it run for
+    # hours and report as "cancelled".
+    timeout-minutes: 330
+
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        # 127.0.0.1, not localhost: on GitHub runners localhost resolves to ::1
+        # first while a service container publishes on IPv4 only. See the note
+        # on the test-go job in ci.yml, where that cost the entire job its
+        # coverage without anyone noticing.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+      SOAK_DURATION: ${{ inputs.duration || '1h' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Run soak test
+        shell: bash
+        run: |
+          set -o pipefail  # without it `tee` supplies the exit status and a
+                           # failing `go test` reports as a green step.
+
+          # The harness timeout must exceed SOAK_DURATION, with room for
+          # teardown and the final assertions. The obvious spelling --
+          # -timeout="${SOAK_DURATION}" -- kills the binary at exactly the
+          # moment the test stops its workload, so the panic races the
+          # assertions and a passing run can report as a hang. Computed here,
+          # and independently rejected by the test itself if it is ever wrong.
+          timeout=$(python3 -c "
+          import re, sys
+          units = {'ns':1e-9, 'us':1e-6, 'ms':1e-3, 's':1, 'm':60, 'h':3600}
+          d = sys.argv[1]
+          secs = sum(float(v) * units[u] for v, u in re.findall(r'([0-9.]+)(ns|us|ms|s|m|h)', d))
+          if secs <= 0:
+              raise SystemExit(f'cannot parse SOAK_DURATION={d!r}')
+          budget = 330 * 60  # must track timeout-minutes on this job
+          total = int(secs * 1.25) + 900  # +25% and 15 minutes
+          if total > budget:
+              raise SystemExit(
+                  f'SOAK_DURATION={d} needs {total}s including teardown, over this '
+                  f'job\'s {budget}s budget. GitHub-hosted runners cap a job at 360 '
+                  f'minutes; use a self-hosted runner for anything longer.')
+          print(f'{total}s')
+          " "$SOAK_DURATION")
+          echo "SOAK_DURATION=$SOAK_DURATION -> -timeout=$timeout"
+
+          # -tags=soak_test, without which this package does not exist as far
+          # as the toolchain is concerned and the step passes having compiled
+          # nothing.
+          go test -tags=soak_test -count=1 -v -json \
+            -timeout="$timeout" \
+            ./tests/soak/... 2>&1 | tee soak-report.json
+
+      # 0: this job provisions the one thing the suite needs. A skip means the
+      # PostgreSQL service did not arrive, or the build tag stopped selecting
+      # the package -- either way the job ran for an hour and tested nothing.
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh soak soak-report.json
+
+      - name: Upload soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-report-${{ github.sha }}
+          path: soak-report.json
+          retention-days: 30

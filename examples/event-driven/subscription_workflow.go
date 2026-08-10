@@ -70,9 +70,9 @@ type SignupInput struct {
 }
 
 type SignupResult struct {
-	UserID      string `json:"user_id"`
-	Email       string `json:"email"`
-	WelcomeSent bool   `json:"welcome_sent"`
+	UserID      string      `json:"user_id"`
+	Email       string      `json:"email"`
+	WelcomeSent bool        `json:"welcome_sent"`
 	Profile     ProfileInfo `json:"profile"`
 }
 
@@ -122,10 +122,10 @@ func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
 
 	// Step 2: Send welcome email (best-effort).
 	welcomeResp, err := h.Call("email", "SendWelcome", toJSON(map[string]interface{}{
-		"user_id":     input.UserID,
-		"email":       input.Email,
-		"name":        input.Name,
-		"template":    "welcome_onboarding",
+		"user_id":  input.UserID,
+		"email":    input.Email,
+		"name":     input.Name,
+		"template": "welcome_onboarding",
 	}))
 	welcomeSent := err == nil
 

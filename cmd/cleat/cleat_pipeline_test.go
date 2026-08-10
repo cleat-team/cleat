@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -52,7 +53,7 @@ func repoRoot(t *testing.T) string {
 
 func TestAnalyze_ValidPackage(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, cg, cr, threadingErrs, usage, tr := analyze(pattern, "")
+	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
 
 	if result == nil {
 		t.Fatal("analyze() returned nil result")
@@ -133,7 +134,7 @@ func contains(slice []string, item string) bool {
 
 func TestAnalyze_InvalidPackagePath(t *testing.T) {
 	if os.Getenv("TEST_ANALYZE_BAD_PATH") == "1" {
-		analyze("/cleat-test-nonexistent-path-12345", "")
+		analyze("/cleat-test-nonexistent-path-12345")
 		return
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestAnalyze_InvalidPackagePath$")
@@ -150,7 +151,7 @@ func TestAnalyze_InvalidPackagePath(t *testing.T) {
 func TestAnalyze_InvalidPackageNoEntryPoints(t *testing.T) {
 	if os.Getenv("TEST_ANALYZE_NO_EP") == "1" {
 		pattern := os.Getenv("TEST_ANALYZE_NO_EP_PATH")
-		analyze(pattern, "")
+		analyze(pattern)
 		return
 	}
 
@@ -368,9 +369,9 @@ func TestClassifyReturn(t *testing.T) {
 	intType := types.Typ[types.Int]
 
 	tests := []struct {
-		name    string
-		sig     *types.Signature
-		wantKind  returnKind
+		name     string
+		sig      *types.Signature
+		wantKind returnKind
 		wantType string
 	}{
 		{
@@ -381,7 +382,7 @@ func TestClassifyReturn(t *testing.T) {
 					types.NewParam(0, nil, "", errorType),
 				), false,
 			),
-			wantKind:  returnStringError,
+			wantKind: returnStringError,
 			wantType: "string",
 		},
 		{
@@ -391,7 +392,7 @@ func TestClassifyReturn(t *testing.T) {
 					types.NewParam(0, nil, "", errorType),
 				), false,
 			),
-			wantKind:  returnError,
+			wantKind: returnError,
 			wantType: "",
 		},
 		{
@@ -399,7 +400,7 @@ func TestClassifyReturn(t *testing.T) {
 			sig: types.NewSignatureType(nil, nil, nil, nil,
 				types.NewTuple(), false,
 			),
-			wantKind:  returnNothing,
+			wantKind: returnNothing,
 			wantType: "",
 		},
 		{
@@ -409,7 +410,7 @@ func TestClassifyReturn(t *testing.T) {
 					types.NewParam(0, nil, "", stringType),
 				), false,
 			),
-			wantKind:  returnString,
+			wantKind: returnString,
 			wantType: "string",
 		},
 		{
@@ -420,7 +421,7 @@ func TestClassifyReturn(t *testing.T) {
 					types.NewParam(0, nil, "", errorType),
 				), false,
 			),
-			wantKind:  returnStringError,
+			wantKind: returnStringError,
 			wantType: "int",
 		},
 	}
@@ -551,7 +552,7 @@ func TestRunBuild_GoTarget(t *testing.T) {
 
 	// runBuild prints to stdout/stderr which is fine.
 	// It calls analyze(), prepares the build dir, and compiles WASM.
-	runBuild(pattern, outDir, "go", "", false, false, false)
+	runBuild(pattern, outDir, "go", "", "", false, false, false, 1)
 
 	// Check that output directory contains expected files.
 	entries, err := os.ReadDir(outDir)
@@ -606,10 +607,10 @@ func TestRunBuild_GoTarget(t *testing.T) {
 }
 
 func TestRunBuild_GoTargetBuildDir(t *testing.T) {
-	// Similar to TestRunBuild_TinyGoTarget: verify the build directory setup
-	// for the "go" target without requiring actual go build to compile.
+	// Verify the build directory setup for the "go" target without
+	// requiring actual go build to compile.
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, usage, tr := analyze(pattern, "")
+	result, _, _, _, usage, tr := analyze(pattern)
 
 	if result == nil {
 		t.Fatal("analyze returned nil for basic package")
@@ -701,7 +702,7 @@ func TestRunBuild_WithOutputDir(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "custom", "output")
 
 	// Use a specific nested output path to verify -o behavior.
-	runBuild(pattern, outDir, "go", "", false, false, false)
+	runBuild(pattern, outDir, "go", "", "", false, false, false, 1)
 
 	// Verify output files exist in the specified directory.
 	genFiles := []string{
@@ -750,7 +751,7 @@ func TestInvalidTargetError(t *testing.T) {
 		// Simulate what the build command does.
 		target := "csharp"
 		if !isValidTarget(target) {
-			os.Stderr.WriteString("Error: unknown target \"csharp\". Valid targets: go, tinygo, rust, java, assemblyscript, python\n")
+			os.Stderr.WriteString("Error: unknown target \"csharp\". Valid targets: go, rust, java, assemblyscript, python\n")
 			os.Exit(1)
 		}
 		return
@@ -772,7 +773,7 @@ func TestInvalidTargetError(t *testing.T) {
 
 func TestWasmOutputName_FromRealAnalysis(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern, "")
+	result, _, _, _, _, _ := analyze(pattern)
 
 	name := wasmOutputName(result)
 	if name == "" {
@@ -793,7 +794,7 @@ func TestWasmOutputName_FromRealAnalysis(t *testing.T) {
 
 func TestShortEntryPoints_FromRealAnalysis(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern, "")
+	result, _, _, _, _, _ := analyze(pattern)
 
 	short := shortEntryPoints(result)
 	if len(short) == 0 {
@@ -804,92 +805,6 @@ func TestShortEntryPoints_FromRealAnalysis(t *testing.T) {
 	}
 	if !contains(short, "CancelOrder") {
 		t.Errorf("expected CancelOrder in short entry points, got %v", short)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Build dispatch — go vs tinygo target compilation (tinygo skipped if not
-// available, but verify it dispatches correctly)
-// ---------------------------------------------------------------------------
-
-func TestRunBuild_TinyGoTarget(t *testing.T) {
-	// TinyGo may not be installed on the test machine, so we verify the
-	// dispatch by running analyze() and checking the build config.
-	// The tinygo branch sets cmd.Env and uses exec.Command("tinygo", ...).
-	// We verify the target selection logic works.
-	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, usage, tr := analyze(pattern, "")
-
-	// Verify analyze succeeds before we worry about tinygo dispatch.
-	if result == nil {
-		t.Fatal("analyze returned nil for basic package")
-	}
-
-	outDir := t.TempDir()
-	outputs := wasm.BuildOutputs("main", usage, result, "")
-	wasmFile := wasmOutputName(result)
-	goVersion := result.GoVersion
-	if goVersion == "" {
-		goVersion = "1.26"
-	}
-	buildCfg := &wasm.BuildConfig{
-		SrcDir:      result.TargetPkg.Dir,
-		OutDir:      outDir,
-		PkgName:     "main",
-		ModulePath:  result.ModulePath,
-		ProjectRoot: result.ModuleDir,
-		GoVersion:   goVersion,
-		Outputs:     outputs,
-		WASMOutput:  wasmFile,
-		Target:      "tinygo",
-		XfrmSource:  tr.Files,
-	}
-
-	// PrepareBuildDir with "tinygo" target creates a .deps dir with
-	// a go 1.23 compatible module (capped for tinygo compatibility).
-	if err := wasm.PrepareBuildDir(buildCfg); err != nil {
-		t.Fatalf("PrepareBuildDir (tinygo) failed: %v", err)
-	}
-
-	// The build directory should have go.mod targeting 1.23 for tinygo.
-	modPath := filepath.Join(outDir, "go.mod")
-	modData, err := os.ReadFile(modPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	modStr := string(modData)
-	if !strings.Contains(modStr, "go 1.23") {
-		t.Errorf("expected 'go 1.23' in go.mod for tinygo target, got: %s", modStr)
-	}
-
-	// Should also have .deps/go.mod.
-	depsModPath := filepath.Join(outDir, ".deps", "go.mod")
-	if _, err := os.Stat(depsModPath); os.IsNotExist(err) {
-		t.Error("expected .deps/go.mod for tinygo target")
-	}
-
-	// Generated files should exist.
-	genFiles := []string{
-		"gen_wasm_imports.go",
-		"gen_wasm_memory.go",
-		"gen_host_adapter.go",
-		"gen_wasm_exports.go",
-		"gen_main_stub.go",
-	}
-	for _, gf := range genFiles {
-		if _, err := os.Stat(filepath.Join(outDir, gf)); os.IsNotExist(err) {
-			t.Errorf("expected generated file %s not found in tinygo build", gf)
-		}
-	}
-
-	// The main stub for tinygo uses channel block (not select{}).
-	mainStubPath := filepath.Join(outDir, "gen_main_stub.go")
-	stubData, err := os.ReadFile(mainStubPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(stubData), "<-make(chan struct{})") {
-		t.Errorf("tinygo main stub should use channel block, got: %s", string(stubData))
 	}
 }
 
@@ -1259,7 +1174,7 @@ func TestGenerateWorkflowFile(t *testing.T) {
 
 func TestBuildParams(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern, "")
+	result, _, _, _, _, _ := analyze(pattern)
 
 	if result == nil {
 		t.Fatal("analyze returned nil")
@@ -1302,7 +1217,7 @@ func TestBuildParams(t *testing.T) {
 
 func TestGenerateDevMain(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern, "")
+	result, _, _, _, _, _ := analyze(pattern)
 
 	// Find PlaceOrder entry point — EntryPoints order is non-deterministic.
 	var placeOrderFD *analyzer.FuncDecl
@@ -1346,7 +1261,7 @@ func TestGenerateDevMain(t *testing.T) {
 
 func TestGenerateDevMain_WithConcurrencyKey(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern, "")
+	result, _, _, _, _, _ := analyze(pattern)
 
 	// Find PlaceOrder entry point.
 	var placeOrderFD2 *analyzer.FuncDecl
@@ -1443,7 +1358,7 @@ func TestRunBuild_JavaTarget_NoBuildFile(t *testing.T) {
 	if os.Getenv("TEST_BUILD_JAVA") == "1" {
 		// Empty dir — no build.gradle.kts or build.gradle
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildJava(dir, ".")
+		runBuildJava(dir, ".", "latest")
 		return
 	}
 	emptyDir := t.TempDir()
@@ -1464,7 +1379,7 @@ func TestRunBuild_JavaTarget_NoBuildFile(t *testing.T) {
 func TestRunBuild_RustTarget_NoCargoToml(t *testing.T) {
 	if os.Getenv("TEST_BUILD_RUST") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildRust(dir, ".")
+		runBuildRust(dir, ".", "latest")
 		return
 	}
 	emptyDir := t.TempDir()
@@ -1485,7 +1400,7 @@ func TestRunBuild_RustTarget_NoCargoToml(t *testing.T) {
 func TestRunBuild_ASTarget_NoPackageJSON(t *testing.T) {
 	if os.Getenv("TEST_BUILD_AS") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildAssemblyScript(dir, ".")
+		runBuildAssemblyScript(dir, ".", "latest")
 		return
 	}
 	emptyDir := t.TempDir()
@@ -1506,7 +1421,7 @@ func TestRunBuild_ASTarget_NoPackageJSON(t *testing.T) {
 func TestRunBuild_PythonTarget_NoPyFile(t *testing.T) {
 	if os.Getenv("TEST_BUILD_PYTHON") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildPython(dir, ".", "")
+		runBuildPython(dir, ".", "", "latest")
 		return
 	}
 	emptyDir := t.TempDir()
@@ -1696,7 +1611,7 @@ func TestRunInit_InvalidTemplate(t *testing.T) {
 
 func TestBuildParams_CancelOrder(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern, "")
+	result, _, _, _, _, _ := analyze(pattern)
 
 	// CancelOrder has signature: CancelOrder(h HostCalls, orderID string) error
 	var cancelFD *analyzer.FuncDecl
@@ -1936,5 +1851,43 @@ func TestMustMarshalJSON_Error(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dag:") {
 		t.Errorf("expected error to contain 'dag:', got %v", err)
+	}
+}
+
+// TestWasmOutputName_IsDeterministic pins the property that
+// TestWasmOutputName_FromRealAnalysis only samples.
+//
+// analyzer.LoadPackages collects entry points by ranging over a map, so before
+// internal/analyzer/loader.go sorted the result, EntryPoints came back in Go's
+// randomized iteration order. wasmOutputName derives the build artifact's
+// filename from EntryPoints[0], so `cleat build` on testdata/basic -- which
+// has three entry points -- produced place_order.wasm, cancel_order.wasm or
+// long_running.wasm at random, a different one roughly every third run.
+//
+// That made the failure a ~1-in-3 flake, which is exactly the kind of thing
+// that gets re-diagnosed as "CI being flaky" and retried until green. Asserting
+// the sorted invariant directly fails 100% of the time if the sort is removed.
+func TestWasmOutputName_IsDeterministic(t *testing.T) {
+	pattern := filepath.Join(testdataDir(t), "basic")
+
+	result, _, _, _, _, _ := analyze(pattern)
+	if len(result.EntryPoints) < 2 {
+		t.Fatalf("fixture needs >1 entry point to test ordering, got %d: %v",
+			len(result.EntryPoints), result.EntryPoints)
+	}
+
+	if !sort.StringsAreSorted(result.EntryPoints) {
+		t.Errorf("EntryPoints is not sorted, so its order depends on map iteration: %v",
+			result.EntryPoints)
+	}
+
+	// And the derived name must not vary between loads in the same process.
+	first := wasmOutputName(result)
+	for i := 0; i < 3; i++ {
+		again, _, _, _, _, _ := analyze(pattern)
+		if got := wasmOutputName(again); got != first {
+			t.Fatalf("wasmOutputName differs between loads: %q then %q (entry points %v vs %v)",
+				first, got, result.EntryPoints, again.EntryPoints)
+		}
 	}
 }

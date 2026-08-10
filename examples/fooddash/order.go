@@ -408,11 +408,10 @@ func findDriver(address DeliveryAddress) (driverResult, error) {
 	}, &resp); err != nil {
 		return driverResult{}, err
 	}
-	return driverResult{
-		DriverID:   resp.DriverID,
-		DriverName: resp.DriverName,
-		ETAMinutes: resp.ETAMinutes,
-	}, nil
+	// A conversion, not a field-by-field literal: the two structs differ only
+	// in their JSON tags, so this stays correct if a field is added to both and
+	// stops compiling if one drifts. gosimple (S1016) requires it.
+	return driverResult(resp), nil
 }
 
 func releaseDriver(driverID string) error {

@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugins/eventtriggers"
+	"github.com/google/uuid"
 )
 
 // Run starts the consumer polling loop. It runs every 5 seconds, reading
@@ -89,11 +89,18 @@ func (p *Plugin) pollConfigs(ctx context.Context) error {
 // publish them as events through the event-triggers pipeline.
 func (p *Plugin) pollConfig(ctx context.Context, c configRow) {
 	if p.config.RestProxyURL == "" {
-		p.logger.Debug("kafka-connect: no REST Proxy URL configured, skipping consume",
-			"config_id", c.ID,
-			"topic", c.Topic,
-			"event_type", c.EventType,
-		)
+		// Once, and at WARN rather than DEBUG. An enabled kafka_config row is
+		// an operator saying "consume this topic"; with no REST proxy the
+		// poller does nothing forever and the event-triggers pipeline it feeds
+		// never fires. At DEBUG that is indistinguishable from a quiet topic.
+		p.unconfiguredOnce.Do(func() {
+			p.logger.Warn("kafka-connect: no REST proxy configured (rest_proxy_url); enabled "+
+				"kafka configs will never be consumed and no events will be published from them",
+				"config_id", c.ID,
+				"topic", c.Topic,
+				"event_type", c.EventType,
+			)
+		})
 		return
 	}
 
@@ -121,11 +128,11 @@ func (p *Plugin) pollConfig(ctx context.Context, c configRow) {
 
 // kafkaRecord represents a single Kafka message consumed via the REST Proxy.
 type kafkaRecord struct {
-	Topic     string                 `json:"topic"`
-	Key       interface{}            `json:"key"`
-	Value     interface{}            `json:"value"`
-	Partition int                    `json:"partition"`
-	Offset    int64                  `json:"offset"`
+	Topic     string `json:"topic"`
+	Key       any    `json:"key"`
+	Value     any    `json:"value"`
+	Partition int    `json:"partition"`
+	Offset    int64  `json:"offset"`
 }
 
 // consumeViaRestProxy uses the Confluent REST Proxy v2 consumer API to poll
@@ -175,12 +182,12 @@ func (p *Plugin) consumeViaRestProxy(ctx context.Context, c configRow) ([]kafkaR
 func (p *Plugin) createConsumer(ctx context.Context, proxyURL string, c configRow) (string, string, error) {
 	consumerURL := proxyURL + "/consumers/" + c.ConsumerGroup
 
-	body := map[string]interface{}{
-		"name":                      "cleat-ingest-" + c.ID.String() + "-" + fmt.Sprintf("%d", time.Now().UnixMilli()),
-		"format":                    "json",
-		"auto.offset.reset":         "latest",
-		"auto.commit.enable":        "false",
-		"fetch.min.bytes":           "1",
+	body := map[string]any{
+		"name":                        "cleat-ingest-" + c.ID.String() + "-" + fmt.Sprintf("%d", time.Now().UnixMilli()),
+		"format":                      "json",
+		"auto.offset.reset":           "latest",
+		"auto.commit.enable":          "false",
+		"fetch.min.bytes":             "1",
 		"consumer.request.timeout.ms": "5000",
 	}
 
@@ -226,7 +233,7 @@ func (p *Plugin) createConsumer(ctx context.Context, proxyURL string, c configRo
 func (p *Plugin) subscribeConsumer(ctx context.Context, baseURI, topic string) error {
 	subURL := baseURI + "/subscription"
 
-	body := map[string]interface{}{
+	body := map[string]any{
 		"topics": []string{topic},
 	}
 	payloadBytes, err := json.Marshal(body)
@@ -299,7 +306,7 @@ func (p *Plugin) publishRecord(ctx context.Context, c configRow, record kafkaRec
 	eventID := uuid.New()
 
 	// Build the event data from the Kafka message.
-	eventData := map[string]interface{}{
+	eventData := map[string]any{
 		"topic":     c.Topic,
 		"partition": record.Partition,
 		"offset":    record.Offset,

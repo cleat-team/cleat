@@ -793,8 +793,8 @@
     },
     {
       "id": 12,
-      "title": "Claim Latency P99",
-      "description": "P99 time to claim a workflow from the queue (higher values indicate queue contention)",
+      "title": "Dispatch Latency P99",
+      "description": "P99 time from workflow creation to claim by task_queue (higher values indicate too few workers or a backed-up queue; see Claim Latency for the database claim query's own latency)",
       "datasource": {
         "type": "prometheus",
         "uid": "$datasource"
@@ -885,7 +885,7 @@
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum(rate(cleat_dispatch_latency_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])) by (le))",
-          "legendFormat": "P99 Claim Latency",
+          "legendFormat": "P99 Dispatch Latency",
           "refId": "A"
         },
         {
@@ -896,7 +896,7 @@
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum(rate(cleat_dispatch_latency_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])) by (le))",
           "hide": false,
-          "legendFormat": "P50 Claim Latency",
+          "legendFormat": "P50 Dispatch Latency",
           "refId": "B"
         }
       ]
@@ -1211,7 +1211,7 @@
             "uid": "$datasource"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum(rate(cleat_db_query_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])) by (le, operation))",
+          "expr": "histogram_quantile(0.99, sum(rate(cleat_db_query_latency_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])) by (le, operation))",
           "legendFormat": "P99 {{operation}}",
           "refId": "A"
         },
@@ -1221,7 +1221,7 @@
             "uid": "$datasource"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum(rate(cleat_db_query_duration_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])) by (le, operation))",
+          "expr": "histogram_quantile(0.50, sum(rate(cleat_db_query_latency_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])) by (le, operation))",
           "legendFormat": "P50 {{operation}}",
           "refId": "B"
         }
@@ -1230,7 +1230,7 @@
     {
       "id": 16,
       "title": "Worker Health (Up / Down)",
-      "description": "Worker instance health — a drop indicates lost workers",
+      "description": "Worker instance health \u2014 a drop indicates lost workers",
       "datasource": {
         "type": "prometheus",
         "uid": "$datasource"
@@ -1360,6 +1360,418 @@
           "hide": false,
           "legendFormat": "Workers with Active Workflows",
           "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Queueing & Reliability",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "panels": []
+    },
+    {
+      "id": 18,
+      "title": "Claim Latency P99",
+      "description": "P99 time to claim a workflow from the queue -- the database claim query itself, not overall queue wait (higher values indicate lock contention or a slow claim query)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum(rate(cleat_claim_latency_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])) by (le))",
+          "legendFormat": "P99 Claim Latency",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum(rate(cleat_claim_latency_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])) by (le))",
+          "hide": false,
+          "legendFormat": "P50 Claim Latency",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "Queue Depth",
+      "description": "Ready workflows waiting in task queues, not yet claimed by a worker",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(cleat_queue_depth{namespace=~\"$namespace\"})",
+          "legendFormat": "Queue Depth",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Workflow Start Rate",
+      "description": "Rate of new workflow executions started, broken down by workflow definition",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(cleat_workflows_started_total{namespace=~\"$namespace\",workflow_name=~\"$workflow_name\"}[$__rate_interval])) by (workflow_name)",
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Call Retry Rate",
+      "description": "Rate of DurableCallWithRetry retry attempts, by service/operation (a retry storm on one dependency is otherwise invisible here -- only the final success/failure of each call is in the event history)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(cleat_call_retries_total{namespace=~\"$namespace\"}[$__rate_interval])) by (service, operation)",
+          "legendFormat": "{{service}}.{{operation}}",
+          "refId": "A"
         }
       ]
     }

@@ -101,7 +101,7 @@ func runClient(args []string) {
 	outputFile := fs.String("o", "", "output file path")
 	serviceName := fs.String("service", "", "service name (defaults to spec package name with _spec suffix stripped)")
 	outPkg := fs.String("p", "", "output package name (defaults to service name)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
@@ -167,7 +167,14 @@ func parseSpecDir(dir string) (*SpecInfo, error) {
 	}
 
 	// Use the first (and usually only) package.
-	var pkg *ast.Package
+	//
+	// ast.Package is deprecated in favour of go/types. Suppressed rather than
+	// migrated: this is a code generator that reads declarations out of a
+	// parsed directory, and go/types would require type-checking the package
+	// (imports resolved, dependencies loaded) to obtain what parser.ParseDir
+	// already gives it. That is a rewrite of this tool's front end, not a lint
+	// fix, and it buys nothing until something here needs type information.
+	var pkg *ast.Package //nolint:staticcheck // SA1019: see above
 	for _, p := range pkgs {
 		pkg = p
 		break

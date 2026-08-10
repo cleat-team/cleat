@@ -1,0 +1,585 @@
+# Per-job ceilings on the number of tests that may SKIP when a job runs.
+#
+# Format: <job key><TAB><max skipped tests><TAB># why
+# Checked by scripts/check-skip-budget.sh. See that script for the reasoning.
+#
+# A budget is not a target. Where a job provisions a resource, the right number
+# is 0: a skip then means something it set up did not arrive. Where a number is
+# larger, it is because the job deliberately does not configure something --
+# the engine job runs against PostgreSQL only, so its MySQL and SQL Server
+# subtests are "nobody asked", which is the one thing a skip is allowed to mean.
+#
+# RULE OF THUMB, learned the expensive way four times in one afternoon: any new
+# test gated on a dialect costs a skip in every job that does not configure that
+# dialect. Two shapes to watch:
+#
+#   * a test running against registeredBackends costs TWO skips (its mysql and
+#     mssql arms) in every PostgreSQL-only job -- test-go/engine AND cluster,
+#     which move together;
+#   * a test gated on CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL costs ONE in whichever
+#     job runs its package without that dialect -- for ./migration/... that is
+#     test-go/support.
+#
+# Work out which jobs run the package you touched, and bump those, before
+# pushing.
+# To check without waiting for CI:
+#
+#   env -u CLEAT_TEST_MYSQL -u CLEAT_TEST_MSSQL -u CLEAT_TEST_POSTGRES \
+#     CLEAT_TEST_DB=postgres://... go test -count=1 -p 1 -json ./engine/... > r.json
+#   scripts/check-skip-budget.sh test-go/engine r.json
+#
+# THE `-p 1` IS NOT OPTIONAL, and this command was missing it until 2026-08-09.
+# `./engine/...` matches two database-backed packages -- engine and
+# engine/testutil -- and without -p 1 Go runs them concurrently against one
+# database. engine/testutil's CleanupPostgresTestData is an unqualified DELETE
+# across eleven tables, so it wipes the other package's fixtures mid-test.
+#
+# Measured 2026-08-09 on develop, same machine, live PostgreSQL 16, eight runs
+# each way:
+#
+#   without -p 1   3 of 8 runs failed
+#   with    -p 1   0 of 8 runs failed
+#
+# The casualties are whichever package loses the race, which is the tell:
+# usually TestAdminForceResolve_RefusesAnotherTenant and
+# _AuditCollisionRollsBack in ./engine (an FK violation on a workflow_defs row
+# the test itself had just deployed), but one run instead took out
+# TestCleanupPostgresTestData in ./engine/testutil. Both pass in isolation.
+#
+# It looks exactly like a flaky product defect and is not one -- a session was
+# spent chasing it as if develop were nondeterministic, and a develop-vs-branch
+# comparison run this way produced two different answers for the same tree. It
+# also
+# perturbs the counts this file exists to record: a test that dies early never
+# reaches the subtests that would have skipped, so a measurement taken off a
+# failing run is not a measurement of anything. check-skip-budget.sh now says
+# so out loud when the report contains failures.
+#
+# The absolute number differs from the runner's; the delta does not.
+#
+# Numbers below were MEASURED on darwin against a live PostgreSQL 16 and, where
+# noted, a live MySQL 8.4 -- not estimated. They may still differ by a few on
+# the Linux runners, since build tags and toolchain availability change which
+# tests exist at all. Reconcile on the first CI run rather than padding them
+# now: check-skip-budget.sh prints every skipped test by name when it trips, so
+# a mismatch is a one-line fix and not a mystery.
+
+test-go/core	0	# measured: 693 pass, 0 skip
+# 347 = 112 mysql + 112 mssql dialect subtests, 119 MySQL/MSSQL-specific
+# top-level tests, and 4 Rust toolchain tests. This job configures PostgreSQL
+# only (CLEAT_TEST_DB) and installs no Rust -- its Setup Rust step is gated to
+# matrix.package.name == 'internal' -- so every one of these is "nobody asked".
+#
+# Observed on the runner, at 343, after a first attempt seeded from a darwin
+# machine that had cargo installed: the four TestRustWorkflow* tests passed
+# locally and skip here. The measurement environment was richer than CI, which
+# is the failure mode to expect from any locally-seeded budget.
+#
+# A PostgreSQL problem cannot hide under this ceiling: testutil.TestDB now
+# fails rather than skips when a configured DSN is unreachable, so that shows
+# up as a failure, not as a larger skip count.
+#
+# 347 -> 346: TestIntegrationWorkflowMaxDuration used to skip unconditionally
+# ("known broken"). It now runs against testdata/spin. Derived, not measured on
+# a runner -- the absolute count here cannot be reproduced off-CI, but the delta
+# is exactly one test and nothing else changed its skip behaviour. If the first
+# CI run disagrees, check-skip-budget.sh prints the exact number.
+#
+# 346 -> 347: TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL is new, and skips
+# when CLEAT_TEST_MSSQL is unset -- exactly as its _MySQL sibling has always
+# done. It closes the 1.1 coverage gap on the third dialect: the guard in
+# migrations/mssql/004 shipped with nothing able to detect its removal. A count
+# going up needs a reason, and this is one added dialect-conditional test, not
+# a test that stopped running.
+#
+# 347 -> 349: the two 2.71 session-context regression tests, each skipping
+# when CLEAT_TEST_MSSQL is unset. They read SESSION_CONTEXT back off a pooled
+# connection to prove the tenant survives sp_reset_connection, so they cannot
+# run without a real SQL Server. Two tests added, none stopped running.
+#
+# 349 -> 351: TestMSSQLTenantIsolation_UnderRealSecurityPolicies, two skip
+# sites on CLEAT_TEST_MSSQL. It applies the shipped security policies and
+# reads across two tenants' pools, so a real SQL Server is not optional.
+#
+# 351 -> 353: TestMSSQLDeadlock_ClassifiedFromTheRealDriverError, two skip
+# sites on CLEAT_TEST_MSSQL. It provokes a real deadlock to check the
+# classifier against the error the driver actually returns, so it cannot run
+# without a server.
+#
+# 353 -> 355: TestEnforceParentClosePolicy runs against registeredBackends, so
+# its mysql and mssql subtests skip in the Postgres-only engine job.
+#
+# 355 -> 359: the four MySQL/SQL Server subtests the runner attributes to
+# TestPerStepFlushWorksOnEveryDialect, TestPerStepFlushDoesNotDoubleCountEvents
+# and TestSignalPayloadRoundTripsOnEveryDialect (IMPROVEMENT-PLAN 2.60). The two
+# increments are independent and additive: 355 came from another workstream's
+# test, +4 from these.
+#
+# Measured locally against a clean worktree of develop the delta is +6, not +4.
+# The runner's number is the one set here, because the runner is where the guard
+# runs, but the discrepancy is unexplained -- so if this fails at 361 that is the
+# real number and not a regression. Do not widen it to silence a failure; a
+# ceiling that cannot be reached is a guard that cannot fail.
+#
+# 359 -> 361: TestIdempotencyKeyIsScopedToTenant runs against
+# registeredBackends, so its mysql and mssql subtests skip in the Postgres-only
+# engine job (IMPROVEMENT-PLAN 3.10). Note this is NOT the +2 the paragraph
+# above warns about -- that one is an unexplained local/runner discrepancy, and
+# this is two named subtests. Read off two runs of the same guard rather than
+# derived: develop at 26efc98 reports `skipped=359 (passed=3114 failed=0)`, this
+# branch reports `skipped=361 (passed=3116 failed=0)`. Both counts moved by
+# exactly the arm count of one new three-dialect test, and nothing stopped
+# running. The postgres arm is the one that matters and it is in the +2 passing.
+#
+# 361 -> 373: the six three-dialect admin force-resolve tests (IMPROVEMENT-PLAN
+# 3.20), each contributing a mysql and an mssql subtest that skip in a job
+# configured for PostgreSQL only. The seventh test in that file,
+# TestAdminForceResolve_AuditCollisionRollsBack, is PostgreSQL-only by
+# construction and adds no skip.
+#
+# 371 was MEASURED for these twelve, on a runner whose base was 359. 373 is that
+# measurement plus 3.10's two, which landed in between -- so the number here is
+# derived from two measured deltas rather than read off one run, and the two
+# increments are independent and additive. If the guard reports 373, that is the
+# confirmation. If it reports something else, that number is the real one and
+# this note is what needs correcting -- do not widen it to silence a failure.
+#
+# 373 -> 374: TestPythonComponentExecutionFence (IMPROVEMENT-PLAN 3.31). It
+# builds a Python component that never returns and asserts the configured budget
+# is what stops it, so it needs componentize-py, which this job does not install
+# -- the "nobody asked" kind of skip. Additive with 3.10's and 3.20's: different
+# workstreams, different tests, none of them stopped anything running.
+#
+# It is not a free skip. e2e-cross-language does install componentize-py and
+# declares python in CLEAT_REQUIRE_TOOLCHAINS, where this test Fatals rather
+# than skips -- so the component-path fence is verified in exactly one job, and
+# that job's budget is 0.
+#
+# 374 -> 386: the six three-dialect write-ahead call intent tests
+# (IMPROVEMENT-PLAN 1.4 phase D), each with a mysql and an mssql subtest that
+# skip where neither is configured. Measured as a delta with the same guard on
+# the same machine, PostgreSQL only: develop reports `skipped=369
+# (passed=3300)`, this branch reports `skipped=381 (passed=3313)`. The absolute
+# numbers sit below the runner's -- the discrepancy noted further up,
+# unexplained and long-standing -- so the delta is what carries, and it is
+# exactly the arm count of the six new tests.
+# TestWriteAheadIntent_FailsLoudlyWhenUnsupported needs no backend and adds no
+# skip. Additive with the fence test above: the two branches were measured
+# independently and touch no test in common.
+#
+# 386 -> 390: 3.12's two tests, TestDeployDoesNotOverwriteAnotherTenantsDefinition
+# and TestDeployRecordsTheDeployingTenant, each with a mysql and an mssql arm
+# that skip in the Postgres-only engine job. Measured locally as +4 on the same
+# command. Additive with 3.20's twelve, 3.31's fence test and 1.4 phase D's
+# twelve: different workstreams, different tests, nothing stopped running.
+#
+# 390 -> 398: 3.11's four tests -- TestQueueDepthCountsOnlyTheCallersTenant,
+# TestGetWASMLengthIsScopedToTenant, TestGetAllowedSignalCallersIsScopedToTenant
+# and TestDeleteExpiredEventsDeletesOnlyTheCallersTenant -- each with a mysql
+# and an mssql arm that skip in the Postgres-only engine job. OBSERVED on the
+# runner rather than derived: the guard reported `skipped=398 budget=390
+# (passed=3333 failed=0)`, i.e. zero failing tests and exactly the eight new
+# subtests. The three-dialect shape is the point of those tests (3.11 turned
+# out to be three dialects, not one), so the arms are not removable; they run
+# for real in multi-db-ci.yml's test-mysql and test-mssql jobs.
+#
+# 398 -> 399: TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint (3.16),
+# one test that skips when CLEAT_TEST_MSSQL is unset. It applies the shipped
+# CHECK constraint to workflow_schedules and needs a real SQL Server; it runs
+# for real in multi-db-ci.yml's test-mssql job.
+#
+# 399 -> 401: TestCompleteWorkflowStoresAnObjectForEmptyQueryState (3.17), a
+# three-dialect test whose mysql and mssql arms skip here. Observed on the
+# runner: `skipped=401 budget=399 (passed=3338 failed=0)`.
+#
+# 401 -> 403: TestCreateUpdateRequestAcceptsAnyPayload (3.19), a three-dialect
+# test whose mysql and mssql arms skip here. Caught before pushing this time,
+# by the check documented at the top of this file: the local number moved
+# 396 -> 398 on the same command, and the runner sits a fixed distance above
+# local, so leaving the budget at 401 would have tripped the guard at ~403.
+#
+# 403 -> 413: the ten dialect arms of 1.4 phase E's resolver tests --
+# TestResolveAmbiguity_CompletesTheStepAndPersistsIt (2),
+# _FallsBackWhenItCannotSay's three cases (6) and
+# _UnrecordableResolutionIsNotUsed (2) -- each with a mysql and an mssql subtest
+# that skip where neither is configured. Measured as a delta with the same guard
+# on the same machine, PostgreSQL only: develop reports `skipped=399
+# (passed=3372)`, this branch reports `skipped=409 (passed=3383)`. The absolute
+# numbers sit below the runner's, as they have all along, so the delta is what
+# carries.
+#
+# 413 -> 417: 3.34's two tests, TestConcurrencyKeyTTLKeepsSubSecondPrecision and
+# TestConcurrencyKeyExcludesWhileHeld, each with a mysql and an mssql arm that
+# skip here. Measured as a delta rather than assumed: with the file removed the
+# same command reports 408, with it 412, so +4 on whatever the runner's base is.
+#
+# 417 -> 420: PR "schedules carry a timezone" adds three tests running against
+# registeredBackends -- TestScheduleTimezone_RoundTrips, _EmptyBecomesUTC and
+# _ReachesGetDueSchedules -- whose mysql and mssql arms skip in a job
+# configured for PostgreSQL only.
+#
+# OBSERVED on the runner, not derived: both jobs reported
+# `skipped=420 budget=417 (passed=3433 failed=0)`. Zero failing tests; the
+# whole delta is skips.
+#
+# WORTH FLAGGING: the rule of thumb at the top of this file predicts +6 for
+# three registeredBackends tests (two arms each), and the runner moved +3.
+# The number set here is the observed one, per this file's own instruction not
+# to widen a budget past what the guard actually reports -- but the discrepancy
+# is unexplained, and it is the same *shape* as the long-standing local/runner
+# gap noted further up. If a later three-dialect test moves this by 6 rather
+# than 3, that is the thing to investigate, not this line.
+#
+# 420 -> 426: PR 3's three registeredBackends tenant tests. +6, the arm count
+# the rule of thumb predicts, observed on the runner.
+#
+# THIS RESOLVES THE +3/+6 DISCREPANCY NOTED FURTHER UP. PR 2 measured +6
+# locally while the runner appeared to move only +3 (417 -> 420), which looked
+# like a local/runner disagreement. It was not: the budget of 417 was itself
+# LOOSE BY 3 -- the real baseline was 414 -- so PR 2's +6 landed on 420 and read
+# as +3 against a ceiling that had never been reachable. A budget that cannot
+# be reached is a guard that cannot fail, and it silently corrupts the next
+# person's arithmetic too. Trust the rule of thumb over an apparent runner
+# discrepancy and suspect a loose budget instead.
+#
+# 426 -> 432: the three ClaimDueSchedule dialect tests --
+# _AdvancesWhenTheInstantMatches, _RefusesWhenTheInstantMoved and
+# _ExactlyOneOfNConcurrentClaimsWins. +6 by the same rule, applied deliberately
+# this time rather than second-guessed.
+#
+# 432 -> 438: three more registeredBackends tests for the misfire/overlap
+# policy columns -- TestSchedulePolicies_RoundTripAndDefaults,
+# TestClaimDueSchedule_RecordsTheRunItStarted and
+# TestSchedulePolicies_DatabaseRejectsUnknownValues. +6 by the rule of thumb,
+# which the two entries above confirmed is the right one to trust.
+# 438 -> 442: four more registeredBackends tests for the cron host calls
+# (TestScheduleCron_WritesTheScheduleTheGuestAskedFor, _ARetryAfterACrash...,
+# _QuotaCapsTheTenantNotTheRun, TestCronRoundTrip_ListThenDelete). The rule of
+# thumb predicts +8 and that is exactly what they cost: 8 of the 442 skips
+# carry those four names.
+#
+# The remaining 4 were slack in the 438 ceiling itself -- develop measured 434
+# on 2026-08-08, re-derived with the command at the top of this file. That is
+# the SECOND time this entry has been set from the prediction rather than from
+# a measurement and come out high (the 417 -> 414 correction above was the
+# first). A ceiling nobody can reach is a guard that cannot fail, and it
+# quietly corrupts the arithmetic on the next PR, which is how 3 became 4.
+# Measure, then write the number down.
+# Reconciled against the runner on the first CI run, as the note at the top of
+# this file says to: darwin measured 442, the Linux runner 446. The DELTA is +8
+# on both -- the rule of thumb is right either way; the absolute base differs
+# by 4 because build tags and toolchain availability change which tests exist
+# at all (the runner also reports 4 fewer passing, the same 4 tests).
+#
+# 446 -> 447: TestMSSQLClaim_ReturnsTenantIDAsCanonicalUUIDText, one test gated
+# on CLEAT_TEST_MSSQL. +1, which is exactly what the rule of thumb at the top of
+# this file predicts for a top-level test gated on one dialect -- not a
+# registeredBackends test, so it costs one arm and not two.
+#
+# OBSERVED, not derived: both jobs reported `skipped=447 budget=446
+# (passed=3487 failed=0)`. Zero failing tests, so the entire delta is the one
+# new skip.
+#
+# It is not a free skip. multi-db-ci.yml's test-mssql job sets CLEAT_TEST_MSSQL
+# and the test runs for real there -- it is the only thing anywhere asserting
+# that a claimed row's TenantID is parseable UUID text, which is what
+# cmd/cleat-worker routes execution on.
+#
+# 447 -> 451: the four dialect-gated cross-tenant claim tests --
+# TestMySQLIntegration_{ClaimWorkflowsAcrossTenants,CrossTenantClaimRefusedOnFactoryStore}
+# and TestMSSQLIntegration_ClaimWorkflowsAcrossTenants{,_RequiresCleatAdminMembership}.
+# Two MySQL-gated and two MSSQL-gated top-level tests, so +4 by the rule of
+# thumb at the top of this file -- one arm each, not two, since none of them
+# runs against registeredBackends.
+#
+# MEASURED as a delta on darwin, not derived, with the command above: develop
+# reports `skipped=442 (passed=3488)`, this branch `skipped=446 (passed=3504)`.
+# The absolute numbers sit 4 below the runner's, the long-standing offset noted
+# further up, so the delta is what carries.
+#
+# The PostgreSQL cross-tenant tests in engine/cross_tenant_claim_test.go add NO
+# skips: this job sets CLEAT_TEST_DB, so they run here, and they are the arm
+# that matters -- PostgreSQL is the only dialect where the claim function
+# actually exists.
+#
+# 451 -> 452: TestMSSQLSchedules_TenantIDSurvivesTheRoundTripToStartNewRun, one
+# test gated on CLEAT_TEST_MSSQL. +1 by the rule of thumb -- a single-dialect
+# top-level test, one arm.
+#
+# MEASURED as a delta on darwin: develop reports `skipped=447 (passed=3492)`,
+# this branch `skipped=448 (passed=3505)`, against the documented +4
+# darwin/runner offset.
+#
+# The other test added alongside it,
+# TestMSSQLUUIDColumnsAreConvertedInProjections, needs NO database at all --
+# it reads the shipped migrations and the store's own source -- so it adds no
+# skip and runs in every job. That is the point of it: the defect it guards
+# has now shipped twice, and both times every job without a SQL Server was
+# blind to it.
+#
+# 452 -> 453: TestMySQLIntegration_CrossTenantSchedulesRefusedOnFactoryStore,
+# one MySQL-gated test. +1.
+#
+# The PostgreSQL cross-tenant schedule tests in
+# engine/cross_tenant_schedules_test.go add NO skips -- this job sets
+# CLEAT_TEST_DB, so they run here, and PostgreSQL is the only dialect where
+# admin.get_due_schedules exists.
+#
+# WORTH READING IF YOU ARE ABOUT TO SKIP THIS BUMP: the local check said
+# "within budget". It was wrong to trust, and this file already says why --
+# darwin measured 449 against a ceiling of 452, but the runner sits +4 above
+# darwin, so CI would have reported 453 and tripped the guard. A local run that
+# is under budget by less than the offset is not a pass.
+#
+# 453 -> 454: TestPythonCronEndToEnd, which needs componentize-py and wasm-tools.
+# This job installs neither, so it skips here -- and runs for real in
+# tier1-gate.yml and e2e-cross-language.yml, both of which install the toolchain
+# and sweep ./engine/... with a TestPython pattern.
+#
+# Same arithmetic trap as the entry above, hit twice in one session: darwin
+# measured 450 against a ceiling of 453 and check-skip-budget.sh said "under
+# budget by 3", which is NOT a pass when the runner sits +4 above darwin. 454 is
+# the number the runner will see.
+#
+# 454 -> 455: TestComponentShortStringResultsAreNotTruncated, gated on the same
+# componentize-py/wasm-tools toolchain this job does not install.
+#
+# THIRD time in one session the same arithmetic has caught me out, so it is
+# worth stating as a rule rather than a note: check-skip-budget.sh comparing a
+# DARWIN count against a RUNNER ceiling is only meaningful with the +4 offset
+# applied. "under budget by 3" means the runner will be at budget+1 and the
+# guard will trip. Local slack of 4 or less is a failure, not a pass.
+# 2026-08-10 -- 455 -> 473, both entries, for the remediation landed in #458.
+#
+# This is the "rule of thumb" above being paid, exactly as written: the wave
+# added dialect-parameterised tests over registeredBackends, and each costs TWO
+# skips (its mysql and mssql arms) in every PostgreSQL-only job. Measured
+# locally against the same tree, PostgreSQL only, engine package:
+#
+#   before  skipped=451  passed=3506
+#   after   skipped=475  passed=3591
+#
+# +24 skips, 0 removed, +85 passes. The 24 are the mysql/mssql arms of the
+# fencing tests (FlushEvent/WriteCallIntent/CompleteCallIntent Fence{Held,Lost},
+# stream D), completed-workflow retention (stream H), and four MSSQL-specific
+# tests from stream J. None of that coverage is lost -- those arms run in the
+# Multi-DB job, which configures both dialects.
+#
+# The runner measured 473, not the 479 that 455 + 24 would predict. The local
+# and runner numbers have never been equal (the entry above records runner
+# figures), so do not read the 6 as a specific set of tests; it is the gap
+# between the two environments plus whatever stopped skipping now that test
+# databases are built from the shipped migrations (stream A1). 473 is what the
+# runner measured on this tree, in both jobs, and that is what a budget records.
+#
+# Re-derive: scripts/check-skip-budget.sh prints "job=... skipped=N budget=M"
+# in the Skip budget step of Test Go (engine) and Cluster Integration Tests.
+
+# 2026-08-10 -- 473 -> 479, both entries, for wave 2 (#459).
+#
+# The same rule again, one PR later. Wave 2 adds stream J's SQL Server tests,
+# and the runner measured:
+#
+#   job=test-go/engine skipped=479 budget=473 (passed=3594 failed=0)
+#
+# +6 skips, +2 passes, 0 failures. The six are the SQL Server arms and
+# SQL-Server-only tests from stream J: TestMSSQLIndexes_ReadyAndActiveExist (1),
+# TestMSSQLIndexes_TenantReadyUsedByPlanner (2) and
+# TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies (2), plus
+# one dialect arm elsewhere in the wave.
+#
+# These are case (a) in scripts/check-skips.sh's taxonomy -- genuinely optional,
+# nobody asked. Each guards on `os.Getenv("CLEAT_TEST_MSSQL") == ""`, which is
+# "was it requested", not "is it reachable"; a DSN that IS set and unreachable
+# still fails through testutil.MSSQLTestDB rather than skipping. The engine job
+# configures PostgreSQL only; the SQL Server coverage runs in multi-db-ci.yml,
+# which configures it.
+#
+# Budgets are paid per PR rather than in one lump at the front, so each wave
+# carries the cost of the tests it adds and an unexplained jump stays visible.
+
+test-go/engine	479	# runner 2026-08-10: was 473; see the remediation notes below
+test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
+test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
+test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
+#
+# 6 -> 7: TestMSSQLPayloadConstraintsAcceptJSONScalars (3.18), which applies the
+# real migrations to a scratch database and needs a live SQL Server. Runs for
+# real in multi-db-ci.yml's test-mssql job, which has one.
+test-go/support	11	# was 7; +4 for 3.37's MSSQL-gated admin-role tests in ./migration/
+# The four in ./migration/ are all "this job configures PostgreSQL only":
+#
+#   TestIdempotencyTenantMigrationPreservesExistingKeys/{mysql,mssql}
+#   TestRunner_AppliesShippedMySQLMigrations
+#   TestRunner_SecondMySQLRunAppliesNothing
+#
+# 2 -> 4 was the first two, when 3.10 added the upgrade-path test. 4 -> 6 is
+# the two MySQL bootstrap tests 3.13 added.
+#
+# None of them is dead: multi-db-ci.yml's test-mysql and test-mssql jobs now
+# run ./migration/... against live servers, which is where they do their work.
+# That was the point of adding it there -- a test asserting that the shipped
+# migrations can be applied is worth nothing in a job with no server to apply
+# them to, and this budget is where that would have been hidden.
+#
+# The /postgres arm of the upgrade test is absent from the list because
+# CLEAT_TEST_DB is set here, so it runs -- and it is the arm that matters,
+# since 3.10's upgrade decision is about rows that already exist.
+# 4 -> 5: TestTenantIsolationOverHTTP_MSSQL skips unconditionally, blocked on
+# 2.71 -- MSSQLStoreFactory's per-tenant sp_set_session_context is cleared when
+# a pooled connection is recycled, so with the real schema every tenant-scoped
+# read on SQL Server returns nothing. The test is written, applies the real
+# migration, and asserts the policies are enabled before asserting anything
+# about tenants; it is recorded here rather than deleted so that unskipping it
+# is the acceptance test for 2.71. Same treatment as plugin-harness/multi-db.
+# Drop back to 4 when it goes.
+#
+# 5 -> 6: TestTenantIsolationOverHTTP_MySQL. This job configures PostgreSQL
+# only, so MySQL is "nobody asked" -- the one thing a skip is allowed to mean.
+# It passes against a live MySQL 8.4 and was confirmed to fail with the fix
+# reverted. Wiring a MySQL service into this job would take it back to 5.
+#
+# Note what did NOT move: TestTenantIsolationOverHTTP_Postgres is absent from
+# this list because CLEAT_TEST_DB is set for this job, so the database-backed
+# tenant isolation test actually runs in CI rather than evaporating.
+# 6 -> 7 -> 6. The 7 was TestDefersRunOnTheFencedBackend, skipped as
+# known-broken: every deferred callback ran on wazero regardless of routing,
+# because Engine.RunDefer never consulted backendForWasm, and wazero does not
+# fire the execution fence. That entry said "unskipping it is the acceptance
+# test for IMPROVEMENT-PLAN 3.32", and that is what happened -- RunDefer now
+# routes to the backend, and the test returns in 1.00s against its 1s budget
+# where it previously ran past 20s. Back to a real 6: if defers stop being
+# fenced, this job goes red rather than quietly skipping.
+test-go/commands	6	# measured: TestAPIMetrics, TestHelperProcess, TestRunBuild_PythonTarget_WasmRoundtrip, TestTenantIsolationOverHTTP_{MSSQL,MySQL}
+# 0 and it should stay 0: this job needs nothing but a Go toolchain, so a skip
+# here can only mean the test stopped running.
+test-go/manifests	0	# measured: 3 subtests pass, 0 skip
+# 0, and it is the whole point of wiring this suite up. Every one of its 68
+# tests needs either PostgreSQL or the wasmtime backend, and this job has both
+# (CLEAT_TEST_DB, and CGO via -race). Measured on darwin against a live
+# PostgreSQL 16 with CGO_ENABLED=1: 68 pass, 0 skip. With CGO off, 7 skip on
+# "wasmtime backend requires CGO" -- so a nonzero count here means CGO got
+# turned off and the suite quietly stopped testing the primary backend.
+test-go/integrity	0	# measured: 68 pass, 0 skip
+# 0: everything here needs only the PostgreSQL service this job already runs.
+test-go/upgrade	0	# measured: 8 pass, 0 skip
+# 0: same, PostgreSQL only. ~23s.
+test-go/scale	0	# measured: 16 pass, 0 skip
+# 0: the job provisions everything this suite needs -- the same PostgreSQL
+# service, and a Go toolchain to build cleat-worker and the fixture. It has no
+# conditional skips at all: an unreachable database is t.Fatalf, and the
+# wasmtime backend is not optional here either. A skip appearing under this
+# ceiling would mean the job stopped providing something.
+test-go/crash	0	# measured: 3 pass, 0 skip
+fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
+# Same number as test-go/engine, and for the same reason: this job also runs
+# `go test ./engine/...`, against the cluster's own database. It was seeded at 0
+# on the assumption that a job which brings up four workers and a database has
+# provisioned everything its tests need. That was wrong about *which* tests it
+# runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
+# job configures neither. The cluster being healthy is asserted by the
+# healthcheck and restart-count steps above this one, not by the skip count.
+cluster	479	# same as test-go/engine, and for the same reason; see the note there
+# 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
+# own budget, separate from the "cluster" entry above -- that one is
+# ./engine/... run against the job's own cleat_tests database, this one is a
+# single package run against the cluster's own database, overridden with
+# CLEAT_TEST_DB at the step level precisely so it is always configured. Its
+# clusterDB() helper honours CLEAT_TEST_POSTGRES / CLEAT_TEST_DB with the same
+# skip-when-unconfigured, fail-when-configured-but-unreachable split as
+# engine/testutil.TestDB -- see tests/exhaustion/exhaustion_test.go. Since
+# this job always configures it, "unconfigured" can never be true here, so a
+# skip can only mean the env override in ci.yml stopped taking effect.
+# Measured 2026-08-07 against a live 4-container cluster: 1 pass, 0 skip.
+cluster/exhaustion	0	# measured: 1 pass, 0 skip
+# plugin-harness/multi-db was 1, not 0, because TestPluginCalls_MultiDB
+# carried an unconditional t.Skip blaming "wazero v1.11.1 nil Sys context
+# panic (see runtime.go)" -- so that job started PostgreSQL, MySQL and SQL
+# Server and then tested nothing at all.
+#
+# That reason was false, and had been false since CGO-on landed: the
+# postgres subtest runs the same WASM Go workflow through wasmtime
+# successfully, so the WASM path -- and wazero -- is never reached at all.
+# Removing the skip and running CGO-on against all three live databases
+# surfaced what it was actually hiding: three unrelated migration-tooling
+# defects, none of them in wazero, in engine execution, or in the WASM path
+# the skip's text pointed at.
+#
+#   - mysql: tests/plugin-harness/testdb.go carried its own copy of a SQL
+#     statement splitter that did not understand MySQL's DELIMITER
+#     directive, and fragmented migrations/mysql/003_procedures.sql's
+#     stored procedure body on the semicolons inside it (Error 1064 near
+#     'DELIMITER //'). Fixed by exporting and reusing migration.SplitSQL,
+#     the splitter migration.Runner already used correctly in production.
+#   - mssql (splitting): the same home-grown splitter also split MSSQL
+#     batches on every semicolon rather than only on GO, breaking
+#     migrations/mssql/003_procedures.sql's stored procedure the same way
+#     ("Incorrect syntax near 'ON'"). Fixed by exporting and reusing
+#     migration.SplitMSSQL.
+#   - mssql (re-run ordering): migrations/mssql/001_schema.sql dropped the
+#     SECURITY POLICY objects that depend on dbo.fn_tenant_filter only near
+#     the bottom of the file, after CREATE OR ALTER FUNCTION had already
+#     tried to alter that function -- so re-applying the file against a
+#     database that already carried the schema failed ("Cannot ALTER
+#     'dbo.fn_tenant_filter' because it is being referenced by object
+#     'TenantFilter_Defs'"). This is what MSSQL's test setup does on every
+#     run, since MSSQL core migrations are not schema-isolated per test the
+#     way PostgreSQL and MySQL are (real isolation would require
+#     schema-parameterising engine/'s MSSQL queries too, which hardcode
+#     "dbo." -- out of scope for a test-harness fix). Fixed by moving the
+#     DROP SECURITY POLICY block before the function it enables re-altering;
+#     a no-op reorder on a fresh install, verified against migration/'s
+#     existing MSSQL test suite.
+#
+# The lesson for the next reader: a skip's stated reason is a claim, not a
+# fact, and it can go stale the moment the surrounding code changes (here,
+# CGO-on landing) without anyone updating the text. Believe the error a
+# removed skip actually produces, not the comment above it.
+plugin-harness/multi-db	0
+# 1 = TestPluginCalls_Wasm_Python only, which needs componentize-py that this
+# job does not install. Go, Rust, AssemblyScript and Java must all run.
+#
+# 1 -> 0: the entry above said "installing componentize-py here would turn it
+# into coverage of the routing that e2e-cross-language currently carries
+# alone", and that is what this does. The job now installs componentize-py and
+# the Python SDK, so TestPluginCalls_Wasm_Python runs. All five languages run
+# in this job and none of them may skip.
+#
+# Verified on linux before the budget was dropped, not after: 17 plugin
+# results, execute and replay identical. It is the only test anywhere that
+# drives the whole plugin surface -- streaming included -- from a Component
+# Model guest.
+#
+# The budget is here because the step had no -v and no report, so a skipped
+# language was indistinguishable from a passing one -- which is how Go sat
+# unconditionally skipped and Rust skipped for want of a toolchain, in a job
+# named WASM Integration. Measured on the runner after both were fixed.
+#
+# wasm_plugin_test.go used to carry four t.Skipf sites (Rust/AS/Java) whose
+# text called a crash a "compatibility issue" -- this budget of 0 was the
+# only thing making one of those skips fail the build. They are now
+# t.Fatalf, so a wasmtime/TeaVM crash fails the test directly and this
+# budget is no longer load-bearing for that particular failure mode. Kept at
+# 0 regardless: it still catches an unconditional skip of a whole language,
+# same as the Go/Rust history above.
+plugin-harness/wasm	0
+# 0: the Cross-Language E2E workflow installs Rust and the wasm32-wasip1 target,
+# so every test in tests/cross-language has what it needs. Measured on darwin
+# with cargo present: 7 pass, 0 skip. Without cargo all seven skip, which is
+# what this catches.
+# 0 -> 1 -> 0. The 1 was TestPythonWasmEndToEnd, skipped as known-broken (2.72)
+# after failing on both backends -- wasmtime at "undefined element: out of
+# bounds table access", wazero at "module[__main_module__] not instantiated".
+# That entry said "drop back to 0 when either instantiation path is fixed;
+# unskipping the test is that fix's acceptance test", and that is what happened
+# on 2026-08-05: the native component path was being compiled out by a build tag
+# no build set, and with it compiled in the same component runs. The test is
+# unskipped, so this is a real 0 again -- if Python regresses, this job goes red
+# rather than quietly skipping.
+e2e-cross-language	0
+# 0: the soak job provisions PostgreSQL, which is the only thing this suite
+# needs. The one way it can skip is testing.Short(), which nothing in the
+# workflow passes -- so a skip here means the job ran for an hour and tested
+# nothing, which is precisely the state the suite was already in before it was
+# wired up. Measured against a live PostgreSQL 16: 1 pass, 0 skip.
+soak	0

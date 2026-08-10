@@ -117,7 +117,7 @@ func (c *memoryFakeConn) QueryContext(_ context.Context, query string, args []dr
 type cleanupState struct {
 	mu               sync.Mutex
 	workflowBlobRefs map[string]map[string]struct{} // workflowID -> set of sha256 hexes
-	workflowStatuses map[string]string               // workflowID -> status
+	workflowStatuses map[string]string              // workflowID -> status
 }
 
 func newCleanupState() *cleanupState {

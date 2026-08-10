@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,7 +12,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // mockCaller records all service calls for test assertions.
@@ -110,8 +115,23 @@ func TestCallExportNotFound(t *testing.T) {
 	}
 }
 
-
 // ---- Engine execution tests with standard Go WASM + wasmtime ----
+
+// ErrWasmtimeCGOUnavailable (backend_wasmtime_errors.go) is the sentinel
+// backend_wasmtime_stub.go (build tag //go:build !cgo) returns. Unlike
+// backend_wasmtime_test.go, this file carries no build tag, so it compiles
+// both with and without CGO, and NewWasmtimeBackend can legitimately resolve
+// to that stub -- a genuine "nobody asked for CGO" case, not a defect. But
+// ci.yml's test-go/engine entry and its cluster-tests job both run with CGO
+// on by default, where NewWasmtimeBackend resolves to the real
+// backend_wasmtime.go implementation (the primary backend per CLAUDE.md);
+// any other error there means wasmtime itself failed to initialise, which is
+// a real defect masquerading as an absent optional resource. Checking
+// errors.Is against the sentinel -- rather than guessing from a CGO_ENABLED
+// env var, which reflects what the compiler saw and not necessarily the
+// running binary, or matching the error's string, which is an implementation
+// detail -- lets each site tell the two cases apart precisely and is the
+// same check cmd/cleat-worker/main.go uses at startup.
 
 func TestEngineExecute(t *testing.T) {
 	wasmPath := buildTestWasm(t)
@@ -129,7 +149,10 @@ func TestEngineExecute(t *testing.T) {
 
 	backend, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
+			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
+		}
+		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)
 	}
 	defer backend.Close(ctx)
 
@@ -179,7 +202,10 @@ func TestEngineReplay(t *testing.T) {
 
 	backend, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
+			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
+		}
+		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)
 	}
 	defer backend.Close(ctx)
 
@@ -223,7 +249,10 @@ func TestEngineReplayDivergence(t *testing.T) {
 
 	backend, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
+			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
+		}
+		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)
 	}
 	defer backend.Close(ctx)
 
@@ -240,49 +269,43 @@ func TestEngineReplayDivergence(t *testing.T) {
 		t.Skip("WASM execution returned empty history; cannot test divergence (pre-existing environment issue)")
 	}
 
-	t.Run("event_type_mismatch_enriched", func(t *testing.T) {
-		hist := make([]EventRecord, len(history))
-		copy(hist, history)
-		if len(hist) > 0 {
-			hist[0].EventType = "sleep"
-		}
-		caller := &mockCaller{}
-		engine := NewEngine(rt, caller, WithBackend("go", backend))
-		result, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, hist)
-		if err != nil {
-			t.Logf("Replay error (expected): %v", err)
-		}
-		if result == "" {
-			t.Error("expected divergence error result, got empty")
-		}
-		for _, label := range []string{"actual request:", "expected request:"} {
-			if !strings.Contains(result, label) {
-				t.Errorf("result missing %q: %s", label, result)
-			}
-		}
-	})
+	// These read the enriched divergence detail off the *error*, not off the
+	// result. They used to read it off the result, and tolerated an error with
+	// a t.Logf("expected if divergence bails out") -- because a Go guest that
+	// returned an error was handed back as a success whose result happened to
+	// contain the message. IMPROVEMENT-PLAN 3.22 fixed that, so a divergence is
+	// now the failure it always described itself as. The substance is
+	// unchanged: the same two labels, in the same message, still have to reach
+	// whoever is debugging the workflow.
+	for _, tc := range []struct {
+		name   string
+		mutate func(*EventRecord)
+	}{
+		{"event_type_mismatch_enriched", func(r *EventRecord) { r.EventType = "sleep" }},
+		{"service_mismatch_enriched", func(r *EventRecord) { r.Service = "different_service" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hist := make([]EventRecord, len(history))
+			copy(hist, history)
+			tc.mutate(&hist[0])
 
-	t.Run("service_mismatch_enriched", func(t *testing.T) {
-		hist := make([]EventRecord, len(history))
-		copy(hist, history)
-		if len(hist) > 0 {
-			hist[0].Service = "different_service"
-		}
-		caller := &mockCaller{}
-		engine := NewEngine(rt, caller, WithBackend("go", backend))
-		result, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, hist)
-		if err != nil {
-			t.Logf("Replay error (expected if divergence bails out): %v", err)
-		}
-		if result == "" {
-			t.Error("expected divergence error result, got empty")
-		}
-		for _, label := range []string{"actual request:", "expected request:"} {
-			if !strings.Contains(result, label) {
-				t.Errorf("result missing %q: %s", label, result)
+			caller := &mockCaller{}
+			engine := NewEngine(rt, caller, WithBackend("go", backend))
+			result, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, hist)
+			if err == nil {
+				t.Fatalf("Replay of a diverging history succeeded, result = %q; a divergence is "+
+					"a bug in the workflow code and running the same call again reproduces it", result)
 			}
-		}
-	})
+			for _, label := range []string{"actual request:", "expected request:"} {
+				if !strings.Contains(err.Error(), label) {
+					t.Errorf("divergence error missing %q: %v", label, err)
+				}
+			}
+			if result != "" {
+				t.Errorf("Replay returned both an error and the result %q", result)
+			}
+		})
+	}
 }
 
 func TestEngineExecuteCancelOrder(t *testing.T) {
@@ -301,7 +324,10 @@ func TestEngineExecuteCancelOrder(t *testing.T) {
 
 	backend, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Skipf("wasmtime backend not available: %v", err)
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
+			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
+		}
+		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)
 	}
 	defer backend.Close(ctx)
 
@@ -1084,6 +1110,28 @@ func TestEventFieldsMatch_AllEventTypes(t *testing.T) {
 		})
 	}
 }
+
+// withWasmtimeBackend creates a wasmtime backend and returns an EngineOption
+// that registers it for the "go" language. When wasmtime is not available
+// (CGO disabled or libwasmtime.so not found), the test is skipped.
+//
+// This is used by integration tests that need the wasmtime backend to properly
+// execute Go wasip1 modules, avoiding the wazero Runtime's stub cleat_poll_work
+// which always returns 0 (causing "wasm trap: exit(code=0)").
+func withWasmtimeBackend(t *testing.T) EngineOption {
+	t.Helper()
+	ctx := context.Background()
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		if errors.Is(err, ErrWasmtimeCGOUnavailable) {
+			t.Skip("wasmtime backend requires CGO and this build has it disabled; falling back to wazero-only coverage")
+		}
+		t.Fatalf("wasmtime backend not available (CGO is enabled in this build, so this is a real init failure, not an absent optional resource): %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+	return WithBackend("go", wt)
+}
+
 func minimalWasm() []byte {
 	// A minimal WASM module: magic + version, plus an empty code section.
 	return []byte{
@@ -1095,19 +1143,32 @@ func minimalWasm() []byte {
 
 func buildTestWasm(t *testing.T) string {
 	t.Helper()
+	return buildFixtureWasm(t, "basic")
+}
+
+// buildFixtureWasm compiles testdata/<fixture> to WASM with `cleat build` and
+// returns the path of the resulting module.
+func buildFixtureWasm(t *testing.T, fixture string) string {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping WASM compilation in short mode")
 	}
 
 	cwd, _ := os.Getwd()
+	// Resolve symlinks so Go toolchain module resolution works correctly.
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
 	projectRoot := cwd
-	if strings.HasSuffix(cwd, "internal/host") {
+	if strings.HasSuffix(cwd, "/engine") {
+		projectRoot = filepath.Dir(cwd)
+	} else if strings.HasSuffix(cwd, "internal/host") {
 		projectRoot = filepath.Dir(filepath.Dir(cwd))
 	}
 
 	tmpDir := t.TempDir()
 	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "cleat"),
-		"build", "--target", "go", "-o", tmpDir, filepath.Join(projectRoot, "testdata", "basic"))
+		"build", "--target", "go", "-o", tmpDir, filepath.Join(projectRoot, "testdata", fixture))
 	cmd.Dir = projectRoot
 	cmd.Env = os.Environ()
 
@@ -1259,6 +1320,52 @@ func (m *mockChildWorkflowStore) StartChildWorkflowAtomic(ctx context.Context, c
 func (m *mockChildWorkflowStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
 	m.gotRunID = runID
 	return m.result, m.completed, m.err
+}
+
+func (m *mockChildWorkflowStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
+
+// ---------------------------------------------------------------------------
+// Mock promise store for CreatePromise and AwaitPromise tests.
+// ---------------------------------------------------------------------------
+
+type mockPromiseStore struct {
+	createErr error  // error to return from CreatePromise
+	status    string // "resolved", "rejected", or "" (pending)
+	result    string // promise result (for resolved)
+	errMsg    string // error message (for rejected)
+	getErr    error  // error to return from GetPromise
+	// tracking
+	lastCreatedWorkflowID  string
+	lastCreatedPromiseName string
+	lastCreatedPromiseID   string
+	lastGetWorkflowID      string
+	lastGetPromiseID       string
+}
+
+func (m *mockPromiseStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
+	m.lastCreatedWorkflowID = workflowID
+	m.lastCreatedPromiseName = promiseName
+	m.lastCreatedPromiseID = promiseID
+	return m.createErr
+}
+
+func (m *mockPromiseStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+	return nil
+}
+
+func (m *mockPromiseStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+	return nil
+}
+
+func (m *mockPromiseStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
+	m.lastGetWorkflowID = workflowID
+	m.lastGetPromiseID = promiseID
+	if m.getErr != nil {
+		return "", "", "", m.getErr
+	}
+	return m.status, m.result, m.errMsg, nil
 }
 
 func newTestExecSession() *execSession {
@@ -1518,4 +1625,2015 @@ func TestPollChildJSONFormat(t *testing.T) {
 			t.Errorf("expected 'no child workflow store' in output: %s", out)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// CreatePromise tests.
+// ---------------------------------------------------------------------------
+
+func TestCreatePromiseReplayMatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeCreatePromise,
+		PromiseID: "abc-123",
+	}}
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	// packSimpleResult(0, 0) = 0
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after advanceReplayStep, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true after replay match")
+	}
+}
+
+func TestCreatePromiseReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	// Fresh path runs after exitReplay, recording a create_promise event.
+	if len(s.history) < 2 {
+		t.Fatalf("expected at least 2 history entries (original + fresh event), got %d", len(s.history))
+	}
+	if s.history[1].EventType != EventTypeCreatePromise {
+		t.Errorf("expected fresh event type create_promise, got %q", s.history[1].EventType)
+	}
+	if s.history[1].PromiseID == "" {
+		t.Error("expected non-empty PromiseID in fresh event")
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestCreatePromiseReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // stepCount(0) >= len(history)(0) -> past end of history
+
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay (past end of history)")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	// Fresh path runs, recording a create_promise event.
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry (fresh event), got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeCreatePromise {
+		t.Errorf("expected EventTypeCreatePromise, got %q", s.history[0].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestCreatePromiseFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeCreatePromise {
+		t.Errorf("expected EventTypeCreatePromise, got %q", s.history[0].EventType)
+	}
+	if s.history[0].PromiseName != "my-promise" {
+		t.Errorf("expected PromiseName 'my-promise', got %q", s.history[0].PromiseName)
+	}
+	if s.history[0].PromiseID == "" {
+		t.Error("expected non-empty PromiseID (UUID generated)")
+	}
+}
+
+func TestCreatePromiseFreshWithStore(t *testing.T) {
+	mock := &mockPromiseStore{}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	if mock.lastCreatedPromiseName != "my-promise" {
+		t.Errorf("expected CreatePromise called with name 'my-promise', got %q", mock.lastCreatedPromiseName)
+	}
+	if mock.lastCreatedPromiseID == "" {
+		t.Error("expected non-empty promiseID passed to CreatePromise")
+	}
+}
+
+func TestCreatePromiseFreshStoreError(t *testing.T) {
+	mock := &mockPromiseStore{createErr: fmt.Errorf("db down")}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	// Store error is logged, not surfaced. Function should still succeed.
+	if result != 0 {
+		t.Errorf("expected 0 (error is logged, not surfaced), got %d", result)
+	}
+	if mock.lastCreatedPromiseName != "my-promise" {
+		t.Error("expected CreatePromise called despite previous errors")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitPromise tests.
+// ---------------------------------------------------------------------------
+
+func TestAwaitPromiseReplayResolved(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:          0,
+		EventType:     EventTypePromiseResolved,
+		PromiseID:     "abc-123",
+		PromiseResult: `{"status":"ok"}`,
+	}}
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// packAwaitPromiseResult(resultLen=0, timedOut=false, errCode=0)
+	expected := packAwaitPromiseResult(0, false, 0)
+	if result != expected {
+		t.Errorf("expected %d, got %d", expected, result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+func TestAwaitPromiseReplayRejected(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:         0,
+		EventType:    EventTypePromiseRejected,
+		PromiseID:    "abc-123",
+		PromiseError: "bad request",
+	}}
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// packAwaitPromiseResult(resultLen=0, timedOut=false, errCode=1)
+	expected := packAwaitPromiseResult(0, false, 1)
+	if result != expected {
+		t.Errorf("expected %d, got %d", expected, result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+}
+
+func TestAwaitPromiseReplayAwaitThenFreshNoStore(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.promiseStore = nil
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitPromise,
+		PromiseID: "abc-123",
+	}}
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay from await_promise event")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	// Fresh path with no promiseStore -> suspend.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
+		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	}
+}
+
+func TestAwaitPromiseReplayAwaitThenFreshResolved(t *testing.T) {
+	mock := &mockPromiseStore{
+		status: "resolved",
+		result: `{"status":"ok"}`,
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitPromise,
+		PromiseID: "abc-123",
+	}}
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	// Fresh path finds resolved promise.
+	expected := packAwaitPromiseResult(0, false, 0)
+	if result != expected {
+		t.Errorf("expected %d (resolved), got %d", expected, result)
+	}
+	if mock.lastGetPromiseID != "abc-123" {
+		t.Errorf("expected GetPromise called with 'abc-123', got %q", mock.lastGetPromiseID)
+	}
+}
+
+func TestAwaitPromiseReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type - not a promise event
+	}}
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// Divergence: exitReplay is NOT called (unlike CreatePromise).
+	// isReplay stays true, fresh path runs which records await_promise and suspends.
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true (exitReplay not called on mismatch)")
+	}
+	// Fresh path suspends since promiseStore is nil.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
+		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	}
+}
+
+func TestAwaitPromiseReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // stepCount(0) >= len(history)(0)
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay (past end of history)")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	// Fresh path suspends (no store).
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+}
+
+func TestAwaitPromiseFreshResolved(t *testing.T) {
+	mock := &mockPromiseStore{
+		status: "resolved",
+		result: `{"status":"ok"}`,
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	expected := packAwaitPromiseResult(0, false, 0)
+	if result != expected {
+		t.Errorf("expected %d (resolved), got %d", expected, result)
+	}
+	if mock.lastGetPromiseID != "abc-123" {
+		t.Errorf("expected GetPromise called with 'abc-123', got %q", mock.lastGetPromiseID)
+	}
+	// Should have recorded a promise_resolved event.
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypePromiseResolved {
+		t.Errorf("expected EventTypePromiseResolved, got %q", s.history[0].EventType)
+	}
+}
+
+func TestAwaitPromiseFreshRejected(t *testing.T) {
+	mock := &mockPromiseStore{
+		status: "rejected",
+		errMsg: "bad request",
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	expected := packAwaitPromiseResult(0, false, 1)
+	if result != expected {
+		t.Errorf("expected %d (rejected), got %d", expected, result)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypePromiseRejected {
+		t.Errorf("expected EventTypePromiseRejected, got %q", s.history[0].EventType)
+	}
+}
+
+func TestAwaitPromiseFreshPending(t *testing.T) {
+	mock := &mockPromiseStore{
+		status: "", // pending - status not "resolved" and not "rejected"
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// Pending -> suspends.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
+		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	}
+	// Should have recorded an await_promise event.
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeAwaitPromise {
+		t.Errorf("expected EventTypeAwaitPromise, got %q", s.history[0].EventType)
+	}
+}
+
+func TestAwaitPromiseFreshStoreError(t *testing.T) {
+	mock := &mockPromiseStore{
+		getErr: fmt.Errorf("db down"),
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// Store error -> treated as pending, suspends.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+}
+
+func TestAwaitPromiseFreshNilStore(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.promiseStore = nil
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// Nil store -> suspends immediately.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	// Verify timeout encoding: nowMs + timeoutMs
+	expectedUntil := time.UnixMilli(s.nowMs).Add(time.Duration(5000) * time.Millisecond)
+	if !s.suspendErr.Until.Equal(expectedUntil) {
+		t.Errorf("expected Until=%v, got %v", expectedUntil, s.suspendErr.Until)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PollCancellation host function tests
+// ---------------------------------------------------------------------------
+
+// mockCancellationStore implements SignalStore with configurable
+// PollCancellation return values.
+type mockCancellationStore struct {
+	cancelled bool
+	reason    string
+	err       error
+
+	mu                sync.Mutex
+	polledWorkflowIDs []string // captures every workflowID PollCancellation was called with
+}
+
+func (m *mockCancellationStore) PollCancellation(_ context.Context, workflowID string) (bool, string, error) {
+	m.mu.Lock()
+	m.polledWorkflowIDs = append(m.polledWorkflowIDs, workflowID)
+	m.mu.Unlock()
+	return m.cancelled, m.reason, m.err
+}
+
+// lastPolledWorkflowID returns the workflowID passed on the most recent
+// PollCancellation call, or "" if it was never called.
+func (m *mockCancellationStore) lastPolledWorkflowID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.polledWorkflowIDs) == 0 {
+		return ""
+	}
+	return m.polledWorkflowIDs[len(m.polledWorkflowIDs)-1]
+}
+
+func (m *mockCancellationStore) DeliverSignal(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (m *mockCancellationStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
+	return "", false, nil
+}
+
+func TestPollCancellationReplay(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+	if result != 0 {
+		t.Errorf("expected 0 in replay mode, got %d", result)
+	}
+}
+
+func TestPollCancellationNoStore(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+	if result != 0 {
+		t.Errorf("expected 0 with no store, got %d", result)
+	}
+}
+
+func TestPollCancellationNotCancelled(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.workflowID = "wf-not-cancelled"
+	store := &mockCancellationStore{cancelled: false}
+	s.engine.signalStore = store
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+	if result != 0 {
+		t.Errorf("expected 0 when not cancelled, got %d", result)
+	}
+	if got := store.lastPolledWorkflowID(); got != "wf-not-cancelled" {
+		t.Errorf("expected PollCancellation to be called with workflowID %q, got %q", "wf-not-cancelled", got)
+	}
+}
+
+func TestPollCancellationWithReason(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.workflowID = "wf-with-reason"
+	store := &mockCancellationStore{
+		cancelled: true,
+		reason:    "testing",
+	}
+	s.engine.signalStore = store
+
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+
+	result := s.PollCancellation(ctx, nil, 0, 100)
+
+	expected := int64(uint64(7)<<32 | 1) // len("testing")=7, cancelled=1
+	if result != expected {
+		t.Errorf("expected %d, got %d", expected, result)
+	}
+
+	written := string(buf[:7])
+	if written != "testing" {
+		t.Errorf("expected 'testing' in buffer, got %q", written)
+	}
+	if got := store.lastPolledWorkflowID(); got != "wf-with-reason" {
+		t.Errorf("expected PollCancellation to be called with workflowID %q, got %q", "wf-with-reason", got)
+	}
+}
+
+func TestPollCancellationEmptyReason(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.workflowID = "wf-empty-reason"
+	store := &mockCancellationStore{
+		cancelled: true,
+		reason:    "",
+	}
+	s.engine.signalStore = store
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+
+	expected := int64(1) // 0<<32 | 1
+	if result != expected {
+		t.Errorf("expected %d, got %d", expected, result)
+	}
+	if got := store.lastPolledWorkflowID(); got != "wf-empty-reason" {
+		t.Errorf("expected PollCancellation to be called with workflowID %q, got %q", "wf-empty-reason", got)
+	}
+}
+
+func TestPollCancellationStoreError(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.workflowID = "wf-store-error"
+	store := &mockCancellationStore{
+		err: fmt.Errorf("db down"),
+	}
+	s.engine.signalStore = store
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+	if result != 0 {
+		t.Errorf("expected 0 on store error, got %d", result)
+	}
+	if got := store.lastPolledWorkflowID(); got != "wf-store-error" {
+		t.Errorf("expected PollCancellation to be called with workflowID %q, got %q", "wf-store-error", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ContinueAsNew / ContinueAsNewWithVersion tests.
+// ---------------------------------------------------------------------------
+
+func TestContinueAsNewReplayCachedResult(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeContinueAsNew,
+		NewInput:  `{"v":1}`,
+	}}
+
+	result := s.ContinueAsNew(context.Background(), nil, `{"v":2}`)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput from cached event '{\"v\":1}', got %q", s.suspendErr.NewInput)
+	}
+}
+
+func TestContinueAsNewReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type — should be EventTypeContinueAsNew
+	}}
+
+	result := s.ContinueAsNew(context.Background(), nil, `{"v":1}`)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
+	}
+	if len(s.history) != 2 {
+		t.Fatalf("expected history len=2 (original + new ContinueAsNew), got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	}
+}
+
+func TestContinueAsNewReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	// history empty — stepCount=0 >= len(history)=0
+
+	result := s.ContinueAsNew(context.Background(), nil, `{"v":1}`)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	}
+}
+
+func TestContinueAsNewFresh(t *testing.T) {
+	s := newTestExecSession()
+	// isReplay=false by default
+
+	result := s.ContinueAsNew(context.Background(), nil, `{"v":1}`)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay to remain false")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", s.suspendErr.NewInput)
+	}
+}
+
+func TestContinueAsNewFreshEmptyInput(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.ContinueAsNew(context.Background(), nil, "")
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != "" {
+		t.Errorf("expected empty NewInput, got %q", s.suspendErr.NewInput)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.NewInput != "" {
+		t.Errorf("expected empty NewInput in event, got %q", last.NewInput)
+	}
+}
+
+func TestContinueAsNewWithVersionReplayCachedResult(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:       0,
+		EventType:  EventTypeContinueAsNew,
+		NewInput:   `{"v":1}`,
+		NewVersion: 3,
+	}}
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":2}`, 5)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput from cached event '{\"v\":1}', got %q", s.suspendErr.NewInput)
+	}
+	if s.suspendErr.NewVersion != 3 {
+		t.Errorf("expected NewVersion=3 from cached event, got %d", s.suspendErr.NewVersion)
+	}
+}
+
+func TestContinueAsNewWithVersionReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 2)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
+	}
+	if len(s.history) != 2 {
+		t.Fatalf("expected history len=2 (original + new ContinueAsNew), got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewVersion != 2 {
+		t.Errorf("expected NewVersion=2 in event, got %d", last.NewVersion)
+	}
+}
+
+func TestContinueAsNewWithVersionReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	// history empty
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 2)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewVersion != 2 {
+		t.Errorf("expected NewVersion=2 in event, got %d", last.NewVersion)
+	}
+}
+
+func TestContinueAsNewWithVersionFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 2)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	}
+	if last.NewVersion != 2 {
+		t.Errorf("expected NewVersion=2, got %d", last.NewVersion)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", s.suspendErr.NewInput)
+	}
+	if s.suspendErr.NewVersion != 2 {
+		t.Errorf("expected NewVersion=2, got %d", s.suspendErr.NewVersion)
+	}
+}
+
+func TestContinueAsNewWithVersionFreshZero(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 0)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewVersion != 0 {
+		t.Errorf("expected NewVersion=0, got %d", s.suspendErr.NewVersion)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.NewVersion != 0 {
+		t.Errorf("expected NewVersion=0 in event, got %d", last.NewVersion)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// SignalWorkflow tests.
+// ---------------------------------------------------------------------------
+
+type mockSignalStore struct {
+	deliverErr         error
+	lastDeliverWFID    string
+	lastDeliverName    string
+	lastDeliverPayload string
+}
+
+func (m *mockSignalStore) DeliverSignal(_ context.Context, workflowID, signalName, payload string) error {
+	m.lastDeliverWFID = workflowID
+	m.lastDeliverName = signalName
+	m.lastDeliverPayload = payload
+	return m.deliverErr
+}
+
+func (m *mockSignalStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
+	return "", false, nil
+}
+
+func (m *mockSignalStore) PollCancellation(_ context.Context, _ string) (bool, string, error) {
+	return false, "", nil
+}
+
+func TestSignalWorkflowReplayMatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:          0,
+		EventType:     EventTypeSignalReceived,
+		RunID:         "target-run-123",
+		SignalName:    "my-signal",
+		SignalPayload: `{"x":1}`,
+	}}
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+func TestSignalWorkflowReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	// Fresh path records EventTypeSignalReceived.
+	if len(s.history) < 2 {
+		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
+	}
+	if s.history[1].EventType != EventTypeSignalReceived {
+		t.Errorf("expected EventTypeSignalReceived, got %q", s.history[1].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestSignalWorkflowReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // stepCount(0) >= len(0) → past end
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeSignalReceived {
+		t.Errorf("expected EventTypeSignalReceived, got %q", s.history[0].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestSignalWorkflowFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	r := s.history[0]
+	if r.EventType != EventTypeSignalReceived {
+		t.Errorf("expected EventTypeSignalReceived, got %q", r.EventType)
+	}
+	if r.RunID != "target-run-123" {
+		t.Errorf("expected RunID 'target-run-123', got %q", r.RunID)
+	}
+	if r.SignalName != "my-signal" {
+		t.Errorf("expected SignalName 'my-signal', got %q", r.SignalName)
+	}
+	if r.SignalPayload != `{"x":1}` {
+		t.Errorf("expected SignalPayload '{\"x\":1}', got %q", r.SignalPayload)
+	}
+}
+
+func TestSignalWorkflowFreshWithStore(t *testing.T) {
+	mock := &mockSignalStore{}
+	s := newTestExecSession()
+	s.engine.signalStore = mock
+
+	s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if mock.lastDeliverWFID != "target-run-123" {
+		t.Errorf("expected DeliverSignal WFID 'target-run-123', got %q", mock.lastDeliverWFID)
+	}
+	if mock.lastDeliverName != "my-signal" {
+		t.Errorf("expected signal name 'my-signal', got %q", mock.lastDeliverName)
+	}
+	if mock.lastDeliverPayload != `{"x":1}` {
+		t.Errorf("expected payload '{\"x\":1}', got %q", mock.lastDeliverPayload)
+	}
+}
+
+func TestSignalWorkflowStoreError(t *testing.T) {
+	mock := &mockSignalStore{deliverErr: fmt.Errorf("db down")}
+	s := newTestExecSession()
+	s.engine.signalStore = mock
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	// Store error is logged, not surfaced.
+	if result != 0 {
+		t.Errorf("expected 0 (error logged, not surfaced), got %d", result)
+	}
+	// Event still recorded.
+	if len(s.history) != 1 || s.history[0].EventType != EventTypeSignalReceived {
+		t.Error("expected event recorded despite store error")
+	}
+}
+
+func TestSignalWorkflowAuthDenied(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.requireSignalAuth = true
+	s.engine.signalAuthCheck = func(_ context.Context, targetWorkflowID, callerDefName string) error {
+		return fmt.Errorf("not authorized")
+	}
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if result != errSignalAuthRequiredInt {
+		t.Errorf("expected errSignalAuthRequiredInt (%d), got %d", errSignalAuthRequiredInt, result)
+	}
+	// No event should be recorded on auth failure.
+	if len(s.history) != 0 {
+		t.Errorf("expected 0 history entries on auth failure, got %d", len(s.history))
+	}
+}
+
+func TestSignalWorkflowAuthAllowed(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.requireSignalAuth = true
+	s.engine.signalAuthCheck = func(_ context.Context, targetWorkflowID, callerDefName string) error {
+		return nil
+	}
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 || s.history[0].EventType != EventTypeSignalReceived {
+		t.Error("expected event recorded when auth allowed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableScheduleInvoke tests.
+// ---------------------------------------------------------------------------
+
+func TestScheduleInvokeReplayMatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:       0,
+		EventType:  EventTypeDurableScheduleInvoke,
+		Service:    "my-svc",
+		Op:         "my-op",
+		Request:    `{}`,
+		DurationMs: 5000,
+	}}
+	result := s.DurableScheduleInvoke(context.Background(), nil, "my-svc", "my-op", `{}`, 5000)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+func TestScheduleInvokeReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // stepCount >= len → past end
+
+	result := s.DurableScheduleInvoke(context.Background(), nil, "my-svc", "my-op", `{}`, 5000)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true (ScheduleInvoke does not exitReplay on past-end)")
+	}
+}
+
+func TestScheduleInvokeFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.DurableScheduleInvoke(context.Background(), nil, "my-svc", "my-op", `{"k":"v"}`, 10000)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	r := s.history[0]
+	if r.EventType != EventTypeDurableScheduleInvoke {
+		t.Errorf("expected EventTypeDurableScheduleInvoke, got %q", r.EventType)
+	}
+	if r.Service != "my-svc" {
+		t.Errorf("expected Service 'my-svc', got %q", r.Service)
+	}
+	if r.Op != "my-op" {
+		t.Errorf("expected Op 'my-op', got %q", r.Op)
+	}
+	if r.Request != `{"k":"v"}` {
+		t.Errorf("expected Request '{\"k\":\"v\"}', got %q", r.Request)
+	}
+	if r.DurationMs != 10000 {
+		t.Errorf("expected DurationMs=10000, got %d", r.DurationMs)
+	}
+}
+
+func TestScheduleInvokeFreshNoCaller(t *testing.T) {
+	// caller is nil → event recorded, no goroutine spawned.
+	s := newTestExecSession()
+	s.engine.caller = nil // already nil from newTestExecSession
+
+	result := s.DurableScheduleInvoke(context.Background(), nil, "svc", "op", `{}`, 0)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Errorf("expected 1 history entry, got %d", len(s.history))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RegisterUpdateHandler tests.
+// ---------------------------------------------------------------------------
+
+func TestRegisterUpdateHandlerReplayMatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:              0,
+		EventType:         EventTypeUpdateHandler,
+		UpdateHandlerName: "my-handler",
+	}}
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+func TestRegisterUpdateHandlerReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if len(s.history) < 2 {
+		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
+	}
+	if s.history[1].EventType != EventTypeUpdateHandler {
+		t.Errorf("expected EventTypeUpdateHandler, got %q", s.history[1].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestRegisterUpdateHandlerReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // past end
+
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeUpdateHandler {
+		t.Errorf("expected EventTypeUpdateHandler, got %q", s.history[0].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+// AwaitAnyChild tests.
+// ---------------------------------------------------------------------------
+
+func TestAwaitAnyChildReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type — should be EventTypeAwaitAnyChild
+	}}
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected error code 1 (divergence), got %d", errCode)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true (divergence should not call exitReplay)")
+	}
+	if s.stepCount != 0 {
+		t.Errorf("expected stepCount=0 (step not advanced), got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Errorf("expected history unchanged (len=1), got len=%d", len(s.history))
+	}
+}
+
+func TestAwaitAnyChildReplayCachedResult(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitAnyChild,
+		Response:  `{"run_id":"run-1","result":"done"}`,
+	}}
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1","run-2"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected error code 0, got %d", errCode)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true (cached result)")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+}
+
+func TestAwaitAnyChildReplaySuspendThenCompleted(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitAnyChild},
+		{Step: 1, EventType: EventTypeAwaitAnyChild, Response: `{"run_id":"run-1","result":"done"}`},
+	}
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1","run-2"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected error code 0, got %d", errCode)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true after consuming both events")
+	}
+	if s.stepCount != 2 {
+		t.Errorf("expected stepCount=2 (both events consumed), got %d", s.stepCount)
+	}
+}
+
+func TestAwaitAnyChildReplaySuspendNoReexec(t *testing.T) {
+	mock := &mockChildWorkflowStore{completed: false}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitAnyChild,
+	}}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("expected suspend sentinel, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_any_child") {
+		t.Errorf("expected Reason containing 'await_any_child', got %q", s.suspendErr.Reason)
+	}
+}
+
+func TestAwaitAnyChildReplayPastEnd(t *testing.T) {
+	mock := &mockChildWorkflowStore{completed: false}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	s.isReplay = true
+	// empty history — stepCount >= len(history) triggers exitReplay
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("expected suspend sentinel, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+}
+
+func TestAwaitAnyChildFreshCompleted(t *testing.T) {
+	mock := &mockChildWorkflowStore{
+		result:    "done",
+		completed: true,
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected error code 0, got %d", errCode)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	lastEvent := s.history[len(s.history)-1]
+	if lastEvent.EventType != EventTypeAwaitAnyChild {
+		t.Errorf("expected EventTypeAwaitAnyChild, got %s", lastEvent.EventType)
+	}
+	if lastEvent.Request != `["run-1"]` {
+		t.Errorf("expected Request=%q, got %q", `["run-1"]`, lastEvent.Request)
+	}
+	if !strings.Contains(lastEvent.Response, `"run_id":"run-1"`) {
+		t.Errorf("expected Response with run_id, got %q", lastEvent.Response)
+	}
+	if !strings.Contains(lastEvent.Response, `"result":"done"`) {
+		t.Errorf("expected Response with result, got %q", lastEvent.Response)
+	}
+}
+
+func TestAwaitAnyChildFreshStoreError(t *testing.T) {
+	mock := &mockChildWorkflowStore{
+		err: fmt.Errorf("db down"),
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected error code 0 (error is in JSON response), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	lastEvent := s.history[len(s.history)-1]
+	if lastEvent.EventType != EventTypeAwaitAnyChild {
+		t.Errorf("expected EventTypeAwaitAnyChild, got %s", lastEvent.EventType)
+	}
+	if !strings.Contains(lastEvent.Response, `"error":"db down"`) {
+		t.Errorf("expected Response to contain error, got %q", lastEvent.Response)
+	}
+	if !strings.Contains(lastEvent.Response, `"run_id":"run-1"`) {
+		t.Errorf("expected Response with run_id, got %q", lastEvent.Response)
+	}
+}
+
+func TestAwaitAnyChildFreshNoChildCompleted(t *testing.T) {
+	mock := &mockChildWorkflowStore{completed: false}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("expected suspend sentinel, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_any_child") {
+		t.Errorf("expected Reason containing 'await_any_child', got %q", s.suspendErr.Reason)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 (empty event recorded), got %d", s.stepCount)
+	}
+}
+
+func TestAwaitAnyChildFreshNilStore(t *testing.T) {
+	s := newTestExecSession()
+	// s.engine.childWfStore is nil — verify no panic, graceful suspend
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("expected suspend sentinel, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+}
+
+func TestAwaitAnyChildFreshInvalidJSON(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.AwaitAnyChild(context.Background(), nil, "not valid json", 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected error code 1, got %d", errCode)
+	}
+}
+
+func TestAwaitAnyChildFreshDeterministicOrdering(t *testing.T) {
+	mock := &mockChildWorkflowStore{
+		result:    "ok",
+		completed: true,
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+
+	s.AwaitAnyChild(context.Background(), nil, `["c","a","b"]`, 0, 0)
+
+	// "a" sorted first, so it should be polled first and returned immediately.
+	if mock.gotRunID != "a" {
+		t.Errorf("expected first polled runID='a' (sorted order), got %q", mock.gotRunID)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	lastEvent := s.history[len(s.history)-1]
+	if lastEvent.EventType != EventTypeAwaitAnyChild {
+		t.Errorf("expected EventTypeAwaitAnyChild, got %s", lastEvent.EventType)
+	}
+	// Request should preserve original (unsorted) order.
+	if lastEvent.Request != `["c","a","b"]` {
+		t.Errorf("expected Request to preserve original order, got %q", lastEvent.Request)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RegisterUpdateHandler tests.
+// ---------------------------------------------------------------------------
+
+func TestRegisterUpdateHandlerReplay_Match(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:              0,
+		EventType:         EventTypeUpdateHandler,
+		UpdateHandlerName: "my-handler",
+	}}
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after advanceReplayStep, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true after replay match")
+	}
+}
+
+func TestRegisterUpdateHandlerReplay_Mismatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	if len(s.history) < 2 {
+		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
+	}
+	if s.history[1].EventType != EventTypeUpdateHandler {
+		t.Errorf("expected fresh event type update_handler, got %q", s.history[1].EventType)
+	}
+	if s.history[1].UpdateHandlerName != "my-handler" {
+		t.Errorf("expected UpdateHandlerName='my-handler', got %q", s.history[1].UpdateHandlerName)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestRegisterUpdateHandlerReplay_PastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	// empty history triggers exitReplay
+
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeUpdateHandler {
+		t.Errorf("expected fresh event type update_handler, got %q", s.history[0].EventType)
+	}
+	if s.history[0].UpdateHandlerName != "my-handler" {
+		t.Errorf("expected UpdateHandlerName='my-handler', got %q", s.history[0].UpdateHandlerName)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestRegisterUpdateHandlerFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	rec := s.history[0]
+	if rec.EventType != EventTypeUpdateHandler {
+		t.Errorf("expected EventTypeUpdateHandler, got %s", rec.EventType)
+	}
+	if rec.UpdateHandlerName != "my-handler" {
+		t.Errorf("expected UpdateHandlerName='my-handler', got %q", rec.UpdateHandlerName)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PluginCallStreaming tests.
+// ---------------------------------------------------------------------------
+
+func TestPluginCallStreamingReplay_MultipleChunks(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypePluginCallStreamChunk,
+			PluginOutput: "chunk1", StreamChunkIndex: 0},
+		{Step: 1, EventType: EventTypePluginCallStreamChunk,
+			PluginOutput: "chunk2", StreamChunkIndex: 1, StreamFinish: true},
+	}
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected errCode=0, got %d", errCode)
+	}
+	if s.stepCount != 2 {
+		t.Errorf("expected stepCount=2, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true")
+	}
+}
+
+func TestPluginCallStreamingReplay_StreamError(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:             0,
+		EventType:        EventTypePluginCallStreamChunk,
+		PluginOutput:     "plugin_call_streaming: boom",
+		StreamChunkIndex: 0,
+		StreamFinish:     true,
+	}}
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (stream error), got %d", errCode)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true")
+	}
+}
+
+func TestPluginCallStreamingReplay_EmptyHistory(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	// empty history — no chunks to replay
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected errCode=0 (empty result), got %d", errCode)
+	}
+	if s.stepCount != 0 {
+		t.Errorf("expected stepCount=0 (no events consumed), got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true")
+	}
+}
+
+func TestPluginCallStreamingFresh_Success(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	psr.Register("test-plugin", "Echo", func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		ch := make(chan plugin.StreamEvent, 2)
+		ch <- plugin.StreamEvent{Index: 0, Content: "hello"}
+		ch <- plugin.StreamEvent{Index: 1, Content: "world", Finish: true}
+		close(ch)
+		return ch, nil
+	})
+
+	s := newTestExecSession()
+	s.engine.pluginStreamRegistry = psr
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected errCode=0, got %d", errCode)
+	}
+	if s.stepCount != 2 {
+		t.Errorf("expected stepCount=2 (two chunks), got %d", s.stepCount)
+	}
+	if len(s.history) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypePluginCallStreamChunk {
+		t.Errorf("expected EventTypePluginCallStreamChunk in history[0], got %s", s.history[0].EventType)
+	}
+	if s.history[1].EventType != EventTypePluginCallStreamChunk {
+		t.Errorf("expected EventTypePluginCallStreamChunk in history[1], got %s", s.history[1].EventType)
+	}
+	if !s.history[1].StreamFinish {
+		t.Error("expected second chunk to have StreamFinish=true")
+	}
+}
+
+func TestPluginCallStreamingFresh_NoRegistry(t *testing.T) {
+	s := newTestExecSession()
+	// s.engine.pluginStreamRegistry is nil
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (no registry), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].StreamFinish != true {
+		t.Error("expected StreamFinish=true on error event")
+	}
+	if s.history[0].StreamChunkIndex != 0 {
+		t.Errorf("expected StreamChunkIndex=0, got %d", s.history[0].StreamChunkIndex)
+	}
+}
+
+func TestPluginCallStreamingFresh_FuncNotFound(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	// "Echo" is not registered
+
+	s := newTestExecSession()
+	s.engine.pluginStreamRegistry = psr
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (not found), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].StreamFinish != true {
+		t.Error("expected StreamFinish=true on error event")
+	}
+}
+
+func TestPluginCallStreamingFresh_FuncError(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	psr.Register("test-plugin", "Echo", func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		return nil, fmt.Errorf("plugin init failure")
+	})
+
+	s := newTestExecSession()
+	s.engine.pluginStreamRegistry = psr
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (func error), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].StreamFinish != true {
+		t.Error("expected StreamFinish=true on error event")
+	}
+}
+
+// ---- SuspendError.Error() ----
+
+func TestSuspendError_Error_WithoutUntil(t *testing.T) {
+	e := &SuspendError{Reason: "timeout"}
+	got := e.Error()
+	if want := "cleat: suspend: timeout"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSuspendError_Error_WithUntil(t *testing.T) {
+	tm := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	e := &SuspendError{Reason: "sleep", Until: tm}
+	got := e.Error()
+	if !strings.Contains(got, "cleat: suspend until") || !strings.Contains(got, "sleep") {
+		t.Errorf("got %q, expected 'suspend until' and 'sleep'", got)
+	}
+}
+
+// ---- DeferralsFromHistory ----
+
+func TestDeferralsFromHistory_Empty(t *testing.T) {
+	defs := DeferralsFromHistory(nil)
+	if len(defs) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(defs))
+	}
+	defs = DeferralsFromHistory([]EventRecord{})
+	if len(defs) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(defs))
+	}
+}
+
+func TestDeferralsFromHistory_DefersOnly(t *testing.T) {
+	history := []EventRecord{
+		{EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup temp files"},
+		{EventType: EventTypeDefer, DeferID: "d2", DeferDescription: "release lock"},
+	}
+	defs := DeferralsFromHistory(history)
+	if len(defs) != 2 {
+		t.Fatalf("expected 2 defers, got %d", len(defs))
+	}
+	if defs["d1"] != "cleanup temp files" {
+		t.Errorf("d1: got %q, want %q", defs["d1"], "cleanup temp files")
+	}
+	if defs["d2"] != "release lock" {
+		t.Errorf("d2: got %q, want %q", defs["d2"], "release lock")
+	}
+}
+
+func TestDeferralsFromHistory_MixedEvents(t *testing.T) {
+	history := []EventRecord{
+		{EventType: "call", Service: "svc"},
+		{EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup"},
+		{EventType: "sleep"},
+		{EventType: EventTypeDefer, DeferID: "d2", DeferDescription: "notify"},
+	}
+	defs := DeferralsFromHistory(history)
+	if len(defs) != 2 {
+		t.Fatalf("expected 2 defers, got %d", len(defs))
+	}
+	if defs["d1"] != "cleanup" {
+		t.Errorf("d1: got %q, want 'cleanup'", defs["d1"])
+	}
+	if defs["d2"] != "notify" {
+		t.Errorf("d2: got %q, want 'notify'", defs["d2"])
+	}
+}
+
+// ---- DispatchUpdate ----
+
+func TestDispatchUpdate_NilHandler(t *testing.T) {
+	engine := NewEngine(nil, nil)
+	_, err := engine.DispatchUpdate(context.Background(), "update1", `{"key":"val"}`)
+	if err == nil {
+		t.Fatal("expected error for nil handler")
+	}
+	if !strings.Contains(err.Error(), "no update handler configured") {
+		t.Errorf("error should mention missing handler: %v", err)
+	}
+}
+
+func TestDispatchUpdate_ValidHandler(t *testing.T) {
+	handler := func(name, payload string) (string, error) {
+		return `{"result":"` + name + `"}`, nil
+	}
+	engine := NewEngine(nil, nil, WithUpdateHandler(handler))
+	result, err := engine.DispatchUpdate(context.Background(), "myUpdate", `{"x":1}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := `{"result":"myUpdate"}`; result != want {
+		t.Errorf("got %q, want %q", result, want)
+	}
+}
+
+// ---- invokeStepCallback ----
+
+func TestInvokeStepCallback_NilCallback(t *testing.T) {
+	s := newTestExecSession()
+	s.stepCount = 5
+	ok := s.invokeStepCallback(context.Background(), nil)
+	if !ok {
+		t.Error("expected true with nil callback")
+	}
+	if s.stepCount != 5 {
+		t.Errorf("stepCount should not change: got %d", s.stepCount)
+	}
+}
+
+func TestInvokeStepCallback_ReplayNext(t *testing.T) {
+	var calledStep int
+	var calledRec *EventRecord
+	var calledQS map[string]string
+	cb := WithReplayStepCallback(func(step int, rec *EventRecord, qs map[string]string) ReplayStepAction {
+		calledStep = step
+		calledRec = rec
+		calledQS = qs
+		return ReplayNext
+	})
+	s := newTestExecSession()
+	s.engine.stepCallback = nil // clear, then apply
+	cb(s.engine)
+	s.stepCallback = s.engine.stepCallback
+	s.stepCount = 7
+	s.queryState["key"] = "val"
+	rec := &EventRecord{Service: "test-svc"}
+
+	ok := s.invokeStepCallback(context.Background(), rec)
+	if !ok {
+		t.Error("expected true for ReplayNext")
+	}
+	if calledStep != 6 { // stepCount-1
+		t.Errorf("expected step 6, got %d", calledStep)
+	}
+	if calledRec != rec {
+		t.Error("callback should receive the EventRecord")
+	}
+	if calledQS["key"] != "val" {
+		t.Error("queryState snapshot missing entries")
+	}
+	// Verify snapshot is a copy — modifying returned qs doesn't affect session.
+	if len(calledQS) > 0 {
+		calledQS["key"] = "modified"
+		if s.queryState["key"] == "modified" {
+			t.Error("modifying snapshot should not mutate session queryState")
+		}
+	}
+}
+
+func TestInvokeStepCallback_ReplayQuit(t *testing.T) {
+	cancelCalled := false
+	cb := WithReplayStepCallback(func(step int, rec *EventRecord, qs map[string]string) ReplayStepAction {
+		return ReplayQuit
+	})
+	s := newTestExecSession()
+	s.engine.stepCallback = nil
+	cb(s.engine)
+	s.stepCallback = s.engine.stepCallback
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.stepCancel = func() { cancelCalled = true }
+	s.stepCount = 3
+
+	ok := s.invokeStepCallback(ctx, nil)
+	if ok {
+		t.Error("expected false for ReplayQuit")
+	}
+	if !cancelCalled {
+		t.Error("expected stepCancel to be called on ReplayQuit")
+	}
+}
+
+// ---- DurableDefer ----
+
+func TestDurableDefer_Fresh(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = false
+	s.DurableDefer(context.Background(), nil, "cleanup temp files", 0, 0)
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 event recorded, got %d", len(s.history))
+	}
+	rec := s.history[0]
+	if rec.EventType != EventTypeDefer {
+		t.Errorf("expected EventTypeDefer, got %s", rec.EventType)
+	}
+	if rec.DeferDescription != "cleanup temp files" {
+		t.Errorf("got description %q, want %q", rec.DeferDescription, "cleanup temp files")
+	}
+	if len(s.deferrals) != 1 {
+		t.Fatalf("expected 1 deferral in map, got %d", len(s.deferrals))
+	}
+	if s.deferrals[rec.DeferID] != "cleanup temp files" {
+		t.Errorf("deferral map has wrong description: %q", s.deferrals[rec.DeferID])
+	}
+}
+
+func TestDurableDefer_Replay(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:             0,
+		EventType:        EventTypeDefer,
+		DeferID:          "defer-99",
+		DeferDescription: "release lock",
+	}}
+	s.DurableDefer(context.Background(), nil, "ignored", 0, 0)
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+// ---- FreshPluginCallStreaming — call guard rejection ----
+
+func TestPluginCallStreamingFresh_CallGuardRejection(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	psr.Register("secure-plugin", "GetSecrets", func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		ch := make(chan plugin.StreamEvent, 1)
+		ch <- plugin.StreamEvent{Index: 0, Content: "secret", Finish: true}
+		close(ch)
+		return ch, nil
+	})
+
+	guard := NewPluginCallGuard()
+	guard.Allow("caller-plugin", []string{"other-plugin"}) // NOT allowed to call secure-plugin
+
+	s := newTestExecSession()
+	s.engine.pluginStreamRegistry = psr
+	s.engine.pluginCallGuard = guard
+	s.callerPluginName = "caller-plugin"
+
+	result := s.PluginCallStreaming(context.Background(), nil, "secure-plugin", "GetSecrets", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (call guard rejection), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry (error event), got %d", len(s.history))
+	}
+	if s.history[0].StreamFinish != true {
+		t.Error("expected StreamFinish=true on guard rejection event")
+	}
+	if s.history[0].EventType != EventTypePluginCallStreamChunk {
+		t.Errorf("expected EventTypePluginCallStreamChunk, got %s", s.history[0].EventType)
+	}
 }

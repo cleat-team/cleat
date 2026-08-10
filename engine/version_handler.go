@@ -8,8 +8,41 @@ import (
 	"time"
 )
 
+// VersionStoreResolver resolves the WorkflowStore scoped to an HTTP
+// request's authenticated tenant. Implementations write the error response
+// themselves and return ok=false when no store can be resolved (no
+// authenticated tenant, or a tenant whose store cannot be opened), mirroring
+// cmd/cleat-worker's apiServer.scopedStore -- which is exactly what
+// production wiring passes here (see the call in cmd/cleat-worker/main.go).
+//
+// This type exists because RegisterVersionHandler used to take a single
+// process-wide WorkflowStore, opened once at boot against the default
+// tenant. Every version endpoint -- including
+// POST /api/versions/<name>/<v>/purge, which permanently deletes workflow
+// definitions -- then served every caller from that one tenant's data
+// regardless of who authenticated, and any caller could purge the default
+// tenant's definitions. Routing each request through a resolver is the same
+// fix cmd/cleat-worker/server.go applies to every other handler; this
+// package cannot import cmd/cleat-worker's apiServer or the auth package
+// directly (auth already imports engine), so the resolver is the seam
+// between them.
+type VersionStoreResolver func(w http.ResponseWriter, r *http.Request) (store WorkflowStore, ok bool)
+
+// StaticVersionStore returns a VersionStoreResolver that always resolves to
+// store, regardless of the request. It exists for callers that have no
+// per-request tenant to scope to -- tests, and an embedded/local-dev setup
+// that only ever has one tenant. Production HTTP wiring must not use this:
+// it recreates exactly the defect VersionStoreResolver exists to close.
+func StaticVersionStore(store WorkflowStore) VersionStoreResolver {
+	return func(http.ResponseWriter, *http.Request) (WorkflowStore, bool) {
+		return store, true
+	}
+}
+
 // RegisterVersionHandler adds version management HTTP endpoints to the given
-// ServeMux. All routes are prefixed with /api/versions.
+// ServeMux. All routes are prefixed with /api/versions. resolve is called
+// once per request to obtain the tenant-scoped store; see
+// VersionStoreResolver.
 //
 // Endpoints:
 //
@@ -20,14 +53,14 @@ import (
 //	POST   /api/versions/<name>/<v>/purge         — delete version permanently
 //	GET    /api/versions/stale        — list stale version alerts
 //	POST   /api/versions/gc           — run garbage collection
-func RegisterVersionHandler(mux *http.ServeMux, store WorkflowStore) {
-	h := &versionHandler{store: store}
+func RegisterVersionHandler(mux *http.ServeMux, resolve VersionStoreResolver) {
+	h := &versionHandler{resolve: resolve}
 	mux.HandleFunc("/api/versions", h.handleVersions)
 	mux.HandleFunc("/api/versions/", h.handleVersions)
 }
 
 type versionHandler struct {
-	store WorkflowStore
+	resolve VersionStoreResolver
 }
 
 func (h *versionHandler) handleVersions(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +128,11 @@ func (h *versionHandler) listAllVersions(w http.ResponseWriter, r *http.Request)
 		writeVersionError(w, 405, "method not allowed")
 		return
 	}
-	summary, err := CollectVersionMetrics(r.Context(), h.store)
+	store, ok := h.resolve(w, r)
+	if !ok {
+		return
+	}
+	summary, err := CollectVersionMetrics(r.Context(), store)
 	if err != nil {
 		writeVersionError(w, 500, err.Error())
 		return
@@ -108,7 +145,11 @@ func (h *versionHandler) listWorkflowVersions(w http.ResponseWriter, r *http.Req
 		writeVersionError(w, 405, "method not allowed")
 		return
 	}
-	defs, err := h.store.ListWorkflowDefs(r.Context(), name)
+	store, ok := h.resolve(w, r)
+	if !ok {
+		return
+	}
+	defs, err := store.ListWorkflowDefs(r.Context(), name)
 	if err != nil {
 		writeVersionError(w, 500, err.Error())
 		return
@@ -124,7 +165,11 @@ func (h *versionHandler) listStaleAlerts(w http.ResponseWriter, r *http.Request)
 		writeVersionError(w, 405, "method not allowed")
 		return
 	}
-	alerts, err := CheckStaleVersions(r.Context(), h.store, defaultStaleThreshold, defaultPurgeThreshold)
+	store, ok := h.resolve(w, r)
+	if !ok {
+		return
+	}
+	alerts, err := CheckStaleVersions(r.Context(), store, defaultStaleThreshold, defaultPurgeThreshold)
 	if err != nil {
 		writeVersionError(w, 500, err.Error())
 		return
@@ -140,12 +185,16 @@ func (h *versionHandler) runGC(w http.ResponseWriter, r *http.Request) {
 		writeVersionError(w, 405, "method not allowed")
 		return
 	}
+	store, ok := h.resolve(w, r)
+	if !ok {
+		return
+	}
 	opts := DefaultGCOptions()
 	// Support dry_run=true query parameter.
 	if r.URL.Query().Get("dry_run") == "true" {
 		opts.DryRun = true
 	}
-	result, err := GarbageCollectVersions(r.Context(), h.store, opts)
+	result, err := GarbageCollectVersions(r.Context(), store, opts)
 	if err != nil {
 		writeVersionError(w, 500, err.Error())
 		return
@@ -158,7 +207,11 @@ func (h *versionHandler) markDeprecated(w http.ResponseWriter, r *http.Request, 
 		writeVersionError(w, 405, "method not allowed")
 		return
 	}
-	if err := h.store.MarkVersionDeprecated(r.Context(), name, version, deprecated); err != nil {
+	store, ok := h.resolve(w, r)
+	if !ok {
+		return
+	}
+	if err := store.MarkVersionDeprecated(r.Context(), name, version, deprecated); err != nil {
 		writeVersionError(w, 500, err.Error())
 		return
 	}
@@ -174,7 +227,11 @@ func (h *versionHandler) purgeVersion(w http.ResponseWriter, r *http.Request, na
 		writeVersionError(w, 405, "method not allowed")
 		return
 	}
-	if err := h.store.PurgeWorkflowDef(r.Context(), name, version); err != nil {
+	store, ok := h.resolve(w, r)
+	if !ok {
+		return
+	}
+	if err := store.PurgeWorkflowDef(r.Context(), name, version); err != nil {
 		writeVersionError(w, 500, err.Error())
 		return
 	}
@@ -182,7 +239,7 @@ func (h *versionHandler) purgeVersion(w http.ResponseWriter, r *http.Request, na
 }
 
 // writeVersionJSON is a standalone JSON response writer for this package.
-func writeVersionJSON(w http.ResponseWriter, status int, v interface{}) {
+func writeVersionJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -195,6 +252,6 @@ func writeVersionError(w http.ResponseWriter, status int, msg string) {
 
 // Default thresholds for stale version checking.
 const (
-	defaultStaleThreshold  = 7 * 24 * time.Hour  // 7 days
-	defaultPurgeThreshold  = 30 * 24 * time.Hour // 30 days
+	defaultStaleThreshold = 7 * 24 * time.Hour  // 7 days
+	defaultPurgeThreshold = 30 * 24 * time.Hour // 30 days
 )

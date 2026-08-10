@@ -2,17 +2,17 @@ package jobqueue
 
 import (
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterRoutes registers the job queue HTTP handlers on the given mux.
@@ -29,7 +29,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -119,7 +119,7 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		"def_name", req.DefName,
 	)
 
-	p.writeJSON(w, 201, map[string]interface{}{
+	p.writeJSON(w, 201, map[string]any{
 		"job_id":     jobID,
 		"queue_name": queueName,
 		"status":     "pending",
@@ -155,7 +155,7 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			FROM task_queue
 			WHERE tenant_id = $1 AND queue_name = $2
 		`
-	args := []interface{}{tid, queueName}
+	args := []any{tid, queueName}
 	argIdx := 3
 
 	if statusFilter != "" {

@@ -60,8 +60,9 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Optional
+from typing import Any
 
 from .host_calls import HostCalls
 
@@ -787,8 +788,8 @@ class Plugins:
         model: str,
         messages: list[dict],
         tools: Any = None,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
         system_prompt: str = "",
         tool_choice: str = "",
     ) -> LLMChatResult:
@@ -926,8 +927,8 @@ class Plugins:
         model: str,
         messages: list[dict],
         tools: Any = None,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
         system_prompt: str = "",
         tool_choice: str = "",
     ) -> Iterator[dict]:
@@ -965,8 +966,8 @@ class Plugins:
         table: str,
         vector: list[float],
         limit: int = 10,
-        filter: Optional[dict] = None,
-        min_score: Optional[float] = None,
+        filter: dict | None = None,
+        min_score: float | None = None,
     ) -> list[dict]:
         """Search for similar vectors in a pgvector collection.
 
@@ -1009,7 +1010,7 @@ class Plugins:
         table: str,
         id: str,
         vector: list[float],
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> None:
         """Insert or update an embedding vector in a pgvector collection.
 

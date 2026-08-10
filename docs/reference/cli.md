@@ -25,7 +25,7 @@ and compilation.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o <dir>` | temp dir | Output directory for generated WASM and auxiliary files |
-| `--target <name>` | `go` | Compilation target: `go` (standard Go toolchain, fully implemented), `tinygo` (smaller binaries), `rust`, `java`, `assemblyscript`, or `python` |
+| `--target <name>` | `go` | Compilation target: `go` (standard Go toolchain, fully implemented), `rust`, `java`, `assemblyscript`, or `python` |
 | `--entry <file:func>` | `""` | Entry point in `file.py:func_name` format (Python target only) |
 | `--json` | `false` | Output diagnostics as JSON to stdout (progress goes to stderr) |
 
@@ -67,8 +67,15 @@ Upload a compiled WASM workflow to the database.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--name <name>` | derived from WASM metadata or filename | Workflow name |
-| `--namespace <ns>` | `default` | Workflow namespace |
 | `--task-queue <queue>` | `default` | Task queue (e.g. `default`, `gpu`, `high-memory`) |
+
+> Corrected 2026-08-09: this table previously also listed a `--namespace`
+> flag. `runDeploy` in `cmd/cleat/main.go` only defines `--name` and
+> `--task-queue` (`fs.String("name", ...)`, `fs.String("task-queue", ...)`) —
+> there is no `--namespace` flag on `deploy`. Namespace/tenant is set at
+> workflow *start* time instead, via the `tenant_id` field in the
+> `POST /api/workflows/<name>/start` body — see the `run` section below and
+> `docs/reference/multi-tenancy.md`.
 
 Requires `--db` or `CLEAT_DATABASE_URL`. In dry-run mode (no DB configured),
 prints what would be deployed.
@@ -90,6 +97,11 @@ Run a workflow locally with live-reload for development.
 | `--input <json>` / `-i` | `{}` | Workflow input as JSON |
 | `--entry-point <name>` / `-e` | `""` | Entry point function name |
 | `--concurrency-key <key>` / `-c` | `""` | Concurrency key for virtual object scope |
+| `--watch` / `-w` | off | Watch the target package directory for `.go` file changes and re-run automatically |
+
+> Added 2026-08-09: `--watch`/`-w` was missing from this table. It's real —
+> `cmd/cleat/dev.go` parses it (`args[i] == "--watch" \|\| args[i] == "-w"`)
+> and drives `runDevWithWatch`, an fsnotify-based watch loop.
 
 When `--input` is not provided and stdin is a pipe, input is read from stdin.
 
@@ -112,7 +124,7 @@ Build (if needed) and execute a workflow in-process.
 | `--entry-point <name>` | `place_order` | Entry point function name |
 | `--input <json>` | `{}` | Workflow input as JSON |
 | `--api-addr <addr>` | `:8080` | HTTP API + web UI listen address (empty to disable) |
-| `--target <name>` | `go` | Build target when WASM is not pre-built: `go` (standard Go, fully implemented), `tinygo` (smaller binaries), or `rust` |
+| `--target <name>` | `go` | Build target when WASM is not pre-built: `go` (standard Go, fully implemented), or `rust` |
 
 Example:
 

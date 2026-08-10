@@ -1,17 +1,188 @@
 run:
-  go: "1.26"
+  go: "1.25"
 linters:
   enable:
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
+    # Not on by golangci-lint's default set, so listing it under `disable`
+    # below never did anything -- it had to be enabled to run at all.
     - misspell
+    # Enabled 2026-08-05 (WS-3). Was 4 findings, not the 8 recorded below.
+    - ineffassign
+    # Enabled 2026-08-05 (WS-3). 9 findings, 8 fixed and 1 suppressed.
+    - gosimple
+    # Enabled 2026-08-05 (WS-3). 16 findings, 13 fixed and 3 suppressed.
+    - staticcheck
+    # Enabled 2026-08-05 (WS-3). 32 findings, all fixed with `unconvert -apply`.
     - unconvert
+  disable:
+    - errcheck
+    - unused
     - gocyclo
-    - gofmt
+    - gosec
+  # The disables above are a backlog, not a policy. This note used to read
+  # "errcheck and other noisy linters are temporarily disabled. The engine
+  # refactoring introduced hundreds of pre-existing issues." That was true when
+  # it was written, and by then unfalsifiable: nobody could tell which linters
+  # were still hundreds and which had quietly become tractable.
+  #
+  # Measured 2026-08-04 against this file's own exclusions (non-test files),
+  # with golangci-lint's default caps removed -- max-issues-per-linter and
+  # max-same-issues both default to non-zero and silently truncate, so errcheck
+  # reads as 50 with them on and 307 with them off:
+  #
+  #     misspell        0    <- enabled by this change
+  #     ineffassign     8
+  #     gosimple        9
+  #     unused         16
+  #     staticcheck    17
+  #     unconvert      23
+  #     gocyclo        28
+  #     gosec         193
+  #     errcheck      307
+  #
+  # misspell is off the list because it was never "hundreds": it is zero, and
+  # leaving it disabled meant the next typo in a comment or an error string had
+  # nothing stopping it.
+  #
+  # Re-measure before believing these numbers. Recording them is the point --
+  # the next person can take the cheapest one off the top instead of inheriting
+  # a claim they have no way to check.
+  #
+  # ineffassign, 2026-08-05 (WS-3): and re-measuring was the right advice. It
+  # was **4**, not 8, on golangci-lint v1.64.7 against this file's exclusions.
+  # The table above is a measurement with a date on it, not a running total, so
+  # the other rows should be assumed equally stale until someone re-runs them.
+  #
+  # Three of the four were the defensive trailing `argIdx++` the workstream
+  # notes warned about, in scheduledbackup/{commands,routes}.go and
+  # webhookingest/host_functions.go. They are //nolint'd with the reason rather
+  # than deleted: each keeps a SQL placeholder counter correct so the next
+  # clause added below cannot silently reuse the previous one's $N. Deleting
+  # them passes the linter and plants a bug.
+  #
+  # The fourth was real, in internal/closure/threading.go: a map initialised
+  # outside an `if` and unconditionally overwritten as the first statement
+  # inside it, with no reader in the nil branch. Moved into the branch.
+  #
+  # gosimple, 2026-08-05 (WS-3): 9, matching the table. Eight were mechanical
+  # (five fmt.Sprintf with no arguments, two `x == nil || len(x) == 0`, one
+  # single-case select). The ninth is //nolint'd at the site with its reasoning:
+  # featureflags' evaluateFlagOutput is a host call's wire contract that happens
+  # to be field-identical to an internal type, and S1016's conversion would
+  # couple the two while still looking independent.
+  #
+  # staticcheck, 2026-08-05 (WS-3): 16, and unlike the two above it was not all
+  # cosmetic. Two were worth having:
+  #
+  #   SA9003 engine/flush.go -- an `if err != nil` with an EMPTY BODY, so a
+  #     deferred callback that never ran was indistinguishable from one that ran
+  #     and succeeded. A defer export with the wrong signature is rejected with
+  #     "expected 0 params, but passed 4" and an author would have seen cleanup
+  #     quietly not happen. Now logged, matching what cmd/cleat-worker's own
+  #     runDefers has always done.
+  #   SA9003 tests/plugin-harness/testdb.go -- a `for` whose only statement was
+  #     an `if` with an empty body. Dead scaffolding; removed.
+  #
+  # Eight SA4016 were `uint64(written)<<32 | 0`, which is packSimpleResult(0, n)
+  # written out by hand; they now call the helper, which is both shorter and
+  # names what the two halves of the word mean. Three SA1019 deprecations are
+  # //nolint'd at the site with the reasoning, including one flagged for WS-1:
+  # go-mssqldb does implement StmtExecContext, so applyTenantSessionContext
+  # could propagate ctx, which it currently does not.
+  #
+  # unconvert, 2026-08-05 (WS-3): 32, not the 23 recorded -- eight of the extra
+  # were created hours earlier by staticcheck's SA4016 fix in the same file, so
+  # the two linters disagreed about the same lines until both were run. Applied
+  # with `unconvert -apply ./...` rather than by hand; the only judgement call
+  # was reverting its one edit to a _test.go file, since this config excluded
+  # test files at the time and the change should be exactly what the linter
+  # enforces. That exclusion is gone as of 2026-08-08, so that revert has since
+  # been re-applied along with the rest of the test-file backlog.
+  #
+  # unused, 2026-08-05 (WS-3): MEASURED AT 30 AND DELIBERATELY NOT ENABLED.
+  # It is the same U1000 analysis that scripts/check-test-only-code.sh already
+  # runs against its own 59-entry baseline. Enabling it here would give one
+  # class of finding two mechanisms with two baselines, which is the shape that
+  # let the routing tables in 2.72 drift apart. If dead code should be enforced
+  # by golangci-lint, the move is to retire the script, not to run both.
+  #
+  # THE WHOLE TABLE WAS RE-MEASURED THE SAME DAY, and it had moved a lot in
+  # 24 hours -- which is the argument for re-measuring rather than a curiosity:
+  #
+  #     linter        2026-08-04   2026-08-05
+  #     ineffassign        8            4      <- now enabled, 0
+  #     gosimple           9            9      <- now enabled, 0
+  #     unused            16           30
+  #     staticcheck       17           16
+  #     unconvert         23           24
+  #     gocyclo           28           35
+  #     gosec            193          283
+  #     errcheck         307          280
+  #
+  # unused nearly doubled and gosec grew by 90 in a day of three streams
+  # landing changes. Part of that is new code, which is the point: a disabled
+  # linter is not a backlog being worked off, it is one being added to.
+  #
+  # RE-MEASURED 2026-08-08, and none of the four became tractable:
+  #
+  #     linter      08-04   08-05   08-08   08-08 incl. tests
+  #     errcheck      307     280     283          878
+  #     gosec         193     283     268          659
+  #     gocyclo        28      35      35           44
+  #     unused         16      30      30           55
+  #
+  # Re-derive any column with:
+  #
+  #     golangci-lint run --timeout=15m -c <one-linter.yml> ./... | grep -c '(<linter>)'
+  #
+  # where <one-linter.yml> sets `linters: {disable-all: true, enable: [<linter>]}`
+  # and `issues: {max-issues-per-linter: 0, max-same-issues: 0}`. Note that you
+  # cannot get this by passing `--disable-all --enable=X` on the command line
+  # against THIS file -- golangci-lint refuses ("can't combine options
+  # --disable-all and --disable") and, if you pipe its output to grep, the
+  # error is swallowed and every count comes back 0. That produced a tidy table
+  # of four zeroes on the first attempt at this measurement.
+  #
+  # The last column is new: it is the same count with test files included, now
+  # that they are no longer excluded (see `issues:` below). It is the number
+  # that matters for anyone thinking of enabling one of these, and it is 2-3x
+  # the third column in every row -- errcheck alone is 878. So removing the
+  # test exclusion did not make these four any closer to enableable; what it
+  # made cheaper was the six linters that ARE on, which cost 28 findings.
 issues:
-  exclude-files:
-    - ".*_test\\.go$"
+  # THERE IS NO `exclude-files` HERE ANY MORE, AND THAT IS THE POINT.
+  #
+  # This file carried `exclude-files: [".*_test\.go$"]` from the beginning, so
+  # every linter above skipped every test file. Measured 2026-08-08:
+  #
+  #     find . -name '*.go'      -not -path './.claude/*' | wc -l   ->  764
+  #     find . -name '*_test.go' -not -path './.claude/*' | wc -l   ->  366
+  #
+  # 366 of 764 files -- 48% of the repo's Go source -- were outside a REQUIRED
+  # status check, and nothing said so. `lint-go` went green on roughly half the
+  # tree while reading like it covered all of it.
+  #
+  # Removing the exclusion cost 28 findings (ineffassign 14, staticcheck 6,
+  # gosimple 6, unconvert 2), fixed in the same PR. Three of them were not
+  # style:
+  #
+  #   * plugin/recovery_test.go -- SA4023, a `err == nil` on an interface
+  #     holding a non-nil pointer. The comparison is never true, so the
+  #     t.Fatal was unreachable and the test could not fail. Now a
+  #     compile-time `var _ error = (*PanicError)(nil)`.
+  #   * cmd/cleat-worker/worker_daemon_test.go -- SA9003, `if !reapCalled {}`
+  #     with an EMPTY BODY. The test asserted nothing at all.
+  #   * engine/mysql_store_integration_test.go -- ineffassign on `errMsg`,
+  #     which was a dropped assertion: the block before it checks all three
+  #     return values, this one checked two.
+  #
+  # A linter that cannot see test files cannot see a test that does not test.
+  # If you are tempted to re-add the exclusion to make a new linter tractable,
+  # scope it to that linter instead of blinding all of them.
+  #
+  # The two caps below are golangci-lint's defaults (50 and 3) turned off. They
+  # truncate the *report*, not the exit code, so they never affected whether
+  # this gate passed -- but they are why the errcheck row in the table above
+  # reads 50 with them on and 283 with them off, and a truncated count is how
+  # a backlog gets mis-sized. Off, so what the job prints is what it found.
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -44,6 +44,7 @@ const mockSchedule: Schedule = {
   next_run_at: '2024-01-01T02:00:00Z',
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
+  timezone: 'UTC',
 };
 
 const mockDAGResponse: DAGResponse = {
@@ -389,6 +390,49 @@ describe('API Client', () => {
           input: '{"key":"val"}',
         }),
       });
+    });
+
+    it('includes optional timezone', async () => {
+      mockFetchOk(undefined);
+      await createSchedule({
+        name: 'nightly',
+        cron: '0 0 * * *',
+        def_name: 'NightlyJob',
+        timezone: 'America/New_York',
+      });
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/schedules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'nightly',
+          cron: '0 0 * * *',
+          def_name: 'NightlyJob',
+          timezone: 'America/New_York',
+        }),
+      });
+    });
+
+    it('omits timezone when not provided', async () => {
+      mockFetchOk(undefined);
+      await createSchedule({
+        name: 'nightly',
+        cron: '0 0 * * *',
+        def_name: 'NightlyJob',
+      });
+      const [, opts] = (globalThis.fetch as any).mock.calls[0];
+      expect(JSON.parse(opts.body)).not.toHaveProperty('timezone');
+    });
+
+    it('rejects an invalid IANA zone with the server-provided 400 message', async () => {
+      mockFetchError(400, { error: 'invalid timezone: "Not/AZone"' });
+      await expect(
+        createSchedule({
+          name: 'bad-tz',
+          cron: '0 0 * * *',
+          def_name: 'NightlyJob',
+          timezone: 'Not/AZone',
+        }),
+      ).rejects.toThrow('invalid timezone: "Not/AZone"');
     });
   });
 

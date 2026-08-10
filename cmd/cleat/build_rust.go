@@ -13,7 +13,7 @@ import (
 // runBuildRust compiles a Rust workflow crate to WASM using cargo.
 // Uses wasm32-unknown-unknown (no WASI) to avoid non-deterministic
 // WASI imports (environ_get etc.) that break replay determinism.
-func runBuildRust(pattern, outDir string) {
+func runBuildRust(pattern, outDir, channel string) {
 	cargoDir := pattern
 
 	// Validate Cargo.toml exists.
@@ -36,6 +36,9 @@ func runBuildRust(pattern, outDir string) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
+	if channel != "" {
+		cmd.Env = append(cmd.Env, "CLEAT_CHILD_BINDING_POLICY="+channel)
+	}
 
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cargo build failed: %v\n", err)

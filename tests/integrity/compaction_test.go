@@ -15,11 +15,11 @@ func TestCompactionReducesEventCount(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-compact-count-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -37,12 +37,12 @@ func TestCompactionReducesEventCount(t *testing.T) {
 	var events []engine.EventRecord
 	for i := 0; i < numEvents; i++ {
 		events = append(events, engine.EventRecord{
-			Step:     i,
+			Step:      i,
 			EventType: engine.EventTypeCall,
-			Service:  "svc",
-			Op:       fmt.Sprintf("op-%d", i),
-			Request:  `{}`,
-			Response: `{"ok":true}`,
+			Service:   "svc",
+			Op:        fmt.Sprintf("op-%d", i),
+			Request:   `{}`,
+			Response:  `{"ok":true}`,
 		})
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
@@ -59,7 +59,7 @@ func TestCompactionReducesEventCount(t *testing.T) {
 	}
 
 	// Compact the history.
-	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold, nil); err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
 
@@ -98,11 +98,11 @@ func TestCompactionPreservesState(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-compact-preserve-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestCompactionPreservesState(t *testing.T) {
 	}
 
 	// Compact.
-	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold, nil); err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
 
@@ -179,11 +179,11 @@ func TestCompactionIdempotent(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-compact-idem-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestCompactionIdempotent(t *testing.T) {
 	}
 
 	// First compaction.
-	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold, nil); err != nil {
 		t.Fatalf("first compaction: %v", err)
 	}
 	afterFirst, err := store.LoadEventHistory(ctx, runID)
@@ -225,7 +225,7 @@ func TestCompactionIdempotent(t *testing.T) {
 	}
 
 	// Second compaction — should be a no-op since event count is now <= threshold.
-	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold, nil); err != nil {
 		t.Fatalf("second compaction: %v", err)
 	}
 	afterSecond, err := store.LoadEventHistory(ctx, runID)
@@ -265,7 +265,7 @@ func TestCompactionEdgeCases(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -285,7 +285,7 @@ func TestCompactionEdgeCases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			runID := fmt.Sprintf("int-compact-edge-%s-%d", tt.name, time.Now().UnixNano())
 			_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-				VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+				VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 			if err != nil {
 				t.Fatalf("create workflow: %v", err)
 			}
@@ -315,7 +315,7 @@ func TestCompactionEdgeCases(t *testing.T) {
 			beforeCount := tt.numEvents
 
 			// Compact should not error in any edge case.
-			if err := engine.CompactWorkflowHistory(ctx, store, runID, tt.threshold); err != nil {
+			if err := engine.CompactWorkflowHistory(ctx, store, runID, tt.threshold, nil); err != nil {
 				t.Fatalf("CompactWorkflowHistory: %v", err)
 			}
 

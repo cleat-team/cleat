@@ -23,7 +23,7 @@ func TestWalCorruption_ChecksumTampering(t *testing.T) {
 	// Ensure the checksum column exists.
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -64,16 +64,25 @@ func TestWalCorruption_ChecksumTampering(t *testing.T) {
 	}
 }
 
-// TestWalCorruption_PayloadTampering inserts events, tampers with the operation
-// column, then verifies that VerifyWorkflowEvents detects the mismatch
-// (since the stored checksum no longer matches the recomputed checksum).
+// TestWalCorruption_PayloadTampering inserts an event, rewrites its persisted
+// payload, and verifies that VerifyWorkflowEvents detects the mismatch.
+//
+// It tampers with the `payload` column, not the `operation` column it used to
+// use. LoadEventHistory scans the individual columns first and then, if
+// `payload` is non-NULL, overwrites them from it (engine/store_events.go) -- so
+// `payload` is the authoritative copy, it is what the checksum is computed
+// over, and it is what replay reads. Rewriting `operation` alone changes
+// nothing the checksum covers, so the original assertion could never have
+// passed. See IMPROVEMENT-PLAN 2.31 for the gap that leaves behind: the
+// duplicated columns are what every SQL consumer reads, and nothing detects a
+// change to them.
 func TestWalCorruption_PayloadTampering(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -90,10 +99,12 @@ func TestWalCorruption_PayloadTampering(t *testing.T) {
 		t.Fatalf("expected no error before tampering, got: %v", err)
 	}
 
-	// Tamper with the operation column (used in checksum computation).
-	_, err := db.Exec(`UPDATE event_history SET operation = 'tampered-op' WHERE workflow_id = $1 AND step = 0`, runID)
+	// Tamper with the payload, which is what the checksum covers.
+	_, err := db.Exec(`UPDATE event_history
+		SET payload = jsonb_set(payload::jsonb, '{operation}', '"tampered-op"')
+		WHERE workflow_id = $1 AND step = 0`, runID)
 	if err != nil {
-		t.Fatalf("tamper operation: %v", err)
+		t.Fatalf("tamper payload: %v", err)
 	}
 
 	// Verify that VerifyWorkflowEvents detects the mismatch.
@@ -105,6 +116,35 @@ func TestWalCorruption_PayloadTampering(t *testing.T) {
 	if !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Errorf("expected error message to contain 'checksum mismatch', got: %v", err)
 	}
+
+	// The shadow columns are still not part of the checksum -- but as of
+	// IMPROVEMENT-PLAN 2.32 verification compares them against payload
+	// separately, so tampering with one is detected even though the chain
+	// itself is untouched.
+	//
+	// This assertion used to say the opposite, and was written that way
+	// deliberately: it pinned the gap so that closing it would fail here and
+	// force the test to be updated rather than leave a stale claim behind.
+	// That is exactly what happened, and this is the inversion.
+	runID2 := createTestWorkflow(t, db, store, ctx)
+	if err := store.AppendEventHistoryBatch(ctx, runID2, []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "original", Request: `{"data":"original"}`, Response: `{}`},
+	}); err != nil {
+		t.Fatalf("append events: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE event_history SET operation = 'tampered-op' WHERE workflow_id = $1 AND step = 0`, runID2); err != nil {
+		t.Fatalf("tamper operation column: %v", err)
+	}
+	err = store.VerifyWorkflowEvents(ctx, runID2)
+	if err == nil {
+		t.Error("tampering with the operation column verified clean: the column is what the " +
+			"admin dashboard and cleatctl display, so this row now shows a value replay will never use")
+	} else if !strings.Contains(err.Error(), "operation") {
+		// Specifically not a checksum mismatch: the chain is intact here, and
+		// an error naming the wrong mechanism would send the next person
+		// looking for corruption that is not there.
+		t.Errorf("expected the error to name the diverging column, got: %v", err)
+	}
 }
 
 // TestWalCorruption_MissingEvent inserts events at steps 0, 1, 2, 3, then
@@ -115,7 +155,7 @@ func TestWalCorruption_MissingEvent(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -176,7 +216,7 @@ func TestWalCorruption_EventOrdering(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -224,7 +264,7 @@ func TestWalCorruption_PgSwitchWAL(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	// Test pg_switch_wal() multiple times, inserting events between switches.
@@ -232,7 +272,7 @@ func TestWalCorruption_PgSwitchWAL(t *testing.T) {
 		// Create a separate workflow run for each iteration.
 		runID := fmt.Sprintf("int-wal-%d-%d", time.Now().UnixNano(), i)
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 		if err != nil {
 			t.Fatalf("create workflow instance: %v", err)
 		}
@@ -297,13 +337,13 @@ func TestWalCorruption_ReplayVerification(t *testing.T) {
 	// Use the minimal schema so we get the checksum column.
 	testutil.SetupMinimalSchema(t, db, testutil.DialectPostgres)
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-replay-%d", time.Now().UnixNano())
 
 	// Create a workflow instance directly.
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -370,12 +410,12 @@ func TestWalCorruption_DefaultOnReplayFailure(t *testing.T) {
 	defer db.Close()
 
 	testutil.SetupMinimalSchema(t, db, testutil.DialectPostgres)
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-default-on-%d", time.Now().UnixNano())
 
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}

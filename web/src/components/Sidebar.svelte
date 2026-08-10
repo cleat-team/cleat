@@ -1,5 +1,9 @@
 <script lang="ts">
-  let { active, onNavigate }: { active: string; onNavigate: (path: string) => void } = $props();
+  let {
+    active,
+    onNavigate,
+    onOpenApiKey,
+  }: { active: string; onNavigate: (path: string) => void; onOpenApiKey: () => void } = $props();
 </script>
 
 <aside class="sidebar">
@@ -10,5 +14,7 @@
     <a href="#schedules" class:active={active === 'schedules'} onclick={() => onNavigate('schedules')}>Schedules</a>
     <a href="#definitions" class:active={active === 'definitions'} onclick={() => onNavigate('definitions')}>Definitions</a>
     <a href="#dead-letters" class:active={active === 'dead-letters'} onclick={() => onNavigate('dead-letters')}>Dead Letters</a>
+    <!-- svelte-ignore a11y_invalid_attribute -->
+    <a href="#" onclick={(e) => { e.preventDefault(); onOpenApiKey(); }}>API Key</a>
   </nav>
 </aside>

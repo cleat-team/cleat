@@ -2,10 +2,12 @@ package pluginharness
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cleat-team/cleat/cleat/wasmtest"
@@ -24,25 +26,105 @@ import (
 	_ "github.com/cleat-team/cleat/plugins/webhookingest"
 )
 
-// findProjectRoot walks up from the working directory to locate the repo root
-// (the directory containing go.mod).
+// findProjectRoot walks up from the working directory to locate the repo root.
+//
+// It looks for the go.mod declaring the ROOT module, not merely the nearest
+// go.mod. This directory is its own module (see go.mod here, and CLAUDE.md on
+// the root<->cleat/ module cycle), so "nearest go.mod" stops right here and
+// every path built on top of it -- testdata directories, migrations -- lands
+// one repo-depth too shallow.
+//
+// That failure is silent, which is why the check is on the module line rather
+// than on the file's existence: the callers below t.Skipf when their testdata
+// directory is missing, so a wrong root reads as "test data not found" and the
+// suite goes green having built and run nothing.
 func findProjectRoot(t *testing.T) string {
 	t.Helper()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
+	const rootModule = "module github.com/cleat-team/cleat\n"
 	dir := cwd
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		b, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil && strings.Contains(string(b), rootModule) {
 			return dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("could not find project root from %s", cwd)
+			t.Fatalf("could not find the repo root (a go.mod declaring %q) from %s",
+				strings.TrimSuffix(rootModule, "\n"), cwd)
 		}
 		dir = parent
 	}
+}
+
+// commandAt builds an exec.Cmd that runs in dir, with $PWD corrected to match.
+//
+// cmd.Dir on its own is not enough for the `go` command: it resolves the main
+// module from $PWD when that is set and consistent, so a child process that
+// inherits the test binary's PWD looks for a go.mod in *this* directory rather
+// than in cmd.Dir. That was harmless while this directory was part of the root
+// module. Since it became its own module (see go.mod, and CLAUDE.md on the
+// root<->cleat/ module cycle), the inherited PWD makes
+//
+//	go run <repoRoot>/cmd/cleat build ...
+//
+// fail with "directory <repoRoot>/cmd/cleat outside main module or its selected
+// dependencies" -- while cmd.Dir points at the repo root the entire time, which
+// is what makes it slow to diagnose. Measured: identical command, PWD inherited
+// fails, PWD set to dir succeeds.
+//
+// Go's exec keeps the last value for a duplicated key, so appending is enough.
+func commandAt(dir, name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PWD="+dir)
+	return cmd
+}
+
+// cleatBinary compiles cmd/cleat once per test binary and returns its path.
+//
+// `go run <repoRoot>/cmd/cleat <workflowDir>` cannot serve both halves any
+// more. cmd/cleat is in the root module and the Go workflow under testdata/ is
+// in this one (see go.mod), and a single `go run` resolves everything against
+// one main module: run it from the repo root and the workflow is "main module
+// (github.com/cleat-team/cleat) does not contain package .../testdata/
+// goworkflow"; run it from here and cmd/cleat is "outside main module".
+//
+// Compiling the tool first splits the two resolutions apart. The CLI is built
+// in the root module, and each `cleat build` below then runs with its working
+// directory inside whichever module owns the workflow it is compiling.
+//
+// Building once also removes four redundant compiles of the CLI -- each of the
+// five callers used to `go run` it separately.
+var (
+	cleatBinOnce sync.Once
+	cleatBinPath string
+	cleatBinErr  error
+)
+
+func cleatBinary(t *testing.T) string {
+	t.Helper()
+	cleatBinOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "cleat-cli")
+		if err != nil {
+			cleatBinErr = fmt.Errorf("temp dir for the cleat binary: %w", err)
+			return
+		}
+		bin := filepath.Join(dir, "cleat")
+		out, err := commandAt(findProjectRoot(t), "go", "build", "-o", bin, "./cmd/cleat").CombinedOutput()
+		if err != nil {
+			cleatBinErr = fmt.Errorf("building cmd/cleat:\n%s\n%w", out, err)
+			return
+		}
+		cleatBinPath = bin
+	})
+	if cleatBinErr != nil {
+		t.Fatalf("%v", cleatBinErr)
+	}
+	return cleatBinPath
 }
 
 // buildGoWorkflowWasm compiles the Go workflow in testdata/goworkflow to WASM
@@ -64,12 +146,9 @@ func buildGoWorkflowWasm(t *testing.T) []byte {
 	}
 
 	tmpDir := t.TempDir()
-	cmd := exec.Command("go", "run",
-		filepath.Join(projectRoot, "cmd", "cleat"),
+	cmd := commandAt(workflowDir, cleatBinary(t),
 		"build", "--target", "go", "-o", tmpDir, workflowDir,
 	)
-	cmd.Dir = projectRoot
-	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("cleat build (go) failed:\n%s\n%v", string(out), err)
@@ -94,8 +173,14 @@ func buildGoWorkflowWasm(t *testing.T) []byte {
 	return nil
 }
 
-// buildRustWorkflowWasm compiles the Rust workflow in testdata/rustworkflow to WASM
-// using cleat build --target rust (cargo build --target wasm32-wasip1).
+// buildRustWorkflowWasm compiles the Rust workflow in testdata/rustworkflow to
+// WASM using `cleat build --target rust`, which is the command users run.
+//
+// That path compiles for wasm32-unknown-unknown (cmd/cleat/build_rust.go:34),
+// not wasm32-wasip1. This comment and the guard below both said wasip1, so the
+// check was for a target the build does not use: a machine with wasip1 and not
+// unknown-unknown passed the guard and then failed inside cargo, and one with
+// unknown-unknown and not wasip1 skipped a build that would have worked.
 func buildRustWorkflowWasm(t *testing.T) []byte {
 	t.Helper()
 
@@ -106,20 +191,17 @@ func buildRustWorkflowWasm(t *testing.T) []byte {
 		t.Skip("Rust toolchain not available — install from https://rustup.rs")
 	}
 
-	// Verify wasm32-wasip1 target is installed (used by cleat build --target rust).
+	// Verify the target `cleat build --target rust` actually compiles for.
 	checkCmd := exec.Command("rustup", "target", "list", "--installed")
 	checkOut, _ := checkCmd.Output()
-	if !strings.Contains(string(checkOut), "wasm32-wasip1") {
-		t.Skip("wasm32-wasip1 target not installed — run: rustup target add wasm32-wasip1")
+	if !strings.Contains(string(checkOut), "wasm32-unknown-unknown") {
+		t.Skip("wasm32-unknown-unknown target not installed — run: rustup target add wasm32-unknown-unknown")
 	}
 
 	tmpDir := t.TempDir()
-	cmd := exec.Command("go", "run",
-		filepath.Join(projectRoot, "cmd", "cleat"),
+	cmd := commandAt(workflowDir, cleatBinary(t),
 		"build", "--target", "rust", "-o", tmpDir, workflowDir,
 	)
-	cmd.Dir = projectRoot
-	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("cleat build (rust) failed:\n%s\n%v", string(out), err)
@@ -156,12 +238,9 @@ func buildASWorkflowWasm(t *testing.T) []byte {
 	}
 
 	tmpDir := t.TempDir()
-	cmd := exec.Command("go", "run",
-		filepath.Join(projectRoot, "cmd", "cleat"),
+	cmd := commandAt(workflowDir, cleatBinary(t),
 		"build", "--target", "assemblyscript", "-o", tmpDir, workflowDir,
 	)
-	cmd.Dir = projectRoot
-	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("cleat build (assemblyscript) failed:\n%s\n%v", string(out), err)
@@ -203,18 +282,28 @@ func buildPythonWorkflowWasm(t *testing.T) []byte {
 	}
 
 	tmpDir := t.TempDir()
-	cmd := exec.Command("go", "run",
-		filepath.Join(projectRoot, "cmd", "cleat"),
+	cmd := commandAt(filepath.Dir(pyFile), cleatBinary(t),
 		"build", "--target", "python", "--entry",
 		pyFile+":call_all_plugins",
 		"-o", tmpDir, pyFile,
 	)
-	cmd.Dir = projectRoot
-	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, "PYTHONPATH="+filepath.Join(projectRoot, "python-sdk"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Skipf("cleat build (python) failed — componentize-py pipeline may need setup, skipping: %s", string(out))
+		// Fatal, not Skip. Whether the toolchain is present was already decided
+		// above, by importing componentize_py and cleat_sdk -- that check is
+		// what legitimately skips. Reaching here means the toolchain IS
+		// installed and the build broke, which is case (b) in
+		// scripts/check-skips.sh's taxonomy and must fail.
+		//
+		// It was a Skipf, and it hid a real break: when tests/plugin-harness
+		// became its own module, wasm.FindRepoRoot resolved the repo root to
+		// this directory and the build could not find python-sdk/scripts/
+		// build_wasm.py. The suite reported SKIP and the only thing that
+		// noticed was this job's skip budget of 0.
+		t.Fatalf("cleat build (python) failed although componentize-py and cleat_sdk "+
+			"both import, so this is a real build failure rather than a missing "+
+			"toolchain:\n%s", string(out))
 	}
 
 	entries, err := os.ReadDir(tmpDir)
@@ -248,12 +337,9 @@ func buildJavaWorkflowWasm(t *testing.T) []byte {
 	}
 
 	tmpDir := t.TempDir()
-	cmd := exec.Command("go", "run",
-		filepath.Join(projectRoot, "cmd", "cleat"),
+	cmd := commandAt(workflowDir, cleatBinary(t),
 		"build", "--target", "java", "-o", tmpDir, workflowDir,
 	)
-	cmd.Dir = projectRoot
-	cmd.Env = os.Environ()
 	buildOut, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("cleat build (java) failed — Gradle/TeaVM pipeline may need setup, failing: %s", string(buildOut))
@@ -283,6 +369,12 @@ func TestPluginCalls_Wasm_Go(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping WASM compilation test in short mode")
 	}
+	// The unconditional skip that used to be here read "wazero v1.11.1 nil Sys
+	// context panic" and was a workaround for the job running with
+	// CGO_ENABLED=0. That forced wazero, and the panic is wazero's. With CGO on
+	// -- the shipped configuration, and now this workflow's -- a Go workflow
+	// runs on wasmtime and the test passes. Measured both ways before removing
+	// it: CGO on passes, CGO off reproduces the exact nil-pointer dereference.
 
 	// Create in-memory test env (discovers and initialises plugins).
 	env := NewTestPluginEnvInMemory(t)
@@ -300,16 +392,20 @@ func TestPluginCalls_Wasm_Go(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workflow execution failed: %v", err)
 	}
-	// The workflow returns a JSON string via the WASM ABI. The engine
-	// JSON-encodes the return value, so Execute returns a JSON-encoded
-	// string containing the actual result object.  Unwrap it first.
-	var rawJSON string
-	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
-		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.2000s", err, result)
-	}
+	// One unmarshal, not two.
+	//
+	// This used to unwrap an outer JSON string first, because the generated
+	// dispatch wrapper called encodeJSONString on a result the workflow had
+	// already marshalled -- so {"a":1} arrived as "{\"a\":1}". The comment here
+	// described that as "the engine JSON-encodes the return value", which read
+	// like the design rather than the bug it was.
+	//
+	// The contract is a string containing a JSON-encoded object (ABI.md), the
+	// wrapper now passes it through, and this test needed the extra unwrap only
+	// for as long as the encoding was wrong.
 	var results map[string]interface{}
-	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-		t.Fatalf("failed to parse result JSON: %v\nraw: %.2000s", err, rawJSON)
+	if err := json.Unmarshal([]byte(result), &results); err != nil {
+		t.Fatalf("failed to parse result JSON: %v\nraw: %.2000s", err, result)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 
@@ -402,7 +498,7 @@ func TestPluginCalls_Wasm_Rust(t *testing.T) {
 	result, history, err := wenv.Execute(t, wasmBytes, "call_all_plugins", `{}`)
 	if err != nil {
 		if strings.Contains(err.Error(), "wasmtime panic") {
-			t.Skipf("wasmtime-go compatibility issue with this WASM module: %v", err)
+			t.Fatalf("wasmtime-go crashed on this WASM module: %v", err)
 		}
 		t.Fatalf("workflow execution failed: %v", err)
 	}
@@ -486,7 +582,7 @@ func TestPluginCalls_Wasm_AS(t *testing.T) {
 	result, history, err := wenv.Execute(t, wasmBytes, "call_all_plugins", `{}`)
 	if err != nil {
 		if strings.Contains(err.Error(), "wasm trap") {
-			t.Skip("AS WASM runtime trap — likely AS/transform version incompatibility, skipping")
+			t.Fatalf("AS WASM module trapped at runtime: %v", err)
 		}
 		t.Fatalf("workflow execution failed: %v", err)
 	}
@@ -562,18 +658,27 @@ func TestPluginCalls_Wasm_Python(t *testing.T) {
 	entryPoint := "run"
 	result, history, err := wenv.Execute(t, wasmBytes, entryPoint, `{}`)
 	if err != nil {
-		if strings.Contains(err.Error(), "not instantiated") || strings.Contains(err.Error(), "unknown import") || strings.Contains(err.Error(), "indirect_function_table") {
-			t.Skipf("WASI 0.2.0 resource routing not yet supported: %v", err)
-		}
-		if strings.Contains(err.Error(), "wasmtime panic") {
-			t.Skipf("wasmtime-go compat issue: %v", err)
-		}
+		// No escape hatches. This used to skip on "not instantiated",
+		// "unknown import", "indirect_function_table" and "wasmtime panic" --
+		// which are, precisely and exclusively, the errors the decomposition
+		// path emits when it cannot assemble a component.
+		//
+		// That was defensible while Python ran there and failed. It is not now:
+		// Python executes on wasmtime's native Component Model runtime
+		// (IMPROVEMENT-PLAN 2.72), and if it ever regresses to decomposition
+		// those four strings are exactly what would come back. The skips would
+		// have turned the regression they were named after into a green run.
 		t.Fatalf("workflow execution failed: %v", err)
 	}
 
-	// The workflow returns a JSON string via the WASM ABI. The engine
-	// JSON-encodes the return value, so Execute returns a JSON-encoded
-	// string containing the actual result object. Unwrap it first.
+	// Two unmarshals here, deliberately, unlike the Go case above.
+	//
+	// Go's generated wrapper now passes the result through (ABI.md: an entry
+	// point returns a string containing a JSON-encoded object), so its test
+	// unmarshals once. This guest still arrives double-encoded for its own
+	// reason -- componentize-py hands back a JSON string, and the Rust fixture
+	// returns a String that serde then serialises -- so the outer unwrap is
+	// still correct HERE. Do not remove it for symmetry with the Go case.
 	var rawJSON string
 	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
 		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.2000s", err, result)
@@ -633,15 +738,15 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 	result, history, err := wenv.Execute(t, wasmBytes, "CallAllPlugins", `{}`)
 	if err != nil {
 		if strings.Contains(err.Error(), "wasmtime panic") || strings.Contains(err.Error(), "wasm trap") {
-			t.Skipf("wasmtime-go compatibility issue with Java/TeaVM modules: %v", err)
+			t.Fatalf("wasmtime-go crashed on this Java/TeaVM module: %v", err)
 		}
 		t.Fatalf("workflow execution failed: %v", err)
 	}
-	// Clean trailing bytes and skip crash defaults.
+	// Clean trailing bytes and detect crash defaults.
 	result = strings.TrimRight(result, "\x00")
 	result = strings.TrimSpace(result)
 	if result == "ok" || result == `"ok"` || strings.Contains(result, "wasmtime panic") {
-		t.Skipf("Java module crashed (wasmtime-go compat): raw: %.200s", result)
+		t.Fatalf("Java/TeaVM module crashed: execution returned the crash-default placeholder result instead of plugin output, raw: %.200s", result)
 	}
 	// TeaVM encodes the result as a JSON-encoded string matching the
 	// Go/Python/AS convention. Unwrap the outer JSON string, then

@@ -16,11 +16,11 @@ func TestConcurrentEventAppends(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-conc-append-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
@@ -98,14 +98,14 @@ func TestConcurrentClaimAndHeartbeat(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	// Create a workflow for each contention scenario.
 	makeWorkflow := func(suffix string) string {
 		id := fmt.Sprintf("int-conc-claim-%s-%d", suffix, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, id)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
 		if err != nil {
 			t.Fatalf("create workflow %s: %v", suffix, err)
 		}
@@ -180,7 +180,7 @@ func TestConcurrentStatusUpdates(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 
 	// Create multiple workflows.
@@ -189,7 +189,7 @@ func TestConcurrentStatusUpdates(t *testing.T) {
 	for i := 0; i < numWorkflows; i++ {
 		runID := fmt.Sprintf("int-conc-status-%d-%d", i, time.Now().UnixNano())
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
@@ -225,14 +225,19 @@ func TestConcurrentStatusUpdates(t *testing.T) {
 					continue
 				}
 
-				// Alternate between completing and failing.
+				// Pass the generation the claim just handed back, not a
+				// hardcoded 0. ClaimWorkflow bumps the generation, so from the
+				// second claim onward a literal 0 loses the fence and the
+				// store correctly refuses the write. This test used to send 0
+				// and count that refusal as a failure -- it was asserting the
+				// absence of the fence it is meant to be running underneath.
 				if iter%2 == 0 {
-					if err := store.CompleteWorkflow(ctx, id, workerID, 0, `{"status":"done"}`, nil); err != nil {
+					if err := store.CompleteWorkflow(ctx, id, workerID, wf.Generation, `{"status":"done"}`, nil); err != nil {
 						errCh <- fmt.Errorf("complete %s iter %d: %w", id, iter, err)
 					}
 				} else {
 					// Re-create as ready for next iteration by releasing.
-					if err := store.ReleaseWorkflow(ctx, id, workerID, 0, time.Now()); err != nil {
+					if err := store.ReleaseWorkflow(ctx, id, workerID, wf.Generation, time.Now()); err != nil {
 						errCh <- fmt.Errorf("release %s iter %d: %w", id, iter, err)
 					}
 				}

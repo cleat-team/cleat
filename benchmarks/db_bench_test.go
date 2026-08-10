@@ -35,8 +35,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/google/uuid"
 
 	_ "github.com/lib/pq"
 )

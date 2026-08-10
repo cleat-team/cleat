@@ -12,10 +12,10 @@ import (
 )
 
 type ollamaRequest struct {
-	Model    string         `json:"model"`
-	Messages []ollamaMsg    `json:"messages"`
-	Stream   bool           `json:"stream"`
-	Options  ollamaOptions  `json:"options,omitempty"`
+	Model    string        `json:"model"`
+	Messages []ollamaMsg   `json:"messages"`
+	Stream   bool          `json:"stream"`
+	Options  ollamaOptions `json:"options,omitempty"`
 }
 
 type ollamaMsg struct {
@@ -29,11 +29,11 @@ type ollamaOptions struct {
 }
 
 type ollamaResponse struct {
-	Message      ollamaMsg `json:"message"`
-	Done         bool      `json:"done"`
-	TotalDuration int64    `json:"total_duration"`
-	EvalCount    int       `json:"eval_count"`
-	PromptEvalCount int    `json:"prompt_eval_count"`
+	Message         ollamaMsg `json:"message"`
+	Done            bool      `json:"done"`
+	TotalDuration   int64     `json:"total_duration"`
+	EvalCount       int       `json:"eval_count"`
+	PromptEvalCount int       `json:"prompt_eval_count"`
 }
 
 // OllamaChat calls a local Ollama instance.
@@ -119,9 +119,9 @@ func OllamaChatStream(ctx context.Context, client *http.Client, baseURL string, 
 		baseURL = "http://localhost:11434"
 	}
 
-	bodyMap := map[string]interface{}{}
+	bodyMap := map[string]any{}
 	data, _ := json.Marshal(input)
-	json.Unmarshal(data, &bodyMap)
+	_ = json.Unmarshal(data, &bodyMap)
 	bodyMap["stream"] = true
 
 	bodyJSON, err := json.Marshal(bodyMap)

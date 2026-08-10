@@ -112,4 +112,3 @@ func TestWithCallContextMultipleTimes(t *testing.T) {
 		t.Errorf("expected wf-2, got %q", got.WorkflowID)
 	}
 }
-

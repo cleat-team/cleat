@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,14 @@ func TestASTransform(t *testing.T) {
 	hasNode := exec.Command("node", "--version").Run() == nil
 	hasNpx := exec.Command("npx", "--version").Run() == nil
 
+	// GitHub's runners ship node and npx, so in CI their absence is a broken
+	// environment, not an excuse. Skipping there would silently retire this
+	// whole file — which matters more than usual now that it is the only thing
+	// asserting the AssemblyScript determinism checks run at all (§2.42).
+	if (!hasNode || !hasNpx) && os.Getenv("CI") != "" {
+		t.Fatalf("node and npx are expected on CI runners (node=%v npx=%v); "+
+			"without them the AS transform is untested, not optional", hasNode, hasNpx)
+	}
 	if !hasNode && !hasNpx {
 		t.Skip("AS transform tests require node or npx")
 	}
@@ -52,6 +61,13 @@ func TestASTransform(t *testing.T) {
 	// ---- Full compilation pipeline via npx asc ----
 	if hasNpx {
 		t.Run("compiles_to_wasm", testASCompilesToWasm)
+		// These two are the ones that exercise the static-analysis layer
+		// against a real parse tree. detects_math_random above hands the
+		// validator a hand-built AST in the shape the walker assumed, so it
+		// passed for years while the walker could not read AssemblyScript at
+		// all. Anything asserting that the checks WORK has to go through asc.
+		t.Run("rejects_nondeterminism", testASRejectsNondeterminism)
+		t.Run("nondeterminism_escape_hatch", testASNondeterminismEscapeHatch)
 	}
 }
 
@@ -348,12 +364,19 @@ const badStmt = {
   signature: { parameters: [] },
   body: {
     statements: [
+      // AssemblyScript's real shape: ExpressionStatement wrapping a
+      // CallExpression whose 'expression' is a PropertyAccessExpression.
+      // These fixtures used to use ESTree/Babel names (callee/object), which
+      // is the shape the walker wrongly assumed -- so this test agreed with
+      // the bug instead of catching it.
       {
-        callee: {
-          object: { text: "Math" },
-          property: { name: { text: "random" } }
-        },
-        args: []
+        expression: {
+          expression: {
+            expression: { text: "Math" },
+            property: { text: "random" }
+          },
+          args: []
+        }
       }
     ]
   }
@@ -385,12 +408,19 @@ const seedRandomStmt = {
   signature: { parameters: [] },
   body: {
     statements: [
+      // AssemblyScript's real shape: ExpressionStatement wrapping a
+      // CallExpression whose 'expression' is a PropertyAccessExpression.
+      // These fixtures used to use ESTree/Babel names (callee/object), which
+      // is the shape the walker wrongly assumed -- so this test agreed with
+      // the bug instead of catching it.
       {
-        callee: {
-          object: { text: "Math" },
-          property: { name: { text: "seedRandom" } }
-        },
-        args: []
+        expression: {
+          expression: {
+            expression: { text: "Math" },
+            property: { text: "seedRandom" }
+          },
+          args: []
+        }
       }
     ]
   }
@@ -412,12 +442,19 @@ const safeStmt = {
   signature: { parameters: [] },
   body: {
     statements: [
+      // AssemblyScript's real shape: ExpressionStatement wrapping a
+      // CallExpression whose 'expression' is a PropertyAccessExpression.
+      // These fixtures used to use ESTree/Babel names (callee/object), which
+      // is the shape the walker wrongly assumed -- so this test agreed with
+      // the bug instead of catching it.
       {
-        callee: {
-          object: { text: "console" },
-          property: { name: { text: "log" } }
-        },
-        args: []
+        expression: {
+          expression: {
+            expression: { text: "console" },
+            property: { text: "log" }
+          },
+          args: []
+        }
       }
     ]
   }
@@ -465,80 +502,79 @@ process.stdout.write(JSON.stringify(results));
 // Full pipeline: compile minimal AS workflow with npx asc + transform
 // ---------------------------------------------------------------------------
 
-func testASCompilesToWasm(t *testing.T) {
+// asFixture is a compiled-for-real AssemblyScript project: a temp dir with the
+// real @cleat/sdk installed, the asc binary located, and one compile already
+// run through the transform.
+type asFixture struct {
+	dir      string
+	wasmPath string
+	out      string // asc's combined stdout+stderr
+	err      error  // asc's exit status
+}
+
+// compileASFixture writes indexTS into a throwaway AS project, npm-installs the
+// real @cleat/sdk beside it, and compiles it with asc + the cleat transform.
+//
+// It reports asc's outcome rather than asserting on it, because callers want
+// opposite things: one wants a .wasm, the other wants a rejection.
+//
+// The only skips are environmental — no npm, or an npm install that cannot
+// reach the network. A compile that fails for any other reason is returned to
+// the caller to judge, never swallowed.
+func compileASFixture(t *testing.T, indexTS string, env ...string) asFixture {
+	t.Helper()
 	tmpDir := t.TempDir()
 
-	// ---- Create project files ----
-
-	// assembly/index.ts — self-contained source that does not import
-	// @cleat/sdk (AS 0.27.32 cannot resolve scoped packages from node_modules
-	// nor from asconfig.json paths).  All types referenced by the transform's
-	// generated wrapper are defined inline.
 	asmDir := filepath.Join(tmpDir, "assembly")
 	if err := os.MkdirAll(asmDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-
-	indexTS := `
-class CleatCallOutcome {
-  response: string = "";
-  isError: bool = false;
-  error: string = "";
-}
-
-class HostCalls {
-  cleatCall(service: string, action: string, input: string): CleatCallOutcome {
-    return new CleatCallOutcome();
-  }
-}
-
-class Memory {
-  static readString(ptr: usize, len: i32): string { return ""; }
-  static writeString(ptr: usize, maxLen: i32, s: string): i32 { return 0; }
-  static encodeExportResult(errCode: u32, actualLen: u32): i64 { return 0; }
-}
-
-const SUSPEND_SENTINEL: i64 = 0;
-
-function isWorkflowSuspended(): bool { return false; }
-
-function resetWorkflowSuspended(): void {}
-
-function cleatEntry(name: string = ""): (target: usize, propertyKey: string, descriptor: usize) => void {
-  return function(target: usize, propertyKey: string, descriptor: usize): void {};
-}
-
-@cleatEntry()
-function myWorkflow(h: HostCalls, input: string): string {
-  return "{\"status\":\"ok\"}";
-}
-`
 	if err := os.WriteFile(filepath.Join(asmDir, "index.ts"), []byte(indexTS), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// package.json — only assemblyscript is needed; @cleat dep is resolved
-	// via the --transform flag pointing directly at the JS file.
-	pkgJSON := `{
+	// package.json. The --transform flag points at the transform's JS file
+	// directly, but that is not sufficient on its own: the transform injects
+	// an `import { HostCalls, Memory, ... } from "@cleat/sdk"` into the
+	// wrapper it generates, and asc must resolve that import at parse time.
+	// Installing @cleat/sdk from the repo checkout is what lets this compile.
+	// Without it asc fails with a parse error, no .wasm is produced, and the
+	// subtest skips — which is what it did from the day it was written until
+	// this was fixed, despite being named "compiles to wasm".
+	pkgJSON := fmt.Sprintf(`{
   "name": "test-as-workflow",
   "private": true,
   "devDependencies": {
     "assemblyscript": "^0.27.0"
+  },
+  "dependencies": {
+    "@cleat/sdk": "file:%s"
   }
-}`
+}`, filepath.Join(asRepoRoot(t), "packages", "cleat-as"))
 	if err := os.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(pkgJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// ---- npm install (needed for asc binary) ----
 	t.Log("Running npm install...")
 	npmCmd := exec.Command("npm", "install", "--no-audit", "--no-fund")
 	npmCmd.Dir = tmpDir
 	if out, err := npmCmd.CombinedOutput(); err != nil {
-		t.Skipf("npm install failed (may not have network): %v\n%s", err, out)
+		// In CI npm and the registry are always available -- confirmed on this
+		// very change, where all six TestASTransform subtests ran and passed on
+		// the runner. So a failure here is a real failure, and skipping would
+		// turn the tests that catch §2.42 green without running them, which is
+		// precisely the shape of bug those tests exist to prevent.
+		//
+		// Locally, an offline developer still gets a skip: the resource is
+		// genuinely optional there and nobody asked for it.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("npm install failed in CI, where the registry is expected to "+
+				"be reachable: %v\n%s", err, out)
+		}
+		t.Skipf("npm install failed and CI is unset, so treating this as an "+
+			"offline working copy: %v\n%s", err, out)
 	}
 
-	// ---- Locate asc binary ----
 	ascPath := filepath.Join(tmpDir, "node_modules", ".bin", "asc")
 	if _, err := os.Stat(ascPath); os.IsNotExist(err) {
 		ascPath = filepath.Join(tmpDir, "node_modules", "assemblyscript", "bin", "asc.js")
@@ -547,36 +583,68 @@ function myWorkflow(h: HostCalls, input: string): string {
 		}
 	}
 
-	// ---- Compile with asc + transform ----
-	transformPath := filepath.Join(transformDir(t), "index.js")
 	distDir := filepath.Join(tmpDir, "dist")
 	if err := os.MkdirAll(distDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Log("Running asc compilation with transform...")
-	sourcePath := filepath.Join(asmDir, "index.ts")
 	wasmPath := filepath.Join(distDir, "workflow.wasm")
-
-	ascArgs := []string{
-		sourcePath,
+	ascCmd := exec.Command(ascPath,
+		filepath.Join(asmDir, "index.ts"),
 		"--runtime", "stub",
 		"-O0",
 		"--initialMemory", "170",
-		"--transform", transformPath,
+		"--transform", filepath.Join(transformDir(t), "index.js"),
 		"-o", wasmPath,
-	}
-
-	ascCmd := exec.Command(ascPath, ascArgs...)
+	)
 	ascCmd.Dir = tmpDir
-	ascOut, ascErr := ascCmd.CombinedOutput()
-	t.Logf("asc output:\n%s", string(ascOut))
+	if len(env) > 0 {
+		ascCmd.Env = append(os.Environ(), env...)
+	}
+	out, err := ascCmd.CombinedOutput()
+	t.Logf("asc output:\n%s", string(out))
 
+	return asFixture{dir: tmpDir, wasmPath: wasmPath, out: string(out), err: err}
+}
+
+func testASCompilesToWasm(t *testing.T) {
+	// This fixture imports the real @cleat/sdk, exactly as a user's workflow
+	// does. It previously declared stand-in HostCalls/Memory/cleatEntry
+	// definitions inline because the SDK was not installed; those now collide
+	// with the real ones (TS2300 duplicate identifier), and more importantly
+	// they meant this test could never have caught a mismatch between the
+	// transform's generated wrapper and the SDK it generates against — which
+	// is most of what there is to catch here.
+	fx := compileASFixture(t, `
+import { HostCalls, cleatEntry } from "@cleat/sdk";
+
+@cleatEntry()
+function myWorkflow(h: HostCalls, input: string): string {
+  return "{\"status\":\"ok\"}";
+}
+`)
+	tmpDir, wasmPath := fx.dir, fx.wasmPath
+	ascOut, ascErr := []byte(fx.out), fx.err
+
+	// A compilation failure is a FAILURE, not a skip.
+	//
+	// This block used to t.Skipf here, which made the subtest unfalsifiable:
+	// any asc error at all — including a real regression in the transform —
+	// produced no .wasm and was reported as a skip, and skips are green. The
+	// stated justification was that @cleat/sdk could not be installed in the
+	// fixture, so the transform's generated import never resolved. That is now
+	// fixed (see the package.json above), so there is no longer any expected
+	// reason for asc to fail, and any failure is a defect worth failing on.
+	//
+	// The only legitimate skips in this test are environmental and are handled
+	// earlier: a missing `npm`/`node`, or an `npm install` that cannot reach
+	// the network.
 	if ascErr != nil {
-		// Check if .wasm was produced despite errors
 		if _, err := os.Stat(wasmPath); os.IsNotExist(err) {
-			t.Skipf("asc compilation failed and no .wasm produced: %v\n%s", ascErr, ascOut)
+			t.Fatalf("asc compilation failed and produced no .wasm: %v\n%s", ascErr, ascOut)
 		}
+		t.Errorf("asc reported an error even though a .wasm was produced: %v\n%s", ascErr, ascOut)
 	}
 
 	// ---- Verify .wasm output ----
@@ -628,9 +696,15 @@ console.log(JSON.stringify({ funcNames: names, all: allExports }));
 	}
 
 	// The transform should have generated a wrapper that exports myWorkflow.
-	// NOTE: AS 0.27.32 provides afterParse with parser.sources but the
-	// transform checks parser.program (undefined in this AS version).
-	// If myWorkflow is missing, explain the known issue rather than failing.
+	// This used to be a t.Skipf, on the theory that AS 0.27.32's afterParse
+	// provides parser.sources but not parser.program, so the transform (which
+	// read parser.program) could never detect @cleatEntry and myWorkflow could
+	// legitimately go missing. That bug was real but was fixed in
+	// packages/cleat-as/transform/index.js (afterParse now reads this.program,
+	// which AS sets on the prototype, instead of the absent parser.program) --
+	// see the comment there. Confirmed live: this test now finds myWorkflow
+	// every run. A missing export here is a real transform regression, not an
+	// expected AS-version quirk, so it must fail rather than skip.
 	found := false
 	for _, name := range verifyResult.FuncNames {
 		if name == "myWorkflow" {
@@ -640,13 +714,92 @@ console.log(JSON.stringify({ funcNames: names, all: allExports }));
 	}
 
 	if !found {
-		t.Skipf("WASM compiled but 'myWorkflow' export not found (got functions: %v). "+
-			"This is expected when the transform does not detect @cleatEntry due to "+
-			"an AS 0.27 API compatibility issue: the transform checks parser.program "+
-			"but AS 0.27 provides parser.sources instead.", verifyResult.FuncNames)
+		t.Fatalf("WASM compiled but 'myWorkflow' export not found (got functions: %v)", verifyResult.FuncNames)
 	}
 
 	t.Logf("WASM exports %d functions including 'myWorkflow': %v",
 		len(verifyResult.FuncNames), verifyResult.FuncNames)
 	t.Logf("WASM size: %d bytes", len(wasmData))
+}
+
+// testASRejectsNondeterminism is the test the AS static-analysis layer never
+// had, and its absence is why that layer sat inert for its whole life.
+//
+// The transform's checks are numbered E001..E005 — they are errors — but they
+// were only console.error() calls, so `cleat build` printed a diagnostic and
+// exited 0. Worse, on real AssemblyScript source they did not print at all:
+// _walkStatements looked for ESTree/Babel property names (node.callee,
+// consequent, alternate, declaration, init) and AssemblyScript's AST has
+// different ones, and for CallExpression has no `callee` property whatsoever
+// — the called expression is `expression`. Every call graph came back empty,
+// so `if (durableLeaves.size === 0) continue` skipped validation for every
+// file ever compiled.
+//
+// The pre-existing detects_math_random subtest could not catch that. It hands
+// _validateDurableFunction a synthetic AST literal built in the shape the
+// walker expected, and calls it directly — bypassing afterParse, the call
+// graph, and the durable-leaf gate. It asserted the diagnostic string was
+// producible, which was true the whole time.
+//
+// This one compiles genuine AssemblyScript through genuine asc and asserts on
+// the exit status. It cannot pass unless the analysis really runs on a real
+// parse tree and really fails the build.
+func testASRejectsNondeterminism(t *testing.T) {
+	fx := compileASFixture(t, `
+import { HostCalls, cleatEntry } from "@cleat/sdk";
+
+@cleatEntry()
+function myWorkflow(h: HostCalls, input: string): string {
+  // Math.random() cannot be part of a durable workflow: replay would draw a
+  // different value than the original run did.
+  let r: f64 = Math.random();
+  if (r > 2.0) { return "{}"; }
+  return "{\"status\":\"ok\"}";
+}
+`)
+
+	if fx.err == nil {
+		t.Errorf("asc exited 0 for a workflow calling Math.random() inside a "+
+			"durable function: the determinism check does not gate the build.\n%s", fx.out)
+	}
+
+	if !strings.Contains(fx.out, "E001") {
+		t.Errorf("no E001 diagnostic for Math.random() in a durable function. "+
+			"If the build also passed, the analysis never ran at all.\n%s", fx.out)
+	}
+
+	// A rejected build must not leave a deployable artifact behind.
+	if _, err := os.Stat(fx.wasmPath); err == nil {
+		t.Errorf("asc produced %s despite the determinism violation: a "+
+			"nondeterministic workflow is still deployable", fx.wasmPath)
+	}
+}
+
+// testASNondeterminismEscapeHatch pins the documented override. Without a test
+// it is the kind of thing that gets renamed or dropped, and anyone who set it
+// to unblock a false positive would find their build failing with no clue why.
+func testASNondeterminismEscapeHatch(t *testing.T) {
+	fx := compileASFixture(t, `
+import { HostCalls, cleatEntry } from "@cleat/sdk";
+
+@cleatEntry()
+function myWorkflow(h: HostCalls, input: string): string {
+  let r: f64 = Math.random();
+  if (r > 2.0) { return "{}"; }
+  return "{\"status\":\"ok\"}";
+}
+`, "CLEAT_AS_ALLOW_NONDETERMINISM=1")
+
+	if fx.err != nil {
+		t.Errorf("CLEAT_AS_ALLOW_NONDETERMINISM=1 did not let the build through: %v\n%s",
+			fx.err, fx.out)
+	}
+	if _, err := os.Stat(fx.wasmPath); err != nil {
+		t.Errorf("escape hatch set but no .wasm produced: %v\n%s", err, fx.out)
+	}
+	// The override must stay loud; a silent one is how a workflow ships broken.
+	if !strings.Contains(fx.out, "E001") {
+		t.Errorf("escape hatch suppressed the E001 diagnostic entirely; it should "+
+			"downgrade the error to a warning, not hide it\n%s", fx.out)
+	}
 }

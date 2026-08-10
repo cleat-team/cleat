@@ -10,7 +10,7 @@ import (
 )
 
 // runBuildAssemblyScript compiles an AssemblyScript project to WASM using asc.
-func runBuildAssemblyScript(pattern, outDir string) {
+func runBuildAssemblyScript(pattern, outDir, channel string) {
 	asDir := pattern
 	if asDir == "" {
 		asDir = "."
@@ -71,6 +71,10 @@ func runBuildAssemblyScript(pattern, outDir string) {
 	cmd.Dir = asDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	if channel != "" {
+		cmd.Env = append(cmd.Env, "CLEAT_CHILD_BINDING_POLICY="+channel)
+	}
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: AssemblyScript compilation failed: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Make sure assembly/index.ts exists and has no syntax errors.\n")

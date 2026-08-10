@@ -30,17 +30,18 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Optional, TypeVar
+from typing import Any, TypeVar
 
 from .host_calls import (
+    INFINITE_TIMEOUT_MS,
     ChildResult,
     ChildWorkflowOptions,
     PromiseResult,
     RetryPolicy,
     SignalResult,
 )
-from .host_calls import INFINITE_TIMEOUT_MS
 
 T = TypeVar("T")
 
@@ -60,7 +61,7 @@ class _EventLogEntry:
     args: tuple = ()
     kwargs: dict = field(default_factory=dict)
     result: Any = None
-    exception: Optional[str] = None
+    exception: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +76,7 @@ class _ChildState:
     name: str
     run_id: str
     result: str
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -124,9 +125,8 @@ class LocalHostCalls:
         self._cron_schedules: dict[str, dict] = {}
         self._cron_counter: int = 0
         self._update_handlers: dict[
-            str, tuple[Callable[[str], str], Optional[Callable[[str], bool]]]
+            str, tuple[Callable[[str], str], Callable[[str], bool] | None]
         ] = {}
-        self._query_handlers: dict[str, Callable[[str], str]] = {}
         self._scope_prefix: str = ""
         self._workflow_id: str = "local-wf-id"
         self._run_id: str = "local-run-id"
@@ -255,7 +255,6 @@ class LocalHostCalls:
         self._cron_schedules.clear()
         self._cron_counter = 0
         self._update_handlers.clear()
-        self._query_handlers.clear()
         self._scope_prefix = ""
 
     # ------------------------------------------------------------------
@@ -473,7 +472,7 @@ class LocalHostCalls:
         service: str,
         operation: str,
         request: Any,
-        timeout_ms: Optional[int] = None,
+        timeout_ms: int | None = None,
     ) -> str:
         """Make a durable (deterministically replayed) call to an external service.
 
@@ -560,7 +559,7 @@ class LocalHostCalls:
         self,
         url: str,
         method: str = "GET",
-        headers: Optional[dict] = None,
+        headers: dict | None = None,
         body: str = "",
     ) -> tuple:
         """Perform an HTTP fetch via the ``"http"`` service.
@@ -586,12 +585,12 @@ class LocalHostCalls:
         self,
         url: str,
         method: str = "GET",
-        headers: Optional[dict] = None,
+        headers: dict | None = None,
         body: str = "",
         result_type: type[T] = dict,
     ) -> T:
         """Perform a cleat HTTP fetch and deserialize the JSON response."""
-        resp_body, status = self.fetch(url, method, headers, body)
+        resp_body, _status = self.fetch(url, method, headers, body)
         data = json.loads(resp_body)
         if isinstance(data, dict) and result_type is not dict:
             return result_type(**data)
@@ -865,9 +864,17 @@ class LocalHostCalls:
         return run_id
 
     def child_workflow_with_options(
-        self, name: str, input: Any, options: ChildWorkflowOptions = ChildWorkflowOptions()
+        self, name: str, input: Any, options: ChildWorkflowOptions | None = None
     ) -> str:
-        """Start a child workflow instance with version and priority options."""
+        """Start a child workflow instance with version and priority options.
+
+        ``options`` defaults to ``ChildWorkflowOptions()``; see the note in
+        ``HostCalls.child_workflow_with_options`` for why it is built here
+        rather than in the signature. This signature has to keep matching that
+        one -- it is the local stand-in for it.
+        """
+        if options is None:
+            options = ChildWorkflowOptions()
         if self._mode == "replay":
             return self._replay_next("child_workflow_with_options")
         run_id = self.child_workflow(name, input)
@@ -1045,7 +1052,7 @@ class LocalHostCalls:
     # 35. create_promise
     # ------------------------------------------------------------------
 
-    def create_promise(self, name: str, ttl_ms: Optional[int] = None) -> str:
+    def create_promise(self, name: str, ttl_ms: int | None = None) -> str:
         """Create a cleat promise with the given name.
 
         Returns
@@ -1128,7 +1135,7 @@ class LocalHostCalls:
         self,
         name: str,
         handler: Callable[[str], str],
-        validator: Optional[Callable[[str], bool]] = None,
+        validator: Callable[[str], bool] | None = None,
     ) -> None:
         """Register a handler for update calls on this workflow."""
         if self._mode == "replay":
@@ -1155,28 +1162,10 @@ class LocalHostCalls:
             return True
         return validator(payload)
 
-    # ------------------------------------------------------------------
-    # 40. register_query_handler
-    # ------------------------------------------------------------------
-
-    def register_query_handler(
-        self,
-        name: str,
-        handler: Callable[[str], str],
-    ) -> None:
-        """Register a read-only handler for query calls on this workflow."""
-        if self._mode == "replay":
-            self._replay_next("register_query_handler")
-            return
-        self._query_handlers[name] = handler
-        self._record("register_query_handler", name=name)
-
-    def _handle_query(self, name: str, payload: str) -> str:
-        """Internal: look up and invoke a registered query handler."""
-        handler = self._query_handlers.get(name)
-        if handler is None:
-            raise RuntimeError(f"No query handler registered for '{name}'")
-        return handler(payload)
+    # There is no register_query_handler / _handle_query here (removed
+    # 2026-08-09). register_query_handler recorded a handler name but nothing
+    # ever routed an external query to it -- see docs/determinism.md, "Why
+    # there is no RegisterQueryHandler". Use set_query_state instead.
 
     # ------------------------------------------------------------------
     # 41. defer
@@ -1234,8 +1223,8 @@ class LocalHostCalls:
         target_schema: str,
         name: str,
         input_json: Any,
-        version: Optional[int] = None,
-        parent_close_policy: Optional[str] = None,
+        version: int | None = None,
+        parent_close_policy: str | None = None,
     ) -> str:
         """Start a child workflow in a schema. Delegates to child_workflow, ignoring schema.
 
@@ -1302,7 +1291,7 @@ class LocalHostCalls:
     # 44. run_detached
     # ------------------------------------------------------------------
 
-    def run_detached(self, fn: Callable[["LocalHostCalls"], Any]) -> None:
+    def run_detached(self, fn: Callable[[LocalHostCalls], Any]) -> None:
         """Execute a function that is detached from workflow cancellation."""
         saved = self._detached_context
         self._detached_context = True

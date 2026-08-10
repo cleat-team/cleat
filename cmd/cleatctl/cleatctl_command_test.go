@@ -314,6 +314,10 @@ func (m *mockStore) UpdateScheduleNextRun(ctx context.Context, name string, next
 	return nil
 }
 
+func (m *mockStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
+	return true, nil
+}
+
 func (m *mockStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	if m.loadWorkflowConfigFn != nil {
 		return m.loadWorkflowConfigFn(ctx, defName, defVersion)
@@ -1743,6 +1747,9 @@ func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error)
 func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
+func (m *mockStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
 func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]engine.EventRecord, error) {
 	return nil, nil
 }
@@ -1750,6 +1757,15 @@ func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, p
 	return nil, nil
 }
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	return nil
+}
+func (m *mockStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
+	return nil
+}
+func (m *mockStore) AdminForceFail(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error {
+	return nil
+}
+func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error {
 	return nil
 }
 func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
@@ -1766,4 +1782,30 @@ func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID stri
 		return m.getAllowedSignalCallersFn(ctx, workflowID)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	return nil
+}
+func (m *mockStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	return nil
+}
+func (m *mockStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
+func (m *mockStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	return nil, nil
+}
+func (m *mockStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	return nil
+}
+func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error { return nil }
+func (m *mockStore) GetRoutingRules(ctx context.Context, workflowName string) ([]engine.RoutingRule, error) {
+	return nil, nil
+}
+func (m *mockStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	return 0, nil
+}
+func (m *mockStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
 }

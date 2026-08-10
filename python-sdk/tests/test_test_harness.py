@@ -9,8 +9,8 @@ import json
 import pytest
 
 try:
-    from cleat_sdk.test_harness import CleatTestHarness
     from cleat_sdk.host_calls import HostCalls, RetryPolicy, SuspendSentinel
+    from cleat_sdk.test_harness import CleatTestHarness
 except ImportError as e:
     pytest.skip(
         f"Skipping test harness tests: {e}",
@@ -204,10 +204,10 @@ class TestSignals:
         h.stub_signal("sig1", "data")
         h.stub_signal("sig2", "more")
         # First poll consumes sig1
-        payload, found = h.poll_signal("sig1")
+        _payload, found = h.poll_signal("sig1")
         assert found
         # sig2 is still there
-        payload2, found2 = h.poll_signal("sig2")
+        _payload2, found2 = h.poll_signal("sig2")
         assert found2
 
 

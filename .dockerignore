@@ -8,3 +8,23 @@ prompts
 *.md
 Dockerfile
 .dockerignore
+
+# go.work must NOT enter the build context.
+#
+# It lists ./examples, ./tests/cross-language and ./tests/plugin-harness as
+# workspace modules, and this file excludes examples above -- so `COPY . .`
+# brought in a go.work whose modules were not there, and every `go build` in
+# the image died with
+#
+#   go: cannot load module examples listed in go.work file:
+#       open examples/go.mod: no such file or directory
+#
+# which broke the cleat-worker image outright. The image does not need the
+# workspace: cmd/cleat-worker builds from the root module alone, which requires
+# no local replaces (that is the whole point of the module-cycle fix). Verified
+# with GOWORK=off go build ./cmd/cleat-worker.
+#
+# Adding a directory to a workspace means checking every build context that
+# does not contain it. This is the one in this repo.
+go.work
+go.work.sum

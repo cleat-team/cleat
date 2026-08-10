@@ -16,6 +16,8 @@
 //	versions gc [--dry-run]         — run garbage collection on deprecated versions
 //	deploy workflow <name> <wasm>    — deploy a new workflow WASM binary
 //	deploy plugin <name> <wasm>      — deploy a plugin WASM binary
+//	drop-tenant <tenant-id>          — permanently delete a tenant and all its data
+//	revoke-api-key [flags]           — revoke a cleat API key (credential rotation)
 package main
 
 import (
@@ -53,19 +55,19 @@ func main() {
 
 	db, err := sql.Open("postgres", *dsn)
 	if err != nil {
-		log.Fatalf("failed to connect: %v", err)
+		log.Fatalf("failed to connect to database: %v — check the --db flag or CLEAT_DB_URL environment variable", err)
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		log.Fatalf("failed to ping: %v", err)
+		log.Fatalf("failed to ping database: %v — check that the database is running and the connection string is correct", err)
 	}
 
 	ctx := context.Background()
 	factory := engine.NewPostgresStoreFactory(db, "public")
 	store, closer, err := factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
-		log.Fatalf("failed to open store: %v", err)
+		log.Fatalf("failed to open database store: %v — check that the database is accessible and the public schema exists", err)
 	}
 	defer closer.Close()
 
@@ -85,6 +87,10 @@ func main() {
 		runDebug(ctx, store, db, args[1:])
 	case "check-db":
 		runCheckDB(ctx, db, args[1:])
+	case "drop-tenant":
+		runDropTenant(ctx, db, args[1:])
+	case "revoke-api-key":
+		runRevokeAPIKey(ctx, db, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -109,6 +115,8 @@ Commands:
   replay <id> --entry-point <n>   replay a workflow's event history for diagnostics
   check-db [--verbose]            verify database connectivity and schema health
   debug <id> [--entry-point <n>] [--watch]  step-through workflow event replay
+  drop-tenant <tenant-id> [--dry-run] [--yes]  permanently delete a tenant and all its data
+  revoke-api-key [--key-id|--key-hash|--key-stdin|--list]  revoke an API key
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

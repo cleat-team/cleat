@@ -15,8 +15,9 @@ import (
 	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/tetratelabs/wazero/sys"
-)
 
+	"github.com/cleat-team/cleat/monitoring/prometheus"
+)
 
 // cleatComplete stores the workflow result delivered via cleat_complete host import.
 // This decouples workflow completion from Go WASI runtime shutdown behavior.
@@ -31,17 +32,19 @@ var cleatCompleteKey struct{}
 const DefaultMemoryLimitPages = 512
 
 var wazeroInitOnce sync.Once
+
 // Runtime wraps a wazero runtime with pre-registered host function imports.
 type Runtime struct {
 	wazeroRuntime wazero.Runtime
 	// stdout/stderr are NOT goroutine-safe — they are shared across callers
 	// of InstantiateModuleNamed. Concurrent execution must use the
 	// wazeroBackend.Execute() path, which uses per-backend buffers.
-	stdout        bytes.Buffer
-	stderr        bytes.Buffer
-	callTimeout   time.Duration // per-call WASM execution timeout (0 = none)
+	stdout           bytes.Buffer
+	stderr           bytes.Buffer
+	callTimeout      time.Duration // per-call WASM execution timeout (0 = none)
 	MemoryLimitPages uint32        // max WASM linear memory in pages (64KB each)
-	fuelLimit         uint64        // max WASM fuel (function calls) per invocation; 0 = no limit
+	fuelLimit        uint64        // max WASM fuel (function calls) per invocation; 0 = no limit
+	Metrics          *prometheus.Metrics
 }
 
 // Stdout returns captured stdout output from the most recent module.
@@ -109,7 +112,19 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	wasiBuilder.NewFunctionBuilder().WithFunc(
 		func(ctx context.Context, m api.Module) {},
 	).Export("reset_adapter_state")
-	if _, err := wasiBuilder.Instantiate(ctx); err != nil {
+	// Instantiate WASI with a fake Sys context that returns fixed (zero) time.
+	// This prevents the wazero nil pointer panic in clock_time_get (which
+	// accesses mod.Sys for walltime/nanotime) while keeping the Go WASM
+	// runtime's GC/goroutine scheduler from accessing real wall clock time.
+	// Workflow logic uses h.Now() (cleat_now) for deterministic time.
+	wasiCompiled, err := wasiBuilder.Compile(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("host: compiling WASI module: %w", err)
+	}
+	wasiConfig := wazero.NewModuleConfig().
+		WithWalltime(func() (int64, int32) { return 0, 0 }, sys.ClockResolution(1)).
+		WithNanotime(func() int64 { return 0 }, sys.ClockResolution(1))
+	if _, err := rt.InstantiateModule(ctx, wasiCompiled, wasiConfig); err != nil {
 		return nil, fmt.Errorf("host: instantiating WASI module: %w", err)
 	}
 
@@ -218,41 +233,59 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 		return nil
 	}
 
-	started := make(chan struct{})
+	// Run _start in a goroutine. When it completes, the Go WASI runtime
+	// has fully initialized its function table, so we can call exports
+	// without call_indirect traps. We track completion via a done channel
+	// so the caller can wait for the runtime to be ready rather than
+	// sleeping a fixed interval.
+	done := make(chan struct{})
+	errCh := make(chan error, 1)
 	go func() {
-		close(started)
+		defer func() {
+			if r := recover(); r != nil {
+				errCh <- fmt.Errorf("host: _start panicked: %v", r)
+			}
+			close(done)
+		}()
 		start.Call(ctx)
 	}()
 
-	// Wait for the goroutine to actually begin executing _start.
-	select {
-	case <-started:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
 	// Exponential backoff: check module liveness at increasing intervals.
-	// Fast-starting modules (most Go wasip1 binaries) pass on the first
-	// iteration and pay only the initial 100µs yield. Slow starters
-	// (e.g., modules with heavy init() work) get up to ~10ms total.
+	// Most Go wasip1 modules allocate memory within the first 100µs.
+	// Heavy init() work may take longer; we back off to ~10ms total.
 	delay := 100 * time.Microsecond
 	const maxDelay = 10 * time.Millisecond
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-errCh:
+			return err
 		case <-time.After(delay):
 		}
 
-		// Liveness check: memory is allocated during instantiation, but
-		// if _start panicked the module may have been torn down, so verify
-		// memory is still accessible.
 		if mem := mod.Memory(); mem != nil && mem.Size() > 0 {
-			// Give Go WASM runtime extra time to initialize the function
-			// table after _start launches. Prevents call_indirect traps
-			// in child workflows where timing is tighter.
-			time.Sleep(50 * time.Millisecond)
-			return nil
+			// Memory is live. Wait for _start to complete so the runtime's
+			// function table is fully populated. _start runs main(), which
+			// for Go WASI modules calls proc_exit when done. Most modules
+			// complete quickly here (main() polls for work and returns
+			// immediately when none is queued). If _start blocks (e.g.,
+			// waiting on a blocking import), we fall back to a short grace
+			// period — the runtime has already allocated its function table
+			// by this point, and the remaining init is non-critical.
+			select {
+			case <-done:
+				// _start completed normally; runtime is fully initialized.
+				return nil
+			case err := <-errCh:
+				return err
+			case <-time.After(5 * time.Millisecond):
+				// _start is still running (likely blocked on a host import
+				// in main()). The Go runtime's function table is populated
+				// early during _start, so 5ms is sufficient for the rare
+				// case where init work overlaps with our memory check.
+				return nil
+			}
 		}
 		delay *= 2
 		if delay > maxDelay {
@@ -353,6 +386,7 @@ func formatWasmCallError(err error) error {
 // and shuts down the module when the fuel budget is exhausted.
 type fuelMeter struct {
 	remaining atomic.Uint64
+	Metrics   *prometheus.Metrics
 }
 
 // NewFunctionListener satisfies FunctionListenerFactory. It returns itself as
@@ -363,9 +397,11 @@ func (fm *fuelMeter) NewFunctionListener(_ api.FunctionDefinition) experimental.
 
 // Before implements FunctionListener. Each function call consumes one unit of
 // fuel. When the budget is exhausted, the module is closed to stop execution.
-func (fm *fuelMeter) Before(_ context.Context, mod api.Module, _ api.FunctionDefinition, _ []uint64, _ experimental.StackIterator) {
+func (fm *fuelMeter) Before(ctx context.Context, mod api.Module, _ api.FunctionDefinition, _ []uint64, _ experimental.StackIterator) {
 	if fm.remaining.Add(^uint64(0)) == 0 { // decrement by 1
-		wasmFuelExhaustedTotal.Inc()
+		if fm.Metrics != nil {
+			fm.Metrics.RecordWasmFuelExhausted(ctx)
+		}
 		mod.CloseWithExitCode(context.Background(), 1)
 	}
 }
@@ -421,10 +457,9 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// offset. Some WASM SDKs (Java/TeaVM, AssemblyScript) hardcode the
 	// 10 MiB convention and will break if the buffer moves lower.
 	currentSize := mem.Size()
-	legacyOffset := uint32(10 * 1024 * 1024)
-	scratchBase := currentSize + wasmPageSize // one guard page after current heap
-	if scratchBase < legacyOffset {
-		scratchBase = legacyOffset
+	scratchBase, scratchErr := scratchBaseFor(uint64(currentSize), OutBufSize)
+	if scratchErr != nil {
+		return "", false, scratchErr
 	}
 	inputOffset := scratchBase
 	outputOffset := scratchBase + OutBufSize
@@ -468,7 +503,7 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// each call consumes one unit of fuel. When the budget is exhausted,
 	// the module is closed, which surfaces as an ExitError to the caller.
 	if r.fuelLimit > 0 {
-		fm := &fuelMeter{}
+		fm := &fuelMeter{Metrics: r.Metrics}
 		fm.remaining.Store(r.fuelLimit)
 		callCtx = experimental.WithFunctionListenerFactory(callCtx, fm)
 	}

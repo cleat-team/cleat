@@ -25,9 +25,11 @@ import functools
 import inspect
 import json
 import typing
-from typing import Any, Callable, Optional, get_type_hints
+from collections.abc import Callable
+from typing import Any, get_type_hints
 
 from .host_calls import HostCalls, SuspendSentinel
+
 # String sentinel for workflow suspension (matches Go side check).
 SUSPEND_SENTINEL_STR = "__CLEAT_SUSPEND__"
 
@@ -58,7 +60,7 @@ def _unwrap_result(result: Any) -> Any:
 def _from_dict(
     value: Any,
     target_type: Any,
-    _cache: Optional[dict] = None,
+    _cache: dict | None = None,
 ) -> Any:
     """Recursively construct typed objects from JSON-deserialised values.
 
@@ -117,13 +119,13 @@ def _from_dict(
         return value
 
     # ---- list[Element] / List[Element] ----
-    if origin in (list, typing.List):
+    if origin in (list, list):
         if args and isinstance(value, (list, tuple)):
             return [_from_dict(item, args[0], _cache) for item in value]
         return value
 
     # ---- dict[str, Value] / Dict[str, Value] ----
-    if origin in (dict, typing.Dict):
+    if origin in (dict, dict):
         if args and len(args) == 2 and isinstance(value, dict):
             return {k: _from_dict(v, args[1], _cache) for k, v in value.items()}
         return value
@@ -131,7 +133,10 @@ def _from_dict(
     # ---- Dataclass ----
     try:
         is_dc = dataclasses.is_dataclass(target_type)
-    except Exception:
+    # Deliberate: target_type is caller-supplied and may be any object,
+    # including one with a hostile __class__ or a broken metaclass. A failure
+    # to identify it as a dataclass just means "treat it as a plain value".
+    except Exception:  # noqa: BLE001
         is_dc = False
 
     if is_dc:
@@ -145,7 +150,11 @@ def _from_dict(
         if type_hints is None:
             try:
                 type_hints = typing.get_type_hints(target_type)
-            except Exception:
+            # Deliberate: get_type_hints evaluates annotations, so it raises
+            # whatever a user's forward reference raises -- NameError for an
+            # unresolvable name, TypeError, or anything a module-level
+            # __getattr__ chooses. Unresolvable hints degrade to no coercion.
+            except Exception:  # noqa: BLE001
                 type_hints = {}
             _cache[target_type] = type_hints
 
@@ -206,7 +215,7 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
             raise RuntimeError("No cleat_entry functions registered")
 
         if len(wrappers) == 1:
-            return list(wrappers.values())[0](args_str)
+            return next(iter(wrappers.values()))(args_str)
 
         # Multiple entries: dispatch based on __cleat_entry__ in input JSON.
         input_data: dict = json.loads(args_str) if args_str else {}
@@ -233,7 +242,7 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
     module.WitWorld = type("WitWorld", (), {"run": wrapped})
 
 
-def cleat_entry(name: Optional[str] = None) -> Callable:
+def cleat_entry(name: str | None = None) -> Callable:
     """Mark a function as a Cleat workflow entry point.
 
     The decorated function **must** accept a :class:`HostCalls` instance as
@@ -361,7 +370,11 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
                 # fresh execution).  Propagate a sentinel string.
                 return SUSPEND_SENTINEL_STR
 
-            except Exception as exc:
+            # Deliberate, and load-bearing: this is the workflow error
+            # boundary. Everything the user's workflow body can raise has to
+            # become a JSON error payload here, or it crosses the WASM ABI as
+            # a trap and the engine sees a dead guest instead of a failed step.
+            except Exception as exc:  # noqa: BLE001
                 # Any other exception is treated as a workflow error.
                 return json.dumps({"error": str(exc)})
 
@@ -385,7 +398,7 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
     return _make_entry
 
 
-def virtual_object(name: Optional[str] = None) -> Callable:
+def virtual_object(name: str | None = None) -> Callable:
     """Register a function as a virtual object entry point.
 
     This decorator wraps :func:`cleat_entry` and marks the function as
@@ -429,7 +442,7 @@ def virtual_object(name: Optional[str] = None) -> Callable:
     return _make_entry
 
 
-def query_handler(name: Optional[str] = None) -> Callable:
+def query_handler(name: str | None = None) -> Callable:
     """Mark a function as a read-only query handler (no journaling).
 
     Unlike :func:`cleat_entry`, which marks a workflow entry point that

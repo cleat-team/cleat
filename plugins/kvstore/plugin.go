@@ -31,10 +31,10 @@ func New() plugin.Plugin {
 
 // Plugin implements a versioned JSONB key-value store with tenant isolation.
 type Plugin struct {
-db     plugin.PluginDB
-	mux    *http.ServeMux
-	logger *slog.Logger
-	config Config
+	db      plugin.PluginDB
+	mux     *http.ServeMux
+	logger  *slog.Logger
+	config  Config
 	dialect plugin.Dialect
 }
 

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func TestInfo(t *testing.T) {
@@ -122,7 +122,7 @@ func TestEvaluateFlag_RuleEqMatch(t *testing.T) {
 		Rules:             json.RawMessage(`[{"attribute": "user_id", "operator": "eq", "value": "user-123"}]`),
 		RolloutPercentage: 0,
 	}
-	ctx := EvaluationContext{UserID: "user-123", Attributes: map[string]interface{}{"region": "us-east"}}
+	ctx := EvaluationContext{UserID: "user-123", Attributes: map[string]any{"region": "us-east"}}
 	result := EvaluateFlag(flag, ctx)
 	if !result.Enabled {
 		t.Error("expected flag to be enabled when rule matches")
@@ -158,7 +158,7 @@ func TestEvaluateFlag_RuleNeqMatch(t *testing.T) {
 		Rules:             json.RawMessage(`[{"attribute": "plan", "operator": "neq", "value": "free"}]`),
 		RolloutPercentage: 0,
 	}
-	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{"plan": "pro"}}
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]any{"plan": "pro"}}
 	result := EvaluateFlag(flag, ctx)
 	if !result.Enabled {
 		t.Error("expected flag to be enabled when neq matches")
@@ -173,7 +173,7 @@ func TestEvaluateFlag_RuleContainsMatch(t *testing.T) {
 		Rules:             json.RawMessage(`[{"attribute": "email", "operator": "contains", "value": "@example.com"}]`),
 		RolloutPercentage: 0,
 	}
-	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{"email": "test@example.com"}}
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]any{"email": "test@example.com"}}
 	result := EvaluateFlag(flag, ctx)
 	if !result.Enabled {
 		t.Error("expected flag to be enabled when contains matches")
@@ -188,7 +188,7 @@ func TestEvaluateFlag_RuleContainsNoMatch(t *testing.T) {
 		Rules:             json.RawMessage(`[{"attribute": "email", "operator": "contains", "value": "@example.com"}]`),
 		RolloutPercentage: 0,
 	}
-	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{"email": "test@other.com"}}
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]any{"email": "test@other.com"}}
 	result := EvaluateFlag(flag, ctx)
 	if result.Enabled {
 		t.Error("expected flag to be disabled when contains does not match")
@@ -203,7 +203,7 @@ func TestEvaluateFlag_RuleInMatch(t *testing.T) {
 		Rules:             json.RawMessage(`[{"attribute": "plan", "operator": "in", "value": ["pro", "enterprise"]}]`),
 		RolloutPercentage: 0,
 	}
-	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{"plan": "enterprise"}}
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]any{"plan": "enterprise"}}
 	result := EvaluateFlag(flag, ctx)
 	if !result.Enabled {
 		t.Error("expected flag to be enabled when in matches")
@@ -218,7 +218,7 @@ func TestEvaluateFlag_RuleInNoMatch(t *testing.T) {
 		Rules:             json.RawMessage(`[{"attribute": "plan", "operator": "in", "value": ["pro", "enterprise"]}]`),
 		RolloutPercentage: 0,
 	}
-	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{"plan": "free"}}
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]any{"plan": "free"}}
 	result := EvaluateFlag(flag, ctx)
 	if result.Enabled {
 		t.Error("expected flag to be disabled when in does not match")
@@ -233,7 +233,7 @@ func TestEvaluateFlag_RuleNotInMatch(t *testing.T) {
 		Rules:             json.RawMessage(`[{"attribute": "plan", "operator": "not_in", "value": ["free"]}]`),
 		RolloutPercentage: 0,
 	}
-	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{"plan": "pro"}}
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]any{"plan": "pro"}}
 	result := EvaluateFlag(flag, ctx)
 	if !result.Enabled {
 		t.Error("expected flag to be enabled when not_in matches (not in list)")
@@ -249,14 +249,14 @@ func TestEvaluateFlag_AndLogicAllRulesMustMatch(t *testing.T) {
 		RolloutPercentage: 0,
 	}
 	// Both rules match.
-	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{"plan": "pro", "region": "us-east"}}
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]any{"plan": "pro", "region": "us-east"}}
 	result := EvaluateFlag(flag, ctx)
 	if !result.Enabled {
 		t.Error("expected flag to be enabled when all rules match")
 	}
 
 	// Only one rule matches.
-	ctx2 := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{"plan": "pro", "region": "eu-west"}}
+	ctx2 := EvaluationContext{UserID: "user-1", Attributes: map[string]any{"plan": "pro", "region": "eu-west"}}
 	result2 := EvaluateFlag(flag, ctx2)
 	if result2.Enabled {
 		t.Error("expected flag to be disabled when not all rules match")
@@ -271,7 +271,7 @@ func TestEvaluateFlag_MissingAttribute(t *testing.T) {
 		Rules:             json.RawMessage(`[{"attribute": "nonexistent", "operator": "eq", "value": "foo"}]`),
 		RolloutPercentage: 0,
 	}
-	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{"plan": "pro"}}
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]any{"plan": "pro"}}
 	result := EvaluateFlag(flag, ctx)
 	if result.Enabled {
 		t.Error("expected flag to be disabled when attribute is missing from context")
@@ -617,7 +617,7 @@ func TestEvaluateFlagEmptyAttributes(t *testing.T) {
 		RolloutPercentage: 0,
 	}
 	// Empty attributes map — rule references custom_attr which doesn't exist.
-	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{}}
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]any{}}
 	result := EvaluateFlag(flag, ctx)
 	if result.Enabled {
 		t.Error("expected flag to be disabled when attribute is missing")

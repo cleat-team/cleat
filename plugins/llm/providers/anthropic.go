@@ -12,27 +12,27 @@ import (
 )
 
 type anthropicRequest struct {
-	Model       string           `json:"model"`
-	MaxTokens   int              `json:"max_tokens"`
-	Messages    []anthropicMsg   `json:"messages"`
-	System      string           `json:"system,omitempty"`
-	Temperature float64          `json:"temperature,omitempty"`
-	Tools       []anthropicTool  `json:"tools,omitempty"`
+	Model       string          `json:"model"`
+	MaxTokens   int             `json:"max_tokens"`
+	Messages    []anthropicMsg  `json:"messages"`
+	System      string          `json:"system,omitempty"`
+	Temperature float64         `json:"temperature,omitempty"`
+	Tools       []anthropicTool `json:"tools,omitempty"`
 }
 
 type anthropicMsg struct {
-	Role    string              `json:"role"`
-	Content []anthropicContent  `json:"content"`
+	Role    string             `json:"role"`
+	Content []anthropicContent `json:"content"`
 }
 
 type anthropicContent struct {
-	Type         string          `json:"type"`
-	Text         string          `json:"text,omitempty"`
-	Content      string          `json:"content,omitempty"`
-	ToolUseID    string          `json:"tool_use_id,omitempty"`
-	ID           string          `json:"id,omitempty"`
-	Name         string          `json:"name,omitempty"`
-	Input        json.RawMessage `json:"input,omitempty"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
 }
 
 type anthropicTool struct {
@@ -77,10 +77,10 @@ func AnthropicChat(ctx context.Context, client *http.Client, apiKey, baseURL str
 		}
 		for _, tc := range m.ToolCalls {
 			content = append(content, anthropicContent{
-				Type:      "tool_use",
-				ID:        tc.ID,
-				Name:      tc.Function.Name,
-				Input:     json.RawMessage(tc.Function.Arguments),
+				Type:  "tool_use",
+				ID:    tc.ID,
+				Name:  tc.Function.Name,
+				Input: json.RawMessage(tc.Function.Arguments),
 			})
 		}
 		if m.Role == "tool" {
@@ -213,9 +213,9 @@ func AnthropicChatStream(ctx context.Context, client *http.Client, apiKey, baseU
 	}
 
 	// Build the streaming request body.
-	bodyMap := map[string]interface{}{}
+	bodyMap := map[string]any{}
 	data, _ := json.Marshal(input)
-	json.Unmarshal(data, &bodyMap)
+	_ = json.Unmarshal(data, &bodyMap)
 	bodyMap["stream"] = true
 
 	bodyJSON, err := json.Marshal(bodyMap)
@@ -255,7 +255,7 @@ func AnthropicChatStream(ctx context.Context, client *http.Client, apiKey, baseU
 			}
 
 			var sseData struct {
-				Type string `json:"type"`
+				Type  string `json:"type"`
 				Delta *struct {
 					Type string `json:"type"`
 					Text string `json:"text"`

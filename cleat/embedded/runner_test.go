@@ -1096,6 +1096,13 @@ func TestScopeManagement(t *testing.T) {
 
 		// Clear scope and verify.
 		prev = h.ClearScope()
+		// Asserted rather than dropped: ineffassign found this return being
+		// discarded once the cleat module started being linted. The block below
+		// asserts exactly this property for Invoice, so leaving it unchecked
+		// here meant the first ClearScope could return anything at all.
+		if prev != "vo:Order:ord-42:" {
+			return fmt.Errorf("expected scope prefix 'vo:Order:ord-42:', got %q", prev)
+		}
 		objType, instKey = h.GetScope()
 		if objType != "" || instKey != "" {
 			return errors.New("expected empty scope after clear")
@@ -1249,8 +1256,8 @@ func TestHTTPFetch_DefaultsMethodToGET(t *testing.T) {
 		h := ctx.H()
 		// URL with no method should default to GET then fail at connection.
 		_, err := h.DurableCall("http", "fetch", `{"url":"http://127.0.0.1:1/"}`)
-			if err == nil {
-				// On the off chance the request succeeded: highly unlikely.
+		if err == nil {
+			// On the off chance the request succeeded: highly unlikely.
 			t.Log("unexpectedly got a response from port 1")
 		}
 		ctx.SetOutput(`{"ok":true}`)

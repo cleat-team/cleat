@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/llm/providers"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions.
@@ -34,14 +34,14 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 }
 
 type chatRequest struct {
-	Provider    string             `json:"provider"`
-	Model       string             `json:"model"`
+	Provider    string              `json:"provider"`
+	Model       string              `json:"model"`
 	Messages    []providers.Message `json:"messages"`
-	Temperature float64            `json:"temperature,omitempty"`
-	MaxTokens   int                `json:"max_tokens,omitempty"`
-	Tools       []providers.Tool   `json:"tools,omitempty"`
-	ToolChoice  string             `json:"tool_choice,omitempty"`
-	System      string             `json:"system,omitempty"`
+	Temperature float64             `json:"temperature,omitempty"`
+	MaxTokens   int                 `json:"max_tokens,omitempty"`
+	Tools       []providers.Tool    `json:"tools,omitempty"`
+	ToolChoice  string              `json:"tool_choice,omitempty"`
+	System      string              `json:"system,omitempty"`
 }
 
 type embedRequest struct {
@@ -318,4 +318,3 @@ func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugi
 
 	return out, nil
 }
-

@@ -17,30 +17,69 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/cleat/wasmtest"
 	"github.com/cleat-team/cleat/engine"
 )
 
-// findProjectRoot walks up from the working directory to find the repo root.
+// findProjectRoot walks up from the working directory to locate the repo root.
+//
+// It looks for the go.mod declaring the ROOT module, not merely the nearest
+// go.mod. This directory is its own module (see go.mod here, and CLAUDE.md on
+// the root<->cleat/ module cycle), so "nearest go.mod" stops right here and
+// every path built on top of it -- testdata directories, migrations -- lands
+// one repo-depth too shallow.
+//
+// That failure is silent, which is why the check is on the module line rather
+// than on the file's existence: the callers below t.Skipf when their testdata
+// directory is missing, so a wrong root reads as "test data not found" and the
+// suite goes green having built and run nothing.
 func findProjectRoot(t *testing.T) string {
 	t.Helper()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
+	const rootModule = "module github.com/cleat-team/cleat\n"
 	dir := cwd
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		b, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil && strings.Contains(string(b), rootModule) {
 			return dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("could not find project root from %s", cwd)
+			t.Fatalf("could not find the repo root (a go.mod declaring %q) from %s",
+				strings.TrimSuffix(rootModule, "\n"), cwd)
 		}
 		dir = parent
 	}
+}
+
+// commandAt builds an exec.Cmd that runs in dir, with $PWD corrected to match.
+//
+// cmd.Dir on its own is not enough for the `go` command: it resolves the main
+// module from $PWD when that is set and consistent, so a child process that
+// inherits the test binary's PWD looks for a go.mod in *this* directory rather
+// than in cmd.Dir. That was harmless while this directory was part of the root
+// module. Since it became its own module (see go.mod, and CLAUDE.md on the
+// root<->cleat/ module cycle), the inherited PWD makes
+//
+//	go run <repoRoot>/cmd/cleat build ...
+//
+// fail with "directory <repoRoot>/cmd/cleat outside main module or its selected
+// dependencies" -- while cmd.Dir points at the repo root the entire time, which
+// is what makes it slow to diagnose. Measured: identical command, PWD inherited
+// fails, PWD set to dir succeeds.
+//
+// Go's exec keeps the last value for a duplicated key, so appending is enough.
+func commandAt(dir, name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PWD="+dir)
+	return cmd
 }
 
 // requireCargo skips the test if cargo is not installed.
@@ -48,14 +87,6 @@ func requireCargo(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("cargo"); err != nil {
 		t.Skip("cargo not installed — skipping Rust WASM cross-language test")
-	}
-}
-
-// requireTinygo skips the test if tinygo is not installed.
-func requireTinygo(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not installed — skipping Go WASM cross-language test")
 	}
 }
 
@@ -70,9 +101,19 @@ func buildRustWasm(t *testing.T, projectRoot string) string {
 		t.Skipf("Rust workflow example not found at %s - skipping", rustDir)
 	}
 
-	cmd := exec.Command("cargo", "build", "--target", "wasm32-wasip1", "--release")
-	cmd.Dir = rustDir
-	cmd.Env = append(os.Environ(),
+	// wasm32-unknown-unknown, matching cmd/cleat/build_rust.go, and it has to
+	// keep matching.
+	//
+	// This built wasm32-wasip1 until 2026-08-04, so every Rust test here
+	// exercised an artifact shape no user ever runs -- `cleat build --target
+	// rust` has always shipped the unknown-unknown cdylib. The two produce
+	// different import sets, and the difference is not cosmetic: the reason
+	// recorded for keeping Rust off the wasmtime backend was that wasmtime-go
+	// "crashes on fn.Call for Rust cdylib core modules", a claim this suite was
+	// structurally unable to check because it never built a cdylib. It does not
+	// reproduce, and Rust now runs on wasmtime.
+	cmd := commandAt(rustDir, "cargo", "build", "--target", "wasm32-unknown-unknown", "--release")
+	cmd.Env = append(cmd.Env,
 		"HOME="+os.Getenv("HOME"),
 		"PATH="+os.Getenv("PATH"),
 	)
@@ -82,7 +123,7 @@ func buildRustWasm(t *testing.T, projectRoot string) string {
 		t.Fatalf("cargo build failed:\n%s\n%v", string(out), err)
 	}
 
-	wasmPath := filepath.Join(rustDir, "target", "wasm32-wasip1", "release", "rust_workflow.wasm")
+	wasmPath := filepath.Join(rustDir, "target", "wasm32-unknown-unknown", "release", "rust_workflow.wasm")
 	if _, err := os.Stat(wasmPath); err != nil {
 		t.Fatalf("Rust WASM not found at %s: %v", wasmPath, err)
 	}
@@ -94,21 +135,12 @@ func buildRustWasm(t *testing.T, projectRoot string) string {
 // buildGoWasm compiles a Go workflow to WASM using the cleat build pipeline.
 func buildGoWasm(t *testing.T, projectRoot, pkgPath string) string {
 	t.Helper()
-	requireTinygo(t)
 
 	tmpDir := t.TempDir()
-	cmd := exec.Command("go", "run",
+	cmd := commandAt(projectRoot, "go", "run",
 		filepath.Join(projectRoot, "cmd", "cleat"),
-		"build", "--target", "tinygo", "-o", tmpDir, pkgPath,
+		"build", "-o", tmpDir, pkgPath,
 	)
-	cmd.Dir = projectRoot
-	cmd.Env = os.Environ()
-	if goroot := os.Getenv("GOROOT"); goroot != "" {
-		cmd.Env = append(cmd.Env, "GOROOT="+goroot)
-	}
-	if tinygoroot := os.Getenv("TINYGOROOT"); tinygoroot != "" {
-		cmd.Env = append(cmd.Env, "TINYGOROOT="+tinygoroot)
-	}
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -305,7 +337,7 @@ func TestGoWorkflow_ExecuteAndReplay(t *testing.T) {
 	)
 	defer env.Close()
 
-	inputJSON := `{"UserID":"user-42","Cart":[{"SKU":"SKU-001","Quantity":2}]}`
+	inputJSON := `{"userID":"user-42","cart":[{"sku":"SKU-001","quantity":2}]}`
 
 	result, history, err := env.Execute(t, wasmBytes, "place_order", inputJSON)
 	if err != nil {

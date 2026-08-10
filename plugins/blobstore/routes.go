@@ -3,8 +3,8 @@ package blobstore
 import (
 	"crypto/sha256"
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,10 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
-
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -32,7 +31,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -158,7 +157,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		"content_type", contentType,
 	)
 
-	p.writeJSON(w, 201, map[string]interface{}{
+	p.writeJSON(w, 201, map[string]any{
 		"key":    key,
 		"sha256": sha256Hex,
 		"size":   len(body),
@@ -330,7 +329,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		FROM blob_index i
 		WHERE i.tenant_id = $1 AND i.deleted_at IS NULL
 		`
-	args := []interface{}{tid}
+	args := []any{tid}
 	argIdx := 2
 
 	if prefix != "" {

@@ -23,7 +23,7 @@ func (a *SQLDBAdapter) Begin(ctx context.Context) (plugin.PluginTx, error) {
 	return &sqlTxAdapter{tx: tx}, nil
 }
 
-func (a *SQLDBAdapter) Exec(ctx context.Context, query string, args ...interface{}) (int64, error) {
+func (a *SQLDBAdapter) Exec(ctx context.Context, query string, args ...any) (int64, error) {
 	result, err := a.DB.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
@@ -31,7 +31,7 @@ func (a *SQLDBAdapter) Exec(ctx context.Context, query string, args ...interface
 	return result.RowsAffected()
 }
 
-func (a *SQLDBAdapter) Query(ctx context.Context, query string, args ...interface{}) (plugin.Rows, error) {
+func (a *SQLDBAdapter) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
 	rows, err := a.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -39,7 +39,7 @@ func (a *SQLDBAdapter) Query(ctx context.Context, query string, args ...interfac
 	return &sqlRowsWrapper{rows: rows}, nil
 }
 
-func (a *SQLDBAdapter) QueryRow(ctx context.Context, query string, args ...interface{}) plugin.RowScanner {
+func (a *SQLDBAdapter) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
 	row := a.DB.QueryRowContext(ctx, query, args...)
 	return &rowScanner{row: row}
 }
@@ -54,7 +54,7 @@ type sqlTxAdapter struct {
 
 var _ plugin.PluginTx = (*sqlTxAdapter)(nil)
 
-func (a *sqlTxAdapter) Exec(ctx context.Context, query string, args ...interface{}) (int64, error) {
+func (a *sqlTxAdapter) Exec(ctx context.Context, query string, args ...any) (int64, error) {
 	result, err := a.tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
@@ -62,7 +62,7 @@ func (a *sqlTxAdapter) Exec(ctx context.Context, query string, args ...interface
 	return result.RowsAffected()
 }
 
-func (a *sqlTxAdapter) Query(ctx context.Context, query string, args ...interface{}) (plugin.Rows, error) {
+func (a *sqlTxAdapter) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
 	rows, err := a.tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -70,7 +70,7 @@ func (a *sqlTxAdapter) Query(ctx context.Context, query string, args ...interfac
 	return &sqlRowsWrapper{rows: rows}, nil
 }
 
-func (a *sqlTxAdapter) QueryRow(ctx context.Context, query string, args ...interface{}) plugin.RowScanner {
+func (a *sqlTxAdapter) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
 	row := a.tx.QueryRowContext(ctx, query, args...)
 	return &rowScanner{row: row}
 }

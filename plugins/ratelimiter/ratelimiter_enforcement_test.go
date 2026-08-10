@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,9 +39,10 @@ type fakeRateLimitRow struct {
 
 type fakeDBStore struct {
 	mu              sync.RWMutex
-	apiKeys         map[string]string          // sha256 hex -> tenant_id uuid string
+	apiKeys         map[string]string           // sha256 hex -> tenant_id uuid string
 	rateLimits      map[string]fakeRateLimitRow // key: "tenant_uuid/limit_key"
-	corruptNextScan bool                      // next queryAllRateLimits returns corrupt data
+	corruptNextScan bool                        // next queryAllRateLimits returns corrupt data
+	rateCounters    map[string]int              // key: "tenant_uuid/limit_key/window_iso" -> count
 }
 
 type fakeConnector struct {
@@ -96,11 +97,13 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	defer c.store.mu.RUnlock()
 
 	switch {
-	case strings.Contains(query, "FROM tenant_api_keys"):
+	case strings.Contains(query, "tenant_api_keys") && strings.Contains(query, "tenant_id"):
 		return c.queryTenantLookup(args)
 	case strings.Contains(query, "SELECT tenant_id, limit_key, max_requests, window_seconds"):
 		// background.go reload() — no WHERE clause, returns all rows.
 		return c.queryAllRateLimits(corrupt)
+	case strings.Contains(query, "FROM rate_counter"):
+		return c.queryRateCounter(args)
 	case strings.Contains(query, "SELECT limit_key, max_requests, window_seconds, created_at, updated_at"):
 		// routes.go handleList — filtered by tenant.
 		return c.queryRateLimits(args)
@@ -120,6 +123,12 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	switch {
 	case strings.Contains(query, "INSERT INTO rate_limits"):
 		return c.execInsertRateLimit(args)
+	case strings.Contains(query, "INSERT INTO rate_counter"):
+		return c.execInsertRateCounter(args)
+	case strings.Contains(query, "DELETE FROM rate_counter"):
+		return driver.RowsAffected(0), nil
+	case strings.Contains(query, "UPDATE rate_counter"):
+		return c.execUpdateRateCounter(args)
 	case strings.Contains(query, "DELETE FROM rate_limits"):
 		return c.execDeleteRateLimit(args)
 	default:
@@ -376,8 +385,9 @@ func newTestPlugin(t *testing.T) *Plugin {
 func newPluginWithDB(t *testing.T) (*Plugin, *fakeDBStore) {
 	t.Helper()
 	store := &fakeDBStore{
-		apiKeys:    make(map[string]string),
-		rateLimits: make(map[string]fakeRateLimitRow),
+		apiKeys:      make(map[string]string),
+		rateCounters: make(map[string]int),
+		rateLimits:   make(map[string]fakeRateLimitRow),
 	}
 	keyHash := sha256.Sum256([]byte(testAPIKey))
 	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantA.String()
@@ -404,7 +414,7 @@ func authMiddlewareHandler(t *testing.T, maxRequests, windowSeconds int) (*Plugi
 	p.buckets[testTenantA.String()+"/default"] = newTokenBucket(maxRequests, windowSeconds)
 	p.mu.Unlock()
 
-	store := &fakeDBStore{apiKeys: make(map[string]string)}
+	store := &fakeDBStore{apiKeys: make(map[string]string), rateCounters: make(map[string]int)}
 	keyHash := sha256.Sum256([]byte(testAPIKey))
 	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantA.String()
 
@@ -1177,7 +1187,7 @@ func TestListAfterDelete(t *testing.T) {
 
 	// Create two limits.
 	put := func(key string) {
-		body := fmt.Sprintf(`{"max_requests":5,"window_seconds":30}`)
+		body := `{"max_requests":5,"window_seconds":30}`
 		req := httptest.NewRequest("PUT", "/rate-limits/"+key, bytes.NewReader([]byte(body)))
 		req.Header.Set("Authorization", "Bearer "+testAPIKey)
 		rec := httptest.NewRecorder()
@@ -1342,7 +1352,6 @@ func TestRunWithDBInitialReloadSuccess(t *testing.T) {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // Reload scan-error path
 // ---------------------------------------------------------------------------
@@ -1426,7 +1435,7 @@ type rowsErrConn struct {
 func (*rowsErrConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("rowsErrConn: unexpected Prepare")
 }
-func (*rowsErrConn) Close() error  { return nil }
+func (*rowsErrConn) Close() error              { return nil }
 func (*rowsErrConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("rowsErrConn: no tx") }
 
 var _ driver.QueryerContext = (*rowsErrConn)(nil)
@@ -1447,7 +1456,7 @@ func (c *rowsErrConn) QueryContext(_ context.Context, query string, args []drive
 		}
 		return &rowsErrFakeRows{columns: columns, data: data, failOn: len(data)}, nil
 	}
-	if strings.Contains(query, "FROM tenant_api_keys") {
+	if strings.Contains(query, "tenant_api_keys") && strings.Contains(query, "tenant_id") {
 		keyHash, err := argBytes(args, 1)
 		if err != nil {
 			return nil, err
@@ -1467,8 +1476,9 @@ func (c *rowsErrConn) QueryContext(_ context.Context, query string, args []drive
 
 func TestReload_RowsErr(t *testing.T) {
 	store := &fakeDBStore{
-		apiKeys:    make(map[string]string),
-		rateLimits: make(map[string]fakeRateLimitRow),
+		apiKeys:      make(map[string]string),
+		rateCounters: make(map[string]int),
+		rateLimits:   make(map[string]fakeRateLimitRow),
 	}
 	keyHash := sha256.Sum256([]byte(testAPIKey))
 	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantA.String()
@@ -1493,5 +1503,173 @@ func TestReload_RowsErr(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "rows iteration") {
 		t.Errorf("expected 'rows iteration' error, got: %v", err)
+	}
+}
+
+// ---- Rate counters: in-memory store -----------------------------------------
+
+func (c *fakeConn) execInsertRateCounter(args []driver.NamedValue) (driver.Result, error) {
+	tid, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	key, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	windowStart, err := argTime(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	rk := tid + "/" + key + "/" + windowStart.Format(time.RFC3339)
+	if _, exists := c.store.rateCounters[rk]; !exists {
+		c.store.rateCounters[rk] = 0
+	}
+	return driver.RowsAffected(1), nil
+}
+
+func (c *fakeConn) execUpdateRateCounter(args []driver.NamedValue) (driver.Result, error) {
+	tid, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	key, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	windowStart, err := argTime(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	rk := tid + "/" + key + "/" + windowStart.Format(time.RFC3339)
+	c.store.rateCounters[rk]++
+	return driver.RowsAffected(1), nil
+}
+
+func (c *fakeConn) queryRateCounter(args []driver.NamedValue) (driver.Rows, error) {
+	tid, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	key, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	// Sum counts with matching key prefix.
+	prefix := tid + "/" + key + "/"
+	var total int
+	for rk, count := range c.store.rateCounters {
+		if strings.HasPrefix(rk, prefix) {
+			total += count
+		}
+	}
+	return &fakeRows{
+		columns: []string{"coalesce"},
+		data:    [][]driver.Value{{int64(total)}},
+	}, nil
+}
+
+func argTime(args []driver.NamedValue, ordinal int) (time.Time, error) {
+	for _, a := range args {
+		if a.Ordinal == ordinal {
+			t, ok := a.Value.(time.Time)
+			if !ok {
+				return time.Time{}, fmt.Errorf("arg %d: want time.Time, got %T", ordinal, a.Value)
+			}
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("arg %d not found", ordinal)
+}
+
+// ---- Test: DB mode allowDB / checkDBRateLimit --------------------------------
+
+func TestAllowDB_UnderLimit(t *testing.T) {
+	store := &fakeDBStore{
+		apiKeys:      make(map[string]string),
+		rateLimits:   make(map[string]fakeRateLimitRow),
+		rateCounters: make(map[string]int),
+	}
+	keyHash := sha256.Sum256([]byte(testAPIKey))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantA.String()
+	fakeDB := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { fakeDB.Close() })
+
+	p := &Plugin{}
+	err := p.Init(context.Background(), &plugin.Environment{
+		DB:      &engine.SQLDBAdapter{DB: fakeDB},
+		Config:  []byte(`{"mode":"db"}`),
+		Dialect: plugin.DialectPostgres,
+	})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if p.mode != "db" {
+		t.Fatal("expected mode=db")
+	}
+	// Pre-populate a rate-limit config (has to be present for allowDB to find it).
+	p.mu.Lock()
+	p.buckets[testTenantA.String()+"/api"] = newTokenBucket(10, 1) // 10 req/sec
+	p.mu.Unlock()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	info := p.allowDB(testTenantA, req)
+	if !info.allowed {
+		t.Fatal("expected allowed=true for first request")
+	}
+	// Verify the counter was incremented.
+	rk := testTenantA.String() + "/api/" + time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	if store.rateCounters[rk] != 1 {
+		t.Errorf("expected counter=1, got %d", store.rateCounters[rk])
+	}
+}
+
+func TestAllowDB_OverLimit(t *testing.T) {
+	store := &fakeDBStore{
+		apiKeys:      make(map[string]string),
+		rateLimits:   make(map[string]fakeRateLimitRow),
+		rateCounters: make(map[string]int),
+	}
+	keyHash := sha256.Sum256([]byte(testAPIKey))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantA.String()
+	fakeDB := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { fakeDB.Close() })
+
+	p := &Plugin{}
+	err := p.Init(context.Background(), &plugin.Environment{
+		DB:      &engine.SQLDBAdapter{DB: fakeDB},
+		Config:  []byte(`{"mode":"db"}`),
+		Dialect: plugin.DialectPostgres,
+	})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	// Pre-populate the counter to saturate the limit (1 req/sec rate limit).
+	now := time.Now().UTC().Truncate(time.Second)
+	rk := testTenantA.String() + "/api/" + now.Format(time.RFC3339)
+	store.rateCounters[rk] = 1
+	p.mu.Lock()
+	p.buckets[testTenantA.String()+"/api"] = newTokenBucket(1, 1) // 1 req/sec
+	p.mu.Unlock()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	info := p.allowDB(testTenantA, req)
+	if info.allowed {
+		t.Fatal("expected allowed=false (limit exceeded)")
+	}
+}
+
+func TestCheckDBRateLimit_ZeroMaxRequests(t *testing.T) {
+	p := &Plugin{}
+	p.Init(context.Background(), &plugin.Environment{})
+	allowed, remaining, err := p.checkDBRateLimit(context.Background(), uuid.Nil, rateLimitConfig{maxRequests: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if allowed {
+		t.Error("expected allowed=false when maxRequests=0")
+	}
+	if remaining != 0 {
+		t.Errorf("expected remaining=0, got %d", remaining)
 	}
 }

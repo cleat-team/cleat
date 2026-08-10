@@ -38,6 +38,7 @@ func TestComputeBasicIdentifiesDurableLeaves(t *testing.T) {
 		basicFQ("releaseReservation"):      true,
 		basicFQ("refundPayment"):           true,
 		basicFQ("notifyCustomer"):          true,
+		basicFQ("LongRunning"):             true,
 	}
 
 	for name := range expectedLeaves {
@@ -74,10 +75,10 @@ func TestComputeBasicIdentifiesDurableClosure(t *testing.T) {
 
 	// Functions that transitively reach a cleat leaf.
 	expectedClosure := map[string]bool{
-		basicFQ("PlaceOrder"):          true,
-		basicFQ("CancelOrder"):         true,
-		basicFQ("validateAndReserve"):  true,
-		basicFQ("processPayment"):      true,
+		basicFQ("PlaceOrder"):         true,
+		basicFQ("CancelOrder"):        true,
+		basicFQ("validateAndReserve"): true,
+		basicFQ("processPayment"):     true,
 	}
 
 	for name := range expectedClosure {
@@ -112,13 +113,13 @@ func TestComputeBasicCorrectlyTagsPureFunctions(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	// Total functions = 12 (8 leaves + 4 closure), so pure should be empty.
+	// Total functions = 13 (9 leaves + 4 closure), so pure should be empty.
 	totalFuncs := len(result.Funcs)
 	durableCount := len(cr.DurableLeaves) + len(cr.DurableClosure)
 	pureCount := len(cr.Pure)
 
-	if totalFuncs != 12 {
-		t.Errorf("expected 12 functions, got %d", totalFuncs)
+	if totalFuncs != 13 {
+		t.Errorf("expected 13 functions, got %d", totalFuncs)
 	}
 
 	if durableCount+pureCount != totalFuncs {
@@ -233,11 +234,11 @@ func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 	cr := Compute(result, cg)
 
 	expectedLeaves := map[string]bool{
-		"github.com/cleat-team/cleat/testdata/errors.leafFunc":                   true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithGoroutine":           true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithInterfaceDispatch":   true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithFuncValue":           true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithFloatCondition":      true,
+		"github.com/cleat-team/cleat/testdata/errors.leafFunc":                 true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithGoroutine":         true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithInterfaceDispatch": true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithFuncValue":         true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithFloatCondition":    true,
 	}
 
 	for name := range expectedLeaves {

@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -36,7 +35,7 @@ func requireDB(t *testing.T) (*sql.DB, *engine.PostgresStore) {
 		t.Skipf("Skipping: cannot ping database: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return db, engine.NewPostgresStore(db, "queue-1", "queue-2", "queue-3")
+	return db, engine.NewPostgresStore(db, TestQueue1, TestQueue2, TestQueue3)
 }
 
 // TestKillWorkerMidExecution kills one worker and verifies that in-flight
@@ -55,7 +54,8 @@ func TestKillWorkerMidExecution(t *testing.T) {
 	workflowIDs := make([]string, 0, numWorkflows)
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("test-cluster-failover-%d", i)
-		q := fmt.Sprintf("queue-%d", (i%3)+1)
+		q := []string{TestQueue1, TestQueue2, TestQueue3}[i%3]
+		EnsureDef(t, db, "failover-test", 1)
 		_, err := db.Exec(`
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 			VALUES ($1, 'failover-test', 1, 'ready', '{}', $2)
@@ -73,42 +73,104 @@ func TestKillWorkerMidExecution(t *testing.T) {
 		}
 	}()
 
-	// Claim workflows using multiple workers to simulate distribution.
-	var mu sync.Mutex
-	claimed := make(map[string]string)
-	var wg sync.WaitGroup
-	for _, wid := range []string{"worker-1", "worker-2", "worker-3"} {
-		wg.Add(1)
-		go func(wID string) {
-			defer wg.Done()
-			for range 5 {
-				wf, err := store.ClaimWorkflow(ctx, wID)
-				if err != nil {
-					return
-				}
-				if wf == nil {
-					return
-				}
-				mu.Lock()
-				claimed[wf.ID] = wID
-				mu.Unlock()
-			}
-		}(wid)
+	// Claim workflows across three workers, round-robin and in order.
+	//
+	// This used to run the three workers as goroutines racing each other, each
+	// allowed up to five claims for six workflows -- so worker-1 legitimately
+	// finished with none whenever the other two took all six between them, and
+	// the guard below turned that into a failed run. Observed on CI
+	// (2026-08-05): "worker-1 claimed none of the 6 workflows". The guard is
+	// right and stays; the race is what had to go.
+	//
+	// Round-robin gives each worker exactly two, which is what the test wanted
+	// from the distribution in the first place. Nothing here is testing
+	// concurrent claiming -- TestClaimSkipLocked and the scale suite do that --
+	// so the concurrency was cost without cover.
+	//
+	// The claimed instance is kept, not just its ID: ReleaseWorkflow needs the
+	// generation ClaimWorkflow handed back. This map used to be
+	// map[id]workerID, so the release below passed a literal 0, lost the
+	// fence, logged the refusal and carried on -- and the assertion at the end
+	// was a t.Log too, so the test passed while releasing nothing and
+	// reclaiming nothing.
+	claimed := make(map[string]*engine.WorkflowInstance)
+	claimedBy := make(map[string]string)
+	workers := []string{"worker-1", "worker-2", "worker-3"}
+	for i := 0; i < numWorkflows; i++ {
+		wID := workers[i%len(workers)]
+		wf, err := store.ClaimWorkflow(ctx, wID)
+		if err != nil {
+			t.Fatalf("ClaimWorkflow(%s): %v", wID, err)
+		}
+		if wf == nil {
+			// Fewer ready workflows than expected: say which claim came up
+			// empty rather than leaving the guard below to report the
+			// aftermath.
+			t.Fatalf("ClaimWorkflow(%s) returned nothing on claim %d of %d; "+
+				"the workflows this test inserted are not all ready",
+				wID, i+1, numWorkflows)
+		}
+		claimed[wf.ID] = wf
+		claimedBy[wf.ID] = wID
 	}
-	wg.Wait()
 
-	// Simulate worker-1 crash: release its workflows back to ready.
-	for id, workerID := range claimed {
-		if workerID == "worker-1" {
-			if err := store.ReleaseWorkflow(ctx, id, "worker-1", 0, time.Now()); err != nil {
-				t.Logf("ReleaseWorkflow for %s: %v", id, err)
+	// Crash whichever worker actually claimed work, rather than naming one.
+	//
+	// This comment used to say "claiming is a race between three concurrent
+	// workers", which was true when it was written and false by the time it
+	// landed. Two changes fixed the same CI failure independently and merged
+	// cleanly: #330 replaced the concurrent claiming with the round-robin loop
+	// above, and #329 (this block) stopped assuming which worker held claims.
+	// Neither is wrong, but the first removed the race the second describes.
+	//
+	// Kept rather than reverted to a hardcoded "worker-1", for two reasons.
+	// The vacuity guard reads better as "no worker claimed anything" than as
+	// "worker-1 claimed none", since the latter is a statement about the
+	// distribution and only the former is a statement about failover. And it
+	// means the test does not silently depend on the round-robin above staying
+	// round-robin: if anyone restores concurrent claiming, this keeps working
+	// instead of flaking again.
+	//
+	// Picked deterministically (most claims, ties broken by the fixed name
+	// order) so a failure is reproducible rather than depending on map
+	// iteration order, which is randomised. With round-robin claiming every
+	// worker holds the same number, so this reliably selects worker-1 today.
+	workerIDs := []string{"worker-1", "worker-2", "worker-3"}
+	claimCounts := make(map[string]int, len(workerIDs))
+	for _, workerID := range claimedBy {
+		claimCounts[workerID]++
+	}
+	victim := ""
+	for _, wID := range workerIDs {
+		if claimCounts[wID] > claimCounts[victim] {
+			victim = wID
+		}
+	}
+	if claimCounts[victim] == 0 {
+		t.Fatalf("no worker claimed any of the %d workflows, so this test has nothing "+
+			"to fail over and would pass without exercising failover at all", numWorkflows)
+	}
+
+	// Simulate the victim crashing: release its workflows back to ready.
+	var released int
+	for id, workerID := range claimedBy {
+		if workerID == victim {
+			if err := store.ReleaseWorkflow(ctx, id, victim, claimed[id].Generation, time.Now()); err != nil {
+				t.Fatalf("ReleaseWorkflow for %s: %v", id, err)
 			}
+			released++
 		}
 	}
 
-	// Verify that remaining workers can claim the released workflows.
+	// Verify that the *other* workers can claim the released workflows.
+	survivors := make([]string, 0, len(workerIDs)-1)
+	for _, wID := range workerIDs {
+		if wID != victim {
+			survivors = append(survivors, wID)
+		}
+	}
 	reclaimed := make(map[string]string)
-	for _, wid := range []string{"worker-2", "worker-3"} {
+	for _, wid := range survivors {
 		for range 10 {
 			wf, err := store.ClaimWorkflow(ctx, wid)
 			if err != nil {
@@ -121,21 +183,25 @@ func TestKillWorkerMidExecution(t *testing.T) {
 		}
 	}
 
-	// Count how many of worker-1's original workflows got reclaimed.
-	var reclaimedFromWorker1 int
-	for id, wID := range claimed {
-		if wID == "worker-1" {
+	// Count how many of the victim's original workflows got reclaimed.
+	var reclaimedFromVictim int
+	for id, wID := range claimedBy {
+		if wID == victim {
 			if _, ok := reclaimed[id]; ok {
-				reclaimedFromWorker1++
+				reclaimedFromVictim++
 			}
 		}
 	}
 
-	if reclaimedFromWorker1 == 0 {
-		t.Log("Note: no worker-1 workflows were reclaimed by remaining workers (may be timing)")
-	} else {
-		t.Logf("Reclaimed %d workflows from worker-1 on remaining workers", reclaimedFromWorker1)
+	// An assertion, not a note. "No workflows were reclaimed (may be timing)"
+	// is the same output a completely broken failover path produces, and this
+	// test is the only thing that would have said otherwise.
+	if reclaimedFromVictim == 0 {
+		t.Errorf("%s released %d workflows and the remaining workers (%v) reclaimed "+
+			"none of them: work orphaned by a crashed worker is not being picked up",
+			victim, released, survivors)
 	}
+	t.Logf("Reclaimed %d of %d workflows released by %s", reclaimedFromVictim, released, victim)
 }
 
 // TestKillPostgresAndRestart kills the PostgreSQL container, restarts it,
@@ -156,11 +222,12 @@ func TestKillPostgresAndRestart(t *testing.T) {
 
 	// Create a workflow before the kill.
 	runID := "test-cluster-pg-restart"
+	EnsureDef(t, db, "pg-restart", 1)
 	_, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'pg-restart', 1, 'ready', '{}', 'queue-1')
+		VALUES ($1, 'pg-restart', 1, 'ready', '{}', $2)
 		ON CONFLICT (id) DO NOTHING
-	`, runID)
+	`, runID, TestQueue1)
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
@@ -196,15 +263,19 @@ func TestKillPostgresAndRestart(t *testing.T) {
 	newDB, newStore := requireDB(t)
 	_ = newDB
 
+	// An assertion, not a note. This used to log "No workflows to claim after
+	// restart (may have been consumed by another worker)" and pass -- which is
+	// also what a database that never recovered produces. Nothing else can
+	// consume it now: the workflow is on a queue no compose worker serves.
 	wf, err := newStore.ClaimWorkflow(ctx, "worker-1")
 	if err != nil {
 		t.Fatalf("Claim after restart failed: %v", err)
 	}
 	if wf == nil {
-		t.Log("No workflows to claim after restart (may have been consumed by another worker)")
-	} else {
-		t.Logf("Successfully claimed workflow %s after postgres restart", wf.ID)
+		t.Fatal("no workflow could be claimed after the PostgreSQL restart, " +
+			"though one was inserted before it")
 	}
+	t.Logf("Successfully claimed workflow %s after postgres restart", wf.ID)
 }
 
 // TestFullClusterRestart stops all workers, restarts them, and verifies state
@@ -224,11 +295,12 @@ func TestFullClusterRestart(t *testing.T) {
 
 	// Create workflows and process some of them.
 	runID := "test-cluster-restart"
+	EnsureDef(t, db, "restart-test", 1)
 	_, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'restart-test', 1, 'ready', '{}', 'queue-1')
+		VALUES ($1, 'restart-test', 1, 'ready', '{}', $2)
 		ON CONFLICT (id) DO NOTHING
-	`, runID)
+	`, runID, TestQueue1)
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
@@ -251,7 +323,7 @@ func TestFullClusterRestart(t *testing.T) {
 	}
 
 	// Release the workflow (simulating worker restart before completion).
-	if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", 0, time.Now()); err != nil {
+	if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", wf.Generation, time.Now()); err != nil {
 		t.Fatalf("ReleaseWorkflow: %v", err)
 	}
 

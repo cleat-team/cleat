@@ -41,7 +41,7 @@ func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args
 	// Load event history.
 	events, err := store.LoadEventHistory(ctx, workflowID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading event history: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error loading event history for %q: %v\n", workflowID, err)
 		osExit(1)
 	}
 	fmt.Printf("  Events: %d\n", len(events))
@@ -97,7 +97,7 @@ func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args
 	)
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "replay error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "replay error: %v\n  Check that --entry-point matches an export in the deployed WASM and that the workflow event history is not corrupted.\n", err)
 		osExit(1)
 	}
 

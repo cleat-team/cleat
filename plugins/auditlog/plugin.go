@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func init() {
@@ -45,12 +45,12 @@ type queuedAuditEvent struct {
 
 // Plugin implements audit trail recording and querying.
 type Plugin struct {
-	db        plugin.PluginDB
-	mux       *http.ServeMux
-	logger    *slog.Logger
-	config    Config
-	dialect   plugin.Dialect
-	buffer    chan queuedAuditEvent // bounded channel acting as ring buffer
+	db      plugin.PluginDB
+	mux     *http.ServeMux
+	logger  *slog.Logger
+	config  Config
+	dialect plugin.Dialect
+	buffer  chan queuedAuditEvent // bounded channel acting as ring buffer
 }
 
 // Config controls audit-log behaviour.

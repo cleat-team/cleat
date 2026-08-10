@@ -4,72 +4,60 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 
 	_ "github.com/lib/pq"
 )
 
+// suiteQueue keeps this suite's workflows off the queues the other tests/
+// suites use.
+//
+// Without it every DB-backed suite inserted onto "default" and constructed its
+// store with no queue list, which also polls "default". Go runs distinct
+// packages in parallel and they all point at CLEAT_TEST_DB, so
+// `go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...`
+// had tests/scale claiming tests/integrity's workflows out from under it:
+// 17 failures, and every one of them passes when the suites are run one at a
+// time. ClaimWorkflows filters on `task_queue = ANY($2)`, so giving each suite
+// its own queue is the whole fix. IMPROVEMENT-PLAN 2.39.
+const suiteQueue = "queue-upgrade-tests"
+
 // testDB returns a database connection for upgrade tests.
+//
+// The schema comes from engine/testutil, which builds it from
+// migrations/postgres/. This helper used to create every table itself with
+// CREATE TABLE IF NOT EXISTS, which is how the suite came to depend on a
+// workflow_instances with no foreign key to workflow_defs -- see the same note
+// in tests/integrity and engine/fault_test.go.
+//
+// testutil.TestDB also fails, rather than skips, when CLEAT_TEST_DB is set but
+// unreachable, so a database that stops arriving empties this job loudly.
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("Skipping upgrade test in short mode")
+	db := testutil.TestDB(t, testutil.DialectPostgres)
+
+	// worker_rolling_test.go inserts instances with def_name='test',
+	// def_version=1, and workflow_instances_def_name_def_version_fkey requires
+	// the definition to exist. Seeded here because nothing else in this
+	// package creates it: on a machine where another suite had already made
+	// the row those tests passed, and on a fresh database they failed. That is
+	// an order dependency between packages, which is worth removing whether or
+	// not it is currently biting.
+	if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
+		VALUES ('test', 1, '\x00', '{}') ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatalf("seed workflow_defs(test, 1): %v", err)
 	}
-	dsn := os.Getenv("CLEAT_TEST_DB")
-	if dsn == "" {
-		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
-	}
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Skipf("Skipping: no database available: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping: cannot ping database: %v", err)
-	}
-	// Clean up leftover test data.
+
+	// Clean up leftover test data. Children first: the foreign keys apply to
+	// deletes too.
 	db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE 'upg-%'`)
 	db.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'upg-%'`)
 	db.Exec(`DELETE FROM workflow_defs WHERE name LIKE 'upg-%'`)
 
-	// Ensure base schema exists.
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_defs (
-		name TEXT NOT NULL, version INTEGER NOT NULL,
-		wasm_bytes BYTEA NOT NULL, entry_points TEXT[] NOT NULL DEFAULT '{}',
-		min_version INTEGER NOT NULL DEFAULT 0,
-		max_history_length INTEGER NOT NULL DEFAULT 0,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (name, version))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_instances (
-		id TEXT PRIMARY KEY, def_name TEXT NOT NULL, def_version INTEGER NOT NULL DEFAULT 1,
-		status TEXT NOT NULL DEFAULT 'ready', input JSONB NOT NULL DEFAULT '{}',
-		assigned_to TEXT, heartbeat_at TIMESTAMPTZ,
-		next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(), completed_at TIMESTAMPTZ,
-		result JSONB, error_msg TEXT, parent_workflow_id TEXT,
-		trace_id TEXT,
-		query_state JSONB DEFAULT '{}', task_queue TEXT NOT NULL DEFAULT 'default',
-		cancellation_requested BOOLEAN NOT NULL DEFAULT false,
-		cancellation_reason TEXT, sticky_worker_id TEXT)`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS event_history (
-		workflow_id TEXT NOT NULL, step INTEGER NOT NULL,
-		event_type TEXT NOT NULL DEFAULT 'call',
-		service TEXT, operation TEXT, request JSONB, response JSONB, error TEXT,
-		duration_ms BIGINT, signal_names TEXT, timeout_ms BIGINT,
-		signal_name TEXT, signal_payload JSONB, defer_description TEXT,
-		defer_id TEXT, child_name TEXT, child_input JSONB, run_id TEXT,
-		new_input JSONB, plugin_name TEXT, plugin_func TEXT,
-		plugin_input JSONB, plugin_output JSONB, plugin_error TEXT,
-		promise_name TEXT, promise_id TEXT, promise_result TEXT, promise_error TEXT,
-		payload JSONB,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (workflow_id, step))`)
-	db.Exec(`CREATE EXTENSION IF NOT EXISTS pgcrypto`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS tenant_id TEXT`)
-	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS payload JSONB`)
 	return db
 }
 
@@ -93,7 +81,7 @@ func TestMigrationNoDataLoss(t *testing.T) {
 
 	runID := fmt.Sprintf("upg-mig-noloss-%d", time.Now().UnixNano())
 	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{"key":"value"}', 'default')`, runID, defName)
+		VALUES ($1, $2, 1, 'ready', '{"key":"value"}', '`+suiteQueue+`')`, runID, defName)
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
@@ -102,7 +90,7 @@ func TestMigrationNoDataLoss(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	err = store.AppendEventHistory(ctx, runID, engine.EventRecord{
 		Step: 0, EventType: engine.EventTypeCall,
 		Service: "svc", Op: "op", Request: `{"original":"data"}`, Response: `{"ok":true}`,
@@ -124,13 +112,21 @@ func TestMigrationNoDataLoss(t *testing.T) {
 	}
 
 	// Verify existing data is intact after migration.
+	// input is JSONB, so comparing its ::text rendering to a Go literal
+	// compares formatting, not data: PostgreSQL returns {"key": "value"},
+	// with a space. All three checks in this file did that, and all three
+	// failed the moment a database was pointed at them. Let PostgreSQL do the
+	// comparison, and read the text only for the failure message.
+	const wantInput = `{"key":"value"}`
 	var input string
-	err = db.QueryRow(`SELECT input::text FROM workflow_instances WHERE id = $1`, runID).Scan(&input)
+	var inputIntact bool
+	err = db.QueryRow(`SELECT input::text, input = $2::jsonb FROM workflow_instances WHERE id = $1`,
+		runID, wantInput).Scan(&input, &inputIntact)
 	if err != nil {
 		t.Fatalf("read instance after migration: %v", err)
 	}
-	if input != `{"key":"value"}` {
-		t.Errorf("instance input changed after migration: got %q", input)
+	if !inputIntact {
+		t.Errorf("instance input changed after migration: got %s, want %s", input, wantInput)
 	}
 
 	// Verify event history is intact.
@@ -182,7 +178,7 @@ func TestMigrationRollback(t *testing.T) {
 
 	runID := fmt.Sprintf("upg-mig-roll-%d", time.Now().UnixNano())
 	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{"preserved":true}', 'default')`, runID, defName)
+		VALUES ($1, $2, 1, 'ready', '{"preserved":true}', '`+suiteQueue+`')`, runID, defName)
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
@@ -191,7 +187,7 @@ func TestMigrationRollback(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	err = store.AppendEventHistory(ctx, runID, engine.EventRecord{
 		Step: 0, EventType: engine.EventTypeCall,
 		Service: "svc", Op: "op", Request: `{"preserved":true}`, Response: `{"ok":true}`,
@@ -219,13 +215,16 @@ func TestMigrationRollback(t *testing.T) {
 	}
 
 	// Verify original data is intact after rollback.
+	const wantInput = `{"preserved":true}`
 	var input string
-	err = db.QueryRow(`SELECT input::text FROM workflow_instances WHERE id = $1`, runID).Scan(&input)
+	var inputIntact bool
+	err = db.QueryRow(`SELECT input::text, input = $2::jsonb FROM workflow_instances WHERE id = $1`,
+		runID, wantInput).Scan(&input, &inputIntact)
 	if err != nil {
 		t.Fatalf("read instance after rollback: %v", err)
 	}
-	if input != `{"preserved":true}` {
-		t.Errorf("instance input changed after rollback: got %q", input)
+	if !inputIntact {
+		t.Errorf("instance input changed after rollback: got %s, want %s", input, wantInput)
 	}
 
 	// Verify event history is intact.
@@ -261,7 +260,7 @@ func TestMigrationIdempotent(t *testing.T) {
 
 	runID := fmt.Sprintf("upg-mig-idem-%d", time.Now().UnixNano())
 	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{"idempotent":true}', 'default')`, runID, defName)
+		VALUES ($1, $2, 1, 'ready', '{"idempotent":true}', '`+suiteQueue+`')`, runID, defName)
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
@@ -270,7 +269,7 @@ func TestMigrationIdempotent(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	store := engine.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db, suiteQueue)
 	err = store.AppendEventHistory(ctx, runID, engine.EventRecord{
 		Step: 0, EventType: engine.EventTypeCall,
 		Service: "svc", Op: "op", Request: `{"idempotent":true}`, Response: `{"ok":true}`,
@@ -315,13 +314,16 @@ func TestMigrationIdempotent(t *testing.T) {
 	}
 
 	// Verify original data is intact.
+	const wantInput = `{"idempotent":true}`
 	var input string
-	err = db.QueryRow(`SELECT input::text FROM workflow_instances WHERE id = $1`, runID).Scan(&input)
+	var inputIntact bool
+	err = db.QueryRow(`SELECT input::text, input = $2::jsonb FROM workflow_instances WHERE id = $1`,
+		runID, wantInput).Scan(&input, &inputIntact)
 	if err != nil {
 		t.Fatalf("read instance after second migration: %v", err)
 	}
-	if input != `{"idempotent":true}` {
-		t.Errorf("instance input changed: got %q", input)
+	if !inputIntact {
+		t.Errorf("instance input changed: got %s, want %s", input, wantInput)
 	}
 
 	// Apply multiple migration-style ALTER TABLE statements that match the

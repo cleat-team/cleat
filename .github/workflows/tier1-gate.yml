@@ -1,0 +1,303 @@
+# ---------------------------------------------------------------------------
+# Tier 1 Gate
+#
+# Runs scripts/tier-gate.sh, which enforces tiers.yaml's tier-1 contract:
+# must pass, on every dialect named there, and a skip is a failure.
+#
+# This is the job that turns tier 1 from a claim into a property. tiers.yaml's
+# own header said so: "Nothing enforces this file until scripts/tier-gate.sh is
+# wired into CI as a required check. Until then a tier here is a claim about
+# what we intend to hold ourselves to, not a claim that anything is checking."
+#
+# Deliberately strict, and the strictness is the point:
+#   - no continue-on-error. A tier-1 failure blocks.
+#   - no known-failure list. Tier 1 has none by definition.
+#   - the gate refuses to run at all when a precondition is missing, rather
+#     than running and reporting a green that measured nothing. An unset DSN
+#     takes ./engine/ from 3846 tests to 2544 and still prints "ok"; that
+#     asymmetry is the whole reason this file exists.
+#
+# What this job must provide, and why each one is here rather than optional:
+#
+#   postgres 5432    tier1.dialects
+#   mysql    3306    tier1.dialects
+#   mssql    1433    tier1.dialects
+#   postgres 5433    ./tests/crash/... is a tier-1 package and uses none of the
+#                    CLEAT_TEST_* DSNs. It reads CLEAT_CRASH_DB, derives an
+#                    unprivileged cleat_app role from it, and applies the
+#                    shipped migrations itself. Its tests Fatal rather than
+#                    skip when it is unreachable, so without this service the
+#                    gate reports five failures that mean "nobody asked".
+#   componentize-py  tier1.languages includes python (D2). Both it and
+#   wasm-tools       wasm-tools are checked independently by the gate, because
+#                    installing only the first leaves the engine tests skipping
+#                    with a different message.
+#
+# What this job deliberately does NOT provide: Rust, Node, a JDK or Gradle.
+# Those are tier-2 languages, and D5 decided the gate filters their tests out
+# rather than provisioning their toolchains -- see the note above
+# tier1.exclude_tests in tiers.yaml. The short version is that tier 1's
+# contract makes every registry it depends on a release blocker, and on
+# 2026-08-06 alone Maven Central answered 429 and 403 on unrelated PRs and
+# actions/setup-go changed a cache key in a way that made one PR permanently
+# unmergeable. PyPI and the wasm-tools release are accepted here because
+# python IS tier 1; crates.io, npm and Maven Central are not, because their
+# languages are not.
+# ---------------------------------------------------------------------------
+name: Tier 1 Gate
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tier1:
+    name: Tier 1 Gate
+    runs-on: ubuntu-latest
+    # The gate ran 6595 tests in 11 packages plus the cleat module when this
+    # was written, with -p 1 (engine/testutil's CleanupPostgresTestData is an
+    # unqualified DELETE FROM across eleven tables, so concurrent packages
+    # delete each other's fixtures). 45 is generous against that; a gate that
+    # times out is indistinguishable from one that fails, and this one has to
+    # be readable.
+    timeout-minutes: 45
+
+    services:
+      postgres:
+        # PINNED 2026-08-08. `postgres:16` is a floating tag in exactly the way
+        # `2022-latest` was for SQL Server below: it moved from 16.0 to 16.14
+        # over the life of this repo, and every required check that touches a
+        # database resolved whatever the registry served that morning.
+        #
+        # scripts/check-workflow-guards.py's floating-tag guard did NOT catch
+        # this when the pin landed: it only rejected `:latest` and tags ending
+        # in `-latest`, so a major-only tag walked straight through. Tightened
+        # the same day to require a digest and nothing else, once mysql:8.4 was
+        # pinned too -- so this is now enforced rather than merely done. See
+        # is_floating() for why enumerating moving-tag spellings was the wrong
+        # shape: no rule over tag TEXT separates `8.4` from `8.4.11` without
+        # knowing the publisher's versioning policy, and Docker Hub tags are
+        # mutable by design regardless.
+        #
+        # Re-derive the digest, and read the version it resolves to:
+        #
+        #   docker buildx imagetools inspect postgres:16      # Digest: sha256:...
+        #   docker run --rm postgres:16 postgres --version    # -> 16.14
+        #
+        # The `:16.14@sha256:` form is redundant on purpose: Docker resolves by
+        # digest and ignores the tag, so the tag is there for the reader. If
+        # you bump one, bump both -- a tag that disagrees with its digest is
+        # worse than no tag, because it is a claim nothing checks.
+        #
+        # THIS IS ONE OF TWELVE SITES. The others are in ci.yml, tier2-gate.yml,
+        # multi-db-ci.yml, soak.yml, plugin-harness-ci.yml (x2), this file (x2),
+        # and the four compose files at the repo root and in .devcontainer/.
+        # cmd/cleat/templates/workflow/docker-compose.yml is deliberately NOT
+        # pinned -- see the comment there.
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_USER: cleat
+          POSTGRES_PASSWORD: cleat
+          POSTGRES_DB: cleat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      # The crash suite's own instance. Not a second database on the first
+      # server: this suite crashes and restarts workers against it and applies
+      # migrations as an owner role, and PARALLEL-WORKSTREAMS.md gives it its
+      # own port for that reason. The DSN shape below matches the default in
+      # tests/crash/harness_test.go's ownerDSN.
+      postgres-crash:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_USER: cleat
+          POSTGRES_PASSWORD: cleat
+          POSTGRES_DB: cleat
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      mysql:
+        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        env:
+          MYSQL_ROOT_PASSWORD: cleat
+          MYSQL_DATABASE: cleat
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      mssql:
+        # Pinned by digest on 2026-08-07. THE RATIONALE FOR ALL SEVEN `image:`
+        # SITES LIVES HERE; the other six, spread over five files, carry a
+        # one-line pointer back to this comment.
+        #
+        # `2022-latest` is a moving tag. Microsoft republishes it on their own
+        # schedule, so a republish can turn every open PR in the repo red for a
+        # reason unrelated to anything the project did, and the failure lands on
+        # whoever happens to have a PR open. Three of its uses are required
+        # status checks -- Test SQL Server, Tier 1 Gate and Tier 2 Gate -- so
+        # that is not a hypothetical inconvenience. Same class as the MinIO
+        # `:latest` pinned in #377, and larger.
+        #
+        # The digest below is what `2022-latest` resolved to on 2026-08-07, so
+        # this is the image these jobs were already green on: pinning it is a
+        # no-op today and a guarantee tomorrow. It is SQL Server 16.0.4265.3 on
+        # an ubuntu 22.04 base, linux/amd64. The tag carries a single manifest
+        # rather than an index, so there is one digest and not one per platform
+        # -- worth knowing before bumping it. Re-derive both:
+        #
+        #   docker manifest inspect -v mcr.microsoft.com/mssql/server:2022-latest
+        #   curl -sL https://mcr.microsoft.com/v2/mssql/server/blobs/<config-digest> \
+        #     | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["Labels"])'
+        #
+        # WHY THE `docker ps --filter ancestor=` LINES BELOW MOVED WITH IT.
+        # Pinning `image:` on its own would have been worse than not pinning at
+        # all. The steps that create the cleat database find their container
+        # with `docker ps -q --filter ancestor=<ref>`, and that filter matches
+        # on the reference actually used to pull, not on the repository. So a
+        # half-done pin leaves `docker exec` with an empty container ID.
+        # Measured on 2026-08-07, against a container started from a digest ref:
+        #
+        #   docker ps -q --filter "ancestor=alpine@sha256:c64c687c..."  -> 1 match
+        #   docker ps -q --filter "ancestor=alpine:3.20"                -> 0 matches
+        #
+        # All seven `image:` sites and all four `ancestor=` filters name the
+        # same digest, and they have to be bumped together. That is enforced as
+        # of #399: `scripts/check-workflow-guards.py` fails the required `Lint`
+        # job on an `ancestor=` reference that is not also an `image:` in the
+        # same file. (This paragraph previously said "six" and "nothing
+        # enforces that" -- both were true when written and neither is now.
+        # The count was short because it grepped only .github/workflows/ and
+        # missed the two compose files.) Re-derive the set:
+        #
+        #   grep -rn 'mcr.microsoft.com/mssql/server' .github/workflows/ \
+        #     docker-compose.cluster.yml docker-compose.dev.yml
+        #
+        # This is a pin to be bumped deliberately, not a fossil: renovate.json
+        # extends config:recommended, whose github-actions manager reads service
+        # image fields, so a newer digest arrives as a reviewable PR that has to
+        # go green before it lands. That is the whole difference from a tag.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
+
+    env:
+      # Explicit, not inherited. Go defaults CGO_ENABLED to 1 only when a C
+      # compiler is present and 0 otherwise, so relying on the default would
+      # silently remove NewWasmtimeBackend on a runner without gcc and run
+      # everything on wazero -- which tier 1 does not name. The gate checks
+      # this too and fails on CGO_ENABLED=0; pinning it here means the check
+      # never has to fire.
+      CGO_ENABLED: "1"
+
+      # Both PostgreSQL names. The tree carries two conventions for the same
+      # DSN -- CLEAT_TEST_DB and CLEAT_TEST_POSTGRES -- and setting only one
+      # silently skips everything keyed on the other. The gate requires both
+      # and says so; converging on one name is the real fix.
+      CLEAT_TEST_POSTGRES: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
+      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
+      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
+      CLEAT_CRASH_DB: postgres://cleat:cleat@127.0.0.1:5433/cleat?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # componentize-py and the SDK it compiles against. python is tier 1
+      # (D2), so this is a tier-1 precondition rather than a convenience --
+      # without it TestPythonWasmEndToEnd and TestPythonComponentExecutionFence
+      # skip, and the gate fails on the skip rather than letting the run go
+      # quietly green.
+      - name: Install componentize-py and the Python SDK
+        run: |
+          pip install --upgrade pip
+          pip install componentize-py
+          pip install -e python-sdk
+
+      # The prebuilt binary, not `cargo install wasm-tools`.
+      #
+      # Measured on the Cross-Language E2E job, which does use cargo: its
+      # toolchain install step runs 2m20s, almost all of it compiling
+      # wasm-tools from source. The release tarball is a download. It also
+      # keeps a Rust toolchain out of a tier-1 job, which matters for more than
+      # speed -- see this file's header on why tier 1 does not take
+      # dependencies on tier-2 languages' registries.
+      #
+      # Pinned to the same version scripts/docker/python-toolchain.Dockerfile
+      # installs, so the container a developer runs this gate in and the runner
+      # agree. If those drift, a developer's green is not evidence about CI's.
+      - name: Install wasm-tools
+        env:
+          WASM_TOOLS_VERSION: "1.255.0"
+        run: |
+          set -euo pipefail
+          curl -sSLf "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux.tar.gz" \
+            | tar xz -C /tmp
+          sudo mv /tmp/wasm-tools-*/wasm-tools /usr/local/bin/wasm-tools
+          wasm-tools --version
+
+      # SQL Server starts with no application database, and the DSN above names
+      # one. Doing this in a step rather than in the service definition because
+      # a service has no way to run SQL after it is healthy.
+      - name: Create the cleat database on SQL Server
+        run: |
+          docker exec "$(docker ps -q --filter 'ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89')" \
+            /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
+            -Q "IF DB_ID('cleat') IS NULL CREATE DATABASE cleat"
+
+      # No `|| true`, no continue-on-error, and no attempt to summarise the
+      # result here. The gate's own exit status is this job's exit status; its
+      # stdout already names what it excluded, what it ran, and what failed.
+      - name: Tier 1 gate
+        run: scripts/tier-gate.sh
+
+      # The log on failure, because the gate deliberately keeps it rather than
+      # deleting its evidence -- re-running a 6595-test suite to find out what
+      # broke is not a debugging strategy.
+      - name: Upload the tier-1 log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-gate-log-${{ github.sha }}
+          path: tier-gate.log
+          retention-days: 30

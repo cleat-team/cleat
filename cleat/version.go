@@ -37,4 +37,9 @@ var (
 	// Example: {"llm": ">=1.2.0", "blobstore": "~2.0.0"}
 	// Set at build time: -X cleat.PluginDeps=<json-string>
 	PluginDeps = "{}"
+
+	// ChildBindingPolicy is the child workflow version binding policy.
+	// Values: "", "frozen", "stable", "latest", "tag:<name>"
+	// Set at build time: -X cleat.ChildBindingPolicy=frozen
+	ChildBindingPolicy = ""
 )

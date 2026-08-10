@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // tokenBucket implements a simple token bucket rate limiter. All operations
@@ -198,7 +198,7 @@ func (p *Plugin) allowDB(tid uuid.UUID, r *http.Request) rateLimitInfo {
 	if info.remaining == math.MaxFloat64 {
 		info.remaining = 0
 	}
-	info.resetAt = time.Now().Unix() + int64(math.Ceil(float64(constrainedCfg.windowSeconds)))
+	info.resetAt = time.Now().Unix() + int64(constrainedCfg.windowSeconds)
 	return info
 }
 

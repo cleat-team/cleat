@@ -113,7 +113,7 @@ export default {
 
     // instantiate() is @assemblyscript/loader's instantiate which returns
     // { module, instance, exports }. Capture the module's memory export.
-    const result = instantiate(binary, createImports(myImports));
+    const result = await instantiate(binary, createImports(myImports));
     wasmMemory = result.exports.memory;
     return result;
   },

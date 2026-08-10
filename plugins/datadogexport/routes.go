@@ -2,16 +2,16 @@ package datadogexport
 
 import (
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -28,7 +28,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -45,42 +45,33 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 	return tid
 }
 
-// redactAPIKey replaces the API key with "****" unless the caller passes
-// ?show_api_key=true.
-func (p *Plugin) redactAPIKey(r *http.Request, c *configJSON) {
-	if r.URL.Query().Get("show_api_key") == "true" {
-		return
-	}
-	c.APIKey = "****"
-}
-
 // ---- types ----
 
 type configJSON struct {
-	ID            uuid.UUID `json:"id"`
-	TenantID      uuid.UUID `json:"tenant_id"`
-	Name          string    `json:"name"`
-	APIKey        string    `json:"api_key"`
-	Site          string    `json:"site"`
-	MetricsPrefix string    `json:"metrics_prefix"`
-	Enabled       bool      `json:"enabled"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID            uuid.UUID     `json:"id"`
+	TenantID      uuid.UUID     `json:"tenant_id"`
+	Name          string        `json:"name"`
+	APIKey        plugin.Secret `json:"api_key"`
+	Site          string        `json:"site"`
+	MetricsPrefix string        `json:"metrics_prefix"`
+	Enabled       bool          `json:"enabled"`
+	CreatedAt     time.Time     `json:"created_at"`
+	UpdatedAt     time.Time     `json:"updated_at"`
 }
 
 type createConfigRequest struct {
-	Name          string `json:"name"`
-	APIKey        string `json:"api_key"`
-	Site          string `json:"site,omitempty"`
-	MetricsPrefix string `json:"metrics_prefix,omitempty"`
+	Name          string        `json:"name"`
+	APIKey        plugin.Secret `json:"api_key"`
+	Site          string        `json:"site,omitempty"`
+	MetricsPrefix string        `json:"metrics_prefix,omitempty"`
 }
 
 type updateConfigRequest struct {
-	Name          *string `json:"name,omitempty"`
-	APIKey        *string `json:"api_key,omitempty"`
-	Site          *string `json:"site,omitempty"`
-	MetricsPrefix *string `json:"metrics_prefix,omitempty"`
-	Enabled       *bool   `json:"enabled,omitempty"`
+	Name          *string        `json:"name,omitempty"`
+	APIKey        *plugin.Secret `json:"api_key,omitempty"`
+	Site          *string        `json:"site,omitempty"`
+	MetricsPrefix *string        `json:"metrics_prefix,omitempty"`
+	Enabled       *bool          `json:"enabled,omitempty"`
 }
 
 // ---- POST /datadog/configs ----
@@ -105,7 +96,7 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 		p.writeError(w, 400, "invalid request body")
 		return
 	}
-	if req.APIKey == "" {
+	if req.APIKey.Reveal() == "" {
 		p.writeError(w, 400, "api_key is required")
 		return
 	}
@@ -125,7 +116,7 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO dd_config (tenant_id, id, name, api_key, site, metrics_prefix, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
-		`, p.dialect), tid, id, req.Name, req.APIKey, site, prefix, now)
+		`, p.dialect), tid, id, req.Name, req.APIKey.Reveal(), site, prefix, now)
 	if err != nil {
 		p.logger.Error("datadog-export: create config", "error", err)
 		p.writeError(w, 500, "failed to create config")
@@ -133,7 +124,9 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.logger.Info("datadog-export: config created", "id", id, "tenant", tid)
-	// Intentionally return the API key on create — the caller just provided it.
+	// The API key is redacted on every response, including create -- the
+	// caller already has the value they just sent, so echoing it back adds
+	// nothing and is one more path to get wrong.
 	p.writeJSON(w, 201, configJSON{
 		ID:            id,
 		TenantID:      tid,
@@ -184,10 +177,6 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		configs = []configJSON{}
 	}
 
-	for i := range configs {
-		p.redactAPIKey(r, &configs[i])
-	}
-
 	p.writeJSON(w, 200, configs)
 }
 
@@ -224,7 +213,6 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c.TenantID = tid
-	p.redactAPIKey(r, &c)
 	p.writeJSON(w, 200, c)
 }
 
@@ -260,7 +248,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	// Build dynamic UPDATE query for the fields that are present.
 	setClauses := []string{}
-	args := []interface{}{}
+	args := []any{}
 	argIdx := 1
 
 	if req.Name != nil {
@@ -270,7 +258,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.APIKey != nil {
 		setClauses = append(setClauses, fmt.Sprintf("api_key = $%d", argIdx))
-		args = append(args, *req.APIKey)
+		args = append(args, req.APIKey.Reveal())
 		argIdx++
 	}
 	if req.Site != nil {
@@ -328,7 +316,6 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c.TenantID = tid
-	p.redactAPIKey(r, &c)
 	p.writeJSON(w, 200, c)
 }
 

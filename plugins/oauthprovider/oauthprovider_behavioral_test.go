@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
 
-func (*fakeConn) Close() error      { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
@@ -415,7 +415,7 @@ func TestValidTokenListSessions(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var sessions []map[string]interface{}
+	var sessions []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &sessions); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -529,7 +529,7 @@ func TestListSessionsMulti(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var sessions []map[string]interface{}
+	var sessions []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &sessions); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -573,7 +573,7 @@ func TestDeleteSession(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("auth session after delete: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var sessions []map[string]interface{}
+	var sessions []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &sessions); err != nil {
 		t.Fatalf("failed to decode list: %v", err)
 	}
@@ -1219,7 +1219,7 @@ func TestOA_Callback_Success(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &result)
 	if result["user_email"] != "user@example.com" {
 		t.Errorf("expected useremail, got %q", result["user_email"])
@@ -1441,4 +1441,3 @@ func TestOA_ExtractSession_BasicAuth(t *testing.T) {
 		t.Error("expected nil for Basic auth")
 	}
 }
-

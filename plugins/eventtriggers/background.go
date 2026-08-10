@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 const defaultRetryInterval = 30 * time.Second
@@ -82,7 +82,7 @@ func (p *Plugin) processBatch(parentCtx context.Context) {
 // subscriptions, dispatches workflows, and updates the event status.
 func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uuid.UUID, eventType string, eventDataJSON []byte, retryCount int) {
 	// Parse event data back into the map expected by the matching logic.
-	var eventData map[string]interface{}
+	var eventData map[string]any
 	if err := json.Unmarshal(eventDataJSON, &eventData); err != nil {
 		p.logger.Error("event-triggers: unmarshal event data for retry",
 			"event_id", eventID, "error", err)

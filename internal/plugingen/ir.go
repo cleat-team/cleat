@@ -45,7 +45,7 @@ type TypeIR struct {
 // Inline object fields set Nested to a *TypeIR with the embedded fields.
 type FieldIR struct {
 	Name        string
-	Type        string  // "string", "int64", "float64", "bool", "bytes", "timestamp", "uuid", "array", "map", or a TypeIR name
+	Type        string // "string", "int64", "float64", "bool", "bytes", "timestamp", "uuid", "array", "map", or a TypeIR name
 	Optional    bool
 	Description string
 	Nested      *TypeIR // for array<T>, optional<T>, map<K,V>, inline objects

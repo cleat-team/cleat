@@ -21,10 +21,10 @@ type Vector []float64
 
 // SearchRequest is the typed request for a vector similarity search.
 type SearchRequest struct {
-	Table       string         `json:"collection"`           // maps to plugin's "collection"
+	Table       string         `json:"collection"`             // maps to plugin's "collection"
 	Vector      Vector         `json:"query_vector,omitempty"` // maps to plugin's "query_vector"
-	Limit       int            `json:"top_k,omitempty"`       // maps to plugin's "top_k"
-	Filter      map[string]any `json:"filter,omitempty"`      // optional metadata filter
+	Limit       int            `json:"top_k,omitempty"`        // maps to plugin's "top_k"
+	Filter      map[string]any `json:"filter,omitempty"`       // optional metadata filter
 	MinScore    float64        `json:"min_score,omitempty"`
 	IncludeMeta bool           `json:"include_meta,omitempty"`
 }
@@ -43,10 +43,10 @@ type SearchResponse struct {
 
 // UpsertRequest is the typed request to upsert an embedding vector.
 type UpsertRequest struct {
-	Table    string         `json:"collection"`              // maps to plugin's "collection"
-	ID       string         `json:"external_id,omitempty"`   // maps to plugin's "external_id"
+	Table    string         `json:"collection"`            // maps to plugin's "collection"
+	ID       string         `json:"external_id,omitempty"` // maps to plugin's "external_id"
 	Content  string         `json:"content,omitempty"`
-	Vector   Vector         `json:"embedding,omitempty"`      // maps to plugin's "embedding"
+	Vector   Vector         `json:"embedding,omitempty"` // maps to plugin's "embedding"
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
