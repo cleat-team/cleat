@@ -185,19 +185,59 @@ func main() {
 	if goVersion == "" {
 		goVersion = "1.23"
 	}
-	replaceRoot := cfg.ProjectRoot
+	// Write a minimal go.mod for wasip1 compilation. go mod tidy is run by
+	// the caller to generate go.sum.
+	//
+	// The require line names SDKModulePath, a constant. It used to be built as
+	// cfg.ModulePath+"/cleat" -- the *enclosing* module's path with "/cleat"
+	// appended -- with a replace pointing at cfg.ProjectRoot+"/cleat". That is
+	// only correct for a workflow that lives directly in this repository's root
+	// module, because only there does "<module>/cleat" happen to name the SDK.
+	// For a project `cleat init` scaffolds (module example.com/myapp) it
+	// generated `require example.com/myapp/cleat v0.0.0` replaced by a
+	// myapp/cleat directory that does not exist, and `go mod tidy` in the build
+	// directory failed with exactly that path. The same thing happens for a
+	// workflow in any nested module of this repo.
+	//
+	// The version and the local checkout, unlike the path, are not fixed:
+	//   - sdkReplaceDir finds a sibling SDK checkout by walking up from the
+	//     project root, which is what makes an in-repo workflow build against
+	//     the tree it sits in rather than a published release.
+	//   - failing that, the version the workflow's own module already requires
+	//     is used, so an external project builds against the SDK it compiles
+	//     against.
+	sdkDir := sdkReplaceDir(cfg.ProjectRoot)
+	sdkVersion := "v0.0.0"
+	if sdkDir == "" {
+		if v := sdkRequiredVersion(cfg.ProjectRoot); v != "" {
+			sdkVersion = v
+		}
+	}
 
-	// Write a minimal go.mod for wasip1 compilation.
-	// The cleat/cleat submodule is replaced directly (not via the root
-	// module), and go mod tidy is run by the caller to generate go.sum.
 	modContent := fmt.Sprintf(`module cleat-build
 
 go %s
 
-require %s v0.0.0
-
-replace %s => %s/cleat
-`, goVersion, cfg.ModulePath+"/cleat", cfg.ModulePath+"/cleat", replaceRoot)
+require %s %s
+`, goVersion, SDKModulePath, sdkVersion)
+	if sdkDir != "" {
+		modContent += fmt.Sprintf("\nreplace %s => %s\n", SDKModulePath, sdkDir)
+		// The root module too, when the SDK comes from a local checkout.
+		//
+		// cleat/go.mod requires the root module at v0.0.0 and resolves it with
+		// its own `replace ../` -- and a replace inside a *dependency* module is
+		// ignored, so nothing here can resolve v0.0.0 unless this go.mod says
+		// how. It went unnoticed for a long time only because module graph
+		// pruning usually drops that edge; the moment anything in package cleat's
+		// own tests imports the engine, `go mod tidy` in this directory needs the
+		// root module's go.mod and fails with "unknown revision v0.0.0" -- for
+		// every workflow build, from a change in a test file that never runs here.
+		//
+		// Emitting it unconditionally alongside the SDK replace removes that
+		// coupling. TestGeneratedGoModResolvesTheRootModule pins it.
+		modContent += fmt.Sprintf("\nrequire %s v0.0.0\n\nreplace %s => %s\n",
+			RootModulePath, RootModulePath, filepath.Dir(sdkDir))
+	}
 
 	modPath := filepath.Join(cfg.OutDir, "go.mod")
 	if err := os.WriteFile(modPath, []byte(modContent), 0644); err != nil {
@@ -225,6 +265,24 @@ func FindRepoRoot(from string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving path %s: %w", from, err)
 	}
+	// Two passes, and the order matters. The first looks for the go.mod that
+	// declares the ROOT module; only if there is none does it fall back to the
+	// nearest go.mod of any kind.
+	//
+	// Nearest-first was the original behaviour and it broke the moment this
+	// repository grew nested modules. Called from a Python workflow under
+	// tests/plugin-harness/testdata/, the nearest go.mod became
+	// tests/plugin-harness/go.mod, so repoRoot resolved to tests/plugin-harness
+	// and the caller looked for python-sdk/scripts/build_wasm.py underneath it.
+	// The build failed, and TestPluginCalls_Wasm_Python t.Skipf'd on that
+	// failure -- a skip standing in for a break, which only the job's skip
+	// budget of 0 caught.
+	//
+	// The fallback keeps the old behaviour for a tree that is not this
+	// repository, where there is no root module to find.
+	if root := findModuleRootDeclaring(abs, RootModulePath); root != "" {
+		return root, nil
+	}
 	dir := abs
 	for {
 		if fi, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && !fi.IsDir() {
@@ -233,6 +291,25 @@ func FindRepoRoot(from string) (string, error) {
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			return "", fmt.Errorf("go.mod not found from %s", from)
+		}
+		dir = parent
+	}
+}
+
+// findModuleRootDeclaring walks up from dir looking for a go.mod whose module
+// path is exactly want, and returns that directory, or "" if there is none.
+func findModuleRootDeclaring(dir, want string) string {
+	for {
+		modPath := filepath.Join(dir, "go.mod")
+		if data, err := os.ReadFile(modPath); err == nil {
+			if f, err := modfile.Parse(modPath, data, nil); err == nil &&
+				f.Module != nil && f.Module.Mod.Path == want {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
 		}
 		dir = parent
 	}
@@ -322,6 +399,71 @@ func rewritePackageToMain(content []byte) []byte {
 	return result
 }
 
+// SDKModulePath is the guest SDK's module path. It is a constant of the
+// project, not something to derive from whichever module a workflow happens to
+// live in.
+const SDKModulePath = "github.com/cleat-team/cleat/cleat"
+
+// RootModulePath is the engine module's path. The SDK requires it, so a build
+// directory replacing the SDK with a local checkout must be able to resolve it
+// too -- see where this is used.
+const RootModulePath = "github.com/cleat-team/cleat"
+
+// sdkReplaceDir returns the absolute path of a local SDK checkout to replace
+// SDKModulePath with, or "" if there is none.
+//
+// It walks up from start looking for a cleat/ subdirectory whose go.mod
+// declares SDKModulePath. That finds this repository's own cleat/ directory
+// from anywhere inside the repo -- including from a nested module such as
+// tests/plugin-harness or examples/, which is the case that stopped working
+// when those became separate modules -- and finds nothing in a user's project,
+// which is correct: they should build against a released SDK.
+//
+// The go.mod is read rather than just stat'ed. A directory named "cleat" in
+// someone's project is not unusual, and replacing the SDK with an unrelated
+// directory would fail in a way that points nowhere near the cause.
+func sdkReplaceDir(start string) string {
+	dir := start
+	for {
+		mod := filepath.Join(dir, "cleat", "go.mod")
+		if data, err := os.ReadFile(mod); err == nil {
+			if f, err := modfile.Parse(mod, data, nil); err == nil &&
+				f.Module != nil && f.Module.Mod.Path == SDKModulePath {
+				return filepath.Join(dir, "cleat")
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// sdkRequiredVersion returns the version of SDKModulePath that the module
+// rooted at projectRoot requires, or "" if it does not require it.
+//
+// Used only when there is no local checkout: an external project builds its
+// workflow against the same SDK version its own code compiles against, rather
+// than against a v0.0.0 that resolves to nothing.
+func sdkRequiredVersion(projectRoot string) string {
+	modPath := filepath.Join(projectRoot, "go.mod")
+	data, err := os.ReadFile(modPath)
+	if err != nil {
+		return ""
+	}
+	f, err := modfile.Parse(modPath, data, nil)
+	if err != nil {
+		return ""
+	}
+	for _, r := range f.Require {
+		if r.Mod.Path == SDKModulePath {
+			return r.Mod.Version
+		}
+	}
+	return ""
+}
+
 // propagateReplaces reads the source module's go.mod, extracts all replace
 // directives with local filesystem paths, adjusts paths to be relative to
 // the build directory, and appends them to the build directory's go.mod.
@@ -349,6 +491,12 @@ func propagateReplaces(projectRoot, outDir, modPath string) error {
 	var extra []string
 	for _, r := range modFile.Replace {
 		if !modfile.IsDirectoryPath(r.New.Path) {
+			continue
+		}
+		// The SDK's replace, if one is needed, was already written above.
+		// Emitting it twice is not a duplicate that go tolerates -- it is
+		// "go.mod: repeated replacement of <path>", and the build fails.
+		if r.Old.Path == SDKModulePath || r.Old.Path == RootModulePath {
 			continue
 		}
 		absReplace, err := filepath.Abs(filepath.Join(projectRoot, r.New.Path))

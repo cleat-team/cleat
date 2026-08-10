@@ -166,12 +166,22 @@ jobs:
       # need.
       - name: Run the cross-language suite
         shell: bash
+        # tests/cross-language is its own Go module since the root<->cleat/
+        # module cycle was broken (it imports cleat/wasmtest; the root module
+        # must not). `go test ./tests/cross-language/...` from the repo root no
+        # longer matches -- it fails with "directory prefix tests/cross-language
+        # does not contain main module or its selected dependencies" -- so the
+        # pattern is ./... from inside the module. See
+        # tests/cross-language/go.mod.
+        working-directory: tests/cross-language
         run: |
           # pipefail is required: without it `tee` supplies the exit status and
           # a failing `go test` is silently reported as a green step.
           set -o pipefail
+          # ../../: the report lands at the repo root, because the Skip budget
+          # step below runs scripts/check-skip-budget.sh from there.
           go test -count=1 -short=false -timeout=10m -json \
-            ./tests/cross-language/... 2>&1 | tee cross-language-report.json
+            ./... 2>&1 | tee ../../cross-language-report.json
 
       # 0, and the number is the point: every test in that suite needs cargo and
       # the wasm32-wasip1 target, which this job installs above. A skip here

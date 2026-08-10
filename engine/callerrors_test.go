@@ -4,26 +4,74 @@ import (
 	"context"
 	"errors"
 	"testing"
-
-	"github.com/cleat-team/cleat/cleat"
 )
 
-// TestCallErrorCodesMatchGuestSDK keeps the engine-local copies of the enum
-// honest. engine does not import cleat in non-test code, so nothing but this
-// test stops the two drifting apart -- and a drifted code is worse than no
-// code, because the guest's `switch e.Code` silently falls through to default.
-func TestCallErrorCodesMatchGuestSDK(t *testing.T) {
+// guestRetryable reports whether the guest SDK's CallError.Retryable() returns
+// true for code, and guestCodeNamed returns the byte value of a named member of
+// the guest enum.
+//
+// The engine's tests need to assert what a workflow author would observe, and
+// they cannot ask the SDK directly -- engine must not import the cleat/ module.
+// Routing them through the same table the cleat/-side contract test validates is
+// what keeps this from being the engine agreeing with itself: if the table
+// diverges from the SDK, callerror_contract_test.go fails, not these.
+//
+// An unknown code is not retryable, matching the guest's `default:` arm.
+// guestCodeNamed fatals rather than returning a zero value, because a silently
+// zero want would make an assertion pass against callErrorUnknown.
+
+func guestRetryable(code byte) bool {
+	for _, e := range GuestCallErrorCodes() {
+		if e.Code == code {
+			return e.Retryable
+		}
+	}
+	return false
+}
+
+func guestCodeNamed(t *testing.T, name string) byte {
+	t.Helper()
+	for _, e := range GuestCallErrorCodes() {
+		if e.Name == name {
+			return e.Code
+		}
+	}
+	t.Fatalf("guestCallErrorCodes has no %q member", name)
+	return 0
+}
+
+// TestCallErrorConstantsMatchGuestTable keeps the three constants the engine
+// actually packs in step with guestCallErrorCodes, the table that describes the
+// guest SDK's enum.
+//
+// This is only half the chain. It proves engine agrees with its own mirror; the
+// cleat/ module's callerror_contract_test.go proves the mirror agrees with the
+// SDK. Both halves are needed, and they have to live on opposite sides of the
+// boundary because engine cannot import the SDK module -- that import is the
+// module cycle that made `go install` impossible. See engine/callerrors.go.
+func TestCallErrorConstantsMatchGuestTable(t *testing.T) {
+	byName := map[string]byte{}
+	for _, e := range GuestCallErrorCodes() {
+		byName[e.Name] = e.Code
+	}
+
 	for _, tc := range []struct {
 		name string
 		got  byte
-		want cleat.CallErrorCode
 	}{
-		{"Unknown", callErrorUnknown, cleat.CallErrorUnknown},
-		{"Unavailable", callErrorUnavailable, cleat.CallErrorUnavailable},
-		{"InvalidRequest", callErrorInvalidRequest, cleat.CallErrorInvalidRequest},
+		{"Unknown", callErrorUnknown},
+		{"Unavailable", callErrorUnavailable},
+		{"InvalidRequest", callErrorInvalidRequest},
 	} {
-		if int(tc.got) != int(tc.want) {
-			t.Errorf("callError%s = %d, but cleat.CallError%s = %d", tc.name, tc.got, tc.name, tc.want)
+		want, ok := byName[tc.name]
+		if !ok {
+			t.Errorf("guestCallErrorCodes has no %q entry, so nothing checks callError%s "+
+				"against the guest SDK at all", tc.name, tc.name)
+			continue
+		}
+		if tc.got != want {
+			t.Errorf("callError%s = %d, but guestCallErrorCodes says %s = %d",
+				tc.name, tc.got, tc.name, want)
 		}
 	}
 }
@@ -32,10 +80,10 @@ func TestCallErrorCodesMatchGuestSDK(t *testing.T) {
 // IMPROVEMENT-PLAN 2.15.
 //
 // Every failure path in durablecalls.go, heartbeats.go and plugins.go used to
-// pack the literal 1 -- cleat.CallErrorTimeout, which cleat.CallError.Retryable
-// reports as retryable. A replay divergence, a cancelled workflow and an
-// ambiguous call outcome were all handed to the workflow author as "the call
-// timed out, try again".
+// pack the literal 1 -- the guest's CallErrorTimeout, which the guest's
+// CallError.Retryable() reports as retryable. A replay divergence, a cancelled
+// workflow and an ambiguous call outcome were all handed to the workflow author
+// as "the call timed out, try again".
 //
 // The three below are failures the *engine* produced, as opposed to failures a
 // service reported, and none of them can be fixed by calling again.
@@ -48,8 +96,7 @@ func TestEngineFailuresAreNotReportedAsRetryable(t *testing.T) {
 		{"a replay divergence", callErrorUnknown},
 		{"an ambiguous call outcome", callErrorUnknown},
 	} {
-		e := &cleat.CallError{Code: cleat.CallErrorCode(tc.code)}
-		if e.Retryable() {
+		if guestRetryable(tc.code) {
 			t.Errorf("%s is reported to the guest as retryable (code %d)", tc.what, tc.code)
 		}
 	}
@@ -63,13 +110,12 @@ func TestEngineFailuresAreNotReportedAsRetryable(t *testing.T) {
 // workflow branching on Retryable(). What changed is only the claim that the
 // call timed out.
 func TestCallFailureCodeStaysRetryable(t *testing.T) {
-	e := &cleat.CallError{Code: cleat.CallErrorCode(callFailureCode)}
-	if !e.Retryable() {
+	if !guestRetryable(callFailureCode) {
 		t.Errorf("callFailureCode = %d is no longer retryable; that is a behaviour "+
 			"change for every workflow that branches on Retryable(), and needs to be "+
 			"a deliberate decision rather than a side effect", callFailureCode)
 	}
-	if callFailureCode == byte(cleat.CallErrorTimeout) {
+	if callFailureCode == guestCodeNamed(t, "Timeout") {
 		t.Errorf("callFailureCode is back to CallErrorTimeout, which claims the call " +
 			"timed out when the engine has no idea what happened")
 	}
@@ -88,8 +134,8 @@ func callErrorCodeOf(result int64) byte { return byte((uint64(result) >> 8) & 0x
 func errCodeOf(result int64) byte       { return byte(uint64(result) & 0xFF) }
 
 // TestReplayFailuresAreClassified drives the real replay paths and reads the
-// code the guest would decode. Before 2.15 every one of these returned
-// cleat.CallErrorTimeout.
+// code the guest would decode. Before 2.15 every one of these returned the
+// guest's CallErrorTimeout.
 func TestReplayFailuresAreClassified(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -197,7 +243,7 @@ func callWithRetry(t *testing.T, err error) (int64, EventRecord) {
 //
 // isDefinitelyNonRetryable breaks the retry loop precisely because the error
 // is not worth retrying -- and the engine then reported callFailureCode, which
-// cleat.CallError.Retryable() says *is* retryable. A workflow branching on
+// the guest's CallError.Retryable() says *is* retryable. A workflow branching on
 // err.Retryable(), which is what the guest SDK offers, would go on to retry a
 // call the engine had just decided against. For a non-idempotent operation the
 // caller marked non-retryable, that is a duplicate side effect.
@@ -205,7 +251,7 @@ func TestNonRetryableCallIsNotReportedAsRetryable(t *testing.T) {
 	result, rec := callWithRetry(t, &nonRetryableErr{msg: "bad request"})
 
 	code := callErrorCodeOf(result)
-	if e := (&cleat.CallError{Code: cleat.CallErrorCode(code)}); e.Retryable() {
+	if guestRetryable(code) {
 		t.Errorf("the engine stopped retrying because isDefinitelyNonRetryable said so, "+
 			"then told the guest the call is retryable (code %d)", code)
 	}
@@ -221,7 +267,7 @@ func TestRetriesExhaustedStaysRetryable(t *testing.T) {
 	result, rec := callWithRetry(t, errors.New("connection reset"))
 
 	code := callErrorCodeOf(result)
-	if e := (&cleat.CallError{Code: cleat.CallErrorCode(code)}); !e.Retryable() {
+	if !guestRetryable(code) {
 		t.Errorf("a transient failure that exhausted its retries is reported as non-retryable (code %d)", code)
 	}
 	if rec.ErrNonRetryable {

@@ -60,8 +60,7 @@ func runDagValidate(args []string) {
 	}
 	defer f.Close()
 
-	// Pass nil registry — we're only validating structure.
-	_, err = dagplugin.LoadFromJSON(f, nil)
+	_, err = dagplugin.ParseSpec(f)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Validation failed:\n  %v\n", err)
 		os.Exit(1)
@@ -213,16 +212,13 @@ func readSpec(path string) (*dagplugin.DAGSpec, error) {
 	return &spec, nil
 }
 
-// validateSpec checks the spec for structural errors without needing a registry.
-func validateSpec(spec *dagplugin.DAGSpec) (*dagplugin.DAG, error) {
+// validateSpec checks the spec for structural errors.
+func validateSpec(spec *dagplugin.DAGSpec) (*dagplugin.DAGSpec, error) {
 	jsonStr, err := mustMarshalJSON(spec)
 	if err != nil {
 		return nil, err
 	}
-	return dagplugin.LoadFromJSON(
-		strings.NewReader(jsonStr),
-		nil,
-	)
+	return dagplugin.ParseSpec(strings.NewReader(jsonStr))
 }
 
 // mustMarshalJSON marshals v to JSON.
@@ -252,7 +248,7 @@ func generateDevProgram(spec *dagplugin.DAGSpec, inputJSON string) []byte {
 	b.WriteString("\t\"log\"\n")
 	b.WriteString("\t\"os\"\n")
 	b.WriteString("\n")
-	b.WriteString("\tdagplugin \"github.com/cleat-team/cleat/plugins/dag\"\n")
+	b.WriteString("\tdagplugin \"github.com/cleat-team/cleat/cleat/dagrun\"\n")
 	b.WriteString(")\n\n")
 
 	// Generate stub task functions.
@@ -312,7 +308,7 @@ func generateWorkflowFile(spec *dagplugin.DAGSpec) []byte {
 	b.WriteString("\t\"fmt\"\n")
 	b.WriteString("\n")
 	b.WriteString("\t\"github.com/cleat-team/cleat/cleat\"\n")
-	b.WriteString("\tdagplugin \"github.com/cleat-team/cleat/plugins/dag\"\n")
+	b.WriteString("\tdagplugin \"github.com/cleat-team/cleat/cleat/dagrun\"\n")
 	b.WriteString(")\n\n")
 
 	// Generate an input type.

@@ -1006,6 +1006,20 @@ jobs:
       - name: Run benchmarks
         run: go test -bench=. -benchmem -benchtime=30s ./benchmarks/ | tee bench-output.txt
 
+      # benchmarks/workflows is its own module (github.com/cleat-team/cleat/
+      # benchmarks/workflows) -- it imports the cleat/ SDK, which the root
+      # module does not (see CLAUDE.md on the module cycle) -- so `go test
+      # ./benchmarks/...` from the root no longer reaches it; `...` stops at
+      # a nested module boundary the same way it already did for cleat/.
+      # This is where BenchmarkSimpleWorkflow, BenchmarkFanOutWorkflow,
+      # BenchmarkSagaWorkflow and BenchmarkLLMCallWorkflow moved when
+      # cleat_bench_test.go moved out of the root module's benchmarks/ dir.
+      # Appended (tee -a) to the same bench-output.txt so both halves land in
+      # one trend-tracking upload.
+      - name: Run SDK workflow benchmarks (benchmarks/workflows module)
+        working-directory: benchmarks/workflows
+        run: go test -bench=. -benchmem -benchtime=30s ./... | tee -a ../../bench-output.txt
+
       - name: Upload benchmark artifact
         uses: actions/upload-artifact@v4
         with:

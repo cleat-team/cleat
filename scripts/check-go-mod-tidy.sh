@@ -89,10 +89,26 @@ echo "OK: all $checked Go modules are tidy."
 # The root module ("."), covered by tier1.packages rather than a `modules:` entry, and
 # the benchmarks/comparative/** pins above, are the only modules allowed to be absent
 # from tier1.modules / tier2.modules below.
+#
+# tier2.gated_by counts as a declaration too, and has to. A gated_by entry says
+# the suite runs in a NAMED job in a named workflow, and scripts/tier2-gate.sh
+# already asserts that job still exists -- so such a module is built by
+# something, which is the property this check is defending. tests/cross-language
+# and tests/plugin-harness are the case: they became separate modules when the
+# root<->cleat/ module cycle was broken, and they cannot go in tier2.modules
+# because that is the list tier2-gate.sh runs ITSELF, in a job with no cargo, no
+# componentize-py and no Java toolchain. Listing them there would buy this
+# check's approval with a job that skips everything -- the exact trade this
+# repository keeps refusing.
 TIERS="$REPO_ROOT/tiers.yaml"
 declared="$( {
   awk '/^tier1:/{t=1} t&&/^  modules:/{p=1;next} p&&/^    - dir: /{sub(/^    - dir: /,"");print;next} p&&/^      /{next} p&&/^ *#/{next} p&&/^$/{next} p{exit}' "$TIERS"
   awk '/^tier2:/{t=1} t&&/^  modules:/{p=1;next} p&&/^    - dir: /{sub(/^    - dir: /,"");print;next} p&&/^      /{next} p&&/^ *#/{next} p&&/^$/{next} p{exit}' "$TIERS"
+  # gated_by suites: "./tests/plugin-harness/..." -> "tests/plugin-harness".
+  # Entries that are not Go package patterns (crates/..., packages/...) simply
+  # match no module directory and are harmless.
+  awk '/^tier2:/{t=1} t&&/^  gated_by:/{p=1;next} p&&/^    - suite: /{sub(/^    - suite: /,"");print;next} p&&/^      /{next} p&&/^ *#/{next} p&&/^$/{next} p&&/^    - /{next} p{exit}' "$TIERS" \
+    | sed 's#^\./##; s#/\.\.\.$##'
 } | sort -u)"
 
 undeclared=0

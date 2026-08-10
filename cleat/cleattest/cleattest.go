@@ -1158,7 +1158,7 @@ func (e *TestEnv) awaitChildImpl(runID string) (resp string, retErr error) {
 // awaitAnyChildImpl mirrors engine/children.go's AwaitAnyChild: it polls the
 // children in SORTED runID order and returns the first one with a result.
 //
-// The sort matches the engine deliberately. plugins/dag/dag.go builds its
+// The sort matches the engine deliberately. cleat/dagrun/dagrun.go builds its
 // runIDs slice by ranging over a map, so the argument order is randomised on
 // every call, and engine/children.go sorts before polling so that a replay
 // after a suspend picks the same winner as the original execution. A harness

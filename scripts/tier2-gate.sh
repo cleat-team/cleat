@@ -166,11 +166,41 @@ JSON="${TIER2_GATE_JSON:-$REPO_ROOT/tier2-gate.json}"
 # -json rather than -v: attributing a test to its package from -v output means tracking
 # interleaved state across lines, and gets it wrong for parallel subtests. -json carries
 # Package and Test on every event.
-note "running: go test -json -count=1 -p 1 ..."
-# shellcheck disable=SC2086
-(cd "$REPO_ROOT" && go test -json -count=1 -p 1 $PKGS) >> "$JSON" 2>>"$LOG"
-
+#
+# MODDIRS is read here, before the root run, so the root run can exclude any declared
+# pattern that is actually a separate module (e.g. "./examples/..." once examples/ got
+# its own go.mod). `go test ./examples/...` from the root does not silently match zero
+# packages -- it fails outright: "directory prefix examples does not contain main module
+# or its selected dependencies", reported as a synthetic failing "package" with no Test
+# field. go test still runs every OTHER pattern in the same invocation (verified: the
+# other five run and report normally), so this does not starve them, but there is no
+# reason to invite the noise when the module is about to be tested for real, on its own,
+# below. That loop writes into the same $JSON, so the "must run" check after this section
+# still finds real results under the excluded pattern's prefix -- it reads combined JSON
+# by package-path prefix, not by which command produced a given line.
 MODDIRS=$(awk '/^tier2:/{t=1} t&&/^  modules:/{p=1;next} p&&/^    - dir: /{sub(/^    - dir: /,"");print;next} p&&/^      /{next} p&&/^ *#/{next} p&&/^$/{next} p{exit}' "$TIERS")
+
+ROOT_PKGS=""
+for p in $PKGS; do
+  pre="$(echo "$p" | sed 's|^\./||; s|/\.\.\.$||')"
+  in_moddir=0
+  for md in $MODDIRS; do
+    case "$pre" in
+      "$md" | "$md"/*) in_moddir=1 ;;
+    esac
+  done
+  [ "$in_moddir" = 1 ] || ROOT_PKGS="$ROOT_PKGS
+$p"
+done
+
+note "running: go test -json -count=1 -p 1 ..."
+if [ -n "$(printf '%s' "$ROOT_PKGS" | tr -d '[:space:]')" ]; then
+  # shellcheck disable=SC2086
+  (cd "$REPO_ROOT" && go test -json -count=1 -p 1 $ROOT_PKGS) >> "$JSON" 2>>"$LOG"
+else
+  note "no root-module patterns left after excluding declared tier2.modules dirs"
+fi
+
 for md in $MODDIRS; do
   [ -f "$REPO_ROOT/$md/go.mod" ] || { fail "tiers.yaml names tier-2 module '$md' but $md/go.mod does not exist"; continue; }
   note "running module: $md"

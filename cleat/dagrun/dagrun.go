@@ -1,4 +1,4 @@
-// Package dag provides a Directed Acyclic Graph composition model for
+// Package dagrun provides a Directed Acyclic Graph composition model for
 // workflows. It allows you to define workflows as a DAG of tasks with
 // explicit parent-child dependencies, then execute them using an event-driven
 // scheduler built on AwaitAnyChild.
@@ -7,30 +7,40 @@
 // dependents are started immediately — the scheduler does not wait for an
 // entire topological level to finish before starting the next level.
 //
-// This is a pure library plugin built on existing HostCalls primitives
+// This is a pure library built on existing HostCalls primitives
 // (ChildWorkflowWithOptions, AwaitAnyChild). No new WASM imports, no schema
 // changes.
 //
+// dagrun lives in the cleat/ module (guest-side SDK) rather than the root
+// module's plugins/dag, and that split is deliberate, not cosmetic.
+// TaskContext.H is passed through to every user-written task body, and a
+// task body can legitimately call any cleat.HostCalls method — DurableCall,
+// Sleep, signals, all of it — not just the two this package itself calls.
+// That means TaskContext cannot be narrowed to a small interface without
+// breaking real callers (see examples/dag, which calls ctx.H.DurableCall).
+// So this package needs the full cleat.HostCalls, which makes it
+// guest-side code, which belongs in the guest-side module. plugins/dag (the
+// root module) keeps only the host-side half: DAGSpec/TaskSpec parsing and
+// structural validation, used by `cleat dag validate` and code generation,
+// which need no SDK import at all. See plugins/dag's package doc for that
+// half and why cmd/cleat only ever needed it.
+//
 //cleat:require ChildWorkflowWithOptions,AwaitAnyChild
-package dag
+package dagrun
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"sort"
 
 	"github.com/cleat-team/cleat/cleat"
-	"github.com/cleat-team/cleat/plugin"
 )
 
 // RawMessage is a raw JSON-encoded value.
 //
 // This is an alias rather than a defined type, so map[string]RawMessage and
 // map[string]json.RawMessage are the same type and callers outside this
-// package can construct either. It previously existed as a distinct type
-// only to keep encoding/json out of TinyGo WASM builds.
+// package can construct either.
 type RawMessage = json.RawMessage
 
 // Task represents a single node in the DAG.
@@ -67,11 +77,6 @@ type ExecuteOptions struct {
 // NewDAG creates a new empty DAG.
 func NewDAG() *DAG {
 	return &DAG{tasks: make(map[string]*Task)}
-}
-
-// New creates a new Plugin instance.
-func New() plugin.Plugin {
-	return &Plugin{}
 }
 
 // AddTask adds a task to the DAG. parents lists the names of tasks that must
@@ -447,41 +452,4 @@ func (d *DAG) TopologicalSort() ([][]*Task, error) {
 	}
 
 	return levels, nil
-}
-
-// Plugin implementation
-
-// Plugin registers the dag library as a loadable plugin.
-type Plugin struct {
-	logger *slog.Logger
-}
-
-func init() {
-	plugin.Register(plugin.PluginInfo{
-		Name:        "dag",
-		Version:     "0.1.0",
-		Description: "DAG composition model -- execute workflows as directed acyclic graphs built on child workflow primitives",
-		Author:      "cleat",
-	}, func() plugin.Plugin { return &Plugin{} })
-}
-
-// Info returns plugin metadata for discovery and documentation.
-func (p *Plugin) Info() plugin.PluginInfo {
-	return plugin.PluginInfo{
-		Name:        "dag",
-		Version:     "0.1.0",
-		Description: "DAG composition model -- execute workflows as directed acyclic graphs built on child workflow primitives",
-		Author:      "cleat",
-	}
-}
-
-// Init initializes the plugin with the given environment.
-func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
-	if env.Logger != nil {
-		p.logger = env.Logger
-	} else {
-		p.logger = slog.Default()
-	}
-	p.logger.Info("dag plugin initialized")
-	return nil
 }

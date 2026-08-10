@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/bytecodealliance/wasmtime-go/v44"
-
-	"github.com/cleat-team/cleat/cleat"
 )
 
 func TestWasmtimeReadPayloadAcceptsEmptyButNotNegative(t *testing.T) {
@@ -101,10 +99,11 @@ func TestWasmtimeCleatCallRejectsEmptyOperation(t *testing.T) {
 	if rec.called {
 		t.Error("cleat_call reached the handler with an empty operation name")
 	}
+	want := uint32(guestCodeNamed(t, "InvalidRequest"))
 	if _, callErrorCode, errCode := decodeDurableCallResult(got); errCode == 0 ||
-		callErrorCode != cleat.CallErrorInvalidRequest {
+		callErrorCode != want {
 		t.Errorf("guest would decode callErrorCode=%d errCode=%d; want %d and nonzero",
-			callErrorCode, errCode, cleat.CallErrorInvalidRequest)
+			callErrorCode, errCode, want)
 	}
 }
 

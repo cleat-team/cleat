@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/template"
 )
 
@@ -83,6 +84,9 @@ func scaffoldAgent(projectName string) {
 			fmt.Fprintf(os.Stderr, "Error reading template %s: %v\n", name, err)
 			os.Exit(1)
 		}
+		if strings.HasSuffix(dest, ".go") {
+			data = stripScaffoldBuildTag(data)
+		}
 		if err := os.WriteFile(filepath.Join(dir, dest), data, 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", dest, err)
 			os.Exit(1)
@@ -132,6 +136,9 @@ func scaffoldAgentPython(projectName string) {
 			fmt.Fprintf(os.Stderr, "Error reading template %s: %v\n", name, err)
 			os.Exit(1)
 		}
+		if strings.HasSuffix(dest, ".go") {
+			data = stripScaffoldBuildTag(data)
+		}
 		if err := os.WriteFile(filepath.Join(dir, dest), data, 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", dest, err)
 			os.Exit(1)
@@ -160,6 +167,9 @@ func scaffoldWorkflow(projectName string) {
 			fmt.Fprintf(os.Stderr, "Error reading template %s: %v\n", name, err)
 			os.Exit(1)
 		}
+		if strings.HasSuffix(dest, ".go") {
+			data = stripScaffoldBuildTag(data)
+		}
 		if err := os.WriteFile(filepath.Join(dir, dest), data, 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", dest, err)
 			os.Exit(1)
@@ -180,4 +190,39 @@ func scaffoldWorkflow(projectName string) {
 func writeYAML(dir, projectName string) {
 	yamlContent := fmt.Sprintf("project: %q\nlanguage: go\nentry_points:\n  - name: agent\n    function: AgentLoop\n", projectName)
 	_ = os.WriteFile(filepath.Join(dir, "cleat.yaml"), []byte(yamlContent), 0644)
+}
+
+// stripScaffoldBuildTag removes a leading `//go:build ignore` constraint (and
+// the blank line after it) from an embedded Go template before it is written
+// into a user's new project.
+//
+// Template .go files carry that constraint so they do NOT compile as packages
+// of this repository. That is not tidiness: cmd/cleat/templates/workflow was
+// a real package, it imported github.com/cleat-team/cleat/cleat, and that
+// single import made the root module depend on the cleat/ module while cleat/
+// already depended on the root -- a module cycle whose only fix was a
+// `replace` directive in go.mod, which in turn makes
+// `go install <pkg>@<version>` refuse the module outright:
+//
+//	"The go.mod file for the module providing named packages contains one or
+//	 more replace directives."
+//
+// So README.md's `go install github.com/cleat-team/cleat/cmd/cleat@latest`
+// could not work while these files compiled. Excluding them breaks the cycle.
+//
+// The constraint must not reach the user, though: before this function
+// existed, `cleat init --template agent` copied templates/agent/workflow.go
+// verbatim, `//go:build ignore` and all, so the generated project contained
+// zero buildable Go files -- `go build ./...` in a fresh scaffold reported
+// "matched no packages". Verified before the fix, and covered by
+// TestScaffoldedGoFilesHaveNoBuildConstraint.
+func stripScaffoldBuildTag(data []byte) []byte {
+	s := string(data)
+	for _, tag := range []string{"//go:build ignore\n", "// +build ignore\n"} {
+		if strings.HasPrefix(s, tag) {
+			s = strings.TrimPrefix(s, tag)
+			s = strings.TrimPrefix(s, "\n")
+		}
+	}
+	return []byte(s)
 }

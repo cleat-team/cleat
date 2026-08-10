@@ -1,20 +1,28 @@
-// Package benchmarks provides performance benchmarks for the cleat durable
-// workflow engine. These benchmarks use an in-process HostCalls implementation
-// (via cleat.NewHostCalls) that avoids WASM compilation overhead, measuring
-// pure framework throughput.
+// Package workflows_test provides performance benchmarks for the cleat
+// durable workflow engine's in-process HostCalls path. These benchmarks use
+// an in-process HostCalls implementation (via cleat.NewHostCalls) that
+// avoids WASM compilation overhead, measuring pure framework throughput.
+//
+// Lives in benchmarks/workflows (its own module: benchmarks/workflows/go.mod)
+// rather than the top-level benchmarks/ (root module) because it imports the
+// cleat/ SDK (cleat.NewHostCalls, cleat.HostCalls) -- the root module does
+// not import cleat/ at all, on purpose (see CLAUDE.md on the module cycle).
+// benchmarks/db_bench_test.go and benchmarks/wasm_bench_test.go stay in the
+// root module: they only import engine, never cleat/.
 //
 // Usage:
 //
-//	go test -bench=. -benchmem -benchtime=10s ./benchmarks/
+//	cd benchmarks/workflows && go test -bench=. -benchmem -benchtime=10s ./...
 //
 // Each benchmark reports:
 //   - wf/s     workflows per second
 //   - steps/s  durable steps (API calls) per second
 //   - ns/op    nanoseconds per workflow (standard testing.B metric)
 //
-// To compare with Temporal or DBOS, port the workflow functions in
-// benchmarks/workflows/ to the respective SDK and run equivalent benchmarks.
-package benchmarks
+// To compare with Temporal or DBOS, port the workflow functions in this
+// directory (workflows.go et al.) to the respective SDK and run equivalent
+// benchmarks.
+package workflows_test
 
 import (
 	"fmt"

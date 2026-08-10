@@ -51,7 +51,15 @@ jobs:
           go-version: stable
       - name: Check tools
         run: make tools-go
-      - run: go test -count=1 -timeout=120s ./tests/plugin-harness/... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+      # tests/plugin-harness is its own Go module since the
+      # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
+      # cleat/wasmtest; the root module must not). `go test
+      # ./tests/plugin-harness/...` from the repo root no longer matches -- it
+      # fails with "directory prefix tests/plugin-harness does not contain main
+      # module or its selected dependencies" -- so the pattern is ./... from
+      # inside the module instead. See tests/plugin-harness/go.mod.
+      - run: go test -count=1 -timeout=120s ./... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+        working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"
 
@@ -143,13 +151,24 @@ jobs:
       # fails rather than going quietly green.
       - name: Run WASM integration tests
         shell: bash
+        # tests/plugin-harness is its own Go module since the root<->cleat/
+        # module cycle was broken (it imports cleat/cleattest and cleat/wasmtest;
+        # the root module must not). `go test ./tests/plugin-harness/...` from
+        # the repo root no longer matches -- it fails with "directory prefix
+        # tests/plugin-harness does not contain main module or its selected
+        # dependencies" -- so the pattern is ./... from inside the module.
+        # See tests/plugin-harness/go.mod.
+        working-directory: tests/plugin-harness
         run: |
           # pipefail: without it tee supplies the exit status and a failing
           # `go test` reports as a green step.
           set -o pipefail
+          # ../../: the report has to land at the repo root, because the
+          # Skip budget step below runs scripts/check-skip-budget.sh from
+          # there. Written from inside the module (see working-directory).
           go test -count=1 -timeout=600s -json \
-            ./tests/plugin-harness/... -run 'TestPluginCalls_Wasm' \
-            2>&1 | tee wasm-integration-report.json
+            ./... -run 'TestPluginCalls_Wasm' \
+            2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
           # when a C compiler is present and 0 otherwise, so relying on the
@@ -235,7 +254,17 @@ jobs:
       # No `|| true` here. Redirecting to a file keeps go test's exit status as
       # the step's exit status, so a real failure still fails the job; the
       # budget step below runs regardless via `if: always()`.
-      - run: go test -count=1 -timeout=600s -json ./tests/plugin-harness/... -run 'TestPluginCalls_MultiDB' > test-report.json 2>&1
+      # tests/plugin-harness is its own Go module since the
+      # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
+      # cleat/wasmtest; the root module must not). `go test
+      # ./tests/plugin-harness/...` from the repo root no longer matches -- it
+      # fails with "directory prefix tests/plugin-harness does not contain main
+      # module or its selected dependencies" -- so the pattern is ./... from
+      # inside the module instead. See tests/plugin-harness/go.mod.
+      # ../../test-report.json: the Skip budget step below runs from the repo
+      # root, so the report must land there rather than inside the module.
+      - run: go test -count=1 -timeout=600s -json ./... -run 'TestPluginCalls_MultiDB' > ../../test-report.json 2>&1
+        working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"
 
@@ -324,6 +353,14 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - run: go test -count=1 -timeout=120s -v ./tests/plugin-harness/... -run 'TestBlobstore_S3'
+      # tests/plugin-harness is its own Go module since the
+      # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
+      # cleat/wasmtest; the root module must not). `go test
+      # ./tests/plugin-harness/...` from the repo root no longer matches -- it
+      # fails with "directory prefix tests/plugin-harness does not contain main
+      # module or its selected dependencies" -- so the pattern is ./... from
+      # inside the module instead. See tests/plugin-harness/go.mod.
+      - run: go test -count=1 -timeout=120s -v ./... -run 'TestBlobstore_S3'
+        working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"

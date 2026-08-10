@@ -14,7 +14,7 @@ import (
 	"github.com/cleat-team/cleat/cleat/cleattest"
 	dagexample "github.com/cleat-team/cleat/examples/dag"
 
-	dagplugin "github.com/cleat-team/cleat/plugins/dag"
+	dagplugin "github.com/cleat-team/cleat/cleat/dagrun"
 )
 
 // ---------------------------------------------------------------------------
