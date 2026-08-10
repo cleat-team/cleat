@@ -83,8 +83,8 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 // check into the INSERT's own SELECT list via a WHERE clause, so a fenced
 // write costs nothing beyond the write it was already making, and the fence
 // and the write are the same statement -- there is no gap to argue about.
-// `$32 = ''` is the escape hatch for every caller that does not have a claim
-// to fence to (engine.fencingEnabled() false): the OR makes the WHERE
+// An empty $32 is the escape hatch for every caller that does not have a
+// claim to fence to (engine.fencingEnabled() false): the OR makes the WHERE
 // unconditionally true, so this is exactly the unfenced INSERT it always
 // was. See flushEvent's doc for how a caller that does supply $32/$33
 // distinguishes "fenced out" from "this row was already terminal" when the
@@ -166,13 +166,15 @@ func setRLSOnFlushTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
 // discarded version of this fix that called Heartbeat as a separate
 // statement before every write. fenceParams returns ("", 0) when the engine
 // was not constructed with both WithWorkerID and WithGeneration (see
-// fencingEnabled), which the SQL's `$32 = ''` disjunct treats as "no fence
+// fencingEnabled), which the SQL's empty-$32 disjunct treats as "no fence
 // requested" -- exactly the unfenced INSERT this was before B4.
 //
 // A fenced write can report zero rows affected for two different reasons,
 // and they are not the same thing: the fence was lost, or the row already
 // carries a terminal response/error and the pre-existing
-// `ON CONFLICT ... WHERE event_history.response = '' AND error IS NULL`
+//
+//	ON CONFLICT ... WHERE event_history.response = '' AND error IS NULL
+//
 // clause correctly declined to overwrite it (an idempotent re-flush, not a
 // bug). afterFencedInsert disambiguates the rare zero-rows case with one
 // extra Heartbeat call -- paid only there, not on every write, since the
@@ -401,8 +403,9 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	return e.afterFencedInsert(ctx, res, workflowID, fenceWorkerID, fenceGeneration)
 }
 
-// fenceParams returns the (workerID, generation) pair insertEventSQL's
-// `$32 = '' OR EXISTS (...)` clause expects: the real claim identity when
+// fenceParams returns the (workerID, generation) pair the fence clause in
+// insertEventSQL expects -- its empty-$32-or-EXISTS disjunct, documented on
+// that constant -- which is the real claim identity when
 // fencingEnabled() is true, or ("", 0) -- the documented "no fence
 // requested" sentinel -- otherwise.
 func (e *Engine) fenceParams() (string, int64) {

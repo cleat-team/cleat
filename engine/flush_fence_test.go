@@ -137,7 +137,9 @@ func TestFlushEvent_FenceHeld(t *testing.T) {
 // TestFlushEvent_FenceHeld_IdempotentReflushIsNotFenceLost pins the
 // composition insertEventSQL's doc describes: the fence's WHERE EXISTS
 // clause and the pre-existing
-// `ON CONFLICT ... WHERE event_history.response = '' AND error IS NULL`
+//
+//	ON CONFLICT ... WHERE event_history.response = '' AND error IS NULL
+//
 // clause both gate the same statement, for different reasons, and a zero-row
 // result from the second (the row already carries a terminal
 // response/error, so the conflict resolution correctly declined to

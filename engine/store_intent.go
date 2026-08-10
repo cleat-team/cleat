@@ -138,7 +138,7 @@ func intentFenceOrNotPending(ctx context.Context, hb func(ctx context.Context, w
 // insertEventSQL (engine/flush.go) for why this shape -- SELECT $1, $2, ...
 // WHERE (fence), no FROM, no CTE -- resolves parameter types from the INSERT
 // target list without explicit casts, checked against a real PostgreSQL
-// instance rather than assumed. $8 = '' is the "fencing not requested"
+// instance rather than assumed. An empty $8 is the "fencing not requested"
 // escape hatch; see callIntentStore's doc.
 const writeCallIntentSQLPostgres = `
 	INSERT INTO event_history (workflow_id, step, event_type, service, operation, request,
