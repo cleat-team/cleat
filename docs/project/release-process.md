@@ -69,25 +69,44 @@ so the check could never go green and no contributor could act on it. See the
 comment block in `.github/workflows/dco-check.yml`. Re-derive:
 
 ```bash
-base=$(git merge-base origin/main origin/develop)
-git rev-list --no-merges --count "$base"..origin/develop            # 443
-git rev-list --no-merges "$base"..origin/develop | while read -r c; do \
+# The range is pinned, not derived from `git merge-base`. #466 made develop an
+# ancestor of main, so the live merge-base is now develop's own head and the
+# derived range is empty — it would report 0, not 443. 97abac8..d23529e is the
+# v0.2.0 release as it stood.
+git rev-list --no-merges --count 97abac8..d23529e                   # 443
+git rev-list --no-merges 97abac8..d23529e | while read -r c; do \
   [ -z "$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$c")" ] \
     && echo "$c"; done | wc -l                                      # 284
 ```
 
-(Both measured 2026-08-10, before PR #463 changed the merge-base.)
+(Both measured 2026-08-10, and re-derived after #466 landed.)
 
 ### The 2026-08-10 reconnect
 
 Before 2026-08-10 the repo was squash-only, so `main` could not descend from
 `develop` and did not: since their common ancestor `97abac8` they had 2 and 448
 commits respectively, with neither an ancestor of the other, while their trees
-were byte-identical. PR #463 repaired this with a real merge commit — no file
-changed. This is why `git log main` shows two flattened snapshots (`467a689`,
-`fb4347d`) before the graph becomes continuous, and why anything written about
-this repo's release process before that date describes a world that no longer
-exists.
+were byte-identical. PR #466 repaired this with a real merge commit
+(`main` = `177ca8b`, parents `fb4347d` and `ab90dad`). This is why `git log
+main` shows two flattened snapshots (`467a689`, `fb4347d`) before the graph
+becomes continuous, and why anything written about this repo's release process
+before that date describes a world that no longer exists.
+
+```bash
+git merge-base --is-ancestor origin/develop origin/main && echo connected
+git diff --stat origin/main origin/develop     # empty: same content
+```
+
+The repair took two attempts, and the failure is the clearest possible
+illustration of why it was needed. PR #463 merged `develop` into `main`
+directly and was conflict-free — until a PR landed on `develop` touching
+`.github/workflows/dco-check.yml`. `main` carried its own copy of that file
+from the v0.2.0 squash, so with the merge base still at `97abac8` git read the
+two as independent edits and the merge conflicted. It had been clean an hour
+earlier only because the copies happened to be byte-identical. #463 was closed
+and #466 carried a merge commit built explicitly against `develop`'s tree.
+**Under squash-only merges this conflict was going to recur, widening, at every
+release.**
 
 ## Versioning
 
@@ -285,7 +304,7 @@ gh pr create --base develop --head release/vX.Y.Z --title "chore: back-merge rel
 
 Merge this one **with "Create a merge commit"** as well. This step is the one
 that gets skipped, and skipping it is how `main` and `develop` diverge — which
-is exactly the state PR #463 had to repair.
+is exactly the state PR #466 had to repair.
 
 ### 8. Verify CI
 

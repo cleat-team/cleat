@@ -83,7 +83,7 @@ jobs:
     # the job on that hop re-asks a question that was answered, against a range
     # that under gitflow is the whole release — for v0.2.0, 443 non-merge
     # commits with 284 of them predating the convention. It cannot go green,
-    # and nobody can make it. Measured 2026-08-10, before #463 moved the
+    # and nobody can make it. Measured 2026-08-10, before #466 moved the
     # merge-base:
     #
     #   base=$(git merge-base origin/main origin/develop)
