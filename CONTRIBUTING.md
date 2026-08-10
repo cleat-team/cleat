@@ -127,6 +127,27 @@ but descriptive. The prefix must be one of those listed above.
 A CI check validates branch naming on pull requests. Branches opened by
 dependabot or with the `bot` label are exempt.
 
+### Where to branch from, and how it merges
+
+`develop` is the integration branch and the repo default; `main` holds released
+code only. Contributors work against `develop`:
+
+| Your branch | Cut from | PR into | Merged with |
+|-------------|----------|---------|-------------|
+| `feature/`, `bugfix/`, `fix/`, `docs/` | `develop` | `develop` | **Squash** |
+| `release/vX.Y.Z` | `develop` | `main`, then `develop` | **Merge commit** |
+| `hotfix/...` | `main` | `main`, then `develop` | **Merge commit** |
+
+Almost all contributions are the first row: branch from `develop`, PR into
+`develop`, squashed on merge. The other two are maintainer release flows —
+they merge into *both* long-lived branches, and they must use a real merge
+commit, because squashing them would discard the parent that makes `main`
+descend from the released history.
+
+GitHub cannot enforce the method per target branch, so whoever merges picks it
+from the dropdown. See [docs/project/release-process.md](docs/project/release-process.md)
+for the full model.
+
 ## Contribution Process
 
 1. **Discuss first.** For significant changes, open an issue to discuss the

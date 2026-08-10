@@ -1,5 +1,94 @@
 # Cleat Release Process
 
+## Branching model
+
+cleat follows gitflow. Five branch kinds, and the release flow is fully determined
+by them:
+
+| Branch | Cut from | Merges into | Lifetime |
+|--------|----------|-------------|----------|
+| `main` | — | — | permanent; every commit is a tagged release |
+| `develop` | — | — | permanent; the integration branch, and the repo default |
+| `feature/`, `bugfix/`, `fix/`, `docs/` | `develop` | `develop` | until merged |
+| `release/vX.Y.Z` | `develop` | **`main` and `develop`** | until released |
+| `hotfix/...` | **`main`** | **`main` and `develop`** | until released |
+
+The two rows in bold are the ones that make it gitflow rather than a naming
+convention. A release or hotfix branch merges into *both* long-lived branches;
+skipping the back-merge into `develop` is what makes the branches drift apart.
+
+### Merge method per hop
+
+gitflow is defined by the merge graph, so the method is not a matter of taste:
+
+| Hop | Method | Why |
+|-----|--------|-----|
+| `feature/*` -> `develop` | **Squash** | Keeps develop's history one commit per change. |
+| `release/*` -> `main` | **Merge commit** | `main` must descend from the released history. |
+| `release/*` -> `develop` | **Merge commit** | Carries the version bump and CHANGELOG back. |
+| `hotfix/*` -> `main` | **Merge commit** | Same as a release. |
+| `hotfix/*` -> `develop` | **Merge commit** | The fix reaches develop by merging, never by cherry-pick. |
+
+GitHub cannot enforce a merge method per target branch — both squash and merge
+commit are enabled repo-wide, so the table above is convention and it is on the
+merger to pick the right one from the dropdown. **Squashing a release or hotfix
+PR silently breaks the model**: it discards the second parent, and `main` stops
+being a descendant of anything.
+
+Rebase merging is disabled. Re-derive the settings with:
+
+```bash
+gh api repos/cleat-team/cleat \
+  --jq '{merge:.allow_merge_commit,squash:.allow_squash_merge,rebase:.allow_rebase_merge}'
+# -> {"merge":true,"squash":true,"rebase":false}      (2026-08-10)
+```
+
+### Branch protection
+
+Both `main` and `develop` are protected with `enforce_admins: true` and force
+pushes disabled, so **nothing reaches either branch except through a pull
+request** — including for admins. The release checklist below is written against
+that fact; any instruction telling you to commit or push directly to `main` is
+wrong.
+
+| Branch | Required checks | Re-derive |
+|--------|-----------------|-----------|
+| `main` | `Build`, `Lint` | `gh api repos/cleat-team/cleat/branches/main/protection --jq .required_status_checks.contexts` |
+| `develop` | 32 contexts | `gh api repos/cleat-team/cleat/branches/develop/protection --jq '.required_status_checks.contexts \| length'` |
+
+`main` deliberately requires less than `develop`. Everything reaching `main` has
+already passed the full gate on `develop`; the release PR re-runs the suites
+anyway (the workflows trigger on `branches: [main, develop]`), but only `Build`
+and `Lint` block the merge.
+
+**DCO does not run on PRs into `main`.** It gates *contribution*, and
+contribution enters at `develop`, where every commit is checked on the way in. A
+release PR carries no new authorship — just the whole release, which for v0.2.0
+was 443 non-merge commits with 284 of them predating the sign-off convention —
+so the check could never go green and no contributor could act on it. See the
+comment block in `.github/workflows/dco-check.yml`. Re-derive:
+
+```bash
+base=$(git merge-base origin/main origin/develop)
+git rev-list --no-merges --count "$base"..origin/develop            # 443
+git rev-list --no-merges "$base"..origin/develop | while read -r c; do \
+  [ -z "$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$c")" ] \
+    && echo "$c"; done | wc -l                                      # 284
+```
+
+(Both measured 2026-08-10, before PR #463 changed the merge-base.)
+
+### The 2026-08-10 reconnect
+
+Before 2026-08-10 the repo was squash-only, so `main` could not descend from
+`develop` and did not: since their common ancestor `97abac8` they had 2 and 448
+commits respectively, with neither an ancestor of the other, while their trees
+were byte-identical. PR #463 repaired this with a real merge commit — no file
+changed. This is why `git log main` shows two flattened snapshots (`467a689`,
+`fb4347d`) before the graph becomes continuous, and why anything written about
+this repo's release process before that date describes a world that no longer
+exists.
+
 ## Versioning
 
 Cleat follows [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH).
@@ -101,12 +190,21 @@ Deprecations are communicated via:
 
 Follow these steps for each release:
 
-### 1. Prepare the CHANGELOG
+### 1. Cut the release branch
+
+Release preparation happens on a branch off `develop`, never on `main` or
+`develop` directly:
 
 ```bash
-git checkout main
-git pull origin main
+git fetch origin
+git checkout -b release/vX.Y.Z origin/develop
 ```
+
+From here until the release lands, only version bumps, CHANGELOG edits, and
+bugfixes go on this branch. New features continue to land on `develop` and ship
+in the next release.
+
+### 2. Prepare the CHANGELOG
 
 Open `CHANGELOG.md` and:
 
@@ -118,7 +216,7 @@ Open `CHANGELOG.md` and:
 - Verify the changelog follows [keepachangelog.com](https://keepachangelog.com/)
   format
 
-### 2. Update version strings
+### 3. Update version strings
 
 Check for any hardcoded version strings in the codebase:
 
@@ -128,7 +226,7 @@ grep -r 'v[0-9]\+\.[0-9]\+\.[0-9]\+' --include="*.go" --include="*.rs" .
 
 If any go.mod or version constants reference the old version, update them.
 
-### 3. Run multi-database tests
+### 4. Run multi-database tests
 
 Run the WorkflowStore test suite against all three supported backends to verify
 that no regressions were introduced:
@@ -148,36 +246,67 @@ Each directory should contain the same set of migration files (adapted for
 dialect syntax). If a migration is missing from one backend, add it before
 proceeding with the release.
 
-### 4. Commit and tag
+### 5. Commit and open the release PR into `main`
 
 ```bash
 git add CHANGELOG.md
-git commit -m "Release vX.Y.Z"
+git commit --signoff -m "release: vX.Y.Z"
+git push -u origin release/vX.Y.Z
 
-# Create an annotated tag
-git tag -a vX.Y.Z -m "Release vX.Y.Z"
+gh pr create --base main --head release/vX.Y.Z --title "release: vX.Y.Z"
 ```
 
-### 5. Push tag
+Wait for `Build` and `Lint`, then merge — **with "Create a merge commit"**, not
+squash. Squashing here discards the second parent and breaks the branch model;
+see [Merge method per hop](#merge-method-per-hop).
+
+### 6. Tag `main`
+
+The tag goes on the merge commit that now sits at the head of `main`, and it is
+the tag — not the merge — that publishes the release:
 
 ```bash
-git push origin main
+git fetch origin
+git tag -a vX.Y.Z -m "Release vX.Y.Z" origin/main
 git push origin vX.Y.Z
 ```
 
-### 6. Verify CI
+Tag `origin/main` explicitly rather than whatever your local checkout is on. The
+annotated tag matters: GoReleaser reads its message.
 
-Pushing the tag triggers the CI pipeline (GoReleaser), which:
+### 7. Back-merge into `develop`
 
-1. Builds binaries for all target platforms (linux/amd64, linux/arm64,
-   darwin/amd64, darwin/arm64, windows/amd64)
-2. Creates a GitHub Release with the binaries and checksums attached
-3. Publishes the release to the GitHub Release page
+The same release branch now merges into `develop`, carrying the CHANGELOG and
+version bump back so the branches do not drift:
+
+```bash
+gh pr create --base develop --head release/vX.Y.Z --title "chore: back-merge release vX.Y.Z into develop"
+```
+
+Merge this one **with "Create a merge commit"** as well. This step is the one
+that gets skipped, and skipping it is how `main` and `develop` diverge — which
+is exactly the state PR #463 had to repair.
+
+### 8. Verify CI
+
+Pushing the tag triggers `.github/workflows/release.yml` (GoReleaser), which:
+
+1. Builds `cleat`, `cleat-worker`, and `cleat-gen` for linux and darwin on
+   amd64 and arm64 — **four archives, no Windows build.** `.tar.gz` for linux,
+   `.zip` for darwin. Re-derive with:
+
+   ```bash
+   python3 -c "import yaml; d=yaml.safe_load(open('.goreleaser.yml')); \
+     print(sorted({(g,a) for b in d['builds'] for g in b['goos'] for a in b['goarch']}))"
+   ```
+2. Bundles `LICENSE`, `README.md`, and the built dashboard (`web/dist/`) into
+   each archive
+3. Creates a GitHub Release with the archives and `checksums.txt` attached
 
 Monitor the CI pipeline at:
 https://github.com/cleat-team/cleat/actions
 
-### 7. Verify the release
+### 9. Verify the release
 
 Once CI completes:
 
@@ -187,14 +316,24 @@ Once CI completes:
    - Binary assets are attached for all target platforms
    - Checksum file is present
    - Source code archive is attached
-3. Run the release binary locally for a smoke test:
+3. Smoke-test the install path **against a clean module cache**, so a locally
+   cached copy cannot make a broken release look installable:
 
 ```bash
-go install github.com/cleat-team/cleat/cmd/cleat@vX.Y.Z
+GOMODCACHE=$(mktemp -d) GOFLAGS=-mod=mod GOWORK=off \
+  go install github.com/cleat-team/cleat/cmd/cleat@vX.Y.Z
 cleat version  # should show vX.Y.Z
 ```
 
-### 8. Announce
+`GOWORK=off` matters: this repo has a committed `go.work`, and with the
+workspace active `go install` resolves modules from the local tree rather than
+from the published version, which is a green that measured nothing.
+
+This step is not ceremony. `v0.1.0` was published and could not be installed at
+all — `go install pkg@version` refuses any module whose `go.mod` carries a
+`replace` directive, and the root module carried one until v0.2.0.
+
+### 10. Announce
 
 Post in Discord `#announcements`:
 
@@ -217,10 +356,30 @@ Update the `#release-notes` thread with the changelog.
 For critical security fixes or production outages, a hotfix patch release may
 be cut outside the normal cadence:
 
-1. Create a branch from the latest tag: `git checkout -b hotfix-vX.Y.Z+1 vX.Y.Z`
-2. Apply the fix and bump the PATCH version
-3. Follow the standard release checklist (steps 1-8)
-4. Cherry-pick the fix into `main` after release
+A hotfix is the one branch cut from `main` rather than `develop` — that is what
+lets it ship without dragging in whatever `develop` has accumulated since the
+last release.
+
+```bash
+git fetch origin
+git checkout -b hotfix/worker-panic-on-nil-input origin/main
+```
+
+1. Apply the fix, add a regression test, and bump the PATCH version in
+   `CHANGELOG.md`. Note the branch prefix is `hotfix/` — `hotfix-vX.Y.Z` fails
+   `Validate branch name`, and a PR's head branch cannot be renamed, so the
+   mistake costs a close-and-reopen.
+2. Open a PR into `main`, merge it **with a merge commit**, then tag as in
+   step 6 above.
+3. Open a second PR from the same branch into `develop` and merge it **with a
+   merge commit**.
+
+Step 3 is a merge, not a cherry-pick. An earlier version of this document said
+"cherry-pick the fix into `main` after release", which was the only thing
+possible while the repo was squash-only — a cherry-pick makes a *copy* of the
+commit, so git cannot tell that the two branches carry the same fix and every
+subsequent release re-presents it as a conflict. Merging records the shared
+ancestry once and the question does not come back.
 
 ## Breaking change policy
 
