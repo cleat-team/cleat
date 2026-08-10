@@ -76,6 +76,32 @@ jobs:
   dco:
     name: Developer Certificate of Origin
     runs-on: ubuntu-latest
+
+    # DCO gates *contribution*, and contribution enters at develop. A PR into
+    # main carries no new authorship: it is a release or hotfix branch whose
+    # every commit was already certified here on the way into develop. Running
+    # the job on that hop re-asks a question that was answered, against a range
+    # that under gitflow is the whole release — for v0.2.0, 443 non-merge
+    # commits with 284 of them predating the convention. It cannot go green,
+    # and nobody can make it. Measured 2026-08-10, before #463 moved the
+    # merge-base:
+    #
+    #   base=$(git merge-base origin/main origin/develop)
+    #   git rev-list --no-merges --count "$base"..origin/develop        # 443
+    #   git rev-list --no-merges "$base"..origin/develop | while read -r c; do \
+    #     [ -z "$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$c")" ] \
+    #       && echo "$c"; done | wc -l                                  # 284
+    #
+    # This is why `Developer Certificate of Origin` was also removed from
+    # main's required status checks (2026-08-10). The skip here is the other
+    # half: without it the check stays permanently red on every release PR,
+    # and a red check that is *meant* to be red trains readers to merge past
+    # red — which is the habit this repo can least afford.
+    #
+    #   gh api repos/cleat-team/cleat/branches/main/protection \
+    #     --jq .required_status_checks.contexts     # -> ["Build","Lint"]
+    if: github.event.pull_request.base.ref != 'main'
+
     steps:
       - uses: actions/checkout@v4
         with:
