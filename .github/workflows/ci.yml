@@ -1022,7 +1022,7 @@ jobs:
         run: go test -bench=. -benchmem -benchtime=30s ./... | tee -a ../../bench-output.txt
 
       - name: Upload benchmark artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results-${{ github.sha }}
           path: bench-output.txt
@@ -1143,14 +1143,14 @@ jobs:
         run: make coverage-python
 
       - name: Upload Go coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: go-coverage-${{ github.sha }}
           path: coverage.out
           retention-days: 30
 
       - name: Upload Python coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-coverage-${{ github.sha }}
           path: python-sdk/tests/coverage
