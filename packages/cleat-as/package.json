@@ -35,8 +35,8 @@
   },
   "devDependencies": {
     "assemblyscript": "^0.27.32",
-    "@as-pect/cli": "^8.1.0",
-    "@as-pect/core": "^8.1.0"
+    "@as-pect/cli": "^9.0.0",
+    "@as-pect/core": "^9.0.0"
   },
   "ascMain": "assembly/index.ts",
   "overrides": {
