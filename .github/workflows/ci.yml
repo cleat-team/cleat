@@ -735,7 +735,7 @@ jobs:
           java-version: "17"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Run Java tests
         working-directory: crates/cleat-java
@@ -1075,7 +1075,7 @@ jobs:
           java-version: "17"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Build Go binaries
         run: |
@@ -1200,7 +1200,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
 
       # No host-binary build step here. It produced ./cleat-worker with
       # CGO_ENABLED=0 and nothing in this job ever ran it -- the cluster runs

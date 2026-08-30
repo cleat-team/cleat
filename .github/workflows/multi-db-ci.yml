@@ -188,7 +188,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
 
       # ./migration/... alongside ./engine/...: this is the only job with a
       # live MySQL, and until IMPROVEMENT-PLAN 3.13 nothing anywhere had ever
@@ -253,7 +253,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
 
       # ./migration/... alongside ./engine/...: this is the only job with a
       # live SQL Server, and the migration tests that assert the shipped
