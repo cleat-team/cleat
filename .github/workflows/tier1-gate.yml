@@ -296,7 +296,7 @@ jobs:
       # broke is not a debugging strategy.
       - name: Upload the tier-1 log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tier-gate-log-${{ github.sha }}
           path: tier-gate.log
