@@ -253,6 +253,23 @@ jobs:
           curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
             -o /tmp/shellcheck.tar.xz \
             "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          # TRUST ON FIRST USE, and weaker than it looks -- say so rather than
+          # let the next reader assume this is verification.
+          #
+          # koalaman/shellcheck publishes no checksum file and no build
+          # attestation (`gh attestation verify` -> HTTP 404, measured
+          # 2026-08-30), so there is no upstream value to check against. This
+          # digest is simply what the release served when the pin was written.
+          # It cannot tell you the artifact is what upstream intended; it can
+          # only tell you it has not CHANGED since, which is the actual threat
+          # for a mutable GitHub release asset.
+          #
+          # Contrast tier1-gate.yml's wasm-tools pin, which is attested, and
+          # #474's Gradle wrapper, whose checksum gradle.org publishes.
+          # If shellcheck ever ships attestations, replace this with
+          # `gh attestation verify`.
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/shellcheck.tar.xz" \
+            | sha256sum -c -
           tar -xJf /tmp/shellcheck.tar.xz -C /tmp
           sudo install "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
