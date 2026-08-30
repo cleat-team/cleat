@@ -5347,7 +5347,7 @@ Writing it down is what found the gaps, so here it is in full. The wasmtime back
 | core module (`Execute`) | Go, AssemblyScript, Java, Rust | caller's budget | unchanged |
 | native component (`ExecuteComponentCGo`) | any Component Model guest, i.e. Python | **backend default, caller's budget dropped** | caller's budget |
 | decomposition (`ExecuteComponent`) | native path fails for a non-limit reason | caller's budget | unchanged |
-| defers (`RunDefer`) | every deferred callback, on every path | **none — wazero** | **still none, §3.32** |
+| defers (`RunDefer`) | every deferred callback, on every path | **none — wazero** | the fenced backend, since #338 — §3.32 |
 
 The component-path defect: `ExecuteComponentCGo` passed `context.Background()` to
 `configureStore`, which takes the tighter of ctx's deadline and the backend's configured
@@ -5369,8 +5369,15 @@ Two things fell out of fixing it, both of which would have undone it:
 
 **What is still unwritten:** the *decomposition* path's fence is inherited rather than
 verified — it passes ctx correctly, but nothing exercises a runaway guest through it, because
-every component that reaches it today fails to instantiate for other reasons. And defers are
-§3.32.
+every component that reaches it today fails to instantiate for other reasons.
+
+And the defer row above is now true of `RunDefer` but not yet of the path that calls it after
+a trap. `executor.go:361` passes `context.Background()` to the post-trap defers on purpose, so
+that cleanup still happens when the workflow's own context has timed out or been cancelled —
+correct in intent, but it leaves `configureStore` with no deadline to reconcile against, so
+those defers get the backend-wide 30s default rather than any per-workflow budget. That is the
+same shape as the component-path defect above. **Read off the code, not measured** — noted
+that way deliberately, since every other finding in this section came from running something.
 
 The generalisable finding, which is the one worth carrying: **"which backend runs this" and
 "which code path inside that backend runs this" are different questions, and the limit story
@@ -5567,8 +5574,8 @@ Three findings, each verified against the tree rather than inferred.
    instantiates it *fresh*: new linear memory, so the workflow body never ran in it and nothing
    it captured exists; no `HostHandler` in ctx, so no durable calls, no lock release, no
    notification; and `nil` input.
-3. **The four call sites disagree.** Only `executor.go:643` invokes defers on the live instance
-   with the session. `executor.go:355` runs `invokeDefersOnTrap` *and* `runDefers`
+3. **The four call sites disagree.** Only `executor.go:649` invokes defers on the live instance
+   with the session. `executor.go:361` runs `invokeDefersOnTrap` *and* `runDefers`
    unconditionally — the comment says "fall back" but there is no conditional, so each defer
    body executes **twice**. The success path runs them from `cmd/cleat-worker` *after*
    `FinalizeWorkflowSegment`, by which point the instance is gone.
