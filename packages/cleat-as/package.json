@@ -38,5 +38,8 @@
     "@as-pect/cli": "^8.1.0",
     "@as-pect/core": "^8.1.0"
   },
-  "ascMain": "assembly/index.ts"
+  "ascMain": "assembly/index.ts",
+  "overrides": {
+    "glob-promise": "^6.0.7"
+  }
 }
