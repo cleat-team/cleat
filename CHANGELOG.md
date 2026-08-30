@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing user-facing yet. Changes since `v0.2.0` are limited to the release
+process itself (`docs/project/release-process.md`, `CONTRIBUTING.md`) and to
+the DCO workflow.
+
+## [0.2.0] - 2026-08-10
+
 ### UPGRADE NOTES — breaking
 
 - **SQL Server 2022 is now the minimum.** `migrations/mssql/011` uses
@@ -128,6 +134,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - QueryBuilder and Dialect SQL helper unit tests
 - Regression tests for critical-path PostgresStore methods
 
+### Changed
+- Project renamed from "durable" to "cleat" across the codebase
+
+### Removed
+- TinyGo support for compiling Go workflows to WASM. TinyGo is an
+  embedded-systems toolchain and lacked the standard library coverage this
+  project needs. The standard Go toolchain targeting `wasip1` (`--target go`)
+  is now the only supported way to compile Go workflows to WASM.
+
 ### Fixed
 - Multi-database CI failures in MySQL and MSSQL integration tests
 - Tenant isolation: restore tenant_id filter on GetWorkflowByID
@@ -144,11 +159,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expand fake SQL driver coverage for admin-prefixed queries
 - Corrected CompleteWorkflow status assertion from "completed" to "done"
 - MySQL test schema TEXT to VARCHAR for assigned_to column
-
-### Changed
-- Project renamed from "durable" to "cleat" across the codebase
-
-### Fixed
 - **`CreateUpdateRequest` rejected ordinary payloads.** A non-JSON update
   payload failed outright on MySQL and SQL Server, and one containing a quote
   or a backslash failed on all three — `workflow_update_requests.payload` never
@@ -206,12 +216,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Server: unquoted `key` (a reserved word in both), no `LIMIT` on SQL Server,
   and JSON columns that could be neither read nor written there.
 
-### Removed
-- TinyGo support for compiling Go workflows to WASM. TinyGo is an
-  embedded-systems toolchain and lacked the standard library coverage this
-  project needs. The standard Go toolchain targeting `wasip1` (`--target go`)
-  is now the only supported way to compile Go workflows to WASM.
-
 ## [0.1.0] - 2026-05-13
 
 ### Added
@@ -240,5 +244,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tenant isolation with schema-per-tenant support
 - Workflow versioning with minimum version support
 
-[Unreleased]: https://github.com/cleat-team/cleat/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/cleat-team/cleat/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cleat-team/cleat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cleat-team/cleat/releases/tag/v0.1.0
