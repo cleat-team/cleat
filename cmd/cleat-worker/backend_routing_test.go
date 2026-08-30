@@ -30,7 +30,7 @@ func TestRealFixturesRouteToWasmtime(t *testing.T) {
 		wantWasmtime         bool
 	}{
 		{"assemblyscript", "../../tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm", "assemblyscript", true},
-		{"java-teavm", "../../tests/plugin-harness/testdata/javaworkflow/build/wasm/wasm/workflow.wasm", "java", true},
+		{"java-teavm", "../../tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm", "java", true},
 	}
 
 	for _, tc := range cases {

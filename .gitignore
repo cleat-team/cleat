@@ -118,6 +118,13 @@ examples/*/node_modules/
 **/.gradle/
 examples/*/build/
 
+# The plugin-harness Java workflow is compiled by TestPluginCalls_Wasm_Java on
+# every run, so everything under its build/ is scratch. The one artifact that
+# is a fixture -- the .wasm that wasm/import_section_test.go and
+# cmd/cleat-worker/backend_routing_test.go read -- lives in prebuilt/ instead,
+# outside any directory Gradle owns.
+tests/plugin-harness/testdata/javaworkflow/build/
+
 # CI test-report artifacts (go test -json | tee ...), written into the repo
 # root by the workflow steps that check skip budgets.
 *-report.json
