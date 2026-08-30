@@ -140,7 +140,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
       # -json into a report, and a skip budget over it. Without that, this step
       # ran `go test` with no -v, so a skipped language and a passing one looked
       # identical in the log -- which is how TestPluginCalls_Wasm_Go sat
