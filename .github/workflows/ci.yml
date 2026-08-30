@@ -235,8 +235,25 @@ jobs:
           SHELLCHECK_VERSION: v0.11.0
         run: |
           set -euo pipefail
-          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
-            | tar -xJf - -C /tmp
+          # Downloaded to a file, not piped into tar, and --retry-all-errors is
+          # not optional. Both halves matter; measured with curl 8.7.1 against a
+          # server that aborts the first request mid-body:
+          #
+          #   --retry, piped        -> tar gets 4096 of 8192 bytes, no retry at all
+          #   --retry, to a file    -> exit 18 (PARTIAL_FILE), no retry at all
+          #   +all-errors, piped    -> tar gets 12288 bytes: the first attempt's
+          #                            partial body followed by a whole second copy
+          #   +all-errors, to file  -> exit 0, 8192 bytes  <- this
+          #
+          # Plain --retry only covers transient HTTP status codes (408, 429, 5xx)
+          # and connection failures, so it would not have retried the mid-transfer
+          # aborts this repo actually hits. And once retrying works, piping is
+          # unsafe: curl restarts from byte 0 while tar has already consumed the
+          # first attempt.
+          curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+            -o /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
           sudo install "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
 
