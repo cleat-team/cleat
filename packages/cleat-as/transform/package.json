@@ -21,7 +21,7 @@
     "package.json"
   ],
   "peerDependencies": {
-    "assemblyscript": "^0.27.0"
+    "assemblyscript": "^0.28.19"
   },
   "engines": {
     "node": ">=16.0.0"
