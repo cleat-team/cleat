@@ -137,7 +137,7 @@ jobs:
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v7
