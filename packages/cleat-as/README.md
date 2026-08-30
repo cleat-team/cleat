@@ -614,30 +614,48 @@ function callWithTimeout(
 ```
 
 Host-side timeout enforcement is on the roadmap.
+## Toolchain versions
 
-## Why `package.json` pins `glob-promise` in `overrides`
+This package builds and tests on **AssemblyScript 0.28** with **as-pect 9**:
 
-`@as-pect/cli@8` depends on `glob-promise@^5`, which depends on
-`npm-install-peers`, which depends on **the entire npm 6 CLI** as a library.
-That one edge dragged 457 packages into this lock file — 84% of it — and every
-vulnerability `npm audit` reported lived inside that vendored copy:
+    assemblyscript   ^0.28.19    (peer and dev)
+    @as-pect/cli     ^9.0.0
+    @as-pect/core    ^9.0.0
 
-    before: 544 packages, 48 vulnerabilities (3 critical, 28 high, 17 moderate)
-    after:   73 packages,  9 vulnerabilities (1 high, 8 moderate)
+`as-pect.asconfig.json` must set **`textFile`** as well as `outFile`. as-pect 9
+reads the compiler's `.wat` output (`extractCompilerOutput`), and without it the
+runner fails before a single test executes with:
 
-`glob-promise@6` has no dependencies at all and declares the same
-`glob: ^8.0.3` peer as v5, so the override changes nothing about what the
-package does. `npm-install-peers` existed to install peer dependencies on npm
-6; npm 7+ does that itself.
+    AssemblyScript compiler did not emit output.wat.
+    Available outputs: .../output.wasm
 
-**Do not drop this override** because a dependabot PR touches these packages.
-Removing it restores the npm 6 subtree and all 48 findings. Re-derive with:
+That is a config requirement, not a compiler bug -- `npm run build` succeeds
+whether or not it is set, so the SDK build passing says nothing about whether
+the tests can run.
+
+### Version pins live in five files
+
+Bumping AssemblyScript means bumping all of them together, because the SDK and
+the transform are consumed by `file:` dependencies rather than from a registry:
+
+    packages/cleat-as/package.json                       peer + dev
+    packages/cleat-as/transform/package.json             peer
+    tests/plugin-harness/testdata/asworkflow/package.json
+    examples/as-workflow/package.json
+    examples/widget-store-as/package.json
+
+### Historical note: the `glob-promise` override is gone
+
+Until as-pect 9, `@as-pect/cli@8` depended on `glob-promise@^5` ->
+`npm-install-peers` -> **the whole npm 6 CLI**, which put 457 packages and every
+`npm audit` finding into this lock file. #478 worked around it with an
+`overrides` entry pinning `glob-promise@^6`.
+
+`@as-pect/cli@9` depends on `glob@^13` directly and has no `glob-promise` edge
+at all, so the override was removed rather than carried forward. Re-derive:
 
     cd packages/cleat-as && npm audit --package-lock-only
 
-The 9 that remain are `lodash` inside `chevrotain` inside `@as-pect/snapshots`
-inside `@as-pect/core@8`. Clearing them needs `@as-pect/core@9`, which requires
-`assemblyscript@^0.28.19` against the `^0.27.32` pinned here — a compiler
-upgrade, not a dependency bump. That is why dependabot #417, #423 and #424 all
-failed `ERESOLVE`: each bumped `@as-pect/cli` to 9 and left `assemblyscript`
-where it was.
+    544 packages, 48 vulnerabilities   original
+     73 packages,  9 vulnerabilities   with the #478 override
+     54 packages,  0 vulnerabilities   as-pect 9  <- now

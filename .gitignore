@@ -171,3 +171,10 @@ cmd/cleat-worker/cleat-worker
 # never saw them and nothing noticed they were dead.
 /ast_transform_demo.go
 /ast_transform_demo_v2.go
+
+# `npm run build` in the AS test fixture stamps a second artifact next to the
+# tracked one. Only dist/workflow.wasm is a fixture (wasm/import_section_test.go
+# and cmd/cleat-worker/backend_routing_test.go read it); the stamped copy is
+# build output with no reader, and left untracked it makes the tree dirty after
+# any asworkflow build.
+tests/plugin-harness/testdata/asworkflow/dist/workflow.stamped.wasm
