@@ -614,3 +614,30 @@ function callWithTimeout(
 ```
 
 Host-side timeout enforcement is on the roadmap.
+
+## Why `package.json` pins `glob-promise` in `overrides`
+
+`@as-pect/cli@8` depends on `glob-promise@^5`, which depends on
+`npm-install-peers`, which depends on **the entire npm 6 CLI** as a library.
+That one edge dragged 457 packages into this lock file — 84% of it — and every
+vulnerability `npm audit` reported lived inside that vendored copy:
+
+    before: 544 packages, 48 vulnerabilities (3 critical, 28 high, 17 moderate)
+    after:   73 packages,  9 vulnerabilities (1 high, 8 moderate)
+
+`glob-promise@6` has no dependencies at all and declares the same
+`glob: ^8.0.3` peer as v5, so the override changes nothing about what the
+package does. `npm-install-peers` existed to install peer dependencies on npm
+6; npm 7+ does that itself.
+
+**Do not drop this override** because a dependabot PR touches these packages.
+Removing it restores the npm 6 subtree and all 48 findings. Re-derive with:
+
+    cd packages/cleat-as && npm audit --package-lock-only
+
+The 9 that remain are `lodash` inside `chevrotain` inside `@as-pect/snapshots`
+inside `@as-pect/core@8`. Clearing them needs `@as-pect/core@9`, which requires
+`assemblyscript@^0.28.19` against the `^0.27.32` pinned here — a compiler
+upgrade, not a dependency bump. That is why dependabot #417, #423 and #424 all
+failed `ERESOLVE`: each bumped `@as-pect/cli` to 9 and left `assemblyscript`
+where it was.
