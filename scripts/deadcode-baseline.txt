@@ -1,3 +1,13 @@
+cleat/embedded	field scopeInstKey
+cleat/embedded	field scopeObjType
+cleat/embedded	field scopePrefix
+cleat/embedded	field scopeSet
+cleat/embedded	field signalWait
+cleat/embedded	func (*execution).clearScope
+cleat/embedded	func (*execution).getScope
+cleat/embedded	func (*execution).setScope
+cleat/embedded	func (*execution).uuid
+cleat/embedded	type signalWaiter
 cmd/cleat-worker	field backoffUntil
 cmd/cleat-worker	field circuitOpen
 cmd/cleat-worker	field pluginStreamRegistry
@@ -7,7 +17,6 @@ cmd/cleat-worker	func (*apiServer).inflightCount
 cmd/cleat-worker	func (*healthTracker).maxAge
 cmd/cleat-worker	func baseDSNFromDSN
 cmd/cleat-worker	var lastFreshStepCount
-cmd/cleat/templates/workflow	var h
 cmd/cleatctl	func printCheckDBUsage
 cmd/cleatctl	func printRestoreUsage
 engine	const errSignalAuthRequired
