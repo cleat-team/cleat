@@ -63,7 +63,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: CI package-coverage guard
         run: scripts/check-ci-package-coverage.sh
@@ -316,7 +316,7 @@ jobs:
       # does not ship.
       CGO_ENABLED: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.25'
@@ -441,7 +441,7 @@ jobs:
     name: Vulnerability Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v7
@@ -632,7 +632,7 @@ jobs:
           - name: crash
             path: ./tests/crash/...
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v7
@@ -694,7 +694,7 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -726,7 +726,7 @@ jobs:
     #   grep -ho 'tests="[0-9]*"' build/test-results/test/*.xml |
     #     awk -F'"' '{s+=$2} END{print s}'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -755,7 +755,7 @@ jobs:
     # test alone in a checkout.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -814,7 +814,7 @@ jobs:
     name: Web Dashboard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -858,7 +858,7 @@ jobs:
     name: Test Rust
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -903,7 +903,7 @@ jobs:
     #   gh run view <id> --json jobs \
     #     --jq '.jobs[]|select(.name=="AssemblyScript WASM Build")|.steps[]|"\(.conclusion)\t\(.name)"'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -957,7 +957,7 @@ jobs:
     name: Fuzz Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v7
@@ -994,7 +994,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Fetch enough history for benchmark comparison
           fetch-depth: 0
@@ -1046,7 +1046,7 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v7
@@ -1118,7 +1118,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v7
@@ -1177,7 +1177,7 @@ jobs:
       # database with a running cluster can have.
       CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat_tests?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v7

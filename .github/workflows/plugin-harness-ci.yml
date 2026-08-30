@@ -45,7 +45,7 @@ jobs:
     name: Layer 1 — SDK (cleattest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: stable
@@ -70,7 +70,7 @@ jobs:
     name: Layer 2 — WASM Integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: stable
@@ -234,7 +234,7 @@ jobs:
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=master
       CLEAT_TEST_SKIP_REAL_SERVICES: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: stable
@@ -349,7 +349,7 @@ jobs:
       CLEAT_TEST_S3_BUCKET: cleat-test-harness
       CLEAT_TEST_S3_USE_SSL: 'false'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: stable
