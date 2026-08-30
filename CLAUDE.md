@@ -45,11 +45,18 @@ on the same tree, same command:
 Both printed `ok`. **Check the wall-clock delta** — roughly 20s means Postgres only, roughly 60s
 means all three. A green engine run that took 16 seconds tested no database at all.
 
-**Build and test with CGO on — the default.** `CGO_ENABLED=0` does not skip a check. It removes
-`NewWasmtimeBackend` (behind `//go:build cgo`) from the binary entirely and silently runs
-everything on wazero, the fallback with the known bug tail. **An engine result obtained that way
-is not evidence about the engine.** If a genuine toolchain failure forces it, say so in the PR
-rather than leaving the reader to assume wasmtime was exercised.
+**Build and test with CGO on — the default.** `CGO_ENABLED=0` does not skip a check. It swaps
+`NewWasmtimeBackend` for the `//go:build !cgo` stub in `engine/backend_wasmtime_stub.go`, which
+returns `ErrWasmtimeCGOUnavailable`, so **there is no backend left at all** — `cleat-worker`
+logs "wasmtime is the only WASM backend cleat has, there is no fallback" and exits 1
+(`cmd/cleat-worker/main.go:790`). **An engine result obtained that way is not evidence about the
+engine.** If a genuine toolchain failure forces it, say so in the PR rather than leaving the
+reader to assume wasmtime was exercised.
+
+Note what that does *not* do: `CGO_ENABLED=0 go build ./...` still exits 0 (measured
+2026-08-30). Nothing tells you at build time; the failure is at worker startup. This paragraph
+used to say a CGO-less build "silently runs everything on wazero" — that stopped being true
+when the wazero backend was deleted, and it is the opposite of what happens now.
 
 **Use `-p 1` when running more than one database-backed package in one invocation.**
 `engine/testutil`'s `CleanupPostgresTestData` is an unqualified `DELETE FROM` across eleven
@@ -151,22 +158,35 @@ faster than reading the remaining sites.
 - WASM workflows are compiled with the standard Go toolchain (`--target go`, default)
 - Tests use `go test`, fuzz tests, and behavioral test suites
 
-### Two WASM backends
+### One WASM backend, and a wazero runtime that is not it
 
-- **wasmtime** (`engine/backend_wasmtime.go`) — via CGo. **The backend of record.** Preferred
-  automatically whenever CGO is available (`cmd/cleat-worker/main.go`), and
-  `engine.WasmtimeLanguages` is the single source of truth for which guest languages run on it.
-  Membership there means *verified to load and execute*, not *ought to*.
-- **wazero** (`engine/backend_wazero.go`) — pure Go. **The CGO-less fallback and nothing else**
-  (settled 2026-08-05). It carries a real bug tail — do not treat a wazero-only failure as
-  evidence about the engine as a whole.
+**wasmtime** (`engine/backend_wasmtime.go`, `//go:build cgo`) is the only `WasmBackend` cleat
+has. `engine.WasmtimeLanguages` is the single source of truth for which guest languages run on
+it, and membership there means *verified to load and execute*, not *ought to*.
 
-They are not equivalent, and the difference is safety-relevant: **wazero cannot be fenced for a
+There is no second backend and no fallback. `engine/backend_wazero.go` was **deleted** in #459
+(2026-08-10) — this file described it as "the CGO-less fallback" for twenty days after it
+stopped existing. Confirm with `ls engine/backend_wazero.go`.
+
+**wazero has not left the tree, though, and the distinction matters.** `engine.Runtime`
+(`engine/runtime.go`) is still a wazero runtime, and it still executes guest code on these
+paths:
+
+- `RunDefer`, when `backendForWasm` returns nil — its own comment says "the CGO-less build,
+  where wazero is the only runtime there is. Unfenced, and unavoidably so"
+  (`engine/executor.go:706`)
+- `cleat/wasmtest`, `cmd/cleat run_embedded`, `cmd/cleatctl replay`, `cmd/cleatctl debug`,
+  `cmd/cleat-bench` — all call `engine.NewRuntime`
+
+Re-derive: `grep -rn "NewRuntime(" --include="*.go" . | grep -v _test.go`
+
+So "wazero is gone" is wrong in the direction that matters: **wazero cannot be fenced for a
 compute-bound guest.** Measured three ways, all failing — `WithCloseOnContextDone` breaks all
 execution, fuel only decrements on function entry, and closing the module has no effect on a
-tight loop. A runaway guest on wazero is not stopped. Resource limits and determinism enforcement
-differ too. When changing execution paths, check both, and treat wasmtime as the behaviour of
-record.
+tight loop. A runaway guest on any of the paths above is not stopped. Removing the rest is
+"wazero removal, part 2" in `REMEDIATION-PLAN-2026-08-09.md`, deliberately parked with the WIP
+in a stash — read that section before starting it, it records why `go vet` failed and got 85%
+of the way there.
 
 **"Which backend runs this" and "which code path inside that backend runs this" are different
 questions.** The wasmtime backend has three execution paths — core module, native component, and
