@@ -42,7 +42,18 @@ BASELINE="scripts/deadcode-baseline.txt"
 
 # Pinned: an unpinned @latest would turn an upstream release into a
 # spontaneous CI failure on an unrelated PR.
-STATICCHECK="honnef.co/go/tools/cmd/staticcheck@2025.1.1"
+#
+# The pin is not fire-and-forget, though: staticcheck reads the toolchain's
+# export data, whose format version advances with Go. 2025.1.1 predates Go
+# 1.26 and every scan under it died with
+#
+#   internal error in importing "cmp" (cannot decode "cmp", export data
+#   version 4 is greater than maximum supported version 2)
+#
+# which the vacuous-pass check below turned into a hard failure -- correctly,
+# but on every PR. When the repo's Go version moves, this pin has to move
+# with it.
+STATICCHECK="honnef.co/go/tools/cmd/staticcheck@2026.2.1"
 
 # Key on "<package dir><TAB><symbol>" rather than the raw staticcheck line,
 # so that moving a function within its file does not churn the baseline.
@@ -75,6 +86,23 @@ STATICCHECK="honnef.co/go/tools/cmd/staticcheck@2025.1.1"
 TOOLDIR="$(mktemp -d)"
 trap 'rm -rf "$TOOLDIR"' EXIT
 
+# Every Go module in the repo, same set the govulncheck and go-mod-tidy guards
+# use. `./...` stops at a module boundary, so a single invocation from the repo
+# root sees the root module ONLY -- examples/, tests/plugin-harness/ and the
+# rest are separate modules and are simply not scanned. That is not a
+# theoretical gap: the baseline carried seven `examples/*` entries from an
+# environment where they were reached, and a root-only scan drops all seven
+# while still reporting "no new test-only code". Silently covering less than
+# the baseline assumes is the same vacuous pass this script exists to prevent,
+# so the scan iterates modules explicitly.
+modules() {
+  find . -name go.mod \
+      -not -path './node_modules/*' -not -path '*/node_modules/*' \
+      -not -path './.claude/*' -not -path './benchmarks/comparative/*' |
+    sed 's|/go\.mod$||; s|^\./||; s|^$|.|' |
+    LC_ALL=C sort
+}
+
 scan() {
   if [ ! -x "$TOOLDIR/staticcheck" ]; then
     if ! GOBIN="$TOOLDIR" go install "$STATICCHECK" >&2; then
@@ -83,12 +111,52 @@ scan() {
     fi
   fi
 
-  local out
-  out="$(LC_ALL=C GOOS=linux CGO_ENABLED=0 "$TOOLDIR/staticcheck" \
-    -checks=U1000 -tests=false ./... 2>&1)"
+  local out="" all="" broken=""
+  local m prefix mod_out noise
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    mod_out="$(cd "$m" && LC_ALL=C GOOS=linux CGO_ENABLED=0 GOWORK=off \
+      "$TOOLDIR/staticcheck" -checks=U1000 -tests=false ./... 2>&1)"
+
+    # Anything that is not a U1000 finding is staticcheck failing to analyse,
+    # not a clean module. The 2025.1.1 pin died this way on every package
+    # ("export data version 4 is greater than maximum supported version 2")
+    # and a per-module scan would otherwise report that module as clean.
+    # A module with no non-test packages is legitimately empty under
+    # -tests=false: tests/cross-language is a single _test.go and nothing
+    # else. Said out loud rather than filtered silently, so a module that
+    # becomes empty by accident is visible in the log.
+    if printf '%s\n' "$mod_out" | grep -q '^warning: "\./\.\.\." matched no packages$'; then
+      echo "note: $m has no non-test packages to scan" >&2
+      mod_out="$(printf '%s\n' "$mod_out" | grep -v '^warning: "\./\.\.\." matched no packages$' || true)"
+    fi
+
+    noise="$(printf '%s\n' "$mod_out" | grep -v '(U1000)$' | grep -v '^[[:space:]]*$' || true)"
+    if [ -n "$noise" ]; then
+      broken="$broken$m"$'\n'
+      out="$out$(printf 'module %s:\n%s\n' "$m" "$noise")"
+      continue
+    fi
+
+    # Re-root each finding on the repo so the baseline key is repo-relative:
+    #   examples + datapipeline/pipeline.go:22:5  ->  examples/datapipeline/...
+    if [ "$m" = "." ]; then prefix=""; else prefix="$m/"; fi
+    all="$all$(printf '%s\n' "$mod_out" | grep '(U1000)$' | sed "s|^|$prefix|")"$'\n'
+  done <<EOF
+$(modules)
+EOF
+
+  if [ -n "$broken" ]; then
+    echo "ERROR: staticcheck did not complete in:" >&2
+    printf '%s' "$broken" | sed 's/^/    /' >&2
+    echo "Raw output follows:" >&2
+    printf '%s\n' "$out" | head -20 | sed 's/^/    /' >&2
+    echo "$SCAN_FAILED"
+    return
+  fi
 
   local findings
-  findings="$(printf '%s\n' "$out" |
+  findings="$(printf '%s\n' "$all" |
     grep '(U1000)$' |
     sed -E 's|^([^:]*)/[^/:]*\.go:[0-9]+:[0-9]+: (.*) is unused \(U1000\)$|\1\t\2|' |
     LC_ALL=C sort -u)"
