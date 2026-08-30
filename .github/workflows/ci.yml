@@ -1500,7 +1500,37 @@ jobs:
           # and a deadlock) and delete each other's fixtures mid-test. That
           # was invisible while they shared the cluster's already-migrated
           # database and only appeared once this job got one of its own.
-          go test -p 1 -count=1 -timeout=180s -json ./engine/... 2>&1 | tee test-report.json
+          #
+          # 300s, raised from 180s on 2026-08-30. Measured on three runs of the
+          # same package that day:
+          #
+          #   #468   99.754s   pass
+          #   #470  107.664s   pass
+          #   #472  180.017s   KILLED by the old budget, four CI runs concurrent
+          #
+          # ~100s typical against a 180s ceiling is 1.8x headroom, and one slow
+          # runner spent it. 300s is ~3x, and matches the two other Postgres
+          # steps in this file (./tests/exhaustion/... and ./tests/cluster/...),
+          # which makes 180s the outlier rather than this the exception.
+          #
+          # Raising it is worth more than it looks, because of HOW this fails.
+          # A timeout kills the test binary, so no individual test ever reports
+          # failure: `go test -json` emits every test passing, no FAIL line and
+          # no ::error, and the only evidence is a package-level
+          # `FAIL github.com/cleat-team/cleat/engine 180.017s` whose elapsed
+          # time equals the budget. On #472 that read like a defect in an
+          # unrelated actions/github-script bump and cost a full diagnosis.
+          #
+          # So if this ever goes red again with no named failing test, check the
+          # elapsed time against the number below before looking for a bug:
+          #
+          #   gh run view --job <id> --log | grep -E '^FAIL\s+.*/engine'
+          #
+          # Re-derive the typical duration from a passing run's JSON:
+          #
+          #   jq -r 'select(.Action=="pass" and .Test==null and
+          #          (.Package|endswith("/engine"))) | .Elapsed' test-report.json
+          go test -p 1 -count=1 -timeout=300s -json ./engine/... 2>&1 | tee test-report.json
 
       # This job brings up a real four-worker cluster and a real database, so
       # it has asked for everything its tests need: any skip here means
