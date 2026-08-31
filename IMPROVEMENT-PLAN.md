@@ -4190,6 +4190,36 @@ is not known to have been causing red runs, and it should not be cited as though
 `cmd/cleat-worker` is the well-behaved one here — it uses the run-scoped
 `CleanupTestData(…, runID)` rather than the blanket wipe.
 
+#### `CleanupTestData` — errors were discarded, and its coverage was already right (2026-08-31)
+
+The run-scoped helper deleted through `_, _ = db.Exec(...)` at all seven sites, so a cleanup that
+failed outright was indistinguishable from one that worked — the same defect part 1 fixed for the
+blanket cleanups, which this helper did not get at the time. Now checked, with the existence
+filter so an absent table is still not an error.
+
+**Its seven tables were never a gap, and I said otherwise before measuring.** They are exactly the
+tables a workflow ID can select rows in: six carry a `workflow_id` column, and
+`workflow_instances` carries it as `id`. Measured 2026-08-31 against the PostgreSQL schema, the
+other eight are keyed by name or tenant (`workflow_defs`, `plugin_defs`, `workflow_schedules`,
+`workflow_tags`, `tenant_api_keys`, `workflow_memory_stats`) or by a surrogate id unrelated to any
+workflow (`workflow_routing` keys on `workflow_name`, `workflow_memory_samples` on `def_name`), so
+none of them can be scoped this way at all. "7 of 15" was a complete list described as a partial
+one.
+
+`existingTables` gained SQL Server support for this — `store_backends_test.go` calls
+`CleanupTestData` with all three dialects — matching on schema as well as name, because
+`sys.tables` is keyed on name alone and an unqualified `DELETE` is not.
+
+**A performance regression, found and fixed in the same change.** The first version of the
+PostgreSQL branch issued one `to_regclass` round trip per candidate. Cleanup runs on the order of
+a hundred times per suite, so 15 statements became ~1500 and the engine suite visibly slowed —
+one interrupted local run sat past 600s. Now one round trip with N columns; engine is back to 74s
+across three dialects, in line with every measurement before the change.
+
+**Disclosed:** the new `t.Fatalf` on a failed delete has no test that fires it. Arranging a
+delete that errors *and* survives the existence filter needs a contrived fixture, and a contrived
+one would prove less than this sentence does.
+
 **`-p 1` will not be removed, and that is a decision rather than a deferral.** Measured on
 develop `63708d7`: the `engine` package takes 94–128s in CI and `engine/testutil` takes
 0.35–1.5s, so running them concurrently saves about 1% of that job. Against that, dropping the
