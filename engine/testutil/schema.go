@@ -218,12 +218,22 @@ func existingTables(t *testing.T, db *sql.DB, dialect Dialect, candidates []stri
 		// this whole item exists to remove, reintroduced by the check meant to
 		// support it. Caught by the Cluster job, where leftover rows surfaced
 		// as `CreateSchedule: duplicate key value violates unique constraint`.
-		for _, c := range candidates {
-			var found bool
-			if err := db.QueryRow(`SELECT to_regclass($1) IS NOT NULL`, c).Scan(&found); err != nil {
-				t.Fatalf("cleanup: resolving table %s: %v", c, err)
-			}
-			if found {
+		// One round trip, N columns -- not one query per table. Cleanup runs on
+		// the order of a hundred times per suite, so a per-table query turned
+		// ~15 statements into ~1500 and made the engine suite visibly slower.
+		// The names are compile-time constants in this package, not input.
+		exprs := make([]string, 0, len(candidates))
+		dest := make([]any, 0, len(candidates))
+		found := make([]bool, len(candidates))
+		for i, c := range candidates {
+			exprs = append(exprs, fmt.Sprintf("to_regclass('%s') IS NOT NULL", c))
+			dest = append(dest, &found[i])
+		}
+		if err := db.QueryRow("SELECT " + strings.Join(exprs, ", ")).Scan(dest...); err != nil {
+			t.Fatalf("cleanup: resolving table names: %v", err)
+		}
+		for i, c := range candidates {
+			if found[i] {
 				have[c] = true
 			}
 		}
@@ -232,6 +242,29 @@ func existingTables(t *testing.T, db *sql.DB, dialect Dialect, candidates []stri
 		// database, so this is the same question.
 		rows, err := db.Query(
 			`SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()`)
+		if err != nil {
+			t.Fatalf("cleanup: listing tables: %v", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatalf("cleanup: scanning table names: %v", err)
+			}
+			have[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("cleanup: reading table names: %v", err)
+		}
+	case DialectMSSQL:
+		// Schema-aware, not name-alone. sys.tables is keyed on name, so an
+		// unqualified lookup happily finds a table in another schema that an
+		// unqualified DELETE would then fail to resolve -- the trap
+		// CleanupMSSQLTestData records for admin.tenant_api_keys. Candidates
+		// here are unqualified, so they mean dbo.
+		rows, err := db.Query(`SELECT t.name FROM sys.tables t
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = 'dbo'`)
 		if err != nil {
 			t.Fatalf("cleanup: listing tables: %v", err)
 		}
@@ -325,13 +358,45 @@ func CleanupTestData(t *testing.T, db *sql.DB, dialect Dialect, runID string) {
 	default:
 		t.Fatalf("cleanup test data: unknown dialect: %s", dialect)
 	}
-	_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM workflow_signals WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM workflow_promises WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM concurrency_keys WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM idempotency_keys WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM workflow_update_requests WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id LIKE `+p, runID)
+	// These seven are exactly the tables a workflow ID can select rows in: six
+	// carry a workflow_id column and workflow_instances carries it as `id`.
+	// The other eight tables the blanket cleanups clear are keyed by name or
+	// tenant (workflow_defs, plugin_defs, workflow_schedules, workflow_tags,
+	// tenant_api_keys, workflow_memory_stats) or by a surrogate id unrelated
+	// to any workflow (workflow_routing, workflow_memory_samples), so they
+	// cannot be scoped this way at all. Measured 2026-08-31 against the
+	// PostgreSQL schema; this is a complete list, not a partial one.
+	deletes := []struct{ table, where string }{
+		{"event_history", "workflow_id LIKE " + p},
+		{"workflow_signals", "workflow_id LIKE " + p},
+		{"workflow_promises", "workflow_id LIKE " + p},
+		{"concurrency_keys", "workflow_id LIKE " + p},
+		{"idempotency_keys", "workflow_id LIKE " + p},
+		{"workflow_update_requests", "workflow_id LIKE " + p},
+		{"workflow_instances", "id LIKE " + p},
+	}
+
+	names := make([]string, 0, len(deletes))
+	for _, d := range deletes {
+		names = append(names, d.table)
+	}
+	present := make(map[string]bool)
+	for _, n := range existingTables(t, db, dialect, names) {
+		present[n] = true
+	}
+
+	for _, d := range deletes {
+		if !present[d.table] {
+			continue
+		}
+		// Errors were discarded here with `_, _ =`, so a cleanup that failed
+		// outright was indistinguishable from one that worked -- the same
+		// defect IMPROVEMENT-PLAN 2.60d records for the blanket cleanups,
+		// which this helper did not get when they were fixed.
+		if _, err := db.Exec("DELETE FROM "+d.table+" WHERE "+d.where, runID); err != nil {
+			t.Fatalf("cleanup: delete from %s where %s: %v", d.table, d.where, err)
+		}
+	}
 }
 
 // TestDB opens a database connection for the given dialect using environment
