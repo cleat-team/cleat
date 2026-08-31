@@ -216,9 +216,9 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 		return false, fmt.Errorf("AcquireConcurrencyKey: cleanup expired: %w", err)
 	}
 
-	// Step 2: try to insert. If the key_hash already exists (held by another
-	// workflow with a still-valid expiry), INSERT IGNORE is a silent no-op.
-	_, err = s.db.ExecContext(ctx, `
+	// Step 2: try to insert. If the key_hash already exists -- held by anyone,
+	// including this same workflow -- INSERT IGNORE is a silent no-op.
+	res, err := s.db.ExecContext(ctx, `
 		INSERT IGNORE INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
 		VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), ?)
 	`, keyHash, key, workflowID, ttlMicros, s.tenantID)
@@ -226,19 +226,23 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 		return false, fmt.Errorf("AcquireConcurrencyKey: %w", err)
 	}
 
-	// Step 3: check who owns the key now (tenant-scoped).
-	var ownerID string
-	err = s.db.QueryRowContext(ctx, `
-		SELECT workflow_id FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?
-	`, keyHash, s.tenantID).Scan(&ownerID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	// The answer is "did *this call* take the key", which is exactly what the
+	// insert reports. It used to be "who owns the key now", read back with a
+	// SELECT and compared to workflowID -- so a workflow re-acquiring a key it
+	// already held was told true here and false on PostgreSQL and SQL Server,
+	// where the insert is likewise a no-op and nothing is returned.
+	//
+	// Never re-entrant is the contract, and not merely because two dialects
+	// already had it: ReleaseConcurrencyKey takes only the key and deletes the
+	// row unconditionally, with no hold count anywhere. Under the old answer,
+	// acquire(k); acquire(k); release(k) left the key free while the workflow
+	// still believed it held it -- the failure mode a mutual-exclusion
+	// primitive exists to prevent. IMPROVEMENT-PLAN 3.39.
+	inserted, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("AcquireConcurrencyKey: verify: %w", err)
+		return false, fmt.Errorf("AcquireConcurrencyKey: rows affected: %w", err)
 	}
-
-	return ownerID == workflowID, nil
+	return inserted == 1, nil
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.

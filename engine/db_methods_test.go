@@ -35,7 +35,12 @@ type mockExecResult struct {
 	match    string
 	affected int64
 	err      error // if non-nil, return this error from Exec
-	consume  bool  // if true, this result is removed after first use
+	// affectedErr, if non-nil, is returned from RowsAffected() rather than
+	// from Exec. Drivers can fail there independently -- a caller that reads
+	// RowsAffected to decide something (see MySQLStore.AcquireConcurrencyKey)
+	// has an error path that Exec-level failures cannot reach.
+	affectedErr error
+	consume     bool // if true, this result is removed after first use
 
 	// sideEffect is called after a successful Exec match (no error).
 	// It receives pointers to the shared row/exec result slices so it can
@@ -130,7 +135,7 @@ func (s *mockStmt) Exec(_ []driver.Value) (driver.Result, error) {
 			if er.sideEffect != nil {
 				er.sideEffect(&s.rowsResults, &s.execResults)
 			}
-			return &mockResult{affected: er.affected}, nil
+			return &mockResult{affected: er.affected, affectedErr: er.affectedErr}, nil
 		}
 	}
 	return &mockResult{}, nil
@@ -156,11 +161,12 @@ func (s *mockStmt) Query(_ []driver.Value) (driver.Rows, error) {
 
 // mockResult implements driver.Result with a configurable RowsAffected.
 type mockResult struct {
-	affected int64
+	affected    int64
+	affectedErr error // if non-nil, RowsAffected returns this
 }
 
 func (r *mockResult) LastInsertId() (int64, error) { return 0, nil }
-func (r *mockResult) RowsAffected() (int64, error) { return r.affected, nil }
+func (r *mockResult) RowsAffected() (int64, error) { return r.affected, r.affectedErr }
 
 // mockRows implements driver.Rows with pre-configured data.
 type mockRows struct {

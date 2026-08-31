@@ -301,10 +301,12 @@ func TestMySQLStore_CompleteUpdateRequest(t *testing.T) {
 // Concurrency Keys
 // ---------------------------------------------------------------------------
 
+// The acquire mocks below no longer configure a `SELECT workflow_id` result.
+// AcquireConcurrencyKey used to insert, then read back the owner and compare it
+// to workflowID; it now reports whether *this call* inserted the row, which is
+// what INSERT IGNORE's rows-affected already says. See IMPROVEMENT-PLAN 3.39.
 func TestMySQLStore_AcquireConcurrencyKey_Success(t *testing.T) {
-	store := newMySQLStoreForTest(t, []mockRowsResult{
-		queryRowOk("SELECT workflow_id FROM concurrency_keys WHERE key_hash", "wf-1"),
-	}, []mockExecResult{
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
 		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 0},
 		{match: "INSERT IGNORE INTO concurrency_keys", affected: 1},
 	})
@@ -317,12 +319,18 @@ func TestMySQLStore_AcquireConcurrencyKey_Success(t *testing.T) {
 	}
 }
 
+// TestMySQLStore_AcquireConcurrencyKey_AlreadyHeld covers a key held by anyone,
+// including this same workflow -- the two are the same case now.
+//
+// The mock previously said the INSERT affected 1 row and relied on the
+// follow-up SELECT finding nothing, which is a database state that cannot
+// occur: a row was inserted and is then absent. It passed for a reason that
+// did not correspond to anything real. A held key means INSERT IGNORE is a
+// no-op, so rows-affected is 0.
 func TestMySQLStore_AcquireConcurrencyKey_AlreadyHeld(t *testing.T) {
-	// Default mock behavior returns empty rows, which means insert succeeded
-	// but verify returns ErrNoRows -> not acquired.
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
 		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 0},
-		{match: "INSERT IGNORE INTO concurrency_keys", affected: 1},
+		{match: "INSERT IGNORE INTO concurrency_keys", affected: 0},
 	})
 	acquired, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-2", 30*time.Second)
 	if err != nil {
@@ -354,16 +362,24 @@ func TestMySQLStore_AcquireConcurrencyKey_InsertError(t *testing.T) {
 	}
 }
 
-func TestMySQLStore_AcquireConcurrencyKey_VerifyError(t *testing.T) {
-	store := newMySQLStoreForTest(t, []mockRowsResult{
-		{match: "SELECT workflow_id FROM concurrency_keys WHERE key_hash", err: sql.ErrConnDone},
-	}, []mockExecResult{
+// TestMySQLStore_AcquireConcurrencyKey_RowsAffectedError replaces the former
+// _VerifyError test. The read-back SELECT it covered no longer exists, but the
+// error path did not disappear with it -- it moved. RowsAffected can fail
+// independently of Exec, and a caller that decides "did I take the lock" from
+// its value must not silently report false when it could not find out.
+func TestMySQLStore_AcquireConcurrencyKey_RowsAffectedError(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
 		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 0},
-		{match: "INSERT IGNORE INTO concurrency_keys", affected: 1},
+		{match: "INSERT IGNORE INTO concurrency_keys", affectedErr: sql.ErrConnDone},
 	})
-	_, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-1", 30*time.Second)
+	acquired, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-1", 30*time.Second)
 	if err == nil {
-		t.Fatal("expected error from verify failure")
+		t.Fatal("expected error when rows-affected is unreadable; reporting " +
+			"acquired=false for an unknown outcome would let a second workflow " +
+			"take a key this one may already hold")
+	}
+	if acquired {
+		t.Error("acquired=true alongside an error")
 	}
 }
 

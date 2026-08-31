@@ -5790,7 +5790,7 @@ behaviour through a 10 ms sleep. These tests read the stored expiry back and do 
 against the database's own clock, and check exclusion by having a *second* workflow contend —
 neither needs a race to be observable.
 
-### 3.39 Re-acquiring a concurrency key you already hold answers differently per dialect — 🔴 **OPEN**
+### 3.39 Re-acquiring a concurrency key you already hold answers differently per dialect — ✅ **FIXED** (2026-08-31)
 
 > **Renumbered from §3.35 on 2026-08-06.** `§3.35` had been allocated twice — to this item and
 > to WS-3's defer design, which is the one that keeps the number because two other passages
@@ -5817,6 +5817,57 @@ Not fixed here for the reason §3.34 was handed over in the first place — it i
 what the primitive means, not a patch. The choice is between "re-entrant, and document it" and
 "never re-entrant, and return false consistently". §3.34's test deliberately contends with a
 *second* workflow so that it asks about mutual exclusion rather than about this.
+
+#### Resolution — never re-entrant, and the release API is why
+
+Decided and fixed 2026-08-31: **never re-entrant, on every dialect.** MySQL changed to match the
+other two.
+
+Re-measured before deciding, because the table above was 25 days old. It was exactly right:
+
+    postgres  first=true  self-reacquire=false  other-workflow=false
+    mysql     first=true  self-reacquire=true   other-workflow=false
+    mssql     first=true  self-reacquire=false  other-workflow=false
+
+Mutual exclusion held everywhere, so the divergence was only ever about self-re-entrancy.
+
+**The deciding argument is not the majority vote.** `ReleaseConcurrencyKey(ctx, key)` takes only
+the key and issues an unconditional `DELETE` — there is no hold count anywhere in the system, and
+the delete is not even scoped to the owning workflow. Under MySQL's old answer,
+`acquire(k); acquire(k); release(k)` left the key **free while the workflow still believed it held
+it**: the exact failure a mutual-exclusion primitive exists to prevent. Making the other two
+dialects re-entrant would first have required adding a hold count. Making MySQL non-re-entrant
+required deleting a read-back.
+
+`MySQLStore.AcquireConcurrencyKey` now reports whether *this call* inserted the row —
+`INSERT IGNORE`'s rows-affected — rather than inserting, reading the owner back and comparing it
+to `workflowID`.
+
+**Contract:** `acquire` returns false whenever the key is not yours to take *now*, including when
+you already hold it. One release per successful acquire.
+
+Callers are unaffected. `engine/scope.go` releases the old key before acquiring, so re-entering
+the same virtual-object scope still works; `engine/locking.go` passes the answer straight to the
+guest, which is where the divergence was visible.
+
+**A mock that encoded an impossible database.** `TestMySQLStore_AcquireConcurrencyKey_AlreadyHeld`
+configured the INSERT as affecting 1 row and then relied on the follow-up SELECT finding nothing —
+a row inserted and simultaneously absent. It passed for a reason that corresponded to no real
+state. Corrected to rows-affected 0, which is what a held key actually produces.
+
+`_VerifyError` covered the read-back that no longer exists, but its error path moved rather than
+vanished: `RowsAffected` can fail independently of `Exec`. Replaced by
+`_RowsAffectedError`, which pins that an unreadable outcome is an error rather than a silent
+`false` — reporting false there would invite a second workflow to take a key the first may hold.
+This needed one additive field on the shared mock (`affectedErr` in `db_methods_test.go`).
+
+Re-derive, all three dialects:
+
+    go test ./engine/ -run TestAcquireConcurrencyKeyIsNeverReentrant -v -p 1
+
+Mutation-tested three ways: restoring `return ownerID == workflowID` fails **only** the mysql
+subtest, which is the divergence itself; returning false unconditionally is caught by the
+fresh-key assertion; swallowing the rows-affected error fails `_RowsAffectedError`.
 
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
