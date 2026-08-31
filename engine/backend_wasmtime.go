@@ -606,7 +606,12 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			//
 			// See IMPROVEMENT-PLAN.md 3.22.
 			if completeErr != "" {
-				return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, guestErrorText(completeErr))
+				// Marked, not just formatted: the guest stopped cleanly and
+				// said it had failed. Without the marker the executor cannot
+				// tell this from a trap and labels it one (3.23).
+				return nil, &GuestReturnedError{
+					Err: fmt.Errorf("host: export %q failed: %s", entryPoint, guestErrorText(completeErr)),
+				}
 			}
 			if completeResult != "" {
 				return &ExecResult{Result: completeResult, Suspended: false}, nil
@@ -710,7 +715,11 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Check for a result delivered via cleat_complete before treating
 	// a trap/proc_exit as an error.
 	if completeErr != "" {
-		return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr)
+		// Same marking as the Go-on-wasmtime branch above; this is the
+		// direct-export path taken by every non-Go guest.
+		return nil, &GuestReturnedError{
+			Err: fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr),
+		}
 	}
 	if completeResult == `"__cleat_suspended__"` {
 		return &ExecResult{Suspended: true}, nil

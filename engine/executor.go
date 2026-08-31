@@ -154,6 +154,16 @@ func (e *Engine) executeWithBackend(
 			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
 		session.releaseHeldScopes(context.Background())
+		// A guest that returned an error is not a trap. resolveWasmTrap
+		// prefixes "wasm trap: " onto any non-empty message, so before this
+		// check an operator whose workflow simply returned an error read
+		// "execution failed: wasm trap: host: export ... failed: <their
+		// error>" -- a claim of a memory fault over their own error text.
+		// The guest stopped cleanly and said it had failed. See 3.23.
+		var guestErr *GuestReturnedError
+		if errors.As(callErr, &guestErr) {
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
+		}
 		if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
 			// wasmTrapError, not fmt.Errorf("%s"): resolveWasmTrap returns an
 			// enriched *string*, and formatting it with %s dropped callErr out

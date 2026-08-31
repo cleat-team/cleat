@@ -6346,7 +6346,7 @@ Untrack, extend `.gitignore`. This is also why line-counting tools report nonsen
 
 ---
 
-### 3.23 A guest that returned an error is reported as a "wasm trap" — 🔴 **OPEN** (WS-2, found 2026-08-05)
+### 3.23 A guest that returned an error is reported as a "wasm trap" — ✅ **FIXED** (2026-08-31)
 
 `resolveWasmTrap` (`engine/dwarf_trap.go:19`) prefixes `wasm trap: ` onto **any** non-empty
 message reaching `executor.go:151`, and `executor.go` wraps that again. An operator whose
@@ -6370,6 +6370,40 @@ touched by their in-flight `fix/ws3-defers-on-fenced-backend`. `engine/dwarf_tra
 unowned, but `resolveWasmTrap` takes a `string`, so the "is this actually a trap" question can
 only be asked at the executor call site. Shape: a sentinel error type from the backend, checked
 with `errors.As` before the trap envelope is applied.
+
+#### Resolution — the proposed shape, and a control that had to be rewritten
+
+Fixed 2026-08-31, exactly as the shape above proposed. `GuestReturnedError` (`engine/runtime.go`)
+marks a failure the guest reported by calling `cleat_complete` with a non-empty error. Both
+backend sites that build that message now return it — `backend_wasmtime.go`'s Go-on-wasmtime
+branch and the direct-export branch every non-Go guest takes — and `executor.go` checks it with
+`errors.As` before applying the trap envelope. The marker carries no message of its own; the
+backend has already built one, and wrapping would add another prefix.
+
+`resolveWasmTrap` is untouched. The question it cannot answer is not asked of it.
+
+**The control test was wrong the first time, and the mutation is what caught it.** The pair here
+is "a guest error is not labelled a trap" plus "a real trap still is" — the second exists because
+the cheapest way to pass the first is to stop labelling anything. The first version of that
+control asserted `strings.Contains(err, "wasm trap")`, and it **passed against a build with the
+trap envelope deliberately disabled**: the backend's own message already contains the words, so
+the text survives even when the executor stops applying the envelope. It now asserts
+`errors.As(err, &wasmTrapError{})`, the branch itself, which fails under that mutation. The
+DWARF-enriched source locations are built in that branch, so the weak assertion would have let a
+regression through that silently dropped them while the message still read plausibly.
+
+Re-derive:
+
+    go test ./engine/ -run 'TestGuestReturnedErrorIsNotLabelledATrap|TestRealTrapIsStillLabelledATrap|TestGuestReturnedErrorPreservesTheChain' -v
+
+**Not fixed here:** the doubled `host:` prefix this entry also names. The message still reads
+`host: workflow <id>: execution failed: host: export "x" failed: <their error>` — one prefix
+from the backend, one from the executor. That is a message-format change with a wide blast
+radius across test assertions, and it is not what sent readers to the wrong place; the false
+trap label was. Left open deliberately rather than bundled.
+
+Noticed while measuring, also unfixed: on the replay path `e.workflowID` is empty, so these
+read `host: workflow : execution failed: ...`.
 
 ### 3.24 An ambiguous outcome is classified `unknown` — ✅ **FIXED** (2026-08-31)
 
