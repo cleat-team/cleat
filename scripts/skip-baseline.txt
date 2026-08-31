@@ -81,6 +81,7 @@ engine	setupMSSQLIntegrationTest	2
 engine	withWasmtimeBackend	1
 engine/testutil	MSSQLTestDB	1
 engine/testutil	MySQLTestDB	1
+engine/testutil	SuiteTestDB	2
 engine/testutil	TestDB	4
 internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
 migration	TestIdempotencyTenantMigrationPreservesExistingKeys	1

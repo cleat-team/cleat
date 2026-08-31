@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -44,13 +45,30 @@ func SuiteTestDB(t *testing.T, suite string) *sql.DB {
 	dbName := "cleat_test_" + suite
 	base := PostgresTestDSN()
 
+	// An unreachable database is only a reason to skip when nobody asked for
+	// one. If a DSN was configured explicitly, failing to connect is a failure
+	// of the configuration and skipping hides it -- the Multi-DB workflow once
+	// set CLEAT_TEST_POSTGRES for a service container whose port it had not
+	// published, and every PostgreSQL subtest skipped itself while the job
+	// reported green for its entire existence. Same treatment as TestDB, and
+	// the reason scripts/check-skips.sh rejected the t.Skipf this replaced.
+	configured := os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
+	unavailable := t.Skipf
+	reason := "no PostgreSQL at %s (default DSN, none configured): %v"
+	if configured {
+		unavailable = t.Fatalf
+		reason = "configured PostgreSQL at %s is unreachable: %v"
+	}
+
 	admin, err := sql.Open("postgres", base)
 	if err != nil {
-		t.Fatalf("opening %s: %v", redactDSN(base), err)
+		unavailable(reason, redactDSN(base), err)
+		return nil
 	}
 	defer admin.Close()
 	if err := admin.Ping(); err != nil {
-		t.Skipf("PostgreSQL unreachable at %s: %v", redactDSN(base), err)
+		unavailable(reason, redactDSN(base), err)
+		return nil
 	}
 
 	ensureDatabase(t, admin, dbName, base)
