@@ -52,9 +52,11 @@ func CleanupMySQLTestData(t *testing.T, db *sql.DB) {
 
 	for _, table := range tables {
 		if _, err := db.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
-			t.Logf("cleanup: delete from %s: %v", table, err)
+			t.Fatalf("cleanup: delete from %s: %v\n\n"+
+				"This used to be a t.Logf. See IMPROVEMENT-PLAN 2.60d.", table, err)
 		}
 	}
+	assertTablesEmpty(t, db, tables, func(s string) string { return s })
 }
 
 // MySQLTestDB opens a connection to the MySQL test database.

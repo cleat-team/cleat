@@ -98,9 +98,86 @@ func CleanupPostgresTestData(t *testing.T, db *sql.DB) {
 	}
 	for _, table := range tables {
 		if _, err := db.Exec("DELETE FROM " + table); err != nil {
-			t.Logf("cleanup: delete from %s: %v", table, err)
+			t.Fatalf("cleanup: delete from %s: %v\n\n"+
+				"This used to be a t.Logf, so a cleanup that did nothing was "+
+				"indistinguishable from one that worked, and the fixtures it "+
+				"failed to remove surfaced later as an unrelated test failing "+
+				"on a duplicate key. See IMPROVEMENT-PLAN 2.60d.", table, err)
 		}
 	}
+	assertTablesEmpty(t, db, tables, func(s string) string { return s })
+}
+
+// assertTablesEmpty proves the deletes above actually removed the rows.
+//
+// An error is not the only way cleanup fails, and it is not the way that has
+// cost the most here. A DELETE issued on a connection whose rows are hidden
+// from it removes nothing and reports no error: PostgreSQL row-level security
+// filters the delete to the caller's tenant, and SQL Server applies its
+// security policy to every principal including sysadmin (§3.37, where
+// CleanupMSSQLTestData deleted nothing, reported success, and rows accumulated
+// until a later fixture collided on a primary key -- the 141-failure signature
+// in §2.71's residual).
+//
+// So the check is not "did the statement error" but "is the table empty now".
+// One round trip for all of them, because this runs on the order of a hundred
+// times per suite.
+//
+// quote adapts the identifier to the dialect; the caller supplies it because
+// SQL Server needs bracketed, schema-qualified names and the other two do not.
+func assertTablesEmpty(t *testing.T, db *sql.DB, tables []string, quote func(string) string) {
+	t.Helper()
+	leftover, err := nonEmptyTables(db, tables, quote)
+	if err != nil {
+		t.Fatalf("cleanup: verifying tables are empty: %v", err)
+	}
+	if len(leftover) > 0 {
+		t.Fatalf("cleanup deleted nothing from %s, and reported no error.\n\n"+
+			"A DELETE that removes no rows without failing means the rows are "+
+			"not visible to this connection -- a row-level security policy or "+
+			"security predicate is filtering them. Cleanup then believes it ran, "+
+			"and the rows surface later as a duplicate key in an unrelated test. "+
+			"Use a connection that can see every tenant's rows. See "+
+			"IMPROVEMENT-PLAN 3.37 and 2.60d.", strings.Join(leftover, ", "))
+	}
+}
+
+// nonEmptyTables returns "<table>=<count>" for every table that still has rows.
+//
+// Split out from assertTablesEmpty so the check itself can be tested: a helper
+// whose only failure path is t.Fatalf cannot be shown to fire without failing
+// the test that proves it. See TestNonEmptyTablesSeesRowsCleanupMissed.
+func nonEmptyTables(db *sql.DB, tables []string, quote func(string) string) ([]string, error) {
+	if len(tables) == 0 {
+		return nil, nil
+	}
+
+	parts := make([]string, 0, len(tables))
+	for _, table := range tables {
+		// The table names are compile-time constants in this package, not
+		// input, so there is nothing here to inject.
+		parts = append(parts, fmt.Sprintf(
+			"SELECT '%s' AS t, COUNT(*) AS n FROM %s", table, quote(table)))
+	}
+
+	rows, err := db.Query(strings.Join(parts, " UNION ALL "))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leftover []string
+	for rows.Next() {
+		var name string
+		var n int
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			leftover = append(leftover, fmt.Sprintf("%s=%d", name, n))
+		}
+	}
+	return leftover, rows.Err()
 }
 
 // CleanupTestData deletes test data matching the given runID pattern

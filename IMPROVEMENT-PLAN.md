@@ -4048,7 +4048,7 @@ worth doing: it would stop the DDL re-running per test, which is a cost and a DD
 deadlock risk (§2.39) rather than a correctness problem now that there is only one schema to
 apply.
 
-#### 2.60d `CleanupPostgresTestData` is an unqualified `DELETE FROM` on eleven tables — 🔴 **OPEN**
+#### 2.60d `CleanupPostgresTestData` is an unqualified `DELETE FROM` on eleven tables — 🔶 **CLEANUP NOW FAILS LOUDLY (2026-08-31); ISOLATION STILL OPEN**
 
 ```go
 for _, table := range tables {
@@ -4083,6 +4083,46 @@ transactions rolled back per test. That is a bigger decision than the ~40 call s
 which is why it is recorded rather than done here. The cheap intermediate step — make the
 failure a `Fatalf` — is not obviously right either, because several callers currently rely on
 the delete failing harmlessly on tables their dialect does not have.
+
+#### Part 1 — loud cleanup (2026-08-31). The isolation decision is still open.
+
+**Decision taken:** a database per package, extending what `tests/crash` already does. Rejected:
+tenant-scoped deletes (two of the eleven tables have no `tenant_id` — measured below — and it
+would mean editing ~74 call sites, each of which fails *silently* if it gets the tenant wrong),
+and per-test transaction rollback (the system under test is a durability engine whose crash
+recovery, fencing and reaping are *about* committed state; rolling back tests something else).
+That work is **not done**; this entry covers the precursor only.
+
+**What landed.** `t.Logf` → `t.Fatalf` on a failed delete, plus the check that actually matters:
+after deleting, verify the tables are empty. An error was never the expensive failure here. A
+`DELETE` on a connection whose rows are hidden from it removes nothing *and reports no error* —
+PostgreSQL RLS filters it to the caller's tenant, and SQL Server applies its security policy to
+every principal including sysadmin. §3.37 is precisely that: `CleanupMSSQLTestData` deleted
+nothing, reported success, and rows piled up until an unrelated fixture collided on a primary
+key, which is §2.71's 141-failure signature. `t.Fatalf` alone would not have caught it.
+
+The emptiness check is one round trip (`UNION ALL` of counts) because cleanup runs on the order
+of a hundred times per suite, and it names *every* dirty table rather than the first.
+
+**The stated blocker did not exist.** This entry says several callers "rely on the delete failing
+harmlessly on tables their dialect does not have". Measured 2026-08-31 against live PostgreSQL 16
+and MySQL 8: **all fifteen tables exist in both**, so no delete in either list can fail that way.
+SQL Server is the only dialect where a table can legitimately be absent, and it already checked
+`sys.tables` before deleting — that branch is kept, and only the tables found present are
+verified. Re-derive with `information_schema.tables` per dialect.
+
+**A coverage gap found while measuring, deliberately not fixed here.** The three lists have
+drifted: MySQL and SQL Server clear 15 tables, PostgreSQL only 11. It is missing
+`tenant_api_keys`, `workflow_tags`, `workflow_routing` and `plugin_defs`, all of which exist.
+Adding them changes *what gets deleted* rather than how failures are reported, so it is a
+separate change with its own blast radius — not bundled.
+
+Re-derive:
+
+    go test ./engine/testutil/ -run TestNonEmptyTables -v
+
+Mutation-tested: making the verification blind to rows (dropping the `n > 0` branch) fails both
+new tests, the first with "a table with a row in it was reported as empty".
 
 #### 2.60c A non-JSON signal payload was accepted on PostgreSQL and rejected elsewhere — ✅ **FIXED** (WS-2, 2026-08-04)
 
