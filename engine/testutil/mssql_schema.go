@@ -124,6 +124,10 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 		"plugin_defs",
 	}
 
+	// present collects the tables that actually exist, so the emptiness check
+	// below asks only about those. A table absent from this branch is the one
+	// legitimate reason a delete here does nothing.
+	var present []string
 	for _, table := range tables {
 		// Split "admin.tenant_api_keys" so the existence check can match on
 		// schema as well as name. Checking on name alone is what let the
@@ -137,15 +141,28 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 			JOIN sys.schemas s ON t.schema_id = s.schema_id
 			WHERE s.name = @p1 AND t.name = @p2`, schema, name).Scan(&exists)
 		if err != nil {
-			t.Logf("cleanup: check table %s: %v", table, err)
-			continue
+			t.Fatalf("cleanup: check table %s: %v", table, err)
 		}
 		if exists > 0 {
 			if _, err := db.Exec(fmt.Sprintf("DELETE FROM [%s].[%s]", schema, name)); err != nil {
-				t.Logf("cleanup: delete from %s: %v", table, err)
+				t.Fatalf("cleanup: delete from %s: %v\n\n"+
+					"This used to be a t.Logf. See IMPROVEMENT-PLAN 2.60d.", table, err)
 			}
+			present = append(present, table)
 		}
 	}
+
+	// SQL Server is the dialect this check exists for. Its security policy
+	// applies to every principal including sysadmin, so a filtered DELETE
+	// removes nothing and reports success -- §3.37, and the 141-failure
+	// signature in §2.71's residual.
+	assertTablesEmpty(t, db, present, func(s string) string {
+		schema, name := "dbo", s
+		if i := strings.IndexByte(s, '.'); i >= 0 {
+			schema, name = s[:i], s[i+1:]
+		}
+		return fmt.Sprintf("[%s].[%s]", schema, name)
+	})
 }
 
 // MSSQLTestDB opens a connection to the MSSQL test database.
