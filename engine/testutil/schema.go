@@ -203,32 +203,51 @@ func CleanupAllTestData(t *testing.T, db *sql.DB, dialect Dialect) {
 func existingTables(t *testing.T, db *sql.DB, dialect Dialect, candidates []string) []string {
 	t.Helper()
 
-	var q string
+	have := make(map[string]bool)
+
 	switch dialect {
 	case DialectPostgres:
-		q = `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()`
+		// to_regclass, not information_schema.tables filtered by
+		// current_schema(). The question is "would an unqualified DELETE FROM
+		// <t> resolve", and that is decided by the whole search_path, not by
+		// the first entry on it. Filtering on current_schema() answered a
+		// different question and answered it wrongly wherever the tables live
+		// somewhere else on the path: existingTables returned nothing, cleanup
+		// deleted nothing, and -- because assertTablesEmpty verifies only the
+		// tables it was given -- nothing noticed. That is the silent no-op
+		// this whole item exists to remove, reintroduced by the check meant to
+		// support it. Caught by the Cluster job, where leftover rows surfaced
+		// as `CreateSchedule: duplicate key value violates unique constraint`.
+		for _, c := range candidates {
+			var found bool
+			if err := db.QueryRow(`SELECT to_regclass($1) IS NOT NULL`, c).Scan(&found); err != nil {
+				t.Fatalf("cleanup: resolving table %s: %v", c, err)
+			}
+			if found {
+				have[c] = true
+			}
+		}
 	case DialectMySQL:
-		q = `SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()`
+		// MySQL has no search_path: a connection has exactly one default
+		// database, so this is the same question.
+		rows, err := db.Query(
+			`SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()`)
+		if err != nil {
+			t.Fatalf("cleanup: listing tables: %v", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatalf("cleanup: scanning table names: %v", err)
+			}
+			have[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("cleanup: reading table names: %v", err)
+		}
 	default:
 		t.Fatalf("existingTables: unsupported dialect %s", dialect)
-	}
-
-	rows, err := db.Query(q)
-	if err != nil {
-		t.Fatalf("cleanup: listing tables: %v", err)
-	}
-	defer rows.Close()
-
-	have := make(map[string]bool)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("cleanup: scanning table names: %v", err)
-		}
-		have[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("cleanup: reading table names: %v", err)
 	}
 
 	present := make([]string, 0, len(candidates))
@@ -236,6 +255,18 @@ func existingTables(t *testing.T, db *sql.DB, dialect Dialect, candidates []stri
 		if have[c] {
 			present = append(present, c)
 		}
+	}
+
+	// None of them present means the schema is not where this connection can
+	// see it, not that there is nothing to clean. Returning an empty list
+	// would make cleanup a silent no-op and the emptiness check vacuous --
+	// both would report success having done nothing, which is precisely the
+	// failure 2.60d is about.
+	if len(present) == 0 {
+		t.Fatalf("cleanup: none of the %d expected tables are visible to this "+
+			"connection.\n\nThe schema is not on this connection's search path. "+
+			"Cleaning nothing and reporting success is how fixtures leak into "+
+			"the next test; see IMPROVEMENT-PLAN 2.60d.", len(candidates))
 	}
 	return present
 }

@@ -4195,9 +4195,31 @@ Three things landed:
    at runtime on a constraint violation. The lists are now package-level vars so a test can see
    all three; previously they were function-local in three files that never referenced each other,
    which is why nothing could have noticed.
-2. **An existence check for PostgreSQL and MySQL**, matching what SQL Server always did. One
-   query, not one per table. This is what makes widening the list possible at all — see the
-   correction above.
+2. **An existence check for PostgreSQL and MySQL**, matching what SQL Server always did. This
+   is what makes widening the list possible at all — see the correction above.
+
+   **It has to answer the same question the DELETE asks, and the first version did not.** The
+   cleanup issues `DELETE FROM <table>` unqualified, which PostgreSQL resolves through the whole
+   `search_path`; the check filtered `information_schema.tables` on `current_schema()`, which is
+   only the *first* entry on that path. Measured on a migrated database with
+   `search_path = cleat, public` — the shape the Cluster job runs in, because
+   `001_schema.sql` creates a `cleat` schema for `cleat.assert_tenant_set()`:
+
+   | query | result |
+   |---|---|
+   | `current_schema()` | `cleat` |
+   | `information_schema.tables WHERE table_schema = current_schema()` | **0 rows** |
+   | `to_regclass('workflow_instances') IS NOT NULL` | **true** |
+
+   So the check found nothing, cleanup deleted nothing, and `assertTablesEmpty` verified nothing
+   — three successes, no work done — and the leftover rows surfaced in the Cluster job as
+   `CreateSchedule: duplicate key value violates unique constraint`. That is the silent no-op
+   §2.60d exists to remove, reintroduced by the check meant to support it, and it was caught only
+   because CI runs a configuration the local database does not.
+
+   Now `to_regclass`, which resolves exactly as the DELETE does. `existingTables` additionally
+   fails loudly when *no* candidate resolves, because "nothing to clean" and "the schema is not
+   on this connection's path" are indistinguishable from an empty result.
 3. **`CleanupAllTestData(t, db, dialect)`**, which dispatches. `CleanupPostgresTestData` was
    being called with MySQL and SQL Server handles in `store_backends_test.go`'s dialect loop; the
    name said PostgreSQL, the SQL was dialect-neutral, and the mistake stayed invisible until the
