@@ -4174,6 +4174,22 @@ Mutation-tested: making `SuiteTestDB` fall back to the shared DSN fails
 **Still open:** every other suite that shares the database, and the MySQL and SQL Server
 equivalents of `SuiteTestDB` (this is PostgreSQL-only).
 
+`cmd/cleatctl` moved onto `SuiteTestDB` on 2026-08-31. It was the one remaining place where two
+database-backed packages ran concurrently against one instance *without* `-p 1`: the `commands`
+CI entry runs `./cmd/...`, and `cmd/cleatctl`'s teardown is the unqualified fifteen-table wipe
+while `cmd/cleat-worker` has database-backed tests in four files.
+
+**Characterise this honestly: a hazard, not a demonstrated failure.** The two packages provably
+overlap — measured 2026-08-31, `cleatctl` 17:18:09.952→17:18:16.942 against `cleat-worker`
+17:18:10.001→17:18:19.152, near-total overlap — and the wipe is unqualified, so the mechanism is
+real. But six attempts to make it fail, including `./cmd/...` four times and both packages at
+`-count=3` twice, produced no failure: `cleat-worker`'s database tests are ~0.04s each, so the
+window in which it holds rows across `cleatctl`'s wipe is small. The change removes a hazard; it
+is not known to have been causing red runs, and it should not be cited as though it were.
+
+`cmd/cleat-worker` is the well-behaved one here — it uses the run-scoped
+`CleanupTestData(…, runID)` rather than the blanket wipe.
+
 **`-p 1` will not be removed, and that is a decision rather than a deferral.** Measured on
 develop `63708d7`: the `engine` package takes 94–128s in CI and `engine/testutil` takes
 0.35–1.5s, so running them concurrently saves about 1% of that job. Against that, dropping the
