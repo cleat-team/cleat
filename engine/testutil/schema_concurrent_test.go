@@ -29,7 +29,7 @@ func TestApplyPostgresSchemaFileConcurrent(t *testing.T) {
 	// configured-but-unreachable one is a failure -- and reusing it avoids
 	// adding a second skip site that scripts/check-skips.sh would have to
 	// carry (Start here item 1 / §2.12).
-	db := TestDB(t, DialectPostgres)
+	db := SuiteTestDB(t, "testutil")
 	defer db.Close()
 
 	// Enough concurrency to lose the IF NOT EXISTS race reliably. Each needs

@@ -22,7 +22,7 @@ import (
 // §3.37. It inserts a row, does *not* delete it, and asserts the verification
 // reports it -- simulating a delete that was filtered away silently.
 func TestNonEmptyTablesSeesRowsCleanupMissed(t *testing.T) {
-	db := TestDB(t, DialectPostgres)
+	db := SuiteTestDB(t, "testutil")
 	SetupMinimalSchema(t, db, DialectPostgres)
 	CleanupPostgresTestData(t, db)
 
@@ -65,7 +65,7 @@ func TestNonEmptyTablesSeesRowsCleanupMissed(t *testing.T) {
 // suite; a message naming one table when three are dirty sends the reader back
 // for another run to find the rest.
 func TestNonEmptyTablesReportsEveryOffender(t *testing.T) {
-	db := TestDB(t, DialectPostgres)
+	db := SuiteTestDB(t, "testutil")
 	SetupMinimalSchema(t, db, DialectPostgres)
 	CleanupPostgresTestData(t, db)
 
