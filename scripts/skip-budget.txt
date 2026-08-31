@@ -398,7 +398,7 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # Budgets are paid per PR rather than in one lump at the front, so each wave
 # carries the cost of the tests it adds and an unexplained jump stays visible.
 
-test-go/engine	479	# runner 2026-08-10: was 473; see the remediation notes below
+test-go/engine	481	# 2026-08-31: was 479; +2 for TestAcquireConcurrencyKeyIsNeverReentrant's mysql/mssql arms (3.39)
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -479,7 +479,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	479	# same as test-go/engine, and for the same reason; see the note there
+cluster	481	# same as test-go/engine, and for the same reason; see the note there
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a
