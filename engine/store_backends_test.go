@@ -433,8 +433,11 @@ func TestCascadeDelete(t *testing.T) {
 
 			db := testutil.TestDB(t, d.dialect)
 			testutil.SetupFullSchema(t, db, d.dialect)
-			// Clean any data left from previous test runs.
-			testutil.CleanupPostgresTestData(t, db)
+			// Clean any data left from previous test runs. Dispatched by
+			// dialect: this loop runs against all three, and calling the
+			// PostgreSQL cleanup for every one of them worked only for as long
+			// as that helper issued dialect-neutral SQL.
+			testutil.CleanupAllTestData(t, db, d.dialect)
 
 			addCascadeFKs(t, db, d.dialect)
 

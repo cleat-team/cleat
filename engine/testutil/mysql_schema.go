@@ -27,36 +27,44 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 	applyMigrations(t, db, DialectMySQL)
 }
 
-// CleanupMySQLTestData removes all test data from MySQL tables.
+// mysqlCleanupTables is the set of tables CleanupMySQLTestData clears.
 // Order respects FK constraints — child tables first.
+// Kept in the same order as postgresCleanupTables; TestCleanupTableListsAgree
+// fails if the three drift apart again.
+var mysqlCleanupTables = []string{
+	"tenant_api_keys",
+	"workflow_tags",
+	"workflow_routing",
+	"workflow_update_requests",
+	"workflow_promises",
+	"workflow_signals",
+	"concurrency_keys",
+	"idempotency_keys",
+	"event_history",
+	"workflow_memory_samples",
+	"workflow_memory_stats",
+	"workflow_schedules",
+	"workflow_instances",
+	"workflow_defs",
+	"plugin_defs",
+}
+
+// CleanupMySQLTestData removes all test data from MySQL tables.
 func CleanupMySQLTestData(t *testing.T, db *sql.DB) {
 	t.Helper()
 
-	tables := []string{
-		"tenant_api_keys",
-		"workflow_tags",
-		"workflow_routing",
-		"workflow_update_requests",
-		"workflow_promises",
-		"workflow_signals",
-		"concurrency_keys",
-		"idempotency_keys",
-		"event_history",
-		"workflow_memory_samples",
-		"workflow_memory_stats",
-		"workflow_schedules",
-		"workflow_instances",
-		"workflow_defs",
-		"plugin_defs",
-	}
+	// Same existence check as PostgreSQL and SQL Server: a table absent from
+	// this schema variant is the one legitimate reason a delete here does
+	// nothing, and it must not be confused with a delete that was filtered.
+	present := existingTables(t, db, DialectMySQL, mysqlCleanupTables)
 
-	for _, table := range tables {
+	for _, table := range present {
 		if _, err := db.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
 			t.Fatalf("cleanup: delete from %s: %v\n\n"+
 				"This used to be a t.Logf. See IMPROVEMENT-PLAN 2.60d.", table, err)
 		}
 	}
-	assertTablesEmpty(t, db, tables, func(s string) string { return s })
+	assertTablesEmpty(t, db, present, func(s string) string { return s })
 }
 
 // MySQLTestDB opens a connection to the MySQL test database.
