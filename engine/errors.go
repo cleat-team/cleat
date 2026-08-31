@@ -64,6 +64,14 @@ func (e *CleatError) Error() string {
 	if e.WorkflowID != "" {
 		return fmt.Sprintf("%s: workflow=%s: %v", e.Op, e.WorkflowID, e.Err)
 	}
+	// A CleatError with neither Op nor WorkflowID is a classification-only
+	// wrap: it exists to carry a Code that errors.As can find, over an error
+	// whose message is already complete. Prefixing it would produce ": <msg>",
+	// and adding an Op would produce a third redundant prefix on a message
+	// that already carries two (IMPROVEMENT-PLAN 3.23). Pass it through.
+	if e.Op == "" {
+		return fmt.Sprintf("%v", e.Err)
+	}
 	return fmt.Sprintf("%s: %v", e.Op, e.Err)
 }
 
@@ -95,6 +103,12 @@ func NewCancelledError(op, workflowID string, err error) *CleatError {
 // NewAmbiguousError creates an ambiguous-outcome error — the call may have
 // succeeded but the response was never persisted. The caller should check
 // the external service before retrying.
+//
+// Passing "" for both op and workflowID produces a classification-only wrap
+// that leaves the underlying message untouched; see CleatError.Error. That is
+// how execSession.classifyFailure tags a failed execution whose replay hit an
+// unresolved pending intent, where the message is already built and the only
+// thing missing is the code.
 func NewAmbiguousError(op, workflowID string, err error) *CleatError {
 	return &CleatError{Code: ErrAmbiguous, Op: op, WorkflowID: workflowID, Err: err}
 }

@@ -443,6 +443,15 @@ type execSession struct {
 	// auto-ContinueAsNew without querying the database.
 	eventCount int
 
+	// ambiguity records the first replayed call whose outcome could not be
+	// determined -- dispatched before a crash, no response recorded, and no
+	// resolver able to answer. It is set at the moment the "[AMBIGUOUS]"
+	// result is handed to the guest, so that if the workflow goes on to fail,
+	// the executor can classify the failure as ErrAmbiguous rather than
+	// leaving it indistinguishable from every other error. See
+	// execSession.classifyFailure and IMPROVEMENT-PLAN 3.24.
+	ambiguity *ambiguousCall
+
 	// lastChecksum tracks the checksum of the most recently flushed event,
 	// avoiding a DB round-trip to re-fetch it for the next step's chain.
 	lastChecksum string
