@@ -42,7 +42,7 @@ func SuiteTestDB(t *testing.T, suite string) *sql.DB {
 			"name and is not quoted", suite, validSuiteName)
 	}
 
-	dbName := "cleat_test_" + suite
+	dbName := suiteDatabaseName(suite)
 	base := PostgresTestDSN()
 
 	// An unreachable database is only a reason to skip when nobody asked for
@@ -160,6 +160,10 @@ func swapDatabaseName(dsn, name string) (string, error) {
 	return strings.Join(fields, " "), nil
 }
 
-// suiteDatabaseName is exposed for tests that need to name the database this
-// package would use, without opening it.
+// suiteDatabaseName is the single place the database name is constructed.
+//
+// It started out used only by the test that asserts the name, with SuiteTestDB
+// building the same string inline -- which the test-only-code guard flagged,
+// correctly: two places deriving one name is how they drift apart, and the test
+// would have gone on passing against its own copy of the rule.
 func suiteDatabaseName(suite string) string { return fmt.Sprintf("cleat_test_%s", suite) }
