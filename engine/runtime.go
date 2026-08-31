@@ -326,6 +326,28 @@ func (e *wasmTrapError) Error() string { return e.msg }
 // Unwrap preserves the original error so errors.Is/errors.As still work.
 func (e *wasmTrapError) Unwrap() error { return e.cause }
 
+// GuestReturnedError marks a failure the guest reported deliberately, by
+// calling cleat_complete with a non-empty error, as opposed to a trap.
+//
+// The distinction is not cosmetic. A trap means the module faulted -- an
+// unreachable, a bad memory access, an exhausted limit -- and the reader
+// should be looking at the runtime. A guest-returned error means the workflow
+// ran correctly and said it had failed, and the reader should be looking at
+// their own error text. Before this type existed both arrived as a plain
+// error, so resolveWasmTrap labelled every one of them "wasm trap:" and sent
+// readers hunting a memory fault that never happened.
+//
+// It carries no message of its own: the backend has already built one, and
+// wrapping would add a prefix. This exists to be found with errors.As.
+// See IMPROVEMENT-PLAN.md 3.23.
+type GuestReturnedError struct {
+	Err error
+}
+
+func (e *GuestReturnedError) Error() string { return e.Err.Error() }
+
+func (e *GuestReturnedError) Unwrap() error { return e.Err }
+
 // formatWasmCallError formats an error from a wazero function call into a
 // human-readable WASM stack trace.
 //
