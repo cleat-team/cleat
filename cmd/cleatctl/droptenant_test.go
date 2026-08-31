@@ -71,17 +71,29 @@ func cleanupDropTenantFixtures(t *testing.T, db *sql.DB) {
 	}
 }
 
+// dropTenantTestDB returns a connection to this package's own database.
+//
+// SuiteTestDB, not TestDB, because the cleanup below is an unqualified
+// `DELETE FROM` across every table and this package does not run alone: the
+// `commands` CI entry runs ./cmd/... with no -p 1, so cmd/cleat-worker's
+// database-backed tests execute concurrently against the same instance. This
+// teardown was deleting their fixtures mid-test, and the failures that
+// produces are timing-dependent -- a row that vanishes between two
+// statements -- so they read as flakes rather than as one cause. The engine
+// entry carries -p 1 for exactly this reason; this one never did.
+// IMPROVEMENT-PLAN 2.60d.
+//
+// SetupFullSchema is gone from here because SuiteTestDB already applies the
+// shipped migrations on first use.
 func dropTenantTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	db := testutil.SuiteTestDB(t, "cleatctl")
 	apply032ForDropTenantTest(t, db)
 	testutil.CleanupPostgresTestData(t, db)
 	cleanupDropTenantFixtures(t, db)
 	t.Cleanup(func() {
 		cleanupDropTenantFixtures(t, db)
 		testutil.CleanupPostgresTestData(t, db)
-		db.Close()
 	})
 	return db
 }
