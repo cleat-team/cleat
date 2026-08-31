@@ -191,6 +191,10 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 			if s.engine != nil && s.engine.Metrics != nil {
 				s.engine.Metrics.RecordAmbiguousCall(ctx)
 			}
+			// See the identical call in durablecalls.go: the structural
+			// record is what makes this queryable; the message below is not.
+			s.recordAmbiguity(rec)
+
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)

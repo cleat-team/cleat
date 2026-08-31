@@ -102,6 +102,48 @@ func (r EventRecord) isPendingIntent() bool {
 	return r.Pending || r.Err == pendingSentinel
 }
 
+// ambiguousCall identifies the replayed call that was left mid-flight. It is
+// the call an operator has to go and reconcile against the external service,
+// so the fields here are the ones that name it in a support conversation.
+type ambiguousCall struct {
+	Step    int
+	Service string
+	Op      string
+}
+
+// recordAmbiguity notes that replay handed the guest an unresolved pending
+// intent. First one wins: if a workflow hits several, the earliest is the one
+// whose side effect is in doubt for the longest, and reporting a later call
+// would point reconciliation at the wrong operation.
+//
+// This is deliberately separate from the "[AMBIGUOUS]" text written into the
+// guest-visible result. That text is an English sentence, and until this
+// existed it was the *only* record of the condition -- callers detected it by
+// substring, so rewording the message silently disabled the detection.
+func (s *execSession) recordAmbiguity(rec EventRecord) {
+	if s.ambiguity == nil {
+		s.ambiguity = &ambiguousCall{Step: rec.Step, Service: rec.Service, Op: rec.Op}
+	}
+}
+
+// classifyFailure tags a failed execution with the reason only the host
+// session saw. Today that is exactly one case: replay hit a pending intent
+// that no resolver could settle, the guest turned it into a failure, and the
+// resulting error would otherwise be stored as error_code='unknown' -- the
+// same value as every ordinary bug, so the one class of failure that needs a
+// human to check an external service could not be queried for.
+//
+// A workflow that catches the ambiguous call and completes anyway is not a
+// failure and is not classified; err == nil passes straight through.
+func (s *execSession) classifyFailure(err error) error {
+	if err == nil || s.ambiguity == nil {
+		return err
+	}
+	// Empty op and workflowID: this wrap carries the code and leaves the
+	// message exactly as it was built. See CleatError.Error.
+	return NewAmbiguousError("", "", err)
+}
+
 // freshCallWithIntent is freshCall for an operation declared WriteAheadIntent.
 //
 // The ordering is the entire feature:

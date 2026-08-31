@@ -6371,7 +6371,7 @@ unowned, but `resolveWasmTrap` takes a `string`, so the "is this actually a trap
 only be asked at the executor call site. Shape: a sentinel error type from the backend, checked
 with `errors.As` before the trap envelope is applied.
 
-### 3.24 An ambiguous outcome is classified `unknown` — 🔴 **OPEN** (WS-2, found 2026-08-05)
+### 3.24 An ambiguous outcome is classified `unknown` — ✅ **FIXED** (2026-08-31)
 
 `engine.ErrAmbiguous` (`engine/errors.go:30`) has existed since the first commit and
 `NewAmbiguousError` is called by nothing but its own test. A workflow that ends because it could
@@ -6389,4 +6389,49 @@ enum (`cleat.CallErrorCode`) has no ambiguous member, so a workflow author's `sw
 sees `[0]`, Unknown. Value 6 is free and the wire field is 32 bits, but every SDK carries its
 own copy of the enum — `python-sdk/cleat_sdk/host_calls.py` has a literal `{0..5}` dict — and
 those are WS-3's. Worth doing; not what stands between an ambiguous crash and an operator being
-told about it.
+told about it. **Still open**, and unchanged by the fix below.
+
+#### Resolution — a structural record, because the message was the only record
+
+Fixed 2026-08-31. The entry above proposed wrapping the failure as
+`*CleatError{Code: ErrAmbiguous}` "on its way out", which is right, but it understates what was
+missing: at the point the failure leaves the engine there is nothing left to key that decision
+on. The ambiguity is detected deep in `replayCall`, which does not return a Go error at all —
+it writes a message into guest memory and returns a packed `int64`. So the fix is two halves:
+
+1. `execSession.recordAmbiguity` (`engine/callintent.go`), called at both sites that emit the
+   `[AMBIGUOUS]` text — `durablecalls.go` and `heartbeats.go`. First one wins: the earliest
+   unresolved call is the one whose side effect has been in doubt longest.
+2. `execSession.classifyFailure`, applied in `engine/executor.go` where a guest failure becomes
+   a Go error. `cmd/cleat-worker/setup.go` already does `errors.As(err, &ce)`, so the code
+   reaches `error_code` with no change there.
+
+The wrap uses an empty `Op` and `WorkflowID`, and `CleatError.Error` now passes that case
+through verbatim. Without it the message gains a third prefix on top of the two §3.23 already
+objects to.
+
+**What this replaced.** The condition's only record was an English sentence. Every consumer
+detected it by substring — `tests/integrity/ambiguity_detection_test.go` still contains
+`strings.Contains(replayResult, "[AMBIGUOUS]")` — so rewording the message would have silently
+switched the detection off. That is the same shape as the defects in [[verify-by-running]]: a
+real signal attached to something that was never meant to carry it.
+
+**Two things measured while fixing it, both of which contradicted a comment in the tree.**
+
+- The integrity test asserted that a propagated ambiguity "comes back as part of the JSON result
+  string, not as a Go-level error from `Engine.Replay`". Measured 2026-08-31: all five
+  propagating steps come back through `replayErr`, none through `replayResult`. §3.22 changed
+  that and the comment was never updated. Corrected in the same PR.
+- Of the two returns in `executor.go`'s guest-failure branch, only the `wasmTrapError` one is
+  reachable here — `resolveWasmTrap` returns "" only for an empty message. Removing
+  `classifyFailure` from the *other* return does not fail the regression test. It is kept as
+  defence, and this sentence is the disclosure that it is uncovered rather than verified.
+
+Re-derive:
+
+    go test ./engine/ -run 'TestAmbiguousReplayCarriesErrAmbiguous|TestAmbiguousClassificationPreservesMessage|TestClassifyFailureLeavesOtherFailuresAlone|TestRecordAmbiguityKeepsTheFirst' -v
+
+Each of the three production edits was mutation-tested; removing `recordAmbiguity`, removing
+`classifyFailure` from the trap return, or removing the `Error()` passthrough each fails a named
+test, and the first two fail with the pre-fix reality in the message: `error_code='unknown'` on
+a `*engine.wasmTrapError`.

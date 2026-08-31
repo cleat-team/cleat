@@ -199,6 +199,12 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 				return packDurableCallResult(int(written), 0, 0)
 			}
 
+			// Record the condition structurally before writing the message.
+			// The message is for the workflow author; this is for the
+			// operator, who needs to find these with a query rather than a
+			// substring search. See IMPROVEMENT-PLAN 3.24.
+			s.recordAmbiguity(rec)
+
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)

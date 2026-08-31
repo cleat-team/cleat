@@ -162,12 +162,12 @@ func (e *Engine) executeWithBackend(
 			// opposite of what wasmTrapError.Unwrap was written for. Keeping
 			// the enriched text as the message and callErr as the cause gives
 			// both.
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, &wasmTrapError{
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(&wasmTrapError{
 				cause: callErr,
 				msg:   fmt.Sprintf("host: workflow %s: execution failed: %s", e.workflowID, enriched),
-			}
+			})
 		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr)
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
 	}
 
 	if res.Suspended || session.suspendErr != nil {
