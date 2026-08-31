@@ -85,6 +85,27 @@ func requireMSSQLPoliciesIntact(t *testing.T, db *sql.DB) {
 		"    DROP DATABASE %s; CREATE DATABASE %s;\n", dbName, dbName, dbName)
 }
 
+// mssqlCleanupTables is the set of tables CleanupMSSQLTestData clears.
+// Kept in the same order as postgresCleanupTables; TestCleanupTableListsAgree
+// fails if the three drift apart again.
+var mssqlCleanupTables = []string{
+	"admin.tenant_api_keys",
+	"workflow_tags",
+	"workflow_routing",
+	"workflow_update_requests",
+	"workflow_promises",
+	"workflow_signals",
+	"concurrency_keys",
+	"idempotency_keys",
+	"event_history",
+	"workflow_memory_samples",
+	"workflow_memory_stats",
+	"workflow_schedules",
+	"workflow_instances",
+	"workflow_defs",
+	"plugin_defs",
+}
+
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.
 // Uses DELETE with table existence checks. Order respects FK constraints.
 //
@@ -106,29 +127,12 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 	// connecting principal's default schema and failed with "Invalid object
 	// name" -- while the existence check above it passed, because sys.tables is
 	// keyed on name alone and happily found the admin one.
-	tables := []string{
-		"admin.tenant_api_keys",
-		"workflow_tags",
-		"workflow_routing",
-		"workflow_update_requests",
-		"workflow_promises",
-		"workflow_signals",
-		"concurrency_keys",
-		"idempotency_keys",
-		"event_history",
-		"workflow_memory_samples",
-		"workflow_memory_stats",
-		"workflow_schedules",
-		"workflow_instances",
-		"workflow_defs",
-		"plugin_defs",
-	}
 
 	// present collects the tables that actually exist, so the emptiness check
 	// below asks only about those. A table absent from this branch is the one
 	// legitimate reason a delete here does nothing.
 	var present []string
-	for _, table := range tables {
+	for _, table := range mssqlCleanupTables {
 		// Split "admin.tenant_api_keys" so the existence check can match on
 		// schema as well as name. Checking on name alone is what let the
 		// unqualified entry look present and then fail to delete.

@@ -4104,12 +4104,17 @@ key, which is §2.71's 141-failure signature. `t.Fatalf` alone would not have ca
 The emptiness check is one round trip (`UNION ALL` of counts) because cleanup runs on the order
 of a hundred times per suite, and it names *every* dirty table rather than the first.
 
-**The stated blocker did not exist.** This entry says several callers "rely on the delete failing
-harmlessly on tables their dialect does not have". Measured 2026-08-31 against live PostgreSQL 16
-and MySQL 8: **all fifteen tables exist in both**, so no delete in either list can fail that way.
-SQL Server is the only dialect where a table can legitimately be absent, and it already checked
-`sys.tables` before deleting — that branch is kept, and only the tables found present are
-verified. Re-derive with `information_schema.tables` per dialect.
+**The stated blocker did not exist** — *for the eleven tables in the list at the time.* Measured
+2026-08-31 against live PostgreSQL 16 and MySQL 8: all fifteen candidate tables exist in both, so
+no delete in either list could fail that way. SQL Server is the only dialect where a table can
+legitimately be absent, and it already checked `sys.tables` before deleting.
+
+**That claim was wrong the moment the list grew, and part 3 proves it.** The measurement was
+taken against a *fully migrated* database. `SetupMinimalSchema` creates a subset, and four of the
+tables PostgreSQL was missing are not in it — so widening the list without an existence check
+fails every minimal-schema test on `relation "tenant_api_keys" does not exist`. The blocker this
+entry recorded was real; it just did not bite the eleven tables that were already there. See
+part 3.
 
 **A coverage gap found while measuring, deliberately not fixed here.** The three lists have
 drifted: MySQL and SQL Server clear 15 tables, PostgreSQL only 11. It is missing
@@ -4166,8 +4171,45 @@ Re-derive:
 Mutation-tested: making `SuiteTestDB` fall back to the shared DSN fails
 `TestSuiteTestDBIsNotTheSharedDatabase` with `connected to "cleat", want "cleat_test_testutil"`.
 
-**Still open:** every other suite that shares the database, the MySQL and SQL Server equivalents
-of `SuiteTestDB` (this is PostgreSQL-only), and the `-p 1` removal.
+**Still open:** every other suite that shares the database, and the MySQL and SQL Server
+equivalents of `SuiteTestDB` (this is PostgreSQL-only).
+
+**`-p 1` will not be removed, and that is a decision rather than a deferral.** Measured on
+develop `63708d7`: the `engine` package takes 94–128s in CI and `engine/testutil` takes
+0.35–1.5s, so running them concurrently saves about 1% of that job. Against that, dropping the
+flag risks intermittent red on `develop` — a worse failure mode than a red PR — on the strength
+of four local runs. What part 2 bought is that `-p 1` is no longer *load-bearing*; it stays as
+cheap insurance.
+
+#### Part 3 — the drifted lists, and the check that keeps them together (2026-08-31)
+
+The three cleanup lists had diverged: MySQL and SQL Server cleared 15 tables, PostgreSQL 11. The
+missing four — `tenant_api_keys`, `workflow_tags`, `workflow_routing`, `plugin_defs` — all exist
+in the PostgreSQL schema, so they accumulated rows across every test in the package and surfaced
+later as an unrelated test failing on a duplicate key.
+
+Three things landed:
+
+1. **The lists agree**, and `TestCleanupTableListsAgree` fails if they drift again. Membership
+   *and* order, because they are deleted in foreign-key order and right-members-wrong-order fails
+   at runtime on a constraint violation. The lists are now package-level vars so a test can see
+   all three; previously they were function-local in three files that never referenced each other,
+   which is why nothing could have noticed.
+2. **An existence check for PostgreSQL and MySQL**, matching what SQL Server always did. One
+   query, not one per table. This is what makes widening the list possible at all — see the
+   correction above.
+3. **`CleanupAllTestData(t, db, dialect)`**, which dispatches. `CleanupPostgresTestData` was
+   being called with MySQL and SQL Server handles in `store_backends_test.go`'s dialect loop; the
+   name said PostgreSQL, the SQL was dialect-neutral, and the mistake stayed invisible until the
+   PostgreSQL path grew `current_schema()` and the other two failed with *"FUNCTION
+   cleat.current_schema does not exist"*.
+
+Re-derive:
+
+    go test ./engine/testutil/ -run 'TestCleanupTableListsAgree|TestCleanupListsHaveNoDuplicates' -v
+
+Mutation-tested: dropping `plugin_defs` from the PostgreSQL list — recreating the original drift
+exactly — fails with `mysql clears 15 tables, postgres clears 14` and the same for mssql.
 
 #### 2.60c A non-JSON signal payload was accepted on PostgreSQL and rejected elsewhere — ✅ **FIXED** (WS-2, 2026-08-04)
 

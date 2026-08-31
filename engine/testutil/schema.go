@@ -79,24 +79,46 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 	SetupMinimalSchema(t, db, dialect)
 }
 
+// postgresCleanupTables is the set of tables CleanupPostgresTestData clears.
+//
+// Child tables first, because of the foreign keys. Kept in the same order as
+// mysqlCleanupTables and mssqlCleanupTables so the three can be diffed by eye --
+// they had drifted, and TestCleanupTableListsAgree now fails if they do again.
+var postgresCleanupTables = []string{
+	"tenant_api_keys",
+	"workflow_tags",
+	"workflow_routing",
+	"workflow_update_requests",
+	"workflow_promises",
+	"workflow_signals",
+	"concurrency_keys",
+	"idempotency_keys",
+	"event_history",
+	"workflow_memory_samples",
+	"workflow_memory_stats",
+	"workflow_schedules",
+	"workflow_instances",
+	"workflow_defs",
+	"plugin_defs",
+}
+
 // CleanupPostgresTestData deletes all rows from the cleat test tables.
 // Call before and after tests to ensure isolation from parallel tests.
+//
+// PostgreSQL only, despite having been called with MySQL and SQL Server
+// handles for a long time -- see CleanupAllTestData.
 func CleanupPostgresTestData(t *testing.T, db *sql.DB) {
 	t.Helper()
-	tables := []string{
-		"workflow_update_requests",
-		"workflow_promises",
-		"workflow_signals",
-		"concurrency_keys",
-		"idempotency_keys",
-		"event_history",
-		"workflow_memory_samples",
-		"workflow_memory_stats",
-		"workflow_schedules",
-		"workflow_instances",
-		"workflow_defs",
-	}
-	for _, table := range tables {
+
+	// Only the tables this database actually has. SetupMinimalSchema creates a
+	// subset, so the full list is not present everywhere -- which is what the
+	// existence check is for, and is exactly what SQL Server's cleanup has
+	// always done. Without it, widening this list to match the other dialects
+	// fails every minimal-schema test on `relation "tenant_api_keys" does not
+	// exist`.
+	present := existingTables(t, db, DialectPostgres, postgresCleanupTables)
+
+	for _, table := range present {
 		if _, err := db.Exec("DELETE FROM " + table); err != nil {
 			t.Fatalf("cleanup: delete from %s: %v\n\n"+
 				"This used to be a t.Logf, so a cleanup that did nothing was "+
@@ -105,7 +127,7 @@ func CleanupPostgresTestData(t *testing.T, db *sql.DB) {
 				"on a duplicate key. See IMPROVEMENT-PLAN 2.60d.", table, err)
 		}
 	}
-	assertTablesEmpty(t, db, tables, func(s string) string { return s })
+	assertTablesEmpty(t, db, present, func(s string) string { return s })
 }
 
 // assertTablesEmpty proves the deletes above actually removed the rows.
@@ -140,6 +162,82 @@ func assertTablesEmpty(t *testing.T, db *sql.DB, tables []string, quote func(str
 			"Use a connection that can see every tenant's rows. See "+
 			"IMPROVEMENT-PLAN 3.37 and 2.60d.", strings.Join(leftover, ", "))
 	}
+}
+
+// CleanupAllTestData deletes every row from the tables the given dialect's
+// cleanup knows about, dispatching to the right one.
+//
+// It exists because CleanupPostgresTestData was being called with MySQL and
+// SQL Server handles -- the name says PostgreSQL, the SQL it issued was
+// dialect-neutral, and so the mistake was invisible until the PostgreSQL
+// cleanup grew a PostgreSQL-specific query (`current_schema()`) and the MySQL
+// and SQL Server runs failed with "FUNCTION cleat.current_schema does not
+// exist". Prefer this in anything that loops over dialects.
+func CleanupAllTestData(t *testing.T, db *sql.DB, dialect Dialect) {
+	t.Helper()
+	switch dialect {
+	case DialectPostgres:
+		CleanupPostgresTestData(t, db)
+	case DialectMySQL:
+		CleanupMySQLTestData(t, db)
+	case DialectMSSQL:
+		CleanupMSSQLTestData(t, db)
+	default:
+		t.Fatalf("CleanupAllTestData: unknown dialect: %s", dialect)
+	}
+}
+
+// existingTables filters candidates down to the tables this database has,
+// preserving the caller's order (which is foreign-key order, so it matters).
+//
+// SQL Server's cleanup has always done this, one table at a time against
+// sys.tables. PostgreSQL and MySQL did not, which is why their lists could
+// only ever contain tables present in *every* schema variant -- and why the
+// PostgreSQL list had silently drifted four tables behind the other two:
+// tenant_api_keys, workflow_tags, workflow_routing and plugin_defs exist in
+// the migrated schema but not in SetupMinimalSchema's subset, so adding them
+// without this check fails every minimal-schema test.
+//
+// One query, not one per table: cleanup runs on the order of a hundred times
+// per suite.
+func existingTables(t *testing.T, db *sql.DB, dialect Dialect, candidates []string) []string {
+	t.Helper()
+
+	var q string
+	switch dialect {
+	case DialectPostgres:
+		q = `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()`
+	case DialectMySQL:
+		q = `SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()`
+	default:
+		t.Fatalf("existingTables: unsupported dialect %s", dialect)
+	}
+
+	rows, err := db.Query(q)
+	if err != nil {
+		t.Fatalf("cleanup: listing tables: %v", err)
+	}
+	defer rows.Close()
+
+	have := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("cleanup: scanning table names: %v", err)
+		}
+		have[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("cleanup: reading table names: %v", err)
+	}
+
+	present := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if have[c] {
+			present = append(present, c)
+		}
+	}
+	return present
 }
 
 // nonEmptyTables returns "<table>=<count>" for every table that still has rows.
