@@ -4124,6 +4124,51 @@ Re-derive:
 Mutation-tested: making the verification blind to rows (dropping the `n > 0` branch) fails both
 new tests, the first with "a table with a row in it was reported as empty".
 
+#### Part 2 — a database per suite (2026-08-31). `-p 1` is still in place.
+
+`SuiteTestDB(t, "<suite>")` (`engine/testutil/packagedb.go`) returns a PostgreSQL connection to
+`cleat_test_<suite>`, creating it and applying the shipped migrations on first use. It
+generalises `tests/crash`'s `ensureCrashDatabase`, which had already taken a database of its own
+for this exact reason and recorded the same diagnosis.
+
+`engine/testutil`'s own DB-backed tests now use it, which removes the collision inside
+`./engine/...` — two packages, previously one database, and the reason that CI entry carries
+`flags: -p 1`.
+
+`TestTestDB` deliberately still calls `TestDB`: it is the test *for* `TestDB`, and swapping it
+would leave the function uncovered while the name went on claiming otherwise. It is safe on the
+shared database because it only reads.
+
+**There is no fallback to the shared database**, by design. A suite that silently got the shared
+one back would pass every test here and delete another package's fixtures mid-run, which is the
+failure this exists to remove. A role without `CREATEDB` gets a `t.Fatalf` naming the connection.
+
+**`-p 1` has NOT been removed**, deliberately. Removing it is a CI-wide behaviour change and
+belongs in its own PR, once this has run in CI. Evidence gathered for that decision, all on this
+machine:
+
+| configuration | runs | result |
+|---|---|---|
+| `./engine/...`, no `-p 1`, **stale** local database | 3 | 1 failure (`TestClaimStickyWorkflows`) |
+| `./engine/...`, **with** `-p 1`, stale database | 3 | 1 failure (`TestReleaseWorkflow`) |
+| `./engine/...`, no `-p 1`, **freshly created** database | 4 | 4 green |
+
+**The failures were stale local state, not package parallelism** — they occurred with and
+without `-p 1`, and vanished when the database was dropped and recreated. That is the trap
+CLAUDE.md records under "recreate your test databases"; it cost several runs here because MySQL
+and SQL Server had been recreated earlier in the session and PostgreSQL had not. Four green runs
+is a small sample, which is the other reason `-p 1` stays until CI has an opinion.
+
+Re-derive:
+
+    go test ./engine/testutil/ -run 'TestSuite|TestSwapDatabaseName' -v
+
+Mutation-tested: making `SuiteTestDB` fall back to the shared DSN fails
+`TestSuiteTestDBIsNotTheSharedDatabase` with `connected to "cleat", want "cleat_test_testutil"`.
+
+**Still open:** every other suite that shares the database, the MySQL and SQL Server equivalents
+of `SuiteTestDB` (this is PostgreSQL-only), and the `-p 1` removal.
+
 #### 2.60c A non-JSON signal payload was accepted on PostgreSQL and rejected elsewhere — ✅ **FIXED** (WS-2, 2026-08-04)
 
 All three schemas require `workflow_signals.payload` to hold valid JSON, each saying so
