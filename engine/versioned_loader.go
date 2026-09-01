@@ -245,7 +245,7 @@ func (l *WorkflowLoader) ListVersions(ctx context.Context, name string) ([]Workf
 			return nil, fmt.Errorf("scan workflow def: %w", err)
 		}
 		if pluginDeps.Valid {
-			json.Unmarshal([]byte(pluginDeps.String), &def.PluginDeps)
+			def.PluginDeps = decodePluginDeps(slog.Default(), []byte(pluginDeps.String), def.Name, def.Version)
 		}
 		defs = append(defs, def)
 	}

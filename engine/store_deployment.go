@@ -287,7 +287,7 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 		}
 		def.CreatedAt = createdAt
 		if len(pluginDepsRaw) > 0 {
-			_ = json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+			def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, def.Name, def.Version)
 		}
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
@@ -327,7 +327,7 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt
 	if len(pluginDepsRaw) > 0 {
-		_ = json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+		def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, name, version)
 	}
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)

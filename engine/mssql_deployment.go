@@ -313,7 +313,7 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			tenant_id = @p8
 		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
 		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8);
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, string(pluginDepsJSON), def.Deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}
@@ -354,7 +354,7 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 		}
 		def.CreatedAt = createdAt
 		if len(pluginDepsRaw) > 0 {
-			json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+			def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, def.Name, def.Version)
 		}
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
@@ -384,7 +384,7 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt
 	if len(pluginDepsRaw) > 0 {
-		json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+		def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, name, version)
 	}
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)

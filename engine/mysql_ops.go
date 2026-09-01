@@ -782,7 +782,7 @@ func (s *MySQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 		}
 		def.CreatedAt = createdAt
 		if len(pluginDepsRaw) > 0 {
-			json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+			def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, def.Name, def.Version)
 		}
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
@@ -812,7 +812,7 @@ func (s *MySQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt
 	if len(pluginDepsRaw) > 0 {
-		json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+		def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, name, version)
 	}
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)
