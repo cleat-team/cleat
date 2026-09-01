@@ -6674,6 +6674,69 @@ recorded in §3.43.
 
 Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 74s**.
 
+### 3.47 Audit: every Postgres raw-pool read against an RLS table — ✅ **AUDITED + 2 FIXED** (2026-09-01)
+
+§3.44 fixed one `s.db` read inside a function holding a `tx`. This is the sweep for the rest of
+that shape, and **most of the answer is a negative result** — recorded so nobody re-derives it.
+
+**Method.** RLS is Postgres-only, so the 171 `s.db.Query|Exec` sites across `engine/` reduce to the
+7 Postgres files (18 sites). Each was checked against the 8 tables carrying
+`FORCE ROW LEVEL SECURITY`:
+
+    grep "FORCE ROW LEVEL SECURITY" migrations/postgres/001_schema.sql \
+      | grep "^ALTER TABLE" | awk '{print $3}' | sort -u
+    # event_history, workflow_defs, workflow_instances, workflow_promises,
+    # workflow_routing, workflow_schedules, workflow_signals, workflow_tags
+
+**Result — 16 of 18 are fine, for three distinct reasons:**
+
+| sites | why safe |
+|---|---|
+| `db.go` ×4 | `workflow_memory_stats` / `workflow_memory_samples` — not RLS-forced |
+| `store_lifecycle.go` ×2 | `idempotency_keys` — not RLS-forced, and carries an explicit `tenant_id = $2` |
+| `store_lifecycle.go` ×3, `store_deployment.go` | `admin.claim_workflows()`, `admin.get_due_schedules()`, `admin.tenant_api_keys`, a catalog probe — admin schema, errors checked |
+| `store_children.go` ×2 | cross-schema child workflows; one is explicitly the documented "no tenant to establish" path |
+| `event_stream.go` ×2, `store_event_stream.go` | errors checked |
+| `db_metrics.go` `EstimateEventHistorySize` | `pg_total_relation_size` reads catalog metadata, touches no rows |
+
+**So the §3.44 class — raw pool *and* a dropped error, giving a silent wrong answer — has no other
+instances.** That is the useful finding.
+
+**2 real bugs, both in `db_metrics.go`.** `CountStalledWorkflows` (workflow_instances) and
+`CountEventHistoryTotal` (event_history) read RLS-forced tables on the raw pool. Measured against a
+`cleat_rls_test_role` connection with one genuinely stalled workflow seeded:
+
+    ground truth (superuser):  1
+    CountStalledWorkflows:     0, error "cleat.tenant_id is not set" (P0001)
+
+They **check** their errors, so they fail loudly rather than reporting a confident wrong number —
+broken metrics, not lying metrics, which is the better of the two failure modes and still a bug.
+The cluster compose file connects workers as the NOSUPERUSER/NOBYPASSRLS `cleat_app` role, and
+these are the counts an operator watches to notice stalled work. Both now use `beginTxWithRLS`.
+
+> **The trap that made this hard to see, and that cost me two false passes.** The policy is
+> evaluated *per candidate row*. Against an empty table the read returns 0 rows and never calls
+> `assert_tenant_set` at all, so the query looks healthy. My first two probes seeded nothing — the
+> second failed on a `workflow_defs` column that does not exist — and both "passed" against the
+> broken code. The test now asserts its own fixture (`truth != 1` is a `t.Fatalf`) before asserting
+> anything about the behaviour.
+
+**Found on the way, not fixed — `assert_tenant_set` misses the empty string.** It raises on
+`IS NULL`, but `setRLSOnTx` uses `set_config(..., true)`, which is *transaction-local*. After any
+RLS transaction the pooled connection carries `cleat.tenant_id = ''` rather than NULL, so
+`current_setting('cleat.tenant_id', true)` returns `''`, the `IS NULL` guard does not fire, and
+`RETURN tid::uuid` fails with
+
+    pq: invalid input syntax for type uuid: "" (22P02)
+
+instead of the intended message. Same defect, two different errors depending on whether that
+connection has been used before — which is exactly the kind of variation that makes a report hard
+to reproduce. The fix is a one-line `IF tid IS NULL OR tid = ''` in a **new** migration (editing
+the applied `001_schema.sql` would not re-run on existing databases); WS-3's reserved range is
+030–039. Left for its own PR because it is a schema change, not a Go change.
+
+Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 69s**.
+
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
