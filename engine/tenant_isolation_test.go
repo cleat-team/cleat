@@ -88,7 +88,17 @@ func TestTenantSelfAccess(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
 		ctx := context.Background()
 
-		// Deploy a workflow definition (visible to all tenants).
+		// Deploy a workflow definition. This one is visible to all tenants,
+		// because forEachBackend hands out a default-tenant store and
+		// workflow_defs' RLS policy admits default-tenant rows -- not because
+		// definitions are global. Since IMPROVEMENT-PLAN 3.12,
+		// DeployWorkflowDef writes the deploying store's tenant, so a
+		// definition deployed by any other tenant is not visible to all.
+		//
+		// Spelled out because migrations/postgres/001_schema.sql used to cite
+		// this line as evidence that definitions were "a shared/global
+		// registry, not tenant-partitioned data", and justified a security
+		// policy with it.
 		def := &WorkflowDef{
 			Name:       "test-isolation",
 			Version:    1,

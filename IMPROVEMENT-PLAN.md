@@ -5506,12 +5506,46 @@ the defect:**
   because `engine/testutil`'s MSSQL schema left the column nullable: the §1.9 drift class
   again, found by reading the column back rather than by reading the schema.
 
-**Residual, and it is the same shape as §3.11:** a definition's *contents* are still readable
+~~**Residual, and it is the same shape as §3.11:** a definition's *contents* are still readable
 across tenants by name — `LoadWASM`, `GetWASMLength`, `LoadDAGSpec` and `LoadWorkflowConfig`
 key on `(name, version)` with no tenant. PostgreSQL's RLS policy for this table admits the
 default tenant deliberately, so pre-upgrade definitions stay globally readable by design; on
 MySQL and SQL Server there is nothing underneath at all. Closing that is the same work as
-putting the tenant in the key.
+putting the tenant in the key.~~
+
+**Residual restated 2026-08-31 — the last sentence of that was wrong, and it overstated the
+exposure.** The four methods do take `(defName, defVersion)` with no tenant argument, which is
+what the old text was reading. But the *signature* is not the isolation, and every dialect
+scopes the read:
+
+| dialect | what scopes the read | re-derive |
+|---|---|---|
+| PostgreSQL | RLS — `LoadWASM` runs inside `beginTxWithRLS` | `grep -n "beginTxWithRLS" engine/store_deployment.go` |
+| MySQL | the SQL itself — `AND tenant_id = ?` against `s.tenantID` | `grep -n "func (s \*MySQLStore) LoadWASM" -A4 engine/mysql_ops.go` |
+| SQL Server | `FILTER PREDICATE dbo.fn_tenant_filter(tenant_id)` on `dbo.workflow_defs` | `grep -n "ON dbo.workflow_defs" migrations/mssql/001_schema.sql migrations/mssql/012_admin_role.sql` |
+
+"On MySQL and SQL Server there is nothing underneath at all" was false on both counts.
+`GetWASMLength`'s own comment on the MySQL side says the opposite in as many words — *"MySQL has
+no row-level security, so this predicate is the whole of the isolation"* — so the evidence was
+sitting in the code the residual was describing.
+
+**What is actually left**, stated at its real size: the PostgreSQL policy admits default-tenant
+rows (`tenant_id = cleat.assert_tenant_set() OR tenant_id = '000…'`), so definitions that predate
+this item stay readable by every tenant until the first redeploy adopts them. That is a
+deliberate migration window, documented in `CHANGELOG.md` as a breaking upgrade note, and it
+narrows as deployments redeploy. Putting `tenant_id` in the primary key closes it and lets two
+tenants hold the same definition name — still worth doing, but it is tidiness plus a shrinking
+window, not the open cross-tenant read this entry claimed.
+
+**Found on the way, and worse than the residual itself:** `migrations/postgres/001_schema.sql`
+justified that policy with *"DeployWorkflowDef always writes `tenant_id = '00000000-…'`
+regardless of the calling store's tenant, because workflow definitions are a shared/global
+registry, not tenant-partitioned data."* This item changed that line to `tenantID := s.tenantID`
+and the migration's prose was never updated — so a shipped schema file argued for a security
+policy from a premise its own codebase contradicts, and cited a test comment
+(`engine/tenant_isolation_test.go`, "visible to all tenants") as the evidence. Both corrected;
+the test comment now says *why* that particular definition is visible to all tenants rather than
+implying definitions in general are.
 
 ### 3.13 No cleat-worker can bootstrap a MySQL schema — ✅ **FIXED** (WS-1, 2026-08-05)
 

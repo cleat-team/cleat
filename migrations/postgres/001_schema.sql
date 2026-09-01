@@ -488,18 +488,42 @@ ALTER TABLE workflow_promises ENABLE ROW LEVEL SECURITY;
 -- Fail-closed policies using cleat.assert_tenant_set() (from 008, no COALESCE)
 --
 -- workflow_defs is a partial exception: its PRIMARY KEY is (name, version)
--- with no tenant_id component, and DeployWorkflowDef (engine/store_deployment.go)
--- always writes tenant_id = '00000000-...' (DefaultTenantUUID) regardless of
--- the calling store's tenant, because workflow definitions are a
--- shared/global registry, not tenant-partitioned data (see the "visible to
--- all tenants" comment on TestTenantSelfAccess in
--- engine/tenant_isolation_test.go). A strict tenant_id = assert_tenant_set()
--- policy here would make DeployWorkflowDef fail-closed for every tenant
--- except the default one as soon as RLS is enforced by a non-superuser,
--- non-owner connection, which is the opposite of the intended behavior.
--- The policy below therefore also allows the shared default-tenant rows to
--- be read (and written, matching what DeployWorkflowDef already does
--- unconditionally today) by any tenant.
+-- with no tenant_id component, so two tenants cannot each hold a definition
+-- of the same name. The policy below therefore admits default-tenant rows in
+-- addition to the caller's own.
+--
+-- The reason is a migration window, NOT that definitions are global. This
+-- comment used to justify the OR clause by saying DeployWorkflowDef
+-- "always writes tenant_id = '00000000-...' regardless of the calling store's
+-- tenant, because workflow definitions are a shared/global registry, not
+-- tenant-partitioned data". Both halves stopped being true:
+--
+--   * IMPROVEMENT-PLAN 3.12 changed engine/store_deployment.go to
+--     `tenantID := s.tenantID`; the line carries its own comment recording
+--     that it used to be the default-tenant literal.
+--   * "Not tenant-partitioned" was never a cross-dialect property. MySQL's
+--     LoadWASM filters `AND tenant_id = ?` (engine/mysql_ops.go) and SQL
+--     Server carries a FILTER PREDICATE on dbo.workflow_defs (see
+--     migrations/mssql/001_schema.sql and 012_admin_role.sql).
+--
+-- What the OR clause is actually for: every definition in every database that
+-- predates 3.12 is owned by the default tenant. A strict
+-- `tenant_id = cleat.assert_tenant_set()` policy would make all of them
+-- unreadable the moment RLS is enforced on a non-superuser, non-owner
+-- connection, breaking the first redeploy after the upgrade for every tenant
+-- at once. A default-tenant definition is instead *adopted* by the first
+-- tenant to redeploy it (canAdoptDef, engine/def_ownership.go, used by all
+-- three dialects); until that happens it stays globally readable, and a
+-- tenant other than its creator can still take it over. CHANGELOG.md carries
+-- this as a breaking upgrade note.
+--
+-- So this OR narrows as deployments redeploy, and removing it is the same
+-- work as putting tenant_id in the primary key (IMPROVEMENT-PLAN 3.12's
+-- residual). Do not read it as a statement that definitions are shared.
+--
+-- Editing an already-applied migration is safe here because the change is a
+-- comment: migration.Runner records applied files by name and does not
+-- checksum them, so a database that has 001 recorded is unaffected.
 DROP POLICY IF EXISTS tenant_isolation_defs ON workflow_defs;
 CREATE POLICY tenant_isolation_defs ON workflow_defs
     FOR ALL USING (
