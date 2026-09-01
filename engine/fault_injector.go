@@ -106,44 +106,72 @@ func (fi *FaultInjector) InjectDiskLatency(min, max time.Duration) {
 // The offset is applied to all subsequent time-based operations.
 // A positive offset simulates the database being ahead of the worker.
 // A negative offset simulates the database being behind the worker.
-func (fi *FaultInjector) InjectClockSkew(offset time.Duration) {
+//
+// Returns the error from the database write, and marks the fault active only if
+// that write succeeded. Both halves matter: this used to discard the error and
+// set active unconditionally, so a fault that never reached the database was
+// indistinguishable from one that did, and IsActive(FaultClockSkew) reported
+// true either way. A test asserting the system survives clock skew would then
+// pass without any skew ever being applied -- a green result that measured
+// nothing, in the harness built to catch exactly that.
+func (fi *FaultInjector) InjectClockSkew(offset time.Duration) error {
 	fi.mu.Lock()
 	defer fi.mu.Unlock()
-
-	fi.clockSkewOffset = offset
-	fi.active[FaultClockSkew] = true
 
 	// For positive offset (DB ahead), set heartbeat_at to a future time
 	// on all running instances.
 	if offset > 0 && fi.db != nil {
-		fi.db.ExecContext(context.Background(),
+		if _, err := fi.db.ExecContext(context.Background(),
 			`UPDATE workflow_instances SET heartbeat_at = heartbeat_at + $1::interval WHERE status = 'running'`,
-			fmt.Sprintf("%d seconds", int(offset.Seconds())))
+			fmt.Sprintf("%d seconds", int(offset.Seconds()))); err != nil {
+			return fmt.Errorf("inject clock skew: %w", err)
+		}
 	}
+
+	fi.clockSkewOffset = offset
+	fi.active[FaultClockSkew] = true
+	return nil
 }
 
 // InjectWorkerCrash simulates a worker crash by releasing all workflows
 // assigned to the given workerID back to the ready queue.
-func (fi *FaultInjector) InjectWorkerCrash(workerID string) {
+//
+// Returns the error from the database write, and marks the fault active only if
+// that write succeeded -- see InjectClockSkew for why both halves matter. This
+// one is the more consequential of the two: releasing the workflows IS the
+// fault, so a failed write means the crash never happened and any assertion
+// about recovery is measuring an untouched system.
+func (fi *FaultInjector) InjectWorkerCrash(workerID string) error {
 	fi.mu.Lock()
 	defer fi.mu.Unlock()
 
-	fi.active[FaultWorkerCrash] = true
-
 	if fi.db != nil {
-		fi.db.ExecContext(context.Background(),
+		if _, err := fi.db.ExecContext(context.Background(),
 			`UPDATE workflow_instances
 			 SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
 			 WHERE status = 'running' AND assigned_to = $1`,
-			workerID)
+			workerID); err != nil {
+			return fmt.Errorf("inject worker crash: %w", err)
+		}
 	}
+
+	fi.active[FaultWorkerCrash] = true
+	return nil
 }
 
 // Cleanup restores normal operation, clearing all active faults.
-func (fi *FaultInjector) Cleanup() {
+//
+// Returns the first error from any restore write. The in-memory state is
+// cleared regardless: a failed restore must not leave the injector believing
+// faults are still active, but the caller does need to know the database was
+// not put back -- a clock-skew restore that silently failed leaves every
+// running instance with a future heartbeat_at, which the next test in the same
+// database inherits as an unexplained failure.
+func (fi *FaultInjector) Cleanup() error {
 	fi.mu.Lock()
 	defer fi.mu.Unlock()
 
+	var firstErr error
 	for ft := range fi.active {
 		switch ft {
 		case FaultNetworkPartition:
@@ -157,8 +185,10 @@ func (fi *FaultInjector) Cleanup() {
 			fi.clockSkewOffset = 0
 			// Restore normal heartbeat times.
 			if fi.db != nil {
-				fi.db.ExecContext(context.Background(),
-					`UPDATE workflow_instances SET heartbeat_at = now() WHERE heartbeat_at > now() + interval '1 minute'`)
+				if _, err := fi.db.ExecContext(context.Background(),
+					`UPDATE workflow_instances SET heartbeat_at = now() WHERE heartbeat_at > now() + interval '1 minute'`); err != nil && firstErr == nil {
+					firstErr = fmt.Errorf("cleanup clock skew: %w", err)
+				}
 			}
 		case FaultWorkerCrash:
 			// Already handled by InjectWorkerCrash, no cleanup needed.
@@ -166,6 +196,7 @@ func (fi *FaultInjector) Cleanup() {
 	}
 
 	fi.active = make(map[FaultType]bool)
+	return firstErr
 }
 
 // IsActive reports whether a particular fault type is currently active.
