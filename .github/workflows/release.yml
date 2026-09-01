@@ -74,6 +74,30 @@ jobs:
             exit 1
           fi
 
+      # cleat-worker is built with CGO_ENABLED=1 -- wasmtime is the only WASM
+      # backend, and a CGO-less worker exits 1 at startup. amd64 links with the
+      # runner's own gcc; arm64 needs the cross compiler named by the CC
+      # template in .goreleaser.yml.
+      - name: Install the arm64 cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc --version
+
+      # Registers binfmt_misc handlers so the linux/arm64 worker can be executed
+      # on this amd64 runner. scripts/verify-release-worker.sh runs every
+      # cleat-worker artifact with --verify-backend as a goreleaser post hook,
+      # and has no skip branch: without this step the arm64 hook fails with
+      # "Exec format error" and the release stops.
+      #
+      # That is deliberate. The bug this guards against -- CGO_ENABLED=0 in
+      # .goreleaser.yml, shipping workers that exited 1 before reading a flag --
+      # survived precisely because nothing ever executed the artifact.
+      - name: Set up QEMU for cross-architecture verification
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:

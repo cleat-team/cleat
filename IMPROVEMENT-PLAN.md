@@ -7698,3 +7698,90 @@ Each of the three production edits was mutation-tested; removing `recordAmbiguit
 `classifyFailure` from the trap return, or removing the `Error()` passthrough each fails a named
 test, and the first two fail with the pre-fix reality in the message: `error_code='unknown'` on
 a `*engine.wasmTrapError`.
+
+---
+
+### 3.54 Every released `cleat-worker` binary was dead on arrival — ✅ **FIXED** (2026-09-01)
+
+`.goreleaser.yml` built `cleat-worker` with `CGO_ENABLED=0`. That compiles out
+`engine/backend_wasmtime.go` (`//go:build cgo`), so `NewWasmtimeBackend` resolves to the stub in
+`engine/backend_wasmtime_stub.go` and returns `ErrWasmtimeCGOUnavailable`.
+`cmd/cleat-worker/main.go:789` logs *"wasmtime is the only WASM backend cleat has, there is no
+fallback"* and calls `os.Exit(1)`.
+
+So every `cleat-worker` ever attached to a GitHub release **exited 1 before reading a flag or
+opening a database.** Not a degraded worker — a worker that does not start.
+
+Measured 2026-09-01:
+
+    CGO_ENABLED=0  ->  NewWasmtimeBackend err = "wasmtime backend requires CGO
+                       (binary built with CGO_ENABLED=0)"
+    CGO_ENABLED=1  ->  err = <nil>
+
+Re-derive:
+
+    CGO_ENABLED=0 go build -o /tmp/w0 ./cmd/cleat-worker && /tmp/w0 --verify-backend ; echo $?
+    CGO_ENABLED=1 go build -o /tmp/w1 ./cmd/cleat-worker && /tmp/w1 --verify-backend ; echo $?
+
+**Why it lived for months.** `CGO_ENABLED=0 go build ./...` exits 0 — the failure is at startup,
+not at build time — so the release pipeline was green the entire way. Nothing ever executed the
+artifact it published.
+
+**It was already fixed once, in the other place.** The `Dockerfile` had been changed to
+`RUN CGO_ENABLED=1 go build ...` and grew a `RUN /cleat-worker --verify-backend` gate, with a
+comment explaining that the image used to be CGO-less. goreleaser was missed. The container was
+fine and the tarballs were not, with nothing tying the two together — the same
+fixed-in-one-place-not-the-other shape as §3.50 and §3.53.
+
+**The fix, and the decision inside it.** `cleat-worker` is now `CGO_ENABLED=1` and **linux only**.
+A CGO darwin binary cannot be linked on `ubuntu-latest` without osxcross, and every job in
+`.github/workflows` runs `ubuntu-latest` — 36 of 36, measured 2026-09-01 with
+
+    grep -rhoE 'runs-on: .*' .github/workflows/ | sort | uniq -c
+
+Two binaries that provably start beat four that provably do not. `cleat` and `cleat-gen` are
+unaffected: neither links wasmtime, both stay pure Go on all four targets. macOS users install
+the worker with `go install`, which is the path `README.md:149` actually documents and which
+builds locally with CGO on, or use the Docker image. Re-adding darwin needs a macOS runner, not
+an edit to the `goos` list. A Homebrew formula that builds from source is the natural way to give
+macOS a working worker back; it is deliberately not in this PR.
+
+`wasmtime-go` v44 vendors static libs for all four targets (`linux-{x86_64,aarch64}`,
+`macos-{x86_64,aarch64}`), so this is a linker constraint, not a missing-library one — a darwin
+build works fine *on* a Mac. Confirmed by cross-compiling darwin/amd64 from darwin/arm64 with
+`CC="clang -target x86_64-apple-macos11"`, which produced a working `Mach-O 64-bit executable`.
+
+**Two guards, at two different costs.**
+
+`scripts/verify-release-worker.sh` runs as a goreleaser post-build hook and **executes every
+published artifact** with `--verify-backend`; post hooks run before the publish stage, so a
+failure aborts the release. It has no skip branch — cross-architecture execution is a hard
+requirement, and `release.yml` registers binfmt via `docker/setup-qemu-action` so the arm64 binary
+runs under qemu. A "cannot execute this architecture, skip" branch would pass the arm64 binary
+through unexamined and report success, which is the original bug wearing a skip's clothing.
+
+Its own negative control, measured 2026-09-01 (CLAUDE.md: *a verification script needs its own
+negative control*): `CGO_ENABLED=1` → exit 0, `CGO_ENABLED=0` → exit 1 with
+`wasmtime backend requires CGO`.
+
+`cmd/cleat-worker/goreleaser_cgo_test.go` is the cheap half: it parses `.goreleaser.yml` on every
+PR, so a reintroduction is caught in review rather than at the next tag. It matches the build
+block on `main:`, not on `id:`, because an id is a label a rename can turn every assertion into a
+vacuous pass. Five mutations, each failing for its own reason, and the fifth is the vacuous-pass
+control:
+
+| mutation | result |
+|---|---|
+| `CGO_ENABLED=0` | `TestReleasedWorkerIsBuiltWithCGO` — "released with CGO_ENABLED=0" |
+| `CGO_ENABLED` line deleted | `TestReleasedWorkerIsBuiltWithCGO` — "sets no CGO_ENABLED at all" |
+| `darwin` re-added to `goos` | `TestReleasedWorkerIsLinuxOnly` — `released for goos "darwin"` |
+| verify hook removed | `TestReleasedWorkerArtifactsAreExecuted` |
+| `main:` renamed | **all three** fail with "no build has main: ./cmd/cleat-worker" |
+
+Re-derive: `go test ./cmd/cleat-worker/ -run TestReleasedWorker -count=1`
+
+**Stale prose fixed in the same PR.** `cmd/cleat-worker/verify_backend.go` told the operator the
+binary "would fall back to wazero, where `--wasm-instance-timeout` cannot interrupt a WASM
+guest". That stopped being true when the wazero *backend* was deleted in #459: there is no
+fallback, the worker exits 1. The message now says so. It is the text a release engineer reads at
+the moment the gate fires, and it was describing a failure mode the code no longer has.
