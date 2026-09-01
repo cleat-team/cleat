@@ -272,6 +272,24 @@ Key conventions:
 - **`IMPROVEMENT-PLAN.md`** — the item backlog. Each `§` heading carries a status marker; the
   marker is the source of truth, not any summary table derived from it. Read the body too — it
   has been stale under a fixed heading more than once.
+
+  **A heading with *no* marker is a defect, and it costs more than a wrong one.** §1.1 and §1.2
+  — the two highest-severity items in the document — carried no marker until 2026-09-01 while
+  their bodies had recorded the fixes as done for weeks. A scan for open work reported a
+  closed data-loss bug as the project's top outstanding item, and a session went into
+  re-deriving what the body already said. "No marker" is indistinguishable from "not started",
+  so it is read as the latter. Prose in the heading (`— fixed in 9fc2a81`) counts; nothing at
+  all does not. Measured 2026-09-01: 87 of 99 headings carried a status, and re-derivable with
+
+      grep -cE '^### [0-9]+\.[0-9]+ ' IMPROVEMENT-PLAN.md
+
+  **When a section names the files it will change, those names go stale too, and in the
+  direction that fools you.** §1.1's `Files:` bullet pointed at
+  `migrations/*/003_procedures.sql`. The fix shipped as `004_fix_finalize_workflow_status_fence.sql`,
+  which *redefines* the procedure — so 003 still contains the original unguarded body, exactly
+  as the bug report described. Checking the claim against the file the claim named confirmed
+  the bug, and the confirmation was worthless. For anything defined by `CREATE OR REPLACE`,
+  find the highest-numbered migration that defines it before concluding anything.
 - **`WORKSTREAM.md`** — what is being worked on now, by whom, and in which sandbox.
 - **`BRANCH-TRIAGE.md`** — assessment of unmerged remote branches. Its method
   (`git rev-list --left-right --count`) cannot see through a squash-merge, so it has reported
