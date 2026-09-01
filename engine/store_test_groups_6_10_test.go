@@ -69,16 +69,49 @@ func TestDeliverSignalWakesWorkflow(t *testing.T) {
 			updateWorkflowNextWakeAt(t, store, runID, futureTime)
 
 			// Deliver a signal — expect next_wake_at to be updated to now().
-			beforeDeliver := time.Now()
+			//
+			// Bracketed against the DATABASE's clock, not the Go process's.
+			// DeliverSignal sets next_wake_at from the server's own now(), so the
+			// stored value must lie between two readings of that same clock taken
+			// either side of the call. That is an exact statement of the
+			// behaviour and needs no tolerance for skew.
+			//
+			// This used to read `beforeDeliver := time.Now()` and allow ±1s. It
+			// failed once on a loaded run (2026-09-01, engine suite at 93% CPU
+			// and 1:46 wall against a usual 1:12).
+			//
+			// Two things were wrong with it, and measuring separated them.
+			// Go-to-database clock skew on this machine is only 42ms
+			// (postgres, mysql) to 74ms (mssql), so skew alone does not reach
+			// the 1s window -- the first explanation was wrong. The dominant
+			// term is CALL LATENCY: next_wake_at is written at the end of
+			// DeliverSignal, so the gap from beforeDeliver to the stored value
+			// is the whole round trip. Under load that exceeds a second and the
+			// `diff > time.Second` arm fires.
+			//
+			// Bracketing fixes both at once: dbAfter is sampled after the call
+			// returns, so however long the call takes, nw <= dbAfter. Widening
+			// the window would only have moved the threshold.
+			dbBefore := queryDatabaseNow(t, store)
 			if err := store.DeliverSignal(ctx, runID, "wake-signal", "{}"); err != nil {
 				t.Fatalf("DeliverSignal (ready): %v", err)
 			}
+			dbAfter := queryDatabaseNow(t, store)
 
 			nw := queryWorkflowNextWakeAt(t, store, runID)
-			diff := nw.Sub(beforeDeliver)
-			if diff < -time.Second || diff > time.Second {
-				t.Errorf("ready case: next_wake_at %v not within 1s of %v (diff=%v)",
-					nw, beforeDeliver, diff)
+			// The slack absorbs stored-column precision only (MySQL truncates
+			// DATETIME to the column's fractional seconds), never clock skew:
+			// every value here comes from the same server.
+			const precisionSlack = time.Second
+			if nw.Before(dbBefore.Add(-precisionSlack)) || nw.After(dbAfter.Add(precisionSlack)) {
+				t.Errorf("ready case: next_wake_at %v is outside [%v, %v], the database's "+
+					"own clock either side of DeliverSignal — so it was not reset to now()",
+					nw, dbBefore, dbAfter)
+			}
+			// And the point of the case: it moved off the far-future value.
+			if !nw.Before(futureTime.Add(-time.Minute)) {
+				t.Errorf("ready case: next_wake_at %v is still at or near the future value %v; "+
+					"the signal did not wake the workflow", nw, futureTime)
 			}
 
 			// --- Case 2: status='running' (guard) ---
@@ -97,6 +130,11 @@ func TestDeliverSignalWakesWorkflow(t *testing.T) {
 				t.Fatalf("DeliverSignal (running): %v", err)
 			}
 
+			// No database-clock bracket here, and it is not an oversight: this
+			// case asserts next_wake_at did NOT change, comparing the value read
+			// back against the one this test wrote. Both sides are the same Go
+			// value round-tripped through the column, so only storage precision
+			// is in play -- there is no second clock to disagree with.
 			nw2 := queryWorkflowNextWakeAt(t, store, runID2)
 			diff2 := nw2.Sub(futureTime2)
 			if diff2 < -time.Second || diff2 > time.Second {
@@ -922,6 +960,37 @@ func updateWorkflowNextWakeAt(t *testing.T, store WorkflowStore, workflowID stri
 }
 
 // queryWorkflowNextWakeAt returns next_wake_at from the database.
+// queryDatabaseNow returns the database server's own clock, using the same
+// expression the corresponding DeliverSignal uses to set next_wake_at:
+// now() on PostgreSQL, NOW(6) on MySQL, SYSUTCDATETIME() on SQL Server.
+//
+// It exists so that a test comparing against next_wake_at compares two readings
+// of ONE clock. The Go process and the database server do not share a clock --
+// under colima the database runs in a VM with its own time -- so any assertion
+// that puts time.Now() on one side and a database-generated timestamp on the
+// other is measuring clock skew as much as behaviour.
+func queryDatabaseNow(t *testing.T, store WorkflowStore) time.Time {
+	t.Helper()
+	var now time.Time
+	switch s := store.(type) {
+	case *PostgresStore:
+		if err := s.db.QueryRow(`SELECT now()`).Scan(&now); err != nil {
+			t.Fatalf("queryDatabaseNow (postgres): %v", err)
+		}
+	case *MySQLStore:
+		if err := s.db.QueryRow(`SELECT NOW(6)`).Scan(&now); err != nil {
+			t.Fatalf("queryDatabaseNow (mysql): %v", err)
+		}
+	case *MSSQLStore:
+		if err := s.db.QueryRow(`SELECT SYSUTCDATETIME()`).Scan(&now); err != nil {
+			t.Fatalf("queryDatabaseNow (mssql): %v", err)
+		}
+	default:
+		t.Fatalf("queryDatabaseNow: unknown store type %T", store)
+	}
+	return now
+}
+
 func queryWorkflowNextWakeAt(t *testing.T, store WorkflowStore, workflowID string) time.Time {
 	t.Helper()
 	var nw time.Time
