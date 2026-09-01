@@ -433,12 +433,37 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		}
 		// Workflow failed with a non-suspend error (trap, panic, timeout,
 		// or cancellation). Try running defers on the still-live module
-		// first, then fall back to fresh-module defers.
+		// first, then fall back to fresh-module defers for the ones it
+		// could not offer.
+		//
+		// The fall-back used to be unconditional, so every defer body ran
+		// TWICE -- once on the live module and once on a fresh one. Measured
+		// 2026-09-01 with a guest that registers one defer and traps: two
+		// "defer execution failed" lines for the same defer_id, each carrying
+		// the trap from the defer function itself, so both had reached the
+		// body. The comment said "fall back" and there was no conditional.
+		//
+		// A defer is a destructor, so a doubled body is a doubled effect: a
+		// compensating saga step applied twice, a lock released twice, a
+		// notification sent twice.
+		//
+		// Not the worker: this is executeCompiled, reached only when no
+		// backend is registered -- cleatctl replay|debug, cleat run,
+		// cleat-bench, and the public testing packages cleat/wasmtest,
+		// cleat/cleattest, cleat/embedded. That last group is the reason this
+		// matters rather than the reason it does not: a user testing a
+		// compensating defer saw it fire twice under the harness and once in
+		// production, so the harness disagreed with the runtime in the
+		// direction that makes a real double-compensation look like a test
+		// artifact.
+		//
 		// Use context.Background() so defer functions execute even when the
 		// execCtx has been cancelled or timed out (e.g., workflow timeout).
 		if len(session.deferrals) > 0 {
-			e.invokeDefersOnTrap(context.Background(), mod, session.deferrals)
-			e.runDefers(context.Background(), wasmBytes, session.deferrals)
+			notInvoked := e.invokeDefersOnTrap(context.Background(), mod, session.deferrals)
+			if len(notInvoked) > 0 {
+				e.runDefers(context.Background(), wasmBytes, notInvoked)
+			}
 		}
 		session.releaseHeldScopes(context.Background())
 		// Attempt to resolve the WASM trap to a source location using
@@ -724,8 +749,13 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			return "", session.history, susResult, session.deferrals, session.queryState, nil
 		}
 		// Workflow failed with non-suspend error.
+		//
+		// The return value is deliberately discarded: this site has never had a
+		// fresh-module fall-back, and adding one here would be a behaviour
+		// change rather than the bug fix the other call site is. A defer whose
+		// export is missing is reported by invokeDefersOnTrap's own log line.
 		if len(session.deferrals) > 0 {
-			e.invokeDefersOnTrap(ctx, entryMod, session.deferrals)
+			_ = e.invokeDefersOnTrap(ctx, entryMod, session.deferrals)
 		}
 		session.releaseHeldScopes(ctx)
 		return "", session.history, nil, nil, nil, err
@@ -851,12 +881,25 @@ func (e *Engine) RunDeferCompiled(ctx context.Context, compiled wazero.CompiledM
 // invokeDefersOnTrap attempts to invoke registered defer callbacks after a WASM trap.
 // Each defer is called as a separate export. Failures are logged but not returned —
 // the original trap error takes priority.
-func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferrals map[string]string) {
+//
+// It returns the deferrals it did NOT invoke, so the caller can fall back to a
+// fresh module for those and only those. The caller used to run both passes
+// unconditionally, which executed every defer body twice; see the call site for
+// the measurement.
+//
+// "Invoked" means the export was found and called, whatever the outcome. A
+// defer that ran and trapped must NOT be retried on a fresh instance: it is a
+// destructor, so its effects are the point, and half-applying a compensating
+// action and then applying it again is worse than not retrying. Only a defer
+// the live module could not offer at all is handed on.
+func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferrals map[string]string) (notInvoked map[string]string) {
+	notInvoked = make(map[string]string)
 	for deferID, description := range deferrals {
 		exportName := "cleat_defer_" + deferID
 		fn := mod.ExportedFunction(exportName)
 		if fn == nil {
 			e.log().WarnContext(ctx, "defer export not found", "defer_id", deferID, "description", description, "export_name", exportName)
+			notInvoked[deferID] = description
 			continue
 		}
 		_, _, err := e.rt.CallExportWithSuspend(ctx, mod, exportName, []byte("{}"))
@@ -864,6 +907,7 @@ func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferra
 			e.log().WarnContext(ctx, "defer execution failed", "defer_id", deferID, "description", description, "error", err)
 		}
 	}
+	return notInvoked
 }
 
 // DispatchUpdate dispatches an update to a workflow by invoking its registered handler.
