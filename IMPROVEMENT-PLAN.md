@@ -6064,6 +6064,77 @@ Mutation-tested three ways: restoring `return ownerID == workflowID` fails **onl
 subtest, which is the divergence itself; returning false unconditionally is caught by the
 fresh-key assertion; swallowing the rows-affected error fails `_RowsAffectedError`.
 
+### 3.40 The crash harness migrated a database it never reads — ✅ **FIXED** (2026-08-31)
+
+`tests/crash` starts a real `cleat-worker` subprocess on the shipped two-DSN configuration.
+`startWorker` passed `appDSN(t)` as `--db` and **`ownerDSN()`** as `--migrate-db`. Those are two
+different databases:
+
+- `appDSN(t)` → `cleat_crash`, the database this suite created for itself so that
+  `engine/testutil`'s unqualified `DELETE FROM` could not reach a live worker's rows.
+- `ownerDSN()` → the *base* database, `cleat`. The shared one.
+
+`cmd/cleat-worker` opens `--migrate-db` as a separate connection and runs both
+`migration.Runner` and `plugin.RunMigrations` against it (`main.go:556`). So every worker this
+suite started migrated the shared database and migrated **nothing** in the one every assertion
+here reads — and the isolation `ensureCrashDatabase` exists to provide was given up on every
+worker start.
+
+**Measured 2026-08-31, unfixed harness, after one worker start:**
+
+| database | `schema_migrations` | `plugin_migrations` | public tables |
+|---|---|---|---|
+| `cleat` (`--migrate-db`) | present, 14 rows | present | 16 |
+| `cleat_crash` (`--db`) | absent | absent | 14 |
+
+Re-derive by pointing `CLEAT_CRASH_DB` at a scratch instance, dropping both databases, running
+one test, and diffing `information_schema.tables` between them.
+
+**Nothing was failing**, because the 14 content tables agreed. They agreed by luck: `cleat_crash`
+was built by `ownerDB`'s own `ReadDir`-and-`Exec` loop over `migrations/postgres/*.sql`, a second
+implementation of "apply the shipped migrations" with no `schema_migrations` bookkeeping and its
+own statement splitting. That is the §1.9 / §2.60b mechanism — `engine/testutil` has a guard test
+against reintroducing a hand-written schema, and this suite had quietly kept one. Had the two
+routes ever disagreed, the symptom would not have been "the worker cannot migrate"; it would have
+been an unrelated assertion in this suite failing against a schema nobody had thought about.
+
+**Fixed both halves.** `--migrate-db` now names the database the worker serves from, and
+`ownerDB` applies migrations through `migration.Runner` — the call `cmd/cleat-worker` makes at
+boot — instead of its own loop.
+
+Re-derive:
+
+    CLEAT_CRASH_DB=... go test ./tests/crash/ -run TestWorkerMigratesTheDatabaseItServes -v
+
+**The regression test is asserted on `plugin_migrations`, not on the flags.** The flag is not the
+property; what matters is that the migration the worker performs at boot lands where the worker
+reads. `schema_migrations` cannot witness that — `ownerDB` creates it — but `plugin_migrations`
+can, because only a worker ever creates it.
+
+**It runs in a database of its own, `cleat_crash_migrate_target`, which it drops first.** Two
+mistakes made while writing it, both worth recording because both produced a *green* first
+attempt at some point:
+
+1. Sharing `cleat_crash`, it passed alone and failed in the suite: the four tests above it had
+   already started workers, so `plugin_migrations` existed and there was nothing left to observe.
+2. Without the drop, it passed on a clean database and then failed on every subsequent run of the
+   same checkout, for the same reason.
+
+A witness that is created once and then stays created cannot be reused; the test now guarantees
+its own precondition rather than assuming it.
+
+Mutation-tested two ways. Restoring `--migrate-db ownerDSN()` fails it with the worker's log
+attached, showing a *healthy* worker — RLS enforced, wasmtime registered — that simply migrated
+elsewhere, which is the defect and not a boot failure. Removing the drop makes the second
+consecutive run trip the separate "cannot tell whether the worker created it" guard, so the
+precondition check is load-bearing rather than decorative.
+
+**Not done here:** `tests/crash` still carries `ensureDatabaseNamed` and `swapDatabase`, which
+duplicate `engine/testutil`'s `ensureDatabase` and `swapDatabaseName` (§2.60d part 2). The
+duplication is real but small, and folding it in would mean exporting two helpers and adding a
+dependency to a suite that deliberately keeps few — a separate change, and not a prerequisite for
+anything.
+
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
