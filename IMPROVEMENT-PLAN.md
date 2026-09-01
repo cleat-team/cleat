@@ -5900,6 +5900,49 @@ than verified") resolves by deletion rather than by a test. Writing a fence test
 would be work spent on code that is on its way out — which is worth saying explicitly, because
 "add the missing test" is the reflex the rest of this document encourages.
 
+> **Correction, 2026-09-01: the first half of that ordering is not a prerequisite.** The
+> `componentGetFunc` limit is real — measured, not read — but **nothing in the tree or the
+> toolchain produces a component that hits it**, so "deleting decomposition would turn a bad
+> error message into a hard failure" describes a component shape cleat cannot currently build.
+>
+> **The limit, measured.** A hand-written component exporting `run` both at the top level and
+> through an interface instance `cleat:workflow/entry`, run through `ExecuteComponentCGo`:
+>
+> | `entryPoint` | result |
+> |---|---|
+> | `run` | ✅ `{Result:"ok"}` |
+> | `cleat:workflow/entry` | `component export … not a function` |
+> | `cleat:workflow/entry#run` | `component export … not found` |
+> | `entry` | `component export … not found` |
+>
+> There is **no spelling** that reaches the nested function. Confirmed.
+>
+> **Why it is unexercised.** Two checks, either of which settles it:
+>
+> - The only Component Model binary in the repo — `call_all_plugins.wasm.component.wasm`,
+>   19.3 MB — has exactly **two** component-level exports: `run` (sort byte 1, *func*) and
+>   `exports` (sort byte 5, *instance*). The entry point is the top-level func.
+>   Re-derive with `wasm.ParseComponentBundle` and print `bundle.Exports`.
+> - `python-sdk/wit/cleat.wit`'s world says `export run: func(args: string) -> string;` at the
+>   **world** level, not inside an interface. componentize-py is cleat's only component
+>   producer, and this is the world it compiles against, so every component it emits exports
+>   `run` at the top level by construction.
+>
+> A nested export would require someone to rewrite that world as `export cleat:…/…;` — a
+> deliberate change nobody has made or proposed.
+>
+> **And `tiers.yaml` already parks the thing the prerequisite protects.** It excludes
+> `TestComponentPythonBinary` as "tier 3 — component decomposition … Excluded because the path
+> it covers is parked". Tier 3 is *"not built, not shipped, not claimed"*. So the ordering as
+> written sends the next reader to write speculative code — an export-lookup path with no
+> producer and a test only its author would ever exercise — in order to protect a path the
+> support manifest has already declined.
+>
+> **Revised disposition.** `componentGetFunc` is a *documented limitation*, not a blocker.
+> Fix it when something needs it, which today is nothing; the fix is to resolve the interface's
+> export index first and pass it as the parent, and this note is enough to start from. The
+> decomposition deletion stands on its own merits and its own risk assessment.
+
 ### 3.32 Every deferred callback runs on wazero, unfenced — ✅ **FIXED** (WS-3, 2026-08-05)
 
 `Engine.RunDefer` does not consult `backendForWasm`. It reaches straight for `e.rt`, the
