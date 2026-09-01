@@ -373,7 +373,21 @@ same defect class this plan exists to fix.
 For each item: **write the failing test first, watch it fail, then fix.** A passing unit test
 is not evidence here; that is precisely how these survived.
 
-### 1.1 Unfenced terminal side effects — data loss (~2 sessions)
+### 1.1 Unfenced terminal side effects — data loss — ✅ **FIXED** (heading marker added 2026-09-01)
+
+> **This heading carried no status marker until 2026-09-01, and the body below has said
+> "Done in `8d44300` + `f9bce35`" the whole time.** A scan for open work therefore reported
+> the project's highest-severity data-loss bug as outstanding, and a session was spent
+> re-deriving — from scratch, and independently reaching the same conclusions — what the body
+> already recorded. CLAUDE.md says the marker is the source of truth; a heading with *no*
+> marker over a completed body is the same trap as a ✅ over a stale one, and reads as worse
+> because "no marker" is indistinguishable from "not started".
+>
+> The `Files:` bullet below made it stick. It named
+> `migrations/{postgres,mysql,mssql}/003_procedures.sql`, and 003 is exactly the file the fix
+> *superseded* — `004_fix_finalize_workflow_status_fence.sql` redefines the procedure.
+> Checking the claim against the file the claim named confirmed the bug was still present,
+> because that file is still, correctly, unguarded. Corrected in place below.
 
 `finalize_workflow_status` fences the status `UPDATE` on `assigned_to` + `generation`, then
 runs the terminal block **unconditionally**, gated only on `p_final_status IN ('done','failed')`.
@@ -385,8 +399,11 @@ into the parent's `await_child` event.
   A→stall→reap→B claims→A finishes→A wipes B's live history.
 - Fix: capture `ROW_COUNT`/`@@ROWCOUNT` from the fenced `UPDATE`; skip the entire terminal
   block if zero. All three dialects.
-- Files: `migrations/postgres/003_procedures.sql:20-118`,
-  `migrations/mysql/003_procedures.sql:13-108`, `migrations/mssql/003_procedures.sql:17+`
+- Files, **as fixed**: `migrations/{postgres,mysql,mssql}/004_fix_finalize_workflow_status_fence.sql`.
+  Each redefines `finalize_workflow_status`, so **003 is superseded and still shows the original
+  unguarded body** — read 004, not 003. (Postgres additionally has to `DROP FUNCTION` first,
+  because the fix changes the return type from `VOID` to `BOOLEAN`; the comment in that file
+  explains why `CREATE OR REPLACE` alone fails with 42P13.)
 - Test: two-worker race harness (see 2.2).
 
 **Done in `8d44300` + `f9bce35`, with one lesson worth keeping.** The first test written for
@@ -432,7 +449,12 @@ SQL Server at a filtered run rather than by reading the setup helper. The only w
 one and watch. This is the same defect class as the `tee` without `pipefail` and the mock that
 discarded its argument — a green result produced by something other than the thing under test.
 
-### 1.2 Systemic unchecked `RowsAffected` (~1 session)
+### 1.2 Systemic unchecked `RowsAffected` — ✅ **FIXED** (heading marker added 2026-09-01)
+
+> Same omission as §1.1: no marker on the heading, while the body records both halves as
+> done. Re-verified 2026-09-01 before adding the marker — `ErrFenceLost` is returned from
+> `engine/store_lifecycle.go`, and the concurrency-conflict caller uses `TerminateWorkflow`
+> at `cmd/cleat-worker/server.go:544` with the reasoning the body describes.
 
 Same anti-pattern in Go: fenced `UPDATE`, error checked, `RowsAffected()` never inspected,
 then unconditional post-commit cleanup — `ClearStickyWorker`,
@@ -586,8 +608,6 @@ Three tests, watched failing before the fix: the cancellation case, an uncancell
 the cancellation branch cannot be reached unconditionally and pass for the wrong reason), and
 the poll-error case.
 
-### 1.3 Cancellation is dead end-to-end (~1 session)
-
 ### 1.3 Cancellation is dead end-to-end — ✅ **FIXED**, and this section was stale
 
 **The original entry, kept because the plan being wrong is itself the finding:**
@@ -665,7 +685,30 @@ behaviour change (a transient DB blip would start halting workflows), so it need
 decision WS-1's §1.1 trap needs: establish what a failed *check* should do before changing what
 it returns. Not attempted here.
 
-### 1.4 Crash-recovery: the detector works, nothing writes what it detects (~2–3 sessions)
+### 1.4 Crash-recovery: write-ahead intent — ✅ **FIXED** (heading corrected 2026-09-01)
+
+> **The old heading was "the detector works, nothing writes what it detects", which is the
+> original problem statement and is no longer true.** Phases B and D are both marked done in
+> the body below, and the write side is wired end to end. Assessed 2026-09-01 rather than
+> assumed, after §1.1 and §1.2 turned out to be the same kind of stale:
+>
+> - The dead `flushCallIntent`/`completeCallEvent` pair was **deleted**, not left in the tree
+>   — the "~350 lines of tested-but-dead durability code" the body warns about is gone.
+>   `grep -rn 'flushCallIntent' --include='*.go' engine/ | grep -v _test.go` returns only
+>   comments recording the deletion.
+> - It was reimplemented as `engine/callintent.go` + `engine/store_intent.go`, and the live
+>   path routes through it: `engine/durablecalls.go:96` calls `freshCallWithIntent` for
+>   declared operations.
+> - It is reachable from a real deployment, which is what "nothing writes it" was about:
+>   `--write-ahead-intent-ops` (`cmd/cleat-worker/config.go:112`) feeds
+>   `engine.WithWriteAheadIntentOps` at `cmd/cleat-worker/setup.go:1767`.
+> - **Opt-in per operation is the design, not an unfinished edge.** The flag costs one extra
+>   synchronous round trip per call, so it is declared for operations that are unsafe to
+>   repeat (a card charge, not a GET).
+> - Covered by `TestCrashWithWriteAheadIntentDoesNotRepeatTheCall` (`tests/crash/`), which
+>   SIGKILLs a worker mid-call and asserts the side effect is not repeated, and which carries
+>   its own non-vacuity note: with `--write-ahead-intent-ops` removed it becomes the test that
+>   demonstrates the bug. `go test ./tests/crash/ -count=1` → ok (63s, 2026-09-01).
 
 > **Blocker found and fixed first, 2026-08-04 — ordinary event writes were being
 > discarded.** Before wiring intent writes into the call path it is worth knowing that
