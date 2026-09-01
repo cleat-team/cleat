@@ -6350,6 +6350,82 @@ and the command that re-derives it" exists to prevent. **Not corrected by guessi
 `golangci-lint` is not installed here, so re-deriving means fetching the pinned version first.
 Flagged, deliberately, rather than silently rounded into agreement.
 
+> **Closed 2026-08-31 — the pinned version was fetched and all four re-measured.** See §3.42.
+> Both headings are stale rather than merely ambiguous: `errcheck` is 1028 and `gosec` is 693
+> today. Neither heading number is worth patching in place, because the count is the wrong thing
+> to lead with — §3.42 records why.
+
+### 3.42 The four disabled linters, re-measured — ✅ **MEASURED, none enabled** (2026-08-31)
+
+`golangci-lint@v1.64.7` — the version `ci.yml` pins — installed and run per module, with the
+repo's own config and both report caps off.
+
+| linter | 2026-08-08 (incl. tests) | **2026-08-31** | delta |
+|---|---|---|---|
+| errcheck | 878 | **1028** | +150 |
+| gosec | 659 | **693** | +34 |
+| gocyclo | 44 | **44** | 0 |
+| unused | 55 | **66** | +11 |
+
+`errcheck` grew by 150 in 23 days — the existing note's point with a bigger number: a disabled
+linter is not a backlog being worked off, it is one being added to.
+
+**The totals are the wrong number to decide on, and every previous entry recorded only totals.**
+Split by test-vs-production, then by the single dominant idiom, and both of the big two collapse:
+
+- **errcheck: 1028 → 345 production → 150.** 158 of the 345 (46%) are `tx.Rollback`, the
+  deferred-rollback idiom that returns `ErrTxDone` after a successful commit; another 37 are
+  `w.Write` / `json.Encoder.Encode` writing an HTTP response.
+- **gosec: 693 → 272 production → 39.** 233 of the 272 (86%) are **G115**, integer overflow
+  conversion.
+
+150 and 39 are reviewable; 1028 and 693 are not, and the whole difference is in how the number
+was cut.
+
+**G115 must not be swept, and that was already decided.** CLAUDE.md: *"Four real defects have
+come out of the ABI layer's integer-conversion sites and none of them was an overflow — in every
+case the value meant the wrong thing on one side of the boundary, which a property test over that
+boundary would find faster than reading the remaining sites."* Those property tests landed in
+#485. So gosec's real backlog is 39, and enabling it would mean *excluding* G115, not fixing it.
+
+**Why none was enabled here.** `gocyclo` is the only one small enough to sweep at 44 and the only
+one that did not move — but its distribution runs 34 to 172, with three functions over 160, so a
+`min-complexity` ratchet set where the tree is green today would sit at 173 and gate essentially
+nothing. `unused` stays off for the reason already recorded: `scripts/check-test-only-code.sh`
+runs the same U1000 analysis against its own baseline, and two mechanisms with two baselines is
+the shape that let §2.72's routing tables drift.
+
+**The one defect-shaped thing found on the way**, and the argument for the errcheck residue being
+worth reading rather than excluded wholesale: `engine/db.go:1151` has two adjacent best-effort
+cleanups after a commit, and treats them differently —
+
+```go
+// Best-effort cleanup.
+s.ClearStickyWorker(context.Background(), workflowID)                       // error dropped
+if err := s.ReleaseWorkflowConcurrencyKeys(...); err != nil {
+    s.log().WarnContext(..., "release concurrency keys failed", ...)        // error logged
+}
+```
+
+26 production sites across `db.go`, `store_lifecycle.go`, `mysql_lifecycle.go`,
+`mssql_lifecycle.go` and `mssql_operations.go` drop one of these two. Whether best-effort cleanup
+should log is a judgement, but doing it *both ways within two lines* is not one, and it is
+exactly the §2.60d shape — a cleanup whose failure is invisible. Recorded, not fixed: it is a
+behaviour change across three dialects and belongs in its own PR.
+
+Re-derive (note the zsh trap — `for m in $mods` does not word-split, which reproduces the "tidy
+table of four zeroes" this file already warns about, from a different cause):
+
+    go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.7
+    find . -name go.mod -not -path './node_modules/*' -not -path './.claude/*' \
+      -not -path './benchmarks/comparative/*' | sed 's|/go\.mod$||; s|^\./||; s|^$|.|' | sort > mods
+    while IFS= read -r m; do
+      (cd "$m" && golangci-lint run --timeout=15m -c /path/to/<linter>.yml ./...)
+    done < mods | grep -c '(<linter>)'
+
+where `<linter>.yml` sets `linters: {disable-all: true, enable: [<linter>]}` and
+`issues: {max-issues-per-linter: 0, max-same-issues: 0}`.
+
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and

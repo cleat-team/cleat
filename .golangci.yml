@@ -148,6 +148,59 @@ linters:
   # the third column in every row -- errcheck alone is 878. So removing the
   # test exclusion did not make these four any closer to enableable; what it
   # made cheaper was the six linters that ARE on, which cost 28 findings.
+  #
+  # RE-MEASURED 2026-08-31, and the raw totals are the least interesting part.
+  #
+  #     linter      08-08 incl. tests   08-31   delta
+  #     errcheck           878          1028    +150
+  #     gosec              659           693     +34
+  #     gocyclo             44            44       0
+  #     unused              55            66     +11
+  #
+  # errcheck grew by 150 in 23 days, which is the earlier note's point restated
+  # with a bigger number: a disabled linter is not a backlog being worked off,
+  # it is one being added to.
+  #
+  # BUT THE TOTAL IS THE WRONG NUMBER TO DECIDE ON, and it is the number every
+  # previous entry here recorded. Split by test-vs-production and then by the
+  # single dominant idiom, both of the big two collapse:
+  #
+  #     errcheck   1028 total -> 345 production -> 150
+  #        because 158 of the 345 (46%) are `tx.Rollback`, the deferred-rollback
+  #        idiom that returns ErrTxDone after a successful commit, plus 37 more
+  #        that are `w.Write`/`json.Encoder.Encode` writing an HTTP response.
+  #
+  #     gosec       693 total -> 272 production ->  39
+  #        because 233 of the 272 (86%) are G115, integer overflow conversion.
+  #
+  # 150 and 39 are reviewable. 1028 and 693 are not, and the difference is
+  # entirely in how the number was cut. Re-derive the split with:
+  #
+  #     grep -v '_test\.go' errcheck.txt | grep -oE 'Error return value of `[^`]+`' \
+  #       | sort | uniq -c | sort -rn | head
+  #     grep -v '_test\.go' gosec.txt | grep -oE 'G[0-9]{3}' | sort | uniq -c | sort -rn
+  #
+  # G115 SPECIFICALLY SHOULD NOT BE SWEPT, and that is already decided. CLAUDE.md:
+  # "Four real defects have come out of the ABI layer's integer-conversion sites
+  # and none of them was an overflow -- in every case the value meant the wrong
+  # thing on one side of the boundary, which a property test over that boundary
+  # would find faster than reading the remaining sites." Those property tests
+  # landed in #485. Reading 233 conversion sites for overflows is the sweep that
+  # guidance exists to prevent, so gosec's real backlog is 39, not 693 -- and
+  # enabling it would mean excluding G115 rather than fixing it.
+  #
+  # gocyclo did not move at all in 23 days, and is the only one small enough to
+  # sweep at 44. It is still not cheaply enableable: the distribution runs from
+  # 34 to 172, with three functions over 160, so a `min-complexity` ratchet set
+  # where the tree is green today would have to sit at 173 and would gate
+  # essentially nothing. Enabling it means fixing the tail first.
+  #
+  # A trap worth recording, because it reproduces the "tidy table of four
+  # zeroes" this file already warns about, from a different cause: zsh does not
+  # word-split an unquoted variable, so `for m in $mods` over a newline-
+  # separated module list runs `cd` on one giant string, every run fails, and
+  # every count comes back 0. Loop with `while IFS= read -r m`, and check
+  # stderr for `level=error` rather than trusting the count.
 issues:
   # THERE IS NO `exclude-files` HERE ANY MORE, AND THAT IS THE POINT.
   #
