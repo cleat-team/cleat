@@ -245,6 +245,36 @@ grep -r 'v[0-9]\+\.[0-9]\+\.[0-9]\+' --include="*.go" --include="*.rs" .
 
 If any go.mod or version constants reference the old version, update them.
 
+That grep will not find the Homebrew formula, which is Ruby — bump it
+explicitly:
+
+```bash
+curl -sSLO https://github.com/cleat-team/cleat/archive/refs/tags/vX.Y.Z.tar.gz
+shasum -a 256 vX.Y.Z.tar.gz
+```
+
+and update `url` and `sha256` in `packaging/homebrew/Formula/cleat.rb`.
+
+This is hand-maintained on purpose. goreleaser's `brews:` generator packages
+built binaries, and there is no macOS `cleat-worker` binary to package — the
+worker needs CGO and the release job cannot link a CGO darwin binary on ubuntu
+(see `IMPROVEMENT-PLAN.md` §3.54). The formula is a source build, which is what
+gives macOS a working worker at all, so it cannot be generated from the
+artifacts.
+
+`packaging/homebrew/formula_test.go` fails if the tag in `url` and the `version`
+disagree, so a half-done bump is caught in CI. It cannot check that the
+`sha256` matches the tarball — that needs the network. Verify that yourself:
+
+```bash
+brew style   packaging/homebrew/Formula/cleat.rb
+brew install --build-from-source packaging/homebrew/Formula/cleat.rb
+brew test    cleat && brew uninstall cleat
+```
+
+`brew test` runs `cleat-worker --verify-backend`, so it fails if the formula
+produced a worker that cannot construct the wasmtime backend.
+
 ### 4. Run multi-database tests
 
 Run the WorkflowStore test suite against all three supported backends to verify
