@@ -6874,6 +6874,76 @@ Both halves mutation-tested, each failing for its own reason: reverting the writ
 the defect to SQL Server — and making the read hard-fail trips the permissive test.
 
 Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 71s**.
+### 3.51 The one JSON column SQL Server did not validate — ✅ **FIXED** (2026-09-01)
+
+The schema asymmetry §3.50 recorded. Every other dialect enforces `plugin_deps`'s shape at the
+database, and SQL Server's own schema already applies the same pattern to its other JSON columns —
+`ck_plugin_defs_config`, `ck_workflow_instances_input`, `ck_workflow_instances_result`,
+`ck_workflow_instances_query_state`, `ck_workflow_signals_payload`, all in `001_schema.sql`.
+`plugin_deps` was simply missed. `migrations/mssql/036_plugin_deps_isjson.sql` applies the existing
+convention to the column that skipped it.
+
+Not academic: a validating column would have rejected the `[]byte`→`VARBINARY`→`NVARCHAR(MAX)`
+mojibake write on its first attempt, which is exactly why PostgreSQL and MySQL never had that bug.
+
+**`WITH NOCHECK`, and it is load-bearing.** Measured against a live server:
+
+    ISJSON('{"llm":"1.2.0"}')  = 1
+    ISJSON('<the mojibake>')   = 0
+
+Every `plugin_deps` row written before §3.50's fix is mangled, so a plain `ADD CONSTRAINT` —
+which validates existing rows — would **fail on every existing deployment and block the upgrade**.
+`WITH NOCHECK` enforces the rule going forward and leaves history to the self-heal path §3.50
+already chose. The constraint is therefore *untrusted*
+(`sys.check_constraints.is_not_trusted = 1`), which costs nothing here since nothing filters on
+`plugin_deps`, and `TestPluginDepsCheckConstraintIsUntrusted` pins it so a later tidy-up to
+`WITH CHECK` cannot silently reintroduce the failed upgrade.
+
+**The constraint found a second, unrelated defect within minutes of existing** — which is the
+argument for adding it. `json.Marshal` of a nil map returns the four bytes `"null"`, not nil, so
+
+```go
+pluginDepsJSON, _ := json.Marshal(def.PluginDeps)
+if pluginDepsJSON == nil {          // never true
+    pluginDepsJSON = []byte("{}")
+}
+```
+
+was dead code in **all three dialects**, and every workflow declaring no plugin dependencies stored
+the literal `null`. PostgreSQL `JSONB` and MySQL `JSON` both accept a bare JSON scalar, so nothing
+noticed; `ISJSON('null')` is 0, which is what surfaced it. Fixed in all three: the guard now tests
+`len == 0 || string == "null"`, and folds in the marshal error, because the column is
+`NOT NULL DEFAULT '{}'` everywhere and "no dependencies" has one spelling.
+
+> **Ordering constraint, verified not assumed.** 036 cannot land before §3.50's write fix. Against
+> a tree without it, the constraint rejects every SQL Server deploy —
+> `The MERGE statement conflicted with the CHECK constraint "ck_workflow_defs_plugin_deps"` — and
+> five `TestAdminForce*` tests fail. That is the constraint doing its job, and it is why this PR
+> was stacked rather than run in parallel.
+
+Mutation-tested: with 036 removed and the constraint dropped, both new tests fail — one because a
+non-JSON insert is accepted, the other because the constraint is absent entirely.
+
+**Wider asymmetry recorded, not fixed — and counted per table, because a column name alone is not
+the unit.** `result` carries a check on `workflow_instances`, `workflow_promises` and
+`idempotency_keys` but not on `workflow_update_requests`, so any command that dedupes by column
+name (my first attempt did) reports it as covered. Measured per `CREATE TABLE` block:
+
+| table | JSON-ish `NVARCHAR(MAX)` with no `ISJSON` check |
+|---|---|
+| `event_history` | `response`, `signal_payload`, `child_input`, `new_input`, `plugin_input`, `plugin_output`, `promise_result`, `payload` — **all 8** |
+| `workflow_defs` | `dag_spec` (`plugin_deps` is what 036 fixes) |
+| `workflow_instances` | `compaction_state` |
+| `workflow_update_requests` | `result` |
+
+`plugin_defs`, `workflow_signals`, `workflow_promises`, `workflow_schedules` and
+`idempotency_keys` are fully covered. Re-derive with the per-table script recorded in the PR — a
+`grep | sort -u` over the whole file cannot answer this.
+
+Whether each *should* be validated is a per-column judgement rather than a sweep: `response` and
+`plugin_output` may legitimately hold a non-JSON payload from a service or plugin, and constraining
+them would be a behaviour change rather than a tightening. `event_history` is also the hot write
+path, so eight CHECK constraints there deserve their own measurement. Its own PR.
 
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
