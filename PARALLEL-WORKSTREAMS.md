@@ -123,9 +123,9 @@ underneath it. §1.7 fixed the HTTP layer. This is everything below it.
 
 | item | what |
 |---|---|
-| **§3.10** | **Idempotency keys are global across tenants, on all three dialects.** `idempotency_keys` is keyed by `key_hash` alone and has **no `tenant_id` column**; the hash is `sha256(idempotencyKey)` with the tenant nowhere in it. Two tenants choosing `order-123` collide: the second is handed *the first tenant's workflow ID* with `already_started: true`, and its own workflow never starts. `Idempotency-Key` is a client-supplied header, so this is what happens when two customers name things normally — not an attack. **Start here.** A failing three-dialect test is already on `bugfix/mysql-tenant-scoping-audit`; what remains is a migration and one decision (below). |
-| **§1.7 residual** | `migrations/mysql/` has **zero** RLS policies against PostgreSQL's seven. On MySQL a missed `tenant_id` filter is a silent cross-tenant leak with no database backstop. MySQL 8.4 has no RLS: the options are a view layer, a connection-user scheme, or documenting MySQL as single-tenant-only. **The decision matters more than the code** — settle it before writing a migration. |
-| **§2.71 residual** | The MSSQL test schema defines **none** of the seven security policies (`grep -c "SECURITY POLICY" engine/testutil/mssql_schema.go` → `0`), so ~220 MSSQL tests run with no tenant backstop and cannot observe isolation working or failing. `engine/mssql_rls_enforcement_test.go` shows the shape: read the policies out of the real migration rather than restating them. Turning them on suite-wide fails every test that builds a store on a plain pool — that is the point, and it is a suite migration, not a flag. |
+| **§3.10** | ✅ **DONE.** Corrected 2026-09-01. The row used to open *"Idempotency keys are global across tenants, on all three dialects … `idempotency_keys` is keyed by `key_hash` alone and has no `tenant_id` column"*, and said **"Start here."** It has since been fixed by the column route rather than the hash route: `migrations/{postgres,mysql,mssql}/010_idempotency_keys_tenant_id.sql` exists in all three dialects, and every lookup is tenant-scoped — e.g. `engine/mssql_lifecycle.go:953`, `WHERE key_hash = @p1 AND tenant_id = @p2`, whose own comment records the old global behaviour. The "decision (below)" it refers to was therefore settled. |
+| **§1.7 residual** | 🔴 **STILL REAL — the only one of these three that is.** Re-measured 2026-09-01: `grep -rh 'CREATE POLICY' migrations/mysql/*.sql \| grep -c .` → `0`, against PostgreSQL's `10` (this row said "seven"; that count had drifted too). `migrations/mysql/` has **zero** RLS policies against PostgreSQL's. On MySQL a missed `tenant_id` filter is a silent cross-tenant leak with no database backstop. MySQL 8.4 has no RLS: the options are a view layer, a connection-user scheme, or documenting MySQL as single-tenant-only. **The decision matters more than the code** — settle it before writing a migration. |
+| **§2.71 residual** | ✅ **DONE — and the metric below inverted, so re-read it before believing it.** Corrected 2026-09-01. The row used to say: *"The MSSQL test schema defines none of the seven security policies (`grep -c "SECURITY POLICY" engine/testutil/mssql_schema.go` → `0`), so ~220 MSSQL tests run with no tenant backstop."* **That grep still returns `0`, and it now means the opposite.** The fix was exactly what the row asked for — read the policies out of the real migration rather than restating them — so `mssql_schema.go` no longer *contains* a schema to grep. `SetupMSSQLFullSchema` → `applyMSSQLSchemaFile` → `applyMigrations` runs the shipped `migrations/mssql/*.sql`, and `requireMSSQLPoliciesIntact` fails loudly if the policies are recorded-as-applied but absent. Measured on a **freshly created** database, because MSSQL objects persist and a long-lived one proves nothing: `SetupMSSQLFullSchema` → **8 policies**, all enabled (`TenantFilter_{Defs,EventHistory,Instances,Promises,Routing,Schedules,Signals,Tags}`). |
 | **§3.11** | Four unscoped MySQL queries from the `s.tenantID` audit: `GetWASMLength` (keyed on a user-chosen def name — cross-tenant metadata), `QueueDepth` (counts every tenant's rows), `DeleteExpiredEvents` (**deletes across all tenants**), `GetAllowedSignalCallers` (authorization data, unscoped). |
 
 **The §3.10 decision.** Two fixes, and the difference only shows on upgrade. Adding `tenant_id`
@@ -217,16 +217,30 @@ worse than a reviewed 307 with 250 suppressions.
    residual is the blocking piece and lives there. WS-2 and WS-3 should ask before adding
    test-schema columns: #283 consolidated two hand-written MySQL schemas into one, and a
    third divergence would undo that.
+
+   **The stated reason for that assignment is gone** (2026-09-01): §2.71's schema residual is
+   done, and `mssql_schema.go` no longer hand-writes a schema at all — it applies the shipped
+   migrations. The "third divergence" risk this coupling exists to prevent is correspondingly
+   smaller, since there is now one fewer hand-written copy to diverge. Re-assign or drop the
+   coupling deliberately rather than inheriting it.
 3. **`.github/workflows/` is WS-3's**, but any stream adding a dialect-conditional test moves
    the skip budget for `test-go/engine` **and** `cluster` together. Regenerate, never
    hand-edit, and expect a conflict if two streams add tests the same afternoon.
 
 ## Sequencing, if you want the highest yield first
 
-**WS-1 §3.1** is the cheapest real security fix on the board: proven on all three dialects,
-failing test already written, remaining work is a migration and one decision. **WS-2 §3.20**
-is about an hour and deletes an API that answers as though it works. **WS-3's Python item**
-has the clearest finish line and the best existing notes.
+> **Re-verified 2026-09-01, and most of this paragraph is spent.** `WS-1 §3.1` — the
+> "cheapest real security fix on the board … remaining work is a migration and one decision"
+> — describes §3.10, which is done: migration `010_idempotency_keys_tenant_id.sql` shipped on
+> all three dialects. §2.71's residual is done too. Of the three residuals in the table above,
+> **only §1.7 (MySQL has no RLS) is still real**, and it is a decision, not a migration —
+> `tiers.yaml` already omits `mysql` from `multi_tenant`, so "document MySQL as
+> single-tenant-only" may simply be recording what is already true.
+
+**WS-2 §3.20** is about an hour and deletes an API that answers as though it works. **WS-3's
+Python item** has the clearest finish line and the best existing notes. Both were checked on
+2026-09-01 only to the depth of "the plan still marks them open" — verify before starting,
+per the paragraph below.
 
 Each lands on day one and gives its stream a green PR before it starts a multi-session item.
 
@@ -236,3 +250,14 @@ because it was derived from the plan's headings and the derivation dropped the �
 was built by reading the tree — `grep -c "SECURITY POLICY"`, `WasmtimeLanguages`, the
 migration listing, a green three-dialect run — but it starts going stale the moment someone
 lands a fix. The plan is the source of truth for status; this file is only the split.
+
+**It went stale exactly as predicted, and one of those greps inverted rather than drifting.**
+Re-verified 2026-09-01: two of the three residuals were already fixed. `grep -c "SECURITY
+POLICY" engine/testutil/mssql_schema.go` still returns `0` — the number this file recorded as
+proof the backstop was missing — but it returns `0` now *because the fix landed*, having
+replaced the hand-written schema with a call that applies the shipped migrations. **A metric
+that reads identically before and after the fix is worse than no metric**, because re-running
+it confirms the stale conclusion. Prefer one that has to change: here,
+`SELECT COUNT(*) FROM sys.security_policies` **on a freshly created database** — 0 before, 8
+after. The "freshly created" is load-bearing; MSSQL objects persist, so a long-lived test
+database shows 8 whether or not the helper installs them.
