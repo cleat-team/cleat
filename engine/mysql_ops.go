@@ -695,8 +695,18 @@ func (s *MySQLStore) TraceWorkflow(ctx context.Context, workflowID, traceID stri
 
 // DeployWorkflowDef inserts or updates a workflow definition.
 func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
-	pluginDepsJSON, _ := json.Marshal(def.PluginDeps)
-	if pluginDepsJSON == nil {
+	// json.Marshal of a nil map returns the four bytes "null", not nil, so the
+	// guard this replaced -- `if pluginDepsJSON == nil` -- could never fire and
+	// every workflow that declares no plugin dependencies stored the literal
+	// `null`. PostgreSQL JSONB and MySQL JSON both accept a bare JSON scalar, so
+	// nothing noticed; SQL Server's ISJSON does not (`ISJSON('null')` = 0),
+	// which is how the CHECK constraint in migrations/mssql/036 found it.
+	//
+	// An error is folded in for the same reason the default exists: the column
+	// is NOT NULL DEFAULT '{}' on all three dialects, so "no dependencies" has
+	// one spelling and it is not `null`.
+	pluginDepsJSON, err := json.Marshal(def.PluginDeps)
+	if err != nil || len(pluginDepsJSON) == 0 || string(pluginDepsJSON) == "null" {
 		pluginDepsJSON = []byte("{}")
 	}
 	// Refuse to deploy over a definition owned by another tenant.
