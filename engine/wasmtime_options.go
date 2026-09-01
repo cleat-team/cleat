@@ -30,11 +30,18 @@ const DefaultWasmtimeExecutionTimeout = 30 * time.Second
 const DefaultWasmtimeMemoryLimitBytes = int64(DefaultMemoryLimitPages) * int64(wasmPageSize)
 
 // DefaultWasmtimeTableElementsLimit bounds indirect-function-table growth
-// per wasmtime store. Component-model bundles in this codebase size their
-// largest table at 1,048,576 elements (see tblMinSize in
-// wasmtimeBackend.ExecuteComponent); 8x that headroom keeps existing
-// workflows working while still capping unbounded/attacker-controlled
-// table growth.
+// per wasmtime store.
+//
+// The 1,048,576-element figure it is derived from came from `tblMinSize` in
+// wasmtimeBackend.ExecuteComponent -- the decomposition path, deleted
+// 2026-09-01 (IMPROVEMENT-PLAN 3.65). The number is kept rather than
+// re-derived: it was measured from real componentize-py bundles, those bundles
+// have not changed, and the native Component Model path instantiates the same
+// core modules with the same tables. 8x that headroom keeps existing workflows
+// working while still capping unbounded/attacker-controlled table growth.
+//
+// If it ever needs re-deriving, the source is the largest `(table ...)` minimum
+// in a componentize-py component's core modules, not anything in this repo.
 const DefaultWasmtimeTableElementsLimit = 8 * 1024 * 1024
 
 // DefaultWasmtimeInstancesLimit bounds how many module instances a single

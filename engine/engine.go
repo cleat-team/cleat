@@ -14,7 +14,6 @@ import (
 	"github.com/tetratelabs/wazero"
 
 	"github.com/cleat-team/cleat/monitoring/prometheus"
-	"github.com/cleat-team/cleat/wasm"
 )
 
 // DebugTiming enables verbose per-step/per-execution timing output to stderr
@@ -536,16 +535,24 @@ func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint strin
 	if backend != nil {
 		return e.executeWithBackend(ctx, backend, wasmBytes, entryPoint, input, nil)
 	}
-	// The component check runs before resolveErr is returned: a Component Model
-	// binary goes down the decomposition path regardless of what its metadata
-	// claims its language is, and that path is parked (tier 3) rather than
-	// removed. Failing closed ahead of it would change which error it reports.
+	// A Component Model binary reaching here has no backend to run it, and
+	// there is no longer a second implementation to try.
+	//
+	// This used to decompose the component and instantiate its core modules on
+	// wazero. That path failed at instance 8 of 85 on the only Component Model
+	// binary in the repo -- "memory is not exported in module env" -- and was
+	// deleted along with the wasmtime one it mirrored. Measured 2026-09-01;
+	// see IMPROVEMENT-PLAN 3.65.
+	//
+	// The message names the fix rather than the failure, because for this
+	// engine shape -- cleatctl replay|debug, cleat run_embedded, cleat-bench,
+	// cleat/wasmtest -- the fix is real: components execute on the wasmtime
+	// backend's native Component Model path, which does run them.
 	if isComponentWasm(wasmBytes) {
-		bundle, parseErr := wasm.ParseComponentBundle(wasmBytes)
-		if parseErr != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: parse component bundle: %w", parseErr)
-		}
-		return e.executeComponent(ctx, bundle, entryPoint, input)
+		return "", nil, nil, nil, nil, fmt.Errorf(
+			"host: this is a WASM Component Model binary and this engine has no WASM backend "+
+				"registered for it; components run on the wasmtime backend's native component "+
+				"path, so register one with WithBackend (entry point %q)", entryPoint)
 	}
 	if resolveErr != nil {
 		return "", nil, nil, nil, nil, resolveErr

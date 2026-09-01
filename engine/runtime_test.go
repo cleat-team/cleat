@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -363,30 +362,6 @@ func TestRuntime_InstantiateModuleNamed_EmptyName(t *testing.T) {
 	mod, err := rt.InstantiateModuleNamed(ctx, compiled, "")
 	if err != nil {
 		t.Fatalf("InstantiateModuleNamed with empty name: %v", err)
-	}
-	defer mod.Close(ctx)
-}
-
-func TestInstantiateModuleNamedWithWriters(t *testing.T) {
-	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0, 0)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	defer rt.Close(ctx)
-
-	compiled, err := rt.CompileModule(ctx, minimalWasm())
-	if err != nil {
-		t.Fatalf("CompileModule: %v", err)
-	}
-	defer compiled.Close(ctx)
-
-	// White-box test: instantiateModuleNamedWithWriters uses caller-supplied
-	// buffers for stdout/stderr capture instead of the Runtime's shared ones.
-	var stdoutBuf, stderrBuf bytes.Buffer
-	mod, err := rt.instantiateModuleNamedWithWriters(ctx, compiled, "writer-test", &stdoutBuf, &stderrBuf)
-	if err != nil {
-		t.Fatalf("instantiateModuleNamedWithWriters: %v", err)
 	}
 	defer mod.Close(ctx)
 }
