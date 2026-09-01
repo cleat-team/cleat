@@ -309,7 +309,26 @@ A stream is done when, and only when:
 
 ---
 
-## Open follow-up — wazero removal, part 2
+## ~~Open follow-up~~ — wazero removal, part 2 — ❌ **DECIDED AGAINST 2026-09-01. Do not start this.**
+
+> Everything below describes work that will not happen; it is kept as the record of why.
+> See `IMPROVEMENT-PLAN.md` §3.56 for the decision and §3.30 for the question it closes.
+>
+> Two things changed after this was written. #503 made `Engine.resolveBackend` fail closed on a
+> module whose declared language matches no backend — the guest-controlled path that made the
+> wazero fallback a safety problem — so the safety case for removal is gone. And all three
+> released binaries build CGO-free today: removing wazero forces `cleat` onto wasmtime and
+> therefore onto CGO, ending pure-Go cross-compilation for the CLI, for no correctness gain. It
+> would also break exported API (`engine.Runtime`, `engine.NewRuntime`,
+> `wasmtest.WasmTestEnv.Runtime()`).
+>
+> wazero stays, scoped to CLI and dev tooling. The price is
+> `engine/hostabi_runtime_parity_test.go`, which compares the two host-ABI implementations and
+> found a real defect on its first run (§3.55). **The stash referenced below is stale** and is
+> reference material, not something to apply: its WIP message records "wazero imports 4 left",
+> while the tree today has **31 files importing wazero, 20 of them non-test** (measured
+> 2026-09-01 — `grep -rl 'tetratelabs/wazero' --include='*.go' . | grep -v node_modules | wc -l`,
+> and again with `grep -vc _test.go`).
 
 **Part 1 is on `develop`** (`engine/backend_wazero.go` deleted, `--allow-wazero-fallback`
 removed, worker-level fallback gone; build + vet + all three dialects + every `cmd` package

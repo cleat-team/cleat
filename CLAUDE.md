@@ -227,21 +227,49 @@ stopped existing. Confirm with `ls engine/backend_wazero.go`.
 (`engine/runtime.go`) is still a wazero runtime, and it still executes guest code on these
 paths:
 
-- `RunDefer`, when `backendForWasm` returns nil — its own comment says "the CGO-less build,
-  where wazero is the only runtime there is. Unfenced, and unavoidably so"
-  (`engine/executor.go:706`)
 - `cleat/wasmtest`, `cmd/cleat run_embedded`, `cmd/cleatctl replay`, `cmd/cleatctl debug`,
-  `cmd/cleat-bench` — all call `engine.NewRuntime`
+  `cmd/cleat-bench` — all call `engine.NewRuntime`. **Dev and CLI tooling, all of it.**
+- `RunDefer`, but only when the engine registers *no backends at all* — which is those same
+  tools. The worker calls `RunDefer` too (`cmd/cleat-worker/setup.go:480`) and never reaches
+  this path, because it registers wasmtime.
+- `RunDeferCompiled`, which is wazero by signature — it takes a `wazero.CompiledModule`, so no
+  backend can serve it. **It currently has no callers**, and is listed in
+  `scripts/deadexports-baseline.txt`.
 
 Re-derive: `grep -rn "NewRuntime(" --include="*.go" . | grep -v _test.go`
 
-So "wazero is gone" is wrong in the direction that matters: **wazero cannot be fenced for a
-compute-bound guest.** Measured three ways, all failing — `WithCloseOnContextDone` breaks all
+**This section used to describe the `RunDefer` bullet as an unfenced hazard, quoting a comment
+that said "the CGO-less build, where wazero is the only runtime there is. Unfenced, and
+unavoidably so" at `engine/executor.go:706`.** Every part of that was wrong by 2026-09-01: the
+comment had already been rewritten in the tree, line 706 is now unrelated `continue_as_new`
+code, and #503 closed the case that made it dangerous. Confirm the quote is gone with
+`grep -n 'CGO-less build, where wazero is the only runtime' engine/executor.go`.
+
+What made it dangerous was **guest-controlled**: `wasm.DetectLanguage` returns the guest's own
+`cleat.metadata` Language field verbatim, so a module declaring `"tinygo"` — or `"GO"`, since
+the lookup is exact — matched no backend and fell through to wazero. `Engine.resolveBackend`
+now fails closed on exactly that, distinguishing "this engine does no routing" from "this
+engine routes but not for this language". Read its doc comment for the measurements.
+
+So "wazero is gone" is still wrong, but the reason has changed. **wazero cannot be fenced for a
+compute-bound guest** — measured three ways, all failing: `WithCloseOnContextDone` breaks all
 execution, fuel only decrements on function entry, and closing the module has no effect on a
-tight loop. A runaway guest on any of the paths above is not stopped. Removing the rest is
-"wazero removal, part 2" in `REMEDIATION-PLAN-2026-08-09.md`, deliberately parked with the WIP
-in a stash — read that section before starting it, it records why `go vet` failed and got 85%
-of the way there.
+tight loop. That now bounds *developer tooling*, not anything a worker runs: a runaway guest
+under `cleatctl replay` or `cleat run` is not stopped.
+
+**"wazero removal, part 2" was decided against on 2026-09-01 — do not start it.** See
+IMPROVEMENT-PLAN.md §3.56. The safety case was gone once #503 made routing fail closed, and
+removal would force `cleat` onto CGO (ending pure-Go cross-compilation for the CLI) while
+breaking exported API — `engine.Runtime`, `engine.NewRuntime`, `wasmtest.WasmTestEnv.Runtime()`.
+The parked WIP stash and the `REMEDIATION-PLAN-2026-08-09.md` section describing it are
+superseded.
+
+The price of keeping two implementations is that something must compare them, because the host
+ABI is written twice — `engine/imports.go` for wazero, `engine/wasmtime_hostfuncs*.go` for
+wasmtime. `engine/hostabi_runtime_parity_test.go` does. It found a real defect on its first run:
+`cleat_create_promise` was registered on wasmtime with a parameter no guest passed, so durable
+promises could not link on the worker at all (§3.55). **Note what a name-only comparison would
+have said** — both sides register the same 56 names, and did then too.
 
 **"Which backend runs this" and "which code path inside that backend runs this" are different
 questions.** The wasmtime backend has three execution paths — core module, native component, and

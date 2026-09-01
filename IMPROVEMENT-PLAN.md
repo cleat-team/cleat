@@ -5688,7 +5688,22 @@ copes with the shipped MySQL files today — verified against a live MySQL 8.4 �
 duplication rather than a defect, but two splitters means the next one to drift does so
 silently.
 
-### 3.30 What wazero is for — 🔶 **ANSWERED 2026-08-05; the answer was overtaken by #459 and corrected 2026-08-31**
+### 3.30 What wazero is for — ✅ **DECIDED 2026-09-01: it stays, scoped to CLI and dev tooling**
+
+> **The question is settled; see §3.56 for the decision and the guard that is its price.** wazero
+> is kept deliberately rather than removed: #503 made routing fail closed, so the safety case for
+> removal was gone, and removing it would force `cleat` onto CGO — ending pure-Go
+> cross-compilation for the CLI — while breaking exported API (`engine.Runtime`,
+> `engine.NewRuntime`, `wasmtest.WasmTestEnv.Runtime()`).
+>
+> **Point 1 below is wrong and is kept only because the correction is the interesting part.** It
+> says a `CGO_ENABLED=0` binary "has no wasmtime at all and everything runs on wazero". A
+> CGO-less `cleat-worker` does not run anything: it logs "there is no fallback" and exits 1
+> (`cmd/cleat-worker/main.go:789`). That mattered in practice — every released worker binary was
+> built `CGO_ENABLED=0` and was dead on arrival until §3.54.
+>
+> The prior marker read "ANSWERED … corrected 2026-08-31", which is a status about the *document*
+> rather than the *question*, and it left the item looking open.
 
 Raised because Python moving onto wasmtime (§2.72) emptied the set of languages wazero was
 retained for. The question was whether it still has a stated, tested role.
