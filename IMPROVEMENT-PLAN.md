@@ -8040,3 +8040,40 @@ Re-derive: `go test ./engine/ -run TestCreatePromiseABI -count=1`
 `create_promise` and runs it on the worker. What is covered now is the host side of the boundary
 for one operation; the other output-buffer host calls have the same shape and the same absent
 coverage.
+### 3.58 The release path was only ever exercised by a release — ✅ **FIXED** (2026-09-01)
+
+§3.54 fixed `cleat-worker`'s release build (`CGO_ENABLED=0` produced binaries that exited 1 at
+startup) and added `scripts/verify-release-worker.sh` as a goreleaser post-build hook. But
+`.github/workflows/release.yml` runs only on a `v*` tag, so the two genuinely new pieces — the
+`aarch64-linux-gnu-gcc` cross-compile and executing an arm64 binary under qemu — would first have
+run during an actual release. A toolchain mistake there is a blocked or broken release, not a red
+check on a PR.
+
+**The `Release Dry Run` job** runs `goreleaser build --snapshot --clean` on every PR with the same
+cross compiler and `docker/setup-qemu-action` the release uses.
+
+**`goreleaser build` runs post hooks — verified rather than assumed.** Temporarily attaching
+`sh -c 'echo POSTHOOK-RAN-FOR {{ .Path }}'` to the `cleat` build and running
+`goreleaser build --snapshot --clean --single-target` printed
+
+    running hook  hook=sh -c 'echo "POSTHOOK-RAN-FOR .../dist/cleat_darwin_arm64_v8.0/cleat"'
+
+So `verify-release-worker.sh` really does execute both published workers in the dry run. Without
+that check the job would have looked like coverage while running no hook at all.
+
+**A second assertion, because the hook has a blind spot.** The hook runs `--verify-backend` on an
+x86-64 runner; a cross-compile that silently produced x86-64 for the arm64 target would pass it.
+The job therefore also checks `file` output per target, and **counts the binaries it inspected** —
+a `find | while read` loop that matches nothing exits 0, which is the "checks never started" shape
+CLAUDE.md is about, so fewer than 2 fails.
+
+**Scope, stated rather than implied.** `build` stops before archives, checksums, changelog and
+upload, and does not run `Build Svelte UI` or `Validate no dirty dist/` — a stale dashboard is
+still only caught at tag time. Recorded in `docs/project/release-process.md` §4a.
+
+**Not a required check.** `.github/required-checks.txt` mirrors branch protection, and adding a
+line there without changing the repository setting would be a doc that lies. Making it blocking is
+a maintainer settings change.
+
+`dist/` was not in `.gitignore` (`git check-ignore -v dist/probe` → no match, `git status` → `?? dist/`).
+Now ignored, since this change makes `goreleaser build` the documented local reproduction.

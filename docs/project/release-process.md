@@ -295,6 +295,31 @@ Each directory should contain the same set of migration files (adapted for
 dialect syntax). If a migration is missing from one backend, add it before
 proceeding with the release.
 
+### 4a. The release build is already exercised — but know what it does not cover
+
+The `Release Dry Run` job in `ci.yml` runs `goreleaser build --snapshot --clean` on **every
+PR**, with the same `gcc-aarch64-linux-gnu` cross compiler and `setup-qemu-action` the
+`Release` workflow uses. `goreleaser build` runs the same builds and the same post-build hooks
+as `goreleaser release`, so `scripts/verify-release-worker.sh` executes both published
+`cleat-worker` binaries with `--verify-backend` there too.
+
+This exists because the release path had never executed before a tag. `.goreleaser.yml` built
+`cleat-worker` with `CGO_ENABLED=0` for months, producing binaries that exited 1 at startup,
+and nothing ran them (`IMPROVEMENT-PLAN.md` §3.54).
+
+Reproduce locally with the same command:
+
+```bash
+goreleaser build --snapshot --clean     # output in dist/, which is gitignored
+```
+
+**What the dry run does not cover:** archive creation, checksums, the changelog, and the
+GitHub upload — `build` stops before all of it. It also does not run the `Build Svelte UI` or
+`Validate no dirty dist/` steps, so a stale dashboard is still only caught at tag time.
+
+**It is not a required check.** `.github/required-checks.txt` mirrors branch protection;
+making this blocking is a repository settings change.
+
 ### 5. Commit and open the release PR into `main`
 
 ```bash
