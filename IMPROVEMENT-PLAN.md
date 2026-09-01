@@ -5757,21 +5757,24 @@ path is the only thing keeping it available. What should not survive is §3.32.
 > parked baseline is stale too:** that plan records 8 files importing wazero going to 4, against
 > 20 non-test files today, so the stash is a map and not something to rebase.
 
-### 3.31 The execution-limit story, per backend — 🔶 **PARTLY WRITTEN** (WS-3, 2026-08-05)
+### 3.31 The execution-limit story, per backend — ✅ **WRITTEN** (WS-3, 2026-08-05; closed 2026-09-01)
 
 The item asked for the limit story to be written and tested per *backend* rather than per
 language, on the grounds that §1.5 was a correct fix that reached no deployment for weeks
 because it sat behind a build tag the shipped image did not set.
 
-Writing it down is what found the gaps, so here it is in full. The wasmtime backend has
+Writing it down is what found the gaps, so here it is in full. The wasmtime backend had
 **three** execution paths, not one, and they had three different answers:
 
 | path | entered when | fence before | fence now |
 |---|---|---|---|
 | core module (`Execute`) | Go, AssemblyScript, Java, Rust | caller's budget | unchanged |
 | native component (`ExecuteComponentCGo`) | any Component Model guest, i.e. Python | **backend default, caller's budget dropped** | caller's budget |
-| decomposition (`ExecuteComponent`) | native path fails for a non-limit reason | caller's budget | unchanged |
-| defers (`RunDefer`) | every deferred callback, on every path | **none — wazero** | the fenced backend *when there is one*, since #338 — §3.32; otherwise still unfenced, see below |
+| ~~decomposition (`ExecuteComponent`)~~ | ~~native path fails for a non-limit reason~~ | caller's budget | **deleted 2026-09-01 — §3.65** |
+| defers (`RunDefer`) | every deferred callback, on every path | **none — wazero** | the fenced backend *when there is one*, since #338 — §3.32, **and bounded as a pass rather than per defer since §3.63** |
+
+Two now, not three. Everything below is kept as written because the *findings* are what make the
+remaining two paths' fences legible; only the decomposition row's disposition changed.
 
 The component-path defect: `ExecuteComponentCGo` passed `context.Background()` to
 `configureStore`, which takes the tighter of ctx's deadline and the backend's configured
@@ -5782,18 +5785,27 @@ did not look broken from outside.
 
 Two things fell out of fixing it, both of which would have undone it:
 
-- **The fallback handed a runaway guest a second budget.** `Execute` falls back from the
+- **The fallback handed a runaway guest a second budget.** `Execute` fell back from the
   native path to decomposition on any error, so an interrupted guest was started again from
-  scratch and the effective bound became a multiple of the configured one. Limit traps no
-  longer fall back.
+  scratch and the effective bound became a multiple of the configured one. Limit traps stopped
+  falling back; since §3.65 there is nothing to fall back *to*, so the class is closed by
+  construction rather than by a conditional. `isExecutionLimit` is still load-bearing, though —
+  it is what decides whether an operator is told the host stopped their workflow or that their
+  workflow crashed.
 - **`resourceLimitError` could not see a component-path limit at all.** It matched
   `*wasmtime.Trap`, and the Component Model C API returns no trap code — only a rendered
   message (`wasmtimeinc/wasmtime/error.h`). An exhausted budget arrived as a bare
   `wasm trap: interrupt` under a page of guest backtrace.
 
-**What is still unwritten:** the *decomposition* path's fence is inherited rather than
-verified — it passes ctx correctly, but nothing exercises a runaway guest through it, because
-every component that reaches it today fails to instantiate for other reasons.
+**What was still unwritten — closed 2026-09-01, both by the route this section predicted.**
+
+The *decomposition* path's fence was inherited rather than verified: it passed ctx correctly,
+but nothing exercised a runaway guest through it, because every component that reached it
+failed to instantiate for other reasons. §3.65 deleted the path. This section's own addendum
+called that outcome — *"resolves by deletion rather than by a test. Writing a fence test for it
+first would be work spent on code that is on its way out"* — and that is what happened.
+
+The defer gap below was the other one, and it is closed in §3.63 by measurement plus a fix.
 
 And the defer row above is now true of `RunDefer` but not yet of the path that calls it after
 a trap. `executor.go` passes `context.Background()` to the post-trap defers on purpose (three
