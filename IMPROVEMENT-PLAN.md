@@ -7785,3 +7785,99 @@ binary "would fall back to wazero, where `--wasm-instance-timeout` cannot interr
 guest". That stopped being true when the wazero *backend* was deleted in #459: there is no
 fallback, the worker exits 1. The message now says so. It is the text a release engineer reads at
 the moment the gate fires, and it was describing a failure mode the code no longer has.
+### 3.55 Durable promises could not link on the worker — ✅ **FIXED** (2026-09-01)
+
+**Found by the guard in the same PR, on its first run.** That is the point of the entry: the
+decision to keep wazero (§3.56 below) was justified on the grounds that a second implementation is
+harmless if something checks it. Something checked it, and the two implementations disagreed.
+
+`engine/wasmtime_hostfuncs_plugins.go` registered `cleat_create_promise` with a fifth parameter,
+`ttlMs int64`, and discarded it with `_ = ttlMs`. An arity mismatch is a hard link error, so a
+guest calling `cleat_create_promise` **could not instantiate on the wasmtime backend at all** —
+and the worker runs wasmtime exclusively. Measured 2026-09-01 through the production path
+(`wasm.NeededEnvImports` → `registerAllImports` → `linker.Instantiate`):
+
+    incompatible import type for `env::cleat_create_promise`
+    types incompatible: expected type `(func (param i32 i32 i32 i32) (result i64))`,
+                           found type `(func (param i32 i32 i32 i32 i64) (result i64))`
+
+**Four params is correct, and everything except this one registration already agreed.** `ABI.md`
+2.34 specifies `(param i32 i32 i32 i32) (result i64)`; the Go generator (`wasm/generator.go`:
+`name` + `promise_id_out`), the Rust SDK (`crates/cleat-sdk/src/host_calls.rs`), the Java SDK
+(`HostCalls.java`) and AssemblyScript (`packages/cleat-as/assembly/host-calls.ts`, whose comment
+spells the signature out) all emit four, as does wazero's `engine/imports.go`.
+
+The WIT interface (`python-sdk/wit/cleat.wit`) does carry a `ttl-ms: u64`, which is presumably
+where the parameter came from. But that is the component path: `wasm.RewriteWitImports` rewrites
+import *names* only, and the canonical lowering of `func(name: string, ttl-ms: u64) -> string`
+would be `(i32, i32, i64, i32)` — neither this shape nor wazero's. The fifth parameter never
+matched a real guest on any path.
+
+**Two reasons it survived, and both are more interesting than the defect.**
+
+1. **A test had codified it.** `TestClosure_CreatePromise` declared its guest with five
+   parameters — written to fit the host rather than the spec. Host and test agreed with each
+   other and with nothing else, so the suite was green while every real guest failed. Fixed to
+   four in the same PR, with a comment saying why.
+2. **Durable promises have no end-to-end coverage through a real guest on the production
+   backend.** Re-derive: `grep -rln 'CreatePromise\|create_promise' examples/ tests/` returns
+   `tests/soak` and `tests/integrity` (both handler-level, using `EventTypeCreatePromise`) and
+   `examples/widget-store-as`. Nothing compiles a guest that calls it and runs it on wasmtime.
+   **That gap is still open** — this PR adds a link-level regression test, not an execution one.
+
+**The split that hid it.** wazero was correct, and wazero is what `cleat/wasmtest`, `cleat run`
+and `cleatctl replay` use. wasmtime was wrong, and wasmtime is what the worker uses. Each was
+self-consistent, so no single-runtime test could see it. This is the same shape as every other
+defect this week: a signal that existed and was attached to the wrong thing.
+
+Re-derive: `go test ./engine/ -run 'TestCreatePromiseGuestLinksOnTheWorkerBackend|TestClosure_CreatePromise' -count=1`
+
+### 3.56 The host ABI is written twice, and now something checks it — ✅ **FIXED** (2026-09-01)
+
+**Decision, 2026-09-01: wazero stays, scoped to CLI and dev tooling.** This closes
+"wazero removal, part 2" in `REMEDIATION-PLAN-2026-08-09.md` as *will not do*, with reasons:
+
+- **The safety case is gone.** The worker never constructs a wazero `Runtime` — `grep` for
+  `NewRuntime` in `cmd/cleat-worker/*.go` is empty — and #503 made an unroutable language fail
+  closed rather than fall back. What remains on wazero is `cleatctl replay|debug`, `cleat run`,
+  `cleat-bench` and `cleat/wasmtest`.
+- **The cost is real.** All three released binaries build CGO-less today. Removing wazero forces
+  `cleat` onto wasmtime and therefore onto CGO, ending pure-Go cross-compilation for the CLI —
+  see §3.54 for what that constraint costs in practice. It also breaks public API:
+  `engine.Runtime`, `engine.NewRuntime` and `wasmtest.WasmTestEnv.Runtime()` are exported.
+
+**The price of that decision is a guard, because two implementations that nothing compares will
+drift.** They already had: `engine/imports.go` and `engine/wasmtime_hostfuncs*.go` register the
+same 56 names, and the arity of one of them disagreed (§3.55).
+
+`engine/hostabi_runtime_parity_test.go` (`//go:build cgo`), three tests:
+
+- **`TestWasmtimeSatisfiesEveryWazeroHostImport`** — enumerates wazero's real host module via
+  `ExportedFunctionDefinitions()`, generates a WAT module importing all 56 at exactly those
+  signatures, and instantiates it against the wasmtime backend's real linker. A conformance test,
+  not a text comparison: neither side's source is read, both registration paths are the
+  production ones, and wasmtime names any offender itself.
+- **`TestCreatePromiseGuestLinksOnTheWorkerBackend`** — the §3.55 regression test, asserting the
+  *documented* signature rather than whatever the host declares.
+- **`TestNeitherRuntimeHasHostFunctionsTheOtherLacks`** — closes the direction the first cannot
+  see. A linker with spare definitions instantiates a narrower module happily, so a
+  wasmtime-only function is invisible to instantiation. Extracted with `go/ast` over
+  `linker.FuncWrap`/`FuncNew` calls.
+
+**A name-only comparison would have been a vacuous pass.** The `comm`-over-`grep` check that
+motivated this guard reported the two sets as identical — which they were. The defect was in a
+signature, one level below what that check could see.
+
+Mutation-tested, five ways:
+
+| mutation | caught by |
+|---|---|
+| restore `ttlMs` (the original defect) | conformance **and** regression test |
+| wazero `cleat_now` result `i64` → `i32` | conformance test, `env::cleat_now` |
+| add a wasmtime-only `cleat_fake_new_op` | **set test only** — conformance passed |
+| `wasmtime_hostfuncs*.go` glob unmatched | `t.Fatalf`, not a silent zero |
+| either side falls below 40 functions | floor check |
+
+The third row is why the set test exists: the conformance test passed, silently.
+
+Re-derive: `go test ./engine/ -run 'TestWasmtimeSatisfies|TestNeitherRuntime|TestCreatePromiseGuest' -count=1`

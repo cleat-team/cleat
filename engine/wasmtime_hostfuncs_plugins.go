@@ -77,9 +77,35 @@ func (b *wasmtimeBackend) registerCleatCreatePromise(linker *wasmtime.Linker) er
 		return nil
 	}
 
+	// Four i32 parameters, no trailing ttlMs.
+	//
+	// This registration used to declare a fifth parameter, `ttlMs int64`, and
+	// discard it with `_ = ttlMs`. Nothing ever passed it. ABI.md 2.34 specifies
+	// `(param i32 i32 i32 i32) (result i64)`, and every guest agrees: the Go
+	// generator (wasm/generator.go, name + promise_id_out), the Rust SDK
+	// (crates/cleat-sdk/src/host_calls.rs), the Java SDK (HostCalls.java) and
+	// AssemblyScript (packages/cleat-as/assembly/host-calls.ts, whose comment
+	// spells the signature out). wazero's registration in engine/imports.go is
+	// four as well.
+	//
+	// Since an arity mismatch is a hard link error, the extra parameter meant a
+	// guest that called cleat_create_promise could not instantiate on the
+	// wasmtime backend at all -- which is every guest the worker runs. Measured
+	// 2026-09-01 through the production path (wasm.NeededEnvImports ->
+	// registerAllImports -> linker.Instantiate):
+	//
+	//	incompatible import type for `env::cleat_create_promise`
+	//	types incompatible: expected type `(func (param i32 i32 i32 i32) (result i64))`,
+	//	                       found type `(func (param i32 i32 i32 i32 i64) (result i64))`
+	//
+	// The WIT interface (python-sdk/wit/cleat.wit) does carry a `ttl-ms: u64`,
+	// which is presumably where the parameter came from, but that is the
+	// component path: wasm.RewriteWitImports rewrites import *names* only, and
+	// the canonical lowering of `func(name: string, ttl-ms: u64) -> string`
+	// would be (i32, i32, i64, i32) -- neither this shape nor wazero's. So the
+	// fifth parameter never matched any real guest on any path.
 	return linker.FuncWrap("env", "cleat_create_promise", func(caller *wasmtime.Caller,
-		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen int32, ttlMs int64) int64 {
-		_ = ttlMs
+		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
