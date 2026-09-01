@@ -4171,8 +4171,9 @@ Re-derive:
 Mutation-tested: making `SuiteTestDB` fall back to the shared DSN fails
 `TestSuiteTestDBIsNotTheSharedDatabase` with `connected to "cleat", want "cleat_test_testutil"`.
 
-**Still open:** every other suite that shares the database, and the MySQL and SQL Server
-equivalents of `SuiteTestDB` (this is PostgreSQL-only).
+**Still open:** every other suite that shares the database. The MySQL and SQL Server equivalents
+of `SuiteTestDB` were the other item here until they were measured — see part 4, which is why
+they are no longer listed.
 
 `cmd/cleatctl` moved onto `SuiteTestDB` on 2026-08-31. It was the one remaining place where two
 database-backed packages ran concurrently against one instance *without* `-p 1`: the `commands`
@@ -4189,6 +4190,63 @@ is not known to have been causing red runs, and it should not be cited as though
 
 `cmd/cleat-worker` is the well-behaved one here — it uses the run-scoped
 `CleanupTestData(…, runID)` rather than the blanket wipe.
+
+#### Part 4 — MySQL and SQL Server did not need one (2026-08-31)
+
+The next item on this list was "the MySQL and SQL Server equivalents of `SuiteTestDB`", on the
+strength of `multi-db-ci.yml`'s own comment: both jobs run `./engine/... ./migration/...` under
+`-p 1`, justified by *"three database-backed packages — engine, engine/testutil and migration —
+against one database"*.
+
+**That justification is false for those two dialects, and the work it implied has no user.**
+Measured 2026-08-31:
+
+- `engine/testutil` has no MySQL or SQL Server test. Every DB-backed test in it is PostgreSQL,
+  and those jobs have no PostgreSQL, so all of them skip.
+- Every MySQL and SQL Server test under `./migration/` creates a scratch database of its own
+  (`newMySQLScratchDB`, `newMSSQLScratchDB`, and the fixed `cleat_migration_admin_role_test`)
+  and drops it in cleanup. None touches the shared `cleat` database.
+- `engine` is therefore the only package wiping that database — 24 call sites, which is the
+  number `TestBlanketNonPostgresCleanupHasOneCaller` reports when `engine` is removed from its
+  allowlist.
+
+Probed rather than read, on MySQL 8.4: a sentinel row in `cleat.workflow_defs` survived
+`go test ./engine/testutil/... ./migration/...` with `CLEAT_TEST_MYSQL` set, and no scratch
+database was left behind.
+
+    docker exec <mysql> mysql -uroot -pcleat cleat -e \
+      "INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES ('sentinel_probe', 1, 'x')"
+    CLEAT_TEST_MYSQL=... go test -count=1 ./engine/testutil/... ./migration/...
+    docker exec <mysql> mysql -uroot -pcleat cleat -e \
+      "SELECT COUNT(*) FROM workflow_defs WHERE name='sentinel_probe'"   # 1
+
+**The "3 failures in 8 runs" figure that comment carried was never a measurement of these jobs.**
+It cannot have been: `engine/testutil`, the package it names as the other half of the collision,
+has no MySQL test to collide with. It was a PostgreSQL measurement (`ci.yml`'s engine entry)
+copied across, and it is what would have sent the next reader to build a MySQL `SuiteTestDB`
+nothing would call.
+
+**SQL Server was not probed locally, and the claim there is weaker.**
+`mcr.microsoft.com/mssql/server:2022-latest` does not start under QEMU on arm64 (`Invalid mapping
+of address ... in reserved address space below 0x400000000000`), and `azure-sql-edge`, which does
+start, cannot apply the shipped migrations — `011_json_scalar_payloads.sql` needs `isjson`. The
+SQL Server half rests on the call sites and on CI, not on a local measurement.
+
+**`-p 1` stays in both jobs.** Removing it saves the ~2s `./migration/` takes beside
+`./engine/...`, which is not a reason to drop a serialisation from a required check. What
+changed is the comment, and the fact behind it is now checked rather than asserted:
+`engine/testutil`'s `TestBlanketNonPostgresCleanupHasOneCaller` fails if any package outside
+`engine` calls `CleanupMySQLTestData`, `CleanupMSSQLTestData` or `CleanupAllTestData` — the
+condition that would make `-p 1` load-bearing and make a MySQL `SuiteTestDB` worth building.
+
+Re-derive:
+
+    go test ./engine/testutil/ -run TestBlanketNonPostgresCleanupHasOneCaller -v
+
+Mutation-tested three ways, each failing for its own reason: adding a call site in `plugin/`
+reports it by file and line; removing `engine` from the allowlist reports all 24 real sites
+(proving the walk sees them); renaming the three helpers trips the separate "this guard is
+measuring nothing" branch, so a rename cannot silently empty it.
 
 #### `CleanupTestData` — errors were discarded, and its coverage was already right (2026-08-31)
 
