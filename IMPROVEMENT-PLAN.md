@@ -3776,9 +3776,18 @@ Neither `internal/` nor `plugins/` is WS-3's, so this is left measured rather th
 
 ---
 
-#### Original entry
+#### Original entry — as written before the fix. Not a live status.
 
-### 2.43 `cleat vet --target assemblyscript` cannot fail — 🔴 **was OPEN**
+> Demoted from `###` to `#####` on 2026-08-31, and its 🔴 removed. It kept a top-level
+> heading carrying a live-looking marker directly *below* the ✅ entry that superseded it, so
+> `grep '^### .*🔴'` — which is how anyone finds the open items — returned this and nothing
+> else, and the repo read as having one open red item when it had none. The body below is the
+> original text and describes code that no longer exists: `asDir`, `nodePath` and the
+> `transformFile` candidate search are all gone, and `runVetAS` runs `npx asc … --noEmit` and
+> propagates the exit status (`cmd/cleat/main.go`). The line numbers it cites resolve to
+> unrelated code.
+
+##### 2.43 `cleat vet --target assemblyscript` cannot fail — the original report
 
 The remaining two of §2.40's three dead fallbacks are both in `runVetAS`, and they are
 symptoms of the same thing: **the function never vets anything.**
@@ -4545,10 +4554,34 @@ pool, where no Go-level filter exists and the policy is the only thing that can 
 with a permissive predicate that fails with
 `tenant A's connection can see the other tenant's workflow … (1 row(s))`.
 
-**Still open:** the test schema is missing two tenant-scoped tables the shipped schema has —
+~~**Still open:** the test schema is missing two tenant-scoped tables the shipped schema has —
 `workflow_routing` and `workflow_tags` — so their policies cannot be applied at all. That set
 is now asserted rather than assumed, so a *new* divergence fails the test instead of being
-tolerated silently. Pointing `engine/testutil/` at the real migration remains the real fix.
+tolerated silently. Pointing `engine/testutil/` at the real migration remains the real fix.~~
+
+**Closed 2026-08-31 — by Stream A, not here, which is why it sat stale.** "Pointing
+`engine/testutil/` at the real migration" is exactly what Stream A did: `engine/testutil` now
+applies `migrations/mssql/*.sql` through `migration.Runner`, and
+`TestNoHandWrittenSchema` (`engine/testutil/schema_source_guard_test.go`) fails the build if a
+`CREATE TABLE` literal comes back. There is no longer a "test schema" that can be missing a
+table — it is the shipped schema.
+
+Both tables and both filter predicates ship:
+
+    grep -n "workflow_routing\|workflow_tags" migrations/mssql/001_schema.sql migrations/mssql/012_admin_role.sql
+
+`001_schema.sql:465,470` and `012_admin_role.sql:146,151` each add
+`FILTER PREDICATE dbo.fn_tenant_filter(tenant_id)` on `dbo.workflow_tags` and
+`dbo.workflow_routing`.
+
+**One thing this does *not* establish, stated rather than glossed.** That the predicates are
+*created* is read off the migration files; nothing asserts per-table policy coverage.
+`requireMSSQLPoliciesIntact` (`engine/testutil/mssql_schema.go`) counts
+`sys.security_policies > 0`, and `mssql_rls_enforcement_test.go` checks `is_enabled` for one
+policy by name. A migration that dropped the predicate on `workflow_tags` specifically would
+pass both. That is a smaller, different gap from the one this residual described, and it is
+recorded here rather than fixed because it wants a live SQL Server — which this machine cannot
+run (see the note in `multi-db-ci.yml`'s test-mssql job).
 
 #### Where the switch stands, 2026-08-05 — written, and the blocker is now named
 
@@ -5560,7 +5593,7 @@ copes with the shipped MySQL files today — verified against a live MySQL 8.4 �
 duplication rather than a defect, but two splitters means the next one to drift does so
 silently.
 
-### 3.30 What wazero is for — 🔶 **ANSWERED, and the answer is smaller than expected** (WS-3, 2026-08-05)
+### 3.30 What wazero is for — 🔶 **ANSWERED 2026-08-05; the answer was overtaken by #459 and corrected 2026-08-31**
 
 Raised because Python moving onto wasmtime (§2.72) emptied the set of languages wazero was
 retained for. The question was whether it still has a stated, tested role.
@@ -5586,6 +5619,34 @@ fallback for the languages that do not work under wasmtime", and that set is emp
 Not proposed here: deleting it. A pure-Go build is a real distribution story and the CGO-less
 path is the only thing keeping it available. What should not survive is §3.32.
 
+> **Overtaken by events, 2026-08-10 — and this entry did not say so until 2026-08-31.**
+> The answer above was right on 2026-08-05 and wrong five days later. **#459 deleted
+> `engine/backend_wazero.go`**, so points 1 and 2 are both false now:
+>
+> - **Point 1 is inverted.** A `CGO_ENABLED=0` build does not "run everything on wazero" —
+>   there is no backend left at all. `cleat-worker` logs *"wasmtime is the only WASM backend
+>   cleat has, there is no fallback"* and exits 1 (`cmd/cleat-worker/main.go`). The
+>   CGO-less distribution story this entry declined to give up was given up anyway.
+> - **Point 2's `needsWazeroRuntime` no longer exists.** `grep -rn needsWazeroRuntime` returns
+>   nothing.
+>
+> Re-derive: `ls engine/backend_wazero.go` (absent), `grep -rn needsWazeroRuntime --include='*.go' .`
+>
+> **What wazero still is, measured 2026-08-31:** not a backend, but `engine.Runtime`
+> (`engine/runtime.go`) is still a wazero runtime, and it still executes guest code on seven
+> production call sites — `RunDefer`'s fallback (`engine/executor.go`, twice),
+> `cleat/wasmtest`, `cmd/cleat run_embedded`, `cmd/cleatctl replay`, `cmd/cleatctl debug` and
+> `cmd/cleat-bench` (three). **20 non-test files still import wazero.** So the heading's
+> "smaller than expected" has not aged well either: the *role* shrank to nothing while the
+> *surface* did not shrink at all.
+>
+>     grep -rn "NewRuntime(" --include="*.go" . | grep -v _test.go
+>     grep -rl "tetratelabs/wazero" --include="*.go" . | grep -v node_modules | grep -v _test.go | wc -l
+>
+> Removing the rest is "wazero removal, part 2" in `REMEDIATION-PLAN-2026-08-09.md`. **Its
+> parked baseline is stale too:** that plan records 8 files importing wazero going to 4, against
+> 20 non-test files today, so the stash is a map and not something to rebase.
+
 ### 3.31 The execution-limit story, per backend — 🔶 **PARTLY WRITTEN** (WS-3, 2026-08-05)
 
 The item asked for the limit story to be written and tested per *backend* rather than per
@@ -5600,7 +5661,7 @@ Writing it down is what found the gaps, so here it is in full. The wasmtime back
 | core module (`Execute`) | Go, AssemblyScript, Java, Rust | caller's budget | unchanged |
 | native component (`ExecuteComponentCGo`) | any Component Model guest, i.e. Python | **backend default, caller's budget dropped** | caller's budget |
 | decomposition (`ExecuteComponent`) | native path fails for a non-limit reason | caller's budget | unchanged |
-| defers (`RunDefer`) | every deferred callback, on every path | **none — wazero** | the fenced backend, since #338 — §3.32 |
+| defers (`RunDefer`) | every deferred callback, on every path | **none — wazero** | the fenced backend *when there is one*, since #338 — §3.32; otherwise still unfenced, see below |
 
 The component-path defect: `ExecuteComponentCGo` passed `context.Background()` to
 `configureStore`, which takes the tighter of ctx's deadline and the backend's configured
@@ -5636,6 +5697,26 @@ The generalisable finding, which is the one worth carrying: **"which backend run
 "which code path inside that backend runs this" are different questions, and the limit story
 has to be told about the second.** Both defects above sat inside the backend that CLAUDE.md
 calls the behaviour of record.
+
+> **Correction to the defer row, 2026-08-31.** It read "the fenced backend, since #338", full
+> stop, and that is only half of what the code does. `RunDefer` uses the fenced backend **when
+> `backendForWasm` returns one**; when it returns nil it falls through to `engine.Runtime` —
+> wazero — under a comment that says so in as many words:
+>
+> ```go
+> // No backend for this guest: the CGO-less build, where wazero is the only
+> // runtime there is. Unfenced, and unavoidably so.
+> ```
+>
+> `CLAUDE.md` states this correctly and this section did not, which is the wrong way round for
+> a section whose whole subject is where the fence is. The row now says "when there is one".
+>
+> The gap is not hypothetical-only-in-a-CGO-less-build either: since #459 deleted the wazero
+> *backend*, a CGO-less worker exits at startup, so that branch is now reached by a guest whose
+> language has no registered backend rather than by a whole build mode. Either way the fence is
+> absent and nothing measures it.
+>
+> Re-derive: `grep -n "Unfenced, and unavoidably so" engine/executor.go`
 
 #### 3.31 addendum — the decomposition path has never successfully run anything (2026-08-05)
 
@@ -6192,6 +6273,48 @@ duplicate `engine/testutil`'s `ensureDatabase` and `swapDatabaseName` (§2.60d p
 duplication is real but small, and folding it in would mean exporting two helpers and adding a
 dependency to a suite that deliberately keeps few — a separate change, and not a prerequisite for
 anything.
+
+### 3.41 Status-marker audit — ✅ **DONE** (2026-08-31)
+
+Every `🔴` and `🔶` heading checked against the code rather than read. Twelve items; **four
+were wrong**, and the failure was not random — in each case the marker was accurate when
+written and was overtaken by work done somewhere else, which is precisely the case nobody is
+watching for.
+
+Method:
+
+    awk '/^### /{print NR": "$0}' IMPROVEMENT-PLAN.md | grep -E "🔴|🔶"
+
+then, for each, extract the sentence stating what remains and run a command against the tree
+that would falsify it.
+
+| item | marker said | measured | verdict |
+|---|---|---|---|
+| 2.43 | 🔴 open | `runVetAS` runs `npx asc … --noEmit` and propagates the exit status | **wrong** — preserved original entry kept a live `###` heading below the ✅ that superseded it |
+| 2.71 | residual: test schema lacks `workflow_routing`/`workflow_tags` | `engine/testutil` applies the shipped migrations; both tables and both predicates ship | **wrong** — closed by Stream A |
+| 3.30 | wazero is "the CGO-less fallback and nothing else" | `engine/backend_wazero.go` deleted in #459; `needsWazeroRuntime` gone | **wrong** — inverted, a CGO-less worker now exits |
+| 3.31 | defers "fenced since #338" | `RunDefer` still falls through to unfenced wazero when `backendForWasm` returns nil | **wrong** — half true |
+| 1.7 | 🔶, ~89 unaudited `MySQLStore` `s.tenantID` sites | still unaudited | correct |
+| 2.35 | 🔶, `ErrorCode` has no path into history | `EventRecord.ErrNonRetryable` is still a `bool`; no code field | correct |
+| 2.40 | 🔶, four linters disabled | `errcheck`, `unused`, `gocyclo`, `gosec` still under `disable:` | correct |
+| 3.12 | 🔶, namespace still shared | `LoadWASM`/`GetWASMLength`/`LoadDAGSpec`/`LoadWorkflowConfig` still `(name, version)` | correct |
+| 3.15 | 🔶, no writer for `allowed_signals` | `GetAllowedSignalCallers` is the only interface method; `config.go` says the same | correct |
+| 3.33, 3.36 | linter triage counts | not re-derivable — `golangci-lint` is not installed | **unverified**, see below |
+| 3.38 | 🔶 observed, not reproduced | a dated record of a one-off; nothing to check | correct |
+
+**§2.43 is the one worth learning from.** The fix *was* recorded — as a second `### 2.43`
+section, ✅, immediately above the original. The original was kept as history under a
+`#### Original entry` heading, but itself stayed a `###` carrying `🔴`. So the repo's own
+way of finding open work returned exactly one red item, and it was an item that had been
+fixed. Preserved history now sits at `#####` with no status marker.
+
+**§3.33 and §3.36 both claim exactly "283 findings"**, for `gosec` and `errcheck`
+respectively, while `.golangci.yml`'s measured table gives errcheck 307/280/283/878 and gosec
+193/283/268/659 across four different columns. At least one heading is citing a number without
+saying which measurement produced it, which is the thing CLAUDE.md's "any number carries a date
+and the command that re-derives it" exists to prevent. **Not corrected by guessing** —
+`golangci-lint` is not installed here, so re-deriving means fetching the pinned version first.
+Flagged, deliberately, rather than silently rounded into agreement.
 
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
