@@ -152,6 +152,35 @@ go install github.com/cleat-team/cleat/cmd/cleat-gen@latest
 
 Or build from source: `git clone https://github.com/cleat-team/cleat.git && cd cleat && go install ./cmd/...`
 
+### macOS: use Homebrew or `go install`, not the release archives
+
+The release archives contain **no macOS `cleat-worker`**. The worker needs CGO
+for the wasmtime runtime — wasmtime is the only WASM backend cleat has, and a
+CGO-less build exits 1 at startup — and the release job runs on Linux, which
+cannot link a CGO macOS binary. `cleat` and `cleat-gen` are unaffected and ship
+for macOS as usual.
+
+Either of the two commands above works, or build the Homebrew formula from
+source:
+
+```bash
+brew install --build-from-source packaging/homebrew/Formula/cleat.rb
+```
+
+It compiles the worker with CGO on your machine, where the Xcode Command Line
+Tools that Homebrew already requires guarantee a C toolchain. Its test block
+runs `cleat-worker --verify-backend`, so a worker that cannot construct the
+backend fails the install rather than being discovered later.
+
+There is no published tap yet, so the formula is installed from a path in a
+clone rather than with `brew tap`.
+
+To check any `cleat-worker`, however you installed it:
+
+```bash
+cleat-worker --verify-backend      # exits 0 only if the wasmtime backend is live
+```
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE) for details.

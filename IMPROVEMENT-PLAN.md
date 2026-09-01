@@ -7881,3 +7881,74 @@ Mutation-tested, five ways:
 The third row is why the set test exists: the conformance test passed, silently.
 
 Re-derive: `go test ./engine/ -run 'TestWasmtimeSatisfies|TestNeitherRuntime|TestCreatePromiseGuest' -count=1`
+
+---
+
+### 3.57 macOS gets a working `cleat-worker` back, via Homebrew — ✅ **FIXED** (2026-09-01)
+
+§3.54 stopped the release shipping four `cleat-worker` binaries that exited 1 at startup, at the
+cost of dropping macOS: a CGO darwin binary cannot be linked on `ubuntu-latest` without osxcross,
+and all 36 workflow jobs run ubuntu. This closes the hole that left, without adding a macOS runner
+to CI.
+
+**A source-build Homebrew formula moves the CGO link to the install machine, which is the one
+place it is free.** Homebrew already requires the Xcode Command Line Tools, so a C toolchain is
+guaranteed to be present. `packaging/homebrew/Formula/cleat.rb` builds `cleat-worker` with
+`CGO_ENABLED=1` and `cleat`/`cleat-gen` with `CGO_ENABLED=0`, matching how `.goreleaser.yml`
+ships the latter two so a Homebrew user and a tarball user get the same thing.
+
+**goreleaser's `brews:` generator cannot be used here**, which is worth stating because it is the
+obvious tool and it does not fit: it packages *built binaries*, and the missing macOS
+`cleat-worker` binary is precisely the problem. A formula that repackages the release archives
+would reproduce the gap it is meant to close.
+
+**Verified end to end on darwin/arm64, 2026-09-01**, against the published v0.2.0 source tarball
+(`sha256 40fc9126…`):
+
+| step | result |
+|---|---|
+| `brew style` | no offenses |
+| `brew audit --strict` | no findings |
+| `brew install --build-from-source` | exit 0 |
+| `file $(brew --prefix)/bin/cleat-worker` | `Mach-O 64-bit executable arm64` |
+| `cleat-worker --verify-backend` | `OK: wasmtime backend available`, exit 0 |
+| `brew test` | exit 0 |
+
+Installed, tested, then `brew uninstall` / `brew untap`. **The first `brew test` failed**, and for
+a real reason worth recording: the test block ran `system bin/"cleat-gen", "--help"`, but
+`cleat-gen` has no `--help` and no zero-exit invocation at all — with no arguments it prints usage
+and exits 1. Now asserted as `shell_output("#{bin}/cleat-gen 2>&1", 1)`, which pins the exit
+status rather than assuming it.
+
+**Note on `brew style`.** Run against `packaging/homebrew/cleat.rb` it reported three offenses
+(`Sorbet/StrictSigil`, `Sorbet/TrueSigil`, `Style/FrozenStringLiteralComment`). Those are
+path-detection artifacts, not defects: the same file at a `Formula/` path inspects clean. Hence
+`packaging/homebrew/Formula/cleat.rb`. Re-derive by copying the file to a directory not named
+`Formula/` and running `brew style` on it.
+
+**What the guard covers, and what it cannot.** `packaging/homebrew/formula_test.go` runs in normal
+CI and checks the things a release bump gets wrong silently: that `url` names a tagged tarball
+rather than a branch, that a 64-hex `sha256` is present, that `CGO_ENABLED=1` is set *around the
+worker build* rather than merely somewhere in the file, and that the test block both runs
+`--verify-backend` and asserts on its output.
+
+It **cannot** check that the `sha256` matches the tarball — that needs the network. That is a
+release step, recorded in `docs/project/release-process.md` §3.
+
+Mutation-tested, five ways:
+
+| mutation | result |
+|---|---|
+| `CGO_ENABLED: "1"` → `"0"` | `TestFormulaBuildsTheWorkerWithCGO` |
+| worker build moved outside the CGO=1 block | `TestFormulaBuildsTheWorkerWithCGO`, second assertion |
+| test block stops running `--verify-backend` | `TestFormulaTestBlockExecutesTheWorker` |
+| `url` points at a branch | `TestFormulaPinsATaggedSourceTarball` |
+| formula file missing | **all three** `t.Fatalf` rather than passing |
+
+Re-derive: `go test ./packaging/homebrew/ -count=1`
+
+**Still open:** there is no published tap, so the formula is installed from a path in a clone
+(`brew install --build-from-source packaging/homebrew/Formula/cleat.rb`). A
+`cleat-team/homebrew-cleat` tap would make it `brew install cleat-team/cleat/cleat`; creating that
+repository is a decision for the maintainers, not something to do in passing. README.md says so
+rather than implying a tap exists.
