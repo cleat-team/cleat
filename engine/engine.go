@@ -57,6 +57,7 @@ type Engine struct {
 	generation             int64 // generation this workerID claimed the workflow under; see WithGeneration
 	wasmInstanceTimeout    time.Duration
 	defaultWorkflowTimeout time.Duration
+	deferPassBudget        time.Duration // total for one runDefers pass; see WithDeferPassBudget
 
 	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 
@@ -297,6 +298,32 @@ func WithWASMInstanceTimeout(d time.Duration) EngineOption {
 // WithDefaultWorkflowTimeout sets the total workflow timeout.
 func WithDefaultWorkflowTimeout(d time.Duration) EngineOption {
 	return func(e *Engine) { e.defaultWorkflowTimeout = d }
+}
+
+// DefaultDeferPassBudget bounds one whole cleanup pass -- every defer a failed
+// workflow registered, together -- rather than each defer separately.
+//
+// It is deliberately generous rather than tight. The bound that was missing is
+// an *aggregate* one: before it, N defers each got a fresh copy of the
+// backend's per-invocation budget, so the worst case grew without limit in N
+// (see runDefers for the measurements). Five minutes leaves every plausible
+// legitimate cleanup pass untouched -- a defer that needs longer than the
+// workflow's own instance timeout is already outside what this engine bounds --
+// while turning "unbounded in N" into a fixed ceiling.
+//
+// Set it deliberately with WithDeferPassBudget if a workload has many slow,
+// legitimate defers.
+const DefaultDeferPassBudget = 5 * time.Minute
+
+// WithDeferPassBudget bounds a whole runDefers pass. d <= 0 keeps
+// DefaultDeferPassBudget.
+//
+// The budget is shared by every defer in the pass: configureStore takes the
+// tighter of the remaining time and the backend's own timeout, so a defer that
+// runs long leaves less for the ones after it. That is the intent -- the thing
+// being bounded is the worker slot, not any individual callback.
+func WithDeferPassBudget(d time.Duration) EngineOption {
+	return func(e *Engine) { e.deferPassBudget = d }
 }
 
 // WithContinueAsNewHandler sets a handler for atomic ContinueAsNew transitions.
