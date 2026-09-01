@@ -198,10 +198,6 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("terminate workflow commit: %w", err)
 	}
-	// Best-effort cleanup.
-	s.ClearStickyWorker(context.Background(), workflowID)
-	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID); err != nil {
-		s.log().WarnContext(context.Background(), "release concurrency keys failed", "workflow_id", workflowID, "error", err)
-	}
+	releaseWorkflowResources(s.log(), s, workflowID)
 	return nil
 }

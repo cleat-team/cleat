@@ -551,9 +551,7 @@ func (s *MSSQLStore) completeWorkflowOnce(ctx context.Context, workflowID, worke
 		return err
 	}
 
-	// Best-effort cleanup.
-	s.ClearStickyWorker(context.Background(), workflowID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 	s.enforceParentClosePolicy(context.Background(), workflowID)
 
 	return nil
@@ -614,9 +612,7 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 		return err
 	}
 
-	// Best-effort cleanup.
-	s.ClearStickyWorker(context.Background(), workflowID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 	s.enforceParentClosePolicy(context.Background(), workflowID)
 
 	return nil
@@ -672,9 +668,7 @@ func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, 
 		return err
 	}
 
-	// Best-effort cleanup.
-	s.ClearStickyWorker(context.Background(), workflowID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
@@ -797,9 +791,7 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 		return "", err
 	}
 
-	// Best-effort cleanup after commit.
-	s.ClearStickyWorker(context.Background(), currentRunID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), currentRunID)
+	releaseWorkflowResources(s.log(), s, currentRunID)
 	s.enforceParentClosePolicy(context.Background(), currentRunID)
 
 	return newRunID, nil
@@ -874,8 +866,7 @@ func (s *MSSQLStore) finalizeWorkflowSegmentOnce(ctx context.Context, runID, wor
 
 	// Best-effort cleanup for terminal statuses (post-commit).
 	if finalStatus == "done" || finalStatus == "failed" {
-		s.ClearStickyWorker(context.Background(), runID)
-		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
+		releaseWorkflowResources(s.log(), s, runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
 	}
 

@@ -418,9 +418,7 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 		return err
 	}
 
-	// Best-effort: clear sticky worker assignment.
-	s.ClearStickyWorker(context.Background(), workflowID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
@@ -473,9 +471,7 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 		return err
 	}
 
-	// Best-effort: clear sticky worker assignment.
-	s.ClearStickyWorker(context.Background(), workflowID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
@@ -665,9 +661,7 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		return "", err
 	}
 
-	// Best-effort cleanup after commit.
-	s.ClearStickyWorker(context.Background(), currentRunID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), currentRunID)
+	releaseWorkflowResources(s.log(), s, currentRunID)
 	s.enforceParentClosePolicy(context.Background(), currentRunID)
 
 	return newRunID, nil
@@ -745,8 +739,7 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 
 	// Best-effort cleanup for terminal statuses (post-commit).
 	if finalStatus == "done" || finalStatus == "failed" {
-		s.ClearStickyWorker(context.Background(), runID)
-		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
+		releaseWorkflowResources(s.log(), s, runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
 	}
 
@@ -837,9 +830,7 @@ func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 		return err
 	}
 
-	// Best-effort: clear sticky worker assignment.
-	s.ClearStickyWorker(context.Background(), workflowID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
