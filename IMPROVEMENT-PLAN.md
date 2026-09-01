@@ -8067,6 +8067,23 @@ The job therefore also checks `file` output per target, and **counts the binarie
 a `find | while read` loop that matches nothing exits 0, which is the "checks never started" shape
 CLAUDE.md is about, so fewer than 2 fails.
 
+**It failed on its first run, and the defect was in the release path itself.** The arm64 post
+hook died with
+
+    qemu-aarch64: Could not open '/lib/ld-linux-aarch64.so.1': No such file or directory
+
+binfmt *was* registered — qemu started, and the amd64 hook had already passed. The problem is
+that `gcc-aarch64-linux-gnu` links an aarch64 binary without installing the loader that binary
+needs, so there was nothing for qemu to exec. **`release.yml` carried the identical gap**, so the
+next tag would have aborted the same way — which is precisely the failure this job exists to move
+off the release path. Fixed in both workflows with `libc6-arm64-cross` and
+`QEMU_LD_PREFIX=/usr/aarch64-linux-gnu`.
+
+Worth noting how it presents: the script's own diagnostic said *"This binary cannot construct the
+wasmtime backend"*, which was wrong — the binary never reached its own `main`. The message now
+names the missing-sysroot case explicitly, because a correct failure with a misleading
+explanation costs as much as a wrong result.
+
 **Scope, stated rather than implied.** `build` stops before archives, checksums, changelog and
 upload, and does not run `Build Svelte UI` or `Validate no dirty dist/` — a stale dashboard is
 still only caught at tag time. Recorded in `docs/project/release-process.md` §4a.
