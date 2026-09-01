@@ -7952,3 +7952,48 @@ Re-derive: `go test ./packaging/homebrew/ -count=1`
 `cleat-team/homebrew-cleat` tap would make it `brew install cleat-team/cleat/cleat`; creating that
 repository is a decision for the maintainers, not something to do in passing. README.md says so
 rather than implying a tap exists.
+
+---
+
+### 3.59 Durable promises: linking was tested, meaning was not — ✅ **FIXED** (2026-09-01)
+
+§3.55 fixed `cleat_create_promise`'s arity and added a link-level regression test. Linking is the
+first of the things that have to be right, not all of them, and this closes the rest of the gap
+that entry left open.
+
+**Why the existing test could not see it.** `TestClosure_CreatePromise` already drives a guest
+through the wasmtime backend, but `newClosureSetup` installs `mockHostHandler{ret: 0}`, whose
+`CreatePromise` records the *name* and returns `h.ret`. So its assertion is `got == 0` — and the
+real handler never returns 0 on success: `engine/promises.go:22` returns
+`packSimpleResult(0, written)`, which is `written<<32`. Nothing checked that the promise ID
+reached the guest's buffer, and nothing checked *which* pointer the wrapper passed.
+
+**Subject and collaborator.** The code under test is the wasmtime host-function wrapper in
+`engine/wasmtime_hostfuncs_plugins.go`, not the handler. The handler is therefore a fake — but one
+that behaves the way `engine/promises.go` does, writing through `ctx.Value(wasmMemBufKey{})` and
+packing its result identically, so a wrapper that swaps arguments or drops the return fails here.
+
+`engine/create_promise_abi_test.go` asserts what survives the boundary: the name in, both
+output-buffer arguments **in the right order**, the ID back into guest memory, the packed return
+unpacked the way a guest unpacks it, and — separately — that the host respects the guest's
+declared capacity, with sentinel bytes painted past the buffer so an overrun is observed rather
+than inferred.
+
+Mutation-tested against the wrapper, three ways:
+
+| mutation | caught by |
+|---|---|
+| swap `promiseIDPtr` / `promiseIDMaxLen` | `promiseIDPtr = 64, want 200`; `promiseIDMaxLen = 200, want 64`; and the ID never reaches guest memory |
+| drop the handler's return, `return 0` | `call returned 0x0, want 0xf00000000`; and `reported 0 bytes written, want 4` |
+| stop passing memory on the context | "the wrapper did not put the guest's linear memory on the context" |
+
+The first is the point. An argument swap **links fine** — both are `i32`, both in range — so §3.55's
+link-level test passes and the guest reads a buffer the host never wrote. This is the class
+CLAUDE.md names: *"in every case the value meant the wrong thing on one side of the boundary."*
+
+Re-derive: `go test ./engine/ -run TestCreatePromiseABI -count=1`
+
+**Still open, and narrower than before.** No test compiles a *real SDK guest* that calls
+`create_promise` and runs it on the worker. What is covered now is the host side of the boundary
+for one operation; the other output-buffer host calls have the same shape and the same absent
+coverage.
