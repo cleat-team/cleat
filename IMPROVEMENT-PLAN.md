@@ -6431,6 +6431,12 @@ should log is a judgement, but doing it *both ways within two lines* is not one,
 exactly the §2.60d shape — a cleanup whose failure is invisible. Recorded, not fixed: it is a
 behaviour change across three dialects and belongs in its own PR.
 
+> **Fixed in §3.43** — and the "26" above is itself an example of this section's own thesis about
+> how a number is cut. 26 is what *errcheck* sees, because errcheck cannot see `_ = f()`. Counted
+> directly, it is **38 dropped calls across 20 sites**: 14 bare + 6 `_ =` for `ClearStickyWorker`,
+> 12 bare + 6 `_ =` for `ReleaseWorkflowConcurrencyKeys`. The 12 the linter missed were the ones
+> someone had already noticed enough to silence.
+
 Re-derive (note the zsh trap — `for m in $mods` does not word-split, which reproduces the "tidy
 table of four zeroes" this file already warns about, from a different cause):
 
@@ -6443,6 +6449,60 @@ table of four zeroes" this file already warns about, from a different cause):
 
 where `<linter>.yml` sets `linters: {disable-all: true, enable: [<linter>]}` and
 `issues: {max-issues-per-linter: 0, max-same-issues: 0}`.
+
+### 3.43 Post-commit cleanup dropped its errors at 38 of 40 calls — ✅ **FIXED** (2026-08-31)
+
+The item §3.42 recorded and deferred. `ClearStickyWorker` and `ReleaseWorkflowConcurrencyKeys`
+are called as an ordered pair after every commit that takes a workflow out of the runnable set —
+completion, failure, termination, continue-as-new, and the three admin actions. 20 sites across
+all three dialects, and the copies had drifted into three treatments that did not agree with each
+other, or with themselves:
+
+| | bare | `_ =` | logged |
+|---|---|---|---|
+| `ClearStickyWorker` | 14 | 6 | 0 |
+| `ReleaseWorkflowConcurrencyKeys` | 12 | 6 | 2 |
+
+**What the dropped error costs.** A failed `ReleaseWorkflowConcurrencyKeys` leaves rows in
+`concurrency_keys` owned by a workflow that has already finished, and each row holds a slot that
+live workflows queue behind. It is *not* a permanent leak — `expires_at` is `NOT NULL`
+(`migrations/postgres/001_schema.sql:350`) and the worker's reaper deletes expired rows
+(`cmd/cleat-worker/setup.go:2001`) — so the stall clears itself at the key's TTL. It clears
+itself **silently**, which is the defect: an operator looking at workflows blocked behind a key
+whose holder completed an hour ago had nothing in the log at 18 of the 20 sites.
+
+**A mechanism, not a sweep** — CLAUDE.md's question, and here the answer was clearly the former,
+since all 20 sites were the same ordered pair with the same argument and the same
+`context.Background()`. One unexported helper, `releaseWorkflowResources` in
+`engine/workflow_cleanup.go`, takes a two-method interface so a single copy serves
+`PostgresStore`, `MySQLStore` and `MSSQLStore`. All 20 sites became one line.
+
+**Guarded, so the 21st site cannot be another copy.** `engine/workflow_cleanup_guard_test.go`
+walks the package AST and fails if any non-test file outside an allowlist calls either method
+directly (`sharded_store.go` is allowed: its two methods route to a shard and *return* the error,
+which is the opposite of dropping it). A second test fails if the helper has no callers at all,
+because an AST guard's characteristic failure mode is passing while measuring nothing.
+
+Both were mutation-tested: reverting one site to a bare pair produced
+`store_lifecycle.go:379 calls ClearStickyWorker` / `:380 calls ReleaseWorkflowConcurrencyKeys`,
+and rewriting all 20 back to `_ =` produced the "no callers" failure — each for its own reason,
+not a shared one.
+
+Verified against all three dialects on WS-3 (Postgres 5434, MySQL 3308, SQL Server 1435):
+`go test ./engine/ -p 1 -count=1 -v` → **4131 run, 4127 passed, 4 skipped, 0 failed, 69s wall**.
+The four skips are all `componentize-py` / `wasm-tools` not being installed. Per-dialect subtest
+counts were 194 / 194 / 195, so no dialect silently sat out; the 69s confirms it against
+CLAUDE.md's ~20s-means-Postgres-only rule.
+
+> The first run of that suite failed 6 MySQL tests with
+> `Error 1061 (42000): Duplicate key name 'idx_instances_ready'`. That is the stale-local-schema
+> trap CLAUDE.md warns about, not a regression —
+> `docker exec cleat-ws3-mysql mysql -uroot -pcleat -e "DROP DATABASE cleat; CREATE DATABASE cleat;"`
+> and it went green. Recorded because the failure looks exactly like broken `develop`.
+
+Re-derive the site count:
+
+    grep -rn "releaseWorkflowResources(s.log()" --include="*.go" engine/ | grep -v _test.go | wc -l
 
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 

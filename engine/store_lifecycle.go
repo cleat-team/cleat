@@ -242,9 +242,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		return "", err
 	}
 
-	// Best-effort cleanup after commit.
-	_ = s.ClearStickyWorker(context.Background(), currentRunID)
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), currentRunID)
+	releaseWorkflowResources(s.log(), s, currentRunID)
 	s.enforceParentClosePolicy(context.Background(), currentRunID)
 
 	return newRunID, nil
@@ -310,8 +308,7 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 
 	// Best-effort cleanup for terminal statuses (post-commit).
 	if finalStatus == "done" || finalStatus == "failed" {
-		_ = s.ClearStickyWorker(context.Background(), runID)
-		_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
+		releaseWorkflowResources(s.log(), s, runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
 	}
 
@@ -379,10 +376,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 		return err
 	}
 
-	// Best-effort: clear sticky worker assignment (Feature 10).
-	_ = s.ClearStickyWorker(context.Background(), workflowID)
-	// Best-effort: release all concurrency keys (Feature 5).
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
@@ -440,10 +434,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		return err
 	}
 
-	// Best-effort: clear sticky worker assignment (Feature 10).
-	s.ClearStickyWorker(context.Background(), workflowID)
-	// Best-effort: release all concurrency keys (Feature 5).
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
@@ -552,10 +543,7 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 		return err
 	}
 
-	// Best-effort: clear sticky worker assignment (Feature 10).
-	s.ClearStickyWorker(context.Background(), workflowID)
-	// Best-effort: release all concurrency keys (Feature 5).
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)

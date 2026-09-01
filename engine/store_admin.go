@@ -193,9 +193,7 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		return fmt.Errorf("admin %s: commit: %w", a.action, err)
 	}
 
-	// Best-effort post-commit cleanup, matching CompleteWorkflow / FailWorkflow.
-	_ = s.ClearStickyWorker(context.Background(), workflowID)
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 	s.enforceParentClosePolicy(context.Background(), workflowID)
 	return nil
 }
@@ -305,8 +303,7 @@ func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, g
 		return fmt.Errorf("admin %s: commit: %w", a.action, err)
 	}
 
-	_ = s.ClearStickyWorker(context.Background(), workflowID)
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 	s.enforceParentClosePolicy(context.Background(), workflowID)
 	return nil
 }
@@ -416,8 +413,7 @@ func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID strin
 		return fmt.Errorf("admin %s: commit: %w", a.action, err)
 	}
 
-	_ = s.ClearStickyWorker(context.Background(), workflowID)
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 	s.enforceParentClosePolicy(context.Background(), workflowID)
 	return nil
 }
