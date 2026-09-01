@@ -685,7 +685,30 @@ behaviour change (a transient DB blip would start halting workflows), so it need
 decision WS-1's §1.1 trap needs: establish what a failed *check* should do before changing what
 it returns. Not attempted here.
 
-### 1.4 Crash-recovery: the detector works, nothing writes what it detects (~2–3 sessions)
+### 1.4 Crash-recovery: write-ahead intent — ✅ **FIXED** (heading corrected 2026-09-01)
+
+> **The old heading was "the detector works, nothing writes what it detects", which is the
+> original problem statement and is no longer true.** Phases B and D are both marked done in
+> the body below, and the write side is wired end to end. Assessed 2026-09-01 rather than
+> assumed, after §1.1 and §1.2 turned out to be the same kind of stale:
+>
+> - The dead `flushCallIntent`/`completeCallEvent` pair was **deleted**, not left in the tree
+>   — the "~350 lines of tested-but-dead durability code" the body warns about is gone.
+>   `grep -rn 'flushCallIntent' --include='*.go' engine/ | grep -v _test.go` returns only
+>   comments recording the deletion.
+> - It was reimplemented as `engine/callintent.go` + `engine/store_intent.go`, and the live
+>   path routes through it: `engine/durablecalls.go:96` calls `freshCallWithIntent` for
+>   declared operations.
+> - It is reachable from a real deployment, which is what "nothing writes it" was about:
+>   `--write-ahead-intent-ops` (`cmd/cleat-worker/config.go:112`) feeds
+>   `engine.WithWriteAheadIntentOps` at `cmd/cleat-worker/setup.go:1767`.
+> - **Opt-in per operation is the design, not an unfinished edge.** The flag costs one extra
+>   synchronous round trip per call, so it is declared for operations that are unsafe to
+>   repeat (a card charge, not a GET).
+> - Covered by `TestCrashWithWriteAheadIntentDoesNotRepeatTheCall` (`tests/crash/`), which
+>   SIGKILLs a worker mid-call and asserts the side effect is not repeated, and which carries
+>   its own non-vacuity note: with `--write-ahead-intent-ops` removed it becomes the test that
+>   demonstrates the bug. `go test ./tests/crash/ -count=1` → ok (63s, 2026-09-01).
 
 > **Blocker found and fixed first, 2026-08-04 — ordinary event writes were being
 > discarded.** Before wiring intent writes into the call path it is worth knowing that
