@@ -149,3 +149,46 @@ func TestFailedInjectionIsReportedAndNotMarkedActive(t *testing.T) {
 		t.Error("IsActive(FaultClockSkew) is true after the injecting write failed")
 	}
 }
+
+// TestResetPropagatesCleanupError pins the other half of the Cleanup change.
+//
+// Reset is Cleanup under another name, and it discarded the error -- errcheck
+// found it only because the call was bare; writing `_ = fi.Cleanup()` would
+// have hidden it again, which is the blind spot recorded in §3.43.
+//
+// A silently failed Reset leaves every running instance with a future
+// heartbeat_at, and the next test sharing the database inherits that as an
+// unexplained failure -- the exact cost the Cleanup change was made to avoid.
+func TestResetPropagatesCleanupError(t *testing.T) {
+	db, tenant := faultInjectorTestDB(t)
+
+	if _, err := db.Exec(
+		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, heartbeat_at)
+		 VALUES ('fi-wf-reset', 'fi-def', 1, 'running', '{}', $1, now())`, tenant); err != nil {
+		t.Fatalf("seed workflow_instances: %v", err)
+	}
+
+	fi := NewFaultInjector(db)
+	if err := fi.InjectClockSkew(2 * time.Hour); err != nil {
+		t.Fatalf("InjectClockSkew: %v", err)
+	}
+
+	// Break the injector's pool so the restore write cannot succeed, using a
+	// SECOND handle to the same database. Closing `db` itself would take the
+	// helper's t.Cleanup down with it, and the test would fail on teardown
+	// rather than on its assertion.
+	broken := testutil.TestDB(t, testutil.DialectPostgres)
+	broken.Close()
+	fi = NewFaultInjector(broken)
+	if err := fi.InjectClockSkew(time.Hour); err == nil {
+		t.Fatal("precondition: injecting against a closed pool should fail")
+	}
+	// Mark the fault active by hand so Cleanup has restore work to attempt;
+	// the failed injection above deliberately did not.
+	fi.active[FaultClockSkew] = true
+
+	if err := fi.Reset(); err == nil {
+		t.Error("Reset returned nil after its restore write failed. The caller now " +
+			"believes the database was put back when it was not.")
+	}
+}

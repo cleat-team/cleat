@@ -247,7 +247,27 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 			}
 			close(done)
 		}()
-		start.Call(ctx)
+		// The returned error is reported, not discarded. errCh is read in
+		// three places below, but until this it was only ever WRITTEN on
+		// panic -- and wazero signals a trap by returning an error, not by
+		// panicking. So the common failure was thrown away while the rare one
+		// was caught, `close(done)` still fired, and InitModule returned nil
+		// for a module whose _start had trapped: a guest that failed to
+		// initialise reported success, and the first export call afterwards
+		// failed somewhere unrelated.
+		//
+		// exit(0) is NOT a failure and must not be reported as one. A Go
+		// wasip1 _start runs main() and terminates via proc_exit, which wazero
+		// surfaces as *sys.ExitError -- the normal path for every Go guest.
+		// Only a non-zero exit code, or any other error, means initialisation
+		// actually failed.
+		if _, err := start.Call(ctx); err != nil {
+			var exitErr *sys.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 0 {
+				return
+			}
+			errCh <- fmt.Errorf("host: _start failed: %w", formatWasmCallError(err))
+		}
 	}()
 
 	// Exponential backoff: check module liveness at increasing intervals.

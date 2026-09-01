@@ -247,6 +247,12 @@ func (fi *FaultInjector) Context(ctx context.Context) context.Context {
 }
 
 // Reset clears all active faults and restores the database to normal state.
-func (fi *FaultInjector) Reset() {
-	fi.Cleanup()
+//
+// Returns Cleanup's error rather than discarding it. Reset is Cleanup under
+// another name, so swallowing the error here would reopen exactly what making
+// Cleanup return one closed: a restore that failed silently leaves every
+// running instance with a future heartbeat_at, and the next test sharing the
+// database inherits it as an unexplained failure.
+func (fi *FaultInjector) Reset() error {
+	return fi.Cleanup()
 }
