@@ -1035,10 +1035,28 @@ connecting role is subject to RLS before asserting anything about tenants.
   `Table 'cleat_00000000_0000_0000_0000_000000000000.workflow_instances' doesn't exist` —
   the defect stated in one line, the request served from the default tenant's database.
 
-  SQL Server is written but **skipped, blocked on §2.71** — see below. Unskipping it is that
-  item's acceptance test.
-- The ~89 unaudited `MySQLStore` `s.tenantID` call sites (see the `requireTenant` note
-  elsewhere in this plan). Scoping the store does not audit them.
+  ~~SQL Server is written but **skipped, blocked on §2.71** — see below. Unskipping it is that
+  item's acceptance test.~~ **Running since at least 2026-08-31.** Its only skip is the
+  environmental `CLEAT_TEST_MSSQL not set`; `tiers.yaml`'s tier 1 includes `./cmd/...` and
+  `tier1-gate.yml` sets that variable, so `TestTenantIsolationOverHTTP_MSSQL` runs on every PR.
+  Confirmed from a real gate log rather than inferred — `ran=7056 pass=7054 fail=0 skip=2`, both
+  skips the allowlisted `TestHelperProcess`, printed by name.
+- ~~The ~89 unaudited `MySQLStore` `s.tenantID` call sites (see the `requireTenant` note
+  elsewhere in this plan). Scoping the store does not audit them.~~
+
+  **Not open — closed by D1, and this bullet contradicted the DECIDED block ~150 lines below it
+  for 25 days.** `tiers.yaml` records `multi-tenancy-mysql` as
+  `NOT SUPPORTED — single-tenant only`: "a documented product boundary, not an open engineering
+  item". Auditing those sites *for tenant isolation* is work toward a feature the product has
+  declined, and this bullet is what sends a reader at it — measured, on 2026-08-31, by a reader
+  who read the bullet, stopped, and proposed the work.
+
+  **What is genuinely left is smaller and differently shaped.** `requireTenant` is not a
+  multi-tenancy guard; it is a wrong-answer guard, and it earns its place in a *single*-tenant
+  deployment. An empty `tenantID` produces `WHERE tenant_id = ''`, which matches nothing and
+  errors on nothing, so a query with no identity reads to the caller as "this tenant has no
+  data". Whether every method that needs that guard has it is worth knowing on its own terms —
+  it is just not the 89-site tenant-isolation audit this bullet described.
 - ~~Whether the shipped deployment actually connects as `cleat_app` rather than a
   superuser.~~ **Checked 2026-08-04 — it does.** `docker-compose.cluster.yml` gives every
   worker `--db=postgres://cleat_app:...` with a separate superuser `--migrate-db`, and
