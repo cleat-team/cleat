@@ -435,9 +435,15 @@ func pluginNames(m map[string]string) string {
 func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 	// Register the same backend the workflow itself ran on, so its defers are
 	// fenced the same way it was. wasmtime is the only backend cleat has, and
-	// it is registered for every language in engine.WasmtimeLanguages, so
-	// Engine.RunDefer's backendForWasm lookup always resolves here -- there
-	// is no runtime-less fallback left to reach.
+	// it is registered for every language in engine.WasmtimeLanguages.
+	//
+	// That is NOT the same as "the lookup always resolves", which this comment
+	// used to claim. engine.Engine routes on wasm.DetectLanguage, which returns
+	// the guest's own cleat.metadata Language field verbatim, so a module
+	// declaring "tinygo" -- or "GO", since the lookup is exact -- resolved to no
+	// backend and RunDefer ran it on a wazero Runtime it created on demand.
+	// Engine.resolveBackend now fails closed on that instead; see its doc
+	// comment for the measurements.
 	eng := engine.NewEngine(nil,
 		&dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL},
 		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend))
@@ -1590,7 +1596,13 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// wasmtime is the only WASM backend cleat has (w.wasmtimeBackend is
 	// guaranteed non-nil -- main.go exits fatally if NewWasmtimeBackend
 	// fails), and it is registered for every language in
-	// engine.WasmtimeLanguages, so the engine never needs a Runtime here.
+	// engine.WasmtimeLanguages, so the engine needs no Runtime for any
+	// supported guest.
+	//
+	// A module declaring an unsupported language in its own cleat.metadata used
+	// to reach Replay's legacy path and dereference that nil Runtime, panicking
+	// the workflow. Engine.resolveBackend now rejects it with an error naming
+	// the language.
 
 	// Extract child version pins from WASM metadata (compile-time resolution).
 	var childVersions map[string]int

@@ -13,11 +13,21 @@ import (
 // queryState contains key-value state set via SetQueryState during execution.
 func (e *Engine) Replay(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, history []EventRecord) (result string, resultHistory []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
 	// Check whether a WasmBackend is registered for this module's language.
-	if backend := e.backendForWasm(wasmBytes); backend != nil {
+	backend, err := e.resolveBackend(wasmBytes)
+	if err != nil {
+		return "", nil, nil, nil, nil, err
+	}
+	if backend != nil {
 		return e.executeWithBackend(ctx, backend, wasmBytes, entryPoint, input, history)
 	}
 
-	// Legacy path: compile and replay via the wazero Runtime.
+	// Legacy path: compile and replay via the wazero Runtime. The nil check is
+	// not defensive padding -- the worker constructs its engines with a nil
+	// Runtime, so reaching here without one used to panic rather than report.
+	if e.rt == nil {
+		return "", nil, nil, nil, nil, fmt.Errorf(
+			"host: no runtime available for WASM replay; register a backend for this language with WithBackend")
+	}
 	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: compile module: %w", err)
