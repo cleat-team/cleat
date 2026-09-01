@@ -8094,3 +8094,52 @@ a maintainer settings change.
 
 `dist/` was not in `.gitignore` (`git check-ignore -v dist/probe` → no match, `git status` → `?? dist/`).
 Now ignored, since this change makes `goreleaser build` the documented local reproduction.
+
+---
+
+### 3.60 §3.52's fix left a 50/50 race that discarded the error it connected — ✅ **FIXED** (2026-09-01)
+
+§3.52 connected `InitModule`'s `errCh`, which had only ever been written on panic while wazero
+signals a trap by returning an error. The plumbing was right and **the consumer was not**.
+
+`InitModule` waits on two channels. The goroutine sends the failure on `errCh` (buffered, cap 1)
+and only then runs the deferred `close(done)`, so on a trap **both select cases are ready at
+once** and Go picks uniformly at random. `case <-done: return nil` therefore threw the error
+away about half the times the poller reached that select — reinstating, in a different shape,
+the exact defect §3.52 existed to fix.
+
+Fixed by draining `errCh` with a non-blocking receive before treating a closed `done` as success.
+The send happens-before the close, so anything there is visible.
+
+**How it was found, and why that matters.** It surfaced as a CI failure of
+`TestInitModuleReportsATrappingStart` on a **docs-only PR** (#521) — a test failing on a change
+that touched no code is the signal, and re-running would have buried it.
+
+**The behavioural test is a ~2% detector.** Measured 2026-09-01 with the fix removed:
+
+| run | failures |
+|---|---|
+| `TestInitModuleReportsATrappingStart`, default GOMAXPROCS | 0 / 40 |
+| same, `-cpu 1` | 4 / 200 |
+| a 60-iteration repetition of the same call, `-cpu 1` | 1 / 30 |
+
+On an idle machine the trap lands in `errCh` before the first 100µs backoff elapses and an
+earlier select catches it, so the window never opens. That is why 40 local runs were green while
+CI was not.
+
+**A repetition test was written to make it deterministic and was not** — 1 failure in 30 — so it
+was **deleted rather than shipped**. A test named `...EveryTime` that detects 3% of the time is
+worse than no test: it reads as deterministic, and would be re-run until green and then believed.
+Recording this because the tempting move was to keep it.
+
+What *is* deterministic is the shape of the code, so the regression test is a source guard:
+`engine/init_module_done_branch_guard_test.go` walks `InitModule` with `go/ast` and requires
+every `case <-done:` clause to consult `errCh`. Mutation-tested — reverting to
+`case <-done: return nil` fails **5 of 5** runs naming `runtime.go:297:4`, and the restored code
+passes 5 of 5. Its vacuous-pass control fires too: pointed at a file with no `InitModule`, it
+`t.Fatal`s rather than reporting success over nothing.
+
+This is CLAUDE.md's rule applied to its own exception — *"proving a test can fail catches one
+that cannot fail; it does not catch one that fails sometimes."*
+
+Re-derive: `go test ./engine/ -run 'TestInitModuleDoneBranchConsultsErrCh|TestInitModule' -count=1`
