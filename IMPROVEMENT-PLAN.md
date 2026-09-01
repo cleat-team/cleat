@@ -6927,23 +6927,70 @@ non-JSON insert is accepted, the other because the constraint is absent entirely
 **Wider asymmetry recorded, not fixed — and counted per table, because a column name alone is not
 the unit.** `result` carries a check on `workflow_instances`, `workflow_promises` and
 `idempotency_keys` but not on `workflow_update_requests`, so any command that dedupes by column
-name (my first attempt did) reports it as covered. Measured per `CREATE TABLE` block:
+name (my first attempt did) reports it as covered.
 
-| table | JSON-ish `NVARCHAR(MAX)` with no `ISJSON` check |
-|---|---|
-| `event_history` | `response`, `signal_payload`, `child_input`, `new_input`, `plugin_input`, `plugin_output`, `promise_result`, `payload` — **all 8** |
-| `workflow_defs` | `dag_spec` (`plugin_deps` is what 036 fixes) |
-| `workflow_instances` | `compaction_state` |
-| `workflow_update_requests` | `result` |
-
-`plugin_defs`, `workflow_signals`, `workflow_promises`, `workflow_schedules` and
-`idempotency_keys` are fully covered. Re-derive with the per-table script recorded in the PR — a
-`grep | sort -u` over the whole file cannot answer this.
+> **Superseded by §3.53, and the list that stood here was wrong.** It named all eight of
+> `event_history`'s JSON-ish `NVARCHAR(MAX)` columns as candidates. Only **`payload`** is: the
+> other seven — `response`, `signal_payload`, `child_input`, `new_input`, `plugin_input`,
+> `plugin_output`, `promise_result` — are declared **`TEXT`** on PostgreSQL, not `JSONB`, so the
+> project does not claim they are JSON and constraining them on SQL Server would reject writes the
+> other dialects accept. The instinct in the next paragraph was right; the enumeration was not,
+> because it was eyeballed from column names rather than derived from the PostgreSQL types.
 
 Whether each *should* be validated is a per-column judgement rather than a sweep: `response` and
 `plugin_output` may legitimately hold a non-JSON payload from a service or plugin, and constraining
-them would be a behaviour change rather than a tightening. `event_history` is also the hot write
-path, so eight CHECK constraints there deserve their own measurement. Its own PR.
+them would be a behaviour change rather than a tightening. §3.53 settles the boundary.
+
+### 3.53 JSON-column parity is now a checked invariant, not a sweep — ✅ **FIXED** (2026-09-01)
+
+§3.51 fixed one column and left "the rest" as a per-column judgement. Deriving the boundary turned
+that judgement into a rule that CI can enforce:
+
+> **A column PostgreSQL declares `JSONB` must carry an `ISJSON` check on SQL Server.**
+
+`JSONB` is where the project actually commits to a value being JSON, so it is the right line. The
+seven `event_history` columns §3.51 listed as candidates — `response`, `signal_payload`,
+`child_input`, `new_input`, `plugin_input`, `plugin_output`, `promise_result` — are **`TEXT`** on
+PostgreSQL. A service or plugin may legitimately return something that is not JSON, so constraining
+those on SQL Server would reject writes the other dialects accept: an inconsistency in the opposite
+direction. §3.51's list has been corrected in place.
+
+**Six columns were genuinely missing**, two of which I had not noticed at all until a script
+enumerated them:
+
+| column | PostgreSQL |
+|---|---|
+| `event_history.payload` | nullable |
+| `workflow_defs.dag_spec` | nullable |
+| `workflow_instances.compaction_state` | nullable |
+| `workflow_instances.plugin_vers` | **NOT NULL** |
+| `workflow_instances.allowed_signals` | nullable |
+| `workflow_update_requests.result` | nullable |
+
+`migrations/mssql/037_json_column_checks.sql` adds all six, `WITH NOCHECK` for the reason §3.51
+records, tolerating NULL wherever PostgreSQL does.
+
+**The deliverable is the guard, not the migration.**
+`TestMSSQLValidatesEveryPostgresJSONBColumn` parses both schemas and fails if any PostgreSQL
+`JSONB` column lacks a SQL Server check. It reads the migration *files* rather than a live
+database — those files are the schema, and a file-based check needs no DSN, so it runs in every job
+and adds no skips.
+
+**It matches per table, and that is the whole subtlety.** `payload` and `result` each appear on
+several tables and are checked on some of them, so matching `ISJSON(payload)` anywhere in the file
+credits `event_history.payload` to `workflow_signals`. **I made that exact mistake twice** — once in
+the §3.51 audit and once in the first draft of this one — which is why the guard is mutation-tested
+against it specifically: deleting only the `event_history.payload` constraint must, and does,
+produce a failure naming `event_history.payload` while `ISJSON(payload)` still exists elsewhere in
+the file.
+
+The rule is enforced in one direction only, deliberately: `JSONB` implies a check, not the reverse.
+A column that should not be constrained should stop being declared `JSONB` on PostgreSQL, because
+that declaration is the claim being enforced.
+
+Verified: the six constraints applied to a live SQL Server and the full engine suite passes against
+all three dialects, so nothing the engine writes violates them. `sys.check_constraints` confirms
+all seven cleat-added checks are untrusted while the five original in-table ones stay trusted.
 
 ### 3.52 InitModule discarded the error it had a channel for — ✅ **FIXED** (2026-09-01)
 
