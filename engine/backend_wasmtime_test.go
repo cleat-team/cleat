@@ -1976,8 +1976,18 @@ func TestClosure_StringAndI64(t *testing.T) {
 }
 
 func TestClosure_CreatePromise(t *testing.T) {
-	// cleat_create_promise: (namePtr,nameLen, promiseIDPtr,promiseIDMaxLen, ttlMs i64) -> i64
-	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI64}, []byte{wasmValI64})
+	// cleat_create_promise: (namePtr,nameLen, promiseIDPtr,promiseIDMaxLen) -> i64
+	//
+	// This test used to declare a fifth parameter, `ttlMs i64`, matching the
+	// host registration rather than the specification. That is how the arity
+	// defect stayed alive: the guest here was written to fit the host, so the
+	// pair agreed with each other and with nothing else. ABI.md 2.34 says four
+	// i32 parameters, and the Go, Rust, Java and AssemblyScript SDKs all emit
+	// four -- so every real guest failed to link on the worker while this test
+	// passed. See TestCreatePromiseGuestLinksOnTheWorkerBackend, which asserts
+	// the documented signature specifically so that it cannot be quietly
+	// re-derived from whatever the host happens to declare.
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
 	s := newClosureSetup(t, []struct {
 		name string
 		ft   []byte
@@ -1986,7 +1996,7 @@ func TestClosure_CreatePromise(t *testing.T) {
 	})
 
 	s.writeString(80, "my-promise")
-	got := s.call(t, "test_cleat_create_promise", i32(80), i32(10), i32(200), i32(64), int64(10000))
+	got := s.call(t, "test_cleat_create_promise", i32(80), i32(10), i32(200), i32(64))
 	if got != 0 {
 		t.Errorf("got %v, want 0", got)
 	}
