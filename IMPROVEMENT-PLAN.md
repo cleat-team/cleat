@@ -6945,6 +6945,61 @@ Whether each *should* be validated is a per-column judgement rather than a sweep
 them would be a behaviour change rather than a tightening. `event_history` is also the hot write
 path, so eight CHECK constraints there deserve their own measurement. Its own PR.
 
+### 3.52 InitModule discarded the error it had a channel for — ✅ **FIXED** (2026-09-01)
+
+Third pass through errcheck's `engine` residue, now down to **8** non-`Rollback` production findings
+from 19. Two were real; the other six are recorded below as deliberate.
+
+`Runtime.InitModule` dispatches `_start` in a goroutine and reports the result through `errCh`,
+which is read in three places. But `errCh` was only ever *written* on panic:
+
+```go
+go func() {
+    defer func() {
+        if r := recover(); r != nil { errCh <- ... }
+        close(done)
+    }()
+    start.Call(ctx)          // returned error discarded
+}()
+```
+
+**wazero signals a trap by returning an error, not by panicking.** So the common failure was thrown
+away while the rare one was caught, `close(done)` still fired, and `InitModule` returned nil for a
+guest whose `_start` had trapped — the damage surfacing later on some unrelated export call. The
+machinery to report it was already there and simply not connected: the same shape as §3.44, §3.45
+and §3.50, a signal that existed but was attached to the wrong thing.
+
+**`exit(0)` is not a failure**, and getting that wrong would break every Go guest: a Go wasip1
+`_start` runs `main()` and terminates via `proc_exit`, which wazero surfaces as `*sys.ExitError`.
+So the fix reports every error *except* exit code 0.
+
+> **That carve-out was unverified when written, and the mutation proved it.** Inverting
+> `ExitCode() == 0` to `== 999` left the **entire engine suite green** — nothing exercised a real
+> `proc_exit(0)` through `InitModule`. Closed with `TestInitModuleTreatsExitZeroAsSuccess`, which
+> hand-builds a module importing `wasi_snapshot_preview1.proc_exit` and calling it with 0. Re-run
+> against the same mutation, it now fails with
+> `InitModule reported a failure for a guest whose _start exited 0: ... wasm trap: exit(code=0)`.
+> Without that test the fix would have shipped with an untested branch on the path every Go guest
+> takes.
+
+**Second finding, and it was mine.** §3.49 made `FaultInjector.Cleanup` return its error;
+`Reset` — which is Cleanup under another name — still discarded it. errcheck found it only because
+the call was bare, and `_ = fi.Cleanup()` would have hidden it again, which is §3.43's blind spot
+arriving in code I had just written. `TestResetPropagatesCleanupError` pins it.
+
+**The remaining six are deliberate**, and naming them is the point so the next reader does not
+re-derive:
+
+| site | why it stays |
+|---|---|
+| `backend_wasmtime.go` ×2 | component decomposition, tier 3 — parked, untested, changing it is not free |
+| `runtime.go:427`, `durablecalls.go:79` `CloseWithExitCode` | close-error idiom; the module is being torn down |
+| `sharded_store.go:85` `shard.Close()` | `ShardedStore.Close()` returns nothing; changing it is a public API break for no gain |
+| `version_handler.go:245` `json.Encoder.Encode` | the HTTP-response-write idiom `.golangci.yml` already decomposes out |
+
+Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok**. All six guard
+scripts pass; skip budget 483 against 487, no new skips.
+
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
