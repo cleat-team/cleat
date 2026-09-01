@@ -84,6 +84,14 @@ if [ "$status" -ne 0 ]; then
 	echo "    (arm64 needs aarch64-linux-gnu-gcc)" >&2
 	echo "  * binfmt/qemu is not registered on the runner, so an 'Exec format" >&2
 	echo "    error' is being reported here rather than a backend failure" >&2
+	echo "  * the cross-architecture sysroot is missing. Seen 2026-09-01 on the" >&2
+	echo "    first Release Dry Run: qemu started fine (binfmt was registered)" >&2
+	echo "    but reported" >&2
+	echo "        Could not open '/lib/ld-linux-aarch64.so.1'" >&2
+	echo "    because gcc-aarch64-linux-gnu links the binary without installing" >&2
+	echo "    the loader it needs. Fix: install libc6-arm64-cross and export" >&2
+	echo "    QEMU_LD_PREFIX=/usr/aarch64-linux-gnu. This one is easy to misread" >&2
+	echo "    as a backend failure -- the binary never reached its own main." >&2
 	exit "$status"
 fi
 

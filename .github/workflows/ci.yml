@@ -1090,6 +1090,99 @@ jobs:
   # -------------------------------------------------------------------------
   # Build all targets
   # -------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Release Dry Run — exercise the release build on every PR, not first at a tag
+  # -------------------------------------------------------------------------
+  #
+  # The release path had never executed. #514 fixed cleat-worker's build
+  # (CGO_ENABLED=0 produced binaries that exited 1 at startup, because wasmtime
+  # is the only WASM backend and the no-cgo stub returns
+  # ErrWasmtimeCGOUnavailable) and added scripts/verify-release-worker.sh as a
+  # goreleaser post-build hook. But `Release` only runs on a v* tag, so the two
+  # genuinely new pieces -- the aarch64 cross-compile and running an arm64
+  # binary under qemu -- would first have been exercised during an actual
+  # release, where the failure mode is a broken or blocked release rather than
+  # a red check on a PR.
+  #
+  # `goreleaser build` runs the same builds and the same post hooks as
+  # `goreleaser release`, without publishing anything, so this is the release
+  # path minus the upload.
+  #
+  # NOT a required check: .github/required-checks.txt mirrors branch protection,
+  # and adding a line there without changing the repository setting would be a
+  # doc that lies. Making this blocking is a settings change for a maintainer.
+  release-dryrun:
+    name: Release Dry Run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # Must match the CC template in .goreleaser.yml's cleat-worker build. If
+      # they drift, the arm64 link fails here rather than at the tag.
+      - name: Install the arm64 cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-arm64-cross
+          aarch64-linux-gnu-gcc --version
+          # libc6-arm64-cross supplies /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1.
+          # gcc-aarch64-linux-gnu alone links the binary but does not install the
+          # loader it needs, so qemu-aarch64 fails with
+          #   Could not open '/lib/ld-linux-aarch64.so.1': No such file or directory
+          # which reads as a backend failure but is a missing sysroot. QEMU_LD_PREFIX
+          # below is what points qemu at it.
+          test -e /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1
+
+      # scripts/verify-release-worker.sh executes every cleat-worker artifact
+      # and has no skip branch, so the arm64 one needs binfmt to run at all.
+      # Without this step it fails with "Exec format error" -- which is the
+      # intended behaviour, not a reason to add a skip.
+      - name: Set up QEMU for cross-architecture verification
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: GoReleaser build (no publish)
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: latest
+          args: build --snapshot --clean
+        env:
+          # Where qemu-aarch64 looks for the guest's dynamic loader and libc.
+          # Without it the arm64 post hook dies with "Could not open
+          # '/lib/ld-linux-aarch64.so.1'" before cleat-worker's main runs.
+          QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
+
+      # The post hook already ran --verify-backend on both workers, which is the
+      # assertion that matters. This is the cheap independent confirmation that
+      # the arm64 build is genuinely arm64 -- a cross-compile silently producing
+      # x86-64 would pass a hook executed on an x86-64 runner.
+      - name: Confirm the worker binaries are the architectures they claim
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r bin; do
+            printf '%s\n  %s\n' "$bin" "$(file -b "$bin")"
+            case "$bin" in
+              *linux_arm64*) file -b "$bin" | grep -q 'ARM aarch64' ;;
+              *linux_amd64*) file -b "$bin" | grep -q 'x86-64' ;;
+              *) echo "::error::unexpected cleat-worker target: $bin"; exit 1 ;;
+            esac
+            found=$((found + 1))
+          done < <(find dist -type f -name cleat-worker)
+
+          # Without this the loop matching nothing would exit 0 -- the
+          # "checks never started" shape CLAUDE.md is about.
+          if [ "$found" -ne 2 ]; then
+            echo "::error::expected 2 cleat-worker binaries (linux amd64 + arm64), found $found"
+            exit 1
+          fi
+
   build:
     name: Build
     runs-on: ubuntu-latest

@@ -178,3 +178,8 @@ cmd/cleat-worker/cleat-worker
 # build output with no reader, and left untracked it makes the tree dirty after
 # any asworkflow build.
 tests/plugin-harness/testdata/asworkflow/dist/workflow.stamped.wasm
+
+# goreleaser output. Produced by `goreleaser build --snapshot`, which the
+# Release Dry Run CI job runs and which is the documented way to reproduce a
+# release build locally (docs/project/release-process.md).
+dist/
