@@ -6628,6 +6628,52 @@ no error came back); and failing closed with an empty registry (the CLI-path gua
 Verified: `go test ./engine/ ./cmd/... -p 1 -count=1` against all three dialects → **all ok**,
 engine 70s.
 
+### 3.46 A dropped Unmarshal turned "unreadable" into "you declared nothing" — ✅ **FIXED** (2026-09-01)
+
+Second pass through errcheck's `engine` residue (16 left after §3.44 took three).
+
+`cleat_call_retry` takes the workflow author's non-retryable error patterns as a JSON array.
+`freshCallWithRetry` parsed it and dropped the error, so on malformed JSON the slice stayed nil —
+and a nil slice is indistinguishable from "the author declared no non-retryable errors".
+`isDefinitelyNonRetryable` then matches nothing and every failure becomes retryable, so a call
+explicitly marked *do not retry* is issued `maxAttempts` times. For the non-idempotent operations
+that declaration exists to protect, that is a duplicate side effect.
+
+Measured with a counting caller and a plain error whose message matches the pattern:
+
+| non-retryable list | calls issued |
+|---|---|
+| `["INSUFFICIENT_FUNDS"]` | 1 |
+| `INSUFFICIENT_FUNDS` (not an array) | **5** |
+
+> **The first version of that test proved nothing, and the reason is worth keeping.** It used the
+> existing `nonRetryableErr` fixture, which implements `Retryable() bool { return false }`.
+> `isDefinitelyNonRetryable` checks that interface *first* and short-circuits before ever reaching
+> the pattern list, so the malformed case stopped after 1 call and the test went red only on the
+> return-value assertion. The count assertion — the one that demonstrates the defect — was passing
+> for a reason unrelated to the bug. Fixed by using a plain `errors.New` whose message matches, so
+> classification has to go through the list. This is CLAUDE.md's "check that it went red *for the
+> reason you expect*" catching a test that was half-measuring.
+
+The argument crosses the ABI from five language SDKs, the layer CLAUDE.md records as the source of
+four real defects, "in every case the value meant the wrong thing on one side of the boundary". An
+SDK emitting a bare comma-separated string lands exactly here.
+
+Fixed by refusing with `badParamDurableCall` — the §2.10 convention for this host-function family,
+which encodes the refusal in the layout the guest adapter actually decodes. Failing closed is the
+safe direction: *"I could not read your safety declaration"* must not be treated as *"you made no
+safety declaration"*. An empty string is still a valid "no patterns" and keeps working; that is
+its own subtest.
+
+**Left for a follow-up, with a count errcheck cannot produce.** The same dropped-`Unmarshal`-means-
+empty-value shape covers `plugin_deps` on the workflow-def read paths, where corrupt JSON reads as
+*this workflow has no plugin dependencies*. errcheck reports **5** such sites
+(`mysql_ops.go` ×2, `mssql_deployment.go` ×2, `versioned_loader.go`) — but `store_deployment.go`
+does it twice more with `_ =`, which errcheck cannot see. **7 sites, not 5**, the same blind spot
+recorded in §3.43.
+
+Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 74s**.
+
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
