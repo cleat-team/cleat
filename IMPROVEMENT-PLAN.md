@@ -8207,12 +8207,85 @@ calls no handler, so the argument-order property cannot apply. It is allowlisted
 `directWriters`, and the allowlist is asserted **exact in both directions** so that a wrapper
 which starts or stops writing directly is a decision rather than a silent gap.
 
-**Still open, and now named:** `cleat_poll_work` is the least-covered call in this file and the
+**Named here, closed in §3.62:** `cleat_poll_work` is the least-covered call in this file and the
 one where a mix-up is most dangerous — it takes **two** output buffers, `(entryNamePtr,
 entryNameMaxLen)` and `(argsPtr, argsMaxLen)`, and copies into both with hand-written bounds.
+The bounds turned out not to exist.
 
 **What this does not do.** It reads source, so it cannot catch a wrong value passed in the right
 position. That is what §3.59's behavioural test does, for one call. Breadth here, depth there,
 deliberately.
 
 Re-derive: `go test ./engine/ -run TestOutputBufferHostCallsPassPtrAndMaxLenInOrder -count=1 -v`
+
+### 3.62 `cleat_poll_work` wrote to guest pointers it never checked — ✅ **FIXED** (2026-09-01)
+
+§3.61 allowlisted `cleat_poll_work` out of the output-buffer property because it copies into
+guest memory itself instead of delegating to the handler, and named it as the one call still
+needing a behavioural test of its own — "copies into both with hand-written bounds". Reading it
+to write that test: **there were no bounds.**
+
+```go
+copy(buf[entryNamePtr:entryNamePtr+int32(entryLen)], entryBytes[:entryLen])
+copy(buf[argsPtr:argsPtr+int32(argsLen)], b.workInput[:argsLen])
+```
+
+`entryNamePtr` and `argsPtr` come straight off the guest's stack as `i32`. Every other writer in
+the wasmtime host layer checks: `wasmtimeWriteString` compares `uint64(ptr)+uint64(len)` against
+`len(buf)` (`engine/wasmtime_memory.go`), `cleat_complete` does the same inline before slicing
+(`engine/wasmtime_hostfuncs.go`), and `writeResult` was fixed explicitly with a comment naming
+this class (`engine/flush.go`). This was the only one that did not, out of 31 output-buffer
+calls.
+
+Measured 2026-09-01 against a one-page (65536-byte) guest, via a probe module forwarding its four
+parameters to the import:
+
+| call | before |
+|---|---|
+| `entryNamePtr = -1` | `panic: slice bounds out of range [-1:]` |
+| `entryNamePtr = 65530`, `entryNameMaxLen = 64` | `panic: slice bounds out of range [:65538] with capacity 65536` |
+| `argsPtr = 65530`, `argsMaxLen = 1024` | `panic: slice bounds out of range [:65551] with capacity 65536` |
+
+A negative pointer is the interesting one: it slices *backwards*, so a bounds check written in
+signed arithmetic would not catch it either. The fix interprets the pointer as an unsigned WASM
+address (`uint64(uint32(ptr))`), which is what it is.
+
+**Severity, stated precisely rather than dramatically.** This is **not** a worker crash. All
+three sites that call into a guest — `backend_wasmtime.go` at the Go `_start` branch, the
+direct-export branch, and the component branch — wrap the call in a `recover`, so the panic
+became a failed workflow reporting `wasmtime panic in "<entryPoint>"`. Two things are still
+wrong with that: the message names the *guest's* entry point, so the fault looks like guest code
+rather than a host function handed an argument it never validated; and those recovers were added
+for "wasmtime-go internal panics", not for this — relying on them leaves every future direct
+writer one unguarded `copy` away from the same thing.
+
+A fourth defect, found while writing the test: a **negative** `entryNameMaxLen` went into
+`if entryLen > int(entryNameMaxLen)` and set `entryLen` to `-1`. The copy was skipped (guarded by
+`entryLen > 0`) but `-1` was still packed into the returned length, and the guest reads that high
+word as unsigned — 0xFFFFFFFF bytes of entry name supposedly available.
+
+**Fix.** Two helpers in `engine/wasmtime_memory.go`, `clampToMaxLen` and `guestRangeOK`, and both
+ranges checked before *either* copy, so the call is all-or-nothing: a guest that gets its second
+pointer wrong does not come back to a half-populated first buffer.
+
+**Test.** `engine/poll_work_guest_pointer_test.go`. Four refusal cases, each proven to fail with
+the fix removed and for the expected reason — the panic text in the table above. They must be run
+one at a time to see all four, because before the fix the first one killed the test binary.
+
+Two controls, both of which pass with the fix removed as well, and are there to stop the refusal
+being satisfied by refusing too much:
+
+- `TestPollWorkDeliversWorkAtValidPointers` — the ordinary call every Go guest makes. Without it,
+  `return errBadParamInt64` unconditionally would make the file green and no Go workflow could
+  start.
+- `TestPollWorkTruncatesToTheCapacityTheGuestDeclared` — a short-but-valid buffer must still be
+  filled and truncated, and a **sentinel byte** immediately past it must survive. Comparing the
+  buffer's contents cannot see a one-byte overrun; the sentinel can.
+
+**A note on the harness, which measured nothing on its first run.** `NewWasmtimeBackend` calls
+`cfg.SetEpochInterruption(true)`, so a store built with a bare `wasmtime.NewStore` has an epoch
+deadline of 0 and *every* call traps with `wasm trap: interrupt` before reaching the host
+function — including the happy path. The harness calls `b.configureStore` and asserts guest
+memory is the expected 65536 bytes, since the out-of-range pointers are chosen relative to it.
+
+Re-derive: `go test ./engine/ -run TestPollWork -count=1 -v`

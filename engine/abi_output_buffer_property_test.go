@@ -206,6 +206,12 @@ func uint32ArgName(e ast.Expr) (string, bool) {
 // buffers -- (entryNamePtr, entryNameMaxLen) and (argsPtr, argsMaxLen) -- and
 // copies into both with hand-written bounds, which is exactly the shape where a
 // mix-up writes past a guest's declared capacity.
+//
+// That test now exists -- poll_work_guest_pointer_test.go -- and the hand-
+// written bounds were in fact missing entirely: both copies used the guest's
+// pointer unchecked and panicked on a negative or out-of-range one. Anything
+// added to this map inherits the same blind spot, so it needs the same
+// treatment.
 var directWriters = map[string]bool{
 	"cleat_poll_work": true,
 }
