@@ -6737,6 +6737,50 @@ the applied `001_schema.sql` would not re-run on existing databases); WS-3's res
 
 Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 69s**.
 
+### 3.48 `assert_tenant_set` missed the empty string — ✅ **FIXED** (2026-09-01)
+
+The follow-up §3.47 recorded. `cleat.assert_tenant_set()` raises when `cleat.tenant_id` is
+missing, so a query reaching an RLS-forced table without a tenant context fails loudly. It tested
+only for NULL — but `setRLSOnTx` sets the GUC with
+`set_config('cleat.tenant_id', $1, true)`, where the third argument is `is_local`: scoped to the
+transaction and reset when it ends.
+
+**Reset is not undefined.** Once a session has set the GUC even once, `current_setting` returns the
+**empty string** on that connection rather than NULL, the `IS NULL` guard misses, and
+`RETURN tid::uuid` fails. Measured on one pinned connection:
+
+| connection state | error |
+|---|---|
+| fresh | `cleat.tenant_id is not set` (P0001) — the intended message |
+| after one RLS transaction | `invalid input syntax for type uuid: ""` (22P02) |
+
+Both correctly *refuse* the query, so this is a diagnostics defect and not a data-integrity one.
+It still matters: connections come from a pool, so which error a given query produces depends on
+whether that connection happened to serve an RLS transaction earlier — effectively random.
+Identical bugs arrive wearing two different messages, and the 22P02 one never mentions tenants,
+reading like malformed caller input rather than a query that forgot its tenant context.
+
+Fixed in `migrations/postgres/034_assert_tenant_set_empty_string.sql` with
+`IF tid IS NULL OR tid = ''`. `CREATE OR REPLACE` rather than DROP + CREATE, because every
+`tenant_isolation_*` policy in `001_schema.sql` references the function. A **new** migration rather
+than an edit to 001, because `migration.Runner` records by name and never re-runs, so editing 001
+would fix only databases created afterwards and silently leave existing deployments on the old
+definition — the same reasoning §3.12 records from the other direction.
+
+Two things the regression test has to do, either of which would otherwise let it pass vacuously:
+
+- **Pin one connection** with `db.Conn`. The pool is free to hand the second query a different,
+  never-used connection, which takes the NULL path and passes against the unfixed function.
+- **Assert the precondition**, that `current_setting` really is `""` after the transaction, before
+  asserting anything about the error.
+
+Proved red by moving 034 aside and restoring the old definition: it failed with
+`invalid input syntax for type uuid: ""` against `want one containing "cleat.tenant_id is not
+set"` — the exact expected reason. Green once the Runner applied 034 (recorded as version 34).
+
+Verified: `go test ./engine/ ./migration/... -p 1 -count=1` against all three dialects →
+**both ok**, engine 70s.
+
 ### 3.49 A fault that never reached the database reported itself as active — ✅ **FIXED** (2026-09-01)
 
 The third of the errcheck classes from §3.46. `FaultInjector`'s three `ExecContext` calls discarded
@@ -6772,7 +6816,6 @@ behaviour — it fails with "IsActive(FaultWorkerCrash) is true after the inject
 the expected reason.
 
 Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 73s**.
-
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
