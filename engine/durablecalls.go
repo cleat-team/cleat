@@ -265,9 +265,35 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	responsePtr, responseMaxLen uint32) int64 {
 
 	// Parse non-retryable error patterns.
+	//
+	// A parse failure is refused rather than swallowed. This used to drop the
+	// error, which left the slice nil, and a nil slice is indistinguishable from
+	// "the author declared no non-retryable errors": isDefinitelyNonRetryable
+	// finds nothing to match and every failure becomes retryable. So a workflow
+	// that said "do not retry INSUFFICIENT_FUNDS" got its call retried
+	// maxAttempts times, which for the non-idempotent operations that
+	// declaration exists to protect is a duplicate side effect.
+	//
+	// Note that the interface check in isDefinitelyNonRetryable short-circuits
+	// ahead of the pattern list, so this only bites errors classified by message
+	// -- which is exactly what this argument is for.
+	//
+	// nonRetryableErrorsJSON arrives across the ABI from five language SDKs, the
+	// layer CLAUDE.md records as the source of four real defects. An SDK sending
+	// a bare comma-separated string rather than a JSON array lands here.
+	//
+	// Failing closed is the safe direction: "I could not read your safety
+	// declaration" must not be treated as "you made no safety declaration".
+	// badParamDurableCall rather than errBadParam because the guest adapter
+	// decodes the packDurableCallResult layout -- see memory.go for what the raw
+	// sentinel did to it.
 	var nonRetryableErrors []string
 	if nonRetryableErrorsJSON != "" {
-		json.Unmarshal([]byte(nonRetryableErrorsJSON), &nonRetryableErrors)
+		if err := json.Unmarshal([]byte(nonRetryableErrorsJSON), &nonRetryableErrors); err != nil {
+			s.engine.log().WarnContext(ctx, "unparseable non-retryable error list; refusing the call",
+				"service", service, "operation", operation, "error", err)
+			return badParamDurableCall
+		}
 	}
 
 	var lastErr error
