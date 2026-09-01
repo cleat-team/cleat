@@ -6780,7 +6780,6 @@ set"` — the exact expected reason. Green once the Runner applied 034 (recorded
 
 Verified: `go test ./engine/ ./migration/... -p 1 -count=1` against all three dialects →
 **both ok**, engine 70s.
-
 ### 3.49 A fault that never reached the database reported itself as active — ✅ **FIXED** (2026-09-01)
 
 The third of the errcheck classes from §3.46. `FaultInjector`'s three `ExecContext` calls discarded
@@ -6816,6 +6815,66 @@ behaviour — it fails with "IsActive(FaultWorkerCrash) is true after the inject
 the expected reason.
 
 Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 73s**.
+### 3.50 SQL Server's `plugin_deps` has never round-tripped — ✅ **FIXED** (2026-09-01)
+
+The last of the errcheck classes from §3.46, and the dropped error turned out to be hiding a data
+bug rather than guarding against a hypothetical one.
+
+All three dialects marshal `PluginDeps` and pass the result as `[]byte`. go-mssqldb binds `[]byte`
+as `VARBINARY`, and the implicit conversion into the column's `NVARCHAR(MAX)` reinterprets the
+UTF-8 bytes as UTF-16:
+
+    written    {"llm":"1.2.0"}
+    read back  ≻汬≭∺⸱⸲∰}
+
+PostgreSQL (`JSONB`) and MySQL (`JSON`) are unaffected — both are validating JSON types and both
+drivers bind `[]byte` correctly for them. **Every `plugin_deps` row ever written by SQL Server is
+mangled**, and it propagates: `cleatctl deploy` carries the previous version's `PluginDeps` onto
+the new one, so the loss travels down the version chain and each new version records it as fact.
+
+**Nothing noticed because the read discarded its `json.Unmarshal` error** and defaulted the nil map
+to an empty one, so every caller saw the entirely plausible "this workflow declares no plugin
+dependencies". This is the §3.46 class paying off twice: the first pass found a defect, and fixing
+the *reporting* is what surfaced this one.
+
+> What is *not* affected, since it would be easy to overstate: the worker's plugin compatibility
+> gate (`cmd/cleat-worker/setup.go`) reads `PluginDeps` from the WASM metadata, not from this
+> column. It was never at risk.
+
+**Write fixed** with `string(pluginDepsJSON)` on the MSSQL path — one word, confirmed by a
+round-trip test that fails on `mssql` alone when reverted.
+
+**Reads deliberately stay permissive**, which is the weaker option and was a judgement call.
+Returning the error is strictly more correct and is what §3.46 did for its own case. It cannot be
+done here: every SQL Server row written before this change is mangled, so a read that errors turns
+a latent data bug into an outage — `GetWorkflowDef` failing means the workflow cannot be loaded at
+all. One `decodePluginDeps` helper now serves all 7 sites, logs the failure naming def and version,
+and returns an empty map. The read self-heals on the next deploy of each definition. What changed
+is that it is no longer *silent*.
+
+`TestUnparseablePluginDepsIsLoggedNotFatal` pins that contract so a future tightening is a
+deliberate decision rather than an accident.
+
+**A schema asymmetry found on the way, recorded not fixed.** The column is a validating JSON type
+on two of three dialects:
+
+| dialect | column | validates |
+|---|---|---|
+| postgres | `JSONB NOT NULL` | yes |
+| mysql | `JSON NOT NULL` | yes |
+| mssql | `NVARCHAR(MAX)` | **no** |
+
+So syntactically invalid JSON cannot be stored at all on Postgres or MySQL — my first attempt at
+the test tried and both databases refused it (`pq: invalid input syntax for type json`,
+`Error 3140 (22032): Invalid JSON text`). SQL Server alone will store anything. Adding a CHECK
+constraint is a schema change and belongs in its own PR.
+
+Both halves mutation-tested, each failing for its own reason: reverting the write fix fails
+`TestPluginDepsRoundTrip/mssql` **only** — postgres and mysql still pass, which is what isolates
+the defect to SQL Server — and making the read hard-fail trips the permissive test.
+
+Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 71s**.
+
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
