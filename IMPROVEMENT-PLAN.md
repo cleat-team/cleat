@@ -6041,19 +6041,29 @@ see what was acquired, what was done, and to whom.
 
 Three findings, each verified against the tree rather than inferred.
 
-1. **In the embedded (in-process Go) runner, defer closures never run.** `DurableDeferFunc(fn)`
-   appends to `cleat/embedded/runner.go`'s `deferFuncs []func()` at line 508, and that field has
-   **no reader anywhere in non-test code**. The caller gets a defer ID and no cleanup. Not a
-   degraded path — an absent one.
+1. ~~**In the embedded (in-process Go) runner, defer closures never run.**~~ **Closed** —
+   `deferFuncs` was given a reader on 2026-08-05, the same day this was written; the drain is at
+   `cleat/embedded/runner.go:568` and the commit's own comment says "Until 2026-08-05 nothing
+   did." Re-checked 2026-09-01 and left in place rather than deleted, because the "What to do in
+   the meantime" note at the end of this section still asked for it.
+   Re-derive: `grep -rn "deferFuncs" --include="*.go" .` — a reader outside `_test.go` means
+   this is closed.
 2. **In WASM, a defer cannot have context by construction.** `RunDefer` compiles the module and
    instantiates it *fresh*: new linear memory, so the workflow body never ran in it and nothing
    it captured exists; no `HostHandler` in ctx, so no durable calls, no lock release, no
    notification; and `nil` input.
-3. **The four call sites disagree.** Only `executor.go:649` invokes defers on the live instance
-   with the session. `executor.go:361` runs `invokeDefersOnTrap` *and* `runDefers`
-   unconditionally — the comment says "fall back" but there is no conditional, so each defer
-   body executes **twice**. The success path runs them from `cmd/cleat-worker` *after*
-   `FinalizeWorkflowSegment`, by which point the instance is gone.
+3. **The four call sites disagree.** Only one invokes defers on the live instance with the
+   session. `executeCompiled`'s non-suspend-error branch ran `invokeDefersOnTrap` *and*
+   `runDefers` unconditionally — the comment said "fall back" but there was no conditional, so
+   each defer body executed **twice**. The success path runs them from `cmd/cleat-worker`
+   *after* `FinalizeWorkflowSegment`, by which point the instance is gone.
+
+   **The doubling is fixed in §3.64** (2026-09-01), confirmed by running rather than by reading:
+   two `defer execution failed` records for the same `defer_id`, each carrying the trap raised
+   by the defer function itself. Line numbers in the original text have moved; the branch is
+   the one guarded by `if len(session.deferrals) > 0` in `executeCompiled`. The rest of this
+   finding — the four sites disagreeing about *when* and *with what context* — is the design
+   below, and is untouched.
 
 So today: "full context" holds on one error path, "guaranteed to run" holds nowhere, and on the
 common paths a defer can only execute code that depends on nothing.
@@ -6132,7 +6142,10 @@ cannot make host calls" as a contract, which is an accident of the current imple
 is exactly what this design reverses.
 
 The embedded runner's dropped closures (finding 1) should be fixed regardless of which way this
-goes: today that API silently does nothing.
+goes: today that API silently does nothing. **Done — see finding 1 above; it was already fixed
+when this paragraph was written.** The doubled defer body (finding 3) is likewise orthogonal and
+fixed in §3.64: running a destructor twice is wrong under every set of semantics in the decision
+table above.
 
 ### 3.36 errcheck's 283 findings, triaged — 🔶 **1 real defect found, handed to WS-1** (WS-3, 2026-08-05)
 
@@ -8388,3 +8401,67 @@ Runtime and no backends: `cleatctl replay|debug`, `cleat run_embedded`, `cleat-b
 `cleat/wasmtest`. The worker returns from `executeWithBackend` and never reaches it.
 
 Re-derive: `go test ./engine/ -run 'TestDeferPass|TestRunDefer' -count=1 -v`
+
+### 3.64 A defer body ran twice after a trap — ✅ **FIXED** (2026-09-01)
+
+§3.35 finding 3, confirmed by running rather than by reading, and fixed. Its other two findings
+were re-checked at the same time; finding 1 was already closed, on the day it was written.
+
+`executeCompiled`'s non-suspend-error branch called `invokeDefersOnTrap` (the still-live module)
+and then `runDefers` (a fresh module), unconditionally, under a comment reading *"Try running
+defers on the still-live module first, then fall back to fresh-module defers."* **There was no
+conditional.**
+
+Measured 2026-09-01 with a guest that registers one defer and traps, whose defer body also
+traps — the trapping body is what makes execution observable, since a defer that returned
+cleanly would log nothing:
+
+    "defer execution failed" defer_id=defer-0 description=cleanup
+        error="wasm trap: unreachable ... .$2(i32,i32,i32,i32) i64"
+    "defer execution failed" workflow_id=wf-probe defer_id=defer-0 export=cleat_defer_defer-0
+        error="wasm trap: unreachable ... .$2(i32,i32,i32,i32) i64"
+
+Two records, same `defer_id`, and each carries the trap raised by the *defer function* (`$2`),
+so both had reached the body. A defer is a destructor, so a doubled body is a doubled effect: a
+compensating saga step applied twice, a lock released twice, a notification sent twice.
+
+**Scope, stated so nobody has to re-derive it: this is not the worker.** `executeCompiled` is
+reached only when no backend is registered — `Replay` and `Execute` both route to
+`executeWithBackend` first. That leaves `cleatctl replay|debug`, `cleat run`, `cleat-bench`, and
+the public testing packages `cleat/wasmtest`, `cleat/cleattest`, `cleat/embedded`. **That last
+group is the reason it matters rather than the reason it does not**: a user testing a
+compensating defer saw it fire twice under the harness and once in production, so the harness
+disagreed with the runtime in the direction that makes a real double-compensation look like a
+test artifact.
+
+**Fix.** `invokeDefersOnTrap` now returns the deferrals it did *not* invoke, and the caller falls
+back for those and only those. **"Invoked" means the export was found and called, whatever the
+outcome** — a defer that ran and trapped must not be retried on a fresh instance, because it may
+already have applied part of its effect, which is the case where doubling does the most damage.
+
+The other `invokeDefersOnTrap` call site discards the new return value deliberately: it has never
+had a fall-back, and adding one there would be a behaviour change rather than this bug fix.
+
+**One guest carries both halves of the property.** It registers two defers and exports a
+`cleat_defer_*` for only the first:
+
+| | live-module export | must |
+|---|---|---|
+| `defer-0` | present | run **once**, not be re-run |
+| `defer-1` | absent | still reach the fall-back |
+
+Without the second, "run each defer once" is satisfied by deleting the fall-back entirely and
+silently dropping a defer the live module could not offer.
+
+**Three mutations, each caught for its own reason:**
+
+| mutation | what failed |
+|---|---|
+| fall-back made unconditional again | `defer-0's body executed 2 times, want 1` |
+| a trapped defer reported as un-invoked | `defer-0's body executed 2 times` **and** `defer-0 was reported as not invoked, but its export exists and was called -- it trapped` |
+| fall-back deleted entirely | `defer-1 reached the fresh-module fall-back 0 times, want 1` |
+
+The second is the plausible-wrong fix — treating any failure as "not invoked" — and it is caught
+by both the behavioural test and the unit-level one.
+
+Re-derive: `go test ./engine/ -run 'TestDeferBodyRunsOnceAfterATrap|TestInvokeDefersOnTrap' -count=1 -v`
