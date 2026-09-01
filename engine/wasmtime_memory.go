@@ -91,6 +91,40 @@ func wasmtimeWriteString(buf []byte, ptr uint32, s string, maxLen uint32) (uint3
 	return uint32(len(data)), nil
 }
 
+// clampToMaxLen truncates a host-side payload length to the capacity the guest
+// declared for it.
+//
+// maxLen arrives as an i32, so it can be negative -- a corrupt argument, not a
+// capacity. Clamping it to zero rather than propagating it keeps the truncated
+// length usable as both a copy bound and a return value; the old inline form
+// (`if n > int(maxLen) { n = int(maxLen) }`) yielded -1 for maxLen=-1, which
+// skipped the copy but still packed 0xFFFFFFFF into the length the guest reads
+// back.
+func clampToMaxLen(n int, maxLen int32) int {
+	if maxLen <= 0 {
+		return 0
+	}
+	if n > int(maxLen) {
+		return int(maxLen)
+	}
+	return n
+}
+
+// guestRangeOK reports whether length bytes may be written at a guest-supplied
+// pointer without leaving buf.
+//
+// ptr is an i32 and is interpreted as an unsigned WASM address, so a negative
+// value becomes a very large offset and is rejected -- rather than slicing
+// backwards, which is a Go panic and not a WASM trap. A zero length is always
+// in range because nothing is written; a guest that declares no capacity for an
+// output buffer is asking not to receive it, which is legitimate.
+func guestRangeOK(buf []byte, ptr int32, length int) bool {
+	if length <= 0 {
+		return true
+	}
+	return uint64(uint32(ptr))+uint64(length) <= uint64(len(buf))
+}
+
 func callerMemBuf(caller *wasmtime.Caller) ([]byte, *wasmtime.Memory, error) {
 	export := caller.GetExport("memory")
 	if export == nil {
