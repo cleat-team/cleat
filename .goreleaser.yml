@@ -1,7 +1,11 @@
 # ---------------------------------------------------------------------------
 # GoReleaser configuration (v2 format)
 #
-# Builds cleat, cleat-worker, and cleat-gen for Linux and macOS on amd64/arm64.
+# Builds cleat and cleat-gen for Linux and macOS on amd64/arm64, and
+# cleat-worker for Linux only -- the worker needs CGO for the wasmtime backend
+# and this release runs on ubuntu, which cannot link a darwin CGO binary. See
+# the comment on the cleat-worker build below.
+#
 # The embedded Svelte UI (cmd/cleat-worker/web/dist/) is included in the
 # cleat-worker archive.
 # ---------------------------------------------------------------------------
@@ -27,17 +31,59 @@ builds:
       - arm64
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+  # CGO_ENABLED=1, and linux only. Both are forced by the same fact, and this
+  # block shipped binaries that could not start for as long as it said
+  # CGO_ENABLED=0.
+  #
+  # wasmtime is the only WASM backend cleat has. Under CGO_ENABLED=0 the
+  # `//go:build cgo` file engine/backend_wasmtime.go is compiled out and
+  # NewWasmtimeBackend resolves to the stub in backend_wasmtime_stub.go, which
+  # returns ErrWasmtimeCGOUnavailable. cmd/cleat-worker/main.go:789 logs
+  # "there is no fallback" and calls os.Exit(1). Measured 2026-09-01:
+  #
+  #   CGO_ENABLED=0  ->  NewWasmtimeBackend err = "wasmtime backend requires CGO
+  #                      (binary built with CGO_ENABLED=0)"
+  #   CGO_ENABLED=1  ->  err = <nil>
+  #
+  # So every cleat-worker ever attached to a release was dead on arrival: it
+  # exits 1 before reading a flag. Nothing caught it because
+  # `CGO_ENABLED=0 go build ./...` still exits 0 -- the failure is at startup,
+  # not at build time. The Dockerfile was fixed for exactly this in an earlier
+  # pass and grew a `RUN /cleat-worker --verify-backend` gate; goreleaser was
+  # missed, so the container was fine and the tarballs were not.
+  #
+  # darwin is dropped rather than cross-compiled. A CGO darwin binary cannot be
+  # linked on ubuntu-latest without osxcross, and every job in .github/workflows
+  # runs ubuntu-latest (36 of 36, measured 2026-09-01 with
+  # `grep -rhoE 'runs-on: .*' .github/workflows/ | sort | uniq -c`). Two
+  # binaries that provably start beat four that provably do not. macOS users
+  # have `go install` -- the path README.md:149 actually documents, which builds
+  # locally with CGO on -- and the Docker image. Re-adding darwin means adding a
+  # macOS runner, not changing this line.
   - id: cleat-worker
     main: ./cmd/cleat-worker
     binary: cleat-worker
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      # aarch64-linux-gnu-gcc is installed by the Release workflow. If this
+      # template stops matching the installed cross compiler the build fails
+      # loudly at link time, which is the intended behaviour.
+      - 'CC={{- if eq .Arch "arm64" }}aarch64-linux-gnu-gcc{{- else }}gcc{{- end }}'
     goos:
       - linux
-      - darwin
     goarch:
       - amd64
       - arm64
+    # Run each binary that is about to be published and make it prove it has a
+    # working backend. Post hooks run as each artifact is built, before the
+    # publish stage, so a failure here aborts the release rather than
+    # documenting it afterwards.
+    #
+    # This is the check whose absence is the whole bug above: the config said
+    # CGO_ENABLED=0 for months and nothing executed the result.
+    hooks:
+      post:
+        - cmd: ./scripts/verify-release-worker.sh "{{ .Path }}" "{{ .Arch }}"
     mod_timestamp: "{{ .CommitTimestamp }}"
 
   - id: cleat-gen
@@ -103,4 +149,15 @@ release:
     See the [CHANGELOG](https://github.com/cleat-team/cleat/blob/main/CHANGELOG.md) for full details.
 
     ### Downloads
-    Pre-built binaries for Linux and macOS (amd64 + arm64) are attached below.
+    `cleat` and `cleat-gen`: Linux and macOS, amd64 + arm64.
+
+    `cleat-worker`: **Linux only** (amd64 + arm64). The worker requires CGO for
+    the wasmtime runtime, so there is no cross-compiled macOS build. On macOS,
+    install it from source with
+
+    ```
+    go install github.com/cleat-team/cleat/cmd/cleat-worker@latest
+    ```
+
+    or use the Docker image. Every published `cleat-worker` binary is executed
+    with `--verify-backend` before release.
