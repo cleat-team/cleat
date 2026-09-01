@@ -5796,12 +5796,30 @@ verified — it passes ctx correctly, but nothing exercises a runaway guest thro
 every component that reaches it today fails to instantiate for other reasons.
 
 And the defer row above is now true of `RunDefer` but not yet of the path that calls it after
-a trap. `executor.go:361` passes `context.Background()` to the post-trap defers on purpose, so
-that cleanup still happens when the workflow's own context has timed out or been cancelled —
-correct in intent, but it leaves `configureStore` with no deadline to reconcile against, so
-those defers get the backend-wide 30s default rather than any per-workflow budget. That is the
-same shape as the component-path defect above. **Read off the code, not measured** — noted
-that way deliberately, since every other finding in this section came from running something.
+a trap. `executor.go` passes `context.Background()` to the post-trap defers on purpose (three
+sites: the `execCtx` deadline branch, the non-suspend-error branch, and the wazero path's
+equivalent), so that cleanup still happens when the workflow's own context has timed out or
+been cancelled — correct in intent, but it leaves `configureStore` with no deadline to
+reconcile against, so those defers get the backend-wide 30s default rather than any
+per-workflow budget. That is the same shape as the component-path defect above.
+
+> **Measured 2026-09-01 — and it was worse than this paragraph predicted.** This used to end
+> "**Read off the code, not measured** — noted that way deliberately, since every other finding
+> in this section came from running something." Running it, with a backend timeout of 2s:
+>
+> | ctx handed to the defer | elapsed | budget the host reported |
+> |---|---|---|
+> | 200 ms deadline | 150 ms | `199.778625ms wall-clock budget` |
+> | `context.Background()` | 2.001 s | `2s wall-clock budget` |
+> | **3 runaway defers via `runDefers(Background)`** | **6.001 s** | `2s` each |
+>
+> The per-call behaviour is fine — with nothing tighter to reconcile against, the backend's own
+> budget is the right answer. What nobody had noticed is that it is *per call*: each defer
+> starts from a fresh copy, so the worst case grows without limit in the number of defers a
+> workflow registered. On a worker that is 30s each, so twenty runaway defers held a slot for
+> ten minutes. Fixed in §3.63.
+>
+> Re-derive: `go test ./engine/ -run TestDeferPass -count=1 -v`
 
 The generalisable finding, which is the one worth carrying: **"which backend runs this" and
 "which code path inside that backend runs this" are different questions, and the limit story
@@ -5825,8 +5843,21 @@ calls the behaviour of record.
 > *backend*, a CGO-less worker exits at startup, so that branch is now reached by a guest whose
 > language has no registered backend rather than by a whole build mode. Either way the fence is
 > absent and nothing measures it.
+
+> **Superseded, 2026-09-01.** #503 made `resolveBackend` fail closed on exactly that case, so
+> the fall-through is now reached only by an engine that registers no backends at all —
+> `cleatctl replay|debug`, `cleat run_embedded`, `cleat-bench`, `cleat/wasmtest` — where the
+> wazero Runtime is the intended executor rather than a fallback. The unfenced surface is
+> developer tooling, not anything a worker runs.
 >
-> Re-derive: `grep -n "Unfenced, and unavoidably so" engine/executor.go`
+> **The re-derive command this block used to carry was a trap, and is the reason it is being
+> corrected rather than deleted.** It was
+> `grep -n "Unfenced, and unavoidably so" engine/executor.go`, and it still matches — at
+> `engine/executor.go:795`, inside a comment that *quotes the old wording in order to say it
+> was wrong*: "This comment used to say ... Both halves were wrong." A grep that confirms a
+> stale claim by matching the text of its own retraction is the same failure as CLAUDE.md's
+> §1.1 note, where checking a bug report against the migration file it named confirmed a bug
+> that a later migration had already fixed. Read the match, not the exit code.
 
 #### 3.31 addendum — the decomposition path has never successfully run anything (2026-08-05)
 
@@ -8289,3 +8320,71 @@ function — including the happy path. The harness calls `b.configureStore` and 
 memory is the expected 65536 bytes, since the out-of-range pointers are chosen relative to it.
 
 Re-derive: `go test ./engine/ -run TestPollWork -count=1 -v`
+
+### 3.63 A cleanup pass was bounded per defer, not in total — ✅ **FIXED** (2026-09-01)
+
+Closes the measurement §3.31 had deliberately left as "read off the code, not measured", and
+fixes what measuring it found.
+
+Every caller of `runDefers` passes `context.Background()`, on purpose: cleanup must still happen
+when the workflow's own context has timed out or been cancelled. The consequence nobody had run
+is that each `RunDefer` then reaches `configureStore` with no deadline to reconcile against, so
+**each defer gets a fresh copy of the backend's per-invocation budget** and the total scales with
+the number of defers, with no ceiling.
+
+Measured 2026-09-01, backend timeout 2s:
+
+| | elapsed | budget the host reported |
+|---|---|---|
+| `RunDefer` with a 200 ms ctx deadline | 150 ms | `199.778625ms wall-clock budget` |
+| `RunDefer` with `context.Background()` | 2.001 s | `2s wall-clock budget` |
+| `runDefers(Background)`, 3 runaway defers | **6.001 s** | `2s`, `2s`, `2s` |
+
+On a worker the per-invocation budget is `DefaultWasmtimeExecutionTimeout` = 30s
+(`--wasm-instance-timeout`), so twenty runaway defers held a worker slot for ten minutes.
+
+**Fix — one `WithTimeout` over the loop.** `configureStore` already takes the tighter of ctx's
+remaining time and the backend's own timeout, so a single deadline shared by every iteration
+bounds both the pass and each defer within it, without touching the base context and therefore
+without re-coupling cleanup to the workflow's cancellation. `DefaultDeferPassBudget` is 5
+minutes, settable with `engine.WithDeferPassBudget`.
+
+**The default is deliberately generous, and that is the point.** The bound that was missing is an
+*aggregate* one. Five minutes leaves every plausible legitimate cleanup pass untouched while
+turning "unbounded in N" into a fixed ceiling; choosing something tight enough to also shorten a
+single slow defer would have been a second, unrelated behaviour change smuggled into this one.
+
+**The assertion is on the reported budgets, not on the clock.** With one shared deadline the
+first defer gets the full backend timeout, the second whatever remains, the third essentially
+nothing — so **at most one defer can report the full per-invocation budget**. Without the fix all
+three do. CLAUDE.md asks for timing to be removed from assertions rather than widened; here the
+subject *is* wall-clock, so the timing was moved into a value the code under test reports rather
+than one measured from outside. Proven to fail with the fix removed:
+
+    3 of 3 defers were given the full 2s per-invocation budget; at most 1 can be.
+    budgets reported: [2s 2s 2s]
+    the pass took 6s for a 3s budget.
+
+Elapsed time is still checked, with a 5s threshold against a 6s-vs-3s gap, purely so a pass that
+reports the right budgets while still running long cannot slip through.
+
+**Controls**, in `engine/defer_pass_budget_test.go`:
+
+- `TestDeferPassRunsEveryDeferWhenTheyFit` — the important one. "Bound the pass" is trivially
+  satisfiable by running fewer defers, which would silently drop the cleanup this path exists to
+  perform. Three prompt defers under the same budget must produce no failure log.
+- `TestRunDeferHonoursATighterContextDeadline` — pins the mechanism the fix rests on. If
+  `configureStore` stopped preferring the tighter deadline, the aggregate bound would mean
+  nothing *and would keep passing*, because a pass that ignores its deadline still reports one
+  budget per defer.
+- `TestRunDeferWithoutADeadlineFallsBackToTheBackendBudget` — characterises the per-call
+  behaviour as correct, so the two halves stay visible together: the per-call answer was fine,
+  the multiplication was not.
+
+**Out of scope, and named rather than left implicit.** `invokeDefersOnTrap` runs defers on the
+still-live module via `e.rt` — wazero — and is unfenceable for a compute-bound guest (CLAUDE.md,
+measured three ways). It sits in `executeCompiled`, the path taken only by engines built with a
+Runtime and no backends: `cleatctl replay|debug`, `cleat run_embedded`, `cleat-bench`,
+`cleat/wasmtest`. The worker returns from `executeWithBackend` and never reaches it.
+
+Re-derive: `go test ./engine/ -run 'TestDeferPass|TestRunDefer' -count=1 -v`

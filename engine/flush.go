@@ -450,7 +450,40 @@ func (e *Engine) afterFencedInsert(ctx context.Context, res sql.Result, workflow
 
 // runDefers invokes registered defer functions on a fresh module instance.
 // Called on non-suspend errors to ensure cleanup runs even when the workflow fails.
+//
+// The pass is bounded as a whole, which is the part that was missing.
+//
+// Every caller passes context.Background() -- deliberately, so cleanup still
+// happens when the workflow's own context has timed out or been cancelled
+// (executor.go). The consequence nobody had measured is that each RunDefer then
+// reaches configureStore with no deadline to reconcile against, so every defer
+// gets a *fresh* copy of the backend-wide budget and the total scales with the
+// number of defers. Measured 2026-09-01, backend timeout 2s, three runaway
+// defers:
+//
+//	ctx with a 200ms deadline   150ms   ("199.778625ms wall-clock budget")
+//	context.Background()        2.001s  ("2s wall-clock budget")
+//	3 defers, Background        6.001s  -- 2s each, no ceiling
+//
+// On a worker that is 30s each (DefaultWasmtimeExecutionTimeout, settable with
+// --wasm-instance-timeout), so a workflow registering twenty runaway defers
+// held its slot for ten minutes. IMPROVEMENT-PLAN 3.31 recorded this as read
+// off the code and explicitly not measured; the numbers above are that gap
+// closed, and the multiplication is worse than the section predicted.
+//
+// One WithTimeout over the loop is the whole fix: configureStore already takes
+// the tighter of ctx's remaining time and the backend's own timeout, so a
+// single deadline shared by every iteration bounds both the pass and each
+// defer within it, without touching the base context and therefore without
+// re-coupling cleanup to the workflow's cancellation.
 func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[string]string) {
+	budget := e.deferPassBudget
+	if budget <= 0 {
+		budget = DefaultDeferPassBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
 	type defEntry struct {
 		id     string
 		desc   string
