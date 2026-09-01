@@ -69,7 +69,34 @@ regression invisible forever. A skip is legitimate only for a genuine environmen
 (a toolchain that is not installed, a DSN that is not set).
 
 **"No pending checks" also matches "checks never started."** Guard `gh pr checks` wait-loops on a
-total count, not on the absence of pending. The repo runs 41 checks.
+total count, not on the absence of pending. The repo runs **46** checks (measured 2026-08-31 on
+#500; re-derive with `gh pr checks <pr> | grep -c .`), of which `Benchmarks` and `Coverage`
+report `skipping` on a normal PR, so 44 is a green run and not a truncated one.
+
+**And parse that output with `awk -F'\t'`, because check names contain spaces.** The total-count
+guard above is necessary but not sufficient: it does not help if the *pending* count is itself
+silently zero. `gh pr checks` is tab-delimited with names like `Tier 1 Gate` and
+`Test Go (engine) on 1.26`, so the natural-looking
+
+    pend=$(echo "$out" | grep -cE '^\S+\s+pending')     # blind to 40 of 46 checks
+
+cannot match them — `^\S+` takes `Tier`, `\s+` takes the space, and the next token is `1`, not
+`pending`. Measured 2026-08-31 on #500, **40 of the 46 names contain a space**
+(`gh pr checks <pr> | awk -F'\t' '$1 ~ / /' | grep -c .`); the six it can still see are `Build`,
+`CodeQL`, `Lint`, `lint-go`, `Benchmarks` and `Coverage`, none of which are the ones that matter.
+`Tier 1 Gate` and `Test Go (engine) on 1.26` are both in the blind 40 — so the count does not
+degrade, it reads zero for exactly the checks worth waiting on. That reported #500 as green with
+six still running; `gh pr merge` refusing with "the base branch policy prohibits the merge" was
+the only thing that caught it. Use
+
+    pend=$(echo "$out" | awk -F'\t' '$2=="pending"' | grep -c .)
+    fail=$(echo "$out" | awk -F'\t' '$2!="pass" && $2!="pending" && $2!="skipping"' | grep -c .)
+
+The general rule this is an instance of: **a verification script needs its own negative control.**
+Before trusting a new watcher, run its parse once against a PR that has known-pending checks and
+confirm the count is non-zero. A loop that cannot see the state it looks for does not fail —
+it prints a confident green, which is the same failure this file's whole "Is this result real?"
+section is about.
 
 **A merge's own `develop` run can be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
