@@ -6737,6 +6737,42 @@ the applied `001_schema.sql` would not re-run on existing databases); WS-3's res
 
 Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 69s**.
 
+### 3.49 A fault that never reached the database reported itself as active — ✅ **FIXED** (2026-09-01)
+
+The third of the errcheck classes from §3.46. `FaultInjector`'s three `ExecContext` calls discarded
+their errors *and* set `active[ft] = true` unconditionally, so a fault whose write never landed was
+indistinguishable from one that did, and `IsActive` returned true either way.
+
+That is this repo's signature failure — a green result that measured nothing — sitting inside the
+harness built to catch it. A test asserting "the system recovers from a worker crash" passes with
+no crash injected, because `InjectWorkerCrash`'s UPDATE *is* the crash.
+
+**Why it survived: the database path had no coverage at all.** Every existing test in
+`unit_test.go` constructs `NewFaultInjector(nil)`, so only the in-memory `active` map was ever
+exercised — nine tests over a type whose entire point is what it does to a database.
+
+    grep -c "NewFaultInjector(nil)" engine/unit_test.go
+
+Fixed on both halves, because either alone is insufficient: the three methods now **return** their
+error, and mark the fault active **only on success**. Returning an error is source-compatible —
+`fi.InjectClockSkew(x)` as a statement stays legal — and the only caller is `unit_test.go`.
+
+Three new tests against a real database, asserting the rows actually changed rather than that no
+error came back:
+
+- `InjectWorkerCrash` really moves the instance to `ready` with `assigned_to` NULL
+- `InjectClockSkew` really pushes `heartbeat_at` forward, and `Cleanup` really puts it back — a
+  silent restore failure leaves every running instance with a future heartbeat, which the next
+  test sharing the database inherits as an unexplained failure
+- against a **closed pool**, injection reports the error and does *not* claim the fault is active
+
+The third is what makes the other two mean anything: tests over a working database pass equally
+well against the old error-discarding code. Mutation-tested by restoring the unconditional
+behaviour — it fails with "IsActive(FaultWorkerCrash) is true after the injecting write failed",
+the expected reason.
+
+Verified: `go test ./engine/ -p 1 -count=1` against all three dialects → **ok, 73s**.
+
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
