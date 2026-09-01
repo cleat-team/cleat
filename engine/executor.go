@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/tetratelabs/wazero"
@@ -19,6 +20,10 @@ import (
 // backendForWasm looks up a WasmBackend for the given WASM binary by
 // detecting its language and checking the registered backends map.
 // Returns nil if no backend is registered for the detected language.
+//
+// Prefer resolveBackend: a nil from here is ambiguous between "this engine does
+// no backend routing" and "this engine routes, but not for that language", and
+// those two need opposite handling.
 func (e *Engine) backendForWasm(wasmBytes []byte) WasmBackend {
 	if e.backends == nil {
 		return nil
@@ -28,6 +33,70 @@ func (e *Engine) backendForWasm(wasmBytes []byte) WasmBackend {
 		return backend
 	}
 	return nil
+}
+
+// resolveBackend picks the backend for a module, distinguishing the two cases a
+// bare nil from backendForWasm conflates:
+//
+//   - (backend, nil)  — routed; execute on it.
+//   - (nil, nil)      — this engine registers no backends at all, so the wazero
+//     Runtime it was constructed with is the intended executor. That is the
+//     cmd/cleatctl replay|debug, cmd/cleat run_embedded and cmd/cleat-bench
+//     shape, and it stays working.
+//   - (nil, err)      — this engine DOES route, but has no backend for this
+//     module's language. Fail closed.
+//
+// That last case is the one worth spelling out, because three call sites used to
+// treat it three different ways and all three were wrong.
+//
+// wasm.DetectLanguage returns the Language field of the guest's own
+// "cleat.metadata" custom section verbatim (wasm/metadata.go), with no
+// validation against WasmtimeLanguages. So the string that selects the execution
+// path is supplied by whoever built the module. Measured 2026-08-31 against an
+// engine registered exactly as cmd/cleat-worker registers it
+// (WithBackends(WasmtimeLanguages, ...), nil Runtime):
+//
+//	declared "go"     -> routed to the backend
+//	declared "cobol"  -> no backend
+//	declared "tinygo" -> no backend
+//	declared "GO"     -> no backend   (case alone is enough)
+//
+// and with no backend, the three paths did this:
+//
+//	RunDefer  compiled and ran the guest on a wazero Runtime it created on
+//	          demand -- and CLAUDE.md records that wazero cannot be fenced for a
+//	          compute-bound guest. A guest-chosen string selected an unstoppable
+//	          runtime.
+//	Replay    dereferenced e.rt, which the worker sets to nil, and panicked.
+//	Execute   returned a clean error, having been given a nil check the other
+//	          two never got.
+//
+// tiers.yaml grants no language outside WasmtimeLanguages (tier 1 is
+// [go, python], tier 2 adds rust, java, assemblyscript), so failing closed here
+// can only reject what was never claimed to work.
+func (e *Engine) resolveBackend(wasmBytes []byte) (WasmBackend, error) {
+	if backend := e.backendForWasm(wasmBytes); backend != nil {
+		return backend, nil
+	}
+	if len(e.backends) == 0 {
+		return nil, nil
+	}
+	return nil, fmt.Errorf(
+		"host: no WASM backend registered for guest language %q (registered: %v); "+
+			"the language comes from the module's own cleat.metadata section and is "+
+			"not a supported guest language",
+		wasm.DetectLanguage(wasmBytes), e.registeredLanguages())
+}
+
+// registeredLanguages returns the routed languages in sorted order, for error
+// messages that are stable enough to assert on.
+func (e *Engine) registeredLanguages() []string {
+	langs := make([]string, 0, len(e.backends))
+	for lang := range e.backends {
+		langs = append(langs, lang)
+	}
+	sort.Strings(langs)
+	return langs
 }
 
 // executeWithBackend runs a workflow execution (fresh or replay) using the
@@ -702,7 +771,11 @@ func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName strin
 	// PerExecution, not the backend itself: Execute stores the handler on the
 	// backend struct, so calling it on the shared root would race a concurrent
 	// workflow execution. executeWithBackend takes the same precaution.
-	if backend := e.backendForWasm(wasmBytes); backend != nil {
+	backend, err := e.resolveBackend(wasmBytes)
+	if err != nil {
+		return "", err
+	}
+	if backend != nil {
 		res, err := backend.PerExecution().Execute(ctx, wasmBytes, deferName, input, handlerFromContextOrNil(ctx))
 		if err != nil {
 			return "", err
@@ -713,8 +786,19 @@ func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName strin
 		return res.Result, nil
 	}
 
-	// No backend for this guest: the CGO-less build, where wazero is the only
-	// runtime there is. Unfenced, and unavoidably so.
+	// No backend AND no backends registered at all -- resolveBackend returned
+	// (nil, nil), so this engine does no routing and the wazero Runtime it was
+	// built with is the intended executor. That is cmd/cleatctl replay|debug,
+	// cmd/cleat run_embedded, cmd/cleat-bench and cleat/wasmtest.
+	//
+	// This comment used to say "the CGO-less build, where wazero is the only
+	// runtime there is. Unfenced, and unavoidably so." Both halves were wrong.
+	// A CGO-less worker exits at startup (CLAUDE.md), so it never gets here;
+	// what did get here was a CGO build handed a module whose cleat.metadata
+	// named a language outside WasmtimeLanguages -- guest-supplied input
+	// selecting an unfenceable runtime. resolveBackend now rejects that case
+	// before this point, so what remains really is unavoidable: an engine with
+	// no backends has nothing else to run on.
 	rt := e.rt
 	if rt == nil {
 		var err error

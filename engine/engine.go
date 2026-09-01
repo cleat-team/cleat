@@ -505,15 +505,23 @@ func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine 
 // If the WASM binary uses the Component Model format, it decomposes it into
 // constituent core modules following the component instance DAG.
 func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage) (result string, history []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
-	if backend := e.backendForWasm(wasmBytes); backend != nil {
+	backend, resolveErr := e.resolveBackend(wasmBytes)
+	if backend != nil {
 		return e.executeWithBackend(ctx, backend, wasmBytes, entryPoint, input, nil)
 	}
+	// The component check runs before resolveErr is returned: a Component Model
+	// binary goes down the decomposition path regardless of what its metadata
+	// claims its language is, and that path is parked (tier 3) rather than
+	// removed. Failing closed ahead of it would change which error it reports.
 	if isComponentWasm(wasmBytes) {
 		bundle, parseErr := wasm.ParseComponentBundle(wasmBytes)
 		if parseErr != nil {
 			return "", nil, nil, nil, nil, fmt.Errorf("host: parse component bundle: %w", parseErr)
 		}
 		return e.executeComponent(ctx, bundle, entryPoint, input)
+	}
+	if resolveErr != nil {
+		return "", nil, nil, nil, nil, resolveErr
 	}
 	if e.rt == nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: no runtime available for WASM compilation; register a backend for this language with WithBackend")

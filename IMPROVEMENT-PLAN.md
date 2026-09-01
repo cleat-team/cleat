@@ -6565,6 +6565,69 @@ Verified: `engine/store_children_checksum_rls_test.go` fails against the unfixed
 passes after. Full suite all three dialects, `go test ./engine/ -p 1 -count=1` → **ok, 71s**.
 errcheck's non-Rollback production residue in `engine`: **19 → 16**.
 
+### 3.45 A guest-supplied string chose the execution runtime — ✅ **FIXED** (2026-09-01)
+
+`wasm.DetectLanguage` returns the `Language` field of the guest's own `cleat.metadata` custom
+section **verbatim, with no validation** against `WasmtimeLanguages` (`wasm/metadata.go:277`).
+`Engine.backendForWasm` looks that string up in a 5-entry map and returns nil on a miss. So the
+string that selects the execution path is supplied by whoever built the module.
+
+Measured against an engine registered exactly as `cmd/cleat-worker` registers one
+(`WithBackends(WasmtimeLanguages, ...)`, nil `Runtime`):
+
+| declared language | resolves to a backend |
+|---|---|
+| `go`, `python`, `rust`, `java`, `assemblyscript` | yes |
+| `cobol`, `tinygo` | **no** |
+| `GO` | **no** — the lookup is exact, so case alone is enough |
+
+That last row matters: this is a plausible toolchain slip, not only an adversarial input.
+
+**And with no backend, the three call sites did three different things** — all from the same
+`if backend != nil` shape:
+
+- **`RunDefer`** created a wazero `Runtime` on demand and ran the guest on it. CLAUDE.md records
+  that **wazero cannot be fenced for a compute-bound guest** — measured three ways, all failing.
+  So a guest-chosen string selected an unstoppable runtime. Confirmed by mutation: with the fix
+  reverted, `RunDefer` on a `cobol` module returns `host: export "defer-1" not found`, which is
+  the wazero path reporting after it compiled and instantiated the module.
+- **`Replay`** dereferenced `e.rt`, which both worker constructions set to nil, and **panicked**.
+- **`Execute`** returned a clean error, having been given a nil check the other two never got.
+
+**Three comments asserted this could not happen, and two were wrong:**
+
+- `engine/executor.go` — "the CGO-less build, where wazero is the only runtime there is." A
+  CGO-less worker exits at startup, so it never reaches that line; what did reach it was a **CGO**
+  build.
+- `cmd/cleat-worker/setup.go` — "`backendForWasm` lookup always resolves here — there is no
+  runtime-less fallback left to reach."
+- `engine/engine.go`'s `WithBackends` was the accurate one: "returns nil when it is absent, **which
+  sends the workflow to the fallback runtime**."
+
+**Fix.** One `Engine.resolveBackend` replacing three copies of the nil check, distinguishing the
+two cases a bare nil conflated:
+
+- `(nil, nil)` — the engine registers **no** backends, so its wazero `Runtime` is the intended
+  executor. That is `cmd/cleatctl replay|debug`, `cmd/cleat run_embedded` and `cmd/cleat-bench`,
+  and they keep working unchanged.
+- `(nil, err)` — the engine **does** route but has no backend for this language. Fail closed.
+
+`tiers.yaml` grants no language outside `WasmtimeLanguages` (tier 1 `[go, python]`, tier 2 adds
+rust, java, assemblyscript), so failing closed rejects only what was never claimed.
+
+**Behaviour change to disclose.** `cleat/wasmtest` registers backends *and* holds a `Runtime`, so
+under CGO a module declaring an unsupported language now errors instead of silently running on
+wazero. Without CGO `backendOptions()` returns nil, leaving no backends, so that path still falls
+back as before.
+
+Guarded by `engine/backend_fence_routing_test.go`, mutation-tested three ways, each failing for
+its own reason: disabling fail-closed (the `export not found` above); breaking routing for real
+languages (the control catches it, and asserts the backend was actually *called*, not merely that
+no error came back); and failing closed with an empty registry (the CLI-path guard fires).
+
+Verified: `go test ./engine/ ./cmd/... -p 1 -count=1` against all three dialects → **all ok**,
+engine 70s.
+
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
