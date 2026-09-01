@@ -6504,6 +6504,67 @@ Re-derive the site count:
 
     grep -rn "releaseWorkflowResources(s.log()" --include="*.go" engine/ | grep -v _test.go | wc -l
 
+### 3.44 Child-workflow checksums were chained off an RLS-blocked read — ✅ **FIXED** (2026-08-31)
+
+Found by reading errcheck's `engine` residue after §3.42 made it legible. Of 283 findings, 108 are
+in tests and 156 of the remaining 175 are the deferred `tx.Rollback` idiom, leaving **19** worth
+reading. Three of those 19 were the same defect in three dialects.
+
+`StartChildWorkflowAtomic` chains its event's checksum onto the previous step's. Every other
+statement in it runs on the open `tx`; that one read ran on `s.db` — the raw pool, no RLS context —
+and discarded its error:
+
+```go
+var prevCS string
+if event.Step > 1 {
+    s.db.QueryRowContext(ctx,
+        `SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = $1 AND step = $2`,
+        parentID, event.Step-1).Scan(&prevCS)      // error dropped
+}
+checksum := computeEventChecksum(event, prevCS)
+```
+
+`event_history` carries `FORCE ROW LEVEL SECURITY` with `tenant_id = cleat.assert_tenant_set()`,
+which raises when `cleat.tenant_id` is unset. Measured against a real `cleat_rls_test_role`
+connection:
+
+    pq: cleat.tenant_id is not set -- tenant context required for RLS-scoped query (P0001)
+
+Error dropped ⇒ `prevCS` stays `""` ⇒ the event is checksummed as if it had no predecessor.
+
+**The consequence is not the failed read.** `VerifyWorkflowEvents` recomputes the chain and
+compares, so an untampered history fails verification with `checksum mismatch`. The integrity
+feature reports tamper evidence against a row cleat wrote itself.
+
+**Why two layers of existing coverage both missed it:**
+
+- `TestStartChildWorkflowAtomicUnderRLS` drives this exact function through this exact
+  non-superuser connection — with `Step: 1`. The bad read sits behind `if event.Step > 1`, so the
+  one test aimed at this function under RLS skips the only statement in it that is not RLS-safe.
+- Every other test connects as a superuser, which PostgreSQL exempts from RLS entirely.
+
+Catching it needs both halves at once: a non-superuser role **and** a step greater than 1.
+
+> **A trap for anyone re-deriving this.** The raise only happens when a candidate row exists —
+> PostgreSQL evaluates the policy per row, so against an empty `event_history` the same read
+> returns plain `sql.ErrNoRows` and never calls `assert_tenant_set`. My first probe forgot to seed
+> a row and "proved" the read was harmless. In production a step-1 row is always present when
+> `Step > 1`, which is exactly the case that raises.
+
+**The fix was already written.** All three dialects have `previousStoredChecksum(ctx, tx, ...)` —
+tx-scoped, tenant-qualified, and explicit about `ErrNoRows` — and all three copies ignored it. The
+three sites now call it. That also fixes a silent semantic divergence: the helper reads the
+immediately preceding *row* (`step < N ORDER BY step DESC LIMIT 1`), matching what
+`VerifyWorkflowEvents` expects, while the hand-rolled copies read `step = N-1` exactly and
+disagreed whenever the history had a gap.
+
+Third instance today of one shape: an abstraction exists, and copies of it drifted (see §3.43).
+
+Verified: `engine/store_children_checksum_rls_test.go` fails against the unfixed code with
+`stored == computeEventChecksum(event, "")` and the exact chained value it should have had, and
+passes after. Full suite all three dialects, `go test ./engine/ -p 1 -count=1` → **ok, 71s**.
+errcheck's non-Rollback production residue in `engine`: **19 → 16**.
+
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
 > Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and

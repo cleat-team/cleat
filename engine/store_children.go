@@ -83,11 +83,15 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 
 	// 2. INSERT child_workflow event into the parent's event_history.
 	event.RunID = childID
-	var prevCS string
-	if event.Step > 1 {
-		s.db.QueryRowContext(ctx,
-			`SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = $1 AND step = $2`,
-			parentID, event.Step-1).Scan(&prevCS)
+	// previousStoredChecksum, not a hand-rolled read: it runs on tx (so it sees
+	// this transaction and carries its RLS/tenant context), qualifies by
+	// tenant_id, and distinguishes "no predecessor" from a failed read. The
+	// copy that used to be here ran on s.db -- the raw pool, no RLS context --
+	// and discarded the error, so under a non-superuser role it silently
+	// checksummed against an empty predecessor and broke the chain.
+	prevCS, err := s.previousStoredChecksum(ctx, tx, parentID, event.Step)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow atomic: previous checksum: %w", err)
 	}
 	checksum := computeEventChecksum(event, prevCS)
 	_, err = tx.ExecContext(ctx, `
