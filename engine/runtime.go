@@ -295,8 +295,34 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 			// by this point, and the remaining init is non-critical.
 			select {
 			case <-done:
-				// _start completed normally; runtime is fully initialized.
-				return nil
+				// _start finished -- which includes finishing by failing, so
+				// errCh must be drained before this is called success.
+				//
+				// Listing `<-done` and `<-errCh` as sibling cases is not enough.
+				// The goroutine sends on errCh (buffered, cap 1) and only then
+				// runs the deferred close(done), so on a trap BOTH cases are
+				// ready at once and Go picks uniformly at random: roughly half
+				// the time this returned nil for a guest whose _start had
+				// trapped, which is the exact bug the error plumbing was added
+				// to fix.
+				//
+				// It reproduced as a ~5% flake in
+				// TestInitModuleReportsATrappingStart -- 3 failures in 60 runs
+				// under `-cpu 1`, measured 2026-09-01, and once in CI on an
+				// unrelated docs PR. It did not reproduce at all with the
+				// default GOMAXPROCS on an idle machine, because the trap then
+				// reaches errCh before the first 100µs backoff elapses and the
+				// select above catches it. The window only opens when the
+				// poller reaches this point first.
+				//
+				// The send happens-before the close, so a non-blocking receive
+				// here sees any error that exists.
+				select {
+				case err := <-errCh:
+					return err
+				default:
+					return nil
+				}
 			case err := <-errCh:
 				return err
 			case <-time.After(5 * time.Millisecond):
