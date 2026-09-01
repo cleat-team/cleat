@@ -69,9 +69,37 @@ regression invisible forever. A skip is legitimate only for a genuine environmen
 (a toolchain that is not installed, a DSN that is not set).
 
 **"No pending checks" also matches "checks never started."** Guard `gh pr checks` wait-loops on a
-total count, not on the absence of pending. The repo runs **46** checks (measured 2026-08-31 on
-#500; re-derive with `gh pr checks <pr> | grep -c .`), of which `Benchmarks` and `Coverage`
-report `skipping` on a normal PR, so 44 is a green run and not a truncated one.
+total count, not on the absence of pending.
+
+**But do not hardcode that total, because it is path-dependent.** Measured 2026-09-01, after
+every check had settled:
+
+| PR | touches | checks |
+|---|---|---|
+| #504 | `CLAUDE.md` only | 46 |
+| #500 | docs + `engine/` | 46 |
+| #503 | `engine/` + `cmd/` | **50** |
+
+The four `{AssemblyScript,Java,Python,Rust} SDK Integration` jobs are the whole of the gap; they
+trigger only on some paths. `Benchmarks` and `Coverage` report `skipping` on a normal PR, so a
+green run shows two fewer passing than the total. Re-derive with
+`gh pr checks <pr> | grep -c .`, and diff two PRs with `comm -23` over the sorted name column to
+see which jobs a path triggers.
+
+**"After every check had settled" is load-bearing, and I got it wrong writing this.** The first
+draft of the table above said #504 ran 45, because I ran `grep -c .` 25 seconds after pushing —
+before the 46th check had been registered. A total sampled while checks are still being created is
+itself a "checks never started" reading, and it is the more dangerous kind, because it looks like
+a settled fact rather than a pending state. If you are recording a total, take it from a PR whose
+checks have all finished, not from one you are still watching.
+
+A fixed floor is therefore weaker than it looks: gate at 46 and a PR that should run 50 passes the
+moment its 46th check settles, with four SDK jobs not yet queued — which is precisely the
+"checks never started" case this paragraph is about. **The reliable arbiter is the branch policy,
+not a count.** `gh pr merge` refuses while required checks are outstanding, and
+`gh pr view <pr> --json mergeStateStatus` reports `BLOCKED` rather than `CLEAN`. On
+2026-08-31 that refusal was the only thing that caught a watcher reporting green over six
+pending checks.
 
 **And parse that output with `awk -F'\t'`, because check names contain spaces.** The total-count
 guard above is necessary but not sufficient: it does not help if the *pending* count is itself
