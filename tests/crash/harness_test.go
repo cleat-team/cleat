@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,6 +34,8 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+
+	"github.com/cleat-team/cleat/migration"
 )
 
 const (
@@ -80,13 +83,22 @@ func ownerDSN() string {
 // is the §1.10 defect. Not worth reintroducing to save a role.
 func appDSN(t *testing.T) string {
 	t.Helper()
+	return appDSNFor(t, crashDatabase)
+}
+
+// appDSNFor is appDSN against a named database. Only
+// TestWorkerMigratesTheDatabaseItServes passes anything but crashDatabase; it
+// needs a database no other test has started a worker against, because the
+// evidence it looks for is created once and then stays created.
+func appDSNFor(t *testing.T, dbName string) string {
+	t.Helper()
 	owner := ownerDSN()
 	at := strings.Index(owner, "@")
 	scheme := strings.Index(owner, "://")
 	if at < 0 || scheme < 0 {
 		t.Fatalf("cannot derive the cleat_app DSN from %s: expected scheme://user:pass@host/db", redact(owner))
 	}
-	return swapDatabase(owner[:scheme+3]+"cleat_app:"+appPassword+owner[at:], crashDatabase)
+	return swapDatabase(owner[:scheme+3]+"cleat_app:"+appPassword+owner[at:], dbName)
 }
 
 func redact(dsn string) string {
@@ -115,7 +127,13 @@ func repoRoot(t *testing.T) string {
 // pass.
 func ownerDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := ensureCrashDatabase(t)
+	return ownerDBFor(t, crashDatabase)
+}
+
+// ownerDBFor is ownerDB against a named database. See appDSNFor.
+func ownerDBFor(t *testing.T, dbName string) *sql.DB {
+	t.Helper()
+	dsn := ensureDatabaseNamed(t, dbName)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("opening %s: %v", redact(dsn), err)
@@ -125,27 +143,26 @@ func ownerDB(t *testing.T) *sql.DB {
 			"instance (WS-2's is port 5433; override with CLEAT_CRASH_DB)", redact(dsn), err)
 	}
 
-	root := repoRoot(t)
-	dir := filepath.Join(root, "migrations", "postgres")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("reading %s: %v", dir, err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".sql") {
-			names = append(names, e.Name())
-		}
-	}
-	// ReadDir is already lexical, which is the migration order.
-	for _, name := range names {
-		body, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("reading migration %s: %v", name, err)
-		}
-		if _, err := db.Exec(string(body)); err != nil {
-			t.Fatalf("applying migration %s: %v", name, err)
-		}
+	// Applied through migration.Runner -- the same call cmd/cleat-worker makes
+	// at boot -- rather than this suite's own ReadDir-and-Exec loop over
+	// migrations/postgres/*.sql.
+	//
+	// That loop was a second implementation of "apply the shipped migrations",
+	// which is the mechanism §1.9 and §2.60b are about: engine/testutil used to
+	// carry its own copy of the schema, the copy drifted, and every test in the
+	// repo ran against a schema production never uses. A loop that reads the
+	// right files is a smaller version of the same thing, not a different
+	// thing -- it has no schema_migrations bookkeeping, so it re-executes every
+	// file on every run and can only ever work for statements that are
+	// re-appliable, and it splits statements differently from the Runner.
+	// engine/testutil has a guard test against reintroducing a hand-written
+	// schema; this suite had no such guard and had quietly kept one.
+	if err := migration.NewRunner(db, migration.DialectPostgres,
+		filepath.Join(repoRoot(t), "migrations")).Run(context.Background()); err != nil {
+		t.Fatalf("applying the shipped PostgreSQL migrations to %s: %v\n\n"+
+			"This is the code path cmd/cleat-worker takes at boot, so a failure "+
+			"here is a worker that cannot start, not a harness problem.",
+			dbName, err)
 	}
 
 	// Give cleat_app a login. 005 creates it NOLOGIN and says the deployment
@@ -178,6 +195,21 @@ const crashDatabase = "cleat_crash"
 // smallest fix that does not change a helper every other suite depends on.
 func ensureCrashDatabase(t *testing.T) string {
 	t.Helper()
+	return ensureDatabaseNamed(t, crashDatabase)
+}
+
+// ensureDatabaseNamed is ensureCrashDatabase against a named database. See
+// appDSNFor for the one caller that passes anything else.
+//
+// dbName is interpolated into CREATE DATABASE, which cannot be parameterised,
+// so it is restricted to characters that need no quoting. Both call sites pass
+// a compile-time constant; the check is here so that stops being load-bearing.
+func ensureDatabaseNamed(t *testing.T, dbName string) string {
+	t.Helper()
+	if !validDatabaseName.MatchString(dbName) {
+		t.Fatalf("database name %q must match %s -- it is interpolated into "+
+			"CREATE DATABASE, which cannot be parameterised", dbName, validDatabaseName)
+	}
 	base := ownerDSN()
 
 	admin, err := sql.Open("postgres", base)
@@ -192,24 +224,25 @@ func ensureCrashDatabase(t *testing.T) string {
 
 	var exists bool
 	if err := admin.QueryRow(
-		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, crashDatabase).Scan(&exists); err != nil {
-		t.Fatalf("checking for the %s database: %v", crashDatabase, err)
+		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, dbName).Scan(&exists); err != nil {
+		t.Fatalf("checking for the %s database: %v", dbName, err)
 	}
 	if !exists {
-		// CREATE DATABASE cannot be parameterised. crashDatabase is a compile-time
-		// constant, so there is nothing here to inject.
-		if _, err := admin.Exec(`CREATE DATABASE ` + crashDatabase); err != nil {
+		// CREATE DATABASE cannot be parameterised; dbName is checked above.
+		if _, err := admin.Exec(`CREATE DATABASE ` + dbName); err != nil {
 			// A concurrent run may have won the race; re-check rather than fail.
 			if err2 := admin.QueryRow(
 				`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`,
-				crashDatabase).Scan(&exists); err2 != nil || !exists {
-				t.Fatalf("creating the %s database: %v", crashDatabase, err)
+				dbName).Scan(&exists); err2 != nil || !exists {
+				t.Fatalf("creating the %s database: %v", dbName, err)
 			}
 		}
 	}
 
-	return swapDatabase(base, crashDatabase)
+	return swapDatabase(base, dbName)
 }
+
+var validDatabaseName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,50}$`)
 
 // swapDatabase replaces the database component of a postgres URL.
 func swapDatabase(dsn, name string) string {
@@ -465,11 +498,31 @@ type worker struct {
 // not honour cannot pass here.
 func startWorker(t *testing.T, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
 	t.Helper()
+	return startWorkerOn(t, crashDatabase, bin, taskQueue, svcURL, extraFlags...)
+}
+
+// startWorkerOn is startWorker against a named database. See appDSNFor.
+func startWorkerOn(t *testing.T, dbName, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
+	t.Helper()
 
 	w := &worker{log: &strings.Builder{}}
+	// --migrate-db is the owner connection to the database this worker serves
+	// from, NOT ownerDSN(). ownerDSN() names the *base* database -- `cleat` --
+	// which this suite deliberately does not use: it took cleat_crash of its own
+	// precisely so engine/testutil's unqualified DELETEs could not reach it (see
+	// ensureCrashDatabase). Passing it here meant every worker start ran
+	// migration.Runner and plugin.RunMigrations against the shared database and
+	// migrated nothing in the one it actually reads and writes.
+	//
+	// Measured 2026-08-31 before the fix, after one worker start: `cleat` had
+	// schema_migrations (14 rows) and plugin_migrations; cleat_crash had
+	// neither, and its 14 tables came from ownerDB's loop instead. The tables
+	// happened to agree, so nothing failed -- but the worker's own migration
+	// step, the one cmd/cleat-worker runs at boot, was being exercised against
+	// a database no assertion in this suite ever looks at.
 	args := []string{
-		"--db", appDSN(t),
-		"--migrate-db", ownerDSN(),
+		"--db", appDSNFor(t, dbName),
+		"--migrate-db", ensureDatabaseNamed(t, dbName),
 		"--task-queue", taskQueue,
 		"--bench-svc-url", svcURL,
 		"--poll", "200ms",

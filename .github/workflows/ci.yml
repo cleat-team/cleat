@@ -582,7 +582,15 @@ jobs:
       CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
       # tests/crash needs the owner DSN explicitly: it applies the migrations
       # itself (including 005_app_role.sql) and grants cleat_app a login, then
-      # points the worker at cleat_app. Same database as CLEAT_TEST_DB.
+      # points the worker at cleat_app.
+      #
+      # This is the *base* DSN, and the suite does not run in the database it
+      # names. It creates cleat_crash beside it -- and cleat_crash_migrate_target
+      # for one test -- because engine/testutil's unqualified DELETEs would
+      # otherwise reach a live worker's rows mid-test (see ensureCrashDatabase).
+      # So the role here needs CREATEDB as well as CREATE/ALTER ROLE. Reading
+      # this variable as "the database tests/crash uses" is what put the wrong
+      # value behind --migrate-db until 2026-08-31.
       CLEAT_CRASH_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
     strategy:
       fail-fast: false
