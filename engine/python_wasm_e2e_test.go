@@ -71,7 +71,7 @@ func TestPythonWasmEndToEnd(t *testing.T) {
 
 	// ---- Step 2: Decompose the component model binary to a core module ----
 	// wasm-tools >= 1.230 removed "component decompose". The wasmtime
-	// backend's ExecuteComponent handles component binaries natively, so
+	// backend's native Component Model path handles component binaries, so
 	// we only decompose if the tool is available (for wazero fallback).
 	if pythonWasm.canDecompose() {
 		coreWasmPath := pythonWasm.decomposeComponent(t, wasmPath)

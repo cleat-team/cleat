@@ -8508,3 +8508,94 @@ The second is the plausible-wrong fix — treating any failure as "not invoked" 
 by both the behavioural test and the unit-level one.
 
 Re-derive: `go test ./engine/ -run 'TestDeferBodyRunsOnceAfterATrap|TestInvokeDefersOnTrap' -count=1 -v`
+
+### 3.65 The component decomposition path, deleted — ✅ **DONE** (2026-09-01)
+
+§3.31's addendum established that decomposition *"has never successfully executed a workflow …
+code that is reached and has never once succeeded."* Re-measured before removing anything, and
+it is worse than that: there were **two** decomposition implementations, not one, and they fail
+at different points on the same binary.
+
+Measured 2026-09-01 against the only Component Model binary in the repo — a 19.3 MB
+componentize-py build — with the native path as the control:
+
+| path | result |
+|---|---|
+| **native** (`ExecuteComponentCGo`) | reached CPython, ran guest code, returned the guest's own `type mismatch: expected string, found bool` from a deliberately wrong input — **it works** |
+| **wasmtime decomposition** (`ExecuteComponent`) | failed at instance 81 of 85: `incompatible import type for env::cleat_call` — expected `(param i32 ×7)`, found `(param i32 ×8) (result i64)` |
+| **wazero decomposition** (`Engine.executeComponent`) | failed at instance 8: `"memory" is not exported in module "env"` |
+
+The control is what makes this decisive. The fixture is executable, the remaining path executes
+it, and both decomposition implementations fail on it in unrelated ways. §3.31 recorded the
+wasmtime one failing at instance 81 on 2026-08-05; the second implementation was never measured
+at all.
+
+**Deleted, 16 files, −4,005 / +317:**
+
+| | lines |
+|---|---|
+| `wasmtimeBackend.ExecuteComponent` + `perExportRoute` + `defineWitDylib` | 620 + 100 + 325 |
+| `engine/wit_dylib_stack.go` (+ its 624-line test) — the wit_dylib value-stack machine, reachable only from `defineWitDylib` | 664 |
+| `Engine.executeComponent` — the wazero twin | 273 |
+| `wasm/component.go` (+ its 461-line test) — `ParseComponentBundle` and the section parsers | 642 |
+| `Runtime.instantiateModuleNamedWithWriters` | 12 |
+
+**This removes exported API**: `wasm.ParseComponentBundle`, `wasm.ComponentBundle`,
+`wasm.ComponentExport`, `wasm.CoreInstance`, `wasm.InstantiateArg`, `wasm.ExportSpec`,
+`wasm.PatchEmptyImportModuleName`. Every caller of every one of them was a decomposition path;
+after the deletion the file had no users at all. Keeping it would have meant a dead-exports
+baseline entry for a parser with nothing to parse for.
+
+**Two things the deletion surfaced that the plan had not.**
+
+- `engine/wit_dylib_stack.go` — 664 lines of value-stack machinery plus 624 lines of tests —
+  existed solely for decomposition. `scripts/check-test-only-code.sh` did not flag it, because
+  it *was* reached from production code; it was reached from production code that never
+  succeeded. That is the shape §3.31's addendum named — "not dead code in the
+  `check-test-only-code.sh` sense … something rarer, code that is reached and has never once
+  succeeded" — and the guard cannot see it by construction.
+- `Runtime.instantiateModuleNamedWithWriters`'s doc said it was *"used by
+  wazeroBackend.Execute()"*. That type was deleted in #459. Its real last caller was
+  `executeComponent`. `check-test-only-code.sh` caught it the moment that went, which is the
+  guard working as designed on the one it *could* see.
+
+**What a caller meets now.** A native-path failure used to be a prelude: `Execute` logged it and
+then ran decomposition, whose failure was what the caller actually saw — and it described
+decomposition's problems assembling the module, reading like "wasmtime cannot run this
+component" when the cause was something else. §2.72 records months of that error being taken as
+wasmtime's verdict on Component Model guests. The native path's error is now the answer.
+
+On the no-backend route (`cleatctl replay|debug`, `cleat run_embedded`, `cleat-bench`,
+`cleat/wasmtest`), `"memory" is not exported in module "env"` is replaced by a message naming
+the fix, which for that engine shape is real: register the wasmtime backend.
+
+**Tests** — `engine/component_no_decomposition_test.go`, and the control is the important one:
+
+- `TestComponentOnTheBackendTakesTheNativePathOnly` — a component must still **execute**.
+  Without it, "no longer reaches decomposition" is satisfied by a backend that stopped running
+  components at all, which is the most likely way to break this and would look like success.
+  Python is tier 1.
+- `TestComponentFailureIsNotFollowedByASecondWorseError` — the error names the entry point and
+  contains none of decomposition's vocabulary (`instantiate instance`,
+  `incompatible import type`, `component bundle`).
+- `TestComponentWithoutABackendSaysHowToRunIt` — names `Component Model` and `WithBackend`, and
+  is not the old instantiation failure.
+
+**Deleted rather than kept:** `TestComponentStdoutStderrRace` covered a concurrency fix inside
+`executeComponent`. With that gone the test's `Execute` call returns before instantiating
+anything, so it would have passed while exercising nothing — a vacuous test is worse than none,
+because it reads as coverage.
+
+**Prose corrected in the same commit** (CLAUDE.md: fix what describes it, not just the marker):
+`tiers.yaml` ×4 — the D5 skip-budget rationale, the tier-1 exclusion list, Python's two open
+items, and the tier-3 parked entry; `engine/wasmtime_options.go`'s table-limit justification,
+which derived its number from `tblMinSize` in the deleted function; `engine/runtime.go`'s struct
+comment; `engine/component_fence_test.go`'s "third of three execution paths";
+`cleat/wasmtest/wasmtest_backends.go`; `engine/python_wasm_e2e_test.go`.
+
+**§3.31's remaining gap closes by deletion, as it predicted.** "The decomposition path's fence is
+inherited rather than verified" needed no test: there is no longer a path to fence. The
+`componentGetFunc` prerequisite it named turned out not to be one — see the correction in its
+addendum.
+
+Re-derive: `go test ./engine/ -run TestComponent -count=1 -v`

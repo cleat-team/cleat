@@ -90,11 +90,16 @@ tier1:
   # provision their toolchains.
   #
   # tier1.packages lists ./engine/..., ./wasm/... and ./cmd/..., and those packages also
-  # contain the Rust, Java and AssemblyScript integration tests -- tier 2 -- and
-  # TestComponentPythonBinary, which covers the parked component *decomposition* path,
-  # tier 3. `go test ./engine/...` sweeps all of them in, each skips for want of a
-  # toolchain, and tier 1 forbids skips. So the gate reported 14 non-allowlisted skips
-  # that no test fix could remove.
+  # contain the Rust, Java and AssemblyScript integration tests -- tier 2 -- and, until
+  # 2026-09-01, TestComponentPythonBinary, which covered the parked component
+  # *decomposition* path, tier 3. `go test ./engine/...` sweeps all of them in, each
+  # skips for want of a toolchain, and tier 1 forbids skips. So the gate reported 14
+  # non-allowlisted skips that no test fix could remove.
+  #
+  # One of those 14 is gone rather than filtered: the decomposition path was deleted
+  # (IMPROVEMENT-PLAN 3.65) and its test with it. The rest of this reasoning is
+  # unchanged -- the tier-2 language tests still need toolchains the gate does not
+  # provision.
   #
   # The alternative was a runner carrying Rust, Node, a JDK, Gradle, componentize-py and
   # wasm-tools together. Measured on the Cross-Language E2E job, which is the closest
@@ -136,18 +141,17 @@ tier1:
     - "^TestAssemblyScriptWorkflowExecute$"
     - "^TestASTransform$"
     - "^TestVetAS$"
-    # tier 3 -- component decomposition. wasm/component_test.go. Not a language gap: it
-    # reads a hardcoded /tmp/test_python.wasm, so it has never run anywhere but the
-    # machine it was written on, and it asserts 14 modules and a ~12 MB first module --
-    # properties of one componentize-py version.
+    # TestComponentPythonBinary was excluded here, as tier 3 -- component decomposition.
+    # Removed 2026-09-01: the path it covered was deleted (IMPROVEMENT-PLAN 3.65), so the
+    # test, wasm/component_test.go and wasm/component.go went with it and there is nothing
+    # left to exclude.
     #
-    # Deliberately NOT deleted as "superseded by TestPythonWasmEndToEnd", which this
-    # file previously suggested and which is wrong: both ParseComponentBundle callers in
-    # the engine are on the decomposition fallback path, and the Python e2e takes the
-    # native component path, so it never reaches the parser. This is the only test that
-    # parses a real componentize-py bundle. Excluded because the path it covers is
-    # parked, not because the test is worthless.
-    - "^TestComponentPythonBinary$"
+    # The earlier note is worth keeping, because it argued the test should NOT be deleted
+    # as "superseded by TestPythonWasmEndToEnd": both ParseComponentBundle callers were on
+    # the decomposition path, and the Python e2e takes the native component path, so it
+    # never reached the parser. That argument was correct and is why the test survived
+    # this long. It stopped applying when the callers themselves went away -- the test is
+    # not superseded, it is unreferenced.
 
   # D2, DECIDED 2026-08-06: python joins go at tier 1.
   #
@@ -310,15 +314,17 @@ tier2:
     # sdk-python was here. D2 promoted it to tier 1 on 2026-08-06 -- see the block above
     # tier1.languages for the evidence. These two open items travel with it and are the
     # reason its promotion is to tier 1 with named gaps rather than a clean bill:
-    #   * §3.31 residual — the component *decomposition* path has never once succeeded.
-    #     Python executes via the native component path; decomposition is a separate,
-    #     parked code path (see tier 3).
-    #   * wasm/component_test.go's TestComponentPythonBinary skips on a hardcoded
-    #     /tmp/test_python.wasm, so it has never run anywhere but the machine it was
-    #     written on, and it asserts exactly 14 modules and a ~12 MB first module --
-    #     properties of one componentize-py version. Rebuild it from the real toolchain
-    #     in a job that has one, or delete it as superseded by TestPythonWasmEndToEnd.
-    #     It is a test-design bug, not a toolchain gap, and not a tier-1 blocker.
+    # Both open items are CLOSED as of 2026-09-01, by deletion rather than by fixes:
+    #   * §3.31 residual — the component *decomposition* path had never once succeeded.
+    #     Deleted (IMPROVEMENT-PLAN 3.65). Python executes via the native component path,
+    #     which is now the only one, so there is no longer a second path to be wrong
+    #     about.
+    #   * wasm/component_test.go's TestComponentPythonBinary skipped on a hardcoded
+    #     /tmp/test_python.wasm and asserted properties of one componentize-py version.
+    #     Deleted with the parser it exercised.
+    # Python's tier-1 standing rests on TestPythonWasmEndToEnd and
+    # TestPythonComponentExecutionFence, which run in a job that provisions the
+    # toolchain -- unchanged by either deletion.
 
     - id: sdk-java
       decision: DECIDED 2026-08-06    # D4 -- promoted from tier 3 on measurement; see #347
@@ -958,11 +964,26 @@ tier3:
     # The general lesson for this file: before parking anything, check whether the
     # evidence for parking it came from a check capable of returning a different answer.
 
-    - id: component-decomposition-path
-      why: |
-        Wired, reached, and has never once successfully executed a workflow. §3.31's
-        recommendation is to fix componentGetFunc's nil parent export index and then delete
-        this path, rather than write a test for it.
+    # component-decomposition-path was parked here. DELETED 2026-09-01 -- see
+    # IMPROVEMENT-PLAN 3.65. Kept as a note rather than removed outright because the
+    # measurement is the useful part: tier 3 means "not built, not shipped, not claimed",
+    # and this is what following that through to its conclusion looks like.
+    #
+    # Measured against the only Component Model binary in the repo, a 19.3 MB
+    # componentize-py build, with the native path as the control:
+    #
+    #   native component path     reached CPython, ran guest code, returned the guest's
+    #                             own type error -- i.e. it works
+    #   wasmtime decomposition    failed at instance 81 of 85, "incompatible import type
+    #                             for env::cleat_call"
+    #   wazero decomposition      failed at instance 8, "memory is not exported in
+    #                             module env"
+    #
+    # §3.31 recommended fixing componentGetFunc's nil parent export index first. That
+    # turned out not to be a prerequisite (see the correction in 3.31's addendum): the
+    # only component producer cleat has is componentize-py driven by
+    # python-sdk/wit/cleat.wit, whose world exports `run` at the top level, so nothing
+    # builds a component the nil parent index cannot resolve.
 
     - id: formal-specs
       why: |

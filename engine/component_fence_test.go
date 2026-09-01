@@ -17,26 +17,35 @@ import (
 // The execution fence on the native Component Model path.
 //
 // IMPROVEMENT-PLAN 3.31 asks for the execution-limit story to be written and
-// tested per *backend* rather than per language. This is the wasmtime
-// backend's third execution path -- core modules, decomposition, and the
-// native component path -- and it was the one that did not enforce the
-// caller's budget.
+// tested per *backend* rather than per language. This is one of the wasmtime
+// backend's two execution paths -- core modules and the native component path
+// -- and it was the one that did not enforce the caller's budget.
+//
+// There were three until 2026-09-01, when the decomposition path was deleted
+// (3.65). Its fence was the one 3.31 recorded as "inherited rather than
+// verified", and it resolves by deletion rather than by a test, which is what
+// that section predicted.
 // ---------------------------------------------------------------------------
 
 // TestComponentPathResourceLimitClassification covers the classifier that
 // makes the fence legible, in the form the component path produces.
 //
-// The two paths report the same trap differently. Core modules and
-// decomposition come back through wasmtime-go as a *wasmtime.Trap with a
-// machine-readable code. The native component path comes back through the
+// The two paths report the same trap differently. Core modules come back
+// through wasmtime-go as a *wasmtime.Trap with a machine-readable code. The native component path comes back through the
 // Component Model C API, whose wasmtime_error_t exposes a rendered message, an
 // exit status and a wasm trace -- and no trap code (wasmtimeinc/wasmtime/
 // error.h). So that path is classified by matching wasmtime's own rendering,
 // and this test is what stands between that and a silent regression if the
 // wording changes upstream: the failure mode without it is not a wrong answer
-// but a missing one -- an exhausted budget stops being recognised as a limit,
-// which is exactly when Execute would resume falling back to decomposition and
-// hand a runaway guest a second budget.
+// but a missing one -- an exhausted budget stops being recognised as a limit
+// and is reported as a guest crash.
+//
+// It used to be worse than that. Until the decomposition path was deleted
+// (3.65), a limit the classifier failed to recognise was also a limit that did
+// not stop Execute falling back, so a runaway guest was handed a second budget.
+// With one path left there is nothing to fall back to, but the classifier still
+// decides whether an operator is told the host stopped their workflow or that
+// their workflow crashed.
 func TestComponentPathResourceLimitClassification(t *testing.T) {
 	b := &wasmtimeBackend{}
 	b.limits.instructionLimit = 5_000_000

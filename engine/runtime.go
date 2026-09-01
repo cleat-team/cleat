@@ -37,8 +37,16 @@ var wazeroInitOnce sync.Once
 type Runtime struct {
 	wazeroRuntime wazero.Runtime
 	// stdout/stderr are NOT goroutine-safe — they are shared across callers
-	// of InstantiateModuleNamed. Concurrent execution must use the
-	// wazeroBackend.Execute() path, which uses per-backend buffers.
+	// of InstantiateModuleNamed.
+	//
+	// This used to say "concurrent execution must use the
+	// wazeroBackend.Execute() path, which uses per-backend buffers". That type
+	// was deleted in #459 and the last caller of the per-execution variant
+	// (instantiateModuleNamedWithWriters) went with the component decomposition
+	// path in IMPROVEMENT-PLAN 3.65, so the variant is gone too. Concurrent
+	// execution now means the wasmtime backend, which does not touch these at
+	// all. What remains true is the warning itself: anything that instantiates
+	// through this Runtime concurrently races on them.
 	stdout           bytes.Buffer
 	stderr           bytes.Buffer
 	callTimeout      time.Duration // per-call WASM execution timeout (0 = none)
@@ -196,19 +204,6 @@ func (r *Runtime) InstantiateModuleNamed(ctx context.Context, compiled wazero.Co
 		WithName(name).
 		WithStdout(&r.stdout).
 		WithStderr(&r.stderr).
-		WithStartFunctions()
-	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
-}
-
-// instantiateModuleNamedWithWriters is like InstantiateModuleNamed but uses
-// the provided writers for stdout/stderr capture instead of the Runtime's
-// shared buffers. This is used by wazeroBackend.Execute() so that concurrent
-// workflow executions each have independent buffers.
-func (r *Runtime) instantiateModuleNamedWithWriters(ctx context.Context, compiled wazero.CompiledModule, name string, stdout, stderr *bytes.Buffer) (api.Module, error) {
-	config := wazero.NewModuleConfig().
-		WithName(name).
-		WithStdout(stdout).
-		WithStderr(stderr).
 		WithStartFunctions()
 	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
 }
