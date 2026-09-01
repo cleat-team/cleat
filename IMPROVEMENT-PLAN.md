@@ -8158,3 +8158,61 @@ This is CLAUDE.md's rule applied to its own exception — *"proving a test can f
 that cannot fail; it does not catch one that fails sometimes."*
 
 Re-derive: `go test ./engine/ -run 'TestInitModuleDoneBranchConsultsErrCh|TestInitModule' -count=1`
+
+---
+
+### 3.61 The output-buffer ABI, as a property rather than 31 tests — ✅ **FIXED** (2026-09-01)
+
+§3.59 gave `cleat_create_promise` a behavioural test after §3.55 found the host registering it
+with a parameter no guest passed. **31 of the 56 `cleat_*` host functions take a
+`(ptr, maxLen)` output-buffer pair**, and that PR covered one of them.
+
+The mutation that mattered in §3.59 was **swapping `promiseIDPtr` with `promiseIDMaxLen`**: both
+are `i32`, both in range, so the module still links, the host writes at an offset the guest never
+nominated, and the guest reads a buffer nobody filled. Nothing in the suite would have seen that
+in any of the other 30.
+
+CLAUDE.md names the right shape for this layer — *"a backlog of 200 similar findings is usually
+one missing abstraction, not 200 fixes … which a property test over that boundary would find
+faster than reading the remaining sites."*
+
+`engine/abi_output_buffer_property_test.go` asserts the invariant every wrapper shares, over
+every wrapper: **the closure's last two parameters are `(ptr, maxLen)`, and they reach the
+handler as its last two arguments, in that order, with the guest's memory on the context.**
+
+Verified to hold with zero deviations before being encoded: of 56 `FuncWrap` registrations, 31
+end in a `(Ptr, MaxLen)` pair and **none** ends in a `MaxLen` whose preceding parameter is not its
+`Ptr`. The 5 host calls with no `*wasmtime.Caller` — `cleat_now`, `cleat_random`, `cleat_sleep`,
+`cleat_version`, `cleat_min_version` — take no buffer.
+
+Mutation-tested, including on calls §3.59 does **not** cover:
+
+| mutation | result |
+|---|---|
+| swap ptr/maxLen in `cleat_get_state` | `SWAPPED — the handler receives (valueMaxLen, valuePtr)` |
+| swap ptr/maxLen in `cleat_uuid` | `SWAPPED — the handler receives (uuidMaxLen, uuidPtr)` |
+| stale `directWriters` entry | named and failed |
+| break output-buffer recognition | `only 0 wrappers were recognised … expected at least 25` |
+| glob matches no files | `t.Fatal` |
+
+**Two things the test got wrong first, both worth recording.**
+
+It reported four wrappers as making no handler call. They were fine: `cleat_call`,
+`cleat_poll_work`, `cleat_json_parse` and `cleat_json_stringify` bind `callCtx := ctxWithMem(...)`
+to a local instead of passing it inline, and the detector only matched the inline form. **A test
+going red is not evidence the code is wrong** — three of those four were a defect in the test.
+
+The fourth, `cleat_poll_work`, genuinely differs: it copies into the guest's memory itself and
+calls no handler, so the argument-order property cannot apply. It is allowlisted in
+`directWriters`, and the allowlist is asserted **exact in both directions** so that a wrapper
+which starts or stops writing directly is a decision rather than a silent gap.
+
+**Still open, and now named:** `cleat_poll_work` is the least-covered call in this file and the
+one where a mix-up is most dangerous — it takes **two** output buffers, `(entryNamePtr,
+entryNameMaxLen)` and `(argsPtr, argsMaxLen)`, and copies into both with hand-written bounds.
+
+**What this does not do.** It reads source, so it cannot catch a wrong value passed in the right
+position. That is what §3.59's behavioural test does, for one call. Breadth here, depth there,
+deliberately.
+
+Re-derive: `go test ./engine/ -run TestOutputBufferHostCallsPassPtrAndMaxLenInOrder -count=1 -v`
