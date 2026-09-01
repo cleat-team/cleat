@@ -171,11 +171,24 @@ func (s *MySQLStore) log() *slog.Logger {
 // that skip into a failure, which is how this surfaced.
 //
 // Scope, stated plainly: this guard is currently applied to
-// GetActiveInstanceCountsByVersion only, the one method the test covers.
-// Auditing the other ~89 tenant-scoped MySQL call sites, and deciding which
-// legitimately run without a tenant, is IMPROVEMENT-PLAN.md 1.7 and is not
-// done. Do not read the presence of this helper as a claim that MySQL tenant
-// scoping is enforced.
+// GetActiveInstanceCountsByVersion only, the one method the test covers. Do not
+// read the presence of this helper as a claim that MySQL tenant scoping is
+// enforced.
+//
+// This used to point at "auditing the other ~89 tenant-scoped MySQL call
+// sites" as IMPROVEMENT-PLAN.md 1.7 work that "is not done". Corrected
+// 2026-08-31: tiers.yaml records multi-tenancy-mysql as NOT SUPPORTED --
+// single-tenant only (D1, 2026-08-06), "a documented product boundary, not an
+// open engineering item", because emulating RLS costs 6.1x on scans. So there
+// is no tenant-isolation audit outstanding here, and a comment sending the
+// next reader at one is worse than no comment.
+//
+// What this guard is actually for survives that decision, which is why it
+// stays: it is a wrong-answer guard, not a multi-tenancy guard. An empty
+// tenantID makes every tenant_id predicate a comparison against the empty
+// string -- no rows, no error -- so a query with no identity reads to the
+// caller as "this tenant has no data". That is just as wrong in the
+// single-tenant deployment MySQL is supported for.
 func (s *MySQLStore) requireTenant(op string) error {
 	if s.tenantID == "" {
 		return fmt.Errorf("%s: tenant ID must be set; MySQL has no row-level "+
