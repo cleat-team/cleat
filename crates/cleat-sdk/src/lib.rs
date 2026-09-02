@@ -3,6 +3,7 @@
 //! Provides the [`HostCalls`] struct for making cleat API calls from WASM
 //! workflows, and memory helpers for the cleat ABI.
 
+pub mod defer;
 pub mod host_calls;
 pub mod memory;
 pub mod plugins;
@@ -34,6 +35,7 @@ mod native_stubs {
     }
 }
 
+pub use defer::{register_defer, run_deferred};
 pub use cleat_macro::cleat_test;
 pub use host_calls::{ChildWorkflowOptions, FetchResult, HostCalls, RetryPolicy, SignalResult};
 pub use saga::{Saga, SagaStep};
