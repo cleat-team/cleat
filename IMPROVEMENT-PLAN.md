@@ -8737,7 +8737,7 @@ delete it; write-only persisted state is a trap for the next reader.**
 
 Re-derive: `go test ./engine/ -run TestDeferRegisteredBeforeASuspension -count=1 -v`
 
-### 3.67 A `cleat_sleep` at the replay frontier never resumes — 🔶 **FIXED except sleep-first** (WS-3, 2026-09-01)
+### 3.67 A `cleat_sleep` at the replay frontier never resumes — ✅ **FIXED** (WS-3, 2026-09-01)
 
 Found while building §3.66's regression test, which had to route around it.
 
@@ -8915,10 +8915,22 @@ longer special, which retires the bug class rather than the bug.
    virtual clock is already behind reality is not ahead of schedule. It does differ from the old
    "at least N more seconds from now".
 
-**Still broken: a sleep that is the workflow's first durable operation.** History is empty, so
-there is no anchor -- `s.nowMs` is re-seeded from the wall clock every segment and the deadline
-moves forward with it. Closing this needs the workflow's `created_at` passed into `Replay` as the
-anchor: worker plumbing rather than engine logic, and deliberately a separate change.
+**The sleep-first case, closed separately.** A workflow whose first durable operation is a sleep
+has no recorded event to anchor to, so the anchor fell back to the process wall clock -- which is
+re-read every segment, so the deadline moved forward with it and never arrived. This is not an
+edge case: "wait five minutes, then do the thing" is an ordinary delayed job, and it is the shape
+most likely to be written as a sleep before anything else.
+
+`WithWorkflowStartTime` supplies the workflow row's `created_at`, which the worker passes from
+`wf.CreatedAt` and which is fixed for the life of the run, so the deadline stops moving.
+`seedNowMs` takes the most deterministic anchor available -- first recorded event, then
+`created_at`, then the process clock -- and the precedence has its own test, because
+`created_at` winning over history would make a long-running workflow measure every sleep from the
+moment it was created and read every deadline as already elapsed.
+
+It also removes a determinism hole that predates all of this: `Now()` for a fresh workflow's
+first steps was seeded from the wall clock, so two replays of the same empty history produced
+different values. It is now `created_at` on every replay.
 
 A related hazard was fixed on the way. The package-level `nowMs` seed is refreshed by the
 worker's dispatch loop and by **nothing** in the CLI and embedded paths, where it stays zero. An

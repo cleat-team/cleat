@@ -117,10 +117,7 @@ func (e *Engine) executeWithBackend(
 		compactedStep = e.compactionState.CompactedStep
 	}
 
-	now := nowMs.Load()
-	if len(replayHistory) > 0 && replayHistory[0].TimestampMs > 0 {
-		now = replayHistory[0].TimestampMs
-	}
+	now := e.seedNowMs(replayHistory)
 
 	session := &execSession{
 		engine:       e,
@@ -314,10 +311,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		compactedStep = e.compactionState.CompactedStep
 	}
 
-	now := nowMs.Load()
-	if len(replayHistory) > 0 && replayHistory[0].TimestampMs > 0 {
-		now = replayHistory[0].TimestampMs
-	}
+	now := e.seedNowMs(replayHistory)
 
 	session := &execSession{
 		engine:        e,
