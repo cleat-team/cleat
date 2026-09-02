@@ -785,13 +785,14 @@ func main() {
 		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
 		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
+		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
 	)
 	if wasmtimeErr != nil {
 		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)
 		os.Exit(1)
 	}
 	var wasmtimeBackend engine.WasmBackend = wt
-	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes)
+	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes, "defer_budget", *wasmDeferBudget)
 
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
 	var notifyCh chan struct{}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -267,6 +268,93 @@ func (b *wasmtimeBackend) configureStore(ctx context.Context, store *wasmtime.St
 	}
 	store.Limiter(memLimit, tblLimit, instLimit, -1, -1)
 	return timeout, nil
+}
+
+// deferRunnerExport is the export codegen emits so the host can drain a killed
+// workflow's defer table. See wasm/exports.go.
+const deferRunnerExport = "__cleat_run_deferred"
+
+// runGuestDefersAfterKill runs the defers of a workflow the host just stopped.
+//
+// IMPROVEMENT-PLAN 3.35 phase 4. A guest killed by the fence, the instruction
+// limit, or an unrecoverable runtime failure never reaches the entry point
+// wrapper that normally drains its defer table (3.70), so its cleanup -- the
+// released lock, the refunded charge -- simply did not happen. #544 and #548
+// measured that the instance is nonetheless still usable and its closures
+// intact after all three; this is the call that uses that.
+//
+// Best-effort by construction. It is called immediately before returning the
+// error that says the workflow was killed, and it must not change that error:
+// the workflow failed, and it failed for the reason the caller already has.
+// A cleanup that itself fails is logged and nothing more.
+//
+// The budget refresh is not uniform, and the shape of it was measured rather
+// than assumed (2026-09-02, probes over testdata/fencereentry):
+//
+//   - Wall clock is always refreshed. SetEpochDeadline is relative to the
+//     current epoch, so without it the call is interrupted immediately.
+//   - Fuel is refreshed only when metering is on, and it is REQUIRED there:
+//     without SetFuel the runner traps instantly, ran=0. The wall-clock budget
+//     above stays the binding bound, so this can be generous.
+//   - The memory ceiling is deliberately NOT raised. It does not need to be:
+//     the export takes no arguments, so unlike an entry point it needs no
+//     scratch buffers, and an OOM-killed guest ran its defer with the ceiling
+//     left exactly where it was (ran=1, the defer reached the host). Raising
+//     it would hand more memory to a guest that has just proved it cannot be
+//     trusted with what it had.
+func (b *wasmtimeBackend) runGuestDefersAfterKill(
+	store *wasmtime.Store, instance *wasmtime.Instance, entryPoint string, cause error,
+) {
+	fn := instance.GetFunc(store, deferRunnerExport)
+	if fn == nil {
+		// Not an error worth logging on its own: a guest built before this
+		// export existed, or one with no entry points, simply has nothing to
+		// drain here.
+		return
+	}
+
+	budget := b.limits.deferBudget
+	if budget <= 0 {
+		budget = DefaultWasmtimeDeferBudget
+	}
+	ticks := uint64(budget / epochTickInterval)
+	if ticks == 0 {
+		ticks = 1
+	}
+	store.SetEpochDeadline(ticks)
+	if b.limits.instructionLimit > 0 {
+		if err := store.SetFuel(b.limits.instructionLimit); err != nil {
+			slog.Default().Warn("could not refuel the guest to run its defers",
+				"entry_point", entryPoint, "error", err)
+			return
+		}
+	}
+
+	var ran int64
+	var callErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callErr = fmt.Errorf("wasmtime panic: %v", r)
+			}
+		}()
+		res, err := fn.Call(store)
+		if err != nil {
+			callErr = err
+			return
+		}
+		ran, _ = res.(int64)
+	}()
+
+	switch {
+	case callErr != nil:
+		slog.Default().Warn("a killed workflow's defers could not be run",
+			"entry_point", entryPoint, "defer_budget", budget,
+			"error", callErr, "killed_by", cause)
+	case ran > 0:
+		slog.Default().Info("ran the defers of a killed workflow",
+			"entry_point", entryPoint, "defers_run", ran, "killed_by", cause)
+	}
 }
 
 // executionLimitError marks an error as "the host stopped this guest", as
@@ -600,6 +688,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			// silent "ok".
 			if startErr != nil {
 				if limitErr := b.resourceLimitError(startErr, execTimeout); limitErr != nil {
+					b.runGuestDefersAfterKill(store, instance, entryPoint, limitErr)
 					return nil, fmt.Errorf("host: export %q: %w", entryPoint, limitErr)
 				}
 				// A NON-ZERO WASI exit is the guest dying, not finishing.
@@ -639,6 +728,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 				var wasmErr *wasmtime.Error
 				if errors.As(startErr, &wasmErr) {
 					if code, ok := wasmErr.ExitStatus(); ok && code != 0 {
+						b.runGuestDefersAfterKill(store, instance, entryPoint, startErr)
 						return nil, fmt.Errorf(
 							"host: export %q: the guest exited with status %d without "+
 								"reporting a result; it was killed rather than finishing "+

@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/cleat-team/cleat/engine"
 )
 
 // Config holds structured configuration for the cleat worker.
@@ -107,6 +109,7 @@ var (
 	wasmMemoryMaxMB                = flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
 	wasmCumulativeAllocationMaxMB  = flag.Int("wasm-cumulative-allocation-max-mb", 0, "Max cumulative WASM linear memory across all concurrent executions in MB (default 0 = unlimited)")
 	wasmInstructionLimit           = flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit). Enforced via wasmtime fuel (SetConsumeFuel/SetFuel).")
+	wasmDeferBudget                = flag.Duration("wasm-defer-budget", engine.DefaultWasmtimeDeferBudget, "Max wall-clock time for the cleanup pass the host runs on a workflow it killed -- the defers of a workflow stopped by --wasm-instance-timeout, --wasm-instruction-limit, or an unrecoverable guest runtime failure. This is EXTRA execution granted to a workflow the fence already stopped, so the worst case a runaway workflow can occupy a worker is --wasm-instance-timeout plus this. 0 uses the built-in default.")
 	wasmInstanceTimeout            = flag.Duration("wasm-instance-timeout", 30*time.Second, "Max wall-clock time for a single WASM invocation (one fresh execution or one replay pass) before it is forcibly interrupted. Enforced via wasmtime epoch interruption, which bounds even a WASM module stuck in a tight loop that never calls back into the host. 0 disables it and is NOT recommended.")
 	noPerStepFlush                 = flag.Bool("no-per-step-flush", false, "Skip per-step event flush; rely on batch finalization for persistence (higher throughput, weaker crash safety)")
 	writeAheadIntentOps            = flag.String("write-ahead-intent-ops", "", "Comma-separated service.operation pairs that must use write-ahead call intent: the engine commits a pending event before dispatching, so a crash mid-call is reported as ambiguous on replay instead of silently repeating the side effect. Costs one extra synchronous round trip per call, so declare only operations that are not safe to repeat (a card charge, not a GET). Independent of --no-per-step-flush, which does not defer these writes.")
