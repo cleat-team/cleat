@@ -1,0 +1,64 @@
+// Package fencereentry is the fixture for IMPROVEMENT-PLAN §3.35 phase 4's
+// deciding measurement: after the execution fence stops a real Go SDK guest,
+// can the host re-enter that instance and get guest code to run?
+//
+// It needs two entry points in ONE module, because the whole question is about
+// a second call into the instance the first call was stopped in. Two fixtures
+// cannot express it: the host would instantiate twice, which is the
+// fresh-instance problem §3.70 already measured and is not what phase 4 is
+// about.
+//
+// See engine/fence_reentry_test.go.
+package fencereentry
+
+import (
+	"strconv"
+
+	"github.com/cleat-team/cleat/cleat"
+)
+
+// SpinForever burns wall-clock time and never enters the host, so the fence is
+// what stops it and not a host call noticing a cancelled context. Same shape
+// and same reasoning as testdata/spin -- the accumulator is returned so neither
+// the Go compiler nor wasm-opt can prove the loop dead and delete it.
+//
+// The iteration count is not a duration. It is "far more than any fence budget
+// a test would set", so that reaching the end is itself a test failure rather
+// than a slow pass.
+// input is unused by both entry points here, and present only because codegen
+// requires it: an entry point whose only parameter is h generates a
+// `argsJSON := readString(...)` that nothing consumes, and the guest fails to
+// compile with "declared and not used: argsJSON". Every other fixture in the
+// repo happens to take an input parameter, so nothing has ever caught it.
+// Tracked separately -- it is not what this fixture is measuring.
+func SpinForever(h cleat.HostCalls, input string) (string, error) {
+	// Registered before the loop, so the fence is guaranteed to stop this
+	// workflow with a defer outstanding. This is phase 4's whole subject: a
+	// cleanup that the guest's own defer runner (3.70) will never reach,
+	// because the entry point never finishes.
+	if _, err := h.DurableDeferFunc(func() {
+		_, _ = h.DurableCall("fence-probe", "the_fenced_workflows_defer", `{}`)
+	}); err != nil {
+		return "", err
+	}
+
+	x := uint64(1)
+	for i := 0; i < 100000000000; i++ {
+		x = x*6364136223846793005 + 1442695040888963407
+		x ^= x >> 33
+	}
+	return `{"value":` + strconv.FormatUint(x, 10) + `}`, nil
+}
+
+// AfterTheFence makes one host call and returns.
+//
+// The host call is the point. A defer body exists to reach the host -- release
+// a lock, refund a payment -- so "the guest ran again" has to mean "the guest
+// reached the host again", not "the export returned an int64". An export that
+// returns without executing its body returns a perfectly plausible int64.
+func AfterTheFence(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableCall("fence-probe", "after_the_fence", `{}`); err != nil {
+		return "", err
+	}
+	return `{"reentered":true}`, nil
+}
