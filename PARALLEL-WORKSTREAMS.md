@@ -3,8 +3,14 @@
 > **Read this first, added 2026-09-02.** `WORKSTREAM.md` (2026-08-06) supersedes this file's
 > *premise* — three concurrent streams — and the record bears it out: since 2026-09-01 only WS-3
 > has stamped work on `IMPROVEMENT-PLAN.md` (WS-1 12 sections in August and 0 in September, WS-2
-> 8 and 0, WS-3 10 and 11). **So do not read the boards, the per-stream schedules, or the
-> coordination rituals below as current.**
+> 8 and 0, WS-3 10 and 11). **So do not read the per-stream schedules or the coordination
+> rituals below as current.**
+>
+> **Amended the same day: the WS-1 and WS-2 boards *are* current, and are the exception to
+> that sentence.** They were re-derived against `develop` at `81d8f8b` after this banner was
+> written — see the second banner below. That does not restart either stream; it means that
+> when the work is picked up, the board says what is actually open. The WS-3 board below is
+> the one that is stale, and carries its own note.
 >
 > It does **not** supersede the parts of this file that say *who owns what and where*, which live
 > nowhere else and are still in force:
@@ -12,7 +18,10 @@
 > - the **checkout → stream map** below — this is how a session learns which stream its sandbox is;
 > - the **database ports** per stream (WS-3 used Postgres `5434`, MySQL `3308`, SQL Server `1435`
 >   for a full three-dialect engine run on 2026-09-02);
-> - the **migration ranges** (`010–019` / `020–029` / `030–039`), still cited as reserved.
+> - the **migration ranges** (`010–019` / `020–029` / `030–039`), still cited as reserved —
+>   but **nearly full**, measured the same day: mssql is at `037` with two numbers left in the
+>   `030` block. The rule this banner gives for `IMPROVEMENT-PLAN.md` section numbers is the
+>   one to use for migrations too; see "On the migration ranges" below.
 >
 > The one rule here that did **not** survive is the `IMPROVEMENT-PLAN.md` section allocation
 > (WS-1 `§3.10+`, WS-2 `§3.20+`, WS-3 `§3.30+`). WS-1 holds §3.34, §3.37 and §3.38 inside WS-3's
