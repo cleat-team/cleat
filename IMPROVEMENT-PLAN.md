@@ -6125,7 +6125,7 @@ both are now decisions about *what a defer may do* rather than prerequisites for
 module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
 the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
-### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 OPEN, and blocked on WS-2** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02)
+### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 OPEN, no longer blocked — the record shape is answered in §3.75** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02)
 
 > **2026-09-01, phases 2–3.** A WASM defer now has a body and it runs. §3.70 records the design
 > and why the "one dispatch export" it was blocked on turned out to be unnecessary: the host
@@ -6463,6 +6463,15 @@ for WS-3 and stays reserved for it. Phases 1–4 are worth shipping without phas
 defer from "runs somewhere, with no context, unless the workflow ever suspended" to "runs where
 it was registered, with the session, on every terminal transition" — best-effort, which is what
 the documentation can then honestly claim.
+
+> **Answered 2026-09-02 — see §3.75 (WS-2).** The record shape this paragraph asks for does not
+> exist, and the reason is that its premise has expired: every defer execution in the tree now
+> runs *inside the claimed segment*, before `FinalizeWorkflowSegment`, so those paths already
+> inherit §1.4's durability with no new record. What is left is the three sites that set a
+> terminal status by direct `UPDATE` and so never build an instance to run defers in. The answer
+> is a **two-phase terminal transition** — mark, run a defer segment, then finalize — whose only
+> new durable state is a workflow-level marker swept by the existing reaper. §3.75 has the
+> inventory, the ordering hazard that makes it urgent, and what to build.
 
 #### Cost, and what it touches
 
@@ -9923,3 +9932,157 @@ correctly before this was fixed**, which is why this landed first.
 Re-derive: generate a wrapper and read it, or run
 `CleatEntryProcessorTest.testGeneratedWrapperPropagatesSuspension`. Removing the processor's
 suspend branch fails exactly that test and no other (282 tests, 1 failure).
+
+### 3.75 The durable record for a resumable defer phase — 🔵 **DESIGN ANSWER, not yet built** (WS-2, 2026-09-02)
+
+§3.35 phase 5 is blocked on WS-2 by design: making `defer` survive a `kill -9` needs the defer
+phase to be "its own durable, resumable unit with a reaper", and the plan states that is **the
+same record shape as §1.4's crash recovery**, which is WS-2's (§3.35, "Phase 5 is not
+scheduled"). WS-3 has phases 1–4 shipped and is deliberately not starting 5 without this
+answer. This section is the answer. The migration that carries it is WS-3's.
+
+**The answer is that phase 5 does not need a new record.** It needs the terminal transition to
+become two-phase. What follows is why the obvious record designs are the wrong shape, and what
+to build instead.
+
+#### The question as it was posed, and why both options are wrong
+
+The question WS-2 was asked to settle: does a defer phase become another `event_history` row
+under phase D's pending discipline — `intent_at IS NOT NULL AND checksum IS NULL`, resolved
+through `ResolveCallIntent` — or its own table with its own reaper?
+
+Both answers assume a fact that is no longer true: that defers run *after* the workflow is
+terminal, so their durability has to be arranged outside the workflow's lifecycle. **Every
+defer execution in the tree today happens inside the claimed segment, before
+`FinalizeWorkflowSegment`.** Measured 2026-09-02 at `develop` `9b4824f`:
+
+| path | where defers run |
+|---|---|
+| success | inside the guest, in the entry-point wrapper, before it reports its result (§3.70). The worker's post-finalization pass was **deleted** — `cmd/cleat-worker/setup.go:1853`, "No defer pass here" |
+| trap / fence / timeout | `engine/executor.go:491`, inside `Engine.Execute`, before it returns to the worker |
+
+So on both paths the workflow is still `running`, its claim is live, `WriteCallIntent`'s
+`workerID`+`generation` fence still matches, and a `kill -9` mid-defer commits nothing terminal
+— `FinalizeWorkflowSegment` appends the segment's events and the terminal status in **one
+fenced transaction** (`engine/store_lifecycle.go:263`). The instance stays `running` with a
+stale heartbeat, `ReapStaleInstances` re-queues it, and replay resolves the pending row through
+the machinery §1.4 already built. **These paths are already covered and need nothing.**
+
+#### What is actually left
+
+The plan names it exactly (§3.35): *"a workflow cancelled or failed terminally between segments
+has no live instance to re-enter at all."* The residue is not a durability gap. It is the set
+of places where a **terminal status is set by an `UPDATE workflow_instances`** rather than by a
+segment finalizing, so no instance ever exists to run the defers:
+
+| site | what it does |
+|---|---|
+| `TerminateWorkflow` (`engine/db.go:1128`, `mysql_ops.go:1188`, `mssql_operations.go:173`) | `SET status = 'terminated' … generation = generation + 1`, then `releaseWorkflowResources` |
+| `enforceParentClosePolicy`, `TERMINATE` arm (`engine/store_lifecycle.go`) | `SET status = 'failed', error_msg = 'parent workflow terminated'` on every child |
+| `adminForceResolve` (`engine/store_admin.go:154`, and the MySQL/MSSQL arms) | `SET status = 'done'`/`'failed' … generation = generation + 1`. §3.20's force-resolve, WS-2's own, and it skips defers the same way |
+
+`RequestCancellation` is **not** in this set: it sets `cancellation_requested`, the guest
+observes it and exits through its own wrapper, so that path already runs defers.
+
+**The ordering hazard is live today and is the sharpest argument for fixing this.**
+`TerminateWorkflow` calls `releaseWorkflowResources` — `ClearStickyWorker` and
+`ReleaseWorkflowConcurrencyKeys` — immediately after the terminal `UPDATE`. So the host
+releases the locks, and the defer that would have released them never runs. A terminated
+workflow's cleanup is not merely skipped; it is pre-empted by the host doing a *different*
+release, in the wrong order, with no record that anything was owed.
+
+#### The shape: a two-phase terminal transition
+
+A defer body needs a live instance **with a session** — §3.35 phase 2's finding was that a defer
+without one panics inside any host call (`handlerFromContext`, `engine/imports.go:20`), and "a
+defer that cannot call the host cannot release the lock it took". Getting a live instance means
+replay, which means dispatch, which means the workflow must be claimable and non-terminal.
+
+That constraint decides the design. The host-driven terminal transition splits in two:
+
+1. **Mark, do not finalize.** `TerminateWorkflow` and the parent-close `TERMINATE` arm record
+   the intended terminal outcome and leave the workflow **schedulable** rather than terminal.
+   They must **not** call `releaseWorkflowResources` at this point.
+2. **A defer segment.** The existing dispatch loop claims it like any other workflow, replays
+   history to reconstruct the instance, runs the registered defers in it, and *then* finalizes
+   with the outcome recorded in step 1 — at which point `releaseWorkflowResources` runs, after
+   the defers that may have released those resources themselves.
+
+Once step 2 is a segment, **every defer execution is again inside a claimed segment**, which is
+the case the tree already handles. No new fence, no new reaper, no new pending discipline.
+
+`FinalizeWorkflowSegment` already supports this: `validFinalStatus` accepts `ready` and
+`suspended`, not only `done`/`failed`, so a segment that ends re-schedulable is an existing
+shape rather than a new one.
+
+#### What is durable, and where it lives
+
+The only genuinely new durable state is the workflow-level fact **"this workflow owes a defer
+phase, and here is the outcome to apply when it is done"**. That is:
+
+- a marker and the pending terminal outcome on `workflow_instances` — the outcome fields
+  (`error_msg`, `error_code`) already exist; what is new is the marker and a deadline;
+- swept by the **existing** `reaperLoop` (`cmd/cleat-worker/setup.go:1910`), so a worker that
+  dies mid-defer-segment leaves a workflow that the reaper re-queues exactly as it does now.
+
+**No per-defer durable row is needed, in `event_history` or anywhere else.** What is owed is
+already derivable from history — `DeferralsFromHistory` (`engine/helpers.go:36`) reconstructs
+the registered set from the `EventTypeDefer` rows, which carry `defer_id` and
+`defer_description` and are written on the normal path. And each defer body's own host calls
+are durable calls that get their own event rows and their own intent handling, so a crash
+*inside* the defer phase is already covered at the granularity that works.
+
+#### Why not the other two
+
+**Its own table with its own reaper** is the more expensive answer by a wide margin, and the
+cost is hidden by the phrase. Re-running a defer requires re-instantiating a WASM guest from
+history, so a separate reaper would have to duplicate dispatch, claim, lease and replay — a
+second scheduler, not a second table. It would also be the second durable-resumable-record
+shape, which is the specific outcome §3.35 asked WS-2 to prevent.
+
+**A pending `event_history` row for the defer phase** is closer, and is the right mechanism for
+the *host calls a defer makes* — but as the record of the phase itself it inherits three
+problems that the workflow-level marker does not have. The fence is defined on a live claim and
+`TerminateWorkflow` bumps `generation`, so it would have to be redefined. The row needs a step
+number after the body's last, minted by a writer that is not the executing session — the
+contention #297 already hit. And a row parked pending at the tail leaves the checksum chain
+seeded from a `NULL`, since `previousStoredChecksum` reads the immediately preceding row and the
+verifier resets on a missing checksum; harmless, but it means an unfinished defer permanently
+shows a reset chain segment.
+
+#### What WS-3 can build against
+
+- Add the marker + deadline column to `workflow_instances`, in the migration range that is
+  free above each dialect's high-water mark (postgres `034`, mysql `033`, mssql `037` as of
+  2026-09-02 — they are **not** aligned).
+- Change the two host-driven terminal sites to mark rather than finalize, and move
+  `releaseWorkflowResources` behind the defer segment on those paths.
+- Add the defer segment to the executor: replay, run defers, finalize with the recorded outcome.
+- Extend `reaperLoop` with the marker's deadline predicate.
+
+#### Open, and deliberately not decided here
+
+**The caller-visible status window.** Between step 1 and step 2 a terminated workflow is not yet
+`terminated`, so a client polling status sees it still in flight for the duration of its defer
+phase. That is the same trade the two-phase transition buys everywhere else, and it is a product
+call rather than an engineering one: either terminate becomes asynchronous and observably so, or
+the marker gets a distinct status (`terminating`) that the API reports honestly. **Do not pick
+one silently** — `tiers.yaml` and the admin API both describe terminate today, and this changes
+what it means.
+
+**The inventory above is the whole of it, measured rather than assumed** —
+`grep -rn "SET status = '" --include='*.go' engine/ | grep -v _test` over all three dialects,
+2026-09-02. Every other terminal `UPDATE` it finds is either a `FinalizeWorkflowSegment` arm
+(so a segment ran and its defers ran with it), a `running`/`ready` transition, or a promise or
+signal row rather than a workflow.
+
+**One site needs checking rather than assuming, and it is the reason to run that grep again
+before building.** `MoveToDeadLetterQueue` (`engine/store_lifecycle.go:505` and its two dialect
+twins) sets `dead_lettered` by direct `UPDATE`, which puts it in the shape of the table above —
+but unlike the three rows there it is **fenced on a live claim**
+(`WHERE id = $1 AND assigned_to = $2 AND generation = $6`) and is called by the worker that
+holds it, from `cmd/cleat-worker/setup.go:2565`, after a segment has failed. So its defers
+should already have run on `Execute`'s trap path. That is a reading of the call site, not a
+measurement: **confirm a dead-lettered workflow's defers actually ran before deciding it needs
+no marker.** If it turns out a workflow can reach the dead-letter queue without a segment having
+executed, it is a fourth row rather than an exception.
