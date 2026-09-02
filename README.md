@@ -133,7 +133,7 @@ walkthrough with a real-world example.
 |---------|-------------|
 | [Tutorials](docs/tutorials/) | Step-by-step walkthroughs: quick start, first workflow, signals |
 | [How-To Guides](docs/how-to/) | Practical guides: plugins, testing, deployment |
-| [Reference](docs/reference/) | CLI reference, SDK API, worker configuration |
+| [Reference](docs/reference/) | CLI reference, SDK API, worker configuration, [workflow lifecycle](docs/reference/workflow-lifecycle.md) |
 | [Explanation](docs/explanation/) | Architecture, execution model, security, WASM compilation |
 | [Operations](docs/operations/) | Production deployment, disaster recovery, upgrading |
 | [Migration Guides](docs/migration/) | Migrating from Temporal, DBOS, Restate |

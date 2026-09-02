@@ -221,6 +221,32 @@ tier1:
     mysql: ">=8.0"       # tested against 8.4, tag-pinned (not digest) -- see below
     mssql: ">=2022"      # tested against the digest pinned in tier1-gate.yml
 
+  # D6, DECIDED 2026-09-02: terminate is ASYNCHRONOUS, and the window is named.
+  #
+  # §3.35 phases 1-4 made a workflow's defer bodies run wherever a live instance exists.
+  # Three transitions set a terminal status by direct UPDATE with no instance --
+  # TerminateWorkflow, the parent-close TERMINATE arm, and adminForceResolve -- so their
+  # defers never run. Running them needs a live instance, which needs dispatch, which needs
+  # the workflow to be claimable and NON-TERMINAL (§3.75).
+  #
+  # So terminating splits in two, and between the halves the workflow is not yet terminal.
+  # That window is accepted rather than designed away, on two conditions:
+  #
+  #   1. it is documented -- docs/reference/workflow-lifecycle.md, which also carries the
+  #      whole state machine, because the window is only comprehensible inside it;
+  #   2. it is VISIBLE -- the window gets its own status, not 'ready'. A caller must be able
+  #      to tell "terminating, running its cleanup" from "runnable"; reusing 'ready' would
+  #      make the two indistinguishable, which is the failure this decision exists to avoid.
+  #
+  # What changes for callers: terminate records an intent that will be honoured, and does not
+  # guarantee the workflow is terminal when the call returns. A caller reading status straight
+  # afterwards must poll. The workflow body is NOT re-executed -- the defer segment replays
+  # history and runs only the registered defers.
+  #
+  # The alternative -- keep terminate synchronous and accept that a terminated workflow's
+  # cleanup never runs -- was declined: a defer that does not run on the one path an operator
+  # reaches for when something is wrong is the path where it matters most.
+
   # D1, DECIDED 2026-08-06. The rule: multi-tenancy requires database-enforced RLS.
   # PostgreSQL and SQL Server have it; MySQL has no row-level security feature at all
   # (CREATE POLICY is a syntax error on 8.4). A view + stored-function + WITH CHECK OPTION
