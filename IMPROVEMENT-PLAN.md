@@ -10079,7 +10079,7 @@ segment finalizing, so no instance ever exists to run the defers:
 
 | site | what it does |
 |---|---|
-| `TerminateWorkflow` (`engine/db.go:1128`, `mysql_ops.go:1188`, `mssql_operations.go:173`) | `SET status = 'terminated' … generation = generation + 1`, then `releaseWorkflowResources` |
+| `TerminateWorkflow` (`engine/db.go:1128`, `mysql_ops.go:1188`, `mssql_operations.go:173`) | `SET status = 'terminated' … generation = generation + 1`, then `releaseWorkflowResources` — **on MySQL only since #571 (§3.76); see the correction below** |
 | `enforceParentClosePolicy`, `TERMINATE` arm (`engine/store_lifecycle.go`) | `SET status = 'failed', error_msg = 'parent workflow terminated'` on every child |
 | `adminForceResolve` (`engine/store_admin.go:154`, and the MySQL/MSSQL arms) | `SET status = 'done'`/`'failed' … generation = generation + 1`. §3.20's force-resolve, WS-2's own, and it skips defers the same way |
 
@@ -10092,6 +10092,26 @@ observes it and exits through its own wrapper, so that path already runs defers.
 releases the locks, and the defer that would have released them never runs. A terminated
 workflow's cleanup is not merely skipped; it is pre-empted by the host doing a *different*
 release, in the wrong order, with no record that anything was owed.
+
+**Corrected 2026-09-02, and the correction is §3.76.** The sentence above says
+`TerminateWorkflow` calls `releaseWorkflowResources`. That was true of PostgreSQL and SQL
+Server and **not** of MySQL, which exec'd the `UPDATE` and returned — so this section described
+two dialects out of three as though it were all of them, and #571 has since made it true by
+fixing MySQL to match. Two things follow, and they pull in opposite directions:
+
+- The hazard above now applies to **three** dialects rather than two, so the argument for the
+  two-phase transition is stronger, not weaker.
+- But §3.76 was found *by checking this section's inventory per dialect rather than reading the
+  PostgreSQL implementation and generalising*, which is what this section did. The inventory's
+  three sites were right; one of them was additionally skipping a release the other two
+  performed. **Re-derive per dialect before building step 2 below** — the same generalisation
+  could be hiding in the parent-close arm or `adminForceResolve`.
+
+§3.76 is not a step toward this section's design, and reading it as one would be a mistake: it
+makes the *current* ordering consistent across dialects, and step 1 below then has to move that
+release on all three. Consistency first and the move second is the right order — a two-phase
+transition built over one dialect that released and two that did not would have been three
+behaviours, not two.
 
 #### The shape: a two-phase terminal transition
 
