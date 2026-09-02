@@ -152,9 +152,30 @@ func start(t *testing.T, db *sql.DB, id string, iterations int64) {
 }
 
 // awaitTerminal polls until the workflow leaves ready/running.
+//
+// It tracks whether the workflow was ever seen "running", because the two ways
+// this can time out need opposite diagnoses and the difference is invisible in
+// the final status alone:
+//
+//   - never running -- nothing ever claimed it. No worker is serving this task
+//     queue, so the fence was never given the chance to fire and nothing here
+//     is evidence about it.
+//   - running -- a worker claimed it and did not stop it. That is the §2.5
+//     defect this suite exists to catch.
+//
+// Until 2026-09-02 both produced "a runaway workflow was not terminated, so it
+// is holding a worker's concurrency slot indefinitely". Against a database with
+// no cluster attached that sentence is false in every clause: nothing was
+// holding a slot, because nothing had claimed the workflow. The suite reads
+// CLEAT_TEST_POSTGRES, which in a normal dev sandbox points at an ordinary test
+// database rather than the cluster's, and clusterDB's precondition check pings
+// the DSN -- proving it is *reachable*, not that a worker is behind it. So the
+// misconfiguration was reported, confidently and specifically, as a broken
+// execution fence.
 func awaitTerminal(t *testing.T, db *sql.DB, id string, budget time.Duration) (status, errMsg string) {
 	t.Helper()
 	deadline := time.Now().Add(budget)
+	everRunning := false
 	for time.Now().Before(deadline) {
 		var msg sql.NullString
 		if err := db.QueryRow(
@@ -162,13 +183,29 @@ func awaitTerminal(t *testing.T, db *sql.DB, id string, budget time.Duration) (s
 		).Scan(&status, &msg); err != nil {
 			t.Fatalf("polling %s: %v", id, err)
 		}
+		if status == "running" {
+			everRunning = true
+		}
 		if status != "ready" && status != "running" {
 			return status, msg.String
 		}
 		time.Sleep(2 * time.Second)
 	}
-	t.Fatalf("workflow %s was still %q after %v -- a runaway workflow was not "+
-		"terminated, so it is holding a worker's concurrency slot indefinitely "+
+	if !everRunning {
+		t.Fatalf("workflow %s was still %q after %v and was never claimed by a "+
+			"worker.\n\n"+
+			"This is a configuration failure, not a fence failure: no worker is "+
+			"serving task queue %q at the configured database, so the execution "+
+			"fence was never given anything to stop and this run is evidence about "+
+			"nothing.\n\n"+
+			"This suite needs docker-compose.cluster.yml (or an equivalent) up, and "+
+			"CLEAT_TEST_POSTGRES/CLEAT_TEST_DB pointing at THAT cluster's database. "+
+			"A DSN that merely responds to a ping is not enough -- clusterDB checks "+
+			"reachability, which an ordinary dev test database also satisfies.",
+			id, status, budget, taskQueue)
+	}
+	t.Fatalf("workflow %s was still %q after %v -- a worker claimed it and did not "+
+		"stop it, so a runaway workflow is holding a concurrency slot indefinitely "+
 		"(the worker's --wasm-instance-timeout is %v)", id, status, budget, instanceTimeout)
 	return "", ""
 }
