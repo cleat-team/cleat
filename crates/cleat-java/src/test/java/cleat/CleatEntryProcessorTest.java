@@ -250,6 +250,59 @@ class CleatEntryProcessorTest {
     }
 
     // ========================================================================
+    // Test: the generated wrapper can actually suspend (IMPROVEMENT-PLAN 3.74)
+    // ========================================================================
+
+    @Test
+    void testGeneratedWrapperPropagatesSuspension() throws IOException {
+        // WHAT: the generated export wrapper must translate a SuspendSignal into
+        // Memory.SUSPEND_SENTINEL, the value the host checks for.
+        //
+        // WHY: it could not. cleatSleepMs returned true meaning "the workflow
+        // should propagate the suspension by returning Memory.SUSPEND_SENTINEL
+        // from the export" -- but the author does not write the export, the
+        // processor generates it, and the generated wrapper had no branch that
+        // could return that value. It stringified whatever the workflow returned
+        // and reported encodeExportResult(0, written): a plain SUCCESS.
+        //
+        // So a Java workflow that slept on a fresh execution completed with a
+        // bogus result instead of suspending. The host half was ready the whole
+        // time -- engine/backend_wasmtime.go checks `if raw == (1 << 62)`.
+
+        JavaFileObject sourceFile = source("test", "TestWorkflow", validTestSource);
+        CompilationResult result = compile(sourceFile, null);
+
+        Path exportFile = result.generatedSourceFiles.stream()
+            .filter(p -> p.toString().replace('\\', '/')
+                          .endsWith("test/TestWorkflow_testEntry_Export.java"))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(exportFile, "the export wrapper was not generated at all; "
+            + "generated files: " + result.generatedSourceFiles);
+        String content = new String(Files.readAllBytes(exportFile));
+
+        assertTrue(content.contains("catch (cleat.SuspendSignal"),
+            "The generated wrapper has no catch for cleat.SuspendSignal, so a "
+            + "suspending workflow falls through to the general Exception handler "
+            + "and is reported as a FAILURE with the message 'cleat: workflow "
+            + "suspended'. Wrapper was:\n" + content);
+
+        assertTrue(content.contains("Memory.SUSPEND_SENTINEL"),
+            "The generated wrapper never returns Memory.SUSPEND_SENTINEL, so no "
+            + "Java workflow can suspend: the host is waiting for (1 << 62) and "
+            + "the guest cannot produce it. Wrapper was:\n" + content);
+
+        // Order matters and is easy to get wrong: a catch for Exception placed
+        // first would swallow SuspendSignal, since it is a RuntimeException.
+        int suspendAt = content.indexOf("catch (cleat.SuspendSignal");
+        int exceptionAt = content.indexOf("catch (Exception");
+        assertTrue(suspendAt < exceptionAt,
+            "catch (cleat.SuspendSignal) must come BEFORE catch (Exception), or "
+            + "the general handler swallows it and a suspended workflow is "
+            + "reported as failed. Wrapper was:\n" + content);
+    }
+
+    // ========================================================================
     // Test: successful compilation and generated files
     // ========================================================================
 
