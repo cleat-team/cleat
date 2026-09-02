@@ -157,7 +157,7 @@ func TestReplayFailuresAreClassified(t *testing.T) {
 		},
 		{
 			name:    "ambiguous outcome",
-			history: []EventRecord{{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Err: pendingSentinel}},
+			history: []EventRecord{{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Pending: true}},
 			want:    callErrorUnknown,
 			why:     "the call may have succeeded; retrying risks a duplicate side effect",
 		},

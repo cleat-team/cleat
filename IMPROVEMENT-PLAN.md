@@ -968,8 +968,27 @@ nothing populates it, because the ambiguity never reaches the host as a failure 
 service, operation and key — today ambiguity is reported inside the workflow result *string*)
 and F (admin force-resolve for a pending step, whose prerequisite §3.20 now exists). §3.22
 should be fixed before either: both are about delivering an answer that this discards.~~
-`pendingSentinel` is still detected alongside `Pending` because
-`tests/integrity` exercises it directly; retiring it belongs with E.
+~~`pendingSentinel` is still detected alongside `Pending` because
+`tests/integrity` exercises it directly; retiring it belongs with E.~~
+**Retired 2026-09-02, with phase F's tail.** `isPendingIntent` now reads `Pending` alone.
+
+The sentinel was `"__CLEAT_PENDING_INTENT__"` in `EventRecord.Err`, the representation the
+deleted `flushCallIntent` would have written. **Nothing in any deployment ever wrote it**: the
+write side was deleted rather than wired in, because every completion path guarded its upsert on
+`error IS NULL`, so a sentinel row could never be completed and would have stuck pending forever.
+So the detector could not fire on any real crash, and `PendingSentinel` was exported for exactly
+one consumer — the test that injected the value nothing produced.
+
+**The tests were converted rather than deleted, which is the part worth stating.**
+`TestPendingSentinelDetection` (now `TestPendingIntentDetection`) drives a real WASM workflow and
+checks that an ambiguous step propagates through the call chain — coverage worth keeping. Only
+its *injection mechanism* was dead, so it now sets `Pending` instead. Same for the three engine
+tests.
+
+Verified the conversion did not make them vacuous, which is the risk when a test's fixture
+changes: neutering `isPendingIntent` to `return false` fails `TestPendingIntentDetection` and
+three engine tests. A conversion that quietly stopped asserting would have passed that check
+green.
 
 **Phase F landed 2026-09-02, and phase E and §3.22 landed before it.** `engine.ResolveStep`
 (`engine/admin_intent.go`) records an outcome for a call left pending by a crash, on the

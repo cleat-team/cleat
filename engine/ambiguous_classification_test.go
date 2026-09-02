@@ -75,7 +75,7 @@ func replayWithPendingIntentAtStep(t *testing.T, step int) error {
 	// ---- Leave one call mid-flight ----
 	modified := make([]EventRecord, len(history))
 	copy(modified, history)
-	modified[step].Err = PendingSentinel
+	modified[step].Pending = true
 	modified[step].Response = ""
 
 	rt2, err := NewRuntime(ctx, 0, 0)

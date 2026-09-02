@@ -273,13 +273,13 @@ func TestFreshAndReplayAgreeOnNonRetryableFailure_Heartbeat(t *testing.T) {
 	}
 }
 
-func TestDurableCallWithHeartbeat_Replay_PendingSentinel(t *testing.T) {
+func TestDurableCallWithHeartbeat_Replay_PendingIntent(t *testing.T) {
 	s := &execSession{
 		isReplay: true,
 		history: []EventRecord{
 			{Step: 0, EventType: EventTypeHeartbeat, Service: "my-svc", Op: "my-op"},
 			{Step: 1, EventType: EventTypeCall, Service: "my-svc", Op: "my-op",
-				Request: `{"key":"val"}`, Err: pendingSentinel},
+				Request: `{"key":"val"}`, Pending: true},
 		},
 		stepCount: 0,
 	}
