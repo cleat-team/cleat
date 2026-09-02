@@ -82,7 +82,7 @@ func releaseWorkflowResources(log *slog.Logger, s workflowResourceReleaser, work
 // 'parent workflow terminated' -- which is squarely inside the contract above:
 // "every commit which takes a workflow out of the runnable set: completion,
 // failure, termination...". It released nothing on any dialect
-// (IMPROVEMENT-PLAN 3.78), so a closing parent stranded one concurrency slot
+// (IMPROVEMENT-PLAN 3.80), so a closing parent stranded one concurrency slot
 // per child until the key's TTL.
 //
 // Why this is a loop over ids rather than one set-based statement: the release

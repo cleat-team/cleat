@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// IMPROVEMENT-PLAN 3.78. releaseWorkflowResources states its own contract: it
+// IMPROVEMENT-PLAN 3.80. releaseWorkflowResources states its own contract: it
 // runs the two best-effort cleanups that follow "every commit which takes a
 // workflow out of the runnable set: completion, FAILURE, termination,
 // continue-as-new, and the admin actions".
