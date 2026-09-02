@@ -8736,3 +8736,84 @@ claimed to protect is already broken beyond it. **Either wire `PendingDefers` to
 delete it; write-only persisted state is a trap for the next reader.**
 
 Re-derive: `go test ./engine/ -run TestDeferRegisteredBeforeASuspension -count=1 -v`
+
+### 3.67 A `cleat_sleep` at the replay frontier never resumes — 🔴 **OPEN, severity high** (WS-3, found 2026-09-01)
+
+Found while building §3.66's regression test, which had to route around it.
+
+`DurableSleep` (`engine/durablecalls.go:400`) records no event — "Sleep is local" — and completes
+only when `s.replayJustEnded` is set. That flag is set by exactly one function, `exitReplay`
+(`engine/lifecycle.go:141`), which is called only by a *durable call* that finds no matching
+event at `s.stepCount`. `DurableSleep` never performs that check itself, and
+`advanceReplayStep` does not end replay when it consumes the last event.
+
+**So a sleep can only resume if some other durable call crosses the replay frontier first, in
+the same segment.** In a workflow that replays faithfully, nothing does: every operation before
+the sleep was recorded in the previous segment, so every one of them replay-matches, and the
+sleep is always the operation that reaches the end of history. It suspends again, with a
+byte-identical history.
+
+Measured 2026-09-01, three successive segments each fed the previous segment's real output
+history, through `Engine.Execute` then `Engine.Replay`:
+
+| guest | seg 1 | seg 2 | seg 3 |
+|---|---|---|---|
+| `sleep` | `events=0 suspended=true` | identical | identical |
+| `call; sleep` | `events=1 suspended=true` | identical | identical |
+| `call; call; sleep` | `events=2 suspended=true` | identical | identical |
+
+`SuspendUntil` is recomputed to the *same* wall-clock value every segment, because `nowMs` is
+re-seeded from `replayHistory[0].TimestampMs` and replayed calls do not advance it.
+
+**This is a regression with a date.** Commit `0a02a84` (2026-05-08), "deterministic durable time
+with local sleep and WASI clock stubbing", made sleep local: it deleted `EventTypeSleep` from the
+compaction codec and from `events.go`, and deleted `DurableSleep`'s own frontier check —
+`if s.isReplay { ... if rec.EventType == EventTypeSleep { ... } }` — replacing it with the
+`replayJustEnded` flag. Before that commit a sleep replay-matched its own recorded event and
+needed nothing else. After it, sleep is the only durable operation that cannot end replay by
+itself. Re-derive:
+`git show 0a02a84 | grep -E "^[-+].*(replayJustEnded|EventTypeSleep)"`.
+
+**Nothing covers it.** `grep -rn EventTypeSleep --include="*.go" . | grep -v _test.go` returns
+nothing — sleep events are never written by production code. No test performs a genuine
+two-segment resume-from-sleep: every test touching `replayJustEnded` sets it by hand on a
+synthetic `execSession` (`engine/lifecycle_test.go:162` and ~15 assertions across
+`host_test.go`, `host_dispatch_test.go`, `host_lifecycle_test.go`, `children_test.go`), and
+`TestIntegrationMultiStepSleep` says in its own comment that it does not use `DurableSleep`.
+The in-process simulators (`cleat/cleattest`, `cleat/embedded`, `cleat/localdev`) never replay,
+so they cannot see it either — the same harness-disagrees-with-the-runtime shape as §3.64.
+
+**The worker does not mask it, and makes it worse.** `cmd/cleat-worker/setup.go:1564` loads the
+history verbatim and `:1786` passes it straight to `eng.Replay`; nothing writes a wake marker.
+Because `SuspendUntil` is identical every segment, `next_wake_at` is rewritten to the same past
+timestamp, and the claim query is `status='ready' AND next_wake_at <= now()`
+(`engine/store_lifecycle.go:80,133`). Once the original wake time passes the workflow is
+*immediately* re-claimable, so this is not a workflow stalled quietly — it is a hot re-claim /
+re-replay / re-suspend loop burning CPU and DB writes indefinitely. **That claim is read from
+the code, not yet measured against a running worker** — see below.
+
+**Shipped examples depend on the broken path.** `examples/subscription/billing.go:59`
+(`DurableSleep(30 days)` then `ContinueAsNew`) and `:123` (a `DurableSleep(24h)` loop with
+`PollCancellation`) both put a sleep exactly at the frontier.
+
+#### What is NOT established
+
+Stated plainly because the conclusion is large. The evidence is the engine-level mechanism plus
+WAT probes exercising the real `Engine.Execute`/`Engine.Replay` path. **It has not been
+reproduced with a compiled Go-SDK guest driven by a real `cleat-worker` against a database.**
+That is the confirmation to run before acting on the severity, and it is the one that would also
+settle the busy-loop claim. The SDK panics `ErrSuspend` on a suspend status
+(`cleat/runtime.go:26-31`), which is the same unwind the probes model, and `DurableSleep`'s
+logic reads no guest state — so a guest is not expected to change the outcome, but "not
+expected to" is not a measurement.
+
+#### Why the obvious fix is not the whole fix
+
+Having `DurableSleep` check `s.isReplay && s.stepCount >= len(s.history)` and complete restores
+the pre-`0a02a84` behaviour for a sleep behind recorded events. It does **not** fix a sleep that
+is the workflow's first durable operation: history is empty, so `isReplay` is false and the
+frontier is indistinguishable from a fresh start. Answering that needs either recording the
+sleep again (reverting the local-sleep design) or comparing against real elapsed time, which
+`nowMs` is virtual precisely to avoid. **That is a durable-time design decision, not a patch**,
+and it is not WS-3's to make alone — the compaction codec, the worker's wake scheduling and the
+`Now()` contract are all downstream of it.
