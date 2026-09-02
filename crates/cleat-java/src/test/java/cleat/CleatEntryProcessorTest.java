@@ -303,6 +303,57 @@ class CleatEntryProcessorTest {
     }
 
     // ========================================================================
+    // Test: the generated wrapper drains defers, and not on suspension (3.73)
+    // ========================================================================
+
+    @Test
+    void testGeneratedWrapperDrainsDefersButNotOnSuspension() throws IOException {
+        // WHAT: the wrapper must run the workflow's defers on the success and
+        // error paths, and must NOT run them in the SuspendSignal branch.
+        //
+        // WHY: "run the defers when the entry point stops running" fires every
+        // cleanup at the first sleep -- releasing locks and refunding payments
+        // in the middle of a workflow that has not finished and is about to
+        // continue. The failure is silent: the workflow still completes, it just
+        // cleaned up too early. This is the control that matters most, and in
+        // Java it only became expressible once suspension worked at all (3.74).
+
+        JavaFileObject sourceFile = source("test", "TestWorkflow", validTestSource);
+        CompilationResult result = compile(sourceFile, null);
+
+        Path exportFile = result.generatedSourceFiles.stream()
+            .filter(p -> p.toString().replace('\\', '/')
+                          .endsWith("test/TestWorkflow_testEntry_Export.java"))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(exportFile, "the export wrapper was not generated");
+        String content = new String(Files.readAllBytes(exportFile));
+
+        assertTrue(content.contains("cleat.Defer.runDeferred()"),
+            "The generated wrapper never drains the defer table on the success "
+            + "path, so no Java workflow's cleanup runs. Wrapper was:\n" + content);
+
+        // The suspend branch must be defer-free. Slice from the SuspendSignal
+        // catch to the next catch and assert nothing drains inside it.
+        int suspendAt = content.indexOf("catch (cleat.SuspendSignal");
+        assertTrue(suspendAt > 0, "no SuspendSignal branch; see 3.74");
+        int nextCatch = content.indexOf("} catch", suspendAt + 1);
+        assertTrue(nextCatch > suspendAt, "could not find the end of the suspend branch");
+        String suspendBranch = content.substring(suspendAt, nextCatch);
+        assertFalse(suspendBranch.contains("Defer.runDeferred"),
+            "The suspend branch drains the defer table. A suspended workflow has "
+            + "NOT exited -- its cleanup is still pending, and firing it at the "
+            + "first sleep releases locks a workflow that is about to continue "
+            + "still holds. Branch was:\n" + suspendBranch);
+
+        // And the error paths must drain, because a defer is FOR the run that
+        // went wrong.
+        assertTrue(content.contains("cleat.Defer.runDeferredForHost()"),
+            "The error paths do not drain the defer table, so a failed workflow "
+            + "never runs its cleanup. Wrapper was:\n" + content);
+    }
+
+    // ========================================================================
     // Test: successful compilation and generated files
     // ========================================================================
 

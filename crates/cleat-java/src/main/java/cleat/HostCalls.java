@@ -561,17 +561,48 @@ public class HostCalls {
     }
 
     /**
-     * Register a deferred cleanup callback to run when the workflow exits.
+     * Record that a cleanup action exists. <strong>Does not run anything.</strong>
      * <p>
-     * Deferred callbacks are executed in LIFO order (last-registered,
-     * first-executed), analogous to Go's {@code defer} or Java's
-     * {@code try/finally}.  The returned defer ID can be used to cancel
-     * the deferred action before the workflow completes.
+     * This sends a <em>description</em> to the host and nothing else. The host
+     * adds it to the workflow's deferrals so it is visible in history, but
+     * there is no body attached and nothing anywhere executes one.
+     * <p>
+     * This javadoc used to describe "a deferred cleanup callback" executed "in
+     * LIFO order, analogous to Go's {@code defer}". None of that was true, or
+     * could be: there is no callback parameter. See IMPROVEMENT-PLAN 3.73.
+     * <p>
+     * Use {@link #deferFunc(Runnable)} for cleanup that actually runs.
      *
      * @param description a human-readable description of the cleanup action
      * @return a result containing the defer ID on success, or an error
      *         description on failure
      */
+    /**
+     * Register cleanup <em>with a body</em>, to run when the workflow finishes.
+     *
+     * <p>{@link #cleatDefer(String)} registers only a description: the host
+     * records that a defer exists and nothing anywhere runs it. This is the one
+     * with a {@link Runnable} attached. See IMPROVEMENT-PLAN 3.73.
+     *
+     * <p>The body runs in LIFO order when the entry point returns -- on the
+     * success path and on the error path, because a defer is for the run that
+     * did not finish the way it meant to. It does NOT run when the workflow
+     * suspends: a suspended workflow has not exited and its cleanup is still
+     * pending.
+     *
+     * @param body the cleanup to run. Exceptions it throws are swallowed so one
+     *             bad cleanup cannot stop the others.
+     * @return a result containing the defer ID on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> deferFunc(Runnable body) {
+        CleatResult<String> registered = cleatDefer("deferred function");
+        if (registered.isOk()) {
+            Defer.register(body);
+        }
+        return registered;
+    }
+
     public CleatResult<String> cleatDefer(String description) {
         int[] p = packStrings(description);
 
