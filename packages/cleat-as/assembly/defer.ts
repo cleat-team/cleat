@@ -68,7 +68,7 @@
 
 import { HostCalls } from "./host-calls";
 import { DurableResult } from "./host-calls";
-import { isWorkflowSuspended } from "./memory";
+import { isWorkflowSuspended, isInDeferPhase, setInDeferPhase } from "./memory";
 
 /**
  * Signature for a defer body.
@@ -134,6 +134,25 @@ export function deferFunc(
   fn: DeferFn,
   payload: string,
 ): DurableResult<string> {
+  // Refused from inside a defer body, and refused BEFORE the host call --
+  // IMPROVEMENT-PLAN §3.35 phase 4. Registering here used to mint a real defer
+  // ID and write a durable `defer` event, and then never run: `runDeferred`
+  // drains the table before the first body runs, so the new entry lands in a
+  // table nobody walks again. A completed workflow's history carried a pending
+  // defer nothing could execute.
+  //
+  // The order matters. Checking after `h.defer` would leave the durable event
+  // behind, which is the whole defect.
+  if (isInDeferPhase()) {
+    return new DurableResult<string>(
+      "",
+      "deferFunc: a defer body may not register another defer. The table is " +
+        "drained before the first body runs, so this would be recorded durably " +
+        "and never run. Do the cleanup inline instead " +
+        "(IMPROVEMENT-PLAN 3.35 phase 4).",
+    );
+  }
+
   let registered = h.defer(description);
   if (!registered.isError) {
     registerDefer(registered.value, fn, payload);
@@ -166,15 +185,22 @@ export function runDeferred(h: HostCalls): i32 {
   let taken = _defers;
   _defers = [];
 
+  // The flag the restrictions in `deferFunc` and `HostCalls.continueAsNew`
+  // read. Cleared on every exit below, including the suspension one: leaving
+  // it set would make the next segment's first `deferFunc` refuse.
+  setInDeferPhase(true);
+
   let ran: i32 = 0;
   for (let i: i32 = taken.length - 1; i >= 0; i--) {
     let entry = taken[i];
     ran++;
     entry.fn(h, entry.payload);
     if (isWorkflowSuspended()) {
+      setInDeferPhase(false);
       return ran;
     }
   }
+  setInDeferPhase(false);
   return ran;
 }
 

@@ -596,6 +596,13 @@ public class HostCalls {
      *         description on failure
      */
     public CleatResult<String> deferFunc(Runnable body) {
+        // Refused BEFORE the host call -- IMPROVEMENT-PLAN 3.35 phase 4.
+        // Registering here used to mint a real defer ID and write a durable
+        // `defer` event that nothing could ever run, because runDeferred drains
+        // the table before the first body starts.
+        if (Defer.inDeferPhase()) {
+            return CleatResult.err(Defer.deferPhaseRefusal("deferFunc"));
+        }
         CleatResult<String> registered = cleatDefer("deferred function");
         if (registered.isOk()) {
             Defer.register(body);
@@ -683,6 +690,12 @@ public class HostCalls {
      * @return a result indicating success, or an error description
      */
     public CleatResult<Void> continueAsNew(String newInputJSON) {
+        // IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: the workflow's
+        // result is already decided by the time defers run, so a recorded
+        // continuation is one the worker will never take.
+        if (Defer.inDeferPhase()) {
+            return CleatResult.err(Defer.deferPhaseRefusal("continueAsNew"));
+        }
         int[] p = packStrings(newInputJSON);
 
         long result = cleatContinueAsNewRaw(p[0], p[1]);
@@ -706,6 +719,12 @@ public class HostCalls {
      * @return a result indicating success, or an error description
      */
     public CleatResult<Void> continueAsNewVersioned(String newInputJSON, int newVersion) {
+        // IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: the workflow's
+        // result is already decided by the time defers run, so a recorded
+        // continuation is one the worker will never take.
+        if (Defer.inDeferPhase()) {
+            return CleatResult.err(Defer.deferPhaseRefusal("continueAsNewVersioned"));
+        }
         int[] p = packStrings(newInputJSON);
 
         long result = cleatContinueAsNewVersionedRaw(p[0], p[1], newVersion);

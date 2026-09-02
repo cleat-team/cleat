@@ -29,6 +29,39 @@ from .host_calls import SuspendSentinel
 _DEFERS: list[tuple[str, Callable[[], None]]] = []
 
 
+# True while ``run_deferred`` is draining the table.
+#
+# IMPROVEMENT-PLAN §3.35 phase 4. Two things a defer body must not do, both
+# measured 2026-09-02 before they were blocked, and both producing a workflow
+# that reported SUCCESS with a durable record that could not be honoured:
+#
+# * registering another defer -- the table is drained BEFORE the first body
+#   runs, so the new entry lands in a table nobody walks again, while the host
+#   has already written a durable ``defer`` event for it;
+# * ``continue_as_new`` -- the host records the event AND the wrapper reports
+#   the already-decided result, so the worker stores ``done`` and the
+#   continuation is silently never taken.
+#
+# Both guards run BEFORE the host call. Checking after would leave the durable
+# event behind, which is the defect rather than the fix.
+_IN_DEFER_PHASE = False
+
+
+def in_defer_phase() -> bool:
+    """Report whether defer bodies are currently running."""
+    return _IN_DEFER_PHASE
+
+
+def defer_phase_refusal(what: str) -> str:
+    """The message both refusals carry."""
+    return (
+        f"cleat: {what} is not allowed from inside a defer body: the defer "
+        "table is drained before the first body runs and the workflow's result "
+        "is already decided, so this would be recorded durably and never taken "
+        "(IMPROVEMENT-PLAN 3.35 phase 4)"
+    )
+
+
 def register_defer(defer_id: str, fn: Callable[[], None]) -> None:
     """Record a defer body under the ID the host minted for it.
 
@@ -56,17 +89,24 @@ def run_deferred() -> int:
     the entry wrapper sees it and the segment suspends. Swallowing it would
     complete a workflow the host has already recorded as suspended.
     """
-    global _DEFERS
+    global _DEFERS, _IN_DEFER_PHASE
     taken = _DEFERS
     _DEFERS = []
 
-    ran = 0
-    for _defer_id, fn in reversed(taken):
-        ran += 1
-        try:
-            fn()
-        except SuspendSentinel:
-            raise
-        except Exception:  # noqa: BLE001 - one bad cleanup must not stop the rest
-            pass
-    return ran
+    # try/finally, not a pair of assignments: SuspendSentinel propagates out of
+    # this function, and a flag left set would make the next segment's first
+    # defer_func refuse.
+    _IN_DEFER_PHASE = True
+    try:
+        ran = 0
+        for _defer_id, fn in reversed(taken):
+            ran += 1
+            try:
+                fn()
+            except SuspendSentinel:
+                raise
+            except Exception:  # noqa: BLE001 - one bad cleanup must not stop the rest
+                pass
+        return ran
+    finally:
+        _IN_DEFER_PHASE = False

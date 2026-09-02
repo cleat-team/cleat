@@ -23,6 +23,7 @@ import {
   SCRATCH_BASE,
   OUTPUT_OFFSET,
   setWorkflowSuspended,
+  isInDeferPhase,
 } from "./memory";
 
 import { jsonStrArray, jsonExtractString, jsonExtractNumber } from "./json";
@@ -1413,6 +1414,18 @@ export class HostCalls {
    * @returns An error message on failure, or `null` on success.
    */
   continueAsNew(inputJson: string): string | null {
+    // Refused from inside a defer body -- IMPROVEMENT-PLAN 3.35 phase 4.
+    // Measured 2026-09-02 before this check: the host recorded a
+    // `continue_as_new` event AND the wrapper went on to report the workflow's
+    // already-decided result, so one history carried two contradictory
+    // terminal facts. The worker stores `done` and the continuation silently
+    // never happens.
+    if (isInDeferPhase()) {
+      return "continueAsNew() is not allowed from a defer body: the workflow's " +
+        "result is already decided by the time defers run, so the continuation " +
+        "would be recorded and never taken (IMPROVEMENT-PLAN 3.35 phase 4).";
+    }
+
     let inputLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, inputJson);
 
     let result: i64 = import_cleat_continue_as_new(SCRATCH_BASE as i32, inputLen);
@@ -1440,6 +1453,18 @@ export class HostCalls {
    * @returns An error message on failure, or `null` on success.
    */
   continueAsNewVersioned(inputJson: string, newVersion: i32): string | null {
+    // Refused from inside a defer body -- IMPROVEMENT-PLAN 3.35 phase 4.
+    // Measured 2026-09-02 before this check: the host recorded a
+    // `continue_as_new` event AND the wrapper went on to report the workflow's
+    // already-decided result, so one history carried two contradictory
+    // terminal facts. The worker stores `done` and the continuation silently
+    // never happens.
+    if (isInDeferPhase()) {
+      return "continueAsNewVersioned() is not allowed from a defer body: the workflow's " +
+        "result is already decided by the time defers run, so the continuation " +
+        "would be recorded and never taken (IMPROVEMENT-PLAN 3.35 phase 4).";
+    }
+
     let inputLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, inputJson);
 
     let result: i64 = import_cleat_continue_as_new_versioned(

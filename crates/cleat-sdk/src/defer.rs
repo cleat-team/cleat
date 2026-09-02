@@ -39,6 +39,41 @@ pub fn register_defer(defer_id: String, f: Box<dyn FnOnce()>) {
     DEFERS.with(|d| d.borrow_mut().push((defer_id, f)));
 }
 
+thread_local! {
+    /// True while `run_deferred` is draining the table.
+    ///
+    /// IMPROVEMENT-PLAN §3.35 phase 4. Two things a defer body must not do,
+    /// both measured 2026-09-02 before they were blocked, and both producing a
+    /// workflow that reported SUCCESS with a durable record that could not be
+    /// honoured:
+    ///
+    /// * registering another defer — the table is drained BEFORE the first body
+    ///   runs, so the new entry lands in a table nobody walks again, while the
+    ///   host has already written a durable `defer` event for it;
+    /// * `continue_as_new` — the host records the event AND the wrapper reports
+    ///   the already-decided result, so the worker stores `done` and the
+    ///   continuation is silently never taken.
+    ///
+    /// Both guards run BEFORE the host call. Checking after would leave the
+    /// durable event behind, which is the defect rather than the fix.
+    static IN_DEFER_PHASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Reports whether defer bodies are currently running.
+pub fn in_defer_phase() -> bool {
+    IN_DEFER_PHASE.with(|f| f.get())
+}
+
+/// The message both refusals carry.
+pub fn defer_phase_refusal(what: &str) -> String {
+    format!(
+        "cleat: {what} is not allowed from inside a defer body: the defer table is \
+         drained before the first body runs and the workflow's result is already \
+         decided, so this would be recorded durably and never taken \
+         (IMPROVEMENT-PLAN 3.35 phase 4)"
+    )
+}
+
 /// Runs registered defer bodies in LIFO order and returns how many ran.
 ///
 /// The table is drained BEFORE the first body runs, which makes this
@@ -57,6 +92,20 @@ pub fn register_defer(defer_id: String, f: Box<dyn FnOnce()>) {
 pub fn run_deferred() -> i64 {
     let taken: Vec<DeferEntry> = DEFERS.with(|d| d.borrow_mut().drain(..).collect());
     let mut ran = 0i64;
+
+    // Set for the duration of the drain and cleared on EVERY exit, including
+    // the SuspendSentinel resume below -- a flag left set would make the next
+    // segment's first defer_func refuse. A guard struct rather than a pair of
+    // assignments, because resume_unwind does not return.
+    struct PhaseGuard;
+    impl Drop for PhaseGuard {
+        fn drop(&mut self) {
+            IN_DEFER_PHASE.with(|f| f.set(false));
+        }
+    }
+    IN_DEFER_PHASE.with(|f| f.set(true));
+    let _phase = PhaseGuard;
+
     for (_id, f) in taken.into_iter().rev() {
         ran += 1;
         if let Err(panic_err) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
@@ -190,5 +239,51 @@ mod tests {
     fn the_host_export_is_safe_on_an_empty_table() {
         fresh();
         assert_eq!(__cleat_run_deferred(), 0);
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LOG: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// IMPROVEMENT-PLAN §3.35 phase 4: the flag is set while bodies run.
+    ///
+    /// Asserted from inside a body rather than from outside, because outside is
+    /// exactly where it is always false and a test that checked there would
+    /// pass against a flag that is never set at all.
+    #[test]
+    fn in_defer_phase_is_true_while_a_body_runs() {
+        LOG.with(|l| l.borrow_mut().clear());
+        register_defer(
+            "d1".to_string(),
+            Box::new(|| {
+                LOG.with(|l| {
+                    l.borrow_mut()
+                        .push(if in_defer_phase() { "inside" } else { "NOT-inside" })
+                });
+            }),
+        );
+        assert!(!in_defer_phase(), "the flag must be clear before the drain");
+        assert_eq!(run_deferred(), 1);
+        LOG.with(|l| assert_eq!(l.borrow().as_slice(), &["inside"]));
+        assert!(
+            !in_defer_phase(),
+            "the flag must be clear after the drain, or the next segment's \
+             first defer_func would be refused"
+        );
+    }
+
+    /// The guard clears the flag even when a body panics, which is the case a
+    /// pair of plain assignments around the loop would get wrong.
+    #[test]
+    fn the_flag_is_cleared_even_when_a_body_panics() {
+        register_defer("d1".to_string(), Box::new(|| panic!("cleanup blew up")));
+        assert_eq!(run_deferred(), 1);
+        assert!(!in_defer_phase());
     }
 }

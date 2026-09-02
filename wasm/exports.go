@@ -304,6 +304,46 @@ func encodeJSONString(s string) string {
 const deferTableSource = `var _cleatDeferIDs []string
 var _cleatDeferFuncs = map[string]func(){}
 
+// _cleatInDeferPhase is true while _cleatRunDeferred is draining the table.
+//
+// IMPROVEMENT-PLAN 3.35 phase 4. Two things a defer body must not do, both
+// measured 2026-09-02 before they were blocked, and both producing a workflow
+// that reported SUCCESS with a durable record that could not be honoured:
+//
+//   - registering another defer. The table is drained BEFORE the first body
+//     runs -- it has to be, or a body that registers would extend the slice
+//     being walked -- so a new registration lands in a table nobody walks
+//     again. The host had already minted an ID and written a durable defer
+//     event, so a completed workflow's history carried a pending defer that
+//     nothing anywhere could run.
+//   - ContinueAsNew. Worse: the host recorded a continue_as_new event AND the
+//     wrapper reported the workflow's already-decided result. One history,
+//     two contradictory terminal facts; the worker stores 'done' and the
+//     continuation silently never happens.
+//
+// Both guards are checked BEFORE the host call, in the generated adapters.
+// Checking after would leave the durable event behind, which is the defect.
+var _cleatInDeferPhase bool
+
+// _cleatDeferPhaseError is the refusal both guarded adapters return.
+//
+// A named type rather than errors.New or fmt.Errorf: this source is emitted
+// into every generated module, and adding an import that a module might not
+// otherwise need is how generated code stops compiling for workflows that do
+// nothing wrong.
+type _cleatDeferPhaseError struct{ what string }
+
+func (e _cleatDeferPhaseError) Error() string {
+	return "cleat: " + e.what + " is not allowed from inside a defer body: " +
+		"the defer table is drained before the first body runs and the workflow's " +
+		"result is already decided, so this would be recorded durably and never " +
+		"taken (IMPROVEMENT-PLAN 3.35 phase 4)"
+}
+
+func _cleatErrInDeferPhase(what string) error {
+	return _cleatDeferPhaseError{what: what}
+}
+
 // _cleatRegisterDefer records a defer body under the ID the host minted for
 // it. Called from the DurableDeferFunc adapter in gen_host_adapter.go.
 func _cleatRegisterDefer(deferID string, fn func()) {
@@ -335,6 +375,12 @@ func _cleatRegisterDefer(deferID string, fn func()) {
 func _cleatRunDeferred() (ran int) {
 	ids := _cleatDeferIDs
 	_cleatDeferIDs = nil
+
+	// Cleared on every exit, including the SuspendSentinel repanic below:
+	// leaving it set would make the next segment's first DurableDeferFunc
+	// refuse.
+	_cleatInDeferPhase = true
+	defer func() { _cleatInDeferPhase = false }()
 	for i := len(ids) - 1; i >= 0; i-- {
 		fn := _cleatDeferFuncs[ids[i]]
 		delete(_cleatDeferFuncs, ids[i])

@@ -44,6 +44,20 @@ declare namespace __AdaptedExports {
    */
   export function __durable_inner_trap_after_defer(h: __Internref5, input: string): string;
   /**
+   * assembly/index/__durable_inner_defer_registers_defer
+   * @param h `~lib/@cleat/sdk/assembly/host-calls/HostCalls`
+   * @param input `~lib/string/String`
+   * @returns `~lib/string/String`
+   */
+  export function __durable_inner_defer_registers_defer(h: __Internref5, input: string): string;
+  /**
+   * assembly/index/__durable_inner_defer_continues_as_new
+   * @param h `~lib/@cleat/sdk/assembly/host-calls/HostCalls`
+   * @param input `~lib/string/String`
+   * @returns `~lib/string/String`
+   */
+  export function __durable_inner_defer_continues_as_new(h: __Internref5, input: string): string;
+  /**
    * assembly/index/place_order
    * @param argsPtr `usize`
    * @param argsLen `i32`
@@ -97,6 +111,24 @@ declare namespace __AdaptedExports {
    * @returns `i64`
    */
   export function trap_after_defer(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
+  /**
+   * assembly/index/defer_registers_defer
+   * @param argsPtr `usize`
+   * @param argsLen `i32`
+   * @param outPtr `usize`
+   * @param maxOutLen `i32`
+   * @returns `i64`
+   */
+  export function defer_registers_defer(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
+  /**
+   * assembly/index/defer_continues_as_new
+   * @param argsPtr `usize`
+   * @param argsLen `i32`
+   * @param outPtr `usize`
+   * @param maxOutLen `i32`
+   * @returns `i64`
+   */
+  export function defer_continues_as_new(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
   /**
    * assembly/index/__cleat_run_deferred
    * @returns `i64`

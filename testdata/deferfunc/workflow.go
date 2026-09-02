@@ -87,3 +87,47 @@ func DeferOnPanic(h cleat.HostCalls, input string) (string, error) {
 	}
 	panic("the workflow panicked")
 }
+
+// DeferRegistersDefer has a defer body that tries to register another defer.
+//
+// IMPROVEMENT-PLAN 3.35 phase 4. Measured before the guard: the host minted an
+// ID and wrote a durable defer event for the inner registration, and nothing
+// ever ran it -- _cleatRunDeferred drains the table before the first body
+// starts, so the new entry landed in a table nobody walks again. A completed
+// workflow's history carried a pending defer that could not be executed.
+//
+// "refused" is the observable: the inner DurableDeferFunc must return an
+// error, and no second defer event may appear in the history.
+func DeferRegistersDefer(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "outer_defer_ran", `{}`)
+		if _, err := h.DurableDeferFunc(func() {
+			h.DurableCall("cleanup", "inner_defer_body", `{}`)
+		}); err != nil {
+			h.DurableCall("cleanup", "inner_defer_refused", `{}`)
+		}
+	}); err != nil {
+		return "", err
+	}
+	h.DurableCall("cleanup", "body", `{}`)
+	return `{"ok":true}`, nil
+}
+
+// DeferContinuesAsNew has a defer body that tries to continue-as-new.
+//
+// Measured before the guard: a continue_as_new event was recorded AND the
+// wrapper reported the workflow's already-decided result, so one history
+// carried two contradictory terminal facts. The worker stores "done" because a
+// result is present, and the continuation is silently never taken.
+func DeferContinuesAsNew(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "defer_ran", `{}`)
+		if err := h.ContinueAsNew(`{"round":2}`); err != nil {
+			h.DurableCall("cleanup", "continue_as_new_refused", `{}`)
+		}
+	}); err != nil {
+		return "", err
+	}
+	h.DurableCall("cleanup", "body", `{}`)
+	return `{"ok":true}`, nil
+}

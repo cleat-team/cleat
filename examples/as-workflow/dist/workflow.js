@@ -28,6 +28,10 @@ export async function instantiate(module, imports = {}) {
         // ~lib/@cleat/sdk/assembly/host-calls/import_cleat_sleep(i64) => i64
         return cleat_sleep(durationMs) || 0n;
       },
+      cleat_continue_as_new(inputPtr, inputLen) {
+        // ~lib/@cleat/sdk/assembly/host-calls/import_cleat_continue_as_new(i32, i32) => i64
+        return cleat_continue_as_new(inputPtr, inputLen) || 0n;
+      },
     }, Object.assign(Object.create(globalThis), imports.env || {})),
   };
   const { exports } = await WebAssembly.instantiate(module, adaptedImports);
@@ -89,6 +93,26 @@ export async function instantiate(module, imports = {}) {
       input = __lowerString(input) || __notnull();
       try {
         return __liftString(exports.__durable_inner_trap_after_defer(h, input) >>> 0);
+      } finally {
+        __release(h);
+      }
+    },
+    __durable_inner_defer_registers_defer(h, input) {
+      // assembly/index/__durable_inner_defer_registers_defer(~lib/@cleat/sdk/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      h = __retain(__lowerInternref(h) || __notnull());
+      input = __lowerString(input) || __notnull();
+      try {
+        return __liftString(exports.__durable_inner_defer_registers_defer(h, input) >>> 0);
+      } finally {
+        __release(h);
+      }
+    },
+    __durable_inner_defer_continues_as_new(h, input) {
+      // assembly/index/__durable_inner_defer_continues_as_new(~lib/@cleat/sdk/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      h = __retain(__lowerInternref(h) || __notnull());
+      input = __lowerString(input) || __notnull();
+      try {
+        return __liftString(exports.__durable_inner_defer_continues_as_new(h, input) >>> 0);
       } finally {
         __release(h);
       }

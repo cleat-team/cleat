@@ -16,6 +16,7 @@ import {
   resetDefers,
   setWorkflowSuspended,
   resetWorkflowSuspended,
+  isInDeferPhase,
 } from "../index";
 
 // Top-level functions, not closures — see the module docs on defer.ts.
@@ -113,5 +114,45 @@ describe("defer registry", (): void => {
     expect<i32>(pendingDeferCount()).toBe(2);
     resetDefers();
     expect<i32>(pendingDeferCount()).toBe(0);
+  });
+});
+
+// IMPROVEMENT-PLAN §3.35 phase 4: the defer-phase flag.
+let phaseLog: bool[] = [];
+
+function recordPhase(h: HostCalls, payload: string): void {
+  phaseLog.push(isInDeferPhase());
+}
+
+describe("defer phase", (): void => {
+  it("is true while a body runs and false either side", (): void => {
+    resetDeferLog();
+    phaseLog = [];
+
+    // Asserted from INSIDE a body. Outside is exactly where the flag is always
+    // false, so a test written there would pass against a flag never set.
+    expect<bool>(isInDeferPhase()).toBe(false);
+    registerDefer("d1", recordPhase, "");
+
+    let h = new HostCalls();
+    expect<i32>(runDeferred(h)).toBe(1);
+
+    expect<i32>(phaseLog.length).toBe(1);
+    expect<bool>(phaseLog[0]).toBe(true);
+    expect<bool>(isInDeferPhase()).toBe(false);
+  });
+
+  it("is cleared on the suspension exit too", (): void => {
+    resetDeferLog();
+    registerDefer("d1", recordAndSuspend, "suspends");
+
+    let h = new HostCalls();
+    runDeferred(h);
+
+    // The early return in runDeferred has its own clear. Without it the next
+    // segment's first deferFunc would be refused for a workflow that is simply
+    // resuming.
+    expect<bool>(isInDeferPhase()).toBe(false);
+    resetWorkflowSuspended();
   });
 });
