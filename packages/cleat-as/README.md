@@ -84,6 +84,39 @@ The `HostCalls` class wraps all WASM host function imports, grouped by category:
 - `cleatFetch(url: string, method: string, headers: string, body: string): string` -- durable HTTP fetch via host
 - `cleatSend(service: string, operation: string, request: string): void` -- fire-and-forget (no response)
 
+### Deferred cleanup
+
+- `deferFunc(h, description, fn, payload)` -- register cleanup **with a body**.
+  Runs in LIFO order when the entry point returns, and **not** when the
+  workflow suspends: a suspended workflow has not exited and its cleanup is
+  still pending.
+- `h.defer(description)` -- records the description with the host and nothing
+  else. Nothing runs it. Use `deferFunc` for cleanup that actually happens.
+
+Because this SDK has no closures (see below), a defer is a top-level function
+reference plus an explicit payload string. Everything the body needs travels
+in that string:
+
+```ts
+import { HostCalls, cleatEntry, deferFunc } from "@cleat/sdk";
+
+function releaseLock(h: HostCalls, payload: string): void {
+  h.cleatCall("locks", "Release", payload);
+}
+
+@cleatEntry()
+export function my_workflow(h: HostCalls, input: string): string {
+  deferFunc(h, "release order lock", releaseLock, '{"lock":"orders-42"}');
+  // ...
+  return '{"ok":true}';
+}
+```
+
+Import the SDK as `@cleat/sdk`, not by relative path. Both resolve to the same
+files, but `asc` treats them as two separate modules with two separate defer
+registries — a defer registered through one would be drained from the other and
+never run. The generated wrapper makes that a compile error.
+
 ### Signals & Events
 - `awaitSignals(signalNames: string[], timeoutMs: i64): SignalResult` -- wait for external signals
 - `pollSignal(name: string): string` -- non-blocking signal check

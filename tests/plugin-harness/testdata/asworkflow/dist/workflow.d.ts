@@ -3,11 +3,11 @@ declare namespace __AdaptedExports {
   export const memory: WebAssembly.Memory;
   /**
    * assembly/index/__durable_inner_call_all_plugins
-   * @param h `../../../../packages/cleat-as/assembly/host-calls/HostCalls`
+   * @param h `~lib/@cleat/sdk/assembly/host-calls/HostCalls`
    * @param _input `~lib/string/String`
    * @returns `~lib/string/String`
    */
-  export function __durable_inner_call_all_plugins(h: __Internref4, _input: string): string;
+  export function __durable_inner_call_all_plugins(h: __Internref5, _input: string): string;
   /**
    * assembly/index/call_all_plugins
    * @param argsPtr `usize`
@@ -17,10 +17,15 @@ declare namespace __AdaptedExports {
    * @returns `i64`
    */
   export function call_all_plugins(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
+  /**
+   * assembly/index/__cleat_run_deferred
+   * @returns `i64`
+   */
+  export function __cleat_run_deferred(): bigint;
 }
-/** ../../../../packages/cleat-as/assembly/host-calls/HostCalls */
-declare class __Internref4 extends Number {
-  private __nominal4: symbol;
+/** ~lib/@cleat/sdk/assembly/host-calls/HostCalls */
+declare class __Internref5 extends Number {
+  private __nominal5: symbol;
   private __nominal0: symbol;
 }
 /** Instantiates the compiled WebAssembly module with the given imports. */
