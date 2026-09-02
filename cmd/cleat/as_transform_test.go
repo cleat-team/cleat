@@ -61,6 +61,7 @@ func TestASTransform(t *testing.T) {
 	// ---- Full compilation pipeline via npx asc ----
 	if hasNpx {
 		t.Run("compiles_to_wasm", testASCompilesToWasm)
+		t.Run("compiles_when_the_user_imports_the_same_symbols", testASCompilesWhenTheUserImportsTheSameSymbols)
 		// These two are the ones that exercise the static-analysis layer
 		// against a real parse tree. detects_math_random above hands the
 		// validator a hand-built AST in the shape the walker assumed, so it
@@ -606,6 +607,53 @@ func compileASFixture(t *testing.T, indexTS string, env ...string) asFixture {
 	t.Logf("asc output:\n%s", string(out))
 
 	return asFixture{dir: tmpDir, wasmPath: wasmPath, out: string(out), err: err}
+}
+
+// testASCompilesWhenTheUserImportsTheSameSymbols is the case that decides
+// whether the transform may always inject its own @cleat/sdk import.
+//
+// It always does today, and by accident: _hasCleatSdkImport probes four
+// property paths for an import's module name and matched none of them, so it
+// returned false even for a source whose first line is
+// `import { HostCalls, cleatEntry } from "@cleat/sdk"` -- measured 2026-09-02
+// with a probe on the real AS parser. The generated wrapper's references to
+// Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended and
+// runDeferred resolve BECAUSE the detector is broken.
+//
+// So the question is not "should detection be fixed" -- fixing it breaks every
+// wrapper whose author did not happen to import all five -- but "is always
+// injecting safe when the author imported them too". This is that test.
+func testASCompilesWhenTheUserImportsTheSameSymbols(t *testing.T) {
+	fx := compileASFixture(t, `
+import {
+  HostCalls,
+  cleatEntry,
+  Memory,
+  SUSPEND_SENTINEL,
+  isWorkflowSuspended,
+  resetWorkflowSuspended,
+  runDeferred,
+} from "@cleat/sdk";
+
+@cleatEntry()
+function myWorkflow(h: HostCalls, input: string): string {
+  if (isWorkflowSuspended()) {
+    return "";
+  }
+  return "{\"status\":\"ok\"}";
+}
+`)
+	if fx.err != nil {
+		if _, statErr := os.Stat(fx.wasmPath); os.IsNotExist(statErr) {
+			t.Fatalf("a workflow that imports the same symbols the transform "+
+				"injects failed to compile: %v\n\n%s\n\n"+
+				"If this is a duplicate-identifier error, the transform cannot "+
+				"inject unconditionally and _hasCleatSdkImport has to be made to "+
+				"work instead -- which is the harder job, because it then has to "+
+				"inject only the names the author left out.", fx.err, fx.out)
+		}
+	}
+	t.Logf("compiled with the author importing all five injected symbols")
 }
 
 func testASCompilesToWasm(t *testing.T) {

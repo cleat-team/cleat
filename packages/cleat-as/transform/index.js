@@ -628,7 +628,6 @@ class CleatEntryTransformer {
   // ---------------------------------------------------------------
   _injectWrappers(parser, sourceEntries) {
     for (const { source, entries } of sourceEntries) {
-      const needsImport = !this._hasCleatSdkImport(source);
       const needsJsonImport = this._hasMultiParamEntries(entries);
       const wrapperCode = this._generateWrappers(entries);
 
@@ -648,8 +647,31 @@ class CleatEntryTransformer {
           return null;
         };
 
-        // Insert @cleat/sdk import at the TOP of the source if needed
-        if (needsImport) {
+        // Insert the @cleat/sdk import at the TOP of the source. Always --
+        // including when the author already imports from "@cleat/sdk".
+        //
+        // This was guarded by `if (!this._hasCleatSdkImport(source))` until
+        // 2026-09-02, and the guard never fired. Measured with a probe on the
+        // real AS parser: for a source whose first line is
+        // `import { HostCalls, cleatEntry } from "@cleat/sdk"`, the detector
+        // returned FALSE. It probes four property paths for an import's module
+        // name and the AS AST matches none of them.
+        //
+        // So every generated wrapper has resolved Memory, SUSPEND_SENTINEL,
+        // isWorkflowSuspended, resetWorkflowSuspended and runDeferred *because
+        // the detector was broken*. A future asc that exposes one of those
+        // property paths would have started suppressing this import and broken
+        // every wrapper whose author had not happened to import all five by
+        // hand -- a latent break with no test in front of it.
+        //
+        // Detection is not worth fixing. A working detector would have to
+        // inject only the names the author left out, name by name, which is
+        // strictly more machinery for no benefit. Injecting unconditionally is
+        // what already happens, and duplicate-importing the same symbol from
+        // the same module is fine: TestASTransform/compiles_when_the_user_
+        // imports_the_same_symbols compiles a workflow that imports all five
+        // itself.
+        {
           let importLine = 'import { HostCalls, Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended, runDeferred';
           if (needsJsonImport) {
             importLine += ', JsonParser, JsonVal';
@@ -691,29 +713,6 @@ class CleatEntryTransformer {
     }
   }
 
-  // ---------------------------------------------------------------
-  // Check if a source already imports from @cleat/sdk
-  // ---------------------------------------------------------------
-  _hasCleatSdkImport(source) {
-    if (!source.statements) return false;
-
-    for (const stmt of source.statements) {
-      if (!stmt) continue;
-
-      // Probe various property paths used by different AS versions
-      const modName =
-        stmt.moduleName ||
-        (stmt.internalNamespace && stmt.internalNamespace.text) ||
-        (stmt.from && (typeof stmt.from === "string" ? stmt.from : stmt.from.text)) ||
-        (stmt.module && (typeof stmt.module === "string" ? stmt.module : stmt.module.text));
-
-      if (modName === "@cleat/sdk") return true;
-
-      if (stmt.namespace && stmt.namespace.text === "@cleat/sdk") return true;
-    }
-
-    return false;
-  }
 
   // ---------------------------------------------------------------
   // Fallback: write wrapper code to a file on disk
