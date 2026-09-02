@@ -337,6 +337,21 @@ not evidence about the branch, it is evidence about the invocation.
 
 Recreating databases: PostgreSQL `DROP DATABASE cleat WITH (FORCE)`; MySQL
 `docker exec cleat-ws2-mysql mysql -u root -pcleat -e "DROP DATABASE cleat; CREATE DATABASE cleat;"`.
+
+**Recreating `cleat` is not enough, and the leftovers fail in a way that reads as a code
+defect.** `cmd/cleat-worker`'s tenant-isolation tests create *per-tenant* databases named
+`cleat_<tenant-uuid-with-underscores>` and drop them in `t.Cleanup` — which does not run when a
+test run is killed. MySQL has no `CREATE INDEX IF NOT EXISTS`, so re-applying `001_schema.sql`
+to a surviving one always fails:
+
+    tenant_isolation_mysql_test.go:76: apply mysql migrations: migration 001_schema.sql:
+    execute: Error 1061 (42000): Duplicate key name 'idx_instances_ready'
+
+Nothing in that says "stale database". Found 2026-09-02 after killing a run mid-flight, and
+confirmed environmental by reproducing it on `develop` with the branch stashed — worth doing
+before reading a failure like this as yours. List and drop them:
+
+    docker --context colima exec cleat-ws2-mysql mysql -uroot -pcleat -N -e "SHOW DATABASES LIKE 'cleat%'"
 **azure-sql-edge ships no `sqlcmd`**, so SQL Server has to be recreated over a Go connection
 or by restarting the container. Do not run `docker compose down -v` — it destroys the user's
 database. Remove containers by name.

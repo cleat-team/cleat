@@ -192,6 +192,11 @@ type CompactedEvent struct {
 	// value rather than a classification -- see recordedErrorClass.
 	ErrCode string `json:"ec,omitempty"`
 
+	// ResolvedBy mirrors EventRecord.ResolvedBy. Dropping it in compaction
+	// would erase, for the oldest history, the fact that a response was
+	// asserted by a human rather than observed from the service.
+	ResolvedBy string `json:"rb,omitempty"`
+
 	// TimestampMs mirrors EventRecord.TimestampMs and is set for every event
 	// type, not just the ones with a dedicated case below -- Now() during
 	// replay reads it off the *previous* history event (execSession.Now,
@@ -364,6 +369,7 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.DurationMs = ev.DurationMs
 			ce.ErrNonRetryable = ev.ErrNonRetryable
 			ce.ErrCode = ev.ErrCode
+			ce.ResolvedBy = ev.ResolvedBy
 		case EventTypeAwaitSignals:
 			ce.SignalNames = ev.SignalNames
 			ce.TimeoutMs = ev.TimeoutMs
@@ -538,6 +544,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.DurationMs = ce.DurationMs
 			rec.ErrNonRetryable = ce.ErrNonRetryable
 			rec.ErrCode = ce.ErrCode
+			rec.ResolvedBy = ce.ResolvedBy
 		case EventCodeAwaitSignals:
 			rec.SignalNames = ce.SignalNames
 			rec.TimeoutMs = ce.TimeoutMs
