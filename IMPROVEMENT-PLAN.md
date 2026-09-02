@@ -5465,7 +5465,7 @@ the residual predicts:
 Re-measure after §3.16 lands: the number that matters is what is left once the schedule defect
 is gone.
 
-### 3.15 Signal authorization consults a list nothing can write — 🔶 **DEFAULT TURNED OFF** (WS-1, 2026-08-05), feature still absent
+### 3.15 Signal authorization consults a list nothing can write — 🟢 **THE WRITER EXISTS** (WS-1, 2026-09-02); the default stays off, for a different reason
 
 Found while scoping `GetAllowedSignalCallers` for §3.11: the method reads
 `workflow_instances.allowed_signals`, and **nothing in the product ever writes that column.**
@@ -5525,6 +5525,61 @@ PostgreSQL store:
 **Still open:** the writer. A store method, an API endpoint and SDK surface, at which point the
 default goes back to `true`. The tests above are written so that the first one fails when that
 lands, which is the signal to revisit them.
+
+#### Resolution — the writer, 2026-09-02
+
+`WorkflowStore.SetAllowedSignalCallers(ctx, workflowID, callers)` on all three dialects and
+`ShardedStore`, plus `GET`/`PUT /api/workflows/:id/allowed-signals`. The documented instruction
+— *add `"*"` (wildcard) to `allowed_signals`* — is now an operation an operator can perform.
+
+**Replaces rather than merges**, and an empty list writes SQL NULL rather than `"[]"`. The
+second one is the part worth recording: the getter normalises NULL, `""` and `"null"` to a nil
+slice, so a Set/Get round trip cannot tell those apart, and a test written only through the
+store would pass against a setter writing anything the getter forgives.
+`TestSetAllowedSignalCallersEmptyWritesNull` reads the column directly for that reason.
+
+**Five things the falsification pass established**, none of which was visible from reading the
+code:
+
+- **The tenant predicate is load-bearing on MySQL only.** Removing `AND tenant_id = ?` from the
+  MySQL setter turns the cross-tenant test red *on mysql alone* — PostgreSQL's RLS and SQL
+  Server's security policies cover for the same omission. That is §3.11's finding restated for
+  a writer, where the consequence is worse: a missed predicate on a getter leaks a list, on a
+  setter it grants a caller access to another tenant's workflow.
+- **The not-found check is what makes a cross-tenant write honest, not merely harmless.** Under
+  RLS the other tenant's row is invisible, so the `UPDATE` is not refused — it matches nothing
+  and *succeeds*. Removing the `RowsAffected() == 0` check turns the PostgreSQL cross-tenant
+  case red with "tenant B ... was told it succeeded". Without it the API would answer 200 to a
+  grant that never happened.
+- **`ErrWorkflowNotFound` deliberately does not distinguish "absent" from "another tenant's".**
+  Splitting them makes the endpoint an existence oracle. The getter already had this property
+  by construction; the writer had to be given it.
+- **MySQL's `RowsAffected` reports 0 for "matched but unchanged"**, so the naive
+  `n == 0 → not found` is wrong there: re-setting a list to the value it already holds reports
+  a missing workflow. The MySQL implementation confirms absence with a follow-up `SELECT`.
+  `TestSetAllowedSignalCallersIsIdempotent` covers it, and the other two dialects would not
+  have caught it — they report 1.
+- **One falsification did not go red, and the comment was corrected rather than the code.**
+  Removing `setSessionContext` from the MSSQL setter leaves every test green, because within a
+  single test nothing returns the connection to the pool and the connector's per-connection
+  setting is still in force — which is precisely the moment §2.71 is about. The call stays,
+  matching every other MSSQL write path; what changed is the comment, which had claimed a
+  requirement the suite does not demonstrate.
+
+**The API is tenant-scoped through `scopedStore`, asserted against a per-tenant factory** rather
+than through `newTestAPIServer`'s single shared mock — §3.20's trap was a handler that checked
+ownership on the scoped store and then operated on the process-wide one, and a grant endpoint is
+where that would cost the most.
+
+**Still open, and it is why the default stays `false`.** Nothing sets `allowed_signals` when a
+workflow *starts*. Every workflow begins with an empty list, so enabling `--require-signal-auth`
+today denies every signal until an operator makes a second call per workflow — usable, but not a
+safe default. Start-time declaration (a field on the start request, and SDK surface for it) is
+the follow-up, and flipping the default is a product call that should wait for it. The three
+tests in `cmd/cleat-worker/signal_auth_test.go` have been rewritten accordingly: the one that
+pinned the defect now asserts deny → grant → revoke through the check the worker installs, and
+the enforcement table sets its list through the supported path while still reading the column
+back.
 
 ### 3.12 One tenant's deploy silently replaces another's workflow code — 🔶 **OVERWRITE CLOSED, NAMESPACE STILL SHARED** (WS-1, 2026-08-05)
 

@@ -194,13 +194,16 @@ Auto-generates an API key on first startup if no keys exist.
 |------|---------|-------------|
 | bool | `false` | Require signal authorization for cross-workflow signals |
 
-> **Not usable yet.** Nothing in cleat can write `allowed_signals` — there is no
-> API, CLI verb or SDK call that sets it — and the check denies when the list is
-> empty. Enabling this flag therefore denies *every* cross-workflow, plugin and
-> external signal, with no supported way to permit one. It defaulted to `true`
-> until 2026-08-05, which is why it now defaults to `false`. The instructions
-> below describe the intended behaviour and are accurate about the mechanism;
-> they are not followable until the list can be populated.
+> **Usable now, but still off by default.** `allowed_signals` has a writer as of
+> 2026-09-02 — `PUT /api/workflows/{id}/allowed-signals`, below — so the
+> instructions in this section are followable. This block used to say the flag
+> was unusable, which was true from 2026-08-05 until that writer landed.
+>
+> The default stays `false` for a reason that is not about the writer: nothing
+> populates `allowed_signals` when a workflow *starts*. Turning the flag on today
+> denies every signal to every workflow until an operator makes a second API call
+> for each one, so it is a per-deployment decision rather than a safe default. It
+> becomes one once a workflow can declare its callers at start time.
 > See IMPROVEMENT-PLAN §3.15.
 
 When enabled, a workflow or external caller can only signal a target
@@ -214,8 +217,27 @@ Applies to WASM `cleat_signal_workflow`, `SendSignalAndWait`, plugin
   `allowed_signals` to permit them.
 - An empty `allowed_signals` means deny all (fail-secure).
 
-Set to `true` to enable signal authorization. Until `allowed_signals` can be
-populated, that denies every signal.
+Set to `true` to enable signal authorization. Every workflow starts with an
+empty `allowed_signals`, so grant callers before enabling the flag, not after.
+
+#### Reading and setting `allowed_signals`
+
+```
+GET /api/workflows/{id}/allowed-signals
+    → 200 {"allowed_signals": ["billing-service"]}
+
+PUT /api/workflows/{id}/allowed-signals
+    {"allowed_signals": ["billing-service", "*"]}
+    → 200 {"allowed_signals": ["billing-service", "*"]}
+```
+
+`PUT` **replaces** the whole list rather than adding to it, so revoking a caller
+means sending the list without them and clearing it means sending `[]`. Both
+verbs are scoped to the calling tenant: a workflow belonging to another tenant
+answers `404`, the same as one that does not exist, so the endpoint cannot be
+used to discover which ids are in use.
+
+`GET` always returns an array. An unset list comes back as `[]`, never `null`.
 
 ---
 

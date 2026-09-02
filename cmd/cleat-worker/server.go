@@ -340,6 +340,12 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.writeError(w, 404, "not found")
 		}
+	case len(parts) == 2 && parts[1] == "allowed-signals" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/allowed-signals
+		s.handleGetAllowedSignals(w, r, id)
+	case len(parts) == 2 && parts[1] == "allowed-signals" && r.Method == http.MethodPut:
+		// PUT /api/workflows/:id/allowed-signals
+		s.handleSetAllowedSignals(w, r, id)
 	case len(parts) == 3 && parts[1] == "update" && r.Method == http.MethodPost:
 		// POST /api/workflows/:id/update/:name
 		s.handleWorkflowUpdate(w, r, id, parts[2])
@@ -724,6 +730,74 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 }
 
 // ---- Promise API handlers ----
+
+// handleGetAllowedSignals handles GET /api/workflows/:id/allowed-signals
+//
+// Returns the list --require-signal-auth checks a caller against. Always a JSON
+// array: an unset column reads back as [], not null, so a client can tell
+// "denies everyone" from "the field is missing" without special-casing.
+func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	callers, err := st.GetAllowedSignalCallers(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if callers == nil {
+		callers = []string{}
+	}
+	s.writeJSON(w, 200, map[string]any{"allowed_signals": callers})
+}
+
+// handleSetAllowedSignals handles PUT /api/workflows/:id/allowed-signals
+//
+// The writer IMPROVEMENT-PLAN 3.15 is about. Until this existed, nothing in the
+// product could populate workflow_instances.allowed_signals, so enabling
+// --require-signal-auth denied every signal and the documented remedy -- "add
+// \"*\" to allowed_signals" -- named something no interface could do.
+//
+// PUT rather than POST because it replaces the whole list, which is what the
+// store method does and what makes the result of two concurrent grants
+// predictable rather than order-dependent.
+func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		AllowedSignals []string `json:"allowed_signals"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.writeError(w, 413, "request body too large")
+			return
+		}
+		s.writeError(w, 400, "invalid JSON body")
+		return
+	}
+	for _, c := range req.AllowedSignals {
+		if c == "" {
+			s.writeError(w, 400, "allowed_signals entries must be non-empty (use \"*\" to allow any caller)")
+			return
+		}
+	}
+	if err := st.SetAllowedSignalCallers(r.Context(), id, req.AllowedSignals); err != nil {
+		// 404 for a workflow this tenant cannot see, which is the same answer
+		// as for one that does not exist -- see engine.ErrWorkflowNotFound.
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			s.writeError(w, 404, "workflow not found")
+			return
+		}
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]any{"allowed_signals": req.AllowedSignals})
+}
 
 // handleListPromises handles GET /api/workflows/:id/promises
 func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, id string) {

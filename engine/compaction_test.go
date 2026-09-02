@@ -1818,3 +1818,7 @@ func TestCompactWorkflowHistory_NoRetryOnNonDeadlock(t *testing.T) {
 		t.Errorf("expected 1 compact call (no retries for non-deadlock), got %d", store.callCount)
 	}
 }
+
+func (_ *mockCompactStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
+	return nil
+}

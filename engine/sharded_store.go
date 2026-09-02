@@ -1039,6 +1039,15 @@ func (s *ShardedStore) UpdateStickyWorker(ctx context.Context, workflowID, worke
 	return shard.Store.UpdateStickyWorker(ctx, workflowID, workerID)
 }
 
+// SetAllowedSignalCallers routes by workflow ID.
+func (s *ShardedStore) SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("set_allowed_signal_callers: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.SetAllowedSignalCallers(ctx, workflowID, callers)
+}
+
 // ClearStickyWorker routes by workflow ID.
 func (s *ShardedStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
 	shard := s.getShard(workflowID)

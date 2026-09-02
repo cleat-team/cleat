@@ -80,14 +80,19 @@ var (
 	memoryCheckInterval   = flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
 	memorySampleRetention = flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
 	requireAuth           = flag.Bool("require-auth", true, "Require API key authentication (default: true when --api-addr is set)")
-	// Defaults to false, not true: nothing in the product can write
-	// workflow_instances.allowed_signals -- no store method, no API, no CLI,
-	// no SDK -- and the check denies when that list is empty. Defaulting it on
-	// therefore denied every cross-workflow, plugin and external signal on a
-	// deployment that had never opted into anything, with no supported way to
-	// permit one. IMPROVEMENT-PLAN 3.15. Turn it back on together with a way
-	// to populate the list.
-	requireSignalAuth              = flag.Bool("require-signal-auth", false, "Require signal authorization: checks caller identity against target's allowed_signals. Off by default: allowed_signals cannot yet be set (IMPROVEMENT-PLAN 3.15)")
+	// Defaults to false. Originally because nothing in the product could write
+	// workflow_instances.allowed_signals, so defaulting it on denied every
+	// cross-workflow, plugin and external signal on a deployment that had never
+	// opted into anything, with no supported way to permit one.
+	//
+	// That half is fixed -- WorkflowStore.SetAllowedSignalCallers and
+	// PUT /api/workflows/:id/allowed-signals exist as of 2026-09-02 -- and the
+	// default still stays off, for a reason that outlives it: a workflow starts
+	// with an empty list and nothing sets one at start time, so turning this on
+	// denies every signal until an operator makes a second call per workflow.
+	// It is a per-deployment decision, not yet a safe default.
+	// IMPROVEMENT-PLAN 3.15.
+	requireSignalAuth              = flag.Bool("require-signal-auth", false, "Require signal authorization: checks caller identity against target's allowed_signals (set it with PUT /api/workflows/{id}/allowed-signals). Off by default: workflows start with an empty list, so enabling this denies every signal until callers are granted")
 	generateAPIKeyFor              = flag.String("generate-api-key", "", "Generate a new API key for the given tenant UUID and exit")
 	maxBodySize                    = flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
 	httpReadTimeout                = flag.Duration("http-read-timeout", 30*time.Second, "HTTP read timeout")

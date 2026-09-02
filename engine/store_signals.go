@@ -237,4 +237,80 @@ func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID 
 	return callers, tx.Commit()
 }
 
+// ErrWorkflowNotFound is returned by SetAllowedSignalCallers when no workflow
+// with the given id is visible to the calling store's tenant.
+//
+// It deliberately does not distinguish "no such workflow" from "another
+// tenant's workflow". Splitting them would make the endpoint an existence
+// oracle: a caller could enumerate ids and learn which ones belong to someone
+// else from the difference in the error. The getter has the same property by
+// construction -- it returns nil for both -- and this keeps the writer honest
+// about the same boundary.
+var ErrWorkflowNotFound = errors.New("workflow not found")
+
+// SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
+//
+// The write side of GetAllowedSignalCallers above. Until this existed, nothing
+// in the product could write workflow_instances.allowed_signals -- no store
+// method, no API, no CLI, no SDK -- while --require-signal-auth consulted it
+// and denied every signal when it was empty. IMPROVEMENT-PLAN 3.15.
+//
+// An empty list writes NULL rather than "[]", so that a cleared list reads back
+// as the getter's nil rather than as an empty non-null array. The two mean the
+// same thing to signalCallerAllowed, but only one of them survives the round
+// trip unchanged, and a setter whose output the getter renormalises is a
+// setter whose tests can pass while the column holds something else.
+func (s *PostgresStore) SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error {
+	encoded, err := encodeAllowedSignals(callers)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// tenant_id in the predicate as well as RLS underneath it. On PostgreSQL
+	// the policy would be enough; carrying it here keeps the three dialects'
+	// statements the same shape, and MySQL has no policy to fall back on.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE workflow_instances SET allowed_signals = $1 WHERE id = $2 AND tenant_id = $3`,
+		encoded, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: rows affected: %w", err)
+	}
+	if n == 0 {
+		// This is what makes a cross-tenant write honest, not just harmless.
+		// Under RLS the other tenant's row is invisible, so the UPDATE is not
+		// refused -- it matches nothing and succeeds. Without this check the
+		// caller is told the grant landed. Falsified: removing it turns
+		// TestSetAllowedSignalCallersRejectsAnotherTenantsWorkflow/postgres red
+		// with "tenant B ... was told it succeeded".
+		return ErrWorkflowNotFound
+	}
+	return tx.Commit()
+}
+
+// encodeAllowedSignals renders a caller list for the allowed_signals column.
+//
+// Returns an invalid sql.NullString (SQL NULL) for an empty list; otherwise a
+// JSON array, which is what GetAllowedSignalCallers unmarshals and what SQL
+// Server's ck_workflow_instances_allowed_signals ISJSON check requires.
+func encodeAllowedSignals(callers []string) (sql.NullString, error) {
+	if len(callers) == 0 {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(callers)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("encode allowed signals: %w", err)
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
 // GetQueryState returns the value for a key in the workflow's query_state JSONB.
