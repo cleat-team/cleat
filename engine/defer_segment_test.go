@@ -9,14 +9,15 @@ import (
 	"testing"
 )
 
-// IMPROVEMENT-PLAN 3.35 phase 5 / 3.75.
+// IMPROVEMENT-PLAN 3.35 phase 5 / 3.75 / 3.81.
 //
 // §3.75's design for the two-phase terminal transition rests on one claim,
 // stated there as settled: "RequestCancellation is not in this set: it sets
 // cancellation_requested, the guest observes it and exits through its own
-// wrapper, so that path already runs defers." The two tests here measure that
+// wrapper, so that path already runs defers." The tests here measure that
 // claim. Half of it is true and half of it is false, and the false half
-// decides the shape of phase 5, so both are pinned rather than described.
+// decided the shape of the defer segment, so both are pinned rather than
+// described -- followed by the mechanism that was built instead.
 //
 // The mockCaller cannot answer either question on its own. A defer body's own
 // DurableCall is refused by the same cancellation check that refused the
@@ -107,14 +108,14 @@ func TestARefusedFreshCallMakesTheGuestDrainItsDefers(t *testing.T) {
 // not merely skipped. It is consumed.
 //
 // So cancellation is not the mechanism §3.75 took it for, and a defer segment
-// cannot be built by reusing it. The host has to distinguish a call made by
-// the workflow body from a call made by a defer body, and today it cannot:
-// _cleatInDeferPhase (wasm/exports.go) is guest-side only and the guest never
-// tells the host. That signal is phase 5's real prerequisite.
+// cannot be built by reusing it. Refusing a call requires the host to
+// distinguish one made by the workflow body from one made by a defer body,
+// and it cannot: _cleatInDeferPhase (wasm/exports.go) is guest-side only and
+// the guest never tells the host.
 //
-// This test asserts the defect. It is expected to be inverted -- ops non-empty
-// -- by the change that fixes it, and the inversion is the point: it should
-// not be possible to fix the refusal without coming back here.
+// WithDeferPhase does not solve that. It sidesteps it -- see
+// TestADeferSegmentDrainsOnTheSuspension, which refuses nothing at all. This
+// test therefore still passes, and pins why the refusal route was not taken.
 func TestRefusingEveryFreshCallDestroysTheCleanup(t *testing.T) {
 	wasmBytes, eng, caller, _ := deferPhaseProbeEngine(t, "wf-cleanup-refused", true)
 
@@ -146,7 +147,9 @@ func TestRefusingEveryFreshCallDestroysTheCleanup(t *testing.T) {
 // A defer segment therefore cannot rely on "replay until the first fresh
 // call". It has to handle a replay that ends in a suspension, which is the
 // shape §3.75's "replay history to reconstruct the instance, run the
-// registered defers in it" does not describe.
+// registered defers in it" does not describe -- and which turns out to be the
+// mechanism rather than the obstacle. This test is the control for the one
+// below it: same fixture, same history, no defer phase, no cleanup.
 func TestASleepingWorkflowNeverReachesAFreshCall(t *testing.T) {
 	ctx := context.Background()
 
@@ -184,5 +187,76 @@ func TestASleepingWorkflowNeverReachesAFreshCall(t *testing.T) {
 	if got := operationsCalled(caller2); len(got) != 0 {
 		t.Fatalf("segment 2 ran cleanup %v. A re-suspended workflow has not "+
 			"terminated, so its defers must still not run.", got)
+	}
+}
+
+// TestADeferSegmentDrainsOnTheSuspension is the mechanism §3.81 names, measured.
+//
+// Same setup as TestASleepingWorkflowNeverReachesAFreshCall -- a workflow that
+// registered a defer and then slept -- but the replay runs as a defer segment.
+// The recorded sleep still has not elapsed, so the guest still re-suspends and
+// still never reaches a fresh call. The difference is that the host now drains
+// the defer table itself, on the instance that is still live, and the defer
+// body's own host call goes through with ordinary semantics.
+//
+// That last part is the whole point and is what separates this from
+// cancellation: TestRefusingEveryFreshCallDestroysTheCleanup measures 0
+// recorded calls because the cleanup was refused. Here it is performed.
+func TestADeferSegmentDrainsOnTheSuspension(t *testing.T) {
+	ctx := context.Background()
+
+	wasmBytes, eng1, caller1, _ := deferPhaseProbeEngine(t, "wf-defer-segment", false)
+	_, history, susp, _, _, err := eng1.Execute(ctx, wasmBytes,
+		"defer_survives_suspension", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("segment 1: %v", err)
+	}
+	if susp == nil {
+		t.Fatalf("segment 1 did not suspend")
+	}
+	if got := operationsCalled(caller1); len(got) != 0 {
+		t.Fatalf("segment 1 made calls %v; a defer must not run on a suspension", got)
+	}
+
+	// The defer segment. No cancellation: nothing is refused, because nothing
+	// needs to be -- the guest re-suspends on its own recorded sleep.
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	caller2 := &mockCaller{}
+	eng2 := NewEngine(rt, caller2,
+		WithBackends(WasmtimeLanguages, wt),
+		WithWorkflowID("wf-defer-segment"),
+		WithDeferPhase())
+
+	_, _, susp2, _, _, _ := eng2.Replay(ctx, wasmBytes,
+		"defer_survives_suspension", json.RawMessage(`{}`), history)
+	if susp2 == nil {
+		t.Fatalf("the defer segment did not suspend; this test no longer measures " +
+			"the suspension path it was written for")
+	}
+
+	got := operationsCalled(caller2)
+	want := "after_sleep"
+	found := false
+	for _, op := range got {
+		if op == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the defer segment recorded %v, want %q among them.\n\n"+
+			"The registered defer did not reach the ServiceCaller. Either the host "+
+			"did not call %s on the suspension, or the guest's table was already "+
+			"empty -- and an empty table is the 3.81 failure, where the drain ran "+
+			"with its calls refused and consumed the cleanup.", got, want, deferRunnerExport)
 	}
 }

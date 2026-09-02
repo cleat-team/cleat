@@ -6498,12 +6498,14 @@ both are now decisions about *what a defer may do* rather than prerequisites for
 module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
 the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
-### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 OPEN, blocked on §3.80** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02)
+### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 PART-BUILT — the defer segment runs, the terminal transition does not use it yet (§3.81)** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02)
 
-> **2026-09-02.** Phase 5's record shape is answered (§3.75), but implementing it found an
-> earlier gap: the host cannot tell a defer body's host call from the workflow body's, so the
-> mechanism §3.75 assumed would drive a defer segment destroys the cleanup instead of running
-> it. Measured; see **§3.80**, which is now phase 5's blocker and names what to build in order.
+> **2026-09-02.** Phase 5's record shape is answered (§3.75), and the *execution* half is now
+> built and measured: `WithDeferPhase` replays a workflow purely to run its outstanding defers,
+> draining them on the suspension the replay ends in. What implementing it found first is that
+> the mechanism §3.75 assumed — refusing the fresh call — destroys the cleanup rather than
+> running it. See **§3.81** for both, and for what is left: the two-phase terminal transition,
+> and the past-the-frontier replay.
 
 > **2026-09-01, phases 2–3.** A WASM defer now has a body and it runs. §3.70 records the design
 > and why the "one dispatch export" it was blocked on turned out to be unnecessary: the host
@@ -10311,14 +10313,14 @@ Re-derive: generate a wrapper and read it, or run
 `CleatEntryProcessorTest.testGeneratedWrapperPropagatesSuspension`. Removing the processor's
 suspend branch fails exactly that test and no other (282 tests, 1 failure).
 
-### 3.75 The durable record for a resumable defer phase — 🔵 **DESIGN ANSWER, not yet built; one premise corrected in §3.80** (WS-2, 2026-09-02)
+### 3.75 The durable record for a resumable defer phase — 🔵 **DESIGN ANSWER, not yet built; one premise corrected and the execution half built in §3.81** (WS-2, 2026-09-02)
 
-> **2026-09-02, read §3.80 before building this.** The record-shape answer below stands. One
+> **2026-09-02, read §3.81 before building this.** The record-shape answer below stands. One
 > supporting claim does not: the inventory excludes `RequestCancellation` because "the guest
 > observes it and exits through its own wrapper, so that path already runs defers", and
 > measurement shows the drain runs but every call it makes is refused by the same check — so the
 > cleanup is consumed rather than performed. The two-phase transition needs a guest→host
-> defer-phase signal first, which does not exist in any SDK. §3.80 has the measurements.
+> defer-phase signal first, which does not exist in any SDK. §3.81 has the measurements.
 
 §3.35 phase 5 is blocked on WS-2 by design: making `defer` survive a `kill -9` needs the defer
 phase to be "its own durable, resumable unit with a reaper", and the plan states that is **the
@@ -10641,7 +10643,7 @@ children and flags its `REQUEST_CANCEL` children, where before it did neither. T
 design says should happen, and it removes the orphan the policy exists to prevent — but a
 deployment relying on terminate being narrow will see children close that did not close before.
 
-### 3.80 Phase 5's prerequisite: the host cannot tell a defer body's call from the workflow's — 🔴 **OPEN, blocks §3.35 phase 5** (WS-3, 2026-09-02)
+### 3.81 The defer segment — 🔶 **MECHANISM BUILT AND MEASURED; the two-phase transition remains** (WS-3, 2026-09-02)
 
 §3.75 answered the record-shape question phase 5 was parked behind, and its answer stands: no
 new durable record is needed, the terminal transition becomes two-phase, and the only new
@@ -10694,20 +10696,44 @@ suspension. Note that this is the *helpful* direction once the signal exists:
 **not** drain — the table survives, and the host can call `__cleat_run_deferred` on the live
 instance with the refusal lifted, which is exactly phase 4's existing machinery.
 
-#### What to build, in order
+#### What was built instead — ✅ `WithDeferPhase`, 2026-09-02
 
-1. **A guest→host defer-phase signal.** One host function, called by `_cleatRunDeferred` on
-   entry and exit, in all five SDKs — the same shape as `__cleat_run_deferred` itself (#550,
-   #553, #557, #558) and with the same trap: an export no host calls, or a host call no guest
-   makes, is two green half-tests and no working feature (§3.73). It needs the ABI parity test
-   (`engine/hostabi_runtime_parity_test.go`) and one test that crosses the boundary.
-2. **The defer phase in the session**, gated on that signal: refuse the body's fresh calls,
-   permit the defer bodies'.
-3. **Then** §3.75's two-phase terminal transition as designed — migration `038` across all three
-   dialects (postgres, mysql and mssql high-water marks are 034/033/037 and are not aligned),
-   the marker and deadline, the three `UPDATE`-driven sites, `reaperLoop`'s predicate, and the
-   caller-visible `terminating` status that D6 in `tiers.yaml` settled.
+The obstacle is the mechanism. `writeRunDeferred` emits the guest's own drain under
+`if !__susSuspended` (`wasm/exports.go`), so **a suspended guest deliberately does not drain** —
+its defer table is still populated and its closures are still in the instance's memory. The host
+calls `__cleat_run_deferred` itself, on the live instance, at the suspension. Nothing is refused,
+so nothing consumes the cleanup, and the defer bodies' calls go through with ordinary semantics.
 
-**Do not start step 3 first.** It is the largest piece and the most obviously shaped like
-progress, and every line of it is built on a defer phase that would consume the cleanup it
-exists to run.
+`WithDeferPhase()` marks an execution as a defer segment;
+`wasmtimeBackend.runGuestDefersAfterSuspend` does the drain at all three of the backend's
+suspend returns. Measured on a real Go SDK guest that registered a defer and slept:
+`defers_run=1`, and the cleanup call reaches the `ServiceCaller`. Pinned by
+`TestADeferSegmentDrainsOnTheSuspension`, whose control is the test directly above it — same
+fixture, same history, no defer phase, no cleanup — and which goes red with
+"the defer segment recorded []" when the drain is removed.
+
+**No SDK change was needed, and the guest→host signal this section originally called phase 5's
+prerequisite is not one.** It was the prerequisite for the *refusal* route, and the refusal
+route is the one that consumes the cleanup. Note the shape of that error: the fix was reached by
+asking what the guest already does on the path in question, not by adding a way to tell it
+something.
+
+#### What is still open
+
+1. **The replay that runs past the end of history.** A workflow finalized `ready` rather than
+   suspended replays to the frontier and then does *new* work, which a defer segment must not
+   permit. Refusing the call is what §3.81 measures as destructive, so the fix is to make that
+   call **suspend** instead — bit 62 of the result word, exactly as `cleat_await_child` and
+   `cleat_await_any_child` already decode it (`wasm/adapter_metadata.go`). The guest then unwinds
+   with `__susSuspended` set, skips its own drain, and lands on the path above. That is an SDK
+   change across all five, but a much smaller one than a new host function, and it is the same
+   bit rather than a new convention.
+2. **§3.75's two-phase terminal transition** — migration `038` across all three dialects
+   (postgres, mysql and mssql high-water marks are 034/033/037 and are **not** aligned), the
+   marker and deadline, the three `UPDATE`-driven sites, `reaperLoop`'s predicate, and the
+   caller-visible `terminating` status that D6 in `tiers.yaml` settled. This is the largest
+   piece and the most obviously shaped like progress; it is now unblocked, because the defer
+   segment it dispatches into exists and is measured.
+3. **The wazero path has no defer segment.** `WithDeferPhase` fails closed on a backend that
+   cannot honour it rather than silently skipping the drain, so `cleatctl replay` and the other
+   tooling paths report the refusal instead of reporting a cleanup that did not happen.

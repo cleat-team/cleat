@@ -56,6 +56,7 @@ type Engine struct {
 	wasmInstanceTimeout    time.Duration
 	defaultWorkflowTimeout time.Duration
 	deferPassBudget        time.Duration // total for one runDefers pass; see WithDeferPassBudget
+	deferPhase             bool          // this execution is a defer segment; see WithDeferPhase
 	nowFn                  func() int64  // wall clock for sleep-deadline decisions; see WithClock
 	workflowStartMs        int64         // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
 
@@ -319,6 +320,25 @@ const DefaultDeferPassBudget = 5 * time.Minute
 // being bounded is the worker slot, not any individual callback.
 func WithDeferPassBudget(d time.Duration) EngineOption {
 	return func(e *Engine) { e.deferPassBudget = d }
+}
+
+// WithDeferPhase marks this execution as a defer segment: the workflow is
+// replayed for the sole purpose of running its outstanding defers, because its
+// terminal outcome has already been decided elsewhere and no instance existed
+// to run them in. IMPROVEMENT-PLAN 3.35 phase 5.
+//
+// It changes one thing: when the replay ends in a suspension -- which is the
+// normal way it ends, because a workflow worth terminating is usually one that
+// is waiting -- the host drains the guest's defer table on the still-live
+// instance instead of letting the segment end there. See
+// wasmtimeBackend.runGuestDefersAfterSuspend for why the suspension is what
+// makes this possible rather than an obstacle to it.
+//
+// The engine fails the execution rather than proceeding if the backend cannot
+// honour it. A defer segment that silently skipped the drain would report the
+// workflow's cleanup as done, which is the failure mode 3.81 exists to record.
+func WithDeferPhase() EngineOption {
+	return func(e *Engine) { e.deferPhase = true }
 }
 
 // WithContinueAsNewHandler sets a handler for atomic ContinueAsNew transitions.
