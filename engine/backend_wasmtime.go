@@ -838,6 +838,30 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		if limitErr := b.resourceLimitError(callErr, execTimeout); limitErr != nil {
 			callErr = limitErr
 		}
+		// Run the guest's outstanding defers before giving up on it.
+		// IMPROVEMENT-PLAN §3.35 phase 4.
+		//
+		// This is the non-Go path -- Rust, Java, AssemblyScript, and any Go
+		// module without _start -- and until this call it had no defer pass at
+		// all. The Go-on-wasmtime branch above got one in #550; #553, #557 and
+		// #558 then gave Rust, AssemblyScript and Java a __cleat_run_deferred
+		// export for the host to call, and nothing called it. "The guest
+		// exports it" and "the host calls it" are two different facts.
+		//
+		// Measured 2026-09-02 before the fix, AssemblyScript spin_forever under
+		// a 2s fence: the workflow was killed, its defer did not run, and the
+		// engine's fallback pass logged `defer execution failed ...
+		// export=cleat_defer_defer-0 ... not found` -- a message about an
+		// export naming convention no guest in any language has ever had, for
+		// cleanup that simply never happened.
+		//
+		// Only reached when the guest did NOT come out through its own wrapper:
+		// the completeErr and completeResult branches above return first, and
+		// a guest that reached either has already drained its own defer table
+		// (§3.73). This call is idempotent regardless -- every SDK's runner
+		// drains the table before running the first body, so a second call
+		// runs nothing and returns 0.
+		b.runGuestDefersAfterKill(store, instance, entryPoint, callErr)
 		return nil, fmt.Errorf("host: export %q: %w", entryPoint, callErr)
 	}
 

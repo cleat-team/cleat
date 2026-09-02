@@ -30,6 +30,13 @@ declare namespace __AdaptedExports {
    */
   export function __durable_inner_defer_suspend(h: __Internref5, input: string): string;
   /**
+   * assembly/index/__durable_inner_spin_forever
+   * @param h `~lib/@cleat/sdk/assembly/host-calls/HostCalls`
+   * @param input `~lib/string/String`
+   * @returns `~lib/string/String`
+   */
+  export function __durable_inner_spin_forever(h: __Internref5, input: string): string;
+  /**
    * assembly/index/place_order
    * @param argsPtr `usize`
    * @param argsLen `i32`
@@ -65,6 +72,15 @@ declare namespace __AdaptedExports {
    * @returns `i64`
    */
   export function defer_suspend(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
+  /**
+   * assembly/index/spin_forever
+   * @param argsPtr `usize`
+   * @param argsLen `i32`
+   * @param outPtr `usize`
+   * @param maxOutLen `i32`
+   * @returns `i64`
+   */
+  export function spin_forever(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
   /**
    * assembly/index/__cleat_run_deferred
    * @returns `i64`

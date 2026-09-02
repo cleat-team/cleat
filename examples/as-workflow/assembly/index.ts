@@ -275,3 +275,31 @@ export function defer_suspend(h: HostCalls, input: string): string {
   h.cleatCall("inventory", "after_sleep", "{}");
   return '{"slept":true}';
 }
+
+// ---------------------------------------------------------------------------
+// spinForever — a runaway workflow with cleanup outstanding
+//
+// For IMPROVEMENT-PLAN §3.35 phase 4: a workflow the HOST kills never reaches
+// the generated wrapper's drain, so the only thing that can run its defers is
+// the host calling __cleat_run_deferred. This entry point exists to be killed.
+// ---------------------------------------------------------------------------
+
+/** Sink for the spin loop, so the optimiser cannot delete it. */
+let _spinSink: i64 = 0;
+
+/** The cleanup a killed workflow must still get. */
+function releaseTheFencedLock(h: HostCalls, payload: string): void {
+  h.cleatCall("inventory", "the_fenced_workflows_defer", payload);
+}
+
+@cleatEntry("SpinForever")
+export function spin_forever(h: HostCalls, input: string): string {
+  deferFunc(h, "release the lock the runaway workflow took", releaseTheFencedLock, "{}");
+
+  // Not `while (true)`: AssemblyScript's optimiser treats a provably infinite
+  // loop with a dead tail as unreachable code. Reading the sink keeps it.
+  while (_spinSink >= 0) {
+    _spinSink += 1;
+  }
+  return '{"unreachable":true}';
+}

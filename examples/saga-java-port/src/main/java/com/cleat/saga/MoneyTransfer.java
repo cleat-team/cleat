@@ -289,6 +289,36 @@ public class MoneyTransfer {
      * @return a status object (not a JSON string containing JSON -- see
      *         {@link #transferMoney(HostCalls, String)})
      */
+    /** Sink for the spin loop, so the JIT and TeaVM cannot delete it. */
+    private static long spinSink = 0;
+
+    /**
+     * A runaway workflow with cleanup outstanding.
+     *
+     * <p>For IMPROVEMENT-PLAN 3.35 phase 4: a workflow the HOST kills never
+     * reaches the generated wrapper's drain, so the only thing that can run its
+     * defers is the host calling __cleat_run_deferred. This entry point exists
+     * to be killed.
+     *
+     * <p>Java is worth measuring separately from the other guests rather than
+     * assuming it behaves the same. A TeaVM module initialises a whole runtime
+     * through _start -- shadow stack, fiber system, thread-local globals -- and
+     * whether a second export can still be called after the fence interrupts it
+     * is a property of that runtime, not of wasmtime.
+     */
+    @CleatEntry(name = "spin_forever")
+    public static Map<String, Object> spinForever(HostCalls h, String input) {
+        h.deferFunc(() -> h.cleatCall(
+            "inventory", "the_fenced_workflows_defer", "{}"));
+
+        // Not `while (true)`: a provably infinite loop with a dead tail is
+        // unreachable code. Reading the sink keeps the loop.
+        while (spinSink >= 0) {
+            spinSink += 1;
+        }
+        return resultObject("unreachable", Boolean.TRUE);
+    }
+
     @CleatEntry(name = "get_transfer_status")
     public static Map<String, Object> getTransferStatus(HostCalls h, String input) {
         // This entry point demonstrates a read-only workflow.
