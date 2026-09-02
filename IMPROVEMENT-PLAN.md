@@ -9226,3 +9226,23 @@ all, so "the host has nothing to add" holds for them for a different reason.
 Both halves are mutation-tested. Suppressing the pass unconditionally fails the trapped-guest
 control; leaving it unconditional fails the regression test with the false log it was written
 for.
+
+**A panic is on the guest's side of that line, which shrinks §3.35 phase 4.** "Panic" reads like
+"trap", and the phase-4 scope was written assuming it was one. Measured 2026-09-02 on a real Go
+SDK guest through wasmtime, entry point `defer_on_panic` in `testdata/deferfunc`:
+
+    err    = host: export "defer_on_panic" failed: the workflow panicked   (GuestReturnedError)
+    calls  = [on_panic]                                                    (the defer body ran)
+    logs   = <empty>                                                       (no host pass)
+
+A Go panic unwinds into the generated dispatcher's `recover`, which reports through
+`cleat_complete`, so the guest still leaves via its own wrapper and the wrapper runs the bodies.
+Pinned by `TestAPanickingGuestRunsItsOwnDefers`, which fails with `recorded []` when the
+dispatcher's runner call is removed.
+
+So what is actually left for phase 4 is the genuinely unrecoverable: a WASM trap, an
+out-of-memory, and a fence kill or timeout — none of which return to guest code at all. **Note
+what that means for the phase 2 fix described below** (`withHandler(context.Background(),
+session)` so a defer body can make host calls on the trap path): it is still correct, but it
+benefits no shipped guest, because the export it would reach — `cleat_defer_<id>` — is one no SDK
+emits and none can. Do not schedule it as though it closed the trap case.

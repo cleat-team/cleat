@@ -155,3 +155,69 @@ func TestHostStillRunsDefersWhenTheGuestTrapped(t *testing.T) {
 			"misleading log into a dropped defer.", logs.String())
 	}
 }
+
+// TestAPanickingGuestRunsItsOwnDefers pins the boundary this fix draws, at the
+// transition most likely to be assumed to fall on the other side of it.
+//
+// "Panic" reads like "trap", and if it were one the guest would have been
+// stopped before its wrapper returned and its defers would be the host's
+// problem. It is not. A Go panic unwinds into the generated dispatcher's
+// recover, which reports the failure through cleat_complete, so the guest
+// still leaves through its own wrapper -- and the wrapper runs the defer
+// bodies before reporting.
+//
+// Measured 2026-09-02 on a real Go SDK guest through wasmtime: the cleanup
+// call was recorded, the failure came back as a GuestReturnedError carrying the
+// panic message, and the host logged nothing.
+//
+// This matters for scoping IMPROVEMENT-PLAN 3.35 phase 4, which is about
+// workflows whose defers nothing runs. Panics are not in that set. What is
+// left there is the genuinely unrecoverable: a WASM trap, an out-of-memory,
+// and a fence kill or timeout -- none of which return to guest code at all.
+func TestAPanickingGuestRunsItsOwnDefers(t *testing.T) {
+	ctx := context.Background()
+	wasmPath := buildFixtureWasm(t, "deferfunc")
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	defer wt.Close(ctx)
+
+	var logs bytes.Buffer
+	caller := &mockCaller{}
+	eng := NewEngine(rt, caller,
+		WithBackends(WasmtimeLanguages, wt),
+		WithWorkflowID("wf-panic"),
+		WithLogger(captureLogs(&logs)))
+
+	_, _, _, _, _, execErr := eng.Execute(ctx, wasmBytes,
+		"defer_on_panic", json.RawMessage(`{}`))
+	if execErr == nil {
+		t.Fatal("defer_on_panic was expected to fail")
+	}
+	if !strings.Contains(execErr.Error(), "the workflow panicked") {
+		t.Fatalf("failed for a different reason than the fixture's own panic, so "+
+			"the defer may not have been reached: %v", execErr)
+	}
+
+	if got := operationsCalled(caller); len(got) != 1 || got[0] != "on_panic" {
+		t.Errorf("recorded %v, want exactly [on_panic].\n\n"+
+			"A panic is recovered by the generated dispatcher, so the guest leaves "+
+			"through its own wrapper and its defers run there.", got)
+	}
+	if strings.Contains(logs.String(), "defer execution failed") {
+		t.Errorf("the host ran a defer pass for a guest that completed.\n\nLogs:\n%s\n\n"+
+			"A recovered panic reaches cleat_complete, so it is a GuestReturnedError "+
+			"and the pass must be skipped.", logs.String())
+	}
+}
