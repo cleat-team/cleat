@@ -58,6 +58,7 @@ engine	TestPythonWasmEndToEnd	1
 engine	TestRLSTenantIsolation	1
 engine	TestRustWorkflowCancelOrder	1
 engine	TestRustWorkflowCompensation	1
+engine	TestRustWorkflowDefersRun	1
 engine	TestRustWorkflowExecute	1
 engine	TestRustWorkflowReplay	1
 engine	TestTenantIsolationWithSeparateStores	1
@@ -134,4 +135,3 @@ tests/plugin-harness	buildJavaWorkflowWasm	2
 tests/plugin-harness	buildPythonWorkflowWasm	4
 tests/plugin-harness	buildRustWorkflowWasm	2
 tests/soak	TestSoakWorkflowMix	1
-wasm	TestComponentPythonBinary	1

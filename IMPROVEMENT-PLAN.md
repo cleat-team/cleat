@@ -9548,3 +9548,55 @@ database was healthy. **That string is in the exception message, which is presen
 Same shape as §1.1's `Files:` pointer and the `ExecuteComponent` grep in CLAUDE.md: a check
 whose evidence is equally consistent with the bug and with the fix. It cost most of a session,
 and the tell was that the "healthy" reading never explained the failure.
+
+---
+
+### 3.73 Four SDKs document a `defer` that runs cleanup, and cannot run it — 🔶 **RUST DONE; PYTHON, JAVA, ASSEMBLYSCRIPT OPEN** (WS-3, 2026-09-02)
+
+§3.70 fixed this for Go. The other four SDKs have the same defect and it is still shipped.
+
+`cleat_defer` carries a **description** across the boundary and nothing else. The host records
+that a defer exists; no code anywhere can run it, because there is no body to run. Meanwhile the
+SDKs say there is one:
+
+- Python: *"Register a deferred cleanup action to run on workflow exit. Deferred actions are
+  **executed** in LIFO order, analogous to Python's `try/finally` or Go's `defer`."*
+  (`python-sdk/cleat_sdk/host_calls.py`)
+- `docs/contributor/SDK_README_TEMPLATE.md`: `cleat_defer | (description) -> string | Register
+  cleanup on exit`
+
+**Python is tier 1** (`tiers.yaml`: `languages: [go, python]`), so this is a tier-1 correctness
+gap, not only a tier-2 feature gap.
+
+**§3.35 phase 4 made one consequence sharper.** `__cleat_run_deferred` is emitted by Go codegen
+only, so the host's kill-path cleanup — added in #551 — silently no-ops for every non-Go guest.
+`GetFunc` returns nil and `runGuestDefersAfterKill` returns without doing anything.
+
+#### The shape, established on Rust (#553)
+
+Four pieces per language, and every one of them is needed:
+
+1. a guest-side table mapping the host's defer ID to a body;
+2. a `defer_func`-style call that registers a body alongside the existing description-only call;
+3. a drain in LIFO order, run by the entry-point wrapper on the success and error paths but
+   **not** on suspension;
+4. a `__cleat_run_deferred` export so the host can drain it for a workflow it killed.
+
+The suspend rule is where the two callers disagree, and it is the part most likely to be got
+wrong: the wrapper's drain must let the suspend sentinel **out** so its segment suspends, and the
+host's export must **swallow** it, because a workflow reached that way is already dead and has no
+segment left. Rust's tests pin both halves; a mutation that swallows the sentinel in the wrapper
+passes every other test in the file.
+
+#### Per-language notes, measured before starting
+
+| SDK | hook | risk |
+|---|---|---|
+| Rust | `#[cleat_entry]` proc macro wraps every export | **done** — real closures, `catch_unwind` already mirrors Go's sentinel handling |
+| Python | `cleat_entry` decorator + `_dispatcher_run` (`python-sdk/cleat_sdk/entry.py`) | tier 1, so it must be right; componentize-py/WIT export surface needs checking |
+| Java | TeaVM; `_start` initialises, exports called by name | unexamined |
+| AssemblyScript | `@cleatEntry` marker + transformer plugin | **highest risk.** The AS SDK deliberately avoids closures — `saga.ts`: *"Uses function references, not closures"* — and builds with `--runtime stub`, which has no GC and no exceptions. A capturing `deferFunc(fn)` may not be expressible; it may only ever get non-capturing function references, which is a materially weaker feature and should be documented as such rather than papered over. |
+
+**If a language cannot support a body, say so in its docs instead of claiming cleanup that
+cannot happen.** That is the failure this item is about; re-creating it in a different form
+would be worse than leaving the gap.

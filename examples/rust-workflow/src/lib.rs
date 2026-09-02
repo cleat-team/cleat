@@ -183,3 +183,28 @@ mod tests {
         assert_eq!(duration, 5000);
     }
 }
+
+/// An entry point whose cleanup has a body.
+///
+/// `h.cleat_defer(description)` registers a description and nothing more: the
+/// host records that a defer exists and no code anywhere runs it. That was true
+/// of every Rust workflow until IMPROVEMENT-PLAN §3.73, and the SDK documented
+/// it as cleanup that runs.
+///
+/// `defer_func` is the one with a closure attached. The generated
+/// `#[cleat_entry]` wrapper drains the table when this returns, so the calls
+/// below arrive in the order body, second, first -- LIFO, because a defer
+/// releases what the defer before it acquired.
+#[cleat_entry]
+fn defer_order(h: &HostCalls, input: PlaceOrderInput) -> Result<String, String> {
+    let user = input.user_id.clone();
+    h.defer_func(move || {
+        HostCalls.cleat_call("notifications", "first", &format!("{{\"user\":\"{}\"}}", user));
+    });
+    h.defer_func(|| {
+        HostCalls.cleat_call("notifications", "second", "{}");
+    });
+
+    h.cleat_call("inventory", "body", "{}");
+    Ok("{\"deferred\":true}".to_string())
+}

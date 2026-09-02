@@ -175,6 +175,13 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
 
             match result {
                 Ok(inner_result) => {
+                    // Run the workflow's own defers before reporting, so
+                    // anything they record lands inside this segment. On the
+                    // error path too -- a defer is FOR the run that did not
+                    // finish the way it meant to -- but NOT on suspension,
+                    // which is the Err arm below: a suspended workflow has not
+                    // exited and its cleanup is still pending.
+                    cleat_sdk::run_deferred();
                     match cleat_sdk::format_cleat_result(inner_result) {
                         Ok(output_json) => {
                             // Normalize through host encoding/json for cross-language

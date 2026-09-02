@@ -425,6 +425,26 @@ impl HostCalls {
         (id, None)
     }
 
+    /// Register cleanup WITH A BODY, to run when the workflow finishes or when
+    /// the host kills it. Mirrors Go's DurableDeferFunc.
+    ///
+    /// `cleat_defer` above registers only a description: the host records that
+    /// a defer exists, and nothing anywhere can run it. That is the whole of
+    /// IMPROVEMENT-PLAN §3.73 -- the SDK documented cleanup that ran in LIFO
+    /// order "analogous to Go's defer", and no mechanism existed to run it.
+    /// This is the one with a closure attached.
+    ///
+    /// The returned ID is the host's, and is the key the body is stored under,
+    /// so the two sides agree about which defer is which.
+    pub fn defer_func<F: FnOnce() + 'static>(&self, f: F) -> (String, Option<String>) {
+        let (id, err) = self.cleat_defer("deferred function");
+        if err.is_some() {
+            return (id, err);
+        }
+        crate::defer::register_defer(id.clone(), Box::new(f));
+        (id, None)
+    }
+
     /// Check for cancellation. Mirrors Go's PollCancellation.
     pub fn poll_cancellation(&self) -> (bool, String) {
         let mut reason_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
