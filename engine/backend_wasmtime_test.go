@@ -2588,39 +2588,6 @@ func TestClosure_ChildWorkflowWithOptions(t *testing.T) {
 	s.expectCall(t, "ChildWorkflowWithOptions")
 }
 
-func TestClosure_ChildWorkflowInSchema(t *testing.T) {
-	// cleat_child_workflow_in_schema: (targetSchema, name, input ptr,len × 3, version,priority i64 × 2, parentClosePolicy ptr,len, runIDPtr,runIDMaxLen) -> i64
-	ft := wasmFunctype([]byte{
-		wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32, wasmValI32,
-		wasmValI64, wasmValI64,
-		wasmValI32, wasmValI32,
-		wasmValI32, wasmValI32,
-	}, []byte{wasmValI64})
-	s := newClosureSetup(t, []struct {
-		name string
-		ft   []byte
-	}{{"cleat_child_workflow_in_schema", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
-		return b.registerCleatChildWorkflowInSchema(l)
-	})
-
-	s.writeString(10, "other-schema")
-	s.writeString(40, "child-wf")
-	s.writeString(70, `{"in":"put"}`)
-	s.writeString(120, "TERMINATE")
-	got := s.call(t, "test_cleat_child_workflow_in_schema",
-		i32(10), i32(12), // targetSchema
-		i32(40), i32(8), // name
-		i32(70), i32(12), // input
-		int64(1), int64(3), // version, priority
-		i32(120), i32(9), // parentClosePolicy
-		i32(200), i32(64), // runID
-	)
-	if got != 0 {
-		t.Errorf("got %v, want 0", got)
-	}
-	s.expectCall(t, "ChildWorkflowInSchema")
-}
-
 func TestClosure_AwaitSignals(t *testing.T) {
 	// cleat_await_signals: (signalNamesPtr,signalNamesLen, timeoutMs i64, sigNamePtr,sigNameMaxLen, payloadPtr,payloadMaxLen) -> i64
 	ft := wasmFunctype([]byte{

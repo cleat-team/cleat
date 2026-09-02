@@ -677,21 +677,6 @@ export declare function import_cleat_continue_as_new_versioned(
 ): i64;
 
 /**
- * cleat_child_workflow_in_schema: 11 params -> i64
- * (import "env" "cleat_child_workflow_in_schema")
- */
-@external("env", "cleat_child_workflow_in_schema")
-export declare function import_cleat_child_workflow_in_schema(
-  schemaPtr: i32, schemaLen: i32,
-  namePtr: i32, nameLen: i32,
-  inputPtr: i32, inputLen: i32,
-  version: i64,
-  priority: i64,
-  policyPtr: i32, policyLen: i32,
-  runIdPtr: i32, runIdMaxLen: i32,
-): i64;
-
-/**
  * cleat_side_effect: (ptr,len, ptr,maxLen) -> i64
  * (import "env" "cleat_side_effect")
  */
@@ -1553,68 +1538,6 @@ export class HostCalls {
       return new DurableResult<string>(
         "",
         "childWorkflowWithOptions(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
-      );
-    }
-
-    let runId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
-    return new DurableResult<string>(runId, null);
-  }
-
-  // ────────────────────────────────────────────
-  // 12b. childWorkflowInSchema
-  // ────────────────────────────────────────────
-
-  /**
-   * Start a child workflow instance within a named schema.
-   *
-   * @param schema     - Schema name for the child workflow.
-   * @param name       - Child workflow definition name.
-   * @param inputJson  - Input JSON for the child workflow.
-   * @param version    - Workflow definition version.
-   * @param priority   - Priority (0 = highest).
-   * @param policy     - Child workflow policy JSON.
-   * @returns A DurableResult containing the child run ID on success.
-   */
-  childWorkflowInSchema(
-    schema: string,
-    name: string,
-    inputJson: string,
-    version: i64,
-    priority: i64,
-    policy: string,
-  ): DurableResult<string> {
-    let schemaLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, schema);
-    let nameOffset: usize = SCRATCH_BASE + schemaLen;
-    let remaining: i32 = OUT_BUF_SIZE - schemaLen;
-    let nameLen: i32 = this.writeScratch(nameOffset, remaining, name, "name");
-    let inputOffset: usize = nameOffset + nameLen;
-    remaining -= nameLen;
-    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
-    let policyOffset: usize = inputOffset + inputLen;
-    remaining -= inputLen;
-    let policyLen: i32 = this.writeScratch(policyOffset, remaining, policy, "policy");
-
-    let result: i64 = import_cleat_child_workflow_in_schema(
-      SCRATCH_BASE as i32,
-      schemaLen,
-      nameOffset as i32,
-      nameLen,
-      inputOffset as i32,
-      inputLen,
-      version,
-      priority,
-      policyOffset as i32,
-      policyLen,
-      OUTPUT_OFFSET as i32,
-      OUT_BUF_SIZE,
-    );
-
-    let decoded = decodeSimpleResult(result);
-
-    if (decoded.errCode !== 0) {
-      return new DurableResult<string>(
-        "",
-        "childWorkflowInSchema(schema='" + schema + "', name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 

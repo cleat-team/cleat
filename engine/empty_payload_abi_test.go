@@ -1,11 +1,8 @@
 package engine
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
-
-	"github.com/tetratelabs/wazero/api"
 )
 
 // Three host functions document behaviour selected by passing an empty name or
@@ -99,60 +96,4 @@ func TestReadOptionalServiceNameAllowsEmptyOnly(t *testing.T) {
 	if _, ok := readOptionalServiceName(mem, 5, 8); ok {
 		t.Error("readOptionalServiceName accepted a name with a space in it")
 	}
-}
-
-// TestABIChildWorkflowInSchemaAcceptsEmptySchemaAndPolicy covers the third
-// unreachable behaviour, and the one place the two backends actively disagreed:
-// wazero guarded the policy parameter with an inline `policyLen > 0` check and
-// wasmtime read it unconditionally, so the same guest call succeeded on one
-// backend and was refused on the other.
-func TestABIChildWorkflowInSchemaAcceptsEmptySchemaAndPolicy(t *testing.T) {
-	rec := &childInSchemaRecorder{}
-	// cleat_child_workflow_in_schema:
-	//   (schemaPtr,schemaLen, namePtr,nameLen, inputPtr,inputLen,
-	//    version i64, priority i64, policyPtr,policyLen, runIDPtr,runIDMaxLen)
-	h := newTestHostFuncHarness(t, "cleat_child_workflow_in_schema",
-		[]byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32,
-			wasmI64, wasmI64, wasmI32, wasmI32, wasmI32, wasmI32},
-		[]byte{wasmI64}, true, rec)
-
-	if !h.mem.Write(64, []byte("child")) || !h.mem.Write(128, []byte("{}")) {
-		t.Fatal("write to memory failed")
-	}
-
-	// schemaLen = 0 and policyLen = 0: local schema, default policy.
-	got, err := h.call(0, 0, 64, 5, 128, 2, 1, 0, 0, 0, 2048, 256)
-	if err != nil {
-		t.Fatalf("call cleat_child_workflow_in_schema: %v", err)
-	}
-	if got == errBadParam {
-		t.Fatal("refused an empty targetSchema/policy; children.go documents " +
-			"an empty targetSchema as the local-schema fallback")
-	}
-	if !rec.called {
-		t.Fatal("did not reach the handler")
-	}
-	if rec.targetSchema != "" || rec.policy != "" {
-		t.Errorf("handler got schema=%q policy=%q, want both empty",
-			rec.targetSchema, rec.policy)
-	}
-	if rec.name != "child" {
-		t.Errorf("handler got name=%q, want \"child\"", rec.name)
-	}
-}
-
-type childInSchemaRecorder struct {
-	stubHostHandler
-	called       bool
-	targetSchema string
-	name         string
-	policy       string
-}
-
-func (h *childInSchemaRecorder) ChildWorkflowInSchema(_ context.Context, _ api.Module,
-	targetSchema, name, inputJSON string, _ int64, _ int64, parentClosePolicy string,
-	_, _ uint32) int64 {
-	h.called = true
-	h.targetSchema, h.name, h.policy = targetSchema, name, parentClosePolicy
-	return 0
 }

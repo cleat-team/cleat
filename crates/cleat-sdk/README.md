@@ -100,7 +100,6 @@ The `HostCalls` struct wraps all WASM imports from the `"env"` module.
 |--------|-------------|
 | `child_workflow` | Start child, returns `(run_id, error)` |
 | `child_workflow_with_options` | Start with `ChildWorkflowOptions` (version, priority, policy) |
-| `child_workflow_in_schema` | Start child in a different schema |
 | `child_workflow_typed` | Typed child start via serde |
 | `await_child` / `await_child_typed` | Await single child completion |
 | `await_all_children` | Await multiple children concurrently |

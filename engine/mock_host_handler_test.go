@@ -112,10 +112,6 @@ func (h *mockHostHandler) ChildWorkflowWithOptions(ctx context.Context, m api.Mo
 	h.record("ChildWorkflowWithOptions", name, inputJSON, parentClosePolicy)
 	return h.ret
 }
-func (h *mockHostHandler) ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
-	h.record("ChildWorkflowInSchema", targetSchema, name, inputJSON, parentClosePolicy)
-	return h.ret
-}
 func (h *mockHostHandler) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
 	h.record("AwaitChild", runID)
 	return h.ret

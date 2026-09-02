@@ -320,9 +320,6 @@ const (
 	cbTypeContinueAsNewVersioned // (string,u32) -> u64
 	cbTypeSideEffect             // (string) -> string
 
-	// durable-extended-children interface
-	cbTypeChildWorkflowInSchema // (string,string,string,u64,u64,string) -> string
-
 	// durable-fetch interface
 	cbTypeFetch // (string,string,string,string) -> string
 
@@ -541,8 +538,6 @@ func goComponentCallback(
 		return entry.backend.dispatchContinueAsNewVersioned(args, nargs, results, nresults)
 	case cbTypeSideEffect:
 		return entry.backend.dispatchSideEffect(args, nargs, results, nresults)
-	case cbTypeChildWorkflowInSchema:
-		return entry.backend.dispatchChildWorkflowInSchema(args, nargs, results, nresults)
 	case cbTypeFetch:
 		return entry.backend.dispatchFetch(args, nargs, results, nresults)
 	case cbTypeScheduleCron:

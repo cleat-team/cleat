@@ -149,15 +149,6 @@ func TestWithSchema(t *testing.T) {
 	}
 }
 
-func TestWithPeerSchemas(t *testing.T) {
-	want := []string{"peer1", "peer2"}
-	opt := WithPeerSchemas(want)
-	e := NewEngine(nil, nil, opt)
-	if len(e.peerSchemas) != 2 || e.peerSchemas[0] != "peer1" {
-		t.Errorf("WithPeerSchemas: got %v, want %v", e.peerSchemas, want)
-	}
-}
-
 func TestWithWorkflowStore(t *testing.T) {
 	store := &stubWorkflowStore{}
 	opt := WithWorkflowStore(store)

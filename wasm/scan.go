@@ -194,7 +194,7 @@ func normalizeImportName(name string) string {
 	switch name {
 	case "cleat_call_retry", "cleat_call_heartbeat", "cleat_fetch":
 		return "cleat_call"
-	case "cleat_child_workflow_with_options", "cleat_child_workflow_in_schema":
+	case "cleat_child_workflow_with_options":
 		return "cleat_child_workflow"
 	case "cleat_continue_as_new_versioned":
 		return "cleat_continue_as_new"

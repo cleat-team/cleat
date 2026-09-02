@@ -109,7 +109,6 @@ var (
 	wasmCacheMaxEntries            = flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
 	wasmCacheMaxMB                 = flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
 	schemaName                     = flag.String("schema", "public", "PostgreSQL schema for cleat tables (default \"public\"). Sets search_path on connections; CREATE SCHEMA IF NOT EXISTS on startup.")
-	peerSchemas                    = flag.String("peer-schemas", "", "Comma-separated list of peer cleat schemas this instance can interact with (cross-instance child workflows, signals)")
 	disableChecksumVerification    = flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
 	wasmMemoryMaxMB                = flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
 	wasmCumulativeAllocationMaxMB  = flag.Int("wasm-cumulative-allocation-max-mb", 0, "Max cumulative WASM linear memory across all concurrent executions in MB (default 0 = unlimited)")

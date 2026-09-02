@@ -40,10 +40,9 @@ type Engine struct {
 	pluginCallGuard      *PluginCallGuard
 	pluginCallObserver   PluginCallObserver
 	tenantID             string
-	db                   *sql.DB  // tenant-scoped DB for plugin host functions
-	maxRetries           int      // retry ceiling; 0 = MaxRetryAttempts
-	schema               string   // PostgreSQL schema name
-	peerSchemas          []string // peer schemas for cross-instance operations
+	db                   *sql.DB // tenant-scoped DB for plugin host functions
+	maxRetries           int     // retry ceiling; 0 = MaxRetryAttempts
+	schema               string  // PostgreSQL schema name
 
 	defName                string
 	defVersion             int
@@ -174,11 +173,6 @@ func WithPluginCallObserver(o PluginCallObserver) EngineOption {
 
 // WithSchema sets the PostgreSQL schema name.
 func WithSchema(schema string) EngineOption { return func(e *Engine) { e.schema = schema } }
-
-// WithPeerSchemas sets peer schemas for cross-instance operations.
-func WithPeerSchemas(schemas []string) EngineOption {
-	return func(e *Engine) { e.peerSchemas = schemas }
-}
 
 // WithDB sets a tenant-scoped DB connection.
 func WithDB(db *sql.DB) EngineOption { return func(e *Engine) { e.db = db } }

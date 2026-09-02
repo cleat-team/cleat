@@ -1060,6 +1060,12 @@ tier3:
 #       provision their toolchains. Recorded inline above tier1.rules.
 #   D6  DECIDED 2026-09-02. Terminate is ASYNCHRONOUS, and the window is named.
 #       Recorded inline in the tenancy block; see IMPROVEMENT-PLAN 3.76 and #576.
+#   D8  DECIDED 2026-09-02. CROSS-SCHEMA CHILD WORKFLOWS ARE REMOVED, not fixed.
+#       cleat_child_workflow_in_schema wrote a child row directly into another
+#       PostgreSQL schema, which makes that deployment's schema part of this one's API,
+#       and it had no settled answer for whose tenant the child belonged to. Cross-pool
+#       work goes through the other pool's API. Nothing in tiers.yaml claimed it at any
+#       tier, and no end-to-end test exercised it. See IMPROVEMENT-PLAN 3.78.
 #   D7  DECIDED 2026-09-02. NAMES ARE PER-TENANT. One tenant must never have to
 #       worry about clashing with another tenant's names, so every primary key over
 #       a user-chosen name carries the tenant. Three tables do not today --
@@ -1069,7 +1075,7 @@ tier3:
 #       they are: a UUID cannot be chosen, so it cannot clash. See
 #       IMPROVEMENT-PLAN 3.12 and 3.77.
 #
-# D1-D4 were settled together on 2026-08-06; D5-D7 have been added since, and this
+# D1-D4 were settled together on 2026-08-06; D5-D8 have been added since, and this
 # register was still saying "all four" until D7 was recorded. New ones go here with
 # the same shape: what was decided, on what date, and what it changes about what the
 # gate enforces.

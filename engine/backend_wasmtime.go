@@ -1002,9 +1002,6 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatChildWorkflowWithOptions(linker); err != nil {
 		return err
 	}
-	if err := b.registerCleatChildWorkflowInSchema(linker); err != nil {
-		return err
-	}
 	if err := b.registerCleatAwaitChild(linker); err != nil {
 		return err
 	}

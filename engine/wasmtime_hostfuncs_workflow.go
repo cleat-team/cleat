@@ -162,43 +162,6 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 	})
 }
 
-func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Linker) error {
-	if b.skipIfNotNeeded("cleat_child_workflow_in_schema") {
-		return nil
-	}
-
-	return linker.FuncWrap("env", "cleat_child_workflow_in_schema", func(caller *wasmtime.Caller,
-		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen int32, version int64, priority int64,
-		policyPtr, policyLen, runIDPtr, runIDMaxLen int32) int64 {
-		h := b.handler
-		buf, _, err := callerMemBuf(caller)
-		if err != nil {
-			return errBadParamInt64
-		}
-		// Empty means the local schema; see children.go.
-		targetSchema, ok := wasmtimeReadOptionalServiceName(buf, schemaPtr, schemaLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		wfName, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
-		if !ok {
-			return errBadParamInt64
-		}
-		// Empty means the default policy. wazero guarded this with an inline
-		// policyLen > 0 check and wasmtime did not, so the same guest call
-		// worked on one backend and was refused on the other.
-		parentClosePolicy, ok := wasmtimeReadOptionalServiceName(buf, policyPtr, policyLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		return h.ChildWorkflowInSchema(ctxWithMem(context.Background(), buf), nil, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
-	})
-}
-
 func (b *wasmtimeBackend) registerCleatAwaitChild(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_await_child") {
 		return nil
