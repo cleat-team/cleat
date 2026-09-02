@@ -468,9 +468,29 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// Use context.Background() so defer functions execute even when the
 		// execCtx has been cancelled or timed out (e.g., workflow timeout).
 		if len(session.deferrals) > 0 {
-			notInvoked := e.invokeDefersOnTrap(context.Background(), mod, session.deferrals)
+			// withHandler, not a bare Background: IMPROVEMENT-PLAN §3.35 phase 2.
+			//
+			// The bare context is deliberate and stays -- defers have to run
+			// when execCtx is already cancelled or timed out, which is exactly
+			// when they matter most. What it was missing is the session, so
+			// handlerFromContext's unchecked assertion panicked inside any host
+			// call the defer body made:
+			//
+			//   interface conversion: interface is nil, not engine.HostHandler
+			//     engine.handlerFromContext  engine/imports.go:20
+			//
+			// That was invisible until the line above started finding a defer
+			// runner to call. While the drain looked for an export no guest
+			// had, no body ever ran, so no body ever reached a host call, so
+			// this panic had nothing to fire on. Two defects in series, and
+			// fixing the outer one is what exposed the inner one.
+			//
+			// A defer that cannot call the host cannot release the lock it
+			// took, which is most of what a defer is for.
+			deferCtx := withHandler(context.Background(), session)
+			notInvoked := e.invokeDefersOnTrap(deferCtx, mod, session.deferrals)
 			if len(notInvoked) > 0 {
-				e.runDefers(context.Background(), wasmBytes, notInvoked)
+				e.runDefers(deferCtx, wasmBytes, notInvoked)
 			}
 		}
 		session.releaseHeldScopes(context.Background())
@@ -628,6 +648,71 @@ func (e *Engine) RunDeferCompiled(ctx context.Context, compiled wazero.CompiledM
 // action and then applying it again is worse than not retrying. Only a defer
 // the live module could not offer at all is handed on.
 func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferrals map[string]string) (notInvoked map[string]string) {
+	notInvoked = make(map[string]string)
+
+	// One export for the whole table, not one per defer.
+	//
+	// This asked the module for `cleat_defer_<id>`, once per registered defer,
+	// until 2026-09-02. **No guest in any language has ever produced an export
+	// by that name** -- `grep -rn "cleat_defer_"` finds consumers and no
+	// producers -- so every defer took the not-found branch, every one was
+	// handed to the fresh-module fallback, and the fallback looked for the
+	// same name and failed the same way. Measured on an AssemblyScript guest
+	// that traps with one defer outstanding: two warnings, zero cleanup.
+	//
+	// The convention that does exist is deferRunnerExport, emitted by every
+	// SDK's codegen, and it drains the whole table in LIFO order in one call
+	// because the bodies live in the guest (§3.73). That also makes the
+	// per-defer bookkeeping below all-or-nothing, which is the honest shape:
+	// the drain either happened or the guest could not offer it.
+	fn := mod.ExportedFunction(deferRunnerExport)
+	if fn == nil {
+		// No runner: fall back to the per-defer convention below.
+		//
+		// Every SDK emits the runner, so in practice this is a guest built
+		// before it existed. It is kept rather than deleted because a
+		// hand-written guest can still export one function per defer, and the
+		// partial-failure semantics that path carries are load-bearing --
+		// see the loop's own comments and TestDeferBodyRunsOnceAfterATrap.
+		return e.invokePerDeferExports(ctx, mod, deferrals)
+	}
+
+	// Called with no arguments and returning one i64 -- how many bodies ran --
+	// so this does not go through CallExportWithSuspend, which marshals the
+	// four-argument entry-point ABI.
+	res, err := fn.Call(ctx)
+	if err != nil {
+		// Logged and not propagated: the original trap is the caller's error
+		// and takes priority. NOT handed to the fallback either -- a defer
+		// that ran and then failed must not be retried, because it is a
+		// destructor and half-applying a compensating action and then applying
+		// it again is worse than not retrying.
+		e.log().WarnContext(ctx, "defer execution failed", "export_name", deferRunnerExport, "error", err)
+		return notInvoked
+	}
+	var ran int64
+	if len(res) > 0 {
+		ran = int64(res[0])
+	}
+	e.log().InfoContext(ctx, "ran the defers of a trapped workflow",
+		"defers_run", ran, "registered", len(deferrals))
+	return notInvoked
+}
+
+// invokePerDeferExports is the legacy shape: one export per registered defer,
+// named "cleat_defer_<id>".
+//
+// No SDK has ever emitted these -- `grep -rn "cleat_defer_"` finds consumers,
+// and the only producers in the tree are hand-written WAT test fixtures. It is
+// reached only by a guest with no deferRunnerExport, and it is kept for the
+// guest that hand-rolls its exports rather than using an SDK.
+//
+// "Invoked" means the export was found and called, whatever the outcome. A
+// defer that ran and trapped must NOT be retried on a fresh instance: it is a
+// destructor, so its effects are the point, and half-applying a compensating
+// action and then applying it again is worse than not retrying. Only a defer
+// the live module could not offer at all is handed on.
+func (e *Engine) invokePerDeferExports(ctx context.Context, mod api.Module, deferrals map[string]string) (notInvoked map[string]string) {
 	notInvoked = make(map[string]string)
 	for deferID, description := range deferrals {
 		exportName := "cleat_defer_" + deferID

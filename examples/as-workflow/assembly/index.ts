@@ -303,3 +303,21 @@ export function spin_forever(h: HostCalls, input: string): string {
   }
   return '{"unreachable":true}';
 }
+
+// ---------------------------------------------------------------------------
+// trapAfterDefer — a workflow that traps with cleanup outstanding
+//
+// The fence cannot be used to make this happen on wazero: a compute-bound
+// guest cannot be interrupted there at all (CLAUDE.md records three ways that
+// were tried and failed). An explicit trap is the one abnormal exit both
+// runtimes can produce, which is what makes it the right fixture for asking
+// whether the wazero path runs a dead workflow's defers the way the wasmtime
+// path now does.
+// ---------------------------------------------------------------------------
+
+@cleatEntry("TrapAfterDefer")
+export function trap_after_defer(h: HostCalls, input: string): string {
+  deferFunc(h, "release the lock the trapped workflow took", releaseTheFencedLock, "{}");
+  unreachable();
+  return "";
+}

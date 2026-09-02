@@ -83,6 +83,16 @@ export async function instantiate(module, imports = {}) {
         __release(h);
       }
     },
+    __durable_inner_trap_after_defer(h, input) {
+      // assembly/index/__durable_inner_trap_after_defer(~lib/@cleat/sdk/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      h = __retain(__lowerInternref(h) || __notnull());
+      input = __lowerString(input) || __notnull();
+      try {
+        return __liftString(exports.__durable_inner_trap_after_defer(h, input) >>> 0);
+      } finally {
+        __release(h);
+      }
+    },
   }, exports);
   function __liftString(pointer) {
     if (!pointer) return null;
