@@ -431,11 +431,33 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeDefer {
+				// Recompute the ID before advanceReplayStep, which bumps
+				// stepCount. The fallback is what the fresh path below would
+				// have minted at this same step, so a history written before
+				// DeferID was recorded still reconstructs the ID the guest was
+				// originally handed.
+				deferID := rec.DeferID
+				if deferID == "" {
+					deferID = fmt.Sprintf("defer-%d", s.stepCount)
+				}
 				if !s.advanceReplayStep(ctx, &rec) {
 					return 0
 				}
 
-				written, _ := s.writeResult(ctx, m, deferIDPtr, rec.DeferID, deferIDMaxLen)
+				// Re-register, do not just re-answer. This branch is the only
+				// one a defer registered in an earlier segment ever reaches
+				// again -- every later segment replays past its registration --
+				// so skipping the map write dropped the defer permanently. The
+				// fresh path below does both halves; replay must too.
+				desc := rec.DeferDescription
+				if desc == "" {
+					desc = description
+				}
+				s.mu.Lock()
+				s.deferrals[deferID] = desc
+				s.mu.Unlock()
+
+				written, _ := s.writeResult(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
 				return packSimpleResult(0, written)
 			}
 		}

@@ -6068,7 +6068,7 @@ both are now decisions about *what a defer may do* rather than prerequisites for
 module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
 the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
-### 3.35 What `defer` is supposed to be — 📐 **DESIGN, not yet implemented** (WS-3, 2026-08-05)
+### 3.35 What `defer` is supposed to be — 🔶 **PHASE 1 OF 5 DONE** (WS-3, 2026-08-05; plan 2026-09-01)
 
 Written because §3.32 fenced the defer path and the fence made an uncomfortable question
 visible: *bounded doing what, exactly?* The implementation turned out to be much further from
@@ -6107,6 +6107,14 @@ Three findings, each verified against the tree rather than inferred.
    the one guarded by `if len(session.deferrals) > 0` in `executeCompiled`. The rest of this
    finding — the four sites disagreeing about *when* and *with what context* — is the design
    below, and is untouched.
+
+4. **A defer registered before a suspension was dropped permanently.** `DurableDefer`'s
+   replay-match branch answered the guest with the recorded `DeferID` and never re-added it to
+   `session.deferrals`, so every segment after the first lost it. **Fixed in §3.66**
+   (2026-09-01), found while planning the implementation below and shipped ahead of it, because
+   it is wrong under every row of the decision table. It is listed here because it changes what
+   the design has to build: replay *does* reconstruct the deferral set now, which is the
+   mechanism the design below depends on.
 
 So today: "full context" holds on one error path, "guaranteed to run" holds nowhere, and on the
 common paths a defer can only execute code that depends on nothing.
@@ -6163,6 +6171,64 @@ These are the author's to make; the design changes shape depending on them.
 | What may a defer body do? | anything / no new defers, no children, no continue-as-new | **Restricted**: no registering defers, no `continue_as_new`. Child workflows are arguable. |
 | Replay cost | full replay per defer phase / reuse compaction | **Reuse compaction state** (`buildFullHistoryFromCompaction` already exists) — otherwise a long workflow pays its whole history again to release one lock. |
 | Timeout | workflow budget / own budget | **Its own budget.** The workflow's remaining budget is often zero exactly when defers matter. |
+
+#### Implementation plan — five phases (WS-3, written 2026-09-01)
+
+**Decisions taken.** The table above is the author's to decide and the recommendations were
+adopted as written, with one change of scope: exactly-once is *deferred*, not declined. Two of
+the six were already settled by earlier work — "its own budget" shipped as
+`WithDeferPassBudget` in §3.63, and "reuse compaction state" is what
+`buildFullHistoryFromCompaction` already does.
+
+| phase | delivers | status |
+|---|---|---|
+| 1 | A defer survives a suspension — replay re-registers it | ✅ §3.66, 2026-09-01 |
+| 2 | A defer can make host calls: the session reaches the body | planned |
+| 3 | Defers run on **all** terminal transitions, in the instance that registered them | planned |
+| 4 | The body is restricted: no new defers, no `continue_as_new` | planned |
+| 5 | Exactly-once: the defer phase as its own durable unit of work | **not scheduled** |
+
+**Phase 2 — the session reaches the body.** `invokeDefersOnTrap` invokes the defer on the
+still-live module with `context.Background()`, so `handlerFromContext`'s unchecked assertion
+panics inside any host call the body makes; the panic is recovered by `CallExportWithSuspend`
+and logged as a defer failure. The bare context is deliberate and must stay — defers have to run
+when `execCtx` is already cancelled — so the fix is `withHandler(context.Background(), session)`,
+which keeps the cancellation immunity and adds the handler. This is the cheapest of the three
+properties to get, because on this one path the live instance and the live session both already
+exist.
+
+**Phase 3 — run them where they were registered.** This is the substance. On success the worker
+runs defers *after* `FinalizeWorkflowSegment`, on a fresh instance, through a brand-new
+`engine.NewEngine` (`cmd/cleat-worker/setup.go:435-487`), by which point there is no session and
+no memory. The design's "instantiate fresh and replay" step is **already paid for on this path**:
+when the workflow body returns, the instance that just ran it is still live and the session is
+still installed, which is precisely the state step 2 wants. So the work is not to build a replay
+phase — it is to invoke the defers before that instance is torn down, and to delete the worker's
+post-finalization pass.
+
+The obstacle is `WasmBackend.Execute` (`engine/backend.go:16-33`), which owns its store and
+instance and destroys them before returning, so the engine cannot call a second export
+afterwards. **Do not widen the interface for this.** The backend already holds the session — it
+sets `b.handler = session` at `backend_wasmtime.go:412` — so it can ask the session for the
+registered defers after the entry point returns and invoke `cleat_defer_<id>` itself, on the
+same store, before teardown. No interface change, and the wazero path in `executeCompiled`
+already has this shape via `invokeDefersOnTrap`; it is missing only the success path.
+
+**Measure before building phase 3.** Whether a second export can be called on the same instance
+after the entry point has returned, and separately after it has *trapped*, is a property of the
+guest's runtime, not of wasmtime — a Go guest that unwound through `proc_exit` has no live
+runtime left to call into. `invokeDefersOnTrap` doing this on wazero today is evidence it works
+there, and is not evidence about wasmtime or about the success path. Establish it per backend
+and per terminal transition before writing the wiring.
+
+**Phase 5 is not scheduled, and the reason is a boundary rather than a cost.** "Guaranteed to
+run" across a `kill -9` needs the defer phase to be its own durable, resumable unit with a
+reaper — the same record shape as §1.4's crash recovery, which is **WS-2's**. Inventing a second
+shape here is how two workstreams end up with two answers. Migration range 030–039 is reserved
+for WS-3 and stays reserved for it. Phases 1–4 are worth shipping without phase 5: they take
+defer from "runs somewhere, with no context, unless the workflow ever suspended" to "runs where
+it was registered, with the session, on every terminal transition" — best-effort, which is what
+the documentation can then honestly claim.
 
 #### Cost, and what it touches
 
@@ -8599,3 +8665,62 @@ inherited rather than verified" needed no test: there is no longer a path to fen
 addendum.
 
 Re-derive: `go test ./engine/ -run TestComponent -count=1 -v`
+
+### 3.66 A defer registered before the workflow suspended never ran — ✅ **FIXED** (WS-3, 2026-09-01)
+
+§3.35 finding 4, found while planning §3.35's implementation and shipped ahead of it: it is a
+defect under every row of that section's decision table, so it does not wait on the decisions.
+
+`DurableDefer` does two things on the fresh path — records an `EventTypeDefer` event, *and*
+adds the ID to `session.deferrals`, which is the live set every terminal-transition call site
+actually iterates. Its replay-match branch did only the first, by omission:
+
+```go
+if rec.EventType == EventTypeDefer {
+    if !s.advanceReplayStep(ctx, &rec) { return 0 }
+    written, _ := s.writeResult(ctx, m, deferIDPtr, rec.DeferID, deferIDMaxLen)
+    return packSimpleResult(0, written)   // s.deferrals never written
+}
+```
+
+Every segment after the first replays past the registration, so that branch is the **only** one
+a previously-registered defer ever reaches again. The defer was dropped permanently the moment
+the workflow suspended once.
+
+**The blast radius is exactly the case defer exists for.** A defer on a workflow that never
+suspends runs in the segment that registered it and was unaffected. A defer on a workflow that
+sleeps, waits for a signal, or awaits a child — the long-running workflow whose locks and saga
+steps are the reason destructors are worth having — was silently lost. Nothing logged:
+`session.deferrals` was empty and every call site is guarded by `if len(deferrals) > 0`.
+
+Measured 2026-09-01, replaying a one-event history through the session:
+
+    after replayed DurableDefer: stepCount=1 isReplay=true deferrals=map[string]string{}
+
+**The existing tests could not see it, and the shape of the gap is the reusable lesson.**
+`TestDurableDeferReplayMatch` asserts `stepCount` and `isReplay` and never looks at
+`s.deferrals`. `TestDurableDeferReplayPastEnd` *does* assert the map — but only on the
+fallthrough, where replay has already ended and the fresh path runs. The one branch carrying the
+bug was the one branch with no assertion on the map, and a reader counting tests would have said
+`DurableDefer`'s replay behaviour was covered twice over.
+
+The fix registers on replay as well as answering the guest, and reconstructs the ID as the fresh
+path would have minted it when a pre-`DeferID` history replays.
+
+**Regression tests:** `engine/defer_survives_suspension_test.go`. The history is one the engine
+produced itself — segment 1 runs, registers, suspends — rather than written by hand. Both halves
+mutation-proved 2026-09-01: with the map write removed, `...SurvivesIt` reports
+`deferrals=map[string]string{}` and `...ActuallyRuns` reports the body was never invoked.
+
+**Not fixed here, and deliberately:** `CompactionState.PendingDefers` is extracted, persisted in
+every compaction state, asserted on by `TestExtractCompactionState_WithPendingDefers`, and
+**read by nothing in production code**. It looks like the missing reader for this bug and is
+not: past `DefaultMaxCompactedEvents` (10,000) `cs.Events` is truncated *from the front*, and a
+replay whose first event no longer matches the guest's first durable call diverges immediately
+and re-executes everything fresh — a far larger problem than defers, which seeding the deferral
+set would paper over rather than fix. A seeding helper was written, wired, and then reverted for
+exactly this reason: mutation testing showed nothing covered the wiring, and the scenario it
+claimed to protect is already broken beyond it. **Either wire `PendingDefers` to something or
+delete it; write-only persisted state is a trap for the next reader.**
+
+Re-derive: `go test ./engine/ -run TestDeferRegisteredBeforeASuspension -count=1 -v`
