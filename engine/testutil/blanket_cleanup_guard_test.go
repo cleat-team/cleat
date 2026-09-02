@@ -86,7 +86,18 @@ func TestBlanketNonPostgresCleanupHasOneCaller(t *testing.T) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "node_modules", "target", "web", "crates":
+			// ".claude" holds agent worktrees -- entire copies of this repo,
+			// each with its own engine/*_test.go. Without it this guard counts
+			// callers that live in a copy of the tree rather than in the tree,
+			// and reports one number per worktree: measured 2026-09-02 in a
+			// checkout with eight of them, 121 "callers" of which every single
+			// one was under .claude/worktrees/agent-*/.
+			//
+			// It fails only locally, which is the bad way round -- CI has no
+			// worktrees, so the guard is green in the one place anyone looks
+			// and red for whoever is actually working. A guard that trips on
+			// files outside the tree it guards teaches people to ignore it.
+			case ".git", ".claude", "node_modules", "target", "web", "crates":
 				return filepath.SkipDir
 			}
 			return nil
