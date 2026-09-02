@@ -76,6 +76,7 @@ engine	TestTenantIsolation_Promises	1
 engine	TestTenantIsolation_Reaper	1
 engine	TestTenantIsolation_Schedules	1
 engine	TestTenantIsolation_Signals	1
+engine	TestTheBackendLogsToTheConfiguredLogger	1
 engine	TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow	1
 engine	TestTheHostRunsDefersOfAKilledJavaWorkflow	1
 engine	TestTheWazeroPathRunsDefersOfATrappedWorkflow	1
