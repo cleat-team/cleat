@@ -184,6 +184,14 @@ type CompactedEvent struct {
 	// on decode reads back exactly as it always did pre-2.35.
 	ErrNonRetryable bool `json:"nr,omitempty"`
 
+	// ErrCode mirrors EventRecord.ErrCode for a call event, for the same
+	// reason ErrNonRetryable is here: a compacted region that dropped it would
+	// reconstruct the event with no class at all, so compaction would quietly
+	// undo IMPROVEMENT-PLAN 2.35 for exactly the old history most likely to be
+	// compacted. omitempty is safe because "" is already the "not recorded"
+	// value rather than a classification -- see recordedErrorClass.
+	ErrCode string `json:"ec,omitempty"`
+
 	// TimestampMs mirrors EventRecord.TimestampMs and is set for every event
 	// type, not just the ones with a dedicated case below -- Now() during
 	// replay reads it off the *previous* history event (execSession.Now,
@@ -355,6 +363,7 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.Error = ev.Err
 			ce.DurationMs = ev.DurationMs
 			ce.ErrNonRetryable = ev.ErrNonRetryable
+			ce.ErrCode = ev.ErrCode
 		case EventTypeAwaitSignals:
 			ce.SignalNames = ev.SignalNames
 			ce.TimeoutMs = ev.TimeoutMs
@@ -528,6 +537,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.Err = ce.Error
 			rec.DurationMs = ce.DurationMs
 			rec.ErrNonRetryable = ce.ErrNonRetryable
+			rec.ErrCode = ce.ErrCode
 		case EventCodeAwaitSignals:
 			rec.SignalNames = ce.SignalNames
 			rec.TimeoutMs = ce.TimeoutMs

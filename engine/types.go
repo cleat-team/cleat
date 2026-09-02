@@ -87,12 +87,15 @@ type EventRecord struct {
 	// instead of guessing at it from the message string.
 	//
 	// This is one bit rather than the full error class IMPROVEMENT-PLAN 2.35
-	// describes, and deliberately so: it is the only part of a classification
-	// the engine can actually populate today. ServiceCaller returns a bare
-	// `error`, and the sole machine-readable signal any implementation can
-	// send is the optional RetryableError interface, which
-	// isDefinitelyNonRetryable already honours. Recording a richer taxonomy
-	// would mean inventing values no caller supplies.
+	// describes. It used to be the only part of a classification the engine
+	// could populate, on the grounds that ServiceCaller returns a bare `error`
+	// whose sole machine-readable signal is the optional RetryableError
+	// interface; that stopped being the whole story when dbServiceCaller began
+	// returning CleatError, and the class is now recorded beside this in
+	// ErrCode below.
+	//
+	// This field remains the authoritative one for retryability, and the two
+	// are not redundant -- see ErrCode for why they can disagree.
 	//
 	// The zero value is the pre-2.35 behaviour: an event recorded before this
 	// field existed carries no such key, reads back as false, and replays as
@@ -100,6 +103,35 @@ type EventRecord struct {
 	// not a code -- a code field's zero value would collide with
 	// callErrorUnknown, which is a real classification.
 	ErrNonRetryable bool `json:"err_non_retryable,omitempty"`
+
+	// ErrCode records the engine's error classification for Err -- the
+	// ErrorCode a ServiceCaller supplied through CleatError -- so the class the
+	// fresh run derived survives into history instead of being collapsed to the
+	// single bit above at write time. IMPROVEMENT-PLAN 2.35.
+	//
+	// It does NOT feed the code the guest sees. ErrNonRetryable remains
+	// authoritative for that, because the two can legitimately disagree:
+	// DurableCallWithRetry's nonRetryableErrors list comes from the *guest's*
+	// retry policy across the ABI, so a workflow author can declare a substring
+	// non-retryable for an error whose CleatError says ErrTransient. The bool
+	// records what the engine actually did; this field records how the caller
+	// classified it. Deriving retryability from this one would let an upgrade
+	// change the retry behaviour of workflows already in flight -- which is the
+	// determinism bug 2.35 exists to prevent, reintroduced from the other side.
+	//
+	// It stores ErrorCode.String() rather than the int, for three reasons.
+	// The int's zero value is ErrUnknown, a real classification, so an absent
+	// field and a genuinely unknown one would be indistinguishable -- the same
+	// collision that made ErrNonRetryable a bool (see above); the empty string
+	// has no such clash. workflow_instances.error_code already stores exactly
+	// these strings, and ErrorCode.String()'s own doc says it is "suitable for
+	// storage in the error_code column", so one vocabulary spans both tables
+	// and an operator's query matches in both. And a string survives a value
+	// being inserted into the ErrorCode iota block, which an int would not.
+	//
+	// Empty means the event predates this field or the failure carried no
+	// CleatError. Nothing downstream requires it to be set.
+	ErrCode string `json:"err_code,omitempty"`
 
 	// Pending records that this event is a write-ahead call intent whose
 	// outcome was never written: the external call was dispatched and the

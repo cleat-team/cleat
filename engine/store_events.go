@@ -164,6 +164,12 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.ErrNonRetryable {
 			payload["error_non_retryable"] = true
 		}
+		// Only when set, for the same reason: an unclassified failure keeps
+		// producing the payload it always did. "error_code" matches the
+		// column name on workflow_instances, which stores the same strings.
+		if rec.ErrCode != "" {
+			payload["error_code"] = rec.ErrCode
+		}
 		if rec.DurationMs > 0 {
 			payload["duration_ms"] = rec.DurationMs
 		}
@@ -496,6 +502,12 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		// those replay as retryable, the behaviour they were recorded under.
 		if v, ok := m["error_non_retryable"].(bool); ok {
 			rec.ErrNonRetryable = v
+		}
+		// Absent on every event written before 2.35's second half, and on any
+		// failure no ServiceCaller classified. Empty means "nobody said" --
+		// never a class -- so nothing downstream can mistake it for one.
+		if v, ok := m["error_code"].(string); ok {
+			rec.ErrCode = v
 		}
 		if v, ok := m["duration_ms"].(float64); ok {
 			rec.DurationMs = int64(v)

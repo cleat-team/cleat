@@ -1,5 +1,7 @@
 package engine
 
+import "errors"
+
 // Call error classification.
 //
 // These mirror the guest SDK's CallErrorCode enum, which is what a workflow
@@ -120,14 +122,56 @@ const cancelledCallError = "workflow cancelled"
 // Reporting InvalidRequest would tell the workflow author their request was
 // malformed, which is a claim nothing here supports.
 //
-// This is the narrow half of IMPROVEMENT-PLAN 2.35. The full error class still
-// has nowhere to come from: no ServiceCaller in the repo returns anything but a
-// bare fmt.Errorf, so a richer taxonomy would be values nothing populates --
-// which is how engine/flush.go accumulated 350 lines of durability code that
-// had never run (docs/durable-call-intent-design.md).
+// This is the narrow half of IMPROVEMENT-PLAN 2.35, and it stays narrow on
+// purpose even though the wide half now exists.
+//
+// The paragraph here used to read "no ServiceCaller in the repo returns
+// anything but a bare fmt.Errorf, so a richer taxonomy would be values nothing
+// populates". That was true when written and stopped being true in the same
+// section's next update: dbServiceCaller (cmd/cleat-worker/setup.go), the only
+// ServiceCaller that runs in production, returns NewPermanentError /
+// NewTransientError throughout. The class is recorded now --
+// EventRecord.ErrCode, written by recordedErrorClass.
+//
+// What has not changed is that this function must not read it. The recorded
+// class and the recorded bit can legitimately disagree, because
+// DurableCallWithRetry's nonRetryableErrors list comes from the guest's own
+// retry policy across the ABI: a workflow author can declare a substring
+// non-retryable for an error whose CleatError says ErrTransient. The bit is
+// what the engine acted on, so the bit is what the guest must be told, and
+// deriving the code from the class instead would change the retry behaviour of
+// workflows already in flight.
 func recordedFailureCode(nonRetryable bool) byte {
 	if nonRetryable {
 		return callErrorUnknown
 	}
 	return callFailureCode
+}
+
+// recordedErrorClass returns the engine's classification of a failed call, as
+// the string EventRecord.ErrCode stores, or "" when the error carries none.
+//
+// "" rather than "unknown" for an unclassified error, which is the whole
+// reason this does not just call ErrorCode.String(): ErrUnknown is the iota
+// zero value, so an error that no ServiceCaller classified and one classified
+// *as* unknown would otherwise be written identically. Empty means "nobody
+// said", and it is also what every event written before IMPROVEMENT-PLAN 2.35's
+// second half reads back as.
+//
+// errors.As, not a type assertion: a CleatError is routinely wrapped by the
+// time it reaches here -- DurableCallWithRetry's loop adds context -- and the
+// same traversal is what isDefinitelyNonRetryable already uses to find
+// RetryableError, so the two agree about which error in a chain is speaking.
+func recordedErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ce *CleatError
+	if !errors.As(err, &ce) {
+		return ""
+	}
+	if ce.Code == ErrUnknown {
+		return ""
+	}
+	return ce.Code.String()
 }

@@ -108,9 +108,18 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 			// failure, so the same step would be non-retryable on the first run
 			// and retryable on the replay of it. recordedFailureCode exists to
 			// stop exactly that.
+			// errClass is the third half of the same story, added by
+			// IMPROVEMENT-PLAN 2.35: the bit above says what the engine did,
+			// this says how the failure was classified. A cancellation is the
+			// one case here the engine classifies itself rather than reading
+			// off the caller, and it is worth recording as a class -- it is
+			// what lets an operator query for calls cut short by a
+			// cancellation instead of grepping for the message.
+			errClass := recordedErrorClass(res.err)
 			if cancelledByWorkflow && res.err != nil {
 				callErr = cancelledCallError
 				nonRetryable = true
+				errClass = ErrCancelled.String()
 			}
 
 			rec := EventRecord{
@@ -122,6 +131,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 				Response:        res.resp,
 				Err:             callErr,
 				ErrNonRetryable: nonRetryable,
+				ErrCode:         errClass,
 			}
 			s.recordEvent(rec)
 
