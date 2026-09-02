@@ -128,8 +128,15 @@ func TestSleepAtTheReplayFrontierResumes(t *testing.T) {
 	// Segment 2: the sleep has elapsed and the workflow is rescheduled. Replay
 	// consumes the recorded call, then reaches the sleep with history
 	// exhausted -- the frontier case.
+	// Simulate the sleep having elapsed. The decision is now a function of real
+	// time, so a test that wants to exercise resume must say the time passed --
+	// otherwise it would have to sleep for 60 seconds, and a test that waits on
+	// a wall clock is the kind of timing dependency CLAUDE.md says to remove
+	// rather than widen.
+	wakeAt := history[0].TimestampMs + 60_000 + 1
 	caller2 := &mockCaller{}
-	eng2 := NewEngine(rt, caller2, WithWorkflowID("wf-sleep-frontier"))
+	eng2 := NewEngine(rt, caller2, WithWorkflowID("wf-sleep-frontier"),
+		WithClock(func() int64 { return wakeAt }))
 	_, history2, suspended2, _, _, err := eng2.Replay(ctx, wasmBytes, "run", json.RawMessage(`{}`), history)
 	if err != nil {
 		t.Fatalf("segment 2: %v", err)
@@ -185,34 +192,91 @@ func TestFreshSleepStillSuspends(t *testing.T) {
 	}
 }
 
-// TestReplayedSleepDoesNotSkipALaterFreshSleep pins the interaction between
-// the two completion paths.
+// TestConsecutiveSleepsEachWaitTheirOwnTurn is the property the accumulator
+// exists for, and the one the previous fix did not have.
 //
-// exitReplay arms replayJustEnded for "the next sleep". The frontier branch
-// completes the sleep that armed it, so it must consume the flag -- otherwise
-// a second, genuinely new sleep later in the same segment would complete
-// without ever waiting, silently dropping a real delay.
-func TestReplayedSleepDoesNotSkipALaterFreshSleep(t *testing.T) {
+// Now() reads history[stepCount-1] while stepCount is within history, and
+// sleeps do not advance stepCount. So two sleeps in a row read the SAME anchor
+// unless the deadline carries forward. Without max(), the second sleep would
+// compute the first sleep's deadline, find it already passed, and complete a
+// wait it never performed -- the same "completing on someone else's evidence"
+// failure as the bug being replaced, one step further along.
+func TestConsecutiveSleepsEachWaitTheirOwnTurn(t *testing.T) {
 	ctx := context.Background()
+	anchor := int64(1_000_000)
+
+	newSession := func(now int64) *execSession {
+		s := newTestExecSession()
+		s.history = []EventRecord{{Step: 0, EventType: EventTypeCall, TimestampMs: anchor}}
+		s.stepCount = 1
+		s.nowMs = anchor
+		s.engine.nowFn = func() int64 { return now }
+		return s
+	}
+
+	// One hour has passed: the first sleep is served, the second is not.
+	s := newSession(anchor + 3_600_000)
+	if status := byte(s.DurableSleep(ctx, nil, 3_600_000) >> 56); status != sleepStatusCompleted {
+		t.Errorf("sleep 1 status %d, want completed(%d)", status, sleepStatusCompleted)
+	}
+	if status := byte(s.DurableSleep(ctx, nil, 3_600_000) >> 56); status != sleepStatusSuspend {
+		t.Errorf("sleep 2 status %d, want suspend(%d).\n\n"+
+			"Only one hour has elapsed and the workflow asked for two. Completing "+
+			"here discards an hour the workflow was told it would wait.",
+			status, sleepStatusSuspend)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("sleep 2 did not suspend")
+	}
+	if got := s.suspendErr.Until.UnixMilli(); got != anchor+7_200_000 {
+		t.Errorf("sleep 2 suspends until %d, want %d -- the deadline must accumulate "+
+			"across both sleeps", got, anchor+7_200_000)
+	}
+
+	// Two hours have passed: both are served and the workflow runs on.
+	s2 := newSession(anchor + 7_200_000)
+	if status := byte(s2.DurableSleep(ctx, nil, 3_600_000) >> 56); status != sleepStatusCompleted {
+		t.Errorf("sleep 1 status %d, want completed", status)
+	}
+	if status := byte(s2.DurableSleep(ctx, nil, 3_600_000) >> 56); status != sleepStatusCompleted {
+		t.Errorf("sleep 2 status %d, want completed after two hours", status)
+	}
+	if s2.suspendErr != nil {
+		t.Errorf("workflow still suspended after both sleeps were served: %v", s2.suspendErr)
+	}
+	if s2.nowMs != anchor+7_200_000 {
+		t.Errorf("virtual clock = %d, want %d", s2.nowMs, anchor+7_200_000)
+	}
+}
+
+// TestInteriorSleepOnReplayCompletes covers the case that needs no special
+// handling and must not acquire any.
+//
+// A sleep with a recorded event after it already finished: that event could
+// only have been written once the sleep returned, so its timestamp is at or
+// beyond the sleep's deadline, and real time is beyond that again. The rule
+// therefore completes it without a "am I replaying?" branch.
+func TestInteriorSleepOnReplayCompletes(t *testing.T) {
+	ctx := context.Background()
+	anchor := int64(1_000_000)
 
 	s := newTestExecSession()
 	s.isReplay = true
-	s.history = []EventRecord{{Step: 0, EventType: EventTypeCall}}
-	s.stepCount = 1 // the recorded call has been replayed; the sleep is next
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeCall, TimestampMs: anchor},
+		{Step: 1, EventType: EventTypeCall, TimestampMs: anchor + 3_600_000},
+	}
+	s.stepCount = 1 // first call replayed; the sleep is next, with an event still ahead
+	s.nowMs = anchor
+	s.engine.nowFn = func() int64 { return anchor + 7_200_000 }
 
-	first := s.DurableSleep(ctx, nil, 1000)
-	if status := byte(first >> 56); status != sleepStatusCompleted {
-		t.Fatalf("the sleep at the frontier returned status %d, want completed(%d)",
+	if status := byte(s.DurableSleep(ctx, nil, 3_600_000) >> 56); status != sleepStatusCompleted {
+		t.Errorf("an interior sleep returned status %d, want completed(%d).\n\n"+
+			"There is a recorded event after this sleep, so the workflow demonstrably "+
+			"got past it. Suspending here would re-run history that already happened.",
 			status, sleepStatusCompleted)
 	}
-	if s.replayJustEnded {
-		t.Error("the frontier branch left replayJustEnded set after consuming it")
-	}
-
-	second := s.DurableSleep(ctx, nil, 1000)
-	if status := byte(second >> 56); status != sleepStatusSuspend {
-		t.Errorf("a second, genuinely new sleep returned status %d, want suspend(%d).\n\n"+
-			"It has never run before, so completing it discards a real delay the "+
-			"workflow asked for.", status, sleepStatusSuspend)
+	if s.suspendErr != nil {
+		t.Errorf("interior sleep suspended: %v", s.suspendErr)
 	}
 }

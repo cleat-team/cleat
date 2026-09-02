@@ -326,8 +326,8 @@ func TestSetScopeReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
@@ -515,8 +515,8 @@ func TestReleaseLockReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
@@ -773,8 +773,8 @@ func TestDurableDeferReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)

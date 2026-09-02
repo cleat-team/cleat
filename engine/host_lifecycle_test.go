@@ -424,8 +424,8 @@ func TestReplyToSignalReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) < 2 {
 		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
@@ -448,8 +448,8 @@ func TestReplyToSignalReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))

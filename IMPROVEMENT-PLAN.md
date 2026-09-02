@@ -8737,7 +8737,7 @@ delete it; write-only persisted state is a trap for the next reader.**
 
 Re-derive: `go test ./engine/ -run TestDeferRegisteredBeforeASuspension -count=1 -v`
 
-### 3.67 A `cleat_sleep` at the replay frontier never resumes — 🔶 **PARTLY FIXED** (WS-3, found, confirmed and partly fixed 2026-09-01)
+### 3.67 A `cleat_sleep` at the replay frontier never resumes — 🔶 **FIXED except sleep-first** (WS-3, 2026-09-01)
 
 Found while building §3.66's regression test, which had to route around it.
 
@@ -8859,47 +8859,80 @@ because the product is broken and go red when it is fixed. The fixture and comma
 it in a couple of minutes; the test to commit is the inverted one, asserting that `stepB.Second`
 *does* run, and it belongs with the fix.
 
-#### What was fixed, and what was left
+#### The fix: elapsed time, not a flag
 
-**Fixed:** `DurableSleep` now makes the frontier check itself --
-`s.isReplay && s.stepCount >= len(s.history)` means history is fully consumed and this is the
-sleep the workflow suspended at, so it completes instead of re-suspending. That is what every
-other durable call already did via `exitReplay`, and what `DurableSleep` did for itself before
-`0a02a84`. The branch also *consumes* `replayJustEnded` after calling `exitReplay`, because
-`exitReplay` arms that flag for "the next sleep" and this sleep is that sleep; leaving it armed
-would complete a second, genuinely new sleep without waiting, silently discarding a real delay.
-Both halves mutation-proved.
+The first attempt had `DurableSleep` check the frontier itself
+(`s.isReplay && s.stepCount >= len(s.history)`). That fixed a single sleep behind recorded
+events and nothing else, because the check *infers* "this must be the sleep we stopped at", and
+the inference only works when there is exactly one candidate.
 
-This covers the measured failure -- `call; sleep; call`, the shape of the real-guest fixture --
-and the regression test asserts that the operation *after* the sleep executes, not merely that
-the segment stopped suspending. That distinction matters: "the sleep resumes" is trivially
-satisfied by a sleep that never suspends at all, which would delete the feature.
+The rule now is not an inference. **The anchor is the timestamp of the last recorded event -- a
+real moment, written when that step ran -- and each sleep pushes a virtual deadline further past
+it. If that deadline is already behind real time, the wait has happened**, whether it was spent
+suspended, queued, or with the worker down. If it is still ahead, this is a new wait and the
+workflow suspends for the remainder.
 
-**Still broken, measured 2026-09-01 after the fix.** Two cases remain, both of which appear in
-shipped code, so do not read this section as closed:
+The accumulator this needs already existed and was being thrown away: `s.nowMs += durationMs`
+already summed total virtual sleep time, and the code computed it and then decided on
+`replayJustEnded` instead.
 
-1. **Two or more consecutive sleeps with no durable event between them.** Sleep records nothing,
-   so once replay ends there is no way to tell which of the sleeps already elapsed. The frontier
-   branch completes the first; the second suspends; the next segment replays and does exactly
-   the same. Measured with `call; sleep; sleep; call` over four segments --
-   `events=1 suspended=true calls=[]` from segment 2 onward, unchanged.
-   **This is not hypothetical:** `examples/subscription/billing.go:122-127` loops
-   `DurableSleep(24h)` with `PollCancellation()` between them, and `PollCancellation` records no
-   event (`engine/signaller.go:115`), so that loop is precisely this shape.
-2. **A sleep that is the workflow's first durable operation.** History is empty, so `isReplay` is
-   false and the frontier is indistinguishable from a fresh start.
+**`Now()` stays local, and structurally so.** Real time enters only the suspend-or-continue
+decision. The guest-visible clock still reads `history[stepCount-1].TimestampMs` during replay
+and the virtual accumulator after, so it advances by the durations the workflow *asked for*,
+never by real elapsed time. That is what separates this from "just check the clock", which would
+make replay non-deterministic.
 
-Both need the one thing this fix deliberately does not add: a way to know *which* sleeps have
-already elapsed. The options are to record sleep events again -- reverting the local-sleep design
-`0a02a84` introduced -- or to give the engine a "this is a resume" signal from the worker, which
-knows. **That is a durable-time design decision**, touching the compaction codec, wake scheduling
-and the `Now()` contract, and it is not WS-3's to make alone.
+`replayJustEnded` is deleted -- the field and `exitReplay`'s write. It asked a question sleep
+cannot answer for itself ("did some *other* durable call just cross the frontier?"), and it was
+the reason sleep was the one durable operation that could not end replay alone. Sleep is no
+longer special, which retires the bug class rather than the bug.
 
-The honest summary: a workflow with a single sleep behind recorded events now resumes; a workflow
-that sleeps twice in a row, or sleeps first, still wakes, re-executes to the same point, and
-re-arms `next_wake_at` in the past.
+**What this buys beyond the original defect:**
 
-Re-derive: `go test ./engine/ -run 'TestSleepAtTheReplayFrontier|TestFreshSleepStillSuspends|TestReplayedSleepDoesNotSkip' -count=1 -v`
+- **Consecutive sleeps work.** `call; sleep; sleep; call` now progresses. Previously the second
+  sleep livelocked even after the frontier fix -- which matters because
+  `examples/subscription/billing.go:122-127` loops `DurableSleep(24h)` with `PollCancellation()`
+  between, and `PollCancellation` records no event, so that loop is exactly this shape.
+- **Early resume is handled.** A reaper, manual retry or NOTIFY that hands the workflow back
+  before its deadline now re-suspends for the remainder. Recording sleep events -- the other
+  candidate design -- would have completed it regardless and cut the wait short.
+- **Interior sleeps need no special case.** A sleep with a recorded event after it completes for
+  a principled reason: that event could only have been written once the sleep returned, so its
+  timestamp is at or beyond the deadline, and real time is beyond that again.
+- **No history growth, no codec change, no migration**, so the event-cap question the
+  record-the-sleeps option raised does not arise at all.
+
+**Two deliberate behaviour changes, called out because they are not test churn.**
+
+1. **A zero-duration sleep now completes instead of suspending.** The question is "has the
+   requested delay passed", and for zero it has. Suspending for 0ms meant a full round trip
+   through the store to wait no time; nothing could have relied on it as a checkpoint, because
+   sleep records no event.
+2. **Time between the last recorded event and the sleep counts toward it.** A workflow that burns
+   five seconds of compute after its last durable call and then sleeps one second does not wait.
+   This follows from the anchor being the last event rather than the moment of the call, and it
+   is the intended reading -- virtual time is a lower bound on real time, and a workflow whose
+   virtual clock is already behind reality is not ahead of schedule. It does differ from the old
+   "at least N more seconds from now".
+
+**Still broken: a sleep that is the workflow's first durable operation.** History is empty, so
+there is no anchor -- `s.nowMs` is re-seeded from the wall clock every segment and the deadline
+moves forward with it. Closing this needs the workflow's `created_at` passed into `Replay` as the
+anchor: worker plumbing rather than engine logic, and deliberately a separate change.
+
+A related hazard was fixed on the way. The package-level `nowMs` seed is refreshed by the
+worker's dispatch loop and by **nothing** in the CLI and embedded paths, where it stays zero. An
+anchor at the epoch puts every deadline decades in the past, so every sleep would have completed
+instantly under `cleat run` or `cleatctl replay`. `DurableSleep` falls back to real now when the
+anchor is non-positive.
+
+**Clock skew** is the residual risk: anchors are event timestamps written by `time.Now()` on
+whichever worker ran that segment, compared against the resuming worker's clock, so a fast clock
+completes sleeps early. This does not introduce a new class of skew -- event timestamps were
+already worker-generated -- but sourcing both from the database would remove it, and is worth
+doing if timers ever need to be tight.
+
+Re-derive: `go test ./engine/ -run 'TestDurableSleep_|TestSleepAtTheReplayFrontier|TestConsecutiveSleeps|TestInteriorSleep|TestFreshSleepStillSuspends' -count=1 -v`
 
 ### 3.68 Replay released a virtual-object scope the workflow had already cleared — ✅ **FIXED** (WS-3, 2026-09-01)
 

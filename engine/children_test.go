@@ -384,8 +384,8 @@ func TestChildWorkflowWithVersion_ReplayMismatch(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	errCode := uint32(result & 0xFFFFFFFF)
 	if errCode != 0 {
