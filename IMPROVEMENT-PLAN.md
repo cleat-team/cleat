@@ -6498,7 +6498,12 @@ both are now decisions about *what a defer may do* rather than prerequisites for
 module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
 the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
-### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 OPEN, no longer blocked — the record shape is answered in §3.75** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02)
+### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 OPEN, blocked on §3.80** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02)
+
+> **2026-09-02.** Phase 5's record shape is answered (§3.75), but implementing it found an
+> earlier gap: the host cannot tell a defer body's host call from the workflow body's, so the
+> mechanism §3.75 assumed would drive a defer segment destroys the cleanup instead of running
+> it. Measured; see **§3.80**, which is now phase 5's blocker and names what to build in order.
 
 > **2026-09-01, phases 2–3.** A WASM defer now has a body and it runs. §3.70 records the design
 > and why the "one dispatch export" it was blocked on turned out to be unnecessary: the host
@@ -10306,7 +10311,14 @@ Re-derive: generate a wrapper and read it, or run
 `CleatEntryProcessorTest.testGeneratedWrapperPropagatesSuspension`. Removing the processor's
 suspend branch fails exactly that test and no other (282 tests, 1 failure).
 
-### 3.75 The durable record for a resumable defer phase — 🔵 **DESIGN ANSWER, not yet built** (WS-2, 2026-09-02)
+### 3.75 The durable record for a resumable defer phase — 🔵 **DESIGN ANSWER, not yet built; one premise corrected in §3.80** (WS-2, 2026-09-02)
+
+> **2026-09-02, read §3.80 before building this.** The record-shape answer below stands. One
+> supporting claim does not: the inventory excludes `RequestCancellation` because "the guest
+> observes it and exits through its own wrapper, so that path already runs defers", and
+> measurement shows the drain runs but every call it makes is refused by the same check — so the
+> cleanup is consumed rather than performed. The two-phase transition needs a guest→host
+> defer-phase signal first, which does not exist in any SDK. §3.80 has the measurements.
 
 §3.35 phase 5 is blocked on WS-2 by design: making `defer` survive a `kill -9` needs the defer
 phase to be "its own durable, resumable unit with a reaper", and the plan states that is **the
@@ -10628,3 +10640,74 @@ removing the call from PostgreSQL alone fails only the PostgreSQL arm.
 children and flags its `REQUEST_CANCEL` children, where before it did neither. That is what the
 design says should happen, and it removes the orphan the policy exists to prevent — but a
 deployment relying on terminate being narrow will see children close that did not close before.
+
+### 3.80 Phase 5's prerequisite: the host cannot tell a defer body's call from the workflow's — 🔴 **OPEN, blocks §3.35 phase 5** (WS-3, 2026-09-02)
+
+§3.75 answered the record-shape question phase 5 was parked behind, and its answer stands: no
+new durable record is needed, the terminal transition becomes two-phase, and the only new
+durable state is a workflow-level marker on the existing reaper. Implementation started against
+that design on 2026-09-02 and stopped at the first measurement, which found a hole in the step
+*before* the record shape.
+
+**§3.75 records one mechanism as already working, and it is not.** Its inventory excludes
+`RequestCancellation` on the grounds that *"it sets `cancellation_requested`, the guest observes
+it and exits through its own wrapper, so that path already runs defers."* Half of that is true.
+Measured against a real Go SDK guest on wasmtime, `testdata/deferfunc`, pinned by
+`engine/defer_phase_needs_a_signal_test.go`:
+
+| | measured | meaning |
+|---|---|---|
+| refuse a fresh call → does the guest drain? | **3 fresh-call attempts** (body + both defer bodies) | ✅ the unwind-and-drain half holds |
+| do the defer bodies' calls reach the caller? | **0 recorded calls** | ❌ they are refused by the same check |
+| a sleeping workflow, replayed | **0 fresh-call attempts**, re-suspends | ❌ the refusal never fires at all |
+
+**Refusing every fresh call does not skip the cleanup, it consumes it.** `_cleatRunDeferred`
+takes the defer table before running anything, so the drain empties the table and every call
+those bodies make is refused. The lock is not released, the charge is not refunded, and the
+registrations are gone. That is worse than not running the defer phase, and it is what §3.75's
+design does if built as written.
+
+**Choosing the observable is the whole of the measurement, and the obvious one is blind.** A
+`mockCaller` sees nothing in either case, because a defer body's `DurableCall` is refused before
+it reaches the caller — "no calls recorded" is what a working drain and a broken one both look
+like. The count of fresh-call *attempts* (`keyedCancellationStore.queriedWith`, one poll per
+attempt, taken before the refusal) is what separates them. The first version of this measurement
+asserted on the caller and reported the premise false; the drain had been working the whole time.
+
+#### What is actually missing
+
+The host has to distinguish **a call made by the workflow body** from **a call made by a defer
+body**, and today it cannot. The guest knows — `_cleatInDeferPhase` (`wasm/exports.go:307`) is
+what phase 4's guards already test to refuse `cleat_defer` and `continue_as_new` from inside a
+defer body — but it is guest-side only and the guest never tells the host.
+
+That signal is phase 5's real prerequisite, and it is independently required by §3.35's own
+design, which asks for a defer's host calls to be recorded *"as new events after the workflow's
+terminal step, in a distinguishable phase"*. Nothing in the tree can distinguish them.
+
+**Second obstacle, and it is the common case.** A workflow worth terminating is usually one that
+is waiting. Replay it and it re-suspends on its recorded sleep without ever reaching the end of
+history, so no fresh call is ever attempted and nothing starts the defer phase. A defer segment
+cannot be "replay until the first fresh call"; it has to handle a replay that ends in a
+suspension. Note that this is the *helpful* direction once the signal exists:
+`writeRunDeferred` is gated on `if !__susSuspended`, so a suspended guest deliberately does
+**not** drain — the table survives, and the host can call `__cleat_run_deferred` on the live
+instance with the refusal lifted, which is exactly phase 4's existing machinery.
+
+#### What to build, in order
+
+1. **A guest→host defer-phase signal.** One host function, called by `_cleatRunDeferred` on
+   entry and exit, in all five SDKs — the same shape as `__cleat_run_deferred` itself (#550,
+   #553, #557, #558) and with the same trap: an export no host calls, or a host call no guest
+   makes, is two green half-tests and no working feature (§3.73). It needs the ABI parity test
+   (`engine/hostabi_runtime_parity_test.go`) and one test that crosses the boundary.
+2. **The defer phase in the session**, gated on that signal: refuse the body's fresh calls,
+   permit the defer bodies'.
+3. **Then** §3.75's two-phase terminal transition as designed — migration `038` across all three
+   dialects (postgres, mysql and mssql high-water marks are 034/033/037 and are not aligned),
+   the marker and deadline, the three `UPDATE`-driven sites, `reaperLoop`'s predicate, and the
+   caller-visible `terminating` status that D6 in `tiers.yaml` settled.
+
+**Do not start step 3 first.** It is the largest piece and the most obviously shaped like
+progress, and every line of it is built on a defer phase that would consume the cleanup it
+exists to run.
