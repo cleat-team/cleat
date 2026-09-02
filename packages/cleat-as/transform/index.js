@@ -759,7 +759,13 @@ class CleatEntryTransformer {
       code += this._generateSingleWrapper(entry);
     }
 
-    code += this._generateDeferRunnerExport();
+    // Only for a module that actually has a workflow in it. A source with no
+    // @cleatEntry must produce NO exports at all -- asserted by
+    // TestASTransform/no_entry_no_wrapper, which this failed when the export
+    // was emitted unconditionally.
+    if (entries.length > 0) {
+      code += this._generateDeferRunnerExport();
+    }
 
     return code;
   }
