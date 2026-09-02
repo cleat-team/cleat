@@ -15,6 +15,22 @@ func (s *execSession) SetScope(ctx context.Context, m api.Module, objectType, in
 	return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
 }
 
+// forgetHeldScope drops scopeKey from the held set WITHOUT releasing it.
+//
+// The two halves of "the workflow no longer holds this scope" are separable on
+// purpose. Releasing is a side effect on the concurrency-key store and must
+// happen exactly once, in the segment that originally ran the step; forgetting
+// is Go-side bookkeeping that every replay of that step has to reproduce, or
+// releaseHeldScopes frees a key the workflow already gave up.
+func (s *execSession) forgetHeldScope(scopeKey string) {
+	for i, held := range s.heldScopes {
+		if held == scopeKey {
+			s.heldScopes = append(s.heldScopes[:i], s.heldScopes[i+1:]...)
+			return
+		}
+	}
+}
+
 func (s *execSession) ClearScope(ctx context.Context) {
 	if s.scopeSet && s.scopePrefix != "" {
 		scopeKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
@@ -23,12 +39,7 @@ func (s *execSession) ClearScope(ctx context.Context) {
 				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			}
 		}
-		for i, held := range s.heldScopes {
-			if held == scopeKey {
-				s.heldScopes = append(s.heldScopes[:i], s.heldScopes[i+1:]...)
-				break
-			}
-		}
+		s.forgetHeldScope(scopeKey)
 	}
 	s.scopeSet = false
 	s.scopePrefix = ""
@@ -58,12 +69,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			}
 		}
-		for i, held := range s.heldScopes {
-			if held == oldKey {
-				s.heldScopes = append(s.heldScopes[:i], s.heldScopes[i+1:]...)
-				break
-			}
-		}
+		s.forgetHeldScope(oldKey)
 	}
 
 	// Acquire new scope key.
@@ -122,6 +128,16 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 	}
 
 	if objectType == "" && instanceKey == "" {
+		// Reproduce ClearScope's bookkeeping, not its release. The fresh path
+		// released this key in the segment that originally ran this step;
+		// re-releasing here would be a side effect during replay. Dropping it
+		// from heldScopes is what replay owes, and skipping that left
+		// releaseHeldScopes to free a key the workflow had explicitly cleared
+		// -- which, once another workflow has acquired that virtual object, is
+		// releasing somebody else's lock.
+		if s.scopeSet && s.scopePrefix != "" {
+			s.forgetHeldScope("vo:" + s.scopeObjType + ":" + s.scopeInstKey)
+		}
 		s.scopeSet = false
 		s.scopePrefix = ""
 		s.scopeObjType = ""
