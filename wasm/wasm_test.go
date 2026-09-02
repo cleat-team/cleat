@@ -872,3 +872,26 @@ func TestCronAdaptersReportTheHostsReason(t *testing.T) {
 
 	syntaxCheck(t, "GenerateHostAdapter(all)", code)
 }
+
+// TestGenerateExportsEmitsTheDeferRunner pins that codegen emits the export the
+// host needs to drain a dead workflow's defer table (IMPROVEMENT-PLAN §3.35
+// phase 4).
+//
+// The name matters as much as the presence. Entry-point exports are ToSnakeCase
+// of an EXPORTED Go identifier, so they always begin with a lowercase letter --
+// a leading underscore is what makes this one impossible to collide with a
+// workflow's own entry point.
+func TestGenerateExportsEmitsTheDeferRunner(t *testing.T) {
+	result, cr := loadBasic(t)
+	_ = cr
+	code := string(GenerateExports("basic", result, "go"))
+
+	if !strings.Contains(code, "//go:wasmexport __cleat_run_deferred") {
+		t.Error("no __cleat_run_deferred export; the host has no way to run the " +
+			"defers of a workflow that was killed before it could run its own")
+	}
+	if !strings.Contains(code, "_cleatRunDeferred()") {
+		t.Error("the defer runner export does not call _cleatRunDeferred")
+	}
+	syntaxCheck(t, "GenerateExports", code)
+}

@@ -254,6 +254,14 @@ func encodeJSONString(s string) string {
 		generateExport(&buf, fd, qual, target)
 	}
 
+	// Only for a module that has workflows. A package with no entry points can
+	// register no defers, so a runner for them would be an export with nothing
+	// to run -- and TestGenerateExportsEmptyEntryPoints pins the broader
+	// invariant that such a package produces no callable surface at all.
+	if len(result.EntryPoints) > 0 {
+		buf.WriteString(deferRunnerExportSource)
+	}
+
 	// The wasmtime backend calls _start which calls main(), which uses
 	// cleat_poll_work + cleatDispatch to route work to entry points.
 	// The wazero backend calls exports directly. Both paths coexist.
@@ -320,7 +328,11 @@ func _cleatRegisterDefer(deferID string, fn func()) {
 // except for cleat.SuspendSentinel, which is not an error. That one must reach
 // the entry point wrapper so the segment suspends; swallowing it would
 // complete a workflow the host has already recorded as suspended.
-func _cleatRunDeferred() {
+// The count it returns is best-effort and exists for the host's log line, not
+// for control flow: a SuspendSentinel leaves through the panic above, so the
+// caller sees no value at all in that case. The evidence that a defer really
+// ran is the host calls it made, never this number.
+func _cleatRunDeferred() (ran int) {
 	ids := _cleatDeferIDs
 	_cleatDeferIDs = nil
 	for i := len(ids) - 1; i >= 0; i-- {
@@ -329,6 +341,7 @@ func _cleatRunDeferred() {
 		if fn == nil {
 			continue
 		}
+		ran++
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -340,7 +353,9 @@ func _cleatRunDeferred() {
 			fn()
 		}()
 	}
+	return ran
 }
+
 
 `
 
@@ -761,3 +776,36 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 	buf.WriteString("\t}\n")
 	buf.WriteString("}\n")
 }
+
+// deferRunnerExportSource is the export the HOST calls to drain the defer
+// table. Emitted only for modules that have entry points.
+const deferRunnerExportSource = `
+// __cleat_run_deferred lets the HOST drain the defer table, for the workflows
+// that never reach the entry point wrapper that normally does it: a guest
+// killed by the execution fence, by the instruction limit, or by an
+// unrecoverable runtime failure such as out-of-memory. IMPROVEMENT-PLAN 3.35
+// phase 4.
+//
+// It is safe to call on an instance that has already run its defers -- the
+// table is drained, so a second call runs nothing and returns 0.
+//
+// The name cannot collide with a workflow's own entry point. Export names are
+// ToSnakeCase of an EXPORTED Go identifier, so they always begin with a
+// lowercase letter; no entry point can produce a leading underscore.
+//
+// Every panic is swallowed here, INCLUDING cleat.SuspendSentinel, which is the
+// one _cleatRunDeferred deliberately lets through. That is right for this
+// caller and wrong for the other one: the entry point wrapper needs the
+// sentinel so its segment suspends, but a workflow reached through this export
+// is already dead and has no segment left to suspend. Letting it out would
+// turn the host's cleanup call into a trap.
+//
+//go:wasmexport __cleat_run_deferred
+func __cleat_run_deferred() (ran int64) {
+	defer func() {
+		_ = recover()
+	}()
+	ran = int64(_cleatRunDeferred())
+	return ran
+}
+`
