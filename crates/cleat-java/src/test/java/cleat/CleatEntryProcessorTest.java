@@ -517,6 +517,85 @@ class CleatEntryProcessorTest {
     }
 
     @Test
+    void testGeneratesTheHostDeferRunnerExport() throws Exception {
+        // WHAT: the processor emits __cleat_run_deferred, the export the HOST
+        //       calls to drain a workflow it killed.
+        // WHY:  the generated wrappers drain the defer table when a workflow
+        //       RETURNS. A workflow stopped by the execution fence, the
+        //       instruction limit or the memory ceiling never reaches one, so
+        //       its cleanup would never happen at all -- the lock stays held,
+        //       the charge stays uncompensated. IMPROVEMENT-PLAN 3.35 phase 4.
+
+        JavaFileObject sourceFile = source("test", "TestWorkflow", validTestSource);
+        CompilationResult result = compile(sourceFile, null);
+
+        Path runnerFile = result.generatedSourceFiles.stream()
+            .filter(p -> p.toString().replace('\\', '/').endsWith("cleat/generated/CleatDeferRunner.java"))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(runnerFile,
+            "CleatDeferRunner must be generated for a module that has an entry point. "
+            + "Without it engine/backend_wasmtime.go's runGuestDefersAfterKill looks up "
+            + "__cleat_run_deferred, gets null, and returns having done nothing. "
+            + "Generated files: " + result.generatedSourceFiles);
+
+        String content = Files.readString(runnerFile);
+
+        assertTrue(content.contains("@Export(name = \"__cleat_run_deferred\")"),
+            "the runner must carry TeaVM's @Export under the name the host looks up. "
+            + "Content:\n" + content);
+        assertTrue(content.contains("public static long __cleat_run_deferred()"),
+            "the export takes no arguments and returns a long: the host calls it with "
+            + "none and reads an i64 count. An entry-point signature here would be found "
+            + "by name and then fail at the call. Content:\n" + content);
+
+        // runDeferredForHost, NOT runDeferred, and the difference is the whole
+        // point. The wrapper needs SuspendSignal to escape so its segment
+        // suspends; this caller must swallow it, because a workflow reached
+        // this way is already dead and has no segment left. Letting it out
+        // would turn the host's cleanup call into a trap.
+        assertTrue(content.contains("cleat.Defer.runDeferredForHost()"),
+            "the runner must call runDeferredForHost(), which swallows SuspendSignal. "
+            + "runDeferred() lets it out, which is right for the wrapper and wrong here. "
+            + "Content:\n" + content);
+    }
+
+    @Test
+    void testDeferRunnerIsProtectedFromTreeShaking() throws Exception {
+        // WHAT: CleatEntryIndex.WRAPPER_CLASSES references CleatDeferRunner,
+        //       and getEntries() does NOT.
+        // WHY:  nothing in the guest calls the runner -- its only caller is the
+        //       host, after it has killed the workflow -- so TeaVM's dead-code
+        //       elimination would remove it, and a tree-shaken export is
+        //       indistinguishable from one that was never generated. It is
+        //       still not an entry point, so it must not appear in the list of
+        //       entry point names.
+
+        JavaFileObject sourceFile = source("test", "TestWorkflow", validTestSource);
+        CompilationResult result = compile(sourceFile, null);
+
+        Path indexFile = result.generatedSourceFiles.stream()
+            .filter(p -> p.toString().replace('\\', '/').endsWith("cleat/generated/CleatEntryIndex.java"))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(indexFile, "CleatEntryIndex file must have been generated");
+
+        String content = Files.readString(indexFile);
+
+        assertTrue(content.contains("cleat.generated.CleatDeferRunner.class"),
+            "WRAPPER_CLASSES must reference CleatDeferRunner, or TeaVM drops the export. "
+            + "Content:\n" + content);
+
+        int entriesAt = content.indexOf("getEntries()");
+        assertTrue(entriesAt >= 0, "CleatEntryIndex must have getEntries(). Content:\n" + content);
+        String entriesBody = content.substring(entriesAt);
+        assertFalse(entriesBody.contains("__cleat_run_deferred"),
+            "getEntries() lists workflow entry points, and the defer runner is not one. "
+            + "A caller enumerating entries would try to execute it as a workflow. "
+            + "Content:\n" + content);
+    }
+
+    @Test
     void testWorkflowEntryReferencesIndex() throws Exception {
         // WHAT: Verify WorkflowEntry references CleatEntryIndex.WRAPPER_CLASSES.
         // WHY: WorkflowEntry is the TeaVM static analysis root; the reference chain
