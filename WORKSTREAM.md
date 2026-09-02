@@ -56,6 +56,14 @@ renumbers another"), and it works for the same reason — a new section that can
 convention that must be remembered. **Take the next free number above the highest in the file
 rather than the next one in a reserved block.**
 
+**One more thing that stopped being true, recorded 2026-09-02: Phase A and Phase B below are
+complete.** A6 is no longer "blocked on CI" — `.github/workflows/tier1-gate.yml` runs
+`scripts/tier-gate.sh`, and `develop` requires **32** status checks with `enforce_admins` on
+(`gh api repos/:owner/:repo/branches/develop/protection --jq '{n: (.required_status_checks.contexts|length), admins: .enforce_admins.enabled}'`).
+D1–D4, which Phase B lists as the gate on everything after it, were all decided 2026-08-06, and
+D5 since; `tiers.yaml`'s own status block says so. Read the phase tables below for their
+measurements and their reasoning, not for their status markers.
+
 **One stream, sequential, until the ground rules hold.** Round 2's three streams each closed
 their named items, so the split worked — but nearly every operational hazard recorded in the
 three status docs was a coordination artifact rather than the work itself: shared files edited
@@ -222,6 +230,22 @@ this is the order.
 concurrency-key re-entrancy (§3.39), the six defer-design decisions (§3.35), and
 positioning (Phase 4). Each was escalated in round 2 rather than guessed at, and each is still
 unanswered.
+
+> **Re-derived 2026-09-02: three of the five were answered and one was never yours.**
+>
+> | | state |
+> |---|---|
+> | MySQL RLS (§1.7) | **Answered 2026-08-06 by D1** — MySQL is single-tenant only, a documented product boundary. README and `docs/reference/multi-tenancy.md` already say so. |
+> | concurrency-key re-entrancy (§3.39) | **Answered and fixed 2026-08-31.** |
+> | the defer-design decisions (§3.35) | **Answered; phases 1–4 shipped**, the last on 2026-09-02. Phase 5 is open but is *not* blocked on you — it is blocked on WS-2 agreeing a durable-record shape with WS-3, which is a cross-stream question the two streams can settle. |
+> | `workflow_defs` namespacing (§3.12) | **Still yours, and now the only one.** Is the workflow-definition namespace per-tenant or global? The overwrite half is closed either way; the answer decides whether a multi-session key change happens. |
+> | positioning (Phase 4) | **Still yours.** |
+>
+> The general lesson, since this list is the third place it has bitten: an escalation is only
+> unanswered until someone answers it, and the answer lands in `tiers.yaml` or a `§` body
+> rather than back in the file that asked. **Check `tiers.yaml` for a `decision:` before
+> re-escalating anything on a list like this.** Three of these five sat here as blocking
+> questions for up to 26 days after they were settled.
 
 ---
 
