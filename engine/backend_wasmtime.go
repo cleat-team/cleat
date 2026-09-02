@@ -270,10 +270,6 @@ func (b *wasmtimeBackend) configureStore(ctx context.Context, store *wasmtime.St
 	return timeout, nil
 }
 
-// deferRunnerExport is the export codegen emits so the host can drain a killed
-// workflow's defer table. See wasm/exports.go.
-const deferRunnerExport = "__cleat_run_deferred"
-
 // runGuestDefersAfterKill runs the defers of a workflow the host just stopped.
 //
 // IMPROVEMENT-PLAN 3.35 phase 4. A guest killed by the fence, the instruction

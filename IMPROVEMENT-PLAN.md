@@ -6190,12 +6190,44 @@ the unfenced path, which for a build with no wasmtime in it is unavoidable rathe
 > kill error still returned. AssemblyScript under `--runtime stub` is the easy case and passing
 > there is not evidence about Java.
 >
-> **Still not covered, and named here so it is not mistaken for done:** (a) the *wazero* path has
-> the same gap — `invokeDefersOnTrap` looks for the same non-existent `cleat_defer_<id>`, so a
-> guest trapped under `cleatctl replay` or `cleat run` still loses its cleanup; (b) the engine's
+> **Still not covered, and named here so it is not mistaken for done:** (a) the engine's
 > fallback `runDefers` still fires after the backend has already run the defers, so the
-> misleading warning above is now emitted *immediately after the cleanup succeeded*; (c) Python
+> misleading warning above can be emitted *immediately after the cleanup succeeded*; (b) Python
 > has no kill path at all (§3.73).
+
+> **2026-09-02, the wazero path had the same hole and a second one behind it — and phase 2 is
+> now DONE.** `invokeDefersOnTrap` asked for `cleat_defer_<id>` too, so a guest trapped under
+> `cleatctl replay`, `cleat run`, `cleat/wasmtest`, `cleat/cleattest` or `cleat/embedded` lost
+> its cleanup. Measured on an AssemblyScript guest that traps with one defer outstanding: two
+> warnings, zero cleanup.
+>
+> **Fixing that exposed phase 2 immediately, which is the part worth recording.** With the drain
+> pointed at `deferRunnerExport` the body finally ran — and panicked on its first host call:
+>
+> ```
+> interface conversion: interface is nil, not engine.HostHandler
+>   engine.handlerFromContext  engine/imports.go:20
+> ```
+>
+> exactly as the phase-2 note below predicts, with exactly the fix it names:
+> `withHandler(context.Background(), session)`. The bare context stays — defers must run when
+> `execCtx` is already cancelled, which is when they matter most — and it gains the session.
+>
+> **Two defects in series, and the outer one hid the inner one completely.** While the drain
+> looked for an export no guest had, no body ever ran, so no body ever reached a host call, so
+> the phase-2 panic had nothing to fire on. A defer that cannot call the host cannot release the
+> lock it took, which is most of what a defer is for — and no test anywhere went red for it.
+>
+> `deferRunnerExport` moved out of `backend_wasmtime.go` for this. That file is `//go:build cgo`,
+> so the wazero path **could not name the export it was supposed to call** — which is a large
+> part of why it was calling the wrong one.
+>
+> The per-defer `cleat_defer_<id>` convention is **kept as a fallback**, reached only when a guest
+> has no runner. No SDK emits it and the only producers in the tree are hand-written WAT
+> fixtures, but its partial-failure semantics are load-bearing and pinned
+> (`TestDeferBodyRunsOnceAfterATrap`): a defer that ran and *trapped* must not be retried on a
+> fresh instance, because it is a destructor and half-applying a compensating action then
+> applying it again is worse than not retrying.
 
 > **2026-09-02, phase 4's fence case is buildable — measured, not argued.** A real Go SDK guest
 > killed mid-loop by the fence can be re-entered, runs guest code, and its outstanding defer runs
@@ -6326,7 +6358,7 @@ the six were already settled by earlier work — "its own budget" shipped as
 | phase | delivers | status |
 |---|---|---|
 | 1 | A defer survives a suspension — replay re-registers it | ✅ §3.66, 2026-09-01 |
-| 2 | A defer can make host calls: the session reaches the body | **blocked, §3.70** |
+| 2 | A defer can make host calls: the session reaches the body | ✅ 2026-09-02 — `withHandler(Background, session)`; §3.70's ABI unblocked it and the wazero drain fix exposed it |
 | 3 | Defers run on **all** terminal transitions, in the instance that registered them | **blocked, §3.70** |
 | 4 | The body is restricted: no new defers, no `continue_as_new` | **blocked, §3.70** |
 | 5 | Exactly-once: the defer phase as its own durable unit of work | **not scheduled** |

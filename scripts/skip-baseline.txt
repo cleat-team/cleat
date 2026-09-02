@@ -75,6 +75,7 @@ engine	TestTenantIsolation_Schedules	1
 engine	TestTenantIsolation_Signals	1
 engine	TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow	1
 engine	TestTheHostRunsDefersOfAKilledJavaWorkflow	1
+engine	TestTheWazeroPathRunsDefersOfATrappedWorkflow	1
 engine	TestUnauthenticatedQueryRejection	2
 engine	bootstrapScratchDB	1
 engine	buildAssemblyScriptWasm	1
