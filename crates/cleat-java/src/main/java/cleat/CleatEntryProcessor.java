@@ -295,6 +295,15 @@ public class CleatEntryProcessor extends AbstractProcessor {
         out.println(");");
         out.println();
 
+        out.println();
+        out.println("            // Run the workflow's own defers before reporting, so");
+        out.println("            // anything they record lands inside this segment. A defer");
+        out.println("            // that itself suspends throws SuspendSignal, which the");
+        out.println("            // handler below catches -- suspension wins over the result,");
+        out.println("            // exactly as when the workflow body suspends. 3.73.");
+        out.println("            cleat.Defer.runDeferred();");
+        out.println();
+
         if (!returnsVoid) {
             out.println("            // Serialize the result to JSON.");
             out.println("            String resultJSON = JsonHelper.stringify(result);");
@@ -321,11 +330,18 @@ public class CleatEntryProcessor extends AbstractProcessor {
         out.println("        } catch (cleat.SuspendSignal e) {");
         out.println("            return cleat.Memory.SUSPEND_SENTINEL;");
         out.println("        } catch (cleat.TerminalError e) {");
+        out.println("            // Cleanup exists for the run that did not finish the way it");
+        out.println("            // meant to, so defers run on the error paths too. Drained for");
+        out.println("            // the host rather than plainly, because a defer that suspends");
+        out.println("            // here has no segment left to suspend: the result is already");
+        out.println("            // decided.");
+        out.println("            cleat.Defer.runDeferredForHost();");
         out.println("            String errorJSON = JsonHelper.errorJson(");
         out.println("                e.getMessage() != null ? e.getMessage() : \"Terminal error\");");
         out.println("            int written = Memory.writeString(outPtr, maxOutLen, errorJSON);");
         out.println("            return Memory.encodeExportResult(cleat.Memory.TERMINAL_ERROR_CODE, written);");
         out.println("        } catch (Exception e) {");
+        out.println("            cleat.Defer.runDeferredForHost();");
         out.println("            // Catch all exceptions and return as error JSON.");
         out.println("            String errorJSON = JsonHelper.errorJson(");
         out.println("                e.getMessage() != null ? e.getMessage() : \"Unknown error\");");

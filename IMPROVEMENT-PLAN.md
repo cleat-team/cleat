@@ -9551,7 +9551,7 @@ and the tell was that the "healthy" reading never explained the failure.
 
 ---
 
-### 3.73 Four SDKs document a `defer` that runs cleanup, and cannot run it — 🔶 **RUST DONE; PYTHON, JAVA, ASSEMBLYSCRIPT OPEN** (WS-3, 2026-09-02)
+### 3.73 Four SDKs document a `defer` that runs cleanup, and cannot run it — 🔶 **RUST, PYTHON, JAVA DONE; ASSEMBLYSCRIPT OPEN** (WS-3, 2026-09-02)
 
 §3.70 fixed this for Go. The other four SDKs have the same defect and it is still shipped.
 
@@ -9600,6 +9600,51 @@ passes every other test in the file.
 **If a language cannot support a body, say so in its docs instead of claiming cleanup that
 cannot happen.** That is the failure this item is about; re-creating it in a different form
 would be worse than leaving the gap.
+
+#### Python: the normal path is done, the kill path needs host work (#554)
+
+`defer_func` runs cleanup when the entry point finishes — success and error paths, not
+suspension — and `HostCalls.defer`'s docstring no longer claims execution it cannot deliver.
+That closes the **tier-1** correctness gap.
+
+**The kill path does not follow, and the reason is structural.** Two things block it, both
+measured 2026-09-02:
+
+1. **The WIT world exports exactly one function** — `export run: func(args: string) -> string`
+   (`python-sdk/wit/cleat.wit`). There is nowhere for the host to call a defer runner. Adding one
+   means changing the WIT world and regenerating the componentize-py bindings.
+2. **Python does not use the execution path the kill-path cleanup lives on.** A component binary
+   is dispatched to `ExecuteComponentCGo`, and `engine/component_cgo.go` has no defer pass at
+   all. Re-derive: `grep -rn deferRunnerExport engine/*.go | grep -v _test` — it appears only in
+   `backend_wasmtime.go`.
+
+**So a Python workflow killed by the execution fence still loses its cleanup**, and §3.35 phase 4
+covers Go, Rust and Java but not Python. Stated here rather than left to be inferred from the
+phase-4 section.
+
+The change is designed and cheap — `export run-deferred: func(args: string) -> string` reusing
+`run`'s shape so `componentCall` needs no new marshalling, plus a component-path defer pass — and
+was deliberately not shipped: componentize-py is SIGKILLed in the WS-3 sandbox, so it could not
+be built even once, and the WIT change affects every Python build rather than only a test.
+
+#### Java: done, and it needed §3.74 first (#556)
+
+`HostCalls.deferFunc(Runnable)` runs cleanup when the entry point finishes, and the javadoc that
+promised "a deferred cleanup callback" for an API with no callback parameter now says what
+`cleatDefer` actually does.
+
+**Writing this required fixing suspension first.** The control test every other SDK has — defers
+must NOT run on suspension — could not be written against a Java SDK where suspension was
+unreachable (§3.74). That is why §3.74 landed before this: the most important test in this item
+had nothing to assert against.
+
+The suspend branch is asserted defer-free by slicing the generated source between
+`catch (cleat.SuspendSignal` and the next `catch` — a drain anywhere in the wrapper would satisfy
+a looser check while still firing every cleanup at the first sleep. Mutation-proven: adding a
+drain to that branch fails exactly that test.
+
+Java **does** get §3.35 phase 4's kill path, unlike Python: TeaVM exports are declared with
+`@Export`, so a `__cleat_run_deferred` export is expressible. Not wired yet.
 
 ---
 
