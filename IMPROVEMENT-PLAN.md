@@ -9600,3 +9600,58 @@ passes every other test in the file.
 **If a language cannot support a body, say so in its docs instead of claiming cleanup that
 cannot happen.** That is the failure this item is about; re-creating it in a different form
 would be worse than leaving the gap.
+
+---
+
+### 3.74 Java workflows could not suspend — ✅ **FIXED** (WS-3, 2026-09-02)
+
+A Java workflow that slept on a fresh execution **completed with a bogus result instead of
+suspending**. The host recorded it as done; the sleep never happened; everything the workflow
+would have done after waking never ran.
+
+#### The two halves disagreed, and only one was missing
+
+The **host** half has been ready all along — `engine/backend_wasmtime.go:855` checks
+`if raw == (1 << 62)` and returns `Suspended: true`.
+
+The **guest** half could not produce that value. `HostCalls.cleatSleepMs` returned `true` with a
+javadoc telling the author *"the workflow should propagate the suspension by returning
+`Memory.SUSPEND_SENTINEL` from the export"* — but **the author does not write the export.**
+`CleatEntryProcessor` generates it, and the generated wrapper had no branch that could return
+that value. It stringified whatever the workflow returned and reported
+`encodeExportResult(0, written)`: a plain success.
+
+Measured 2026-09-02 by generating a real wrapper for a workflow that sleeps
+(`javac -processorpath` against the built SDK jar). Before:
+
+```java
+java.lang.String result = Probe.sleepy(hostCalls, input);
+String resultJSON = JsonHelper.stringify(result);
+int written = Memory.writeString(outPtr, maxOutLen, resultJSON);
+return Memory.encodeExportResult(0, written);   // always success
+```
+
+`grep -c SUSPEND_SENTINEL` on that generated file: **0**.
+
+#### Fix
+
+`cleat.SuspendSignal`, an unchecked exception thrown by `cleatSleepMs`, caught by the generated
+wrapper, which returns `Memory.SUSPEND_SENTINEL`. That is what every other SDK already does —
+Go and Rust panic, Python raises — so Java stops being the one that asks the author to do
+something they have no way to do.
+
+**Catch order is load-bearing and is asserted.** `SuspendSignal` is a `RuntimeException`, so a
+`catch (Exception)` placed first swallows it and reports a suspended workflow as one that
+*failed* with the message "cleat: workflow suspended". The test pins the ordering, not just the
+presence.
+
+#### How it was found
+
+Not by looking for it. §3.73 needed Java's defer hook, and writing the "defers do not run on
+suspension" control test — the one that matters most in every other SDK — required knowing how
+Java suspends. It turned out it does not. **The control test could not have been written
+correctly before this was fixed**, which is why this landed first.
+
+Re-derive: generate a wrapper and read it, or run
+`CleatEntryProcessorTest.testGeneratedWrapperPropagatesSuspension`. Removing the processor's
+suspend branch fails exactly that test and no other (282 tests, 1 failure).

@@ -310,6 +310,16 @@ public class CleatEntryProcessor extends AbstractProcessor {
         out.println();
 
         // Catch block — TerminalError first (non-retryable), then general Exception.
+        // Suspension first: it is not a failure and must not be caught by the
+        // Exception handler below, which would turn a suspended workflow into
+        // one that "failed" with the message "cleat: workflow suspended".
+        //
+        // IMPROVEMENT-PLAN 3.74. This branch did not exist, so no generated
+        // wrapper could ever return the sentinel the host checks for
+        // (engine/backend_wasmtime.go: `if raw == (1 << 62)`). The host half
+        // was ready; the guest half was missing.
+        out.println("        } catch (cleat.SuspendSignal e) {");
+        out.println("            return cleat.Memory.SUSPEND_SENTINEL;");
         out.println("        } catch (cleat.TerminalError e) {");
         out.println("            String errorJSON = JsonHelper.errorJson(");
         out.println("                e.getMessage() != null ? e.getMessage() : \"Terminal error\");");

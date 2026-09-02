@@ -467,7 +467,18 @@ public class HostCalls {
     public boolean cleatSleepMs(long timeoutMs) {
         long result = cleatSleepRaw(timeoutMs);
         int status = Memory.decodeSleepStatus(result);
-        return status == Memory.SLEEP_STATUS_SUSPEND;
+        if (status == Memory.SLEEP_STATUS_SUSPEND) {
+            // Unwind rather than return, which is what every other cleat SDK
+            // does (Go and Rust panic, Python raises). Returning `true` and
+            // asking the author to "propagate the suspension by returning
+            // Memory.SUSPEND_SENTINEL from the export" was unactionable: the
+            // author does not write the export. See IMPROVEMENT-PLAN 3.74.
+            //
+            // The boolean return is kept so replay reads naturally -- it is
+            // always false, because the suspending case no longer returns.
+            throw new SuspendSignal();
+        }
+        return false;
     }
 
     /**
