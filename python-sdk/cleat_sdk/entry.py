@@ -28,6 +28,7 @@ import typing
 from collections.abc import Callable
 from typing import Any, get_type_hints
 
+from .defer import run_deferred
 from .host_calls import HostCalls, SuspendSentinel
 
 # String sentinel for workflow suspension (matches Go side check).
@@ -362,12 +363,27 @@ def cleat_entry(name: str | None = None) -> Callable:
                 result = func(h, **kwargs)
                 result = _unwrap_result(result)
 
-                # (e) Serialise the return value and return as a string.
+                # (e) Run the workflow's own defers before reporting, so
+                #     anything they record lands inside this segment. See
+                #     IMPROVEMENT-PLAN 3.73. A defer that itself suspends
+                #     raises SuspendSentinel, which the handler below catches
+                #     -- suspension wins over the result, exactly as it does
+                #     when the workflow body suspends.
+                run_deferred()
+
+                # (f) Serialise the return value and return as a string.
                 return json.dumps(result, default=str)
 
             except SuspendSentinel:
                 # The workflow signalled suspension (e.g. sleep on a
                 # fresh execution).  Propagate a sentinel string.
+                #
+                # Defers deliberately do NOT run here. A suspended workflow has
+                # not exited; its cleanup is still pending, and firing it at the
+                # first sleep would release locks a workflow that is about to
+                # continue still holds. The final segment replays the entry
+                # point, re-registers the same defers, and runs them when it
+                # completes.
                 return SUSPEND_SENTINEL_STR
 
             # Deliberate, and load-bearing: this is the workflow error
@@ -376,6 +392,17 @@ def cleat_entry(name: str | None = None) -> Callable:
             # a trap and the engine sees a dead guest instead of a failed step.
             except Exception as exc:  # noqa: BLE001
                 # Any other exception is treated as a workflow error.
+                #
+                # Defers still run: cleanup exists for the run that did not
+                # finish the way it meant to, and a defer that only fires on
+                # the happy path is close to useless. A defer that suspends
+                # here turns the segment into a suspension, which is why this
+                # is a nested try rather than a bare call -- the outer
+                # SuspendSentinel handler is already committed to this branch.
+                try:
+                    run_deferred()
+                except SuspendSentinel:
+                    return SUSPEND_SENTINEL_STR
                 return json.dumps({"error": str(exc)})
 
         # Mark the wrapper for introspection tooling.
