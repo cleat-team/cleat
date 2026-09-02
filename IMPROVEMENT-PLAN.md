@@ -9246,3 +9246,32 @@ what that means for the phase 2 fix described below** (`withHandler(context.Back
 session)` so a defer body can make host calls on the trap path): it is still correct, but it
 benefits no shipped guest, because the export it would reach — `cleat_defer_<id>` — is one no SDK
 emits and none can. Do not schedule it as though it closed the trap case.
+
+#### The fence case may be reachable after all — one half measured, one half not
+
+The obvious reading of "the guest never got to run its defers" is that nothing can be done: the
+bodies are closures in guest memory, and the guest is dead. For a **fence kill** that reading is
+wrong on its first step, and the difference is worth knowing before phase 4 is designed.
+
+**Measured 2026-09-02, pinned by `engine.TestTheFenceLeavesTheInstanceUsable`:** after epoch
+interruption stops a spinning guest, the wasmtime instance is *still callable*, and linear memory
+written before the interrupt is *still there* — a second export read back the marker the first
+one wrote before it was stopped. `SetEpochDeadline` is relative to the current epoch, so the
+store needs a fresh budget first; without that the next call is interrupted immediately, which is
+the mutation the test uses to prove the assertion is live.
+
+That is unlike the fresh-instance problem §3.70 ran into. Here the instance that registered the
+defers is the one still standing, so its closure table has not gone anywhere.
+
+**The half that is not measured, and must be before anything is built:** that module is
+hand-written WAT with no language runtime in it. A **Go** guest fenced mid-loop also has a Go
+runtime interrupted at an arbitrary point — scheduler, GC and stack in whatever state the
+interrupt found them — and re-entering it through a `//go:wasmexport` may not be safe. Note the
+shape of the mistake to avoid: a call that returns without error is not a call that ran
+correctly, and §3.70's post-`_start` measurement only established re-entry after a *clean* exit
+through `proc_exit`, which is a different transition entirely.
+
+To settle it, drive a real Go SDK guest the way `Execute` does — `_start`, then a spinning entry
+point under a short `WithWasmtimeExecutionTimeout`, then a fresh epoch deadline and a call to a
+second entry point — and check the second one's *observable effect* (a host call the mock
+records), not merely that it returned.
