@@ -1056,7 +1056,21 @@ tier3:
 #       this makes authentication a feature to build, not a header to add.
 #   D4  DECIDED 2026-08-06. Java and AssemblyScript are tier 2, not parked. Both were
 #       parked on the output of tests that could not fail; see the note in tier 3.
+#   D5  DECIDED 2026-08-06. The tier-1 gate filters lower-tier tests out; it does not
+#       provision their toolchains. Recorded inline above tier1.rules.
+#   D6  DECIDED 2026-09-02. Terminate is ASYNCHRONOUS, and the window is named.
+#       Recorded inline in the tenancy block; see IMPROVEMENT-PLAN 3.76 and #576.
+#   D7  DECIDED 2026-09-02. NAMES ARE PER-TENANT. One tenant must never have to
+#       worry about clashing with another tenant's names, so every primary key over
+#       a user-chosen name carries the tenant. Three tables do not today --
+#       workflow_defs(name, version), workflow_schedules(name) and
+#       workflow_tags(workflow_name, tag) -- and all three were measured colliding
+#       on all three dialects. Keys over a GENERATED id are unaffected and stay as
+#       they are: a UUID cannot be chosen, so it cannot clash. See
+#       IMPROVEMENT-PLAN 3.12 and 3.77.
 #
-# All four decisions are settled. New ones go here with the same shape: what was
-# decided, on what date, and what it changes about what the gate enforces.
+# D1-D4 were settled together on 2026-08-06; D5-D7 have been added since, and this
+# register was still saying "all four" until D7 was recorded. New ones go here with
+# the same shape: what was decided, on what date, and what it changes about what the
+# gate enforces.
 # ---------------------------------------------------------------------------

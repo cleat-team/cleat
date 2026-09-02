@@ -5628,7 +5628,103 @@ pinned the defect now asserts deny → grant → revoke through the check the wo
 the enforcement table sets its list through the supported path while still reading the column
 back.
 
-### 3.12 One tenant's deploy silently replaces another's workflow code — 🔶 **OVERWRITE CLOSED, NAMESPACE STILL SHARED** (WS-1, 2026-08-05)
+### 3.77 Names are per-tenant — D7, and it is three tables rather than one — 🔵 **DECIDED 2026-09-02, not yet built**
+
+The owner's decision, in their words: *"It doesn't make any sense for one tenant to need to
+worry about clashes with some other tenant's workflows."* Recorded as **D7** in `tiers.yaml`.
+
+That settles §3.12, which has sat as "the namespace is shared; taking a name is now loud
+instead of silent" since 2026-08-05. It also turns out to be bigger than §3.12, and the extra
+scope came from asking what the decision *means* rather than which table it was raised against.
+
+#### The rule, and the two classes it separates
+
+**A primary key over a user-chosen name must carry the tenant. A key over a generated id need
+not, and should not be changed.** A UUID cannot be chosen, so it cannot be clashed with; adding
+a tenant to those keys is churn that buys nothing and costs three dialects' worth of migration.
+
+Derived rather than eyeballed — every table that has a `tenant_id` and a primary key that omits
+it, from `migrations/postgres/001_schema.sql`:
+
+| table | primary key | class |
+|---|---|---|
+| `workflow_defs` | `(name, version)` | **user-chosen — in scope** |
+| `workflow_schedules` | `(name)` | **user-chosen — in scope** |
+| `workflow_tags` | `(workflow_name, tag)` | **user-chosen — in scope** |
+| `workflow_instances` | `(id)` | generated — leave |
+| `workflow_routing` | `(id)` | generated — leave |
+| `event_history` | `(workflow_id, step)` | generated — leave |
+| `workflow_signals` | `(workflow_id, signal_name)` | generated prefix — leave |
+| `workflow_promises` | `(workflow_id, promise_id)` | generated prefix — leave |
+| `workflow_update_requests` | `(workflow_id, update_name)` | generated prefix — leave |
+
+The last three are keyed on a workflow id first, so a name only has to be unique *within one
+workflow*, which is one tenant's by construction.
+
+#### Measured, not read — schedules collide on all three dialects
+
+`workflow_schedules` was not on §3.12's radar at all. Two tenants each creating a schedule
+called `nightly-report`, through the ordinary store API, on a per-tenant store apiece:
+
+```
+mssql: Violation of PRIMARY KEY constraint 'pk_workflow_schedules'.
+       Cannot insert duplicate key in object 'dbo.workflow_schedules'.
+       The duplicate key value is (nightly-report).
+```
+
+postgres and mysql fail the same way with their own wording. So this is not "theoretically
+shared" — one tenant naming a schedule takes that name away from every other tenant on the
+deployment, and the error they get names a constraint rather than the problem.
+
+#### The migration hazard, and it is the part that needs deciding before any SQL is written
+
+`workflow_defs` is referenced by three foreign keys on PostgreSQL and three on MySQL — and
+**zero on SQL Server**, which the earlier "three foreign keys per dialect" framing had wrong:
+
+    grep -rn 'REFERENCES workflow_defs' migrations/*/*.sql
+
+They come from `workflow_instances(def_name, def_version)`, `workflow_tags(workflow_name,
+version)` and `workflow_routing(workflow_name, target_version)`. All three referencing tables
+already carry `tenant_id`, so widening them is mechanical.
+
+**What is not mechanical is that `instance.tenant_id != def.tenant_id` is legal today.**
+`canAdoptDef` (`engine/def_ownership.go:62`) admits `""`, the default tenant, or the deployer —
+the adoption window §3.12 opened deliberately, so that the first redeploy after upgrading does
+not break for every tenant at once. Until a definition is adopted, any tenant may start
+workflows on it. Adding `tenant_id` to the foreign key therefore **breaks existing rows**: an
+instance owned by tenant A pointing at a definition owned by the default tenant stops
+satisfying the constraint.
+
+Three ways out, and the choice belongs in review rather than in a commit:
+
+1. **Fan out the definition per referencing tenant.** For each default-tenant definition, copy
+   the row once per distinct tenant that references it, then repoint. Definitions are immutable
+   once deployed, so the copies cannot diverge. Costs storage proportional to `wasm_bytes` ×
+   tenants, and is the only option that leaves the constraint fully enforced.
+2. **Adopt on the evidence.** Where every referencing instance shares one tenant, reassign the
+   definition to that tenant. Cheap and correct for the common single-tenant upgrade, and it
+   still needs option 1 or 3 for the genuinely-shared rows.
+3. **Drop the foreign keys and enforce the relationship in Go.** SQL Server already has no such
+   constraint and is not obviously worse for it, which is an argument this option gets for free
+   — the tree already runs one dialect this way.
+
+**Recommendation: 2 then 1** — adopt where unambiguous, fan out the remainder — because it
+makes the common case free and never leaves a row unconstrained. Option 3 should not be taken
+by accident just because MSSQL already lives there.
+
+#### Sequencing
+
+One table per PR, `workflow_defs` first because it is the one with foreign keys and therefore
+the one that settles the hazard above. `workflow_schedules` and `workflow_tags` are unreferenced
+and should be cheap once the pattern exists. Migration numbers are **not** reserved here: take
+the next free number above each dialect's high-water mark at the time of writing, per #563.
+
+**Do not expect the query sites to be the expensive part.** `workflow_defs` appears in 103
+non-test Go lines and 164 test lines (`grep -rn workflow_defs --include='*.go'`, 2026-09-02),
+but most already carry `tenant_id` in their predicates — §3.10, §3.11 and §3.12's writer fix
+went through them. The expensive part is the migration, and the count is a poor proxy for it.
+
+### 3.12 One tenant's deploy silently replaces another's workflow code — 🔵 **OVERWRITE CLOSED; THE NAMESPACE DECISION IS MADE** (WS-1, 2026-08-05; D7 2026-09-02)
 
 Found while fixing §3.10: the two-tenant test could not deploy a definition of the same name
 from both stores, and the reason it could not turned out to be worse than the inconvenience.
@@ -5688,7 +5784,9 @@ foreign keys per dialect and ~96 query sites and wants its own review:
   violates unique constraint`, which says nothing about what went wrong.
 - **What is not fixed:** two tenants still cannot each hold `order-processor`, and one
   tenant's definition is still readable by name from another. The namespace is shared; taking
-  a name is now loud instead of silent.
+  a name is now loud instead of silent. **Decided 2026-09-02 (D7): it becomes per-tenant**, and
+  the same rule covers two further tables this entry never mentioned. The work, and the
+  migration hazard that has to be settled before any SQL is written, are in §3.77.
 
 **The soft edge, stated rather than buried.** Every definition in every existing database is
 owned by the default tenant, so refusing those outright would break the first redeploy after
