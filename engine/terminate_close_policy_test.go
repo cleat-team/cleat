@@ -18,7 +18,7 @@ import (
 // missing call, not a broken policy.
 //
 // Found by TestParentCloseTerminateReleasesChildConcurrencyKeys' vacuity guard
-// (3.78), which used TerminateWorkflow as the obvious way to close a parent and
+// (3.80), which used TerminateWorkflow as the obvious way to close a parent and
 // caught the child sitting at "ready".
 func TestTerminateWorkflowEnforcesParentClosePolicy(t *testing.T) {
 	for _, backend := range registeredBackends {

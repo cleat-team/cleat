@@ -10465,7 +10465,25 @@ red before the one-line change and green after, with the other two arms unmoved 
 
 ---
 
-### 3.78 A closed parent's children keep their concurrency slots — ✅ **FIXED** (WS-2, 2026-09-02)
+### 3.80 A closed parent's children keep their concurrency slots — ✅ **FIXED** (WS-2, 2026-09-02)
+
+> **Renumbered from §3.78 to §3.80, 2026-09-02, because §3.78 was allocated twice** — this and
+> WS-1's "Cross-schema child workflows, removed" (#582), which landed first and is referenced
+> from `CHANGELOG.md`, `ABI.md`, the execution-design doc and §2.23, so it kept the number and
+> this one moved.
+>
+> **The "next free number above the highest in the file" rule did not prevent it, and could
+> not.** Both writers followed it: §3.77 was the highest, both took §3.78, and neither could see
+> the other's unmerged branch. The rule removes collisions between a writer and the *file*; it
+> does nothing about two writers reading the same file at the same time. #563 retired prefix
+> blocks for needing every writer to remember them — this is the residual failure of what
+> replaced them, and it is cheaper than the alternative rather than a reason to go back.
+>
+> What actually caught it was reading `git log --oneline` after merging and noticing two
+> subjects carrying the same section number. **Check the numbers in the merged log, not only in
+> the file you edited**, because your own file is exactly where a concurrent allocation is
+> invisible.
+
 
 `releaseWorkflowResources` states its own contract: it runs the two best-effort cleanups that
 follow *"every commit which takes a workflow out of the runnable set: completion, **failure**,
@@ -10509,7 +10527,7 @@ have shipped as a fix for a bug it never exercised.
 
 ### 3.79 `TerminateWorkflow` does not enforce the parent close policy — ✅ **FIXED** (WS-2, 2026-09-02)
 
-Found by §3.77's vacuity guard rather than by looking. `enforceParentClosePolicy` is called from
+Found by §3.80's vacuity guard rather than by looking. (This line said §3.77 until 2026-09-02 — a stale reference left by that section's own renumbering, pointing at an unrelated WS-1 item. Renumbering is where cross-references rot, so re-grep the old number after moving a section rather than fixing the ones you remember.) `enforceParentClosePolicy` is called from
 `FinalizeWorkflowSegment` (for `done`/`failed`) and from `adminForceResolve`. It is **not**
 called from `TerminateWorkflow`, on any dialect — so terminating a parent leaves its
 `TERMINATE`-policy children running, while force-completing the same parent fails them.
