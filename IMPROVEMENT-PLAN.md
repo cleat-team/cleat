@@ -2205,10 +2205,57 @@ into a failed workflow. `TestHTTPFetchStatusIsNotAnError` pins that `http.fetch`
 status *in its response*, so a 404 is a successful call that returned 404 and is not classified
 at all.
 
-**Still open: the richer taxonomy, and plugins.** `Retryable()` is one bit; `ErrorCode` carries
+~~**Still open: the richer taxonomy, and plugins.** `Retryable()` is one bit; `ErrorCode` carries
 seven values that still have no path into the event history, because
-`EventRecord.ErrNonRetryable` is a bool by design (see above). The streaming plugin family (`recordStreamError`) remains
-single-coded, and `PluginError` is still a bare string on replay.
+`EventRecord.ErrNonRetryable` is a bool by design (see above).~~ The streaming plugin family
+(`recordStreamError`) remains single-coded, and `PluginError` is still a bare string on replay.
+
+**Update (2026-09-02): the taxonomy has its path into history. Plugins are what is left.**
+
+`EventRecord.ErrCode` stores the class the caller supplied — `ErrorCode.String()`, written
+through `recordedErrorClass` at both sites that record a call failure
+(`durablecalls.go`'s retry loop and `heartbeats.go`'s cancellation path), carried in the
+`payload` JSONB under `error_code`, and round-tripped through compaction as `ec`.
+
+**No migration**, for the reason the bool needed none: `payload` is JSONB, so adding a key
+changes checksums only for newly written events and existing rows still verify.
+
+Three choices worth recording, because each is the kind that looks arbitrary later:
+
+- **A string, not the int.** `ErrUnknown` is the iota zero value, so an int field could not
+  distinguish "no ServiceCaller classified this" from "classified as unknown" — the exact
+  collision that kept `ErrNonRetryable` a bool. Empty means nobody said. It also matches
+  `workflow_instances.error_code`, which stores these same strings, so one vocabulary spans
+  both tables; and it survives a value being inserted into the `ErrorCode` iota block.
+- **It does not feed the guest-visible code.** `recordedFailureCode` still reads
+  `ErrNonRetryable` and nothing else. **The class and the bit can legitimately disagree**:
+  `DurableCallWithRetry`'s `nonRetryableErrors` list comes from the *guest's* retry policy
+  across the ABI, so an author can declare a substring non-retryable for an error whose
+  `CleatError` says `ErrTransient`. The bit is what the engine acted on, so the bit is what the
+  guest is told. Deriving the code from the class would change the retry behaviour of workflows
+  already in flight — this section's own determinism bug, reintroduced from the other side.
+- **So this is history and operator surface, not a guest-facing change.** Worth being plain
+  about: no workflow sees a different code than it did before. What changes is that the class
+  survives, so an operator can query for cancelled or permanent call failures instead of
+  substring-matching a message, and the guest-facing step is unblocked without a second schema
+  decision.
+
+Two comments were corrected in the same change, both true when written and false since:
+`callerrors.go` said *"no ServiceCaller in the repo returns anything but a bare fmt.Errorf"*
+— `dbServiceCaller` has returned `CleatError` since the update above it — and
+`EventRecord.ErrNonRetryable`'s comment said a richer taxonomy "would mean inventing values no
+caller supplies". **The first of those cost a session**: it reads as current, it is two
+paragraphs above the function it describes, and it argues convincingly for not doing the work
+this update just did.
+
+Tests, each verified by breaking the thing it covers: `TestAFreshCallRecordsTheClassTheCallerSupplied`
+drives the real retry path and reads the recorded event (the one that fails if the wiring is
+removed — every other test here still passes without it),
+`TestErrorClassSurvivesThePayloadRoundTrip` through the real encoder and decoder rather than
+`json.Unmarshal`, which would test a serialisation the engine never performs,
+`TestErrorClassSurvivesCompaction`, `TestLegacyEventHasNoClassAndKeepsItsRetryability`, and
+`TestRecordedClassDoesNotMoveTheGuestVisibleCode` — whose breaking check is a compile error
+rather than a red test, and says so.
 
 ---
 

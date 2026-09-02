@@ -388,6 +388,10 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 		Request:         requestJSON,
 		Err:             errMsg,
 		ErrNonRetryable: nonRetryable,
+		// The class the caller supplied, kept alongside the bit the engine
+		// acted on. IMPROVEMENT-PLAN 2.35: without this the taxonomy is
+		// collapsed at write time and replay can only re-derive the bit.
+		ErrCode: recordedErrorClass(lastErr),
 	}
 	s.recordEvent(rec)
 
