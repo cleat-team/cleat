@@ -58,6 +58,7 @@ type Engine struct {
 	defaultWorkflowTimeout time.Duration
 	deferPassBudget        time.Duration // total for one runDefers pass; see WithDeferPassBudget
 	nowFn                  func() int64  // wall clock for sleep-deadline decisions; see WithClock
+	workflowStartMs        int64         // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
 
 	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 
@@ -459,6 +460,40 @@ func (e *Engine) realNowMs() int64 {
 		return e.nowFn()
 	}
 	return time.Now().UnixMilli()
+}
+
+// WithWorkflowStartTime supplies the workflow row's created_at, in ms since
+// the Unix epoch, as the session's clock anchor when there is no history yet.
+//
+// A sleep decides by comparing its deadline against real time, and the anchor
+// that deadline is measured from is the last recorded event. A workflow whose
+// FIRST durable operation is a sleep has no such event, so without this the
+// anchor was re-seeded from the wall clock on every segment and the deadline
+// moved forward with it -- the workflow woke, re-executed, and re-suspended
+// forever. created_at is fixed, so the deadline stops moving.
+//
+// It also makes Now() deterministic for a fresh workflow's first steps, which
+// the wall-clock seed was not: two replays of the same empty history used to
+// produce different values.
+//
+// Zero leaves the previous behaviour, for embedders that have no such
+// timestamp to give.
+func WithWorkflowStartTime(ms int64) EngineOption {
+	return func(e *Engine) { e.workflowStartMs = ms }
+}
+
+// seedNowMs picks the session's starting virtual clock.
+//
+// Preference order, most to least deterministic: the first recorded event's
+// timestamp, then the workflow's created_at, then the process wall clock.
+func (e *Engine) seedNowMs(replayHistory []EventRecord) int64 {
+	if len(replayHistory) > 0 && replayHistory[0].TimestampMs > 0 {
+		return replayHistory[0].TimestampMs
+	}
+	if e.workflowStartMs > 0 {
+		return e.workflowStartMs
+	}
+	return nowMs.Load()
 }
 
 // WithClock overrides the wall clock DurableSleep compares deadlines against.

@@ -1668,6 +1668,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
 		engine.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),
 		engine.WithWorkflowID(wf.ID),
+		// Anchors the session clock when the workflow has no history yet.
+		// Without it a workflow whose first durable operation is a sleep has
+		// nothing to measure its deadline from, so the deadline is re-seeded
+		// from the wall clock every segment and never arrives -- it wakes,
+		// re-executes, and re-suspends forever. IMPROVEMENT-PLAN 3.67.
+		engine.WithWorkflowStartTime(wf.CreatedAt.UnixMilli()),
 		// B4: the same claim identity (w.id, wf.Generation) every terminal
 		// write below (ContinueAsNew, FinalizeWorkflowSegment) already
 		// fences on. Without these two, Engine.fencingEnabled() is false and
