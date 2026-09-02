@@ -4567,8 +4567,6 @@ dialects and was watched failing on each half of the fix separately.
 
 ### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
 
-### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
-
 `multi-db-ci.yml` prefixed all four of its test steps with `CGO_ENABLED=0`. Because
 `NewWasmtimeBackend` is behind `//go:build cgo`, that does not skip a check — it compiles the
 primary backend out and runs everything on the fallback. The workflow whose stated purpose is
