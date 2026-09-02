@@ -6125,7 +6125,7 @@ both are now decisions about *what a defer may do* rather than prerequisites for
 module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
 the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
-### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–3 DONE; 4–5 OPEN** (WS-3, 2026-08-05; plan 2026-09-01)
+### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 OPEN** (WS-3, 2026-08-05; phase 4 landed 2026-09-02)
 
 > **2026-09-01, phases 2–3.** A WASM defer now has a body and it runs. §3.70 records the design
 > and why the "one dispatch export" it was blocked on turned out to be unnecessary: the host
@@ -6136,6 +6136,38 @@ the unfenced path, which for a build with no wasmtime in it is unavoidable rathe
 > with the whole workflow context available. What remains for phase 4 is the case where the guest
 > never gets to run: cancellation, terminal failure, and the execution fence.
 >
+> **2026-09-02, phase 4 is DONE for the kill paths.** Shipped in #550 (the guest exports
+> `__cleat_run_deferred`) and #551 (the host calls it). A workflow stopped by the execution
+> fence, the instruction limit, or an unrecoverable runtime failure now runs its outstanding
+> defers before the host reports the failure. Covered end to end through `Engine.Execute` by
+> `engine/host_runs_defers_on_kill_test.go`, one test per kill mode.
+>
+> Three things about the implementation that were measured rather than assumed:
+>
+> | | |
+> |---|---|
+> | wall clock | always refreshed; `SetEpochDeadline` is relative, so without it the pass is interrupted immediately |
+> | fuel | refreshed only when metering is on, and **required** there — without `SetFuel` the runner traps on its first instruction, `ran=0` |
+> | memory ceiling | **deliberately not raised.** The export takes no arguments, so unlike an entry point it needs no scratch buffers, and an OOM-killed guest ran its defer with the ceiling untouched. Raising it would hand more memory to a guest that just proved it cannot be trusted with what it had. |
+>
+> The pass is bounded by `DefaultWasmtimeDeferBudget` (5s), tunable with
+> `WithWasmtimeDeferBudget`. It is extra execution granted to a workflow the fence already
+> stopped, so it is deliberately small next to the 30s instance timeout: the worst case a
+> runaway workflow can hold a worker grows by about a sixth rather than doubling.
+>
+> **What holds the "no double cleanup" property up is not what it looks like.** Two layers
+> prevent a workflow's cleanup running twice: the host only runs its pass on the kill paths,
+> and `_cleatRunDeferred` is idempotent. Measured — adding the host pass to the
+> `GuestReturnedError` branch leaves the control test PASSING, because idempotence absorbs it.
+> So the gating is defence in depth and guest-side idempotence is load-bearing. Deleting the
+> gating would fail no test; it is kept because relying on idempotence alone makes every
+> future defer body's re-runnability a correctness requirement.
+>
+> **Still open: phase 5, and cancellation/terminal-failure.** This covers workflows the host
+> KILLED mid-execution. A workflow cancelled or failed terminally between segments has no live
+> instance to re-enter at all, so it needs the replay-based path, which is phase 5 and belongs
+> with WS-2's crash-recovery record shape.
+
 > **2026-09-02, phase 4's fence case is buildable — measured, not argued.** A real Go SDK guest
 > killed mid-loop by the fence can be re-entered, runs guest code, and its outstanding defer runs
 > and reaches the host, with no production change required. §3.70's subsection "The fence case is

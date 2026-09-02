@@ -50,6 +50,20 @@ const DefaultWasmtimeTableElementsLimit = 8 * 1024 * 1024
 // leaves generous headroom while still bounding runaway instantiation.
 const DefaultWasmtimeInstancesLimit = 256
 
+// DefaultWasmtimeDeferBudget bounds the cleanup pass the host runs on a guest
+// it has just killed (IMPROVEMENT-PLAN 3.35 phase 4).
+//
+// This is EXTRA execution granted to a workflow the fence has already stopped,
+// so it has to be small enough not to undo the bound it is being granted
+// against. 5s next to the 30s DefaultWasmtimeExecutionTimeout raises the
+// worst case a workflow can hold a worker by about a sixth rather than
+// doubling it, and a cleanup pass is a handful of host calls -- releasing a
+// lock, refunding a charge -- not a workload.
+//
+// It is a wall-clock bound and it is the binding one: it stops a defer body
+// that loops forever exactly the way the fence stops an entry point that does.
+const DefaultWasmtimeDeferBudget = 5 * time.Second
+
 // wasmtimeLimits bundles the resource bounds applied to a wasmtime
 // execution. Zero/negative fields mean "use the backend's built-in
 // default" (see the Default* constants above) except instructionLimit,
@@ -61,6 +75,7 @@ type wasmtimeLimits struct {
 	memoryLimitBytes   int64
 	tableElementsLimit int64
 	instancesLimit     int64
+	deferBudget        time.Duration
 }
 
 // WasmtimeOption configures resource limits for a wasmtimeBackend, applied
@@ -105,4 +120,14 @@ func WithWasmtimeMemoryLimits(memoryBytes, tableElements, instances int64) Wasmt
 		l.tableElementsLimit = tableElements
 		l.instancesLimit = instances
 	}
+}
+
+// WithWasmtimeDeferBudget bounds the cleanup pass the host runs on a killed
+// guest. d <= 0 keeps DefaultWasmtimeDeferBudget.
+//
+// Raise it for workflows whose cleanup genuinely needs longer -- a defer that
+// makes several slow external calls -- knowing that the worst case a runaway
+// workflow can occupy a worker is the execution timeout plus this.
+func WithWasmtimeDeferBudget(d time.Duration) WasmtimeOption {
+	return func(l *wasmtimeLimits) { l.deferBudget = d }
 }
