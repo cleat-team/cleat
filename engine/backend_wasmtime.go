@@ -602,6 +602,51 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 				if limitErr := b.resourceLimitError(startErr, execTimeout); limitErr != nil {
 					return nil, fmt.Errorf("host: export %q: %w", entryPoint, limitErr)
 				}
+				// A NON-ZERO WASI exit is the guest dying, not finishing.
+				//
+				// The check above only recognises the two resource-limit trap
+				// codes. Everything else reaching here used to fall through to
+				// the `"ok"` below, and the case that matters is not
+				// hypothetical: when the Go runtime cannot grow the heap past
+				// the configured memory limit it does not trap at all. It
+				// prints a goroutine dump and calls proc_exit(2) from its fatal
+				// path. That is not a *wasmtime.Trap, so resourceLimitError
+				// returns nil, so an out-of-memory workflow was returned as
+				// Result: `"ok"` with a nil error — and the worker stored
+				// status='done'. Every step after the allocation silently never
+				// happened, with no error text anywhere to find it by.
+				//
+				// Measured 2026-09-02 through Engine.Execute against
+				// testdata/fencereentry's allocate_forever under a 64 MB limit:
+				// result="ok" err=<nil>. See IMPROVEMENT-PLAN §3.71.
+				//
+				// Only non-zero is a failure. proc_exit(0) is how EVERY healthy
+				// Go guest leaves — main() returns and the wasip1 runtime exits
+				// — which is the whole reason startErr was ignored here.
+				//
+				// Non-Go guests never had this hole: the direct-export path
+				// below returns its callErr unconditionally.
+				//
+				// Deliberately NOT widened to "any startErr is a failure". A
+				// non-resource trap that is not a proc_exit still falls through
+				// to `"ok"`, which is the same shape of hole. It is left alone
+				// because nothing has demonstrated a Go guest reaching it: Go
+				// recovers panics into cleat_complete, and its unrecoverable
+				// failures leave through proc_exit, which the check above now
+				// catches. Widening on the strength of an argument rather than
+				// a measurement is how the exit-0 path -- which every healthy
+				// guest depends on -- would get broken.
+				var wasmErr *wasmtime.Error
+				if errors.As(startErr, &wasmErr) {
+					if code, ok := wasmErr.ExitStatus(); ok && code != 0 {
+						return nil, fmt.Errorf(
+							"host: export %q: the guest exited with status %d without "+
+								"reporting a result; it was killed rather than finishing "+
+								"(a Go guest exits this way on an unrecoverable runtime "+
+								"failure such as out-of-memory or stack exhaustion): %w",
+							entryPoint, code, startErr)
+					}
+				}
 			}
 			return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 		}
