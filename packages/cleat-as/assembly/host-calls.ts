@@ -1304,7 +1304,15 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Register cleanup to run on workflow exit.
+   * Record with the host that a cleanup action exists.
+   *
+   * This registers a DESCRIPTION and nothing else. The host stores it in the
+   * workflow's deferrals map; **no code anywhere runs it**, because there is
+   * no body to run. This doc comment said "register cleanup to run on workflow
+   * exit" until IMPROVEMENT-PLAN §3.73, which was not true of any
+   * AssemblyScript workflow ever written.
+   *
+   * Use {@link deferFunc} for cleanup that actually runs.
    *
    * @param description - Human-readable description of the deferred action.
    * @returns A DurableResult containing the defer ID on success.

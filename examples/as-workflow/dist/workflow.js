@@ -13,12 +13,20 @@ export async function instantiate(module, imports = {}) {
         })();
       },
       cleat_call(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen) {
-        // ../../packages/cleat-as/assembly/host-calls/import_cleat_call(i32, i32, i32, i32, i32, i32, i32, i32) => i64
+        // ~lib/@cleat/sdk/assembly/host-calls/import_cleat_call(i32, i32, i32, i32, i32, i32, i32, i32) => i64
         return cleat_call(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen) || 0n;
       },
       cleat_poll_cancellation(reasonPtr, reasonMaxLen) {
-        // ../../packages/cleat-as/assembly/host-calls/import_cleat_poll_cancellation(i32, i32) => i64
+        // ~lib/@cleat/sdk/assembly/host-calls/import_cleat_poll_cancellation(i32, i32) => i64
         return cleat_poll_cancellation(reasonPtr, reasonMaxLen) || 0n;
+      },
+      cleat_defer(descPtr, descLen, deferIdPtr, deferIdMaxLen) {
+        // ~lib/@cleat/sdk/assembly/host-calls/import_cleat_defer(i32, i32, i32, i32) => i64
+        return cleat_defer(descPtr, descLen, deferIdPtr, deferIdMaxLen) || 0n;
+      },
+      cleat_sleep(durationMs) {
+        // ~lib/@cleat/sdk/assembly/host-calls/import_cleat_sleep(i64) => i64
+        return cleat_sleep(durationMs) || 0n;
       },
     }, Object.assign(Object.create(globalThis), imports.env || {})),
   };
@@ -26,7 +34,7 @@ export async function instantiate(module, imports = {}) {
   const memory = exports.memory || imports.env.memory;
   const adaptedExports = Object.setPrototypeOf({
     __durable_inner_place_order(h, input) {
-      // assembly/index/__durable_inner_place_order(../../packages/cleat-as/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      // assembly/index/__durable_inner_place_order(~lib/@cleat/sdk/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
       h = __retain(__lowerInternref(h) || __notnull());
       input = __lowerString(input) || __notnull();
       try {
@@ -36,11 +44,31 @@ export async function instantiate(module, imports = {}) {
       }
     },
     __durable_inner_cancel_order(h, input) {
-      // assembly/index/__durable_inner_cancel_order(../../packages/cleat-as/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      // assembly/index/__durable_inner_cancel_order(~lib/@cleat/sdk/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
       h = __retain(__lowerInternref(h) || __notnull());
       input = __lowerString(input) || __notnull();
       try {
         return __liftString(exports.__durable_inner_cancel_order(h, input) >>> 0);
+      } finally {
+        __release(h);
+      }
+    },
+    __durable_inner_defer_order(h, input) {
+      // assembly/index/__durable_inner_defer_order(~lib/@cleat/sdk/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      h = __retain(__lowerInternref(h) || __notnull());
+      input = __lowerString(input) || __notnull();
+      try {
+        return __liftString(exports.__durable_inner_defer_order(h, input) >>> 0);
+      } finally {
+        __release(h);
+      }
+    },
+    __durable_inner_defer_suspend(h, input) {
+      // assembly/index/__durable_inner_defer_suspend(~lib/@cleat/sdk/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      h = __retain(__lowerInternref(h) || __notnull());
+      input = __lowerString(input) || __notnull();
+      try {
+        return __liftString(exports.__durable_inner_defer_suspend(h, input) >>> 0);
       } finally {
         __release(h);
       }

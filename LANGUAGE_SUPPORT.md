@@ -150,12 +150,20 @@ provisioned.
 - Still true and worth keeping in mind: AssemblyScript is NOT TypeScript. It's
   a different language that looks like TypeScript. Existing TS code will not
   compile as-is.
+- Workflows must import the SDK as `@cleat/sdk`, not by relative path. Both
+  resolve to the same files, but `asc` treats them as two distinct modules with
+  two distinct `HostCalls` types — and, since §3.73, two distinct defer
+  registries, so a defer registered through one would be drained from the
+  other and silently never run. The generated wrapper calls `runDeferred(h)`,
+  which makes that case a compile error rather than a silent one.
 
 **Measured 2026-08-06** (per `tiers.yaml`'s `sdk-assemblyscript` entry):
 `TestAssemblyScriptWorkflowExecute` passes on wasmtime —
 `inventory.Reserve -> payments.Charge -> shipping.CreateShipment ->
 notifications.SendEmail`, four calls in order — and the SDK's own as-pect
-suite is 106/106 across three spec files. Making the test suite able to fail
+suite is 113/113 across four spec files (re-derive with
+`cd packages/cleat-as && npm test`; measured 2026-09-02, was 106/106 across
+three before §3.73 added `defer.spec.ts`). Making the test suite able to fail
 (rather than degrading every failure to `t.Skipf`, as it did before #350)
 found two real defects the same day: no data flowed between the saga's
 steps (a field-naming mismatch, `reservationID` vs `reservation_id` etc.,

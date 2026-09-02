@@ -3,18 +3,32 @@ declare namespace __AdaptedExports {
   export const memory: WebAssembly.Memory;
   /**
    * assembly/index/__durable_inner_place_order
-   * @param h `../../packages/cleat-as/assembly/host-calls/HostCalls`
+   * @param h `~lib/@cleat/sdk/assembly/host-calls/HostCalls`
    * @param input `~lib/string/String`
    * @returns `~lib/string/String`
    */
-  export function __durable_inner_place_order(h: __Internref4, input: string): string;
+  export function __durable_inner_place_order(h: __Internref5, input: string): string;
   /**
    * assembly/index/__durable_inner_cancel_order
-   * @param h `../../packages/cleat-as/assembly/host-calls/HostCalls`
+   * @param h `~lib/@cleat/sdk/assembly/host-calls/HostCalls`
    * @param input `~lib/string/String`
    * @returns `~lib/string/String`
    */
-  export function __durable_inner_cancel_order(h: __Internref4, input: string): string;
+  export function __durable_inner_cancel_order(h: __Internref5, input: string): string;
+  /**
+   * assembly/index/__durable_inner_defer_order
+   * @param h `~lib/@cleat/sdk/assembly/host-calls/HostCalls`
+   * @param input `~lib/string/String`
+   * @returns `~lib/string/String`
+   */
+  export function __durable_inner_defer_order(h: __Internref5, input: string): string;
+  /**
+   * assembly/index/__durable_inner_defer_suspend
+   * @param h `~lib/@cleat/sdk/assembly/host-calls/HostCalls`
+   * @param input `~lib/string/String`
+   * @returns `~lib/string/String`
+   */
+  export function __durable_inner_defer_suspend(h: __Internref5, input: string): string;
   /**
    * assembly/index/place_order
    * @param argsPtr `usize`
@@ -33,10 +47,33 @@ declare namespace __AdaptedExports {
    * @returns `i64`
    */
   export function cancel_order(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
+  /**
+   * assembly/index/defer_order
+   * @param argsPtr `usize`
+   * @param argsLen `i32`
+   * @param outPtr `usize`
+   * @param maxOutLen `i32`
+   * @returns `i64`
+   */
+  export function defer_order(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
+  /**
+   * assembly/index/defer_suspend
+   * @param argsPtr `usize`
+   * @param argsLen `i32`
+   * @param outPtr `usize`
+   * @param maxOutLen `i32`
+   * @returns `i64`
+   */
+  export function defer_suspend(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
+  /**
+   * assembly/index/__cleat_run_deferred
+   * @returns `i64`
+   */
+  export function __cleat_run_deferred(): bigint;
 }
-/** ../../packages/cleat-as/assembly/host-calls/HostCalls */
-declare class __Internref4 extends Number {
-  private __nominal4: symbol;
+/** ~lib/@cleat/sdk/assembly/host-calls/HostCalls */
+declare class __Internref5 extends Number {
+  private __nominal5: symbol;
   private __nominal0: symbol;
 }
 /** Instantiates the compiled WebAssembly module with the given imports. */

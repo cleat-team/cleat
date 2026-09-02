@@ -17,7 +17,9 @@ import {
   HostCalls,
   cleatEntry,
   CleatCallOutcome,
-} from "../../../packages/cleat-as/assembly/index";
+  deferFunc,
+  isWorkflowSuspended,
+} from "@cleat/sdk";
 
 // ---------------------------------------------------------------------------
 // Manual JSON helpers
@@ -200,4 +202,76 @@ export function cancel_order(h: HostCalls, input: string): string {
   }
 
   return '{"status":"reserved"}';
+}
+
+// ---------------------------------------------------------------------------
+// deferOrder — defer bodies actually run (IMPROVEMENT-PLAN §3.73)
+//
+// `h.defer(description)` registers a DESCRIPTION with the host and nothing
+// else; no code anywhere runs it. `deferFunc` is the one with a body, and the
+// generated wrapper drains the table when this returns, so the calls below
+// arrive in the order body, second, first — LIFO, because a defer releases
+// what the defer before it acquired.
+//
+// The bodies are top-level functions taking an explicit payload rather than
+// closures, which is this SDK's existing idiom (see `saga.ts`) and is forced
+// by `--runtime stub`.
+// ---------------------------------------------------------------------------
+
+/** First defer body. Runs LAST, because it was registered first. */
+function notifyFirst(h: HostCalls, payload: string): void {
+  h.cleatCall("notifications", "first", payload);
+}
+
+/** Second defer body. Runs FIRST, because it was registered last. */
+function notifySecond(h: HostCalls, payload: string): void {
+  h.cleatCall("notifications", "second", payload);
+}
+
+@cleatEntry("DeferOrder")
+export function defer_order(h: HostCalls, input: string): string {
+  let userID: string = extractStringField(input, "userID");
+
+  // The state each body needs travels in its payload, not in a capture.
+  deferFunc(h, "notify first", notifyFirst, '{"user":"' + userID + '"}');
+  deferFunc(h, "notify second", notifySecond, "{}");
+
+  h.cleatCall("inventory", "body", "{}");
+  return '{"deferred":true}';
+}
+
+// ---------------------------------------------------------------------------
+// deferSuspend — defers do NOT run when the workflow suspends
+//
+// A suspended workflow has not exited. Its defers are still pending, and
+// firing them at the first sleep would release locks a workflow that is about
+// to continue still holds.
+//
+// This SDK needs that stated as a test more than the others do. Go, Rust,
+// Python and Java suspend by unwinding, so their drain sits on a path the
+// unwind skips and gets the ordering for free. AssemblyScript has no
+// exceptions: suspension is a flag, the entry point returns normally either
+// way, and the guard in the generated wrapper is the only thing keeping the
+// defer from running. Move the drain one line earlier and this workflow
+// releases the lock it is still holding.
+// ---------------------------------------------------------------------------
+
+@cleatEntry("DeferSuspend")
+export function defer_suspend(h: HostCalls, input: string): string {
+  deferFunc(h, "must not run while suspended", notifyFirst, '{"user":"suspended"}');
+
+  h.cleatSleep(60);
+
+  // Returning early on the flag is how an AssemblyScript workflow suspends.
+  // There is no exception to unwind on, so a suspending host call sets the
+  // flag and RETURNS -- the rest of the function body runs unless the author
+  // stops it. `Saga.run` does exactly this check after every step. Without it
+  // the line below would execute during the suspending segment and be
+  // replayed on the next one.
+  if (isWorkflowSuspended()) {
+    return "";
+  }
+
+  h.cleatCall("inventory", "after_sleep", "{}");
+  return '{"slept":true}';
 }
