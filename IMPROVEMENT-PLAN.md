@@ -8737,7 +8737,7 @@ delete it; write-only persisted state is a trap for the next reader.**
 
 Re-derive: `go test ./engine/ -run TestDeferRegisteredBeforeASuspension -count=1 -v`
 
-### 3.67 A `cleat_sleep` at the replay frontier never resumes — 🔴 **OPEN, severity high** (WS-3, found 2026-09-01)
+### 3.67 A `cleat_sleep` at the replay frontier never resumes — 🔴 **OPEN, CONFIRMED, severity high** (WS-3, found and confirmed 2026-09-01)
 
 Found while building §3.66's regression test, which had to route around it.
 
@@ -8796,16 +8796,68 @@ the code, not yet measured against a running worker** — see below.
 (`DurableSleep(30 days)` then `ContinueAsNew`) and `:123` (a `DurableSleep(24h)` loop with
 `PollCancellation`) both put a sleep exactly at the frontier.
 
-#### What is NOT established
+#### Confirmed with a real guest, and with a real store
 
-Stated plainly because the conclusion is large. The evidence is the engine-level mechanism plus
-WAT probes exercising the real `Engine.Execute`/`Engine.Replay` path. **It has not been
-reproduced with a compiled Go-SDK guest driven by a real `cleat-worker` against a database.**
-That is the confirmation to run before acting on the severity, and it is the one that would also
-settle the busy-loop claim. The SDK panics `ErrSuspend` on a suspend status
-(`cleat/runtime.go:26-31`), which is the same unwind the probes model, and `DurableSleep`'s
-logic reads no guest state — so a guest is not expected to change the outcome, but "not
-expected to" is not a measurement.
+The first write-up of this section listed what was *not* established: it had been measured only
+with hand-written WAT guests on the no-backend wazero path. Both gaps are now closed.
+
+**A real compiled Go SDK guest, through the wasmtime backend** -- the routing the worker
+actually uses. The fixture is an ordinary workflow:
+
+```go
+first, err := h.DurableCall("stepA", "First", ...)
+h.DurableSleep(10 * time.Second)
+second, err := h.DurableCall("stepB", "Second", ...)
+return "first=" + first + " second=" + second, nil
+```
+
+Built with `cleat build --target go -o <dir> <package>`, then driven through `Engine.Execute`
+plus three `Engine.Replay` segments, each fed the previous segment's returned history:
+
+| segment | events | suspended | SuspendUntil | host calls made |
+|---|---|---|---|---|
+| 1 (Execute) | 1 | true | `20:51:09.871` | `stepA.First` |
+| 2 (Replay) | 1 | true | `20:51:09.871` | none |
+| 3 (Replay) | 1 | true | `20:51:09.871` | none |
+| 4 (Replay) | 1 | true | `20:51:09.871` | none |
+
+History byte-identical from segment 2 on. **`stepB.Second` never ran, and the result was `""`
+every time.** Reproduced independently in two trees.
+
+**Build trap, recorded because it costs an hour:** `cleat build` writes a throwaway `go.mod` into
+the output directory and runs `go build .` there, so the output directory must be *outside* this
+repo's module tree -- otherwise Go's `go.work` discovery walks up, finds the repo's `go.work`,
+and fails with `main module ... does not contain package ...`. Use `t.TempDir()`.
+
+**The busy-loop half, against a real Postgres store.** Driving the real
+`ClaimWorkflows` / `LoadEventHistory` / `FinalizeWorkflowSegment` in the loop
+`cmd/cleat-worker/setup.go` runs, polling at 200ms:
+
+| segment | wait to claim | `suspend_until` |
+|---|---|---|
+| 1 | 2.3ms | now + 10.18s -- a legitimate future timestamp |
+| 2 | **9.93s** -- correctly waited for the real sleep | same absolute timestamp, now in the past |
+| 3 | 2.3ms | same |
+| 4 | 2.2ms | same |
+| 5 | 2.2ms | same |
+
+**Segment 2 is the control that makes the rest mean something:** the first wake is legitimate and
+the sleep does work once. What never happens is *progress*. From segment 3 on, `next_wake_at` is
+rewritten to the same already-elapsed instant every time, so the claim predicate
+`status='ready' AND next_wake_at <= now()` matches immediately and forever. The precise
+statement is therefore not "the workflow never wakes" but **"it wakes, re-executes to the same
+suspend point, and re-arms itself in the past"** -- a hot re-claim loop burning CPU and DB writes,
+not a quiet stall. Reproduced across three runs, each ~11-13s wall-clock, which matches the
+intentional 10s sleep and confirms real time was exercised rather than a short-circuited path.
+
+*Evidence level:* measured, against the real fenced claim/finalize SQL -- but driven by manual
+store calls mirroring the worker's per-segment flow, **not** the `cleat-worker` daemon binary, so
+goroutine scheduling, poll backoff and NOTIFY/LISTEN wakeup are not exercised.
+
+**No regression test is committed for this.** A test asserting today's behaviour would pass
+because the product is broken and go red when it is fixed. The fixture and command above rebuild
+it in a couple of minutes; the test to commit is the inverted one, asserting that `stepB.Second`
+*does* run, and it belongs with the fix.
 
 #### Why the obvious fix is not the whole fix
 
