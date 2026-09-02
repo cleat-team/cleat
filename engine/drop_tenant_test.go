@@ -34,6 +34,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
@@ -54,21 +55,38 @@ func apply032DropTenantMigration(t *testing.T, db *sql.DB) {
 	}
 }
 
-// resetToOriginal001DropTenant re-applies 001_schema.sql's admin.drop_tenant
-// directly, undoing 032's CREATE OR REPLACE regardless of database history.
+// resetToOriginal001DropTenant reinstalls 001_schema.sql's admin.drop_tenant,
+// undoing 032's CREATE OR REPLACE regardless of database history.
 //
 // testutil.applyPostgresSchemaFile (behind SetupFullSchema) fingerprints the
-// combined contents of the files it applies and skips re-running them
-// against a database where that exact fingerprint was already recorded --
-// 032 is not one of those files, so once 032 has been applied to a given
-// CLEAT_TEST_POSTGRES database (as it is here, by
-// TestDropTenant_DeletesAllTenantData in the same package, and by this
-// stream's own manual verification against the assigned test database --
-// SetupFullSchema alone can never revert it back to the pre-032
-// admin.drop_tenant. TestDropTenant_OldVersionLeavesDataBehind needs
-// exactly that pre-032 version to pin down the bug this migration fixes,
-// so it calls this helper explicitly rather than relying on file-application
-// order within the test binary.
+// combined contents of the files it applies and skips re-running them against a
+// database where that exact fingerprint was already recorded -- 032 is not one
+// of those files, so once 032 has been applied to a given CLEAT_TEST_POSTGRES
+// database, SetupFullSchema alone can never revert it back to the pre-032
+// admin.drop_tenant. TestDropTenant_OldVersionLeavesDataBehind needs exactly
+// that pre-032 version to pin down the bug 032 fixes, so it calls this helper
+// explicitly rather than relying on file-application order within the binary.
+//
+// It extracts ONLY that one function, and that is the whole point.
+//
+// This used to `db.Exec` the entire contents of 001_schema.sql. 001 defines
+// five functions with CREATE OR REPLACE, so re-applying it reverted every one
+// of them -- and two of the five have later migrations that fix them. The
+// collateral one was cleat.assert_tenant_set: 034 makes it treat an empty
+// tenant id like an unset one, and re-applying 001 put the pre-034 body back
+// while leaving version 34 recorded in schema_migrations. No migration run
+// repairs that, because the runner only applies versions it has not recorded.
+//
+// The result was a suite that poisoned its own database. Measured 2026-09-02:
+// a full `go test ./engine/` run finished green and left assert_tenant_set on
+// the 001 body, so the NEXT run failed TestAssertTenantSetRejectsEmptyStringLikeNull
+// with "invalid input syntax for type uuid" -- a tenant/RLS failure with no
+// connection to the test that caused it, appearing and disappearing depending
+// on what had run against that database before. Re-derive the blast radius with
+//
+//	grep -n 'CREATE OR REPLACE FUNCTION' migrations/postgres/001_schema.sql
+//
+// and check each name for later definitions before widening this again.
 func resetToOriginal001DropTenant(t *testing.T, db *sql.DB) {
 	t.Helper()
 	path := filepath.Join("..", "migrations", "postgres", "001_schema.sql")
@@ -76,9 +94,47 @@ func resetToOriginal001DropTenant(t *testing.T, db *sql.DB) {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	if _, err := db.Exec(string(data)); err != nil {
-		t.Fatalf("re-apply %s: %v", path, err)
+	body := extractPlpgsqlFunction(t, string(data), "admin.drop_tenant")
+	if _, err := db.Exec(body); err != nil {
+		t.Fatalf("reinstall 001's admin.drop_tenant: %v", err)
 	}
+}
+
+// extractPlpgsqlFunction returns the single CREATE OR REPLACE FUNCTION block
+// for name from sql, from its CREATE line to the $$ LANGUAGE ... ; that ends
+// it.
+//
+// It fails the test rather than returning something partial. A silently empty
+// or truncated extraction here would leave the post-032 admin.drop_tenant in
+// place, and TestDropTenant_OldVersionLeavesDataBehind -- whose whole job is to
+// show the PRE-032 function losing data -- would then quietly assert that the
+// fixed function is broken, or pass for the wrong reason.
+func extractPlpgsqlFunction(t *testing.T, sql, name string) string {
+	t.Helper()
+	marker := "CREATE OR REPLACE FUNCTION " + name
+	start := strings.Index(sql, marker)
+	if start < 0 {
+		t.Fatalf("no %q in 001_schema.sql; it was renamed or removed, and this "+
+			"helper silently reinstalls nothing without this check", marker)
+	}
+	rest := sql[start:]
+	end := strings.Index(rest, "$$ LANGUAGE plpgsql")
+	if end < 0 {
+		t.Fatalf("found %q but no terminating \"$$ LANGUAGE plpgsql\"; the function "+
+			"body's shape changed", marker)
+	}
+	term := strings.Index(rest[end:], ";")
+	if term < 0 {
+		t.Fatalf("found %q but its LANGUAGE clause has no terminating semicolon", marker)
+	}
+	block := rest[:end+term+1]
+	if strings.Count(block, "CREATE OR REPLACE FUNCTION") != 1 {
+		t.Fatalf("the extracted block for %q contains %d function definitions, want 1 "+
+			"-- extracting more than one is how this helper reverted migrations it "+
+			"was never meant to touch", name,
+			strings.Count(block, "CREATE OR REPLACE FUNCTION"))
+	}
+	return block
 }
 
 // cleanupDropTenantExtras deletes any rows this file's fixtures may have
