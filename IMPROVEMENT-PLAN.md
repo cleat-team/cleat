@@ -9200,10 +9200,29 @@ after it unrun, and on resume the whole set runs again from the top. Durable cal
 replay from history rather than re-executing, so this is ordinary replay semantics, but a defer's
 non-durable side effects can repeat.
 
-**Left behind, and the next thing to fix:** the host-side `cleat_defer_<id>` invocation is now
-redundant for Go guests and logs `defer execution failed … unknown entry point` for a defer that
-in fact ran. The log line itself is not new — it arrived with the fix in this section's last
-paragraph, which turned the host's silent false success into a visible failure — but it is now
-misleading rather than merely noisy. Retiring that path is a separate change with its own tests
-(`engine/defer_runs_once_test.go` pins the current contract, including that a defer the live
-module cannot offer must still be attempted).
+#### The host now runs defers only for a guest that never ran its own — done
+
+The invocation left behind above logged `defer execution failed … unknown entry point` for a
+defer that had just run. Worse than the silence it replaced: an operator reading it concludes
+their cleanup did not happen, and the log is the only evidence they have.
+
+The rule is now one line. **Reaching `cleat_complete` means the guest came out through its entry
+point wrapper, and that wrapper ran the defer bodies.** So:
+
+- `Engine.executeWithBackend`'s error branch skips the defer pass when `callErr` is a
+  `*GuestReturnedError` — the existing marker for "the guest stopped cleanly and said it had
+  failed" (§3.23), already computed three lines below for the trap-vs-error distinction.
+- The worker's success-path pass is **deleted**. `finalStatus == "done"` means the guest
+  completed, so the condition was always false — and `scripts/check-test-only-code.sh` said so,
+  refusing the gated version because it left `runDefers` reachable only from tests. Its fence
+  test went with it: `TestDeferPassIsBoundedInAggregate` covers the same property at the layer
+  that owns `RunDefer`, with three runaway defers instead of one.
+- Trap, fence kill and timeout are untouched. Nothing ran those guests' defers, so the host's
+  pass is the only chance they have and its failure log is a true statement.
+
+The rule covers every SDK rather than special-casing Go: the other four have no defer bodies at
+all, so "the host has nothing to add" holds for them for a different reason.
+
+Both halves are mutation-tested. Suppressing the pass unconditionally fails the trapped-guest
+control; leaving it unconditional fails the regression test with the false log it was written
+for.
