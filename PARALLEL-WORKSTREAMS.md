@@ -151,8 +151,24 @@ CLEAT_TEST_MYSQL='root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true'
 CLEAT_TEST_MSSQL='sqlserver://sa:CleatTest123!@localhost:1433?database=cleat'
 ```
 
+**The DSN block above is WS-1's, and the credentials are not uniform across the three
+sandboxes** (recorded 2026-09-02). Substituting your stream's ports into it is not enough: the
+PostgreSQL container on `5432` is `postgres:postgres`, the ones on `5433` and `5434` are
+`cleat:cleat`, and SQL Server needs `&encrypt=disable` under current Go. Both facts were
+already written down in `WS2-STATUS.md`, which is the point — **read your own stream's status
+doc before standing the databases up**, not after a red baseline sends you looking. A session
+on 2026-09-02 rediscovered four documented environment facts the expensive way, including the
+`-p 1` rule two paragraphs below, by running a suite concurrently with its own falsification
+tests and having to throw the result away. The numbers live in the per-stream status docs and
+deliberately are not restated here.
+
 `go test ./engine/` takes ~21 s with Postgres alone and ~50 s with all three — **check that
 delta**, because an unset DSN skips its dialect silently and the suite still prints `ok`.
+
+**One stream's SQL Server cannot run the repo's migrations, so a "three-dialect" claim is worth
+checking per sandbox.** WS-2's container on `1434` is azure-sql-edge (SQL Server 15.0), which
+lacks the two-argument `ISJSON(payload, VALUE)` that `migrations/mssql/011` requires; WS-1's
+and WS-3's are real SQL Server 2022. Measured, with the probe and the fix, in `WS2-STATUS.md`.
 
 **A name in that table is not unique across docker contexts, and 2026-09-02 there are two
 containers called `cleat-ws1-mssql`** — one in the `colima-cleat-ws1` profile on `1433`, which
