@@ -10507,7 +10507,7 @@ all** — only `FinalizeWorkflowSegment` and `adminForceResolve` do. Without tha
 assertion would have passed for the wrong reason, on an unfixed engine, and this section would
 have shipped as a fix for a bug it never exercised.
 
-### 3.79 `TerminateWorkflow` does not enforce the parent close policy — 🔴 **OPEN, not yet investigated** (WS-2, 2026-09-02)
+### 3.79 `TerminateWorkflow` does not enforce the parent close policy — ✅ **FIXED** (WS-2, 2026-09-02)
 
 Found by §3.77's vacuity guard rather than by looking. `enforceParentClosePolicy` is called from
 `FinalizeWorkflowSegment` (for `done`/`failed`) and from `adminForceResolve`. It is **not**
@@ -10517,11 +10517,39 @@ called from `TerminateWorkflow`, on any dialect — so terminating a parent leav
 Measured 2026-09-02: a child of a parent closed with `TerminateWorkflow` stayed `ready`; the same
 child under `AdminForceComplete` went to `failed`.
 
-**Not yet a defect claim.** Two readings and they need different fixes: either terminate is
-supposed to close children like every other terminal path and the omission is a bug, or
-terminate is deliberately the operator's "stop this one workflow" verb and the close policy is
-for the workflow's own completion. The second is coherent — but nothing says so, and the
-inconsistency with `adminForceResolve`, which *is* an operator verb and does enforce it, is the
-argument against. **Settle which before writing code**, and check `docs/` and the SDK's
-`parent_close_policy` documentation for a stated intent rather than inferring one from the call
-sites.
+~~**Not yet a defect claim.**~~ **Settled the same day, and it is a bug.** The two readings were:
+terminate is supposed to close children like every other terminal path, or terminate is
+deliberately the operator's "stop this one workflow" verb and the close policy is for the
+workflow's own completion.
+
+The instruction was to check for *stated* intent rather than infer it from the call sites. The
+documentation answers it, though not unanimously — which is the reason it was worth reading
+rather than guessing:
+
+| source | says |
+|---|---|
+| `docs/contributor/design/cleat-execution-design.md:1830` | the policy governs what happens "when the parent **completes or fails**" — the narrow reading, and the only support for the second interpretation |
+| same doc, `:1926` | *"`enforceParentClosePolicy` runs on parent **terminal transition**"* — and terminate is one |
+| same doc, `:1932` | the design's stated goal: *"children are cancelled with their parent (**preventing orphan workflows**)"* |
+| same doc, `:1830` | the model is *"matching Temporal's"*, and Temporal applies parent close policy on termination |
+
+**The deciding argument is internal consistency rather than any of those.** `adminForceResolve`
+is an operator verb, on an unclaimed workflow, setting a terminal status with a direct `UPDATE`
+— the same shape as `TerminateWorkflow` in every respect the second reading depends on — and it
+enforces the policy. Two paths that differ in no stated way behaved differently, and nothing in
+the tree explained why.
+
+Counter-evidence was looked for and not found: no test asserted that terminate leaves children
+alone. `TestEnforceParentClosePolicy` closes its parent with `CompleteWorkflow`, so it covers
+the policy and says nothing about this path.
+
+**Fixed** by calling `enforceParentClosePolicy` after the terminal commit on all three dialects,
+beside the `releaseWorkflowResources` call already there.
+`TestTerminateWorkflowEnforcesParentClosePolicy` asserts all three policies at once, so a fix
+that cascades to *everything* cannot pass — ABANDON is the control. Red before, green after;
+removing the call from PostgreSQL alone fails only the PostgreSQL arm.
+
+**This is a behaviour change, not only a fix.** Terminating a parent now fails its `TERMINATE`
+children and flags its `REQUEST_CANCEL` children, where before it did neither. That is what the
+design says should happen, and it removes the orphan the policy exists to prevent — but a
+deployment relying on terminate being narrow will see children close that did not close before.

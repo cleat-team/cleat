@@ -1148,6 +1148,14 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 		return fmt.Errorf("terminate workflow commit: %w", err)
 	}
 	releaseWorkflowResources(s.log(), s, workflowID)
+	// IMPROVEMENT-PLAN 3.79. Terminate is a terminal transition, and the close
+	// policy is what stops a closed parent leaving orphans behind. Every other
+	// terminal path enforces it -- FinalizeWorkflowSegment for done/failed, and
+	// adminForceResolve, which is an operator verb on an unclaimed workflow
+	// exactly like this one. This path did not, so terminating a parent left
+	// its TERMINATE children running while force-completing the same parent
+	// failed them, with nothing recording why the two differed.
+	s.enforceParentClosePolicy(context.Background(), workflowID)
 	return nil
 }
 
