@@ -9391,3 +9391,66 @@ So phase 4 does not need a per-exit design. **One mechanism covers every case th
 can actually reach**, which is a materially simpler problem than the one this section was
 written to scope. What remains is the host deciding to make the call, a named defer-runner
 export to call, and a bounded budget for it.
+
+---
+
+### 3.71 A workflow killed by the memory limit was recorded as having succeeded — ✅ **FIXED** (WS-3, 2026-09-02)
+
+**Severity: silent wrong status, no error text anywhere.** A workflow that the Go runtime killed
+for exceeding the configured memory limit came back from `Engine.Execute` as
+`result="ok", err=nil`. The worker stores `status='done'`. Every step after the allocation never
+ran, nothing retries it, and there is no error recorded to find it by.
+
+Measured 2026-09-02 through `Engine.Execute`, `testdata/fencereentry`'s `allocate_forever` under
+`WithWasmtimeMemoryLimits(64<<20, -1, -1)`:
+
+| | before | after |
+|---|---|---|
+| `result` | `"ok"` | `""` |
+| `err` | `<nil>` | `the guest exited with status 2 without reporting a result` |
+
+Re-derive: `go test ./engine/ -run 'TestAGuestKilledByTheMemoryLimit|TestAHealthyGuestStillSucceeds'`
+
+#### Why the existing guard missed it
+
+The Go-on-wasmtime branch ignores the error from `_start` on purpose: `proc_exit` is how every
+healthy Go guest leaves — `main()` returns and the wasip1 runtime exits — so a non-nil `startErr`
+is the *normal* case. Before returning `"ok"` it asked `resourceLimitError` whether this was a
+fence kill or fuel exhaustion.
+
+That question is too narrow, and the case it misses is the one that matters. **When the Go
+runtime cannot grow the heap past the limit it does not trap at all.** It prints a goroutine dump
+and calls `proc_exit(2)` from its fatal path. That is not a `*wasmtime.Trap`, so
+`resourceLimitError` returns nil, so the guest fell through to `"ok"`.
+
+The fix reads the WASI exit status — `(*wasmtime.Error).ExitStatus()` — and treats **non-zero**
+as the guest having been killed rather than having finished.
+
+#### Notes for whoever touches this next
+
+**Only non-zero.** `proc_exit(0)` is every healthy Go guest, so a fix keying on "`startErr` is
+non-nil" rather than on the status fails every Go workflow in the system while looking like a
+tightening of error handling. That is the mutation to try first on any change here.
+
+**The control cannot prove the discrimination, and it is documented as unable to.**
+`TestAHealthyGuestStillSucceeds` never reaches the changed block — a healthy guest reports through
+`cleat_complete` and returns at the `completeResult != ""` branch above it (measured by probe:
+an `fmt.Fprintf` at the top of the block printed nothing for that test). So the exit-0 half of the
+guard is conservative by construction, not test-driven, and it is written to leave that path
+behaving exactly as before.
+
+**Not widened, deliberately.** A non-resource trap that is not a `proc_exit` still falls through
+to `"ok"` — the same shape of hole. Nothing has demonstrated a Go guest reaching it: panics are
+recovered into `cleat_complete` (§3.70) and unrecoverable failures leave through `proc_exit`.
+Widening on an argument rather than a measurement is how the exit-0 path would get broken.
+
+**Non-Go guests never had this hole.** The direct-export path returns its `callErr`
+unconditionally; this was specific to the `_start` protocol, which is Go, the primary language.
+
+#### How it was found
+
+Not by looking for it. §3.35 phase 4's abnormal-exit measurement needed an OOM arm, and building
+one meant reading what `Execute` does with a guest that dies that way. The measurement was about
+defers; the defect was in the line above. **The same shape as §3.22** — a failing guest handed
+back as a success — and worse, because §3.22 at least left the error text sitting in the result
+column.
