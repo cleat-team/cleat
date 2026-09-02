@@ -398,7 +398,7 @@ test-go/core	0	# measured: 693 pass, 0 skip
 # Budgets are paid per PR rather than in one lump at the front, so each wave
 # carries the cost of the tests it adds and an unexplained jump stays visible.
 
-test-go/engine	502	# 2026-09-02: was 488; +14 for 3.15's seven registeredBackends tests in allowed_signals_writer_test.go, two arms each (mysql, mssql), neither configured in this PostgreSQL-only job. Verified against the CI report rather than arithmetic: of the 502 skips it listed, exactly 14 match ^TestSetAllowedSignalCallers, and 502-14 is the old budget. Was 487 before TestRustWorkflowDefersRun (3.73), 485 before 3.51 added two, 481 before 3.50 added four.
+test-go/engine	504	# 2026-09-02: was 502; +2 for TestTerminateWorkflowReleasesConcurrencyKeys (3.76), which runs against registeredBackends and so costs its mysql and mssql arms in this PostgreSQL-only job. 502 was 488 +14 for 3.15's seven registeredBackends tests in allowed_signals_writer_test.go, two arms each.
 test-go/wasm	1	# measured: TestComponentPythonBinary; no python toolchain here
 test-go/internal	0	# measured: 463 pass, 0 skip. CI also installs Rust here
 test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
@@ -479,7 +479,7 @@ fuzz	1	# ./wasm/..., the same TestComponentPythonBinary as test-go/wasm
 # runs -- ./engine/... carries the whole MySQL and SQL Server suite, and this
 # job configures neither. The cluster being healthy is asserted by the
 # healthcheck and restart-count steps above this one, not by the skip count.
-cluster	502	# same as test-go/engine, and for the same reason; see the note there. Moved together with it on 2026-09-02 -- both jobs reported skipped=502 in the same run, which is the coupling working as documented rather than a coincidence.
+cluster	504	# same as test-go/engine, and for the same reason; see the note there. Moved together with it on 2026-09-02 -- both jobs reported skipped=502 in the same run, which is the coupling working as documented rather than a coincidence.; 3.76 then added two to both.
 # 0: tests/exhaustion (IMPROVEMENT-PLAN 2.5/2.29) gets its own report and its
 # own budget, separate from the "cluster" entry above -- that one is
 # ./engine/... run against the job's own cleat_tests database, this one is a

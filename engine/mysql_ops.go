@@ -1198,6 +1198,20 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 	if err != nil {
 		return fmt.Errorf("terminate workflow: %w", err)
 	}
+	// The other two dialects have always done this and MySQL never did.
+	//
+	// releaseWorkflowResources' contract names termination explicitly -- "every
+	// commit which takes a workflow out of the runnable set: completion,
+	// failure, termination, continue-as-new, and the admin actions" -- and
+	// PostgresStore.TerminateWorkflow and MSSQLStore's both call it after their
+	// commit. This one exec'd the UPDATE and returned.
+	//
+	// Bounded but real: concurrency_keys.expires_at is NOT NULL and the
+	// reaper deletes expired rows, so the slot was not leaked forever. It was
+	// held until the key's TTL, with every workflow queued on that key waiting
+	// out the window for nothing, on a tier-1 dialect, while postgres and mssql
+	// freed it at once.
+	releaseWorkflowResources(s.log(), s, workflowID)
 	return nil
 }
 

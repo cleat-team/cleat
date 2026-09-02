@@ -10196,3 +10196,39 @@ should already have run on `Execute`'s trap path. That is a reading of the call 
 measurement: **confirm a dead-lettered workflow's defers actually ran before deciding it needs
 no marker.** If it turns out a workflow can reach the dead-letter queue without a segment having
 executed, it is a fourth row rather than an exception.
+### 3.76 MySQL's TerminateWorkflow released nothing — ✅ **FIXED** (WS-3, 2026-09-02)
+
+`releaseWorkflowResources` states its own contract: it runs the two best-effort cleanups that
+follow *"every commit which takes a workflow out of the runnable set: completion, failure,
+**termination**, continue-as-new, and the admin actions"*. `PostgresStore.TerminateWorkflow`
+(`engine/db.go`) and `MSSQLStore`'s (`engine/mssql_operations.go`) call it after their commit.
+**`MySQLStore.TerminateWorkflow` (`engine/mysql_ops.go`) execed the UPDATE and returned.**
+
+Measured 2026-09-02 by `TestTerminateWorkflowReleasesConcurrencyKeys`, which acquires a key,
+proves it is contended, terminates the holder, and tries to acquire it again:
+
+| dialect | before |
+|---|---|
+| postgres | PASS |
+| **mysql** | **FAIL — the key stayed held** |
+| mssql | PASS |
+
+**Bounded, not unbounded, and the bound is what keeps this out of §1.x.** `concurrency_keys`
+`expires_at` is `NOT NULL` and the worker's reaper deletes expired rows, so the slot was never
+leaked forever — it was held until the key's TTL, with every workflow queued on that key waiting
+out the window for nothing, on a **tier-1 dialect**, while the other two freed it at once. The
+sticky-worker assignment went the same way.
+
+**Found while verifying §3.75's inventory rather than by looking for it.** §3.75 identifies
+`TerminateWorkflow` as one of three sites that set a terminal status by direct `UPDATE` and so
+never run defers. Checking that claim per dialect — rather than reading the Postgres
+implementation and generalising — is what turned this up: the three sites are right, and one of
+them was *additionally* skipping a release the other two performed.
+
+The test asserts the released **state**, not the call. A dialect that freed the slot by some
+other route would rightly pass, and the arm that failed is the mutation this fix needs — it went
+red before the one-line change and green after, with the other two arms unmoved throughout.
+
+---
+
+
