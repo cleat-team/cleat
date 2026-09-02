@@ -415,7 +415,20 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 	fmt.Fprintf(buf, "//go:wasmexport %s\n", exportName)
 	fmt.Fprintf(buf, "func %s(argsPtr unsafe.Pointer, argsLen uint32, outPtr unsafe.Pointer, maxOutLen uint32) int64 {\n", exportName)
 
-	buf.WriteString("\targsJSON := readString(argsPtr, argsLen)\n")
+	// Only declare argsJSON when something below consumes it. An entry point
+	// whose only parameter is the HostCalls handle has no fields, so an
+	// unconditional declaration is an unused variable -- which is a COMPILE
+	// ERROR in Go, not a warning. The guest failed to build with
+	// "declared and not used: argsJSON", pointing at generated code the author
+	// never wrote.
+	//
+	// This survived because every fixture and example in the repo happens to
+	// take an input parameter, so no test ever generated the zero-field case.
+	// cleatDispatch below is not affected and never was: argsJSON is a
+	// PARAMETER there, and an unused parameter is legal Go.
+	if len(fields) > 0 {
+		buf.WriteString("\targsJSON := readString(argsPtr, argsLen)\n")
+	}
 	if len(fields) == 1 && fields[0].GoType == "string" {
 		// Single string parameter: pass the raw argsJSON directly.
 		buf.WriteString(fmt.Sprintf("\t%s := argsJSON\n", fields[0].GoName))
