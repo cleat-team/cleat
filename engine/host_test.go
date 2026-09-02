@@ -1422,8 +1422,8 @@ func TestAwaitChildReplayEmptyEvent(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != packAwaitChildResultSuspend() {
 		t.Errorf("expected suspend sentinel (1<<62), got %d", result)
@@ -1665,8 +1665,8 @@ func TestCreatePromiseReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	// Fresh path runs after exitReplay, recording a create_promise event.
 	if len(s.history) < 2 {
@@ -1693,8 +1693,8 @@ func TestCreatePromiseReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay (past end of history)")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	// Fresh path runs, recording a create_promise event.
 	if len(s.history) != 1 {
@@ -1824,8 +1824,8 @@ func TestAwaitPromiseReplayAwaitThenFreshNoStore(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay from await_promise event")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	// Fresh path with no promiseStore -> suspend.
 	expected := packAwaitPromiseResult(0, true, 0)
@@ -1906,8 +1906,8 @@ func TestAwaitPromiseReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay (past end of history)")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	// Fresh path suspends (no store).
 	expected := packAwaitPromiseResult(0, true, 0)
@@ -2224,8 +2224,8 @@ func TestContinueAsNewReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
@@ -2255,8 +2255,8 @@ func TestContinueAsNewReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
@@ -2386,8 +2386,8 @@ func TestContinueAsNewWithVersionReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
@@ -2417,8 +2417,8 @@ func TestContinueAsNewWithVersionReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
@@ -2561,8 +2561,8 @@ func TestSignalWorkflowReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	// Fresh path records EventTypeSignalReceived.
 	if len(s.history) < 2 {
@@ -2586,8 +2586,8 @@ func TestSignalWorkflowReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -2820,8 +2820,8 @@ func TestRegisterUpdateHandlerReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) < 2 {
 		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
@@ -2844,8 +2844,8 @@ func TestRegisterUpdateHandlerReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -2943,8 +2943,8 @@ func TestAwaitAnyChildReplaySuspendNoReexec(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != packAwaitChildResultSuspend() {
 		t.Errorf("expected suspend sentinel, got %d", result)
@@ -3150,8 +3150,8 @@ func TestRegisterUpdateHandlerReplay_Mismatch(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) < 2 {
 		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
@@ -3177,8 +3177,8 @@ func TestRegisterUpdateHandlerReplay_PastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))

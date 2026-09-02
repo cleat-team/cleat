@@ -102,8 +102,8 @@ func TestDurableCall_ReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(caller.calls) != 1 {
 		t.Errorf("expected 1 real call, got %d", len(caller.calls))
@@ -142,6 +142,13 @@ func TestDurableCall_Fresh(t *testing.T) {
 
 func TestDurableSleep_FreshSuspends(t *testing.T) {
 	s := newTestExecSession()
+	// newTestExecSession dates the session clock to t=1000000ms -- 1970. Sleep
+	// now decides by comparing its deadline against real time, so without a
+	// matching wall clock every sleep in this fixture would complete: half a
+	// century really has passed since the anchor. Pin the wall clock to the
+	// session's own epoch so "a fresh sleep suspends" is the question asked.
+	sessionEpoch := s.nowMs // captured: DurableSleep advances s.nowMs before comparing
+	s.engine.nowFn = func() int64 { return sessionEpoch }
 
 	result := s.DurableSleep(context.Background(), nil, 5000)
 
@@ -157,33 +164,89 @@ func TestDurableSleep_FreshSuspends(t *testing.T) {
 	}
 }
 
-func TestDurableSleep_ReplayJustEnded(t *testing.T) {
+// TestDurableSleep_DeadlineAlreadyPassed replaces
+// TestDurableSleep_ReplayJustEnded, which set the flag this no longer has.
+//
+// The flag asked whether some *other* durable call had just crossed the replay
+// frontier, which is not a question sleep can answer for itself. The rule is
+// now local to sleep: the anchor is the last recorded event, and if the
+// deadline that anchor plus this duration implies is already behind real time,
+// the wait has happened.
+func TestDurableSleep_DeadlineAlreadyPassed(t *testing.T) {
 	s := newTestExecSession()
-	s.replayJustEnded = true
-	s.history = []EventRecord{{Step: 0, EventType: EventTypeCall}}
+	anchor := int64(1_000_000)
+	s.history = []EventRecord{{Step: 0, EventType: EventTypeCall, TimestampMs: anchor}}
+	s.stepCount = 1
+	// Real time is well past anchor+5000, so the sleep has already been served.
+	s.engine.nowFn = func() int64 { return anchor + 60_000 }
 
 	result := s.DurableSleep(context.Background(), nil, 5000)
 
-	status := byte(result >> 56)
-	if status != sleepStatusCompleted {
+	if status := byte(result >> 56); status != sleepStatusCompleted {
 		t.Errorf("expected sleepStatusCompleted (%d), got %d", sleepStatusCompleted, status)
 	}
-	if s.replayJustEnded {
-		t.Error("expected replayJustEnded=false after consuming it")
+	if s.suspendErr != nil {
+		t.Errorf("a sleep whose deadline has passed must not suspend: %v", s.suspendErr)
+	}
+	if s.nowMs != anchor+5000 {
+		t.Errorf("virtual clock = %d, want %d: Now() must advance by the duration "+
+			"the workflow asked for, not by real elapsed time", s.nowMs, anchor+5000)
 	}
 }
 
+// TestDurableSleep_ResumedEarlyWaitsOutTheRemainder is the case the old flag
+// got wrong and could not have got right.
+//
+// A reaper, a manual retry, or a NOTIFY can hand the workflow back before its
+// deadline. replayJustEnded would have completed the sleep regardless, cutting
+// the wait short. Elapsed-time accounting suspends for what is left.
+func TestDurableSleep_ResumedEarlyWaitsOutTheRemainder(t *testing.T) {
+	s := newTestExecSession()
+	anchor := int64(1_000_000)
+	s.history = []EventRecord{{Step: 0, EventType: EventTypeCall, TimestampMs: anchor}}
+	s.stepCount = 1
+	s.isReplay = false // replay is over; this is forward execution
+	// Only 2s of the requested 5s have actually elapsed.
+	s.engine.nowFn = func() int64 { return anchor + 2_000 }
+
+	result := s.DurableSleep(context.Background(), nil, 5000)
+
+	if status := byte(result >> 56); status != sleepStatusSuspend {
+		t.Errorf("expected sleepStatusSuspend (%d), got %d -- the workflow asked to "+
+			"wait 5s and only 2s have passed", sleepStatusSuspend, status)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr")
+	}
+	if got := s.suspendErr.Until.UnixMilli(); got != anchor+5000 {
+		t.Errorf("suspend until %d, want %d (the original deadline, not a fresh "+
+			"5s from now -- that would extend the wait on every early wake)",
+			got, anchor+5000)
+	}
+}
+
+// TestDurableSleep_ZeroDuration records a deliberate behaviour change.
+//
+// A zero-duration sleep used to suspend, because the old rule suspended
+// unconditionally unless a flag said otherwise. Under elapsed-time accounting
+// it completes: the question is "has the requested delay passed", and for zero
+// it has, trivially.
+//
+// Suspending for 0ms meant persisting a suspension and immediately re-claiming
+// the workflow -- a full round trip through the store to wait no time at all.
+// Nothing could have depended on it as a checkpoint either, because sleep
+// records no event.
 func TestDurableSleep_ZeroDuration(t *testing.T) {
 	s := newTestExecSession()
 
 	result := s.DurableSleep(context.Background(), nil, 0)
 
 	status := byte(result >> 56)
-	if status != sleepStatusSuspend {
-		t.Errorf("expected sleepStatusSuspend for zero duration, got %d", status)
+	if status != sleepStatusCompleted {
+		t.Errorf("expected sleepStatusCompleted for zero duration, got %d", status)
 	}
-	if s.suspendErr == nil {
-		t.Error("expected suspendErr for zero duration sleep")
+	if s.suspendErr != nil {
+		t.Errorf("a zero-duration sleep must not suspend: %v", s.suspendErr)
 	}
 }
 

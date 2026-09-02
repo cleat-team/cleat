@@ -57,6 +57,7 @@ type Engine struct {
 	wasmInstanceTimeout    time.Duration
 	defaultWorkflowTimeout time.Duration
 	deferPassBudget        time.Duration // total for one runDefers pass; see WithDeferPassBudget
+	nowFn                  func() int64  // wall clock for sleep-deadline decisions; see WithClock
 
 	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 
@@ -446,6 +447,29 @@ func WithReplayStepCallback(cb ReplayStepCallback) EngineOption {
 }
 
 // WithLogger sets the structured logger (default: slog.Default()).
+// realNowMs is the wall clock used to decide whether a sleep's deadline has
+// already passed.
+//
+// Deliberately not the package-level nowMs seed: that is a cached value
+// refreshed by the worker's dispatch loop (UpdateNowMs), and nothing refreshes
+// it in the CLI and embedded paths, where it stays at its zero value. A sleep
+// decision read off a clock stuck at the epoch would never complete.
+func (e *Engine) realNowMs() int64 {
+	if e.nowFn != nil {
+		return e.nowFn()
+	}
+	return time.Now().UnixMilli()
+}
+
+// WithClock overrides the wall clock DurableSleep compares deadlines against.
+//
+// Sleep completion is a function of elapsed real time, so a test that wants to
+// exercise resume-after-a-long-sleep has to be able to say that the time
+// passed. Without this such a test would either sleep for real or assert
+// nothing. It does not affect Now(): the guest-visible clock is virtual and
+// advances only by the durations the workflow asked for.
+func WithClock(fn func() int64) EngineOption { return func(e *Engine) { e.nowFn = fn } }
+
 func WithLogger(l *slog.Logger) EngineOption { return func(e *Engine) { e.logger = l } }
 
 // WithChildBindingPolicy sets the child binding policy from WASM metadata.

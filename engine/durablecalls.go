@@ -398,50 +398,49 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 }
 
 func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs int64) int64 {
-	// Sleep is local (not recorded in event history).
-	// It advances virtual time by the duration and either suspends
-	// (forward execution) or completes immediately (first sleep
-	// after replay, which is the resume-from-sleep case).
+	// Sleep is local: it records no event. So what tells us whether a sleep has
+	// already been served is not history but time.
 	//
-	// Local model rationale: if the worker crashes during a sequence
-	// of sleeps before the next durable event, replay re-executes
-	// them from scratch — which is correct because they had no
-	// external side effects.
-	s.nowMs += durationMs
+	// The anchor is the timestamp of the last event the workflow recorded -- a
+	// real moment, written when that step ran. Every sleep since then pushes a
+	// virtual deadline further past it. If that deadline is already behind real
+	// time, the wait has happened, whether it was spent suspended, sitting in a
+	// queue, or with the worker down. If it is still ahead, this is a genuinely
+	// new wait and the workflow suspends for the remainder.
+	//
+	// This replaces the replayJustEnded flag, which asked a question sleep
+	// cannot answer for itself: "did some *other* durable call just cross the
+	// replay frontier?" In a faithful replay none does -- every earlier
+	// operation was recorded and replay-matches -- so the sleep was always what
+	// reached the end of history, and it re-suspended forever. It also replaces
+	// the narrower frontier check that fixed only the single-sleep case.
+	// IMPROVEMENT-PLAN 3.67.
+	//
+	// max() rather than assignment, and this is the subtle part: Now() reads
+	// history[stepCount-1] while stepCount is within history, and sleeps do not
+	// advance stepCount. Two sleeps in a row would otherwise read the *same*
+	// anchor, compute the same deadline, and the second would complete a wait
+	// it never performed -- the same "completing on someone else's evidence"
+	// failure as the bug this replaces, just one step further along.
+	anchor := s.nowMs
+	if n := s.Now(ctx); n > anchor {
+		anchor = n
+	}
+	if anchor <= 0 {
+		// No anchor: a fresh workflow that has recorded nothing yet, and a
+		// nowMs seed that was never set. The package-level seed is refreshed by
+		// the worker's dispatch loop but by nothing in the CLI and embedded
+		// paths, where it stays zero -- and an anchor at the epoch puts every
+		// deadline decades in the past, so every sleep would complete instantly
+		// and no workflow run under `cleat run` or cleatctl would ever wait.
+		anchor = s.engine.realNowMs()
+	}
+	s.nowMs = anchor + durationMs
 
-	if s.replayJustEnded {
-		// This is the sleep that originally suspended the workflow.
-		// The real wait already happened (the timer fired).
-		// Just advance virtual time and continue.
-		s.replayJustEnded = false
+	if s.nowMs <= s.engine.realNowMs() {
 		return packSleepResult(sleepStatusCompleted, 0)
 	}
 
-	// The same case, reached the other way: this sleep is itself at the replay
-	// frontier -- history is fully consumed and nothing after it was ever
-	// recorded, so this is the sleep the workflow suspended at.
-	//
-	// Every other durable call ends replay by itself when it runs past the end
-	// of history, which is what sets replayJustEnded above. DurableSleep did
-	// not, so it could only resume when some *other* call crossed the frontier
-	// first, in the same segment. In a faithful replay nothing does: every
-	// operation before the sleep was recorded in the previous segment and
-	// replay-matches, so the sleep is always what reaches the end of history.
-	// The workflow woke on time, re-executed to this same point, and suspended
-	// again with a byte-identical history -- and because SuspendUntil was
-	// recomputed to the same already-elapsed instant, next_wake_at was re-armed
-	// in the past and the workflow was re-claimed immediately, forever.
-	// IMPROVEMENT-PLAN 3.67 has the measurements.
-	if s.isReplay && s.stepCount >= len(s.history) {
-		s.exitReplay()
-		// exitReplay arms replayJustEnded for "the next sleep"; this sleep is
-		// that sleep, and it is being completed here, so consume it rather than
-		// leaving it to complete a second, genuinely new sleep without waiting.
-		s.replayJustEnded = false
-		return packSleepResult(sleepStatusCompleted, 0)
-	}
-
-	// Forward execution: suspend until the sleep duration elapses.
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("cleat_sleep(%dms)", durationMs),
 		Until:  time.UnixMilli(s.nowMs),

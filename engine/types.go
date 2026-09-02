@@ -60,10 +60,13 @@ type EventRecord struct {
 	EventType EventType `json:"type"`
 
 	// TimestampMs is the virtual time (ms since Unix epoch) that Now()
-	// should return after this event completes. For non-sleep events it
-	// is the wall-clock time when the event was recorded. For sleep
-	// events it is the pre-sleep time plus the sleep duration, encoding
-	// the post-sleep virtual time for deterministic replay.
+	// should return after this event completes: the wall-clock time when the
+	// event was recorded.
+	//
+	// This used to add "for sleep events it is the pre-sleep time plus the
+	// sleep duration" -- there are no sleep events. Sleep has recorded nothing
+	// since 0a02a84 (2026-05-08), and it is this field on the *last recorded*
+	// event that a sleep now anchors its deadline to. See DurableSleep.
 	TimestampMs int64 `json:"timestamp_ms"`
 
 	// CreatedAt is the wall-clock time when the event was recorded in the
@@ -406,7 +409,6 @@ type execSession struct {
 	history          []EventRecord
 	stepCount        int
 	isReplay         bool
-	replayJustEnded  bool // true when replay just ended (first sleep after replay completes)
 	nowMs            int64
 	randomSeq        int64 // monotonic counter for deterministic Random()
 	suspendErr       *SuspendError

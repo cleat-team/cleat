@@ -135,12 +135,13 @@ func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, n
 }
 
 // exitReplay transitions from replay to forward execution.
-// It sets replayJustEnded so that the first DurableSleep after replay
-// can detect the resume-from-sleep case and complete without suspending.
-
+//
+// It used to also arm a replayJustEnded flag that DurableSleep consumed to
+// detect resume-from-sleep. That flag is gone: sleep now decides from elapsed
+// time, which does not require another call to have crossed the frontier
+// first. See DurableSleep and IMPROVEMENT-PLAN 3.67.
 func (s *execSession) exitReplay() {
 	s.isReplay = false
-	s.replayJustEnded = true
 }
 
 // recordEvent timestamps a fresh event, advances the session clock,
