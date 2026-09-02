@@ -9551,7 +9551,7 @@ and the tell was that the "healthy" reading never explained the failure.
 
 ---
 
-### 3.73 Four SDKs document a `defer` that runs cleanup, and cannot run it — 🔶 **RUST, PYTHON, JAVA DONE; ASSEMBLYSCRIPT OPEN** (WS-3, 2026-09-02)
+### 3.73 Four SDKs document a `defer` that runs cleanup, and cannot run it — ✅ **ALL FOUR DONE** (WS-3, 2026-09-02)
 
 §3.70 fixed this for Go. The other four SDKs have the same defect and it is still shipped.
 
@@ -9645,6 +9645,65 @@ drain to that branch fails exactly that test.
 
 Java **does** get §3.35 phase 4's kill path, unlike Python: TeaVM exports are declared with
 `@Export`, so a `__cleat_run_deferred` export is expressible. Not wired yet.
+
+#### AssemblyScript: done, including the kill path (#557)
+
+The one the table above called "highest risk", and the risk was correctly identified — a
+capturing `deferFunc(fn)` is **not** expressible under `--runtime stub`. It did not need to be.
+`deferFunc(h, description, fn, payload)` takes a top-level function reference plus an explicit
+payload string, which is the shape `saga.ts` has always used (`type CompensateFn = (h: HostCalls)
+=> void`). So this is the SDK's existing idiom rather than a weaker version of the other three's.
+
+**The suspend guard is the part that can actually break here, and it is the reverse of what the
+per-language table anticipated.** Go, Rust, Python and Java suspend by *unwinding* — a panic, a
+raise, a thrown `SuspendSignal` — so their drain sits on a path the unwind skips and the ordering
+cannot be got wrong. AssemblyScript has no exceptions: suspension is a global flag
+(`isWorkflowSuspended()`), the entry point **returns normally either way**, and the generated
+wrapper's explicit check is the only thing between a sleeping workflow and its cleanup. Moving
+the drain one line earlier compiles and passes every other test in the file;
+`TestAssemblyScriptDefersDoNotRunOnSuspension` is what catches it, verified by making exactly
+that mutation.
+
+A second consequence of the flag model, worth knowing before writing an AS workflow: a suspending
+host call **does not stop the workflow body**. `Saga.run` checks the flag after every step for
+this reason, and `examples/as-workflow`'s `defer_suspend` had to do the same — without it the
+line after `cleatSleep` executed during the suspending segment. That is not new and not a defect
+of this item; it was simply not written down anywhere.
+
+**`__cleat_run_deferred` is emitted too**, so AssemblyScript joins Go and Rust on §3.35 phase 4.
+The transformer emits it once per module rather than once per entry point — per entry would be a
+duplicate-export failure the moment a module declares two workflows.
+
+**What this cost, and it is the finding worth keeping.** Two AS workflows imported the SDK by
+relative path (`../../packages/cleat-as/assembly/index`) rather than as `@cleat/sdk`. Both
+resolve to the same files, but `asc` treats them as **two distinct modules** — two `HostCalls`
+types, and since this item, two defer registries. A defer registered through one would be drained
+from the other and silently never run: the exact bug this item is about, reintroduced invisibly.
+
+It surfaced only because the generated wrapper passes `h` to `runDeferred`, which makes the two
+modules a type error:
+
+```
+ERROR TS2322: Type '../../packages/cleat-as/assembly/host-calls/HostCalls'
+is not assignable to type '~lib/@cleat/sdk/assembly/host-calls/HostCalls'.
+```
+
+Nothing else in the wrapper crosses the boundary that way — `Memory.readString`,
+`isWorkflowSuspended()` and `SUSPEND_SENTINEL` are all module-local — so a dual-module workflow
+compiled cleanly before and would again if that argument were removed. Recorded in
+`packages/cleat-as/README.md` and `LANGUAGE_SUPPORT.md`, and it is a compile error rather than a
+convention, which is the only reason to trust it.
+
+#### One thing left unfixed, deliberately
+
+`_hasCleatSdkImport` (`packages/cleat-as/transform/index.js`) probes four property paths for an
+import's module name and returns false for all of them in practice — so the transformer *always*
+injects its own `@cleat/sdk` import, including into sources that already have one. That is why
+the wrapper's `Memory` / `SUSPEND_SENTINEL` / `isWorkflowSuspended` references resolve at all,
+and it has been true since long before this item. It works, but for a reason nobody chose: if a
+future `asc` exposes `moduleName` where the current one does not, detection starts returning true,
+no import is injected, and **every generated wrapper stops compiling** — not only the defer line.
+Left alone here under one-PR-one-thing; it is a latent break in the transformer, not in defers.
 
 ---
 
