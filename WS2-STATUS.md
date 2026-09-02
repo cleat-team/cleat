@@ -7,6 +7,47 @@ Read `PARALLEL-WORKSTREAMS.md` first for the ownership map, then this, then WS-2
 `IMPROVEMENT-PLAN.md`. This file is the short version: what is done, what is next, and what a
 future session should not have to rediscover.
 
+> **Re-derived 2026-09-02 against `develop` at `81d8f8b`. Two corrections, then the current
+> list.** The "This round" sections below are still accurate — they describe work that landed
+> and the traps it surfaced, and they are the reason to keep this file. Two things are not:
+>
+> - **The `020–029` block is spent, and the block scheme is retired** (#563). Take the next free
+>   number above the dialect's high-water mark — `ls migrations/<dialect>/*.sql | tail -1`. As of
+>   2026-09-02 that is postgres `034`, mysql `033`, mssql `037`, and they are not aligned: `033`
+>   is a different migration in each dialect.
+> - **"Standing constraints" says `CGO_ENABLED=0` "silently runs everything on wazero".** It
+>   does not, as of #459 (2026-08-10): `engine/backend_wazero.go` was deleted and there is no
+>   backend left at all, so `cleat-worker` exits 1 at startup rather than running unfenced. The
+>   conclusion is unchanged — a result obtained that way is not evidence about the engine — but
+>   the mechanism in that bullet is wrong and has been for three weeks. Corrected in place below.
+>
+> **Of the six items in "Open, in the order I would take it", one is done and one moved.**
+> §3.24 was fixed 2026-08-31 and is listed first; §2.60d is now carried on WS-1's board, since
+> the mechanism lands in `engine/testutil/`. The four that remain are real — each re-checked
+> against the tree, not against the plan's status markers:
+>
+> | item | evidence it is still open |
+> |---|---|
+> | §1.4 phase F | `engine/store_admin.go` implements force-complete/fail; nothing resolves a *pending* step. |
+> | §2.35 residual | `event_history` has `error TEXT` and no `error_code` column — `awk '/CREATE TABLE.*event_history/,/^\);/' migrations/postgres/001_schema.sql`. |
+> | `AdminReReplay` | still in `engine/store_admin_stubs.go`. |
+> | `pendingSentinel` | still in `engine/types.go:399`, exported as `PendingSentinel` for `tests/integrity`. |
+>
+> **And there is a new first item that is not on the list below: the durable-record shape for
+> §3.35 phase 5.** WS-3 has phases 1–4 of `defer` shipped and is deliberately not starting
+> phase 5, because its resumable record is the same shape as §1.4's and building a second
+> answer is what the one-stream rule exists to prevent. That makes it WS-2's to answer, it is
+> a written design rather than a PR, and it should come **before** §2.35 — both touch the same
+> rows, and doing them in the other order means designing the record twice.
+>
+> Of the "Not mine, and blocked on WS-3" pair below, **§3.23 landed** (fixed 2026-08-31). **A
+> guest-visible `CallErrorAmbiguous` did not** — `grep -rn CallErrorAmbiguous .` is empty and
+> the enum still ends at `CallErrorPermissionDenied`. What did change is that adding a member
+> is now a bounded job rather than a hunt through five SDKs: `engine.GuestCallErrorCodes()` is
+> the single source and `cleat/callerror_contract_test.go` fails if an SDK's hand-written copy
+> drifts from it. Still worth doing, still not what stands between an ambiguous crash and an
+> operator being told about it.
+
 ---
 
 ## This round
@@ -229,7 +270,12 @@ needs rephrasing, not escaping.
 
 ## Open, in the order I would take it
 
-1. **§3.24 — an ambiguous outcome classifies as `unknown`.** `engine.ErrAmbiguous` has existed
+> **Superseded 2026-09-02 — read the banner at the top of this file for the current order.**
+> Item 1 is done, item 4 moved to WS-1, and a new first item (the §3.35 phase 5 record shape)
+> sits ahead of all of these. The list is kept because items 2, 3, 5 and 6 are still open and
+> the reasoning under each of them is still the reasoning.
+
+1. ~~**§3.24 — an ambiguous outcome classifies as `unknown`.**~~ **Done, 2026-08-31.** `engine.ErrAmbiguous` has existed
    since the first commit and `NewAmbiguousError` is called by nothing but its own test, so
    nothing can query for the one failure class that needs a human to go and look at the
    external service. Unblocked by #343 and cheap: `cmd/cleat-worker/setup.go:1703` already does
@@ -240,10 +286,12 @@ needs rephrasing, not escaping.
    path; `adminForce` in `engine/store_admin.go` is the shape it extends.
 3. **§2.35 residual** — persist `error_code` per event so replay recovers the classification
    instead of re-deriving one bit of it.
-4. **§2.60d** — test isolation. Still the reason a green run on a reused database means little,
-   and now also the reason the engine matrix job needed `-p 1`. My recommendation is unchanged:
-   a tenant per package with tenant-scoped deletes, because it is the only option that makes
-   the suite exercise tenant scoping rather than route around it.
+4. **§2.60d** — test isolation. **Moved to WS-1's board, 2026-09-02**, because the mechanism
+   lands in `engine/testutil/` and the recommendation below is a tenancy design choice. Still
+   the reason a green run on a reused database means little, and the reason the engine matrix
+   job needed `-p 1`. The recommendation is unchanged and travels with it: a tenant per package
+   with tenant-scoped deletes, because it is the only option that makes the suite exercise
+   tenant scoping rather than route around it.
 5. **`AdminReReplay`** is still a stub and now answers 501 rather than 500. It needs D–F's
    replay semantics, not a fourth `UPDATE`.
 6. **Retire `pendingSentinel`** — still detected alongside `Pending` because `tests/integrity`
@@ -298,7 +346,9 @@ database. Remove containers by name.
 ## Standing constraints
 
 - Build and test with **CGO on**. `CGO_ENABLED=0` removes `NewWasmtimeBackend` (`//go:build
-  cgo`) and silently runs everything on wazero. A result obtained that way is not evidence
+  cgo`) and ~~silently runs everything on wazero~~ — **corrected 2026-09-02** — leaves no WASM
+  backend at all, so `cleat-worker` exits 1 at startup. `CGO_ENABLED=0 go build ./...` still
+  exits 0, so nothing warns you at build time. A result obtained that way is not evidence
   about the engine.
 - WS-2 owns `engine/durablecalls.go`, `engine/flush*.go`, `engine/store_events*.go`,
   `engine/idempotency.go`, `engine/callerrors.go`, `engine/lifecycle.go`, `tests/crash/`,
