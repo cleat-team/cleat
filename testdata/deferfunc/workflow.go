@@ -73,3 +73,17 @@ var errFailed = &workflowError{"the workflow failed"}
 type workflowError struct{ msg string }
 
 func (e *workflowError) Error() string { return e.msg }
+
+// DeferOnPanic registers cleanup and then panics.
+//
+// A panic is not a trap: the generated dispatcher recovers it and reports the
+// failure through cleat_complete, so the guest still leaves through its own
+// wrapper and its defers still have somewhere to run.
+func DeferOnPanic(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "on_panic", `{}`)
+	}); err != nil {
+		return "", err
+	}
+	panic("the workflow panicked")
+}

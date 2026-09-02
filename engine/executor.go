@@ -213,11 +213,7 @@ func (e *Engine) executeWithBackend(
 	}
 	if callErr != nil && session.suspendErr == nil {
 		// Non-suspend error (trap, panic, timeout, or cancellation).
-		// Try running defers on a fresh module.
-		if len(session.deferrals) > 0 {
-			e.runDefers(context.Background(), wasmBytes, session.deferrals)
-		}
-		session.releaseHeldScopes(context.Background())
+		//
 		// A guest that returned an error is not a trap. resolveWasmTrap
 		// prefixes "wasm trap: " onto any non-empty message, so before this
 		// check an operator whose workflow simply returned an error read
@@ -225,7 +221,27 @@ func (e *Engine) executeWithBackend(
 		// error>" -- a claim of a memory fault over their own error text.
 		// The guest stopped cleanly and said it had failed. See 3.23.
 		var guestErr *GuestReturnedError
-		if errors.As(callErr, &guestErr) {
+		guestCompleted := errors.As(callErr, &guestErr)
+
+		// Run defers only for a guest that never got to run its own.
+		//
+		// Reaching cleat_complete -- which is what GuestReturnedError marks --
+		// means the guest came out through its entry point wrapper, and that
+		// wrapper runs the registered defer bodies on the error path as well
+		// as the success path (wasm/exports.go, IMPROVEMENT-PLAN 3.70). The
+		// pass below would then look for an export named "cleat_defer_<id>"
+		// that no guest in any language has ever had, and log the miss as
+		// "defer execution failed" for a defer that had just run. An operator
+		// reading that concludes their cleanup did not happen.
+		//
+		// A trap, a fence kill or a timeout is the other case: the guest was
+		// stopped before its wrapper returned, so nothing ran its defers and
+		// this pass is the only chance they have.
+		if len(session.deferrals) > 0 && !guestCompleted {
+			e.runDefers(context.Background(), wasmBytes, session.deferrals)
+		}
+		session.releaseHeldScopes(context.Background())
+		if guestCompleted {
 			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
 		}
 		if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {

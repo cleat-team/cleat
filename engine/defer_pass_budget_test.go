@@ -39,6 +39,15 @@ import (
 // cleat.metadata section, so DetectLanguage classifies it "go" and it routes to
 // the wasmtime backend; no _start, so Execute takes the direct-export branch
 // rather than the Go dispatcher.
+//
+// The signature is load-bearing, and getting it wrong does not fail loudly.
+// A defer export declared with no parameters is rejected before it executes
+// with "expected 0 params, but passed 4", and the defer pass logs failures
+// without propagating them -- so a fence test written that way passed in 0.01s
+// with the fix reverted, having never run the guest at all. (Learned in
+// cmd/cleat-worker's TestDefersRunOnTheFencedBackend, which this file's
+// coverage superseded when the worker's defer pass was deleted; kept here
+// because the trap outlived the test.)
 const runawayDefersWat = `
 (module
   (memory (export "memory") 1)

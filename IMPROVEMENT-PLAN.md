@@ -9200,10 +9200,49 @@ after it unrun, and on resume the whole set runs again from the top. Durable cal
 replay from history rather than re-executing, so this is ordinary replay semantics, but a defer's
 non-durable side effects can repeat.
 
-**Left behind, and the next thing to fix:** the host-side `cleat_defer_<id>` invocation is now
-redundant for Go guests and logs `defer execution failed … unknown entry point` for a defer that
-in fact ran. The log line itself is not new — it arrived with the fix in this section's last
-paragraph, which turned the host's silent false success into a visible failure — but it is now
-misleading rather than merely noisy. Retiring that path is a separate change with its own tests
-(`engine/defer_runs_once_test.go` pins the current contract, including that a defer the live
-module cannot offer must still be attempted).
+#### The host now runs defers only for a guest that never ran its own — done
+
+The invocation left behind above logged `defer execution failed … unknown entry point` for a
+defer that had just run. Worse than the silence it replaced: an operator reading it concludes
+their cleanup did not happen, and the log is the only evidence they have.
+
+The rule is now one line. **Reaching `cleat_complete` means the guest came out through its entry
+point wrapper, and that wrapper ran the defer bodies.** So:
+
+- `Engine.executeWithBackend`'s error branch skips the defer pass when `callErr` is a
+  `*GuestReturnedError` — the existing marker for "the guest stopped cleanly and said it had
+  failed" (§3.23), already computed three lines below for the trap-vs-error distinction.
+- The worker's success-path pass is **deleted**. `finalStatus == "done"` means the guest
+  completed, so the condition was always false — and `scripts/check-test-only-code.sh` said so,
+  refusing the gated version because it left `runDefers` reachable only from tests. Its fence
+  test went with it: `TestDeferPassIsBoundedInAggregate` covers the same property at the layer
+  that owns `RunDefer`, with three runaway defers instead of one.
+- Trap, fence kill and timeout are untouched. Nothing ran those guests' defers, so the host's
+  pass is the only chance they have and its failure log is a true statement.
+
+The rule covers every SDK rather than special-casing Go: the other four have no defer bodies at
+all, so "the host has nothing to add" holds for them for a different reason.
+
+Both halves are mutation-tested. Suppressing the pass unconditionally fails the trapped-guest
+control; leaving it unconditional fails the regression test with the false log it was written
+for.
+
+**A panic is on the guest's side of that line, which shrinks §3.35 phase 4.** "Panic" reads like
+"trap", and the phase-4 scope was written assuming it was one. Measured 2026-09-02 on a real Go
+SDK guest through wasmtime, entry point `defer_on_panic` in `testdata/deferfunc`:
+
+    err    = host: export "defer_on_panic" failed: the workflow panicked   (GuestReturnedError)
+    calls  = [on_panic]                                                    (the defer body ran)
+    logs   = <empty>                                                       (no host pass)
+
+A Go panic unwinds into the generated dispatcher's `recover`, which reports through
+`cleat_complete`, so the guest still leaves via its own wrapper and the wrapper runs the bodies.
+Pinned by `TestAPanickingGuestRunsItsOwnDefers`, which fails with `recorded []` when the
+dispatcher's runner call is removed.
+
+So what is actually left for phase 4 is the genuinely unrecoverable: a WASM trap, an
+out-of-memory, and a fence kill or timeout — none of which return to guest code at all. **Note
+what that means for the phase 2 fix described below** (`withHandler(context.Background(),
+session)` so a defer body can make host calls on the trap path): it is still correct, but it
+benefits no shipped guest, because the export it would reach — `cleat_defer_<id>` — is one no SDK
+emits and none can. Do not schedule it as though it closed the trap case.

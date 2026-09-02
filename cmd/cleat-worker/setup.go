@@ -425,68 +425,6 @@ func pluginNames(m map[string]string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Defer execution
-// ---------------------------------------------------------------------------
-
-// runDefers executes registered defer callbacks in LIFO (reverse) order.
-// Each defer is invoked as a WASM export named "cleat_defer_<deferID>".
-// Errors during defer execution are logged but do not prevent other defers
-// from running.
-func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
-	// Register the same backend the workflow itself ran on, so its defers are
-	// fenced the same way it was. wasmtime is the only backend cleat has, and
-	// it is registered for every language in engine.WasmtimeLanguages.
-	//
-	// That is NOT the same as "the lookup always resolves", which this comment
-	// used to claim. engine.Engine routes on wasm.DetectLanguage, which returns
-	// the guest's own cleat.metadata Language field verbatim, so a module
-	// declaring "tinygo" -- or "GO", since the lookup is exact -- resolved to no
-	// backend and RunDefer ran it on a wazero Runtime it created on demand.
-	// Engine.resolveBackend now fails closed on that instead; see its doc
-	// comment for the measurements.
-	eng := engine.NewEngine(nil,
-		&dbServiceCaller{store: w.store, workerID: w.id, benchSvcURL: *benchSvcURL},
-		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend))
-	eng.Metrics = w.Metrics
-
-	// Collect defer IDs sorted by step number for LIFO ordering.
-	// Map iteration order is random in Go, so we always parse the step
-	// number from "defer-N" and sort numerically.
-	type defEntry struct {
-		id     string
-		desc   string
-		stepNo int
-	}
-	var entries []defEntry
-	for id, desc := range deferrals {
-		var n int
-		if _, err := fmt.Sscanf(id, "defer-%d", &n); err != nil {
-			n = -1
-		}
-		entries = append(entries, defEntry{id: id, desc: desc, stepNo: n})
-	}
-
-	// Sort descending by step number for LIFO order.
-	for i := 0; i < len(entries); i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].stepNo > entries[i].stepNo {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
-		}
-	}
-
-	for _, entry := range entries {
-		deferName := "cleat_defer_" + entry.id
-		_, err := eng.RunDefer(w.ctx, wasmBytes, deferName, nil)
-		if err != nil {
-			w.logger.ErrorContext(context.Background(), "defer execution failed", "worker_id", w.id, "defer_id", entry.id, "description", entry.desc, "error", err)
-		} else {
-			w.logger.InfoContext(context.Background(), "defer completed", "worker_id", w.id, "defer_id", entry.id, "description", entry.desc)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
 // SQL/DB helpers
 // ---------------------------------------------------------------------------
 
@@ -1789,7 +1727,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	inputJSON := wf.Input
 	setupElapsed := time.Since(workflowStartTime)
 	engineStart := time.Now()
-	result, resultHistory, suspended, deferrals, queryState, err := eng.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
+	result, resultHistory, suspended, _, queryState, err := eng.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
 	engineElapsed := time.Since(engineStart)
 	if len(history) > 0 {
 		w.Metrics.RecordReplayDuration(context.Background(), engineElapsed)
@@ -1914,10 +1852,19 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 
 	// Post-finalization: logging and non-DB side effects.
 	if finalStatus == "done" {
-		// Workflow completed. Run any registered defer callbacks in LIFO order.
-		if len(deferrals) > 0 {
-			w.runDefers(wasmBytes, deferrals)
-		}
+		// No defer pass here.
+		//
+		// finalStatus "done" means the guest reached cleat_complete with a
+		// result, so it came out through its entry point wrapper -- and that
+		// wrapper runs the registered defer bodies before reporting
+		// (wasm/exports.go, IMPROVEMENT-PLAN 3.70). This used to call
+		// w.runDefers, which looked for an export named "cleat_defer_<id>"
+		// that no guest in any language has ever had, and logged the miss as
+		// "defer execution failed" for cleanup that had just run.
+		//
+		// The abnormal paths are unaffected: a guest that trapped, was fenced
+		// or timed out never reached its wrapper, and Engine.Execute still
+		// runs its defers.
 
 		duration := time.Since(workflowStartTime)
 		w.Metrics.RecordWorkflowDuration(context.Background(), duration, wf.DefName, "done", "")
