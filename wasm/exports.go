@@ -242,6 +242,8 @@ func encodeJSONString(s string) string {
 
 `)
 
+	buf.WriteString(deferTableSource)
+
 	qual := types.RelativeTo(result.TargetPkg.Types)
 
 	for _, epName := range result.EntryPoints {
@@ -260,6 +262,114 @@ func encodeJSONString(s string) string {
 	}
 
 	return buf.Bytes()
+}
+
+// deferTableSource is the guest-side defer registry, emitted into every
+// gen_wasm_exports.go.
+//
+// A defer body registered with DurableDeferFunc is a closure in the memory of
+// the instance that registered it. The host runs defers by invoking an export
+// on a FRESH instance, so it cannot reach one: the closure is not there, and
+// there is no name to call it by either -- the ID is minted by the host at
+// runtime, and no export name can be built from it at compile time. That is
+// IMPROVEMENT-PLAN 3.70, and it is why every defer in every Go WASM workflow
+// did nothing.
+//
+// So the guest runs its own. The registering instance still has the closures
+// when the entry point returns, and that is the moment a defer is for.
+//
+// Two things this does NOT do, both deliberate:
+//
+//   - It does not run on suspension. A suspended workflow has not exited; its
+//     defers are still pending, and running them there would fire every
+//     cleanup at the first sleep. The final segment replays the entry point,
+//     which re-registers the same IDs, and runs them when it completes.
+//   - It does not run for a workflow that never returns -- cancelled, failed
+//     terminally, or killed by the fence. The guest is not executing then.
+//     Those need a host-driven path, which needs replay, and is 3.35 phase 4.
+//
+// Re-running is possible in one case: a defer that itself suspends leaves the
+// defers after it unrun, and on resume the whole set runs again from the top.
+// Durable calls inside them replay from history rather than re-executing, so
+// this is ordinary replay semantics, but a defer's non-durable side effects
+// can repeat. Defers are at-least-once, like everything else here.
+const deferTableSource = `var _cleatDeferIDs []string
+var _cleatDeferFuncs = map[string]func(){}
+
+// _cleatRegisterDefer records a defer body under the ID the host minted for
+// it. Called from the DurableDeferFunc adapter in gen_host_adapter.go.
+func _cleatRegisterDefer(deferID string, fn func()) {
+	if fn == nil {
+		return
+	}
+	if _, seen := _cleatDeferFuncs[deferID]; !seen {
+		_cleatDeferIDs = append(_cleatDeferIDs, deferID)
+	}
+	_cleatDeferFuncs[deferID] = fn
+}
+
+// _cleatRunDeferred runs registered defer bodies in LIFO order, the order Go's
+// own defer uses and the order the worker's host-side runDefers uses.
+//
+// The table is drained BEFORE the first body runs. A defer that registers
+// another defer would otherwise extend the slice while it is being walked, and
+// a defer that panics would otherwise be retried by any later caller.
+//
+// A panic in one defer does not stop the others and does not disturb the
+// workflow's own result, which is already decided by the time this runs --
+// except for cleat.SuspendSentinel, which is not an error. That one must reach
+// the entry point wrapper so the segment suspends; swallowing it would
+// complete a workflow the host has already recorded as suspended.
+func _cleatRunDeferred() {
+	ids := _cleatDeferIDs
+	_cleatDeferIDs = nil
+	for i := len(ids) - 1; i >= 0; i-- {
+		fn := _cleatDeferFuncs[ids[i]]
+		delete(_cleatDeferFuncs, ids[i])
+		if fn == nil {
+			continue
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					if _, ok := r.(cleat.SuspendSentinel); ok {
+						panic(r)
+					}
+				}
+			}()
+			fn()
+		}()
+	}
+}
+
+`
+
+// writeRunDeferred emits the call to _cleatRunDeferred that both entry point
+// wrappers make once the entry point has finished.
+//
+// It runs on the error path as well as the success path -- a defer is for
+// cleanup, and a workflow that failed is the case that most needs it -- but
+// not on suspension, and it runs BEFORE the result is reported to the host, so
+// anything a defer records lands inside the segment that ran it.
+//
+// A defer that suspends turns the whole segment into a suspension. Its result
+// is discarded, which is correct: the entry point will run again on resume and
+// produce it again.
+func writeRunDeferred(buf *bytes.Buffer, indent string) {
+	w := func(s string) { buf.WriteString(indent + s + "\n") }
+	w("if !__susSuspended {")
+	w("\tfunc() {")
+	w("\t\tdefer func() {")
+	w("\t\t\tif r := recover(); r != nil {")
+	w("\t\t\t\tif _, ok := r.(cleat.SuspendSentinel); ok {")
+	w("\t\t\t\t\t__susSuspended = true")
+	w("\t\t\t\t}")
+	w("\t\t\t}")
+	w("\t\t}()")
+	w("\t\t_cleatRunDeferred()")
+	w("\t}()")
+	w("}")
+	buf.WriteString("\n")
 }
 
 func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifier, target string) {
@@ -368,6 +478,8 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 	}
 
 	buf.WriteString("\t}()\n\n")
+
+	writeRunDeferred(buf, "\t")
 
 	buf.WriteString("\tif __susSuspended {\n")
 	buf.WriteString("\t\treturn writeSuspendOut()\n")
@@ -575,6 +687,8 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 		}
 
 		buf.WriteString("\t\t}()\n")
+
+		writeRunDeferred(buf, "\t\t")
 
 		// Encode result.
 		buf.WriteString("\t\tif __susSuspended {\n")

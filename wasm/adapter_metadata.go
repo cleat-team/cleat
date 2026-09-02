@@ -7,6 +7,12 @@ type adapterDef struct {
 	ReturnType  string         // Go return type for the closure, e.g. "(string, error)"
 	Params      []adapterParam // closure parameter descriptions
 	ResultStmts []string       // lines of Go code for result processing
+
+	// PreStmts are emitted before the import arguments are set up. They exist
+	// for a method whose import takes an argument the caller does not supply:
+	// DurableDeferFunc takes only a closure, but cleat_defer wants a
+	// description, so the description is synthesised here.
+	PreStmts []string
 }
 
 type adapterParam struct {
@@ -93,6 +99,38 @@ var adapterDefs = map[string]adapterDef{
 			`	return "", fmt.Errorf("cleat_defer: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
 			"}",
 			"return unsafe.String(&deferIDBuf[0], int(deferIDLen)), nil",
+		},
+	},
+	// DurableDeferFunc registers a closure, so unlike DurableDefer it has a
+	// body the guest can actually run. The ID the host mints is the key: it is
+	// what the workflow gets back, and what _cleatRunDeferred looks up.
+	//
+	// The host cannot run this body. It invokes defers by export name from a
+	// fresh instance, and a closure lives in the memory of the instance that
+	// registered it -- so a body registered at runtime is unreachable from
+	// outside. The guest runs its own defers instead, on the path where the
+	// entry point finished. IMPROVEMENT-PLAN 3.35, 3.70.
+	"DurableDeferFunc": {
+		FieldName:  "DurableDeferFunc",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"fn", "func()"},
+		},
+		PreStmts: []string{
+			`description := "deferred function"`,
+			"descriptionPtr, descriptionLen := stringPtr(description)",
+		},
+		ResultStmts: []string{
+			"deferIDLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_defer: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			"}",
+			// Copy rather than alias: unsafe.String would pin the whole 64 KiB
+			// output buffer for as long as the table holds the key.
+			"deferID := string(unsafe.String(&deferIDBuf[0], int(deferIDLen)))",
+			"_cleatRegisterDefer(deferID, fn)",
+			"return deferID, nil",
 		},
 	},
 	"DurableLog": {
