@@ -52,6 +52,7 @@ var hostFunctions = []HostFunction{
 	{"cleat_await_signals", "AwaitSignals"},
 	// Defer
 	{"cleat_defer", "DurableDefer"},
+	{"cleat_defer", "DurableDeferFunc"},
 	// Logging
 	{"cleat_log", "DurableLog"},
 	{"cleat_log", "LogKV"},

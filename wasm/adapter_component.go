@@ -280,6 +280,8 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 			closureParams = append(closureParams, p.Name+" time.Duration")
 		case "func(string)":
 			closureParams = append(closureParams, p.Name+" func(string)")
+		case "func()":
+			closureParams = append(closureParams, p.Name+" func()")
 		case "func() (string, error)":
 			closureParams = append(closureParams, p.Name+" func() (string, error)")
 		}
@@ -298,6 +300,11 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 	// Allocate output buffers.
 	for _, name := range outBufNames(importName) {
 		fmt.Fprintf(buf, "\t\t\t%s := make([]byte, _cleatOutBufSize)\n", name)
+	}
+
+	// Import arguments the caller does not supply (see adapterDef.PreStmts).
+	for _, stmt := range adef.PreStmts {
+		buf.WriteString("\t\t\t" + stmt + "\n")
 	}
 
 	// Build adapter param type lookup for import arg conversion.
@@ -392,6 +399,8 @@ func generateHostFunc(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 			params = append(params, p.Name+" time.Duration")
 		case "func(string)":
 			params = append(params, p.Name+" func(string)")
+		case "func()":
+			params = append(params, p.Name+" func()")
 		case "func() (string, error)":
 			params = append(params, p.Name+" func() (string, error)")
 		}
@@ -409,6 +418,11 @@ func generateHostFunc(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 	// Allocate output buffers.
 	for _, name := range outBufNames(importName) {
 		fmt.Fprintf(buf, "\t%s := make([]byte, _cleatOutBufSize)\n", name)
+	}
+
+	// Import arguments the caller does not supply (see adapterDef.PreStmts).
+	for _, stmt := range adef.PreStmts {
+		buf.WriteString("\t" + stmt + "\n")
 	}
 
 	// Build adapter param type lookup for import arg conversion.
@@ -500,6 +514,8 @@ func generateHostWrapperFunc(buf *bytes.Buffer, fieldName string, wdef hostWrapp
 			params = append(params, p.Name+" time.Duration")
 		case "func(string)":
 			params = append(params, p.Name+" func(string)")
+		case "func()":
+			params = append(params, p.Name+" func()")
 		case "func() (string, error)":
 			params = append(params, p.Name+" func() (string, error)")
 		case "interface{}":

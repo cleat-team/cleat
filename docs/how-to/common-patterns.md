@@ -56,7 +56,7 @@ For simpler compensation patterns, use `DurableDeferFunc`:
 
 ```go
 func CreateOrder(h cleat.HostCalls, input string) error {
-    defer h.DurableDeferFunc(func() {
+    h.DurableDeferFunc(func() {
         h.DurableCall("inventory", "ReleaseReservation", "order-123")
         h.DurableCall("payments", "Refund", "order-123")
     })
@@ -66,8 +66,20 @@ func CreateOrder(h cleat.HostCalls, input string) error {
 }
 ```
 
-The deferred block runs only if the function returns an error. On replay, the
-compensation is not re-executed if it already ran.
+Call `DurableDeferFunc` directly — do not put Go's own `defer` in front of it.
+That would delay the *registration* until the function returns, which reverses
+the order of two or more registrations.
+
+The block runs when the entry point finishes, on the success path as well as
+the error path, exactly like Go's `defer`. If you want cleanup only on failure,
+test for it inside the block. It does not run when the workflow suspends: a
+sleeping workflow has not exited, and the segment that finally completes runs
+it then.
+
+On replay the block runs again, but the durable calls inside it are served from
+the recorded history rather than re-executed, so their effects are not
+repeated. Anything in there that is *not* a durable call can run more than
+once.
 
 ### Key differences: Saga vs DurableDefer
 

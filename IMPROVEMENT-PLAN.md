@@ -6080,7 +6080,16 @@ both are now decisions about *what a defer may do* rather than prerequisites for
 module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
 the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
-### 3.35 What `defer` is supposed to be — 🔶 **PHASE 1 DONE; 2–5 BLOCKED on §3.70** (WS-3, 2026-08-05; plan 2026-09-01)
+### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–3 DONE; 4–5 OPEN** (WS-3, 2026-08-05; plan 2026-09-01)
+
+> **2026-09-01, phases 2–3.** A WASM defer now has a body and it runs. §3.70 records the design
+> and why the "one dispatch export" it was blocked on turned out to be unnecessary: the host
+> instantiates a fresh module to run defers, so no export can reach a closure registered in the
+> instance that is gone — the guest runs its own instead, at the point the entry point finishes.
+> The first of the two intent properties above is now true for a workflow that returns, and the
+> second is true *unconditionally* for those defers, because they run inside the live session
+> with the whole workflow context available. What remains for phase 4 is the case where the guest
+> never gets to run: cancellation, terminal failure, and the execution fence.
 
 Written because §3.32 fenced the defer path and the fence made an uncomfortable question
 visible: *bounded doing what, exactly?* The implementation turned out to be much further from
@@ -9052,7 +9061,7 @@ singly and in the pairs where the property only appears across two calls — acq
 
 Re-derive: `go test ./engine/ -run 'TestReplayReproducesFreshSessionState|TestParityHarnessCanFail' -count=1 -v`
 
-### 3.70 A WASM defer has no callback to call — 🔴 **OPEN, and it reframes §3.35** (WS-3, 2026-09-01)
+### 3.70 A WASM defer has no callback to call — 🟢 **FIXED for the normal path; abnormal exit remains** (WS-3, 2026-09-01)
 
 Found while measuring the prerequisite for §3.35 phase 3. It invalidates the premise of that
 section's phases 2–5, so it is recorded before any of them are built on it.
@@ -9151,3 +9160,50 @@ Re-derive the measurement: build a fixture calling `h.DurableDefer(...)` under `
 `go run ./cmd/cleat build --target go -o <dir outside the module tree> ./testdata/<fixture>`, and
 grep the generated `gen_wasm_exports.go` for `defer` — the only `//go:wasmexport` is the workflow
 entry point.
+
+#### Resolution: the guest runs its own defers, and the dispatch export was not needed
+
+The measurement above established that a post-`_start` export **can** run, so the "one dispatch
+export" design was viable. Building it showed it was also unnecessary, for a reason neither the
+measurement nor the design discussion had reached: **the host does not reuse that instance.**
+`RunDefer` calls `backend.PerExecution().Execute(ctx, wasmBytes, deferName, …)`, which compiles
+and instantiates from bytes — a fresh instance every time (`engine/executor.go`). A closure lives
+in the memory of the instance that registered it, so no export name, dispatched or otherwise,
+can reach it from there. The live-module path in `invokeDefersOnTrap` (`engine/flush.go`) does
+hold the right instance, but invokes by the same `cleat_defer_<id>` name, which no guest exports
+and none can — the ID is minted by the host at runtime and an export name is fixed at compile
+time.
+
+So the fix is on the other side of the boundary. The guest already has the closures at the moment
+a defer is for, and now runs them itself:
+
+- `DurableDeferFunc` is wired into codegen for the first time. It was absent from the `wasm`
+  package's `hostFunctions` table, so the generated adapter never set the `HostCallsOptions`
+  field and the method returned *"the HostCalls runtime was not initialized"* — text that blames
+  the caller for calling it from the wrong place. Verified by mutation: removing the table entry
+  reproduces that exact string.
+- `_cleatRegisterDefer` stores the body under the ID the host minted, so both sides key the same
+  defer identically.
+- `_cleatRunDeferred` runs the bodies in LIFO order once the entry point has finished, on the
+  error path as well as the success path, and **before** the result is reported, so anything a
+  defer records lands inside the segment that ran it.
+
+Two boundaries are deliberate and both are tested. It does **not** run on suspension — a sleeping
+workflow has not exited, and firing every cleanup at the first sleep is the silent failure this
+most easily becomes; the segment that finally completes replays the entry point, re-registers the
+same IDs, and runs them then. And it does not run for a workflow that never returns — cancelled,
+failed terminally, or killed by the fence — because the guest is not executing then. That case
+still needs a host-driven path, which needs replay, and is §3.35 phase 4.
+
+Defers are at-least-once, like everything else here: a defer that itself suspends leaves the ones
+after it unrun, and on resume the whole set runs again from the top. Durable calls inside them
+replay from history rather than re-executing, so this is ordinary replay semantics, but a defer's
+non-durable side effects can repeat.
+
+**Left behind, and the next thing to fix:** the host-side `cleat_defer_<id>` invocation is now
+redundant for Go guests and logs `defer execution failed … unknown entry point` for a defer that
+in fact ran. The log line itself is not new — it arrived with the fix in this section's last
+paragraph, which turned the host's silent false success into a visible failure — but it is now
+misleading rather than merely noisy. Retiring that path is a separate change with its own tests
+(`engine/defer_runs_once_test.go` pins the current contract, including that a defer the live
+module cannot offer must still be attempted).
