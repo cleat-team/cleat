@@ -1891,3 +1891,78 @@ func TestWasmOutputName_IsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Entry points that take no input
+// ---------------------------------------------------------------------------
+
+// TestRunBuild_EntryPointWithNoArguments builds a fixture whose entry point
+// takes only the HostCalls handle.
+//
+// That did not compile. Codegen wrote `argsJSON := readString(argsPtr, argsLen)`
+// into every generated export unconditionally, and an entry point with no
+// parameters has nothing that reads it, so the guest failed with
+// "declared and not used: argsJSON" -- a compile error in generated code the
+// workflow author never wrote and cannot edit.
+//
+// This runs `cleat build` as a SUBPROCESS rather than calling runBuild in
+// process, and that is not incidental: the compile-failure path is
+// os.Exit(1) (main.go), which would kill the test binary instead of failing
+// this test. A subprocess turns it into an exit code and captured output.
+//
+// It is also deliberately a real build rather than another assertion about the
+// generated text. The existing codegen tests run the output through
+// parser.ParseFile, and "declared and not used" is a TYPE error -- a parser
+// never raises it. A test of the same shape as its neighbours would have missed
+// this exactly the way they did.
+// There is deliberately no short-mode skip. TestRunBuild_GoTarget above
+// compiles a Go workflow to WASM without one, and this needs exactly what it
+// needs: the Go toolchain, which is always present in this repo. The Python
+// round-trip test skips because componentize-py is an external dependency that
+// may not be installed -- a different situation, and not this one.
+func TestRunBuild_EntryPointWithNoArguments(t *testing.T) {
+	outDir := t.TempDir()
+	cmd := exec.Command("go", "run", filepath.Join(repoRoot(t), "cmd", "cleat"),
+		"build", "--target", "go", "-o", outDir,
+		filepath.Join(testdataDir(t), "noargs"))
+	cmd.Dir = repoRoot(t)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("building a workflow whose entry point takes no input failed: %v\n\n%s\n\n"+
+			"If the error above is \"declared and not used: argsJSON\", codegen is "+
+			"declaring argsJSON in an export that has no parameters to parse out of "+
+			"it. It must be declared only when something consumes it.", err, out)
+	}
+
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wasmFiles []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".wasm") {
+			wasmFiles = append(wasmFiles, e.Name())
+		}
+	}
+	if len(wasmFiles) == 0 {
+		t.Fatalf("build reported success but produced no .wasm: %v\n\n%s",
+			entryNames(entries), out)
+	}
+
+	// The fixture carries both shapes. Greet takes an argument, so its export
+	// must still extract one -- the mirror-image mistake ("never declare
+	// argsJSON") would compile fine and silently pass every entry point an
+	// empty input.
+	gen, err := os.ReadFile(filepath.Join(outDir, "gen_wasm_exports.go"))
+	if err != nil {
+		t.Fatalf("reading generated exports: %v", err)
+	}
+	if !strings.Contains(string(gen), "argsJSON := readString(argsPtr, argsLen)") {
+		t.Error("no export declares argsJSON, but the fixture's Greet takes a " +
+			"parameter -- every entry point is now being handed an empty input")
+	}
+	if !strings.Contains(string(gen), "Name := argsJSON") {
+		t.Error("Greet's argument is not being read out of argsJSON")
+	}
+}
