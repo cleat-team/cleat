@@ -5859,9 +5859,31 @@ is a fourth option that dominates all of them:
    forward — that machinery exists solely to smooth an upgrade, so with no upgrade to smooth it
    is dead weight. This option removes code instead of adding a migration.
 
-**Recommendation: 4 if there is no deployed data, otherwise 2 then 1** — adopt where
-unambiguous, fan out the remainder — because that makes the common case free and never leaves a
-row unconstrained. Option 3 is now the weakest of the four rather than a free win.
+**DECIDED 2026-09-02: option 4.** There is no deployed `workflow_defs` data to preserve, so
+the migration changes the key outright and the adoption machinery goes with it. Options 1 and 2
+are recorded above because the reasoning is worth keeping if that ever stops being true; option
+3 is the weakest of the four rather than the free win it looked like.
+
+**What option 4 deletes, and this is the part that makes it more than a migration.**
+`canAdoptDef`, the default-tenant adoption window, and the ownership-error path that polices it
+(`engine/def_ownership.go`, `ErrWorkflowDefOwnedByAnotherTenant`, and the repeated SQL guard on
+PostgreSQL that maps `23505` onto it) all exist for one reason: `(name, version)` is a shared
+namespace, so two tenants deploying the same name is a collision that has to be adjudicated.
+Under `(tenant_id, name, version)` it is not a collision at all — each tenant gets its own row —
+so there is nothing to adjudicate and the machinery has no job. Deleting it is not a
+simplification bolted onto the migration; it is what the migration *means*.
+
+**Sequenced as two PRs, because the first stands alone and de-risks the second:**
+
+1. **Tenant-scope every `workflow_defs` lookup.** No schema change. Correct today — the local
+   child-start path resolves a definition by name with no deliberate tenant check and is saved
+   only by a `NOT NULL` constraint when `MAX(version)` comes back empty under RLS — and
+   *required* the moment two tenants can hold one name.
+2. **Change the key and delete the adoption window.** The migration, the PK, the three foreign
+   keys per dialect, and the removal above.
+
+Doing them in the other order leaves a window where the tree is incorrect rather than merely
+under-defended.
 
 #### Sequencing
 
