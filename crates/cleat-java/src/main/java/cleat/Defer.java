@@ -29,6 +29,43 @@ public final class Defer {
     /** Registered bodies, in registration order. A WASM guest is single-threaded. */
     private static final List<Runnable> BODIES = new ArrayList<>();
 
+    /**
+     * True while {@link #runDeferred()} is draining the table.
+     *
+     * <p>IMPROVEMENT-PLAN 3.35 phase 4. Two things a defer body must not do,
+     * both measured 2026-09-02 before they were blocked, and both producing a
+     * workflow that reported SUCCESS with a durable record that could not be
+     * honoured:
+     *
+     * <ul>
+     *   <li>registering another defer -- the table is drained BEFORE the first
+     *       body runs, so the new entry lands in a list nobody walks again,
+     *       while the host has already written a durable {@code defer} event
+     *       for it;</li>
+     *   <li>{@code continueAsNew} -- the host records the event AND the
+     *       generated wrapper reports the already-decided result, so the worker
+     *       stores {@code done} and the continuation is silently never
+     *       taken.</li>
+     * </ul>
+     *
+     * <p>Both guards run BEFORE the host call. Checking after would leave the
+     * durable event behind, which is the defect rather than the fix.
+     */
+    private static boolean inDeferPhase = false;
+
+    /** Reports whether defer bodies are currently running. */
+    public static boolean inDeferPhase() {
+        return inDeferPhase;
+    }
+
+    /** The message both refusals carry. */
+    public static String deferPhaseRefusal(String what) {
+        return "cleat: " + what + " is not allowed from inside a defer body: the defer "
+            + "table is drained before the first body runs and the workflow's result is "
+            + "already decided, so this would be recorded durably and never taken "
+            + "(IMPROVEMENT-PLAN 3.35 phase 4)";
+    }
+
     private Defer() {
         // static only
     }
@@ -70,19 +107,27 @@ public final class Defer {
         List<Runnable> taken = new ArrayList<>(BODIES);
         BODIES.clear();
 
-        int ran = 0;
-        for (int i = taken.size() - 1; i >= 0; i--) {
-            ran++;
-            try {
-                taken.get(i).run();
-            } catch (SuspendSignal e) {
-                throw e;
-            } catch (RuntimeException | Error e) {
-                // One bad cleanup must not stop the rest.
-                continue;
+        // try/finally, not a pair of assignments: SuspendSignal is rethrown out
+        // of this method, and a flag left set would make the next segment's
+        // first deferFunc refuse.
+        inDeferPhase = true;
+        try {
+            int ran = 0;
+            for (int i = taken.size() - 1; i >= 0; i--) {
+                ran++;
+                try {
+                    taken.get(i).run();
+                } catch (SuspendSignal e) {
+                    throw e;
+                } catch (RuntimeException | Error e) {
+                    // One bad cleanup must not stop the rest.
+                    continue;
+                }
             }
+            return ran;
+        } finally {
+            inDeferPhase = false;
         }
-        return ran;
     }
 
     /**

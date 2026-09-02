@@ -117,6 +117,12 @@ var adapterDefs = map[string]adapterDef{
 			{"fn", "func()"},
 		},
 		PreStmts: []string{
+			// Before the host call, not after: a check that ran after
+			// cleat_defer would leave the durable event behind, which is the
+			// whole defect. IMPROVEMENT-PLAN 3.35 phase 4.
+			"if _cleatInDeferPhase {",
+			`	return "", _cleatErrInDeferPhase("DurableDeferFunc")`,
+			"}",
 			`description := "deferred function"`,
 			"descriptionPtr, descriptionLen := stringPtr(description)",
 		},
@@ -174,6 +180,16 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"newInputJSON", "string"},
 		},
+		PreStmts: []string{
+			// IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: a check
+			// after cleat_continue_as_new would leave the event in the
+			// history, and the worker stores 'done' anyway because the
+			// wrapper reports the already-decided result -- so the
+			// continuation is recorded and silently never taken.
+			"if _cleatInDeferPhase {",
+			`	return _cleatErrInDeferPhase("ContinueAsNew")`,
+			"}",
+		},
 		ResultStmts: []string{
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
@@ -188,6 +204,16 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"newInputJSON", "string"},
 			{"newVersion", "int64"},
+		},
+		PreStmts: []string{
+			// IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: a check
+			// after cleat_continue_as_new would leave the event in the
+			// history, and the worker stores 'done' anyway because the
+			// wrapper reports the already-decided result -- so the
+			// continuation is recorded and silently never taken.
+			"if _cleatInDeferPhase {",
+			`	return _cleatErrInDeferPhase("ContinueAsNewWithVersion")`,
+			"}",
 		},
 		ResultStmts: []string{
 			"errCode := uint32(result)",

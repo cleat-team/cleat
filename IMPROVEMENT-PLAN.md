@@ -6125,7 +6125,7 @@ both are now decisions about *what a defer may do* rather than prerequisites for
 module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
 the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
-### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 OPEN** (WS-3, 2026-08-05; phase 4 landed 2026-09-02)
+### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 OPEN, and blocked on WS-2** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02)
 
 > **2026-09-01, phases 2–3.** A WASM defer now has a body and it runs. §3.70 records the design
 > and why the "one dispatch export" it was blocked on turned out to be unnecessary: the host
@@ -6359,15 +6359,44 @@ the six were already settled by earlier work — "its own budget" shipped as
 |---|---|---|
 | 1 | A defer survives a suspension — replay re-registers it | ✅ §3.66, 2026-09-01 |
 | 2 | A defer can make host calls: the session reaches the body | ✅ 2026-09-02 — `withHandler(Background, session)`; §3.70's ABI unblocked it and the wazero drain fix exposed it |
-| 3 | Defers run on **all** terminal transitions, in the instance that registered them | **blocked, §3.70** |
-| 4 | The body is restricted: no new defers, no `continue_as_new` | **blocked, §3.70** |
-| 5 | Exactly-once: the defer phase as its own durable unit of work | **not scheduled** |
+| 3 | Defers run on **all** terminal transitions, in the instance that registered them | ✅ 2026-09-02 for every transition that has a live instance; the rest **is** phase 5 |
+| 4 | The body is restricted: no new defers, no `continue_as_new` | ✅ 2026-09-02, all five SDKs |
+| 5 | Exactly-once: the defer phase as its own durable unit of work | **not scheduled — needs WS-2's record shape** |
 
-**Phases 2–5 are blocked, not merely unscheduled.** §3.70 found that no guest exports the
-callback these phases invoke, so none of their effects are observable until an ABI exists. Phase
-1 stands: it is about the registration set, which does work. Read §3.70 before planning any of
-the rest -- the measurement is cheap to repeat and the conclusion is not what the design below
-assumes.
+**This table said "blocked, §3.70" for phases 2–4 until 2026-09-02, and the heading above said
+"PHASES 1–4 DONE" at the same time.** Both were wrong, in opposite directions, for weeks. The
+heading over-claimed phase 4, which had no implementation anywhere; the table under-claimed
+phases 2 and 3, whose blocker had been removed by §3.70 and §3.73. A scan of either alone gives
+a false answer, which is what this file's own rule about markers over stale bodies is for.
+
+**And the shape shipped is not the shape this five-phase plan describes.** The plan below assumes
+the host invokes a per-defer callback — an export named `cleat_defer_<id>`. What exists is the
+*opposite*: the guest drains its own table inside the entry-point wrapper (§3.70, §3.73), and the
+host has one whole-table export, `__cleat_run_deferred`, for guests it killed (phase 4 of §3.35,
+#550/#553/#557/#558/#559/#560). **No guest in any language has ever exported `cleat_defer_<id>`**
+— `grep -rn "cleat_defer_"` finds consumers and no producers. Read the phase notes below as the
+reasoning that led here, not as a description of the code.
+
+**What phase 3 does and does not cover, precisely.** Defers run on the success path, on the error
+path, and on every kill the host performs — fence, instruction limit, memory ceiling, trap —
+across wasmtime and wazero, in the instance that registered them. They do **not** run for a
+workflow cancelled or failed terminally *between* segments, because there is no instance to run
+them in. That case is not a gap in phase 3; it is the definition of phase 5.
+
+**Phase 4's two restrictions were measured before they were built**, and both produced the same
+failure: a workflow that reported SUCCESS while writing a durable record that could not be
+honoured.
+
+| a defer body that... | before, measured 2026-09-02 |
+|---|---|
+| registers another defer | host wrote `defer-3 "registered from inside a defer body"` into the history; the body never ran, because the table is drained before the first body starts. A completed workflow carrying a pending defer nothing could execute — §3.70's defect by a different road. |
+| calls `continue_as_new` | host recorded a `continue_as_new` event at step 3 **and** the wrapper reported the already-decided result. One history, two contradictory terminal facts; the worker stores `done` and the continuation is silently never taken. |
+
+Both are now refused **before the host call** in all five SDKs, which is the part that matters: a
+guest-side refusal that still let `cleat_defer` reach the host would leave the durable event
+behind, and the durable event is the defect. Pinned by `TestADeferBodyCannot*` (AssemblyScript,
+hand-written guards) and `TestAGoDeferBodyCannot*` (Go, codegen-emitted guards) — different code,
+same contract, so one passing says nothing about the other.
 
 **Phase 2 — the session reaches the body.** `invokeDefersOnTrap` invokes the defer on the
 still-live module with `context.Background()`, so `handlerFromContext`'s unchecked assertion

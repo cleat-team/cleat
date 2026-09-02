@@ -437,6 +437,16 @@ impl HostCalls {
     /// The returned ID is the host's, and is the key the body is stored under,
     /// so the two sides agree about which defer is which.
     pub fn defer_func<F: FnOnce() + 'static>(&self, f: F) -> (String, Option<String>) {
+        // Refused BEFORE the host call -- IMPROVEMENT-PLAN 3.35 phase 4.
+        // Registering here used to mint a real defer ID and write a durable
+        // `defer` event that nothing could ever run, because run_deferred
+        // drains the table before the first body starts.
+        if crate::defer::in_defer_phase() {
+            return (
+                String::new(),
+                Some(crate::defer::defer_phase_refusal("defer_func")),
+            );
+        }
         let (id, err) = self.cleat_defer("deferred function");
         if err.is_some() {
             return (id, err);
@@ -485,6 +495,12 @@ impl HostCalls {
 
     /// Continue as new. Mirrors Go's ContinueAsNew.
     pub fn continue_as_new(&self, input_json: &str) -> Result<(), String> {
+        // IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: the workflow's
+        // result is already decided by the time defers run, so a recorded
+        // continuation is one the worker will never take.
+        if crate::defer::in_defer_phase() {
+            return Err(crate::defer::defer_phase_refusal("continue_as_new"));
+        }
         let result = unsafe {
             imports::cleat_continue_as_new(
                 input_json.as_ptr(), input_json.len() as u32,
@@ -1321,6 +1337,12 @@ impl HostCalls {
 
     /// Continue as new with an explicit version. Mirrors Go's ContinueAsNewWithVersion.
     pub fn continue_as_new_versioned(&self, input_json: &str, new_version: i32) -> Result<(), String> {
+        // IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: the workflow's
+        // result is already decided by the time defers run, so a recorded
+        // continuation is one the worker will never take.
+        if crate::defer::in_defer_phase() {
+            return Err(crate::defer::defer_phase_refusal("continue_as_new_versioned"));
+        }
         let result = unsafe {
             imports::cleat_continue_as_new_versioned(
                 input_json.as_ptr(), input_json.len() as u32,

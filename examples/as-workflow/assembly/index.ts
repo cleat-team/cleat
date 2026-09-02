@@ -321,3 +321,50 @@ export function trap_after_defer(h: HostCalls, input: string): string {
   unreachable();
   return "";
 }
+
+// ---------------------------------------------------------------------------
+// Two things a defer body must not do — IMPROVEMENT-PLAN §3.35 phase 4
+//
+// Both were measured on this SDK on 2026-09-02, before either was blocked, and
+// both produced a workflow that reported SUCCESS with a broken durable record:
+//
+//   * registering another defer wrote a `defer` event for a body that could
+//     never run, because the table is drained before the first body starts;
+//   * continueAsNew wrote a `continue_as_new` event AND let the wrapper report
+//     the already-decided result, so the history carried two contradictory
+//     terminal facts and the continuation silently never happened.
+//
+// These entry points exist so the refusals stay pinned.
+// ---------------------------------------------------------------------------
+
+/** A defer body that tries to register another defer. */
+function deferThatRegisters(h: HostCalls, payload: string): void {
+  h.cleatCall("inventory", "outer_defer_ran", "{}");
+  let r = deferFunc(h, "registered from inside a defer body", notifyFirst, "{}");
+  if (r.isError) {
+    h.cleatCall("inventory", "inner_defer_refused", "{}");
+  }
+}
+
+@cleatEntry("DeferRegistersDefer")
+export function defer_registers_defer(h: HostCalls, input: string): string {
+  deferFunc(h, "outer", deferThatRegisters, "{}");
+  h.cleatCall("inventory", "body", "{}");
+  return '{"ok":true}';
+}
+
+/** A defer body that tries to continue-as-new. */
+function deferThatContinues(h: HostCalls, payload: string): void {
+  h.cleatCall("inventory", "defer_ran", "{}");
+  let err = h.continueAsNew('{"round":2}');
+  if (err !== null) {
+    h.cleatCall("inventory", "continue_as_new_refused", "{}");
+  }
+}
+
+@cleatEntry("DeferContinuesAsNew")
+export function defer_continues_as_new(h: HostCalls, input: string): string {
+  deferFunc(h, "continues as new", deferThatContinues, "{}");
+  h.cleatCall("inventory", "body", "{}");
+  return '{"ok":true}';
+}

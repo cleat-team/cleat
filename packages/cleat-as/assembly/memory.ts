@@ -421,6 +421,46 @@ export function setWorkflowSuspended(): void {
 }
 
 // ──────────────────────────────────────────────
+// Defer phase
+// ──────────────────────────────────────────────
+
+/**
+ * True while the guest is draining its defer table.
+ *
+ * IMPROVEMENT-PLAN §3.35 phase 4. Two things a defer body must not do, both
+ * measured on this SDK 2026-09-02 before they were blocked:
+ *
+ *   * **Register another defer.** The table is drained BEFORE the first body
+ *     runs -- it has to be, or a body that registers would extend the slice
+ *     being walked -- so the new registration lands in a table nobody walks
+ *     again. The host had already minted an ID and written a durable `defer`
+ *     event for it, so a *completed* workflow's history carried a pending
+ *     defer that nothing anywhere could ever run. That is §3.70's defect
+ *     exactly, arrived at by a different road.
+ *   * **Call continueAsNew.** Worse: the host recorded a `continue_as_new`
+ *     event at step 3 AND the wrapper went on to report the workflow's
+ *     already-decided result. One history with two contradictory terminal
+ *     facts; the worker stores `done`, and the continuation silently never
+ *     happens.
+ *
+ * The flag lives here, not in defer.ts, so that `host-calls.ts` can read it
+ * without importing `defer.ts` -- which imports `host-calls.ts`, and a cycle
+ * between two modules with top-level initialisers is a start-function ordering
+ * hazard under `--runtime stub`. `memory.ts` has no imports at all.
+ */
+let _inDeferPhase: bool = false;
+
+/** Returns `true` while defer bodies are running. */
+export function isInDeferPhase(): bool {
+  return _inDeferPhase;
+}
+
+/** Marks the start and end of the defer drain. Called by `runDeferred`. */
+export function setInDeferPhase(v: bool): void {
+  _inDeferPhase = v;
+}
+
+// ──────────────────────────────────────────────
 // Terminal error detection
 // ──────────────────────────────────────────────
 

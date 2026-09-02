@@ -141,3 +141,54 @@ def test_the_entry_wrapper_does_not_run_defers_on_suspension():
     )
     # And the body is still registered, so the segment that DOES finish runs it.
     assert run_deferred() == 1
+
+
+class TestDeferPhaseRestriction:
+    """IMPROVEMENT-PLAN §3.35 phase 4: what a defer body may not do."""
+
+    def setup_method(self):
+        defer_mod._DEFERS = []
+        defer_mod._IN_DEFER_PHASE = False
+
+    def test_in_defer_phase_is_true_while_a_body_runs(self):
+        """Asserted from INSIDE a body.
+
+        Checking from outside is exactly where the flag is always false, so a
+        test written there would pass against a flag that is never set at all.
+        """
+        seen = []
+
+        def body():
+            seen.append(defer_mod.in_defer_phase())
+
+        assert not defer_mod.in_defer_phase()
+        defer_mod.register_defer("d1", body)
+        assert defer_mod.run_deferred() == 1
+        assert seen == [True]
+        assert not defer_mod.in_defer_phase(), (
+            "the flag must be clear after the drain, or the next segment's "
+            "first defer_func would be refused"
+        )
+
+    def test_the_flag_is_cleared_when_a_body_suspends(self):
+        """The case a pair of plain assignments would get wrong.
+
+        SuspendSentinel propagates out of run_deferred, so only try/finally
+        clears the flag on that path.
+        """
+
+        def body():
+            raise SuspendSentinel()
+
+        defer_mod.register_defer("d1", body)
+        with pytest.raises(SuspendSentinel):
+            defer_mod.run_deferred()
+        assert not defer_mod.in_defer_phase()
+
+    def test_the_flag_is_cleared_when_a_body_raises(self):
+        def body():
+            raise RuntimeError("cleanup blew up")
+
+        defer_mod.register_defer("d1", body)
+        assert defer_mod.run_deferred() == 1
+        assert not defer_mod.in_defer_phase()

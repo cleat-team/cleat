@@ -101,4 +101,51 @@ class DeferTest {
         assertEquals(0, Defer.runDeferred(),
             "a null body was counted as a defer that ran");
     }
+
+    // ------------------------------------------------------------------
+    // IMPROVEMENT-PLAN 3.35 phase 4: the defer-phase flag
+    // ------------------------------------------------------------------
+
+    /**
+     * Asserted from INSIDE a body.
+     *
+     * <p>Checking from outside is exactly where the flag is always false, so a
+     * test written there would pass against a flag that is never set at all.
+     */
+    @Test
+    void inDeferPhaseIsTrueWhileABodyRuns() {
+        java.util.List<Boolean> seen = new java.util.ArrayList<>();
+        assertFalse(Defer.inDeferPhase(), "the flag must be clear before the drain");
+
+        Defer.register(() -> seen.add(Defer.inDeferPhase()));
+        assertEquals(1, Defer.runDeferred());
+
+        assertEquals(java.util.List.of(Boolean.TRUE), seen,
+            "a defer body must observe inDeferPhase() == true");
+        assertFalse(Defer.inDeferPhase(),
+            "the flag must be clear after the drain, or the next segment's first "
+            + "deferFunc would be refused");
+    }
+
+    /**
+     * The case a pair of plain assignments would get wrong: SuspendSignal is
+     * rethrown out of runDeferred, so only try/finally clears the flag.
+     */
+    @Test
+    void theFlagIsClearedWhenABodySuspends() {
+        Defer.register(() -> {
+            throw new SuspendSignal();
+        });
+        assertThrows(SuspendSignal.class, Defer::runDeferred);
+        assertFalse(Defer.inDeferPhase());
+    }
+
+    @Test
+    void theFlagIsClearedWhenABodyThrows() {
+        Defer.register(() -> {
+            throw new IllegalStateException("cleanup blew up");
+        });
+        assertEquals(1, Defer.runDeferred());
+        assertFalse(Defer.inDeferPhase());
+    }
 }

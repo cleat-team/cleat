@@ -2640,7 +2640,14 @@ class HostCalls:
             The defer ID the host minted, which is also the key the body is
             stored under.
         """
-        from .defer import register_defer
+        from .defer import defer_phase_refusal, in_defer_phase, register_defer
+
+        # Refused BEFORE the host call -- IMPROVEMENT-PLAN 3.35 phase 4.
+        # Registering here used to mint a real defer ID and write a durable
+        # ``defer`` event that nothing could ever run, because ``run_deferred``
+        # drains the table before the first body starts.
+        if in_defer_phase():
+            raise RuntimeError(defer_phase_refusal("defer_func"))
 
         defer_id = _import_cleat_defer("deferred function")
         register_defer(defer_id, fn)
@@ -2668,6 +2675,14 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        from .defer import defer_phase_refusal, in_defer_phase
+
+        # IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: the workflow's
+        # result is already decided by the time defers run, so a recorded
+        # continuation is one the worker will never take.
+        if in_defer_phase():
+            raise RuntimeError(defer_phase_refusal("continue_as_new"))
+
         input_str = self._marshal(input)
         _import_cleat_continue_as_new(input_str)
 
@@ -2725,6 +2740,12 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        from .defer import defer_phase_refusal, in_defer_phase
+
+        # IMPROVEMENT-PLAN 3.35 phase 4; see continue_as_new above.
+        if in_defer_phase():
+            raise RuntimeError(defer_phase_refusal("continue_as_new_versioned"))
+
         input_str = self._marshal(input)
         _import_continue_as_new_versioned(input_str, new_version)
 
