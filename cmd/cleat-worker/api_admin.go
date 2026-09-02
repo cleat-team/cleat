@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/cleat-team/cleat/auth"
@@ -43,6 +44,20 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 		action = s.handleAdminForceFail
 	case len(parts) == 2 && parts[1] == "re-replay" && r.Method == http.MethodPost:
 		action = s.handleAdminReReplay
+	case len(parts) == 4 && parts[1] == "steps" && parts[3] == "resolve" && r.Method == http.MethodPost:
+		// The step travels in the path, and the action signature carries only
+		// the workflow ID, so it is bound here rather than re-parsed in the
+		// handler. Parsed before the ownership check below runs, so a
+		// malformed step is a 400 rather than a 404 that implies the workflow
+		// does not exist.
+		step, err := strconv.Atoi(parts[2])
+		if err != nil || step < 0 {
+			s.writeError(w, 400, "step must be a non-negative integer")
+			return
+		}
+		action = func(w http.ResponseWriter, r *http.Request, id string, st engine.WorkflowStore) {
+			s.handleAdminResolveStep(w, r, id, step, st)
+		}
 	default:
 		s.writeError(w, 404, "not found")
 		return
@@ -169,6 +184,41 @@ func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request,
 	}
 
 	s.writeJSON(w, 200, map[string]string{"status": "failed"})
+}
+
+// handleAdminResolveStep records an outcome for a call left ambiguous by a
+// crash -- IMPROVEMENT-PLAN 1.4 phase F.
+//
+// The X-Confirm header matches force-complete and force-fail, and for a
+// stronger reason than symmetry: this writes an outcome that replay will treat
+// as the call's real result for the life of the workflow. An operator who has
+// not checked the external service can silently convert "we do not know" into
+// "it succeeded", which is the one thing the [AMBIGUOUS] state exists to
+// prevent.
+func (s *apiServer) handleAdminResolveStep(w http.ResponseWriter, r *http.Request, id string, step int, st engine.WorkflowStore) {
+	if r.Header.Get("X-Confirm") != "resolve-step" {
+		s.writeError(w, 400, "X-Confirm header must be 'resolve-step'")
+		return
+	}
+
+	var req struct {
+		Response string `json:"response"`
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, 400, "invalid JSON: "+err.Error())
+			return
+		}
+	}
+
+	op := operatorFromContext(r)
+	if err := engine.ResolveStep(r.Context(), st, id, step, req.Response, op); err != nil {
+		s.handleAdminOpError(w, err)
+		return
+	}
+
+	s.writeJSON(w, 200, map[string]any{"status": "resolved", "step": step, "resolved_by": op})
 }
 
 func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, id string, st engine.WorkflowStore) {
