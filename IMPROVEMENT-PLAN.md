@@ -10164,7 +10164,15 @@ shows a reset chain segment.
 
 #### Open, and deliberately not decided here
 
-**The caller-visible status window.** Between step 1 and step 2 a terminated workflow is not yet
+**The caller-visible status window — ✅ ANSWERED 2026-09-02, recorded as `tiers.yaml` D6.** Both
+of the options below, not either: terminate becomes asynchronous **and** the window gets its own
+status rather than reusing `ready`. The condition attached to the answer was that it be
+documented and visible, which is `docs/reference/workflow-lifecycle.md` — the whole state machine,
+because the window is only comprehensible inside it. Reusing `ready` was rejected specifically:
+it would make "terminating, running its cleanup" indistinguishable from "runnable", which is the
+failure the decision exists to avoid. The question as originally posed follows.
+
+Between step 1 and step 2 a terminated workflow is not yet
 `terminated`, so a client polling status sees it still in flight for the duration of its defer
 phase. That is the same trade the two-phase transition buys everywhere else, and it is a product
 call rather than an engineering one: either terminate becomes asynchronous and observably so, or
