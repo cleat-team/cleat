@@ -341,6 +341,44 @@ Recreating databases: PostgreSQL `DROP DATABASE cleat WITH (FORCE)`; MySQL
 or by restarting the container. Do not run `docker compose down -v` — it destroys the user's
 database. Remove containers by name.
 
+**And once you recreate it, SQL Server does not come back — this sandbox cannot verify the
+MSSQL dialect at all.** Found 2026-09-02, and it was invisible until the database was recreated:
+the old one had never been migrated past `001`, so it failed early and looked like ordinary
+staleness. On a *fresh* database the migrations get as far as
+`011_json_scalar_payloads.sql` and stop:
+
+    migration 011_json_scalar_payloads.sql: execute: mssql: The isjson function requires 1 argument(s).
+
+That migration needs `ISJSON(payload, VALUE)`, the two-argument form introduced in SQL Server
+2022. **azure-sql-edge is SQL Server 15.0 and does not have it.** Measured across all three
+sandboxes' ports rather than assumed, with `SELECT @@VERSION` and a
+`SELECT ISJSON('"x"', VALUE)` probe:
+
+| port | server | two-arg `ISJSON` |
+|---|---|---|
+| `1433` (WS-1) | SQL Server 2022 (RTM-CU26) 16.0 | supported |
+| `1434` (WS-2) | **Azure SQL Edge 15.0** | **not supported** |
+| `1435` (WS-3) | SQL Server 2022 (RTM-CU26) 16.0 | supported |
+
+So **WS-2 is the only stream that cannot run the repo's own migrations**, and the fix is to
+replace the container with `mcr.microsoft.com/mssql/server:2022-latest`. That needs a Rosetta
+profile — `~/.colima/default/colima.yaml` has `rosetta: false`, and `sqlservr` aborts under
+QEMU without it. **Do not fix this by restarting the `default` profile**: it hosts every
+stream's PostgreSQL and MySQL, so restarting it stops their databases too. Create a
+`cleat-ws2` profile the way `PARALLEL-WORKSTREAMS.md` describes, and note that `colima start`
+rewrites the global docker context, so do it when no other stream is mid-run.
+
+Until then, say so in the PR rather than letting a two-dialect run read as three. CI covers
+MSSQL.
+
+**A related trap the ports table cannot show: a container can be in `docker ps` on a port you
+cannot reach.** There are two containers named `cleat-ws1-mssql` — one in the `colima-cleat-ws1`
+profile on `1433`, and an azure-sql-edge one in the default `colima` profile publishing `1435`,
+which is also WS-3's port. `1435` answers as SQL Server 2022, so it is WS-3's VM that owns the
+binding and the default-profile container is shadowed. Probe the port, do not read the table:
+
+    for c in $(docker context ls -q); do docker --context $c ps --format "$c {{.Names}} {{.Ports}}"; done
+
 ---
 
 ## Standing constraints
