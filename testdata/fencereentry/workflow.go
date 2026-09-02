@@ -25,13 +25,16 @@ import (
 // The iteration count is not a duration. It is "far more than any fence budget
 // a test would set", so that reaching the end is itself a test failure rather
 // than a slow pass.
-// input is unused by both entry points here, and present only because codegen
-// requires it: an entry point whose only parameter is h generates a
-// `argsJSON := readString(...)` that nothing consumes, and the guest fails to
-// compile with "declared and not used: argsJSON". Every other fixture in the
-// repo happens to take an input parameter, so nothing has ever caught it.
-// Tracked separately -- it is not what this fixture is measuring.
-func SpinForever(h cleat.HostCalls, input string) (string, error) {
+// Neither entry point takes an input, because neither needs one.
+//
+// They used to take an unused `input string` purely to work around a codegen
+// defect: an entry point whose only parameter is h generated an
+// `argsJSON := readString(...)` that nothing consumed, and the guest failed to
+// compile with "declared and not used: argsJSON". That is fixed (#545), and
+// testdata/noargs is its regression test -- so the workaround is gone rather
+// than left in place with a comment explaining a problem that no longer
+// exists.
+func SpinForever(h cleat.HostCalls) (string, error) {
 	// Registered before the loop, so the fence is guaranteed to stop this
 	// workflow with a defer outstanding. This is phase 4's whole subject: a
 	// cleanup that the guest's own defer runner (3.70) will never reach,
@@ -56,7 +59,7 @@ func SpinForever(h cleat.HostCalls, input string) (string, error) {
 // a lock, refund a payment -- so "the guest ran again" has to mean "the guest
 // reached the host again", not "the export returned an int64". An export that
 // returns without executing its body returns a perfectly plausible int64.
-func AfterTheFence(h cleat.HostCalls, input string) (string, error) {
+func AfterTheFence(h cleat.HostCalls) (string, error) {
 	if _, err := h.DurableCall("fence-probe", "after_the_fence", `{}`); err != nil {
 		return "", err
 	}
