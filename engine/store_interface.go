@@ -404,6 +404,18 @@ type WorkflowStore interface {
 	// Returns nil when allowed_signals is NULL or empty (deny-all semantics).
 	GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error)
 
+	// SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
+	//
+	// Replaces rather than merges, so the list a caller writes is the list
+	// GetAllowedSignalCallers reads back. An empty or nil slice writes SQL NULL,
+	// which is the same deny-all the getter reports as nil -- "clear the list"
+	// therefore has one spelling and it round-trips.
+	//
+	// Returns ErrWorkflowNotFound when no workflow with that id is visible to
+	// the caller's tenant. Reporting success for a write that matched no row
+	// would tell an operator they had granted access when they had not.
+	SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error
+
 	// ---- Tag methods (deployment channels) ----
 
 	// SetWorkflowTag assigns a tag (e.g., "stable", "canary") to a specific version.

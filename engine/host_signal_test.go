@@ -603,3 +603,7 @@ func TestSendSignalAndWaitAuthWithWildcard(t *testing.T) {
 		t.Fatal("expected wildcard to allow any caller, but got errSignalAuthRequiredInt")
 	}
 }
+
+func (_ *mockSignalWorkflowStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
+	return nil
+}

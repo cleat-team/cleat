@@ -3291,3 +3291,7 @@ func (m *mockPurgeStore) DeleteExpiredEvents(ctx context.Context, olderThan time
 func (m *mockPurgeStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
+
+func (_ *stubWorkflowStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
+	return nil
+}

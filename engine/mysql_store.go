@@ -491,6 +491,46 @@ func (s *MySQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID str
 	return callers, nil
 }
 
+// SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
+// See PostgresStore.SetAllowedSignalCallers. IMPROVEMENT-PLAN 3.15.
+//
+// Scoped by tenant: MySQL has no row-level security, so this predicate is the
+// whole of the isolation -- without it one tenant could grant callers on
+// another tenant's workflow by id.
+func (s *MySQLStore) SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error {
+	encoded, err := encodeAllowedSignals(callers)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE workflow_instances SET allowed_signals = ? WHERE id = ? AND tenant_id = ?`,
+		encoded, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: rows affected: %w", err)
+	}
+	if n == 0 {
+		// MySQL reports 0 for "matched but unchanged" as well as "no such row",
+		// so confirm the row is genuinely absent before reporting not-found --
+		// otherwise setting a list to the value it already holds looks like a
+		// missing workflow.
+		var exists int
+		err := s.db.QueryRowContext(ctx,
+			`SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ?`,
+			workflowID, s.tenantID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrWorkflowNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("set allowed signal callers: confirm: %w", err)
+		}
+	}
+	return nil
+}
+
 // PollAndClaimSignal atomically checks for and claims a pending signal.
 // Uses SELECT ... FOR UPDATE followed by DELETE in a transaction to emulate
 // PostgreSQL's DELETE ... RETURNING.

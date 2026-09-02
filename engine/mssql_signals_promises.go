@@ -83,6 +83,57 @@ func (s *MSSQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID str
 	return callers, nil
 }
 
+// SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
+// See PostgresStore.SetAllowedSignalCallers. IMPROVEMENT-PLAN 3.15.
+//
+// In a transaction with setSessionContext, matching every other MSSQL write
+// path (mssql_lifecycle.go, mssql_events.go, and PollAndClaimSignal below).
+// SQL Server's RLS predicates read SESSION_CONTEXT, and the connector's
+// per-connection setting does not survive the connection being recycled --
+// IMPROVEMENT-PLAN 2.71.
+//
+// Stated as consistency rather than as a proven requirement, because it was
+// falsified and it is not one at this suite's granularity: removing this call
+// leaves every test in allowed_signals_writer_test.go green. Within a single
+// test the connector's setting is still in force, so nothing returns the
+// connection to the pool between the setup and the write, which is the only
+// moment 2.71 is about. Keeping the call is still right -- production recycles
+// connections constantly and the failure mode there is an UPDATE the policy
+// filters to zero rows, which this method reports as ErrWorkflowNotFound, a
+// missing workflow that is not missing. What would be wrong is claiming a test
+// covers it.
+func (s *MSSQLStore) SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error {
+	encoded, err := encodeAllowedSignals(callers)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.setSessionContext(tx); err != nil {
+		return fmt.Errorf("set allowed signal callers: session context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE workflow_instances SET allowed_signals = @p1 WHERE id = @p2 AND tenant_id = @p3`,
+		encoded, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrWorkflowNotFound
+	}
+	return tx.Commit()
+}
+
 func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

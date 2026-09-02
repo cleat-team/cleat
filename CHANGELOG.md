@@ -10,9 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing user-facing yet. Changes since `v0.2.0` are limited to the release
-process itself (`docs/project/release-process.md`, `CONTRIBUTING.md`) and to
-the DCO workflow.
+### Added
+
+- **`allowed_signals` can be set.** `GET` and `PUT
+  /api/workflows/{id}/allowed-signals` read and replace the list
+  `--require-signal-auth` checks a caller against, backed by
+  `WorkflowStore.SetAllowedSignalCallers` on all three dialects. Until now
+  nothing in cleat could write that column, so 0.2.0's note below — that the
+  flag denied every signal with no supported remedy — described a gap that is
+  now closed.
+
+  `PUT` replaces the whole list; send it without a caller to revoke, or `[]` to
+  clear. Both verbs are scoped to the calling tenant, and a workflow belonging
+  to another tenant answers `404` rather than `403`, so the endpoint cannot be
+  used to find out which ids exist.
+
+  **`--require-signal-auth` still defaults to `false`.** Every workflow starts
+  with an empty list and nothing sets one at start time, so enabling the flag
+  denies every signal until callers are granted per workflow. Grant first, then
+  enable. See `docs/reference/worker-config.md`.
 
 ## [0.2.0] - 2026-08-10
 

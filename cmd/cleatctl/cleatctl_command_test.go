@@ -1809,3 +1809,7 @@ func (m *mockStore) PickVersionByRouting(ctx context.Context, workflowName strin
 func (m *mockStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	return 0, nil
 }
+
+func (_ *mockStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
+	return nil
+}

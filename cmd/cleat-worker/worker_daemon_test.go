@@ -103,6 +103,9 @@ type mockStore struct {
 	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string, priority int) (string, error)
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
+	setAllowedSignalCallersFn          func(ctx context.Context, workflowID string, callers []string) error
+	setAllowedSignalCallersID          string
+	setAllowedSignalCallers            []string
 	terminateWorkflowFn                func(ctx context.Context, workflowID, reason string) error
 	adminForceCompleteFn               func(ctx context.Context, workflowID string, generation int64, result string, operator string) error
 	adminForceFailFn                   func(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error
@@ -3806,4 +3809,16 @@ func TestDrainComplete_DoesNotBlock(t *testing.T) {
 	default:
 		t.Error("DrainComplete() should not block after drain completes")
 	}
+}
+
+// SetAllowedSignalCallers records what the handler passed down, so a test can
+// assert on the call rather than only on the status code. An overridable func
+// for the error cases, matching getAllowedSignalCallersFn above.
+func (m *mockStore) SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error {
+	m.setAllowedSignalCallersID = workflowID
+	m.setAllowedSignalCallers = callers
+	if m.setAllowedSignalCallersFn != nil {
+		return m.setAllowedSignalCallersFn(ctx, workflowID, callers)
+	}
+	return nil
 }

@@ -3913,3 +3913,7 @@ func TestShardedClaimWorkflows_RotatesStartingShard(t *testing.T) {
 			"is not rotating, so the last shards starve under sustained load", order)
 	}
 }
+
+func (_ *mockShardStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
+	return nil
+}
