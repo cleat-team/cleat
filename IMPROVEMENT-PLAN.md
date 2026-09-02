@@ -8949,7 +8949,9 @@ Re-derive: `go test ./engine/ -run 'TestDurableSleep_|TestSleepAtTheReplayFronti
 ### 3.68 Replay released a virtual-object scope the workflow had already cleared — ✅ **FIXED** (WS-3, 2026-09-01)
 
 The second instance of §3.66's class, found by auditing every `execSession` method for the same
-shape after §3.66 shipped. There are exactly two.
+shape after §3.66 shipped. ~~There are exactly two.~~ **There were three** — the audit missed one
+in this very function, and §3.69 records both the third instance and why reading for it was the
+wrong method.
 
 `SetScope` has a fresh path and a replay path. Clearing a scope
 (`objectType == "" && instanceKey == ""`) does two separable things on the fresh path, via
@@ -8994,3 +8996,45 @@ knowing to look, and it is the answer to CLAUDE.md's "sweep or mechanism" questi
 sites are few, the invariant is one sentence, and the invariant is what keeps rotting.
 
 Re-derive: `go test ./engine/ -run 'TestReplayDoesNotReleaseAScopeItAlreadyCleared|TestFreshClearReleasesExactlyOnce|TestScopeStillHeldIsStillReleased' -count=1 -v`
+
+### 3.69 A third instance of the replay/fresh state class, found by a property test — ✅ **FIXED** (WS-3, 2026-09-01)
+
+§3.68 ended by proposing the cheaper guard than more point fixes: *"a property test over
+`execSession` that drives each durable call fresh and replayed and asserts the resulting session
+state is identical."* This is that test, and the finding is what it caught on its first run.
+
+**The third instance.** Clearing a scope is not the only way to give one up. Switching from one
+virtual object to another releases the first key and drops it from the held set, both inside
+`freshSetScope`. The replay branch appended the new key and left the old one in place, so
+end-of-segment cleanup released an object this workflow had switched away from — and once
+another workflow holds it, that is their lock. Identical harm to §3.68, a different branch of
+the same function.
+
+    fresh:  heldScopes=[vo:order:o9]
+    replay: heldScopes=[vo:cart:c1 vo:order:o9]
+
+**The method is the point, not the count.** §3.68 said "there are exactly two" on the strength of
+a careful read of every `execSession` method, and it was wrong about the function it was fixing.
+Reading found two instances and missed a third sitting eleven lines away; the property test found
+that third one immediately, without anyone knowing to look for it. This is CLAUDE.md's "sweep or
+mechanism" question answered by measurement: the invariant is one sentence, so encode it once
+rather than auditing for violations.
+
+**What the harness needs to be worth anything**, both of which cost more thought than the
+property itself:
+
+- **A vacuous-pass guard.** If the replayed session diverges — exits replay and re-runs the fresh
+  path — the two states match trivially and the case proves nothing. Each case must consume every
+  recorded event and still be in replay at the end. A case that cannot is a finding, not a case
+  to relax.
+- **A control for the control.** The property passes today, which is exactly what a harness
+  comparing nothing would do. `TestParityHarnessCanFail` drives a deliberately asymmetric
+  mutation — §3.66 reintroduced by hand — through the same comparison and requires it to be
+  caught. Without it every future reader takes on faith that the property test can go red.
+
+**Coverage is the calls that mutate Go-side collections**, which is where the invariant bites:
+`DurableDefer`, `SetScope` (acquire, clear, and switch), `SetState`, `DeleteState`, `IncrState`,
+singly and in the pairs where the property only appears across two calls — acquire-then-clear is
+§3.68 and neither half alone shows it. Extending it to a new durable call is a table entry.
+
+Re-derive: `go test ./engine/ -run 'TestReplayReproducesFreshSessionState|TestParityHarnessCanFail' -count=1 -v`
