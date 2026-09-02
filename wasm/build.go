@@ -172,6 +172,20 @@ func main() {
 	entryName := string(entryNameBuf[:entryNameLen])
 	args := argsBuf[:argsLen]
 	result := cleatDispatch(entryName, args)
+	if result == nil {
+		// nil means cleatDispatch did not recognise entryName. That is a
+		// FAILURE and must be reported on the error channel; it used to be
+		// returned as a result reading {"error":"unknown entry point: ..."},
+		// which arrived here and was completed with status 0 -- success. The
+		// host routes by entry-point name and had no other way to tell a name
+		// the guest never heard of from one that ran, which is how every defer
+		// in every Go WASM workflow did nothing while the host recorded
+		// success. IMPROVEMENT-PLAN 3.70.
+		errStr := encodeJSONString("unknown entry point: " + entryName)
+		errPtr, errLen := stringPtr(errStr)
+		cleatCompleteImport(1, errPtr, errLen)
+		return
+	}
 	resultPtr, resultLen := stringPtr(string(result))
 	cleatCompleteImport(0, resultPtr, resultLen)
 }
