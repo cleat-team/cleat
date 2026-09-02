@@ -1,7 +1,60 @@
 # The workstream — one at a time
 
 Written 2026-08-06 during a GitHub Actions outage. **Supersedes `PARALLEL-WORKSTREAMS.md`**
-(round 2, three concurrent streams), which is kept only as history.
+(round 2, three concurrent streams).
+
+> **"Kept only as history" was wrong, corrected 2026-09-02.** The *concurrency* claim this file
+> makes has held; the claim that the other file is inert has not. Four things in
+> `PARALLEL-WORKSTREAMS.md` are load-bearing today and are recorded nowhere else, so a reader who
+> takes "history" literally loses them. See "What survived the supersession" below.
+
+**The concurrency claim held, and here is the measurement.** Workstream labels on
+`IMPROVEMENT-PLAN.md` section headings, by month, re-derivable with
+
+    grep -oE '\(WS-[0-9], (written )?2026-[0-9]{2}-[0-9]{2}' IMPROVEMENT-PLAN.md \
+      | sed -E 's/\(WS-([0-9]), (written )?([0-9]{4}-[0-9]{2})-.*/WS-\1 \3/' | sort | uniq -c
+
+| | 2026-08 | 2026-09 |
+|---|---|---|
+| WS-1 | 12 | 0 |
+| WS-2 | 8 | 0 |
+| WS-3 | 10 | 11 |
+
+Measured 2026-09-02. One stream has been writing since 2026-09-01, which is what this file asked
+for. **The labels did not stop, though, and that is the source of the confusion this note
+resolves:** work is still stamped `WS-3` because the *ownership map* is still in force, not
+because three streams are running.
+
+---
+
+## What survived the supersession
+
+`PARALLEL-WORKSTREAMS.md` is the only place these live. Nothing here replaces them, and this file
+did not carry them when it declared that one superseded.
+
+| in `PARALLEL-WORKSTREAMS.md` | status |
+|---|---|
+| Checkout → stream map (`:17`) — `/localssd/rcownie/cleat-agent2` is **WS-3, "Execution boundaries: what stops a guest that will not stop"** | **live.** It is how a session in a sandbox learns which stream it is. |
+| Database ports (`:80`) — WS-3 is Postgres `5434`, MySQL `3308`, SQL Server `1435` | **live.** Used 2026-09-02 for a full three-dialect `go test ./engine/... -p 1` (133s wall; Postgres-only is ~21s, so all three connected). |
+| Migration ranges (`:108`) — WS-1 `010–019`, WS-2 `020–029`, WS-3 `030–039` | **live.** §3.35 phase 5 still cites `030–039` as reserved. |
+| `IMPROVEMENT-PLAN.md` section allocation (`:105`) — WS-1 `§3.10+`, WS-2 `§3.20+`, WS-3 `§3.30+` | **already breached, and not worth restoring.** See below. |
+| "Three concurrent streams", the coordination rituals, the per-stream boards | **retired.** That is what this file supersedes. |
+
+**The section-allocation rule failed and the workaround is the thing to copy.** Measured
+2026-09-02 with
+
+    grep -oE '^### (3\.[0-9]+) .*\(WS-[0-9]' IMPROVEMENT-PLAN.md
+
+WS-1 holds **§3.34, §3.37 and §3.38** — all inside WS-3's declared `§3.30+` block — and §3.35 was
+allocated to two streams at once (fixed by renumbering WS-1's concurrency item to §3.39). A
+prefix reservation did not survive contact, because it needs every writer to remember it every
+time.
+
+What did survive is WS-3's response: move to **§3.66+**, above the high-water mark. That is the
+same tactic the migration ranges use ("sparse and above the high-water mark so no stream
+renumbers another"), and it works for the same reason — a new section that cannot collide beats a
+convention that must be remembered. **Take the next free number above the highest in the file
+rather than the next one in a reserved block.**
 
 **One stream, sequential, until the ground rules hold.** Round 2's three streams each closed
 their named items, so the split worked — but nearly every operational hazard recorded in the

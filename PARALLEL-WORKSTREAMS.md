@@ -1,5 +1,24 @@
 # Three parallel workstreams — round 2
 
+> **Read this first, added 2026-09-02.** `WORKSTREAM.md` (2026-08-06) supersedes this file's
+> *premise* — three concurrent streams — and the record bears it out: since 2026-09-01 only WS-3
+> has stamped work on `IMPROVEMENT-PLAN.md` (WS-1 12 sections in August and 0 in September, WS-2
+> 8 and 0, WS-3 10 and 11). **So do not read the boards, the per-stream schedules, or the
+> coordination rituals below as current.**
+>
+> It does **not** supersede the parts of this file that say *who owns what and where*, which live
+> nowhere else and are still in force:
+>
+> - the **checkout → stream map** below — this is how a session learns which stream its sandbox is;
+> - the **database ports** per stream (WS-3 used Postgres `5434`, MySQL `3308`, SQL Server `1435`
+>   for a full three-dialect engine run on 2026-09-02);
+> - the **migration ranges** (`010–019` / `020–029` / `030–039`), still cited as reserved.
+>
+> The one rule here that did **not** survive is the `IMPROVEMENT-PLAN.md` section allocation
+> (WS-1 `§3.10+`, WS-2 `§3.20+`, WS-3 `§3.30+`). WS-1 holds §3.34, §3.37 and §3.38 inside WS-3's
+> block and §3.35 was allocated twice. Take the next free number **above the highest in the
+> file** instead; see `WORKSTREAM.md` for why.
+
 Written 2026-08-05 against `develop` at `6926f2e`, replacing the 2026-08-04 edition. That one
 is done: every item on all three boards is closed or restated here, and there are **no open
 PRs**. Companion to `IMPROVEMENT-PLAN.md`, which stays the source of truth for *what* each
