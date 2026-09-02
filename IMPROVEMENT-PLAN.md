@@ -9350,7 +9350,44 @@ fresh `SetEpochDeadline` makes re-entry fail with `wasm trap: interrupt`; deleti
 `DurableDeferFunc` leaves re-entry passing and fails *only* the defer row, which is what shows the
 two are independent rather than one assertion counted twice.
 
-**What is still not measured:** the other abnormal exits. A trap, an out-of-memory and a
-host-side timeout each leave the instance in a different state from an epoch interrupt, and
-nothing here is evidence about any of them. Do not generalise this row to "abnormal exit is
-solved".
+#### The other abnormal exits behave the same way — measured 2026-09-02
+
+The paragraph here used to say the siblings were unmeasured and warned against generalising.
+They have now been measured, with the same rig, in
+`engine/abnormal_exit_reentry_test.go`. Every reachable abnormal exit for a Go guest leaves
+the instance usable and its outstanding defer runnable:
+
+| how the guest was stopped | mechanism | re-entered | ran guest code | ran the dead workflow's defer |
+|---|---|---|---|---|
+| execution fence (epoch) | `wasm trap: interrupt` | yes | yes | **yes** |
+| instruction limit (fuel) | `wasm trap: all fuel consumed` | yes | yes | **yes** |
+| memory limit (OOM) | `proc_exit(2)` — *not* a trap | yes | yes | **yes** |
+| clean completion (control) | `proc_exit(0)` | yes | yes | n/a |
+
+Re-derive: `go test ./engine/ -run 'Reentry|SurvivesTheFence|HarnessCanCall'`
+
+**The OOM row is the one that was least safe to assume, and it is also the odd one out.** It
+is the only exit that is not a wasmtime trap: the Go runtime asks for memory, is refused by
+`store.Limiter`, dumps every goroutine to stderr and calls `proc_exit(2)` from its fatal path
+— with the allocator mid-flight. The closure table survives that too.
+
+**Each limit is refreshed differently, and getting it wrong is indistinguishable from a dead
+instance.** Time takes `SetEpochDeadline`, instructions take `SetFuel`, and memory takes a
+raised `store.Limiter` — the OOM arm initially failed with `failed to grow memory by 33` while
+*setting up* the re-entry call, because a guest that died of OOM has by construction used
+everything it was allowed and the call still needs scratch space. That was a harness artifact
+reported as a finding, which is the same shape as forgetting `SetEpochDeadline` in the fence
+arm.
+
+**The boundary, stated rather than left as a gap:** there is no arm for a raw wasm trap
+(`unreachable`, out-of-bounds) because a Go guest essentially cannot reach one from Go source.
+Panics are recovered by the generated dispatcher and become `GuestReturnedError` (§3.70, and
+the guest runs its own defers), and Go's unrecoverable failures — fatal OOM, stack exhaustion
+— go out through `proc_exit`, which is the third row above. A hand-written WAT module can
+trap, but it has no Go runtime and therefore no closure table, so the question this table asks
+would be meaningless for it.
+
+So phase 4 does not need a per-exit design. **One mechanism covers every case that a Go guest
+can actually reach**, which is a materially simpler problem than the one this section was
+written to scope. What remains is the host deciding to make the call, a named defer-runner
+export to call, and a bounded budget for it.
