@@ -20,49 +20,14 @@ func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module
 	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), int(priority), parentClosePolicy, runIDPtr, runIDMaxLen)
 }
 
-// ChildWorkflowInSchema starts a child workflow in a target PostgreSQL schema.
-// This enables cross-instance cooperation: a workflow in schema A can spawn a
-// child in schema B, where B's worker pool claims and executes it.
-//
-// The target schema MUST be in the engine's configured peerSchemas (or be the
-// engine's own schema).  An empty targetSchema falls back to the local schema.
-
-func (s *execSession) ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
-	// Validate: target schema must be a peer or our own schema.
-	if targetSchema != "" && targetSchema != s.engine.schema {
-		allowed := false
-		for _, p := range s.engine.peerSchemas {
-			if p == targetSchema {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			errMsg := fmt.Sprintf("child workflow %q: target schema %q is not an allowed peer", name, targetSchema)
-			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
-			return int64(uint64(errWritten)<<32 | 4) // errCode 4 = invalid
-		}
-	}
-
-	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), int(priority), parentClosePolicy, runIDPtr, runIDMaxLen, targetSchema)
-}
-
 // resolveChildVersion resolves the child workflow version by priority:
 //  1. Explicit version from ChildWorkflowOptions (version > 0 from WASM ABI)
 //  2. Runtime override (engine.childBindingOverride)
 //  3. Binding policy from WASM metadata (engine.childBindingPolicy)
 //  4. Fallback: 0 means DB resolves to MAX(version)
-//
-// Cross-schema children (targetSchema != "") skip policy resolution
-// and return explicitVersion (if > 0) or 0 (DB fallback).
-func (s *execSession) resolveChildVersion(ctx context.Context, name string, explicitVersion int, targetSchema string) int {
+func (s *execSession) resolveChildVersion(ctx context.Context, name string, explicitVersion int) int {
 	if explicitVersion > 0 {
 		return explicitVersion
-	}
-
-	// Cross-schema children should still use explicit version or fallback to MAX.
-	if targetSchema != "" {
-		return 0
 	}
 
 	// Check runtime override first (env var or worker flag for debugging).
@@ -138,15 +103,7 @@ func (s *execSession) resolveChildVersion(ctx context.Context, name string, expl
 
 // childWorkflowWithVersion is the shared implementation for creating child workflows.
 // If version <= 0, the parent's version is used as the default.
-// If targetSchema is non-empty, the child is created in that PostgreSQL schema
-// (cross-instance cooperation); otherwise the child is created locally.
-
-func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, priority int, parentClosePolicy string, runIDPtr, runIDMaxLen uint32, targetSchema ...string) int64 {
-	ts := ""
-	if len(targetSchema) > 0 {
-		ts = targetSchema[0]
-	}
-
+func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, priority int, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
@@ -172,7 +129,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	//      - "tag:X": resolve against tag X via store
 	//      - "" (empty): use EffectivePolicy() logic
 	//   4. Fallback: DB resolves version <= 0 to MAX(version) via CASE in INSERT
-	childVersion := s.resolveChildVersion(ctx, name, version, ts)
+	childVersion := s.resolveChildVersion(ctx, name, version)
 
 	// Fresh execution: create child workflow atomically with event.
 	var runID string
@@ -217,22 +174,9 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		}
 
 		var err error
-		if ts != "" {
-			css, ok := s.engine.childWfStore.(CrossSchemaChildStore)
-			if !ok {
-				// Cross-schema requested but store doesn't support it.
-				// Fail loudly rather than silently creating the child in the wrong schema.
-				err := fmt.Errorf("child workflow %q: cross-schema requested (target=%q) but store does not implement CrossSchemaChildStore", name, ts)
-
-				errWritten, _ := s.writeResult(ctx, m, runIDPtr, err.Error(), runIDMaxLen)
-				return int64(uint64(errWritten)<<32 | 4) // error code 4 = invalid
-			}
-			runID, err = css.StartChildWorkflowInSchema(context.Background(), ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
-		} else {
-			s.engine.log().InfoContext(ctx, "calling StartChildWorkflowAtomic",
-				"name", name, "parent_id", parentID, "child_version", childVersion)
-			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(context.Background(), "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
-		}
+		s.engine.log().InfoContext(ctx, "calling StartChildWorkflowAtomic",
+			"name", name, "parent_id", parentID, "child_version", childVersion)
+		runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(context.Background(), "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
 		if err != nil {
 			s.engine.log().ErrorContext(ctx, "StartChildWorkflowAtomic failed",
 				"error", err, "name", name, "parent_id", parentID, "child_version", childVersion)
@@ -599,7 +543,7 @@ func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, input
 	}
 
 	// Resolve child version using the same policy logic as childWorkflowWithVersion.
-	childVersion := s.resolveChildVersion(ctx, name, 0, "")
+	childVersion := s.resolveChildVersion(ctx, name, 0)
 
 	var runID string
 	if s.engine.childWfStore != nil {

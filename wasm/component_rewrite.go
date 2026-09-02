@@ -94,9 +94,6 @@ var WitToEnvImport = map[string]map[string]string{
 		"continue-as-new-versioned": "cleat_continue_as_new_versioned",
 		"side-effect":               "cleat_side_effect",
 	},
-	"cleat:host-calls/durable-extended-children": {
-		"child-workflow-in-schema": "cleat_child_workflow_in_schema",
-	},
 	"cleat:host-calls/durable-fetch": {
 		"fetch": "cleat_fetch",
 	},

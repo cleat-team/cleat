@@ -796,22 +796,6 @@ func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 // Peer schemas parsing
 // ---------------------------------------------------------------------------
 
-// parsePeerSchemas splits a comma-separated list of schema names, trimming whitespace.
-func parsePeerSchemas(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			result = append(result, p)
-		}
-	}
-	return result
-}
-
 // ---------------------------------------------------------------------------
 // Idempotency key cleanup
 // ---------------------------------------------------------------------------
@@ -948,7 +932,6 @@ type Worker struct {
 	retentionDays                    int
 	completedWorkflowRetentionDays   int
 	schemaName                       string
-	peerSchemas                      []string
 	disableChecksumVerification      *bool
 	requireSignalAuth                *bool
 	wasmMemoryMaxMB                  *int
@@ -1627,7 +1610,6 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithPluginRegistry(w.pluginRegistry),
 		engine.WithMaxRetryAttempts(w.maxRetries),
 		engine.WithSchema(w.schemaName),
-		engine.WithPeerSchemas(w.peerSchemas),
 		engine.WithEncryption(w.encryption, w.encryptSensitivePayloads),
 		engine.WithMaxQuotaEvents(w.maxQuotaEvents),
 		engine.WithMaxQuotaChildren(w.maxQuotaChildren),

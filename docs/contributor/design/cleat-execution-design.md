@@ -315,11 +315,14 @@ a single Postgres cluster. The `--schema` flag assigns each worker pool its own
 PostgreSQL schema, providing full table-level isolation:
 `team_a.workflow_instances` is a separate table from
 `team_b.workflow_instances`.
-The `--peer-schemas` flag enables cross-pool cooperation: if `team_a` starts a
-child workflow defined in `team_b`'s schema, the host can resolve and claim it.
-This gives teams the flexibility to operate isolated worker pools while still
-enabling cross-team workflow composition when needed. Each schema gets its own
-migration state, so schema changes are rolled out per pool, not globally.
+Each schema gets its own migration state, so schema changes are rolled out per
+pool, not globally.
+
+Pools do **not** cooperate through the database. A worker pool reads and writes
+its own schema and nothing else; cross-pool work goes through the other pool's
+API, the same way any two services talk. A host call that wrote a child workflow
+directly into a peer schema existed until 2026-09-02 and was removed — see
+IMPROVEMENT-PLAN §3.78 for why.
 
 ### 3.8 Built-in observability
 

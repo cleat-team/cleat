@@ -644,12 +644,6 @@ public class CleatTestEnv {
             return delegate.childWorkflow(name, inputJSON);
         }
 
-        @Override
-        public CleatResult<String> childWorkflowInSchema(
-                String targetSchema, String name, String inputJSON,
-                long version, String parentClosePolicy) {
-            return delegate.childWorkflow(name, inputJSON);
-        }
 
         @Override
         public CleatResult<String> awaitChild(String runID) {

@@ -360,21 +360,6 @@ type ChildWorkflowStore interface {
 	ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error)
 }
 
-// CrossSchemaChildStore is an optional extension to ChildWorkflowStore for
-// starting child workflows in a different PostgreSQL schema.  This enables
-// cross-instance workflow cooperation: an instance in schema A can start a
-// child workflow in schema B, and the B worker pool picks it up.
-type CrossSchemaChildStore interface {
-	ChildWorkflowStore
-
-	// StartChildWorkflowInSchema creates a child workflow in the given target schema.
-	// The schema must be part of the engine's configured peerSchemas.
-	StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-
-	// GetChildResultInSchema polls a child workflow in the given target schema.
-	GetChildResultInSchema(ctx context.Context, targetSchema, runID string) (resultJSON string, completed bool, err error)
-}
-
 // RetryableError is optionally implemented by errors to indicate retryability.
 type RetryableError interface {
 	Retryable() bool

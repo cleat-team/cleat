@@ -190,10 +190,8 @@ func readWasmPayload(mem api.Memory, ptr, length, maxLen uint32) (string, bool) 
 //
 //   - cleat_set_scope with both objectType and instanceKey empty clears the
 //     scope (engine/scope.go, freshSetScope).
-//   - cleat_child_workflow_in_schema with an empty targetSchema falls back to
-//     the local schema (engine/children.go, ChildWorkflowInSchema).
-//   - cleat_child_workflow_in_schema with an empty parentClosePolicy takes the
-//     default, which wazero already allowed and wasmtime did not.
+//   - cleat_child_workflow_with_options with an empty parentClosePolicy takes
+//     the default, which wazero already allowed and wasmtime did not.
 //
 // See IMPROVEMENT-PLAN.md 2.13.
 func readOptionalServiceName(mem api.Memory, ptr, length uint32) (string, bool) {

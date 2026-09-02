@@ -2694,7 +2694,7 @@ The rest of the audit came back clean. All other inserts into the eight RLS-prot
 the zero-UUID default tenant, so the omissions in `store_deployment.go:161` and
 `versioned_loader.go:176` are by design, not defects.
 
-### 2.23 `StartChildWorkflowInSchema` — same omission, but a one-line fix would be a false fix — ✅ **FIXED**
+### 2.23 `StartChildWorkflowInSchema` — same omission, but a one-line fix would be a false fix — ✅ **FIXED**, and ⬛ **SUPERSEDED 2026-09-02: the feature was removed (§3.78)**
 
 `engine/store_children.go:169` omits `tenant_id` from its `<targetSchema>.workflow_instances`
 insert, with `s.tenantID` available and unused — superficially §2.20 again. **It is not, and
@@ -5627,6 +5627,88 @@ tests in `cmd/cleat-worker/signal_auth_test.go` have been rewritten accordingly:
 pinned the defect now asserts deny → grant → revoke through the check the worker installs, and
 the enforcement table sets its list through the supported path while still reading the column
 back.
+
+### 3.78 Cross-schema child workflows, removed — ✅ **DONE** (WS-1, 2026-09-02, D8)
+
+`cleat_child_workflow_in_schema` let a guest start a child workflow by writing a row directly
+into another PostgreSQL schema, gated by an operator allowlist (`--peer-schemas`). Removed
+entirely: host call, store methods, component interface, worker flag, and the surface in all
+four guest SDKs.
+
+The owner's call, and the reason is worth keeping in these words: *"it's adding complexity and
+there's a more familiar way to manage microservices, so we shouldn't waste time on it."*
+
+#### What made it not worth fixing
+
+It came up while scoping D7 (§3.77), because per-tenant names break the feature's central
+assumption. Three findings, each measured rather than read:
+
+- **The definition lookup in the peer schema has no tenant predicate.** `SELECT MAX(version)
+  FROM <peer>.workflow_defs WHERE name = $1 AND NOT deprecated`. That is unambiguous only
+  while `(name, version)` is unique per schema — exactly what D7 removes. Afterwards a peer
+  schema can hold two tenants' `order-processor` and the lookup picks by version number, not
+  by owner, so a child could run another tenant's code.
+- **It ran with no tenant context at all when the target tenant was not recoverable from the
+  schema name.** `tenantIDForSchema` only mapped `tenant_<uuid>`; for an operator-chosen name
+  like `svc_billing` the insert went through `s.db` with no transaction and no
+  `cleat.tenant_id`, and the destination's column default applied. The function's own comment
+  admitted the engine "genuinely does not know which tenant owns the destination" — which is
+  an undefined security model for the feature's headline use case, not an edge.
+- **It was the only place in the engine that deliberately wrote a row on behalf of another
+  tenant.**
+
+#### The design question it could not answer
+
+A peer schema meant two different things in the same function. `tenantIDForSchema` followed
+`admin.create_tenant_role`'s `tenant_<uuid>` convention — **schema per tenant** — while the
+doc comment eleven lines above said "the target schema is a different microservice" — **schema
+per service**. Those need different answers to everything downstream:
+
+- *another tenant* → a cross-schema start is one tenant reaching into another's namespace,
+  which needs an authorization model saying who may start what on whose behalf. There was
+  none; there was a flag listing schema names.
+- *another deployment* → that deployment has its own tenants and the caller must name one. The
+  guest passed `(targetSchema, name)` and nothing else, and after D7 `name` no longer
+  identifies a definition.
+
+**The authorization asymmetry is the tell.** §3.15 established that one workflow *signalling*
+another needs per-workflow authorization (`allowed_signals`). Starting a child **in another
+schema** — which executes code rather than delivering a message — needed only an operator flag,
+with no per-definition or per-caller granularity. The weaker control was on the more powerful
+operation.
+
+#### Why removal rather than a fix
+
+Underneath both readings sits a question neither answers: writing into another deployment's
+tables makes that deployment's schema part of your API, and its migrations part of your
+compatibility surface. Going through its API instead is the familiar answer, already exists,
+and is tenant-scoped end to end.
+
+Removal was also cheap to get right, because there are no deployed guests importing the host
+call. That is the only reason the ABI slot could go rather than being reserved.
+
+#### What it cost, measured
+
+| | |
+|---|---|
+| tests exercising it | 1 (`TestStartChildWorkflowInSchemaAttributesToTargetTenant`), covering tenant *attribution* rather than the cooperation story |
+| end-to-end coverage | none — no two-schema, two-worker-pool test, no example, and neither the cluster nor compose deployments configured `--peer-schemas` |
+| `tiers.yaml` claim | none, at any tier |
+
+A guest-reachable capability that wrote across a tenant boundary, with no support claim, no
+end-to-end test, and an unsettled security model. §2.23 fixed its tenant *attribution* in
+2026-08; that entry stands as history and is superseded by this one.
+
+#### Removal notes
+
+- **ABI count 59 → 58** on both backends, re-derived with the commands in `ABI.md`'s own
+  "Previously undocumented functions" note. No `CurrentABIVersion` bump: nothing that remains
+  changed shape.
+- **`ABI.md` §2.21 is left vacant** rather than renumbering §2.22–§2.59, because those numbers
+  are cited from commit messages and plan entries; a gap reads more cheaply than a shift.
+- The `cleat:host-calls/durable-extended-children` WIT interface held only this one function
+  and went with it, along with its generated Python binding.
+- `GetChildResultInSchema` went too — it existed only to read back what this wrote.
 
 ### 3.77 Names are per-tenant — D7, and it is three tables rather than one — 🔵 **DECIDED 2026-09-02, not yet built**
 

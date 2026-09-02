@@ -288,76 +288,7 @@ func TestGap_GetChildCount_Error(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// GetChildResultInSchema
 // ---------------------------------------------------------------------------
-
-func TestGap_GetChildResultInSchema_Done(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "COALESCE(result", data: [][]driver.Value{{`{"ok":true}`, "done"}}},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	result, done, err := store.GetChildResultInSchema(testCtx, "target_schema", "child-run-id")
-	if err != nil {
-		t.Fatalf("GetChildResultInSchema: %v", err)
-	}
-	if !done {
-		t.Error("expected done=true")
-	}
-	if result != `{"ok":true}` {
-		t.Errorf("unexpected result: %q", result)
-	}
-}
-
-func TestGap_GetChildResultInSchema_Running(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "COALESCE(result", data: [][]driver.Value{{`{}`, "running"}}},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	result, done, err := store.GetChildResultInSchema(testCtx, "target_schema", "child-run-id")
-	if err != nil {
-		t.Fatalf("GetChildResultInSchema (running): %v", err)
-	}
-	if done {
-		t.Error("expected done=false for running workflow")
-	}
-	if result != "" {
-		t.Logf("result for running workflow: %q", result)
-	}
-}
-
-func TestGap_GetChildResultInSchema_NoRows(t *testing.T) {
-	db := newNoopDB(t)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	result, done, err := store.GetChildResultInSchema(testCtx, "target_schema", "nonexistent")
-	if err != nil {
-		t.Fatalf("GetChildResultInSchema (no rows): %v", err)
-	}
-	if done {
-		t.Error("expected done=false for missing workflow")
-	}
-	if result != "" {
-		t.Errorf("expected empty result, got %q", result)
-	}
-}
-
-func TestGap_GetChildResultInSchema_Error(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "COALESCE(result", err: fmt.Errorf("db error")},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	_, _, err := store.GetChildResultInSchema(testCtx, "target_schema", "child-run-id")
-	if err == nil {
-		t.Fatal("expected error from GetChildResultInSchema")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // GetWASMLength
@@ -543,37 +474,7 @@ func TestGap_RetryWorkflow_BeginError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// StartChildWorkflowInSchema
 // ---------------------------------------------------------------------------
-
-func TestGap_StartChildWorkflowInSchema(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "gen_random_uuid", data: [][]driver.Value{{"child-run-123"}}},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	runID, err := store.StartChildWorkflowInSchema(testCtx, "target_schema", "parent-1", "child-wf", `{}`, 0, "ABANDON", 0)
-	if err != nil {
-		t.Fatalf("StartChildWorkflowInSchema: %v", err)
-	}
-	if runID != "child-run-123" {
-		t.Errorf("expected child-run-123, got %q", runID)
-	}
-}
-
-func TestGap_StartChildWorkflowInSchema_Error(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "gen_random_uuid", err: fmt.Errorf("insert failed")},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	_, err := store.StartChildWorkflowInSchema(testCtx, "target_schema", "parent-1", "child-wf", `{}`, 0, "ABANDON", 0)
-	if err == nil {
-		t.Fatal("expected error from StartChildWorkflowInSchema")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // TerminateWorkflow

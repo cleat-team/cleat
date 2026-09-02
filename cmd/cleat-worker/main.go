@@ -857,7 +857,6 @@ func main() {
 		retentionDays:                    *retentionDays,
 		completedWorkflowRetentionDays:   *completedWorkflowRetentionDays,
 		schemaName:                       *schemaName,
-		peerSchemas:                      parsePeerSchemas(*peerSchemas),
 		disableChecksumVerification:      disableChecksumVerification,
 		requireSignalAuth:                requireSignalAuth,
 		maxRetries:                       *maxRetries,

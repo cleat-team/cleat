@@ -46,7 +46,6 @@ type HostHandler interface {
 	ContinueAsNewWithVersion(ctx context.Context, m api.Module, newInputJSON string, newVersion int) int64
 	ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
 	ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64
-	ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64
 	AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
 	AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64
 	PollChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
@@ -287,37 +286,6 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		}
 		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_with_options")
-
-	// cleat_child_workflow_in_schema: (ptr,len x4, i64, i64, ptr,len, ptr,maxLen) -> i64
-	// Creates a child workflow in a different PostgreSQL schema for cross-instance cooperation.
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
-		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
-		mem := m.Memory()
-		// An empty targetSchema means "the local schema" -- see
-		// ChildWorkflowInSchema in children.go.
-		targetSchema, ok := readOptionalServiceName(mem, schemaPtr, schemaLen)
-		if !ok {
-			return errBadParam
-		}
-		wfName, ok := readServiceName(mem, namePtr, nameLen)
-		if !ok {
-			return errBadParam
-		}
-		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
-		if !ok {
-			return errBadParam
-		}
-		// An empty policy means the default. This was already handled here
-		// with an inline policyLen > 0 guard; the helper says the same thing
-		// and is what the wasmtime side now uses too, where the guard was
-		// missing entirely.
-		parentClosePolicy, ok := readOptionalServiceName(mem, policyPtr, policyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
-	}).Export("cleat_child_workflow_in_schema")
 
 	// cleat_await_child: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

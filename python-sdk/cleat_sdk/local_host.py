@@ -1215,40 +1215,6 @@ class LocalHostCalls:
         self._record("continue_as_new_versioned", new_input=new_input, new_version=new_version)
 
     # ------------------------------------------------------------------
-    # 42b. child_workflow_in_schema — start child with schema
-    # ------------------------------------------------------------------
-
-    def child_workflow_in_schema(
-        self,
-        target_schema: str,
-        name: str,
-        input_json: Any,
-        version: int | None = None,
-        parent_close_policy: str | None = None,
-    ) -> str:
-        """Start a child workflow in a schema. Delegates to child_workflow, ignoring schema.
-
-        Parameters
-        ----------
-        target_schema : str
-            Target schema (ignored in local mode; all workflows run in-process).
-        name : str
-            Child workflow definition name.
-        input_json : Any
-            Input for the child workflow.
-        version : int, optional
-            Workflow definition version.
-        parent_close_policy : str, optional
-            Policy for the child when the parent closes.
-
-        Returns
-        -------
-        str
-            The child workflow's run ID.
-        """
-        return self.child_workflow(name, input_json)
-
-    # ------------------------------------------------------------------
     # 42c. side_effect — deterministic function execution
     # ------------------------------------------------------------------
 

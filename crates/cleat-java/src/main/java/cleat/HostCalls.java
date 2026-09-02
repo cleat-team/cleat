@@ -114,14 +114,6 @@ public class HostCalls {
         int policyPtr, int policyLen,
         int outPtr, int maxLen);
 
-    @Import(module = "env", name = "cleat_child_workflow_in_schema")
-    private static native long cleatChildWorkflowInSchemaRaw(
-        int schemaPtr, int schemaLen,
-        int namePtr, int nameLen,
-        int inPtr, int inLen,
-        long version,
-        int policyPtr, int policyLen,
-        int outPtr, int maxLen);
 
     @Import(module = "env", name = "cleat_await_child")
     private static native long cleatAwaitChildRaw(
@@ -834,42 +826,6 @@ public class HostCalls {
         return CleatResult.ok(runId);
     }
 
-    /**
-     * Start a child workflow in a different schema (cross-instance cooperation).
-     * Mirrors Go's ChildWorkflowInSchema.
-     *
-     * @param targetSchema     the PostgreSQL schema of the target cleat instance
-     * @param name             the child workflow definition name
-     * @param inputJSON        the input payload as a JSON string
-     * @param version          the explicit workflow definition version to use
-     *                         (0 = use parent's version / default resolution)
-     * @param parentClosePolicy parent close policy ("abandon", "terminate", "request_cancel")
-     * @return a result containing the child's run ID on success, or an error
-     *         description on failure
-     */
-    public CleatResult<String> childWorkflowInSchema(String targetSchema, String name, String inputJSON, long version, String parentClosePolicy) {
-        int[] p = packStrings(targetSchema, name, inputJSON, parentClosePolicy);
-        int schemaOff = p[0], nameOff = p[1], inOff = p[2], policyOff = p[3];
-        int schemaLen = p[4], nameLen = p[5], inLen = p[6], policyLen = p[7];
-
-        long result = cleatChildWorkflowInSchemaRaw(
-            schemaOff, schemaLen,
-            nameOff, nameLen,
-            inOff, inLen,
-            version,
-            policyOff, policyLen,
-            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int runIdLen = Memory.decodeSimpleExtra(result);
-
-        if (errCode != 0) {
-            return CleatResult.err("childWorkflowInSchema(schema=\"" + targetSchema + "\", name=\"" + name + "\", version=" + version + ") failed: host returned error code " + errCode);
-        }
-
-        String runId = readOutput(runIdLen);
-        return CleatResult.ok(runId);
-    }
 
     /**
      * Wait for a child workflow to complete and retrieve its result.

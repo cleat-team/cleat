@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### UPGRADE NOTES — breaking
+
+- **Cross-schema child workflows are removed.** The `cleat_child_workflow_in_schema`
+  host call, the `cleat:host-calls/durable-extended-children` component interface,
+  the `--peer-schemas` worker flag and the corresponding surface in the Go, Rust,
+  Java, Python and AssemblyScript SDKs are all gone. A worker started with
+  `--peer-schemas` now fails on an unknown flag.
+
+  It let a workflow start a child by writing a row directly into another
+  PostgreSQL schema. That makes the other deployment's schema part of your API and
+  its migrations part of your compatibility surface, and it had no settled answer
+  for whose tenant the child belonged to — the definition lookup in the peer schema
+  carried no tenant predicate, and where the target tenant could not be recovered
+  from the schema name the insert ran with no tenant context at all.
+
+  **Use the other pool's API instead**, the same way any two services talk. Nothing
+  in `tiers.yaml` claimed this feature at any tier and no end-to-end test exercised
+  it. See IMPROVEMENT-PLAN §3.78.
+
+  ABI host-function count goes 59 → 58 on both backends. `CurrentABIVersion` is
+  unchanged: nothing that remains changed shape.
+
 ### Added
 
 - **`allowed_signals` can be set.** `GET` and `PUT

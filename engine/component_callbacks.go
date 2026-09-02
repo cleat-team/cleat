@@ -906,34 +906,6 @@ func (b *wasmtimeBackend) dispatchSideEffect(
 }
 
 // ---------------------------------------------------------------------------
-// durable-extended-children interface
-// ---------------------------------------------------------------------------
-
-// dispatchChildWorkflowInSchema handles (string,string,string,u64,u64,string) -> string.
-func (b *wasmtimeBackend) dispatchChildWorkflowInSchema(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 6 || b.handler == nil {
-		return nil
-	}
-	schema := readStrArg(args, 0, nargs)
-	name := readStrArg(args, 1, nargs)
-	input := readStrArg(args, 2, nargs)
-	version := int64(readU64Arg(args, 3, nargs))
-	priority := int64(readU64Arg(args, 4, nargs))
-	policy := readStrArg(args, 5, nargs)
-
-	buf := make([]byte, 65536)
-	packed := b.handler.ChildWorkflowInSchema(ctxWithMem(context.Background(), buf), nil,
-		schema, name, input, version, priority, policy, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
-	return nil
-}
-
-// ---------------------------------------------------------------------------
 // durable-fetch interface
 // ---------------------------------------------------------------------------
 
@@ -1144,9 +1116,6 @@ var witTypeMap = map[string]map[string]cbType{
 	"cleat:host-calls/durable-extended-lifecycle": {
 		"continue-as-new-versioned": cbTypeContinueAsNewVersioned,
 		"side-effect":               cbTypeSideEffect,
-	},
-	"cleat:host-calls/durable-extended-children": {
-		"child-workflow-in-schema": cbTypeChildWorkflowInSchema,
 	},
 	"cleat:host-calls/durable-fetch": {
 		"fetch": cbTypeFetch,

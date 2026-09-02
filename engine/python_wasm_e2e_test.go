@@ -552,7 +552,6 @@ func registeredImportNames() []string {
 		"cleat_continue_as_new_versioned",
 		"cleat_child_workflow",
 		"cleat_child_workflow_with_options",
-		"cleat_child_workflow_in_schema",
 		"cleat_await_child",
 		"cleat_call_retry",
 		"cleat_await_signals",

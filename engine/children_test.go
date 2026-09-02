@@ -52,153 +52,22 @@ func (m *mockChildStore) ResolveVersionByTag(ctx context.Context, workflowName s
 	return 0, nil
 }
 
-// mockCrossChildStore extends mockChildStore with CrossSchemaChildStore support.
-type mockCrossChildStore struct {
-	mockChildStore
-	startInSchemaFn func(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-	getInSchemaFn   func(ctx context.Context, targetSchema, runID string) (string, bool, error)
-}
-
-func (m *mockCrossChildStore) StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
-	if m.startInSchemaFn != nil {
-		return m.startInSchemaFn(ctx, targetSchema, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
-	}
-	return "child-cross-run", nil
-}
-
-func (m *mockCrossChildStore) GetChildResultInSchema(ctx context.Context, targetSchema, runID string) (string, bool, error) {
-	if m.getInSchemaFn != nil {
-		return m.getInSchemaFn(ctx, targetSchema, runID)
-	}
-	return "", false, nil
-}
-
-// mockOnlyChildStore implements ChildWorkflowStore but NOT CrossSchemaChildStore.
-type mockOnlyChildStore struct {
-	mockChildStore
-}
-
-// Ensure compile-time check: mockOnlyChildStore does NOT implement CrossSchemaChildStore.
-
-// ---------------------------------------------------------------------------
-// ChildWorkflowInSchema tests.
-// ---------------------------------------------------------------------------
-
-func TestChildWorkflowInSchema_OwnSchema(t *testing.T) {
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-
-	// When targetSchema is the engine's own schema, validation passes.
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "my_schema", "test-wf", `{"x":1}`, 0, 0, "", 0, 0)
-	// With no childWfStore, falls through to synthetic path — errCode 0.
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0 (success), got %d", errCode)
-	}
-}
-
-func TestChildWorkflowInSchema_PeerSchema(t *testing.T) {
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-	s.engine.peerSchemas = []string{"peer_a", "peer_b"}
-
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "peer_a", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0 (success), got %d", errCode)
-	}
-}
-
-func TestChildWorkflowInSchema_InvalidSchema(t *testing.T) {
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-	// No peer schemas configured.
-
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "unknown_schema", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 4 {
-		t.Errorf("expected errCode 4 (invalid), got %d", errCode)
-	}
-}
-
-func TestChildWorkflowInSchema_EmptySchema(t *testing.T) {
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-
-	// Empty targetSchema should fall back to local schema.
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0 (success), got %d", errCode)
-	}
-}
-
-func TestChildWorkflowInSchema_CrossSchemaStore(t *testing.T) {
-	called := false
-	store := &mockCrossChildStore{
-		startInSchemaFn: func(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
-			called = true
-			if targetSchema != "peer_b" {
-				t.Errorf("expected targetSchema 'peer_b', got %q", targetSchema)
-			}
-			return "cross-run-id", nil
-		},
-	}
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-	s.engine.peerSchemas = []string{"peer_b"}
-	s.engine.childWfStore = store
-
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "peer_b", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-	if !called {
-		t.Error("expected StartChildWorkflowInSchema to be called")
-	}
-}
-
-func TestChildWorkflowInSchema_CrossSchemaNotSupported(t *testing.T) {
-	// Store implements ChildWorkflowStore but NOT CrossSchemaChildStore.
-	store := &mockOnlyChildStore{}
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-	s.engine.peerSchemas = []string{"peer_b"}
-	s.engine.childWfStore = store
-
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "peer_b", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 4 {
-		t.Errorf("expected errCode 4 (cross-schema not supported), got %d", errCode)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // resolveChildVersion tests.
 // ---------------------------------------------------------------------------
 
 func TestResolveChildVersion_Explicit(t *testing.T) {
 	s := newTestExecSession()
-	v := s.resolveChildVersion(context.Background(), "test-wf", 42, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 42)
 	if v != 42 {
 		t.Errorf("expected explicit version 42, got %d", v)
-	}
-}
-
-func TestResolveChildVersion_TargetSchema(t *testing.T) {
-	s := newTestExecSession()
-	// Cross-schema children skip policy resolution and return 0.
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "peer_schema")
-	if v != 0 {
-		t.Errorf("expected 0 for cross-schema child, got %d", v)
 	}
 }
 
 func TestResolveChildVersion_OverrideLatest(t *testing.T) {
 	s := newTestExecSession()
 	s.engine.childBindingOverride = "latest"
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 for latest override, got %d", v)
 	}
@@ -219,7 +88,7 @@ func TestResolveChildVersion_OverrideTag(t *testing.T) {
 	s.engine.childBindingOverride = "tag:canary"
 	s.engine.childWfStore = store
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 7 {
 		t.Errorf("expected version 7 from tag override, got %d", v)
 	}
@@ -233,7 +102,7 @@ func TestResolveChildVersion_Frozen(t *testing.T) {
 	s.engine.childBindingPolicy = "frozen"
 	s.engine.state = &stubWorkflowState{childVer: map[string]int{"test-wf": 5}}
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 5 {
 		t.Errorf("expected frozen version 5, got %d", v)
 	}
@@ -244,7 +113,7 @@ func TestResolveChildVersion_FrozenNoPin(t *testing.T) {
 	s.engine.childBindingPolicy = "frozen"
 	s.engine.state = &stubWorkflowState{} // no childVer map
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 (no pinned version), got %d", v)
 	}
@@ -264,7 +133,7 @@ func TestResolveChildVersion_Stable(t *testing.T) {
 	s.engine.childWfStore = store
 	s.engine.state = &stubWorkflowState{}
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 3 {
 		t.Errorf("expected stable version 3, got %d", v)
 	}
@@ -276,7 +145,7 @@ func TestResolveChildVersion_StableNoStore(t *testing.T) {
 	s.engine.state = &stubWorkflowState{}
 	// childWfStore is nil
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 when stable resolution fails, got %d", v)
 	}
@@ -287,7 +156,7 @@ func TestResolveChildVersion_Latest(t *testing.T) {
 	s.engine.childBindingPolicy = "latest"
 	s.engine.state = &stubWorkflowState{}
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 for latest policy, got %d", v)
 	}
@@ -307,7 +176,7 @@ func TestResolveChildVersion_TagPolicy(t *testing.T) {
 	s.engine.childWfStore = store
 	s.engine.state = &stubWorkflowState{}
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 9 {
 		t.Errorf("expected version 9 from tag policy, got %d", v)
 	}
@@ -318,7 +187,7 @@ func TestResolveChildVersion_FallbackFrozen(t *testing.T) {
 	s.engine.state = &stubWorkflowState{childVer: map[string]int{"test-wf": 4}}
 	// childBindingPolicy is empty → should fall back to "frozen" since pinned version exists.
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 4 {
 		t.Errorf("expected version 4 from frozen fallback, got %d", v)
 	}
@@ -329,7 +198,7 @@ func TestResolveChildVersion_FallbackLatest(t *testing.T) {
 	s.engine.state = &stubWorkflowState{} // no pinned version
 	// childBindingPolicy is empty → should fall back to "latest".
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 from latest fallback, got %d", v)
 	}
@@ -338,7 +207,7 @@ func TestResolveChildVersion_FallbackLatest(t *testing.T) {
 func TestResolveChildVersion_NoState(t *testing.T) {
 	s := newTestExecSession()
 	// engine.state is nil
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 when state is nil, got %d", v)
 	}

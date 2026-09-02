@@ -74,7 +74,6 @@ func TestNormalizeImportName(t *testing.T) {
 		{"cleat_call_heartbeat", "cleat_call"},
 		{"cleat_fetch", "cleat_call"},
 		{"cleat_child_workflow_with_options", "cleat_child_workflow"},
-		{"cleat_child_workflow_in_schema", "cleat_child_workflow"},
 		{"cleat_continue_as_new_versioned", "cleat_continue_as_new"},
 		{"cleat_send_signal_and_wait", "cleat_await_signals"},
 		{"cleat_reply_to_signal", "cleat_await_signals"},

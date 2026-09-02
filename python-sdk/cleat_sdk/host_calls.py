@@ -113,9 +113,6 @@ try:
     from wit_world.imports.durable_cron import (
         durable_schedule_cron as _import_cleat_schedule_cron,
     )
-    from wit_world.imports.durable_extended_children import (
-        child_workflow_in_schema as _import_child_workflow_in_schema,
-    )
     from wit_world.imports.durable_extended_lifecycle import (
         continue_as_new_versioned as _import_continue_as_new_versioned,
     )
@@ -1953,55 +1950,6 @@ class HostCalls:
         return _import_cleat_child_workflow_with_options(name, input_str, options.version, options.priority, "")
 
     # --------------------------------------------------------------------
-    # 15b. child_workflow_in_schema — cross-instance child workflow
-    # --------------------------------------------------------------------
-
-    def child_workflow_in_schema(
-        self,
-        schema: str,
-        name: str,
-        input: Any,
-        version: int = 0,
-        priority: int = 0,
-        policy: str = "",
-    ) -> str:
-        """Start a child workflow in a different schema (cross-instance).
-
-        Calls the host ``durable-extended-children.child-workflow-in-schema``
-        import.  The child runs in the specified schema namespace, enabling
-        cross-instance workflow cooperation.
-
-        Parameters
-        ----------
-        schema : str
-            Target schema name for the child workflow.
-        name : str
-            Child workflow definition name.
-        input : Any
-            Input for the child workflow.  Dicts are JSON-serialised
-            automatically.
-        version : int
-            Explicit workflow definition version (0 = host default).
-        priority : int
-            Scheduling priority (0 = highest).
-        policy : str
-            Parent-close policy (e.g. ``"abandon"``, ``"terminate"``).
-            Empty string means host default.
-
-        Returns
-        -------
-        str
-            The child workflow's run ID.
-
-        Raises
-        ------
-        RuntimeError
-            If the host reports an error starting the child.
-        """
-        input_str = self._marshal(input)
-        return _import_child_workflow_in_schema(schema, name, input_str, version, priority, policy)
-
-    # --------------------------------------------------------------------
     # 16. await_child — wait for a child workflow
     # --------------------------------------------------------------------
 
@@ -3459,7 +3407,7 @@ def _import_cleat_extend_timeout(additional_ms: int) -> int:
 
 # ========================================================================
 # NEW: Module-level stubs for durable-scope, durable-stream-state,
-# durable-extended-lifecycle, durable-extended-children, and
+# durable-extended-lifecycle and
 # durable-fetch imports.
 #
 # TODO: When WIT bindings are regenerated with componentize-py, add
@@ -3575,16 +3523,6 @@ def _import_side_effect(result: str) -> str:
     """Stub for WASM import ``(import "env" "cleat_side_effect")``."""
     raise NotImplementedError(
         "side_effect can only be called within a cleat WASM runtime."
-    )
-
-
-# -- durable-extended-children.child-workflow-in-schema ------------------------
-
-
-def _import_child_workflow_in_schema(schema: str, name: str, input: str, version: int, priority: int, policy: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_child_workflow_in_schema")``."""
-    raise NotImplementedError(
-        "child_workflow_in_schema can only be called within a cleat WASM runtime."
     )
 
 

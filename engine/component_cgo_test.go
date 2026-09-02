@@ -99,7 +99,7 @@ func TestCbTypeConstants(t *testing.T) {
 		cbTypeAwaitSignals, cbTypePollSignal, cbTypeSendSignalAndWait,
 		cbTypeReplyToSignal, cbTypeSignalWorkflow,
 		cbTypeChildWorkflow, cbTypeAwaitChild, cbTypeAwaitAllChildren,
-		cbTypeChildWorkflowWithOptions, cbTypeChildWorkflowInSchema,
+		cbTypeChildWorkflowWithOptions,
 		cbTypeCreatePromise, cbTypeAwaitPromise, cbTypeResolvePromise, cbTypeRejectPromise,
 		cbTypeSetQueryState, cbTypeRegisterUpdateHandler, cbTypeRegisterQueryHandler,
 		cbTypeDurableSend, cbTypeScheduleInvoke, cbTypeWorkflowID, cbTypeRunID,
@@ -164,7 +164,6 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"UUID", true, 13, strPtr, 1},
 		{"SideEffect", true, 14, strPtr, 1},
 		{"Fetch", true, 15, strPtr, 4},
-		{"ChildWorkflowInSchema", true, 16, strPtr, 6},
 		{"AwaitChild", true, 17, strPtr, 1},
 		{"AwaitAllChildren", true, 18, strPtr, 1},
 		{"PluginCallStreaming", true, 19, strPtr, 3},
@@ -245,7 +244,6 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"SendSignalAndWait(0<4)", true, 21},
 		{"AwaitPromise(0<2)", true, 22},
 		{"PollSignal(0<1)", true, 23},
-		{"ChildWorkflowInSchema(0<6)", true, 16},
 		{"UUID(0<1)", true, 13},
 		{"SideEffect(0<1)", true, 14},
 		{"Fetch(0<4)", true, 15},
@@ -806,19 +804,6 @@ func TestDispatchFetch(t *testing.T) {
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(15, strPtr, 4, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
-}
-
-func TestDispatchChildWorkflowInSchema(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
-	argsPtr, _, freeArgs := cgotestMakeMixedArgs("schema", "name", "input", uint64(0), uint64(0), "policy")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(16, argsPtr, 6, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !cgotestHasResultString(resultPtr) {

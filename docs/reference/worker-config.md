@@ -727,17 +727,6 @@ BYPASSRLS`. The startup line names it.
 
 ## Multi-Instance
 
-### --peer-schemas
-
-| Type | Default | Description |
-|------|---------|-------------|
-| string | `""` | Comma-separated list of peer cleat schemas |
-
-Enables cross-instance child workflows and signals between separate worker
-pools sharing the same database cluster.
-
----
-
 ### --shards-file
 
 | Type | Default | Description |

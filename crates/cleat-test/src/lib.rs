@@ -842,10 +842,6 @@ impl TestEnv {
         self.child_workflow(name, input_json)
     }
 
-    /// Start a child workflow in a different schema (delegates to `child_workflow`).
-    pub fn child_workflow_in_schema(&self, _schema: &str, name: &str, input_json: &str, _version: i64, _policy: &str) -> (String, Option<String>) {
-        self.child_workflow(name, input_json)
-    }
 
     /// Await a child workflow completion.
     pub fn await_child(&self, run_id: &str) -> (String, Option<String>) {

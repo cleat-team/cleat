@@ -44,9 +44,6 @@ func (h *stubHostHandler) ChildWorkflow(_ context.Context, _ api.Module, _, _ st
 func (h *stubHostHandler) ChildWorkflowWithOptions(_ context.Context, _ api.Module, _, _ string, _, _ int64, _ string, _, _ uint32) int64 {
 	return 0
 }
-func (h *stubHostHandler) ChildWorkflowInSchema(_ context.Context, _ api.Module, _, _, _ string, _, _ int64, _ string, _, _ uint32) int64 {
-	return 0
-}
 func (h *stubHostHandler) AwaitChild(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
 	return 0
 }

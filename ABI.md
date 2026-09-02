@@ -586,37 +586,6 @@ Start a child workflow instance with configurable version and parent close polic
 | 0-31 | `errCode` |
 | 32-63 | `runIDLen` — bytes written to run ID buffer |
 
-#### 2.21 `cleat_child_workflow_in_schema`
-
-Start a child workflow instance in a different PostgreSQL schema for cross-instance cooperation.
-
-```
-(func (import "env" "cleat_child_workflow_in_schema")
-  (param i32 i32 i32 i32 i32 i32 i64 i32 i32 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `schema_ptr` | `i32` | Target schema name pointer |
-| `schema_len` | `i32` | Target schema name length |
-| `name_ptr` | `i32` | Child workflow definition name pointer |
-| `name_len` | `i32` | Child workflow name length |
-| `input_ptr` | `i32` | Input JSON pointer |
-| `input_len` | `i32` | Input JSON length |
-| `version` | `i64` | Child workflow definition version |
-| `policy_ptr` | `i32` | Parent close policy pointer |
-| `policy_len` | `i32` | Parent close policy length |
-| `run_id_ptr` | `i32` | Output buffer for run ID |
-| `run_id_max_len` | `i32` | Output buffer capacity (1048576) |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` |
-| 32-63 | `runIDLen` — bytes written to run ID buffer |
-
 #### 2.22 `cleat_await_child`
 
 Wait for a child workflow to complete.
@@ -1395,8 +1364,9 @@ Host-only extension for streaming plugin function calls. Same signature as `plug
 ### Previously undocumented functions
 
 > Added 2026-08-09. This document said "52 host functions" while the actual
-> registered set is 59 on both backends (56 `cleat_*` exports plus
-> `plugin_call`, `plugin_call_streaming`, `set_query_state`). Re-derived with:
+> registered set is **58** on both backends (55 `cleat_*` exports plus
+> `plugin_call`, `plugin_call_streaming`, `set_query_state`). It was 59 until
+> 2026-09-02, when `cleat_child_workflow_in_schema` was removed. Re-derived with:
 >
 > ```
 > grep -oE '\.Export\("[a-zA-Z_]+"\)' engine/imports.go | sort -u | wc -l   # wazero: 59
@@ -1625,6 +1595,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| — | 2026-09-02 | **Removed `cleat_child_workflow_in_schema`** (was §2.21) and the `cleat:host-calls/durable-extended-children` component interface that wrapped it. It wrote a child workflow row directly into another PostgreSQL schema, which made the other deployment's schema part of this one's API and had no settled answer for whose tenant the child belonged to. Cross-pool work goes through the other pool's API instead. Documented count 59 → 58 on both backends. No `CurrentABIVersion` bump: nothing that remains changed shape, and there are no deployed guests importing it. **§2.21 is left vacant rather than renumbering §2.22-§2.59**, because the numbers are referenced from commit messages and IMPROVEMENT-PLAN entries; a gap is cheaper to read than a shift. See IMPROVEMENT-PLAN §3.78. |
 | — | 2026-08-09 | Documentation-only: added §2.53-2.59 for seven host functions (`cleat_await_any_child`, `cleat_poll_child`, `cleat_schedule_cron`, `cleat_delete_cron`, `cleat_list_crons`, `cleat_poll_work`, `cleat_complete`) that were registered in `engine/imports.go` and the wasmtime backend with no ABI entry at all. Updated documentation count from 52 to 59. As with the version-number note at the top of this file: no `CurrentABIVersion` bump, because nothing about the wire contract changed -- only what this document said about it. |
 | 5 | 2026-05-15 | Added Section 6: Cross-Language Determinism specification covering IEEE 754 floats, map iteration order, JSON canonicalization, GC timing, and RNG. Added cross-language replay guarantee. |
 | 4 | 2026-05-13 | Added `cleat_json_parse` (2.51) and `cleat_json_stringify` (2.52) host functions for JSON validation and normalization via the host runtime. Bumped ABI_VERSION to 4. |
