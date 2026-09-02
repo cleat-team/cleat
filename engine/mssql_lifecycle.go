@@ -1074,6 +1074,13 @@ func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 	`},
 	}
 
+	// Collected before the UPDATE: see releaseTerminatedChildren.
+	terminated, listErr := s.childrenClosedByTerminate(ctx, parentWorkflowID)
+	if listErr != nil {
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: could not list TERMINATE children; their concurrency keys and sticky-worker assignments stay held until TTL",
+			"parent_workflow_id", parentWorkflowID, "error", listErr)
+	}
+
 	for _, step := range steps {
 		err := withRollbackGuaranteedRetry(ctx, "enforce parent close policy "+step.policy,
 			mssqlTxRetries, mssqlTxRetryDelay, func() error {
@@ -1090,8 +1097,30 @@ func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		if err != nil {
 			s.log().WarnContext(ctx, "enforceParentClosePolicy failed; children of a terminated parent are unaffected by its close policy",
 				"policy", step.policy, "parent_workflow_id", parentWorkflowID, "error", err)
+			if step.policy == "TERMINATE" {
+				terminated = nil
+			}
 		}
 	}
+
+	releaseTerminatedChildren(s.log(), s, terminated)
+}
+
+// terminateChildrenQuery selects the children the TERMINATE arm is about to
+// fail, so their resources can be released after it commits. Its WHERE must
+// stay identical to that UPDATE's, or the two disagree about which children
+// were closed.
+func (s *MSSQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkflowID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE parent_workflow_id = @p1
+		  AND parent_close_policy = 'TERMINATE'
+		  AND status NOT IN ('done', 'failed')
+	`, parentWorkflowID)
+	if err != nil {
+		return nil, err
+	}
+	return scanWorkflowIDs(rows)
 }
 
 // finishClaim commits a claim transaction and enforces the claim-limit

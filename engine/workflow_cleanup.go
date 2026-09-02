@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 )
 
@@ -72,4 +73,47 @@ func releaseWorkflowResources(log *slog.Logger, s workflowResourceReleaser, work
 	if err := s.ReleaseWorkflowConcurrencyKeys(ctx, workflowID); err != nil {
 		log.WarnContext(ctx, "release concurrency keys failed", "workflow_id", workflowID, "error", err)
 	}
+}
+
+// releaseTerminatedChildren runs releaseWorkflowResources for each child that a
+// parent's TERMINATE close policy just failed.
+//
+// The close policy commits a failure -- SET status = 'failed', error_msg =
+// 'parent workflow terminated' -- which is squarely inside the contract above:
+// "every commit which takes a workflow out of the runnable set: completion,
+// failure, termination...". It released nothing on any dialect
+// (IMPROVEMENT-PLAN 3.78), so a closing parent stranded one concurrency slot
+// per child until the key's TTL.
+//
+// Why this is a loop over ids rather than one set-based statement: the release
+// path is two store methods per workflow, not SQL this package can fold into
+// the UPDATE, and both are best-effort with their own logging. A parent closing
+// thousands of children would make this loop worth revisiting; the shape that
+// fixes it is a bulk ReleaseWorkflowConcurrencyKeys, not a different caller.
+//
+// The ids are collected before the UPDATE rather than returned from it because
+// the three dialects do not agree on returning affected rows -- PostgreSQL has
+// RETURNING, MySQL does not. A child whose status changes between the two
+// statements is released anyway, which is harmless: releasing the resources of
+// a workflow that finished on its own is exactly what its own terminal path
+// would have done.
+func releaseTerminatedChildren(log *slog.Logger, s workflowResourceReleaser, childIDs []string) {
+	for _, id := range childIDs {
+		releaseWorkflowResources(log, s, id)
+	}
+}
+
+// scanWorkflowIDs collects a single-column id result set. One copy so the three
+// dialects' close-policy queries differ only in their placeholders.
+func scanWorkflowIDs(rows *sql.Rows) ([]string, error) {
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

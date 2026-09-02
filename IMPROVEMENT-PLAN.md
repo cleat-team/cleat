@@ -10363,4 +10363,63 @@ red before the one-line change and green after, with the other two arms unmoved 
 
 ---
 
+### 3.78 A closed parent's children keep their concurrency slots — ✅ **FIXED** (WS-2, 2026-09-02)
 
+`releaseWorkflowResources` states its own contract: it runs the two best-effort cleanups that
+follow *"every commit which takes a workflow out of the runnable set: completion, **failure**,
+termination, continue-as-new, and the admin actions"*.
+
+`enforceParentClosePolicy`'s TERMINATE arm commits exactly such a failure —
+`SET status = 'failed', error_msg = 'parent workflow terminated'` — for every child of a closing
+parent, and released nothing. **On all three dialects.**
+
+**Same class as §3.76, found the same way, and it differs in the two respects that matter.**
+§3.76 came out of checking §3.75's inventory per dialect; this came out of checking the same
+inventory against the *contract*, which is the only thing that could have found it: MySQL,
+PostgreSQL and SQL Server all agreed here, so no cross-dialect comparison would have flagged it.
+And it is a **bulk** operation — one closing parent strands a slot per child, not one slot.
+
+Bounded rather than unbounded, for the same reason §3.76 is a §3.x: `concurrency_keys.expires_at`
+is `NOT NULL` and the reaper deletes expired rows, so the slots free themselves at the key's TTL.
+They free themselves silently, with every workflow queued on those keys waiting out the window
+for nothing.
+
+**The fix collects the child ids before the UPDATE rather than returning them from it**, because
+the dialects do not agree on returning affected rows — PostgreSQL has `RETURNING`, MySQL does
+not. A child whose status changes between the two statements is released anyway, which is
+harmless: releasing the resources of a workflow that finished on its own is what its own
+terminal path would have done. If the TERMINATE step itself fails, the id list is dropped, so a
+failed close does not trigger releases it did not earn.
+
+`TestParentCloseTerminateReleasesChildConcurrencyKeys` asserts released *state* rather than the
+call, so an implementation that frees the slot another way rightly passes. Red on PostgreSQL and
+MySQL before the fix, green after; neutering only the PostgreSQL release fails only the
+PostgreSQL arm with MySQL unmoved.
+
+#### The vacuity guard earned its place, and the finding it produced is §3.79
+
+The test first closed the parent with `TerminateWorkflow`, which reads as the obvious way to
+close a parent. The child stayed `ready`, and the guard asserting *"the close policy actually
+fired"* is what caught it: **`TerminateWorkflow` does not call `enforceParentClosePolicy` at
+all** — only `FinalizeWorkflowSegment` and `adminForceResolve` do. Without that guard the key
+assertion would have passed for the wrong reason, on an unfixed engine, and this section would
+have shipped as a fix for a bug it never exercised.
+
+### 3.79 `TerminateWorkflow` does not enforce the parent close policy — 🔴 **OPEN, not yet investigated** (WS-2, 2026-09-02)
+
+Found by §3.77's vacuity guard rather than by looking. `enforceParentClosePolicy` is called from
+`FinalizeWorkflowSegment` (for `done`/`failed`) and from `adminForceResolve`. It is **not**
+called from `TerminateWorkflow`, on any dialect — so terminating a parent leaves its
+`TERMINATE`-policy children running, while force-completing the same parent fails them.
+
+Measured 2026-09-02: a child of a parent closed with `TerminateWorkflow` stayed `ready`; the same
+child under `AdminForceComplete` went to `failed`.
+
+**Not yet a defect claim.** Two readings and they need different fixes: either terminate is
+supposed to close children like every other terminal path and the omission is a bug, or
+terminate is deliberately the operator's "stop this one workflow" verb and the close policy is
+for the workflow's own completion. The second is coherent — but nothing says so, and the
+inconsistency with `adminForceResolve`, which *is* an operator verb and does enforce it, is the
+argument against. **Settle which before writing code**, and check `docs/` and the SDK's
+`parent_close_policy` documentation for a stated intent rather than inferring one from the call
+sites.

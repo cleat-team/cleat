@@ -888,6 +888,13 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 // Both are fixed here. The function stays void: the contract with callers has
 // not changed, only whether a failure is observable.
 func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
+	// Collected before the transaction: see releaseTerminatedChildren.
+	terminated, err := s.childrenClosedByTerminate(ctx, parentWorkflowID)
+	if err != nil {
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: could not list TERMINATE children; their concurrency keys and sticky-worker assignments stay held until TTL",
+			"parent_workflow_id", parentWorkflowID, "error", err)
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		s.log().WarnContext(ctx, "enforceParentClosePolicy: begin failed; children of a closed parent are unaffected by its close policy",
@@ -925,7 +932,27 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 	if err := tx.Commit(); err != nil {
 		s.log().WarnContext(ctx, "enforceParentClosePolicy: commit failed; children of a closed parent are unaffected by its close policy",
 			"parent_workflow_id", parentWorkflowID, "error", err)
+		return
 	}
+
+	releaseTerminatedChildren(s.log(), s, terminated)
+}
+
+// terminateChildrenQuery selects the children the TERMINATE arm is about to
+// fail, so their resources can be released after it commits. Its WHERE must
+// stay identical to that UPDATE's, or the two disagree about which children
+// were closed.
+func (s *MySQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkflowID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE parent_workflow_id = ?
+		  AND parent_close_policy = 'TERMINATE'
+		  AND status NOT IN ('done', 'failed')
+	`, parentWorkflowID)
+	if err != nil {
+		return nil, err
+	}
+	return scanWorkflowIDs(rows)
 }
 
 // finishClaim commits a claim transaction and enforces the claim-limit

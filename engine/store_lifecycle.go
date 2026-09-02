@@ -478,12 +478,47 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 	`},
 	}
 
+	// Collected before the UPDATE: see releaseTerminatedChildren for why not
+	// RETURNING. A failure here costs the release, not the close policy.
+	terminated, err := s.childrenClosedByTerminate(ctx, parentWorkflowID)
+	if err != nil {
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: could not list TERMINATE children; their concurrency keys and sticky-worker assignments stay held until TTL",
+			"parent_workflow_id", parentWorkflowID, "error", err)
+	}
+
 	for _, step := range steps {
 		if err := s.runParentClosePolicyStep(ctx, step.query, parentWorkflowID); err != nil {
 			s.log().WarnContext(ctx, "enforceParentClosePolicy failed; children of a closed parent are unaffected by its close policy",
 				"policy", step.policy, "parent_workflow_id", parentWorkflowID, "error", err)
+			if step.policy == "TERMINATE" {
+				terminated = nil
+			}
 		}
 	}
+
+	releaseTerminatedChildren(s.log(), s, terminated)
+}
+
+// terminateChildrenQuery selects the children the TERMINATE arm is about to
+// fail, so their resources can be released after it commits. Its WHERE must
+// stay identical to that UPDATE's, or the two disagree about which children
+// were closed.
+func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWorkflowID string) ([]string, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE parent_workflow_id = $1
+		  AND parent_close_policy = 'TERMINATE'
+		  AND status NOT IN ('done', 'failed')
+	`, parentWorkflowID)
+	if err != nil {
+		return nil, err
+	}
+	return scanWorkflowIDs(rows)
 }
 
 func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, parentWorkflowID string) error {
