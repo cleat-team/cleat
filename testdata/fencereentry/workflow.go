@@ -93,3 +93,32 @@ func AllocateForever(h cleat.HostCalls) (string, error) {
 // sink retains what AllocateForever allocates. Package-level and never read, so
 // nothing can conclude the allocations are unnecessary.
 var sink [][]byte
+
+// SpinWithARunawayDefer registers a defer that never returns, then spins until
+// the fence stops the entry point.
+//
+// It exists for the one safety property the host-side cleanup pass rests on:
+// that pass grants fresh execution to a workflow the fence has already killed,
+// so if the cleanup itself can run forever the fence has been undone rather
+// than extended. A runaway defer is not a contrived case -- a cleanup that
+// retries an unreachable service in a loop is the ordinary way to write one by
+// accident.
+func SpinWithARunawayDefer(h cleat.HostCalls) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		x := uint64(1)
+		for i := 0; i < 100000000000; i++ {
+			x = x*6364136223846793005 + 1442695040888963407
+			x ^= x >> 33
+		}
+		sink = append(sink, []byte{byte(x)})
+	}); err != nil {
+		return "", err
+	}
+
+	x := uint64(1)
+	for i := 0; i < 100000000000; i++ {
+		x = x*6364136223846793005 + 1442695040888963407
+		x ^= x >> 33
+	}
+	return `{"value":` + strconv.FormatUint(x, 10) + `}`, nil
+}

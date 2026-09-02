@@ -183,3 +183,54 @@ func TestTheHostDoesNotRunDefersTwiceForAWorkflowThatFinished(t *testing.T) {
 			"failed.", n, operationsCalled(caller))
 	}
 }
+
+// TestTheDeferPassIsBounded is the safety property the whole kill-path pass
+// rests on.
+//
+// The pass grants fresh execution to a workflow the fence has already stopped.
+// If the cleanup itself can run forever then the fence has been UNDONE rather
+// than extended, and a runaway workflow holds a worker permanently again --
+// which is §1.5, the bug the fence was built for.
+//
+// The assertion is on wall clock, which is normally a smell. It is the right
+// assertion here because the property under test IS a wall-clock bound: there
+// is nothing else to observe about "this returns rather than hanging". The
+// window is deliberately loose (10x the configured budgets) so it fails on
+// "unbounded", not on a slow machine -- an unbounded pass does not miss this
+// window, it never returns at all.
+func TestTheDeferPassIsBounded(t *testing.T) {
+	const (
+		instanceTimeout = 2 * time.Second
+		deferBudget     = 1 * time.Second
+	)
+	eng, _, wasmBytes := killEngine(t,
+		WithWasmtimeExecutionTimeout(instanceTimeout),
+		WithWasmtimeDeferBudget(deferBudget))
+
+	done := make(chan error, 1)
+	began := time.Now()
+	go func() {
+		_, _, _, _, _, err := eng.Execute(context.Background(), wasmBytes,
+			"spin_with_a_runaway_defer", json.RawMessage(`{}`))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(began)
+		if err == nil {
+			t.Fatal("the workflow was reported as succeeding")
+		}
+		if !strings.Contains(err.Error(), "execution time limit exceeded") {
+			t.Fatalf("failed, but not on the fence: %v", err)
+		}
+		t.Logf("fence + bounded cleanup pass returned in %v (budgets %v + %v)",
+			elapsed.Round(time.Millisecond), instanceTimeout, deferBudget)
+	case <-time.After(10 * (instanceTimeout + deferBudget)):
+		t.Fatalf("Execute had not returned after %v.\n\n"+
+			"A defer that loops forever is not being stopped, so the cleanup pass "+
+			"has undone the execution fence rather than extended it: the runaway "+
+			"workflow holds this worker permanently, which is §1.5 all over again.",
+			10*(instanceTimeout+deferBudget))
+	}
+}
