@@ -6200,11 +6200,24 @@ the unfenced path, which for a build with no wasmtime in it is unavoidable rathe
 > mistake one layer up, and this repo has already had a check that matched an error message
 > rather than the condition and reported a broken database as healthy.
 >
-> **One inconsistency found while testing it and deliberately not fixed here:**
-> `runGuestDefersAfterKill` logs `ran the defers of a killed workflow` to `slog.Default()`, not
-> to the engine's configured logger, so an operator who configures a logger never sees the one
-> line that says the cleanup happened. The backend has no logger field, so wiring one is a change
-> to its construction rather than a one-liner.
+> **The logger inconsistency is fixed (2026-09-02).** `runGuestDefersAfterKill` wrote to
+> `slog.Default()` in all three of its branches — the success line, `could not be run`, and the
+> refuel warning — so a worker with a configured handler saw *nothing at all* about the cleanup
+> of a workflow it had just killed. That is the log an operator reads to answer "did the lock get
+> released?", and it was the one going where they were not looking.
+>
+> The backend now has a `logger` field and a `log()` accessor mirroring `Engine.log()`, set with
+> `WithWasmtimeLogger` and wired in `cmd/cleat-worker/main.go`. `WasmtimeOption` changed from
+> `func(*wasmtimeLimits)` to `func(*wasmtimeConfig)` for it: **a logger is not a limit**, and
+> putting one in a struct called `limits` is the kind of small dishonesty that later gets read as
+> a fact about the type.
+>
+> **Why it stayed invisible so long is the part worth keeping:** `slog.Default()` still prints to
+> stderr, so it looks correct in a terminal and vanishes only under a configured handler — which
+> is exactly the case an operator runs and a developer does not. The regression test mutates the
+> *`PerExecution` copy* rather than the constructor, because that copy is the one that executes
+> workflows: dropping the logger there leaves the root backend looking right and silences every
+> record from the path that matters.
 
 > **2026-09-02, the wazero path had the same hole and a second one behind it — and phase 2 is
 > now DONE.** `invokeDefersOnTrap` asked for `cleat_defer_<id>` too, so a guest trapped under

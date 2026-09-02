@@ -119,3 +119,70 @@ func TestBothBackendsMarkAMissingExport(t *testing.T) {
 		}
 	})
 }
+
+// The backend's own records reach the configured logger.
+//
+// IMPROVEMENT-PLAN §3.35. runGuestDefersAfterKill wrote to slog.Default() in
+// all three of its branches, so a worker with a configured handler saw nothing
+// at all about the cleanup of a workflow it had just killed -- not the success
+// line, not "could not be run", not the refuel warning. The backend had no
+// logger field to write to.
+//
+// This is the log an operator has to read to answer "did the lock get
+// released?", and it was the one going somewhere they were not looking. Found
+// while writing TestAMissingDeferExportIsNotReportedAsAFailure, whose first
+// version asserted on this line and could not see it.
+func TestTheBackendLogsToTheConfiguredLogger(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping AssemblyScript WASM integration test in short mode")
+	}
+
+	wasmBytes, err := os.ReadFile(buildAssemblyScriptWasm(t))
+	if err != nil {
+		t.Fatalf("read AS WASM: %v", err)
+	}
+
+	var logs bytes.Buffer
+	handler := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	wt, err := NewWasmtimeBackend(ctx,
+		WithWasmtimeExecutionTimeout(2*time.Second),
+		WithWasmtimeLogger(handler))
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	defer wt.Close(ctx)
+
+	caller := &mockCaller{}
+	eng := NewEngine(rt, caller,
+		WithBackends(WasmtimeLanguages, wt),
+		WithLogger(handler),
+		WithWorkflowID("wf-backend-logger"))
+
+	if _, _, _, _, _, err := eng.Execute(ctx, wasmBytes,
+		"spin_forever", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("the fenced workflow was reported as succeeding")
+	}
+
+	// Control: the cleanup must have actually happened, or the missing log
+	// line below would be correct rather than a routing bug.
+	if !ranTheDefer(caller) {
+		t.Fatalf("the killed workflow's defer did not run (calls: %v)",
+			operationsCalled(caller))
+	}
+
+	if !strings.Contains(logs.String(), "ran the defers of a killed workflow") {
+		t.Fatalf("the defers ran and the configured logger never heard about it.\n\n"+
+			"Logs:\n%s\n\n"+
+			"The backend writes through b.log(). If that is slog.Default() the "+
+			"record still appears on stderr, which is why this was invisible for "+
+			"as long as it was -- it looks fine in a terminal and vanishes under "+
+			"any configured handler.", logs.String())
+	}
+}

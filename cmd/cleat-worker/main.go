@@ -786,6 +786,10 @@ func main() {
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
 		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
 		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
+		// Without this the backend writes to slog.Default(), and this worker's
+		// configured handler never sees the one record that says whether a
+		// KILLED workflow's defers ran. See WithWasmtimeLogger.
+		engine.WithWasmtimeLogger(logger),
 	)
 	if wasmtimeErr != nil {
 		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)

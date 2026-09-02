@@ -79,6 +79,10 @@ type wasmtimeBackend struct {
 	// concurrently, which it isn't after construction).
 	limits wasmtimeLimits
 
+	// logger receives this backend's own records. nil means slog.Default();
+	// see log() and WithWasmtimeLogger for why that default is a trap.
+	logger *slog.Logger
+
 	// epochStop, when non-nil, stops the background epoch-ticker goroutine
 	// on Close. Only set on the backend returned directly by
 	// NewWasmtimeBackend ("the root") — PerExecution copies share the same
@@ -104,10 +108,11 @@ type wasmtimeBackend struct {
 // Config at all. Fuel-based instruction metering is enabled additionally
 // when WithWasmtimeInstructionLimit(n) is passed with n > 0.
 func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeBackend, error) {
-	lim := wasmtimeLimits{}
+	bcfg := wasmtimeConfig{}
 	for _, opt := range opts {
-		opt(&lim)
+		opt(&bcfg)
 	}
+	lim := bcfg.limits
 	if lim.executionTimeout <= 0 {
 		lim.executionTimeout = DefaultWasmtimeExecutionTimeout
 	}
@@ -134,6 +139,7 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 		compileLocks: new(sync.Map),
 		metaCache:    new(sync.Map),
 		limits:       lim,
+		logger:       bcfg.logger,
 		epochStop:    make(chan struct{}),
 		epochDone:    make(chan struct{}),
 	}
@@ -168,6 +174,19 @@ func (b *wasmtimeBackend) startEpochTicker() {
 	}()
 }
 
+// log returns the configured logger, or slog.Default() when none was set.
+//
+// Mirrors Engine.log(). The nil case is deliberately still slog.Default()
+// rather than a discard: a backend built without a logger by a caller that
+// never had one -- cmd/cleat-worker's verify_backend.go, and every test --
+// should still say something.
+func (b *wasmtimeBackend) log() *slog.Logger {
+	if b.logger != nil {
+		return b.logger
+	}
+	return slog.Default()
+}
+
 // Name returns "wasmtime" for diagnostics.
 func (b *wasmtimeBackend) Name() string { return "wasmtime" }
 
@@ -200,6 +219,11 @@ func (b *wasmtimeBackend) PerExecution() WasmBackend {
 		compileLocks: b.compileLocks,
 		metaCache:    b.metaCache,
 		limits:       b.limits,
+		// Copied, like limits. A PerExecution copy that dropped the logger
+		// would send every record from the path that actually executes
+		// workflows to slog.Default(), which is the bug this field exists to
+		// fix -- and it would do so while the root backend looked correct.
+		logger: b.logger,
 	}
 }
 
@@ -320,7 +344,7 @@ func (b *wasmtimeBackend) runGuestDefersAfterKill(
 	store.SetEpochDeadline(ticks)
 	if b.limits.instructionLimit > 0 {
 		if err := store.SetFuel(b.limits.instructionLimit); err != nil {
-			slog.Default().Warn("could not refuel the guest to run its defers",
+			b.log().Warn("could not refuel the guest to run its defers",
 				"entry_point", entryPoint, "error", err)
 			return
 		}
@@ -344,11 +368,11 @@ func (b *wasmtimeBackend) runGuestDefersAfterKill(
 
 	switch {
 	case callErr != nil:
-		slog.Default().Warn("a killed workflow's defers could not be run",
+		b.log().Warn("a killed workflow's defers could not be run",
 			"entry_point", entryPoint, "defer_budget", budget,
 			"error", callErr, "killed_by", cause)
 	case ran > 0:
-		slog.Default().Info("ran the defers of a killed workflow",
+		b.log().Info("ran the defers of a killed workflow",
 			"entry_point", entryPoint, "defers_run", ran, "killed_by", cause)
 	}
 }

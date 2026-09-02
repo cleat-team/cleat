@@ -1,6 +1,9 @@
 package engine
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // This file has no build constraint (unlike backend_wasmtime.go, which
 // requires cgo) so that cmd/cleat-worker and other callers can construct
@@ -78,10 +81,43 @@ type wasmtimeLimits struct {
 	deferBudget        time.Duration
 }
 
-// WasmtimeOption configures resource limits for a wasmtimeBackend, applied
-// at construction time (NewWasmtimeBackend) and enforced on every store it
-// creates thereafter (see wasmtimeBackend.configureStore).
-type WasmtimeOption func(*wasmtimeLimits)
+// wasmtimeConfig is everything NewWasmtimeBackend accepts: the resource
+// bounds, plus the things that are not bounds.
+//
+// The options used to be func(*wasmtimeLimits), which was accurate while
+// limits were all there was. A logger is not a limit, and putting one in a
+// struct called "limits" is the kind of small dishonesty that later gets read
+// as a fact about the type.
+type wasmtimeConfig struct {
+	limits wasmtimeLimits
+	logger *slog.Logger
+}
+
+// WasmtimeOption configures a wasmtimeBackend, applied at construction time
+// (NewWasmtimeBackend). Resource bounds are enforced on every store it creates
+// thereafter (see wasmtimeBackend.configureStore).
+type WasmtimeOption func(*wasmtimeConfig)
+
+// WithWasmtimeLogger routes the backend's own log records to l.
+//
+// Without it the backend writes to slog.Default(), which is not where an
+// operator who configured a logger is looking. That mattered most on the one
+// path where the backend has something to say that nothing else can: whether a
+// KILLED workflow's defers ran (§3.35 phase 4). Three records -- the success
+// line, the "could not be run" line, and the refuel warning -- all went to the
+// default logger, so a worker with a configured handler reported nothing at
+// all about the cleanup of a workflow it had just killed.
+//
+// Found while writing a test that asserted on that line and could not see it.
+//
+// nil keeps slog.Default().
+func WithWasmtimeLogger(l *slog.Logger) WasmtimeOption {
+	return func(c *wasmtimeConfig) {
+		if l != nil {
+			c.logger = l
+		}
+	}
+}
 
 // WithWasmtimeExecutionTimeout bounds a single wasmtime invocation via
 // epoch interruption. d <= 0 keeps DefaultWasmtimeExecutionTimeout. A
@@ -89,7 +125,7 @@ type WasmtimeOption func(*wasmtimeLimits)
 // engine.WithDefaultWorkflowTimeout), when tighter than this, still wins —
 // see wasmtimeBackend.configureStore.
 func WithWasmtimeExecutionTimeout(d time.Duration) WasmtimeOption {
-	return func(l *wasmtimeLimits) { l.executionTimeout = d }
+	return func(c *wasmtimeConfig) { c.limits.executionTimeout = d }
 }
 
 // WithWasmtimeInstructionLimit bounds fuel (roughly one unit per WASM
@@ -107,7 +143,7 @@ func WithWasmtimeExecutionTimeout(d time.Duration) WasmtimeOption {
 // is why it is the primary, always-on bound and fuel is an optional,
 // opt-in secondary one.
 func WithWasmtimeInstructionLimit(n uint64) WasmtimeOption {
-	return func(l *wasmtimeLimits) { l.instructionLimit = n }
+	return func(c *wasmtimeConfig) { c.limits.instructionLimit = n }
 }
 
 // WithWasmtimeMemoryLimits bounds linear memory, table elements, and
@@ -115,10 +151,10 @@ func WithWasmtimeInstructionLimit(n uint64) WasmtimeOption {
 // Values <= 0 keep the backend's built-in default for that dimension
 // (see the Default* constants above).
 func WithWasmtimeMemoryLimits(memoryBytes, tableElements, instances int64) WasmtimeOption {
-	return func(l *wasmtimeLimits) {
-		l.memoryLimitBytes = memoryBytes
-		l.tableElementsLimit = tableElements
-		l.instancesLimit = instances
+	return func(c *wasmtimeConfig) {
+		c.limits.memoryLimitBytes = memoryBytes
+		c.limits.tableElementsLimit = tableElements
+		c.limits.instancesLimit = instances
 	}
 }
 
@@ -129,5 +165,5 @@ func WithWasmtimeMemoryLimits(memoryBytes, tableElements, instances int64) Wasmt
 // makes several slow external calls -- knowing that the worst case a runaway
 // workflow can occupy a worker is the execution timeout plus this.
 func WithWasmtimeDeferBudget(d time.Duration) WasmtimeOption {
-	return func(l *wasmtimeLimits) { l.deferBudget = d }
+	return func(c *wasmtimeConfig) { c.limits.deferBudget = d }
 }
