@@ -170,3 +170,46 @@ func TestForgetHeldScopeLeavesOtherScopesAlone(t *testing.T) {
 		t.Errorf("forgetting an unheld key changed the set: %#v", s.heldScopes)
 	}
 }
+
+// TestReplaySwitchingScopesDoesNotReleaseTheOldKey is the third instance of
+// this class, and the one a property test found rather than a person.
+//
+// Clearing a scope was not the only way to give one up: switching from one
+// virtual object to another releases the first key and drops it from the held
+// set, all inside freshSetScope. The replay branch appended the new key and
+// left the old one in place, so end-of-segment cleanup released an object this
+// workflow had switched away from -- and once another workflow holds it, that
+// is their lock.
+//
+// Found by TestReplayReproducesFreshSessionState on its first run:
+//
+//	fresh:  heldScopes=[vo:order:o9]
+//	replay: heldScopes=[vo:cart:c1 vo:order:o9]
+//
+// IMPROVEMENT-PLAN 3.69.
+func TestReplaySwitchingScopesDoesNotReleaseTheOldKey(t *testing.T) {
+	ctx := context.Background()
+
+	s, store := scopeSession(t)
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeScopeAcquired},
+		{Step: 1, EventType: EventTypeScopeAcquired},
+	}
+
+	s.SetScope(ctx, nil, "cart", "c1", 0, 0)
+	s.SetScope(ctx, nil, "order", "o9", 0, 0)
+	if !s.isReplay {
+		t.Fatal("the session left replay, so the branch under test never ran and " +
+			"the assertions below are vacuous")
+	}
+
+	s.releaseHeldScopes(ctx)
+
+	if len(store.released) != 1 || store.released[0] != "vo:order:o9" {
+		t.Errorf("released %v, want exactly [vo:order:o9].\n\n"+
+			"vo:cart:c1 was released in the segment that originally switched away "+
+			"from it. Releasing it again at the end of a replayed segment frees "+
+			"whatever workflow holds that object now.", store.released)
+	}
+}

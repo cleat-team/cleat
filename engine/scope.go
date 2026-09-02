@@ -163,6 +163,18 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 		}
 
 		// Acquisition was successful.
+		//
+		// Switching from another object: the fresh path released the previous
+		// key and dropped it from the held set. Replay must reproduce the
+		// second half only -- the release happened in the segment that
+		// originally ran this step -- or releaseHeldScopes frees a key this
+		// workflow gave up when it switched away, which is another workflow's
+		// lock once that object has been re-acquired. Found by the
+		// fresh-vs-replay parity property test on its first run;
+		// IMPROVEMENT-PLAN 3.69.
+		if s.scopeSet && s.scopePrefix != "" {
+			s.forgetHeldScope("vo:" + s.scopeObjType + ":" + s.scopeInstKey)
+		}
 		s.scopeSet = true
 		s.scopeObjType = objectType
 		s.scopeInstKey = instanceKey
