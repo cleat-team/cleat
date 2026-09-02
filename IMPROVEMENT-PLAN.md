@@ -563,51 +563,6 @@ its dead-letter counter, now conditional on the write applying.
   `("", 0)` — the §263 defect, which nothing else would catch — and the dead-letter routing
   that used to live inline at each site.
 
-### 1.3 residual — a cancelled heartbeat call was reported as retryable — ✅ **FIXED** (WS-2, 2026-08-04)
-
-The hardcoded `""` was fixed by `c26c332`; the missing end-to-end test landed in #264. This is
-what was left underneath, and it is a behaviour defect rather than a dead call site.
-
-Both call paths detect cancellation. `freshCall` reports it as `callErrorUnknown`, with a
-comment saying why: *"Not retryable: the workflow was cancelled, so repeating the call is the
-one thing the caller must not do."* `callerrors.go` agrees, naming a cancelled workflow as the
-first of the three canonical non-retryable cases.
-
-`freshCallWithHeartbeat` cancelled the in-flight call's context and then fell through to its
-**generic** error branch, which returns `callFailureCode` — `callErrorUnavailable`, documented
-as *"Retryable"*. So a workflow cancelled during a long call was told the call was worth trying
-again, and a guest branching on `Retryable()` would re-issue the call it had just been
-cancelled out of.
-
-The recorded event was the durable half of the same defect:
-
-```
-callErrorCode = 2, want 0 (callErrorUnknown, non-retryable)
-recorded Err  = "context canceled", want "workflow cancelled"
-recorded ErrNonRetryable = false
-```
-
-Replay reads retryability off the event via `recordedFailureCode`. An event carrying the raw
-context error with `ErrNonRetryable` unset replays as an ordinary retryable failure — so the
-same step was non-retryable on the first run and retryable on the replay of it. That is
-precisely the divergence `recordedFailureCode` was introduced to prevent (§2.35); this path
-routed around it by never recording the classification at all.
-
-Fixed by tracking why the call context was cancelled and reporting a cancellation on both the
-guest-visible code and the recorded event. `cancelledCallError` is now a shared constant, since
-two paths produce it and replay compares against what was written.
-
-**Also:** `PollCancellation` errors were discarded at both sites. Failing open is right — a
-database blip must not abort a workflow that has not been cancelled, and the poll repeats on
-the next tick — but it was *silent*, so a persistently failing poll made cancellation quietly
-stop working with nothing to see. Now logged at both sites, with
-`TestDurableCallWithHeartbeat_PollErrorDoesNotCancel` pinning the fail-open behaviour so the
-guard cannot be flipped by accident.
-
-Three tests, watched failing before the fix: the cancellation case, an uncancelled control (so
-the cancellation branch cannot be reached unconditionally and pass for the wrong reason), and
-the poll-error case.
-
 ### 1.3 Cancellation is dead end-to-end — ✅ **FIXED**, and this section was stale
 
 **The original entry, kept because the plan being wrong is itself the finding:**
@@ -684,6 +639,51 @@ from "not cancelled", and the workflow proceeds to perform side effects. Making 
 behaviour change (a transient DB blip would start halting workflows), so it needs the same
 decision WS-1's §1.1 trap needs: establish what a failed *check* should do before changing what
 it returns. Not attempted here.
+
+#### Residual — a cancelled heartbeat call was reported as retryable — ✅ **FIXED** (WS-2, 2026-08-04)
+
+The hardcoded `""` was fixed by `c26c332`; the missing end-to-end test landed in #264. This is
+what was left underneath, and it is a behaviour defect rather than a dead call site.
+
+Both call paths detect cancellation. `freshCall` reports it as `callErrorUnknown`, with a
+comment saying why: *"Not retryable: the workflow was cancelled, so repeating the call is the
+one thing the caller must not do."* `callerrors.go` agrees, naming a cancelled workflow as the
+first of the three canonical non-retryable cases.
+
+`freshCallWithHeartbeat` cancelled the in-flight call's context and then fell through to its
+**generic** error branch, which returns `callFailureCode` — `callErrorUnavailable`, documented
+as *"Retryable"*. So a workflow cancelled during a long call was told the call was worth trying
+again, and a guest branching on `Retryable()` would re-issue the call it had just been
+cancelled out of.
+
+The recorded event was the durable half of the same defect:
+
+```
+callErrorCode = 2, want 0 (callErrorUnknown, non-retryable)
+recorded Err  = "context canceled", want "workflow cancelled"
+recorded ErrNonRetryable = false
+```
+
+Replay reads retryability off the event via `recordedFailureCode`. An event carrying the raw
+context error with `ErrNonRetryable` unset replays as an ordinary retryable failure — so the
+same step was non-retryable on the first run and retryable on the replay of it. That is
+precisely the divergence `recordedFailureCode` was introduced to prevent (§2.35); this path
+routed around it by never recording the classification at all.
+
+Fixed by tracking why the call context was cancelled and reporting a cancellation on both the
+guest-visible code and the recorded event. `cancelledCallError` is now a shared constant, since
+two paths produce it and replay compares against what was written.
+
+**Also:** `PollCancellation` errors were discarded at both sites. Failing open is right — a
+database blip must not abort a workflow that has not been cancelled, and the poll repeats on
+the next tick — but it was *silent*, so a persistently failing poll made cancellation quietly
+stop working with nothing to see. Now logged at both sites, with
+`TestDurableCallWithHeartbeat_PollErrorDoesNotCancel` pinning the fail-open behaviour so the
+guard cannot be flipped by accident.
+
+Three tests, watched failing before the fix: the cancellation case, an uncancelled control (so
+the cancellation branch cannot be reached unconditionally and pass for the wrong reason), and
+the poll-error case.
 
 ### 1.4 Crash-recovery: write-ahead intent — ✅ **FIXED** (heading corrected 2026-09-01)
 
@@ -10735,3 +10735,69 @@ something.
 3. **The wazero path has no defer segment.** `WithDeferPhase` fails closed on a backend that
    cannot honour it rather than silently skipping the drain, so `cleatctl replay` and the other
    tooling paths report the refusal instead of reporting a cleanup that did not happen.
+
+---
+
+### 3.82 Section numbers collide across workstreams — ✅ **GUARDED** (WS-3, 2026-09-02); four dangling references measured and left open
+
+Three workstreams append `### N.M` sections to this file concurrently, each picking "the next
+free number" against a `develop` that has already moved. The allocation is invisible in the file
+you edited, so the collision exists only in the merge — and a duplicate heading renders
+perfectly, so nothing catches it. Four landed on 2026-09-02 alone:
+
+| number | allocated by | resolution |
+|---|---|---|
+| `3.77` | WS-1 (#579) and WS-3 (#580) | WS-3 moved to 3.80, then 3.81 |
+| `3.78` | WS-1 (#582) and WS-2 (#583) | #587 moved WS-2's to 3.80 — onto the number WS-3 had just taken, forcing the second move above |
+| `2.70` | twice | #588 |
+| `1.3` | the cancellation section and a `1.3 residual` section 45 lines above it | this PR: the residual is now a `####` subsection of 1.3, which is what 2.15 and 2.28 already do with theirs |
+
+**The cost is not the duplicate, it is the cross-references that rot around it.** §3.79 read
+*"found by §3.77's vacuity guard"* while §3.77 was an unrelated WS-1 item about per-tenant names
+— a pointer into real prose about the wrong thing, which is worse than a dead link because it
+reads as correct. Renumbering is where this happens: re-grep the **old** number across this file
+*and* `engine/*.go`, whose comments carry section numbers too, rather than fixing the references
+you remember. A keyword-filtered pass over #580 missed two.
+
+**Guarded** by `scripts/check-section-numbers.sh`, wired into the `Lint` job. It carries a
+vacuity floor (fewer than 50 headings fails rather than passes), because a grep that matches
+nothing reports success — a heading-format change would otherwise turn it into a no-op printing
+OK forever. Watched failing for both reasons before landing: an injected duplicate, and `###`
+rewritten to `##`.
+
+Only `###` is checked. `####` subsections legitimately repeat a parent number — `#### 1.4 phase
+D`, `#### 1.4 phase E`.
+
+#### What is measured but not fixed: four dangling references
+
+Duplicates are one way a pointer goes wrong; a pointer to a section that was renamed, renumbered
+or never written is the other. Measured 2026-09-02 against `develop` at `eab1101`, before this
+section existed — 482 `§N.M` references, 106 distinct, of which **four resolve to no heading**:
+`§0.2` (x1), `§2.3` (x1), `§2.4` (x4), `§2.59` (x1).
+
+**Those counts are pinned to that commit on purpose: this section names all four, so it inflated
+the count it reports.** Run the command on the working tree and it returns 3/2/6/2 — the extra
+occurrences are the sentences you are reading. The *set* is the stable part; the counts are not,
+and any later count has to subtract this section or pin a commit as above. A measurement that
+changes what it measures is worth stating rather than quietly correcting, because the naive
+re-run disagrees with the doc and looks like rot.
+
+Re-derive (against the pinned commit, so the numbers above reproduce):
+
+```
+git show eab1101:IMPROVEMENT-PLAN.md > /tmp/plan-at-eab1101.md
+python3 -c "
+import re
+from collections import Counter
+s=open('/tmp/plan-at-eab1101.md').read()
+h=set(re.findall(r'^### (\d+\.\d+) ', s, re.M))
+c=Counter(re.findall(r'§(\d+\.\d+)', s))
+print([(r,n) for r,n in sorted(c.items()) if r not in h])
+"
+```
+
+**Not fixed and not guarded here, because the fix is not mechanical.** Each needs a reading of
+the surrounding prose to decide what it *meant* — `§2.4` is referenced four times from a summary
+table that may predate a renumbering, and `§0.2` suggests a section block that no longer exists.
+Guessing would produce exactly the failure described above: a confident pointer at the wrong
+prose. A guard added before the four are resolved would be permanently red.
