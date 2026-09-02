@@ -964,11 +964,45 @@ code 5" does not hold in this tree. **That was wrong** — it holds exactly, for
 was checked against (3), a different enum. What is true is narrower: the code exists, and
 nothing populates it, because the ambiguity never reaches the host as a failure at all.
 
-**Still open in the phase:** E (the resolution hook and a typed `ErrAmbiguous` carrying step,
+~~**Still open in the phase:** E (the resolution hook and a typed `ErrAmbiguous` carrying step,
 service, operation and key — today ambiguity is reported inside the workflow result *string*)
 and F (admin force-resolve for a pending step, whose prerequisite §3.20 now exists). §3.22
-should be fixed before either: both are about delivering an answer that this discards. `pendingSentinel` is still detected alongside `Pending` because
+should be fixed before either: both are about delivering an answer that this discards.~~
+`pendingSentinel` is still detected alongside `Pending` because
 `tests/integrity` exercises it directly; retiring it belongs with E.
+
+**Phase F landed 2026-09-02, and phase E and §3.22 landed before it.** `engine.ResolveStep`
+(`engine/admin_intent.go`) records an outcome for a call left pending by a crash, on the
+authority of an operator who checked the external service, reachable at
+`POST /api/admin/instances/{id}/steps/{step}/resolve`.
+
+**It needed no new SQL, and that is the finding.** Phase E built `ResolveCallIntent` on all
+three dialects — tenant-scoped, requiring the row to still be pending, computing the checksum
+from the preceding row inside its own transaction — and left it reachable from exactly one
+caller: `resolveAmbiguity`, which **returns immediately when no `AmbiguityResolver` is
+configured**, as in most deployments. So the mechanism was complete and unreachable, and a
+workflow reported `[AMBIGUOUS]` on every replay forever while its own error text told the
+operator to go and check the external service. Phase F is the path to it, dialect-agnostic,
+built on phase E's per-dialect work.
+
+**The provenance lives on the resolved row, not only in the audit event.** The response is
+written as though the call had returned it, because that is what replay must see — a workflow
+cannot branch on "a human said so". `EventRecord.ResolvedBy` is written in the same statement
+and says the outcome was *asserted rather than observed*. That placement is deliberate: the
+resolution and the audit event are separate statements and cannot be made atomic without
+per-dialect SQL, so the one fact a reader must not lose is the one that cannot be lost
+separately. A failed audit append costs a timeline entry and is reported loudly, naming what
+did happen so the operator does not retry a step that is no longer pending.
+
+**Resolving twice is a conflict rather than a silent overwrite**, and the guard is in
+`ResolveStep` rather than left to `ResolveCallIntent`'s pending predicate — both refuse, but
+only the explicit one produces the "generation mismatch" wording `handleAdminOpError` maps to
+409. The tests assert the wording for that reason: rewording these errors silently changes the
+HTTP contract.
+
+**Not verified on SQL Server** — the dialect skips in this sandbox (`WS2-STATUS.md`), though
+the resolution goes through per-dialect SQL, so CI is doing real work here rather than
+confirming a local result.
 
 ### 1.5 Primary WASM backend has no hang protection (~1–2 sessions) — 🟢 **CLOSED for deployments; developer tooling is the residual** (WS-3, 2026-09-02)
 

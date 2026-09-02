@@ -170,6 +170,11 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.ErrCode != "" {
 			payload["error_code"] = rec.ErrCode
 		}
+		// Only when an operator asserted the outcome, so an ordinary call's
+		// payload is byte-identical to what it always was.
+		if rec.ResolvedBy != "" {
+			payload["resolved_by"] = rec.ResolvedBy
+		}
 		if rec.DurationMs > 0 {
 			payload["duration_ms"] = rec.DurationMs
 		}
@@ -508,6 +513,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		// never a class -- so nothing downstream can mistake it for one.
 		if v, ok := m["error_code"].(string); ok {
 			rec.ErrCode = v
+		}
+		if v, ok := m["resolved_by"].(string); ok {
+			rec.ResolvedBy = v
 		}
 		if v, ok := m["duration_ms"].(float64); ok {
 			rec.DurationMs = int64(v)

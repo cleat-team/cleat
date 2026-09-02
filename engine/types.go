@@ -133,6 +133,23 @@ type EventRecord struct {
 	// CleatError. Nothing downstream requires it to be set.
 	ErrCode string `json:"err_code,omitempty"`
 
+	// ResolvedBy names the operator who supplied this event's outcome, when it
+	// did not come from the service. It is set only by admin step-resolution
+	// (IMPROVEMENT-PLAN 1.4 phase F): a call left pending by a crash, whose real
+	// outcome a human went and checked.
+	//
+	// It lives on the event rather than only in the separate audit record
+	// because the two are written by different statements and cannot be made
+	// atomic without per-dialect SQL. If the audit append fails, this still
+	// says the response was asserted rather than observed -- and that
+	// distinction is permanent, because replay reads this row as the call's
+	// outcome forever. An audit row that can go missing is a worse place for
+	// the one fact a reader must not lose.
+	//
+	// Empty is the normal case: the service answered, and nobody asserted
+	// anything.
+	ResolvedBy string `json:"resolved_by,omitempty"`
+
 	// Pending records that this event is a write-ahead call intent whose
 	// outcome was never written: the external call was dispatched and the
 	// process died before the response came back. It is read from the row --
