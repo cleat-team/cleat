@@ -970,16 +970,61 @@ and F (admin force-resolve for a pending step, whose prerequisite §3.20 now exi
 should be fixed before either: both are about delivering an answer that this discards. `pendingSentinel` is still detected alongside `Pending` because
 `tests/integrity` exercises it directly; retiring it belongs with E.
 
-### 1.5 Primary WASM backend has no hang protection (~1–2 sessions) — fixed for wasmtime, **still open for every deployment**
+### 1.5 Primary WASM backend has no hang protection (~1–2 sessions) — 🟢 **CLOSED for deployments; developer tooling is the residual** (WS-3, 2026-09-02)
 
 > **Re-opened and re-closed 2026-08-04 by §2.28.** The epoch-interruption fix below is real
-> and tested, but it lives behind `//go:build cgo` and the shipped Dockerfile built with
+> and tested, but it lived behind `//go:build cgo` and the shipped Dockerfile built with
 > `CGO_ENABLED=0`, so no container had it: measured on the wazero backend the containers
 > actually ran, a workflow with a 2-second budget ran for 2m35s and returned **success**.
 > The image now builds with CGO on a glibc base and a `--verify-backend` build step keeps it
-> that way. Go guests are fenced in deployments; non-Go guests on wazero still are not.
-> Read §2.28 for the residual.
+> that way.
+>
+> **2026-09-02: the residual this heading carried was stale, and it named a file that no
+> longer exists.** It read *"Go guests are fenced in deployments; non-Go guests on wazero
+> still are not."* There is no wazero backend to be unfenced on — `engine/backend_wazero.go`
+> was deleted in #459 (2026-08-10), three weeks before this sentence was last read as current.
+> Four things now hold, each re-derivable:
+>
+> | claim | command |
+> |---|---|
+> | no wazero backend exists | `ls engine/backend_wazero.go` → no such file |
+> | all five shipped guest languages route to wasmtime | `grep -n 'WasmtimeLanguages =' engine/engine.go` → `go, assemblyscript, java, rust, python` |
+> | the worker registers that backend and no other | `grep -rn 'WithBackends' cmd/cleat-worker/` → one site, `setup.go:1624` |
+> | an unrouted language is refused, not fallen through | `Engine.resolveBackend`, `engine/executor.go:75` (#503) |
+>
+> The fence itself is not per-language: `configureStore` (`engine/backend_wasmtime.go:227`)
+> applies `SetEpochDeadline` to every store before `Execute` branches on language at all. So
+> in a deployment a guest either runs on wasmtime and is fenced, or is refused. **There is no
+> third path**, which is what closes this for deployments — not a per-language test.
+>
+> **The real residual is developer tooling, and it is a different and much smaller thing.**
+> `engine.Runtime` is still a wazero runtime and still executes guest code under
+> `cleatctl replay`, `cleatctl debug`, `cleat run_embedded`, `cleat-bench` and
+> `cleat/wasmtest`. Re-derive with
+> `grep -rn "engine\.NewRuntime(" --include="*.go" . | grep -v _test.go` — **7** call sites
+> (measured 2026-09-02), all of them CLI or test tooling, none in `cmd/cleat-worker`.
+>
+> Use that command and not the looser `grep -rn "NewRuntime("`, which prints **12**: it also
+> catches `engine/runtime.go`'s own definition, two in-package `RunDefer` call sites in
+> `engine/executor.go` that fire only when no backend is registered — those same tools — and
+> a `wazero.NewRuntime` in the AssemblyScript test runner, which is a different symbol that
+> merely ends in the same name. The first draft of this paragraph paired the loose command
+> with the tight count, so anyone re-deriving it would have got 12 and concluded the note was
+> wrong.
+>
+> wazero **cannot** be fenced for a compute-bound guest (CLAUDE.md records the three
+> approaches that were tried and failed), so a runaway guest under `cleatctl replay` is not
+> stopped. That bounds a developer's terminal, not a deployment, and removing wazero to close
+> it was decided against on 2026-09-01 (§3.56).
+>
+> Read §2.28 for the deployment history.
 
+
+**Everything below this line is the original 2026-08 report, kept for its history and no
+longer describing the tree.** Two of its premises have since been falsified rather than fixed:
+wazero is not "a fallback for languages wasmtime cannot host" — it is not a backend at all
+(#459) — and wasmtime is no longer configured without a `Config`. Read it as the record of why
+the fence was built, not as a description of what is there.
 
 > **Raise this to the top of Phase 1.** wasmtime is the primary backend — it is the standard
 > engine and materially more reliable than wazero, which is retained only as a fallback for
