@@ -9568,9 +9568,22 @@ SDKs say there is one:
 **Python is tier 1** (`tiers.yaml`: `languages: [go, python]`), so this is a tier-1 correctness
 gap, not only a tier-2 feature gap.
 
-**§3.35 phase 4 made one consequence sharper.** `__cleat_run_deferred` is emitted by Go codegen
-only, so the host's kill-path cleanup — added in #551 — silently no-ops for every non-Go guest.
-`GetFunc` returns nil and `runGuestDefersAfterKill` returns without doing anything.
+**§3.35 phase 4 made one consequence sharper.** `__cleat_run_deferred` was emitted by Go codegen
+only, so the host's kill-path cleanup — added in #551 — silently no-oped for every non-Go guest.
+`GetFunc` returned nil and `runGuestDefersAfterKill` returned without doing anything.
+
+Where that stands as of 2026-09-02, one row per SDK:
+
+| SDK | normal path | kill path (`__cleat_run_deferred`) |
+|---|---|---|
+| Go | ✅ §3.70 | ✅ #550 |
+| Rust | ✅ #553 | ✅ #553 |
+| Python | ✅ #554 | ❌ structural — see below |
+| Java | ✅ #556 | ✅ #558 |
+| AssemblyScript | ✅ #557 | ✅ #557 |
+
+Python is the only gap left, and it is not an oversight: its WIT world exports one function and
+it runs through `ExecuteComponentCGo`, which has no defer pass at all. Both are set out below.
 
 #### The shape, established on Rust (#553)
 
@@ -9643,8 +9656,29 @@ The suspend branch is asserted defer-free by slicing the generated source betwee
 a looser check while still firing every cleanup at the first sleep. Mutation-proven: adding a
 drain to that branch fails exactly that test.
 
-Java **does** get §3.35 phase 4's kill path, unlike Python: TeaVM exports are declared with
-`@Export`, so a `__cleat_run_deferred` export is expressible. Not wired yet.
+**Java gets §3.35 phase 4's kill path too (#558), unlike Python.** TeaVM exports are declared
+with `@Export`, so `CleatEntryProcessor` generates a `cleat.generated.CleatDeferRunner` carrying
+one — once per compilation that has an entry point, because it is one export for the module and
+per-entry would be a duplicate-export failure the moment a module declares two workflows.
+
+**`CleatEntryIndex.WRAPPER_CLASSES` has to reference it, and that is the part that would have
+been missed.** Nothing in the guest calls the runner: its only caller is the host, after the
+workflow is dead. That makes it exactly what TeaVM's dead-code elimination removes, and a
+tree-shaken export is indistinguishable from one that was never generated. It is deliberately
+**not** in `getEntries()`, which lists workflow entry points — a caller enumerating those would
+otherwise try to execute the defer runner as a workflow.
+
+The runner calls `Defer.runDeferredForHost()`, not `Defer.runDeferred()`, and the difference is
+the same one the suspend rule above is about: the wrapper needs `SuspendSignal` to escape so its
+segment suspends, and this caller must swallow it, because a workflow reached this way is already
+dead and has no segment left.
+
+**`TestJavaExportsTheDeferRunner` goes through the real TeaVM build, not the generated source**,
+because the two disagree in the direction that matters. `CleatEntryProcessorTest` can only show
+that the source says `@Export`; only compiling shows whether TeaVM kept it. Verified by removing
+the `generateDeferRunner()` call: the two processor tests go red, and so does the engine test,
+with the module's real export list in the failure message — `_start`, `transfer_money`,
+`get_transfer_status`, thirty-odd `teavm_*` and no `__cleat_run_deferred`.
 
 #### AssemblyScript: done, including the kill path (#557)
 
