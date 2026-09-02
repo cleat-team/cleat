@@ -5794,10 +5794,25 @@ deployment, and the error they get names a constraint rather than the problem.
 
 #### The migration hazard, and it is the part that needs deciding before any SQL is written
 
-`workflow_defs` is referenced by three foreign keys on PostgreSQL and three on MySQL — and
-**zero on SQL Server**, which the earlier "three foreign keys per dialect" framing had wrong:
+`workflow_defs` is referenced by **three foreign keys on every dialect**.
 
-    grep -rn 'REFERENCES workflow_defs' migrations/*/*.sql
+> **Corrected 2026-09-02, the same day this entry was written.** It said "three on PostgreSQL
+> and three on MySQL — and **zero on SQL Server**, which the earlier 'three foreign keys per
+> dialect' framing had wrong". §3.12's original framing was right and this correction was the
+> error: SQL Server writes `REFERENCES dbo.workflow_defs`, and the grep below did not allow for
+> the schema qualifier, so it matched nothing on that dialect. `migrations/mssql/001_schema.sql`
+> has `fk_instances_def` at line 210 and two more at 408 and 424.
+>
+> Re-derive with a pattern that tolerates the qualifier, and note that the first form is the
+> one that produced a confident wrong answer:
+>
+>     grep -rn 'REFERENCES workflow_defs' migrations/*/*.sql          # WRONG: misses mssql
+>     grep -rEn 'REFERENCES [a-z]*\.?workflow_defs' migrations/*/*.sql # 3, 3, 3
+>
+> The lesson is the one this file keeps relearning in new clothes: a grep that returns zero for
+> one member of a set it returns three for on the others is reporting a pattern problem, not a
+> finding. Zero is the answer that most deserves a second look, and I wrote it into a section
+> heading, a PR description and a commit message before checking.
 
 They come from `workflow_instances(def_name, def_version)`, `workflow_tags(workflow_name,
 version)` and `workflow_routing(workflow_name, target_version)`. All three referencing tables
@@ -5820,13 +5835,55 @@ Three ways out, and the choice belongs in review rather than in a commit:
 2. **Adopt on the evidence.** Where every referencing instance shares one tenant, reassign the
    definition to that tenant. Cheap and correct for the common single-tenant upgrade, and it
    still needs option 1 or 3 for the genuinely-shared rows.
-3. **Drop the foreign keys and enforce the relationship in Go.** SQL Server already has no such
-   constraint and is not obviously worse for it, which is an argument this option gets for free
-   — the tree already runs one dialect this way.
+3. **Drop the foreign keys and enforce the relationship in Go.** ~~SQL Server already has no
+   such constraint and is not obviously worse for it, which is an argument this option gets for
+   free — the tree already runs one dialect this way.~~ **That argument was built on the wrong
+   count and is withdrawn.** All three dialects enforce the constraint today, so this option is
+   levelling *down* rather than codifying what one backend already does.
 
-**Recommendation: 2 then 1** — adopt where unambiguous, fan out the remainder — because it
-makes the common case free and never leaves a row unconstrained. Option 3 should not be taken
-by accident just because MSSQL already lives there.
+   What the foreign keys actually buy, measured: none of the six carries an `ON DELETE` clause,
+   so they default to `NO ACTION` — they refuse to delete a definition that a workflow
+   instance, tag or routing rule still references. That is real protection for an operation
+   that really exists (`DELETE FROM workflow_defs` on all three dialects,
+   `store_deployment.go:376`, `mysql_ops.go:847`, `mssql_deployment.go:419`). Dropping them
+   would let an operator delete the code a running workflow is mid-replay of.
+
+**All three options exist only to preserve existing rows**, and whether there are any is the
+question that decides between them. If a deployment has no `workflow_defs` worth keeping, there
+is a fourth option that dominates all of them:
+
+4. **Change the key outright.** Drop the foreign keys, alter the primary key to
+   `(tenant_id, name, version)`, recreate the foreign keys with `tenant_id` in them. Nothing to
+   backfill, nothing duplicated, constraint fully enforced at the end. It also lets
+   `canAdoptDef` and the whole default-tenant adoption window **be deleted** rather than carried
+   forward — that machinery exists solely to smooth an upgrade, so with no upgrade to smooth it
+   is dead weight. This option removes code instead of adding a migration.
+
+**DECIDED 2026-09-02: option 4.** There is no deployed `workflow_defs` data to preserve, so
+the migration changes the key outright and the adoption machinery goes with it. Options 1 and 2
+are recorded above because the reasoning is worth keeping if that ever stops being true; option
+3 is the weakest of the four rather than the free win it looked like.
+
+**What option 4 deletes, and this is the part that makes it more than a migration.**
+`canAdoptDef`, the default-tenant adoption window, and the ownership-error path that polices it
+(`engine/def_ownership.go`, `ErrWorkflowDefOwnedByAnotherTenant`, and the repeated SQL guard on
+PostgreSQL that maps `23505` onto it) all exist for one reason: `(name, version)` is a shared
+namespace, so two tenants deploying the same name is a collision that has to be adjudicated.
+Under `(tenant_id, name, version)` it is not a collision at all — each tenant gets its own row —
+so there is nothing to adjudicate and the machinery has no job. Deleting it is not a
+simplification bolted onto the migration; it is what the migration *means*.
+
+**Sequenced as two PRs, because the first stands alone and de-risks the second:**
+
+1. **Tenant-scope every `workflow_defs` lookup.** No schema change. Correct today — the local
+   child-start path resolves a definition by name with no deliberate tenant check and is saved
+   only by a `NOT NULL` constraint when `MAX(version)` comes back empty under RLS — and
+   *required* the moment two tenants can hold one name.
+2. **Change the key and delete the adoption window.** The migration, the PK, the three foreign
+   keys per dialect, and the removal above.
+
+Doing them in the other order leaves a window where the tree is incorrect rather than merely
+under-defended.
 
 #### Sequencing
 
