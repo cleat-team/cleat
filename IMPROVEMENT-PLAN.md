@@ -9486,3 +9486,65 @@ one meant reading what `Execute` does with a guest that dies that way. The measu
 defers; the defect was in the line above. **The same shape as §3.22** — a failing guest handed
 back as a success — and worse, because §3.22 at least left the error text sitting in the result
 column.
+
+---
+
+### 3.72 The engine suite poisoned its own database — ✅ **FIXED** (WS-3, 2026-09-02)
+
+**A full `go test ./engine/` run finished green and left the database in a state where the NEXT
+run failed.** The failure landed in `TestAssertTenantSetRejectsEmptyStringLikeNull` — a tenant/RLS
+test with no visible connection to the test that caused it — so it appeared and disappeared
+according to what had run against that database before, which is indistinguishable from a flake
+and from "some unrelated change broke RLS".
+
+#### Mechanism
+
+`engine/drop_tenant_test.go`'s `resetToOriginal001DropTenant` re-applied the **entire**
+`migrations/postgres/001_schema.sql` to recover one pre-032 function.
+
+001 defines **five** functions with `CREATE OR REPLACE`, and exactly two of them have later
+migrations that fix them:
+
+| function | later definition |
+|---|---|
+| `cleat.assert_tenant_set` | **034** — collateral damage |
+| `admin.drop_tenant` | 032 — the one the helper wanted |
+| `admin.create_tenant_role` | none |
+| `admin.grant_plugin_to_tenant` | none |
+| `admin.revoke_plugin_from_tenant` | none |
+
+Re-derive with `grep -n 'CREATE OR REPLACE FUNCTION' migrations/postgres/001_schema.sql`, then
+check each name for later definitions.
+
+So a helper aimed at one function reverted another, and **`schema_migrations` still recorded
+version 34 as applied**. The runner only applies versions it has not recorded, so no migration
+run repaired it — the database stayed broken for every subsequent run.
+
+#### Fix
+
+Extract only `admin.drop_tenant` from 001 rather than executing the whole file. The extraction
+fails the test loudly if it finds nothing, finds no terminator, or finds more than one function:
+a silently empty extraction would leave the *post*-032 function installed, and
+`TestDropTenant_OldVersionLeavesDataBehind` — whose whole job is to show the pre-032 function
+losing data — would then pass for the wrong reason.
+
+#### The regression test asserts the invariant, not the symptom
+
+`TestTheSuiteLeavesTheMigratedSchemaIntact` compares the live `cleat.assert_tenant_set` body
+against what the highest-numbered migration defining it installs. Asserting instead that
+`TestAssertTenantSetRejectsEmptyStringLikeNull` still passes would only ever catch the one
+function that happened to be damaged this time.
+
+Before: run green, body reverted to `IF tid IS NULL THEN`. After: run green, body stays
+`IF tid IS NULL OR tid = ''`, and two consecutive full runs both pass.
+
+#### A check that a retraction also satisfies
+
+While diagnosing this I checked for the string `cleat.tenant_id is not set` and concluded the
+database was healthy. **That string is in the exception message, which is present in BOTH the
+001 and the 034 body** — so the check passes against the broken function. The guard is
+`tid = ''`, and that is what the test matches on.
+
+Same shape as §1.1's `Files:` pointer and the `ExecuteComponent` grep in CLAUDE.md: a check
+whose evidence is equally consistent with the bug and with the fix. It cost most of a session,
+and the tell was that the "healthy" reading never explained the failure.
