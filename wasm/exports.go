@@ -612,8 +612,25 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 		buf.WriteString("\n")
 	}
 
+	// An entry point the guest does not recognise is a FAILURE, reported on the
+	// error channel -- not a result that happens to contain the word "error".
+	//
+	// This used to `return []byte("{\"error\":\"unknown entry point: ...\"}")`,
+	// which the main-stub dispatcher then handed to cleatCompleteImport(0, ...)
+	// -- status 0, success. So the host could not tell an entry point the guest
+	// had never heard of from one that ran and returned that JSON. Measured
+	// 2026-09-01 on a real Go guest: RunDefer for a nonexistent export and for
+	// a plausible-but-absent one returned byte-identical results, both with a
+	// nil error, so every caller's `if err != nil` was dead code.
+	//
+	// That is how every defer in every Go WASM workflow came to do nothing
+	// while the host recorded success: the host invokes defers by entry-point
+	// name, and no guest exports one. IMPROVEMENT-PLAN 3.70.
+	//
+	// Returning nil tells the dispatcher the completion has already been
+	// signalled, so it must not also report success.
 	buf.WriteString("\tdefault:\n")
-	buf.WriteString("\t\treturn []byte(`{\"error\":\"unknown entry point: ` + entryName + `\"}`)\n")
+	buf.WriteString("\t\treturn nil\n")
 	buf.WriteString("\t}\n")
 	buf.WriteString("}\n")
 }
