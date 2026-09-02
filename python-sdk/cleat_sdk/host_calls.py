@@ -2585,10 +2585,19 @@ class HostCalls:
     # --------------------------------------------------------------------
 
     def defer(self, description: str) -> str:
-        """Register a deferred cleanup action to run on workflow exit.
+        """Record that a cleanup action exists. **Does not run anything.**
 
-        Deferred actions are executed in LIFO order, analogous to Python's
-        ``try/finally`` or Go's ``defer``.
+        This sends a *description* to the host and nothing else. The host adds
+        it to the workflow's deferrals so it is visible in history and in the
+        dashboard, but there is no body attached and nothing anywhere executes
+        one.
+
+        This docstring used to say the action "runs on workflow exit" and is
+        "executed in LIFO order, analogous to Python's ``try/finally`` or Go's
+        ``defer``". None of that was true, and could not be: the ABI carries a
+        string. See IMPROVEMENT-PLAN §3.73.
+
+        Use :meth:`defer_func` for cleanup that actually runs.
 
         Parameters
         ----------
@@ -2598,7 +2607,7 @@ class HostCalls:
         Returns
         -------
         str
-            The defer ID, which can be used to cancel the deferred action.
+            The defer ID the host minted.
 
         Raises
         ------
@@ -2606,6 +2615,36 @@ class HostCalls:
             If the host reports an error.
         """
         return _import_cleat_defer(description)
+
+    def defer_func(self, fn: Callable[[], None]) -> str:
+        """Register cleanup **with a body**, run when the workflow finishes.
+
+        The body runs in LIFO order when the entry point returns -- on the
+        success path and on the error path, because a defer is for the run that
+        did not finish the way it meant to. It does **not** run when the
+        workflow suspends: a suspended workflow has not exited, and its cleanup
+        is still pending.
+
+        The closure lives in this guest instance, so it can capture whatever it
+        needs from the workflow body.
+
+        Parameters
+        ----------
+        fn : Callable[[], None]
+            The cleanup to run. Exceptions it raises are swallowed so one bad
+            cleanup cannot stop the others.
+
+        Returns
+        -------
+        str
+            The defer ID the host minted, which is also the key the body is
+            stored under.
+        """
+        from .defer import register_defer
+
+        defer_id = _import_cleat_defer("deferred function")
+        register_defer(defer_id, fn)
+        return defer_id
 
     # --------------------------------------------------------------------
     # 27. continue_as_new — history compaction
