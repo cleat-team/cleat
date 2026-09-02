@@ -183,7 +183,7 @@ jobs:
       # Java 17 to match the five other jobs that build this SDK, rather than
       # inheriting the runner image's default, which can change without us.
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -271,7 +271,7 @@ jobs:
       # test-mysql above for why a SQL Server job builds a Java WASM
       # component at all.
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
