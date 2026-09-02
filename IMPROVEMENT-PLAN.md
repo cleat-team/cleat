@@ -6090,6 +6090,15 @@ the unfenced path, which for a build with no wasmtime in it is unavoidable rathe
 > second is true *unconditionally* for those defers, because they run inside the live session
 > with the whole workflow context available. What remains for phase 4 is the case where the guest
 > never gets to run: cancellation, terminal failure, and the execution fence.
+>
+> **2026-09-02, phase 4's fence case is buildable — measured, not argued.** A real Go SDK guest
+> killed mid-loop by the fence can be re-entered, runs guest code, and its outstanding defer runs
+> and reaches the host, with no production change required. §3.70's subsection "The fence case is
+> reachable — both halves now measured" has the table, the control, and the mutations;
+> `engine.TestAGoGuestSurvivesTheFence` pins it. This is a capability, not a design: the host
+> still has to decide to make that call, and wants a named defer-runner export rather than the
+> unrelated entry point the test borrows. **Traps, OOM and host-side timeouts remain unmeasured**
+> and must not be assumed to behave the same way.
 
 Written because §3.32 fenced the defer path and the fence made an uncomfortable question
 visible: *bounded doing what, exactly?* The implementation turned out to be much further from
@@ -9247,7 +9256,7 @@ session)` so a defer body can make host calls on the trap path): it is still cor
 benefits no shipped guest, because the export it would reach — `cleat_defer_<id>` — is one no SDK
 emits and none can. Do not schedule it as though it closed the trap case.
 
-#### The fence case may be reachable after all — one half measured, one half not
+#### The fence case is reachable — both halves now measured
 
 The obvious reading of "the guest never got to run its defers" is that nothing can be done: the
 bodies are closures in guest memory, and the guest is dead. For a **fence kill** that reading is
@@ -9263,15 +9272,40 @@ the mutation the test uses to prove the assertion is live.
 That is unlike the fresh-instance problem §3.70 ran into. Here the instance that registered the
 defers is the one still standing, so its closure table has not gone anywhere.
 
-**The half that is not measured, and must be before anything is built:** that module is
-hand-written WAT with no language runtime in it. A **Go** guest fenced mid-loop also has a Go
-runtime interrupted at an arbitrary point — scheduler, GC and stack in whatever state the
-interrupt found them — and re-entering it through a `//go:wasmexport` may not be safe. Note the
-shape of the mistake to avoid: a call that returns without error is not a call that ran
-correctly, and §3.70's post-`_start` measurement only established re-entry after a *clean* exit
-through `proc_exit`, which is a different transition entirely.
+That module is hand-written WAT with no language runtime in it, though, and the half that
+mattered was the other one: a **Go** guest fenced mid-loop also has a Go runtime interrupted at an
+arbitrary point — scheduler, GC and stack in whatever state the interrupt found them — and
+re-entering it through a `//go:wasmexport` might not be safe.
 
-To settle it, drive a real Go SDK guest the way `Execute` does — `_start`, then a spinning entry
-point under a short `WithWasmtimeExecutionTimeout`, then a fresh epoch deadline and a call to a
-second entry point — and check the second one's *observable effect* (a host call the mock
-records), not merely that it returned.
+**Measured 2026-09-02 on a real Go SDK guest, pinned by `engine.TestAGoGuestSurvivesTheFence`**
+(fixture `testdata/fencereentry`, harness `engine/fence_reentry_test.go`, which reproduces
+`Execute`'s own setup sequence but keeps the store and instance open). A guest registers a defer,
+spins until a 2s fence kills it, and is then re-entered through the module's *other* generated
+export after a fresh epoch deadline. All three hold:
+
+| | result |
+|---|---|
+| the re-entry call | succeeds — no trap |
+| guest code actually ran | yes: it reached the host (`DurableCall` recorded by the mock) |
+| **the fenced workflow's own defer ran** | **yes, and it reached the host too** |
+
+Re-derive with `go test ./engine/ -run 'TestAGoGuestSurvivesTheFence|TestTheHarnessCanCallAnExportDirectly'`.
+
+**The third row is the one that decides phase 4**, and it needed no production change to observe.
+Codegen already emits `_cleatRunDeferred` at the end of every export (§3.70), so *any* subsequent
+call into the instance drains the closure table — including one made after the fence. The
+mechanism phase 4 needs already works end to end. What is missing is only the host deciding to
+make that call, plus a defer-runner export it can name rather than borrowing an unrelated entry
+point the way the test does.
+
+**Two things keep this honest.** `TestTheHarnessCanCallAnExportDirectly` is the control: it runs
+the same two-phase shape with the fence removed, so a failure in the measurement can be attributed
+to the fence rather than to the harness. And every assertion is mutation-proven — dropping the
+fresh `SetEpochDeadline` makes re-entry fail with `wasm trap: interrupt`; deleting the fixture's
+`DurableDeferFunc` leaves re-entry passing and fails *only* the defer row, which is what shows the
+two are independent rather than one assertion counted twice.
+
+**What is still not measured:** the other abnormal exits. A trap, an out-of-memory and a
+host-side timeout each leave the instance in a different state from an epoch interrupt, and
+nothing here is evidence about any of them. Do not generalise this row to "abnormal exit is
+solved".
