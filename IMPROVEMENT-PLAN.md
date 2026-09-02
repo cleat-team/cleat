@@ -8900,3 +8900,52 @@ that sleeps twice in a row, or sleeps first, still wakes, re-executes to the sam
 re-arms `next_wake_at` in the past.
 
 Re-derive: `go test ./engine/ -run 'TestSleepAtTheReplayFrontier|TestFreshSleepStillSuspends|TestReplayedSleepDoesNotSkip' -count=1 -v`
+
+### 3.68 Replay released a virtual-object scope the workflow had already cleared — ✅ **FIXED** (WS-3, 2026-09-01)
+
+The second instance of §3.66's class, found by auditing every `execSession` method for the same
+shape after §3.66 shipped. There are exactly two.
+
+`SetScope` has a fresh path and a replay path. Clearing a scope
+(`objectType == "" && instanceKey == ""`) does two separable things on the fresh path, via
+`ClearScope`: it **releases** the key on the concurrency-key store, and it **forgets** it —
+splices it out of `s.heldScopes`. The replay branch zeroed the four scope fields inline and did
+neither. Skipping the release is right: it is a side effect that already happened in the segment
+that originally ran the step. Skipping the forget is not, and it is the bug.
+
+`releaseHeldScopes` runs at the end of every execution and releases everything still in that
+slice. Virtual objects use these keys to serialise access to one object instance — so a replayed
+segment frees `vo:<type>:<key>` that this workflow gave up long ago, and **once another workflow
+has acquired that object in the interval, the release frees somebody else's lock.** Two
+workflows are then inside the same virtual object, which is the one thing the scope mechanism
+exists to prevent.
+
+Measured 2026-09-01, the same acquire-then-clear driven both ways:
+
+    FRESH  after acquire+clear: heldScopes=[]string(nil)          scopeSet=false
+    REPLAY after acquire:       heldScopes=[]string{"vo:cart:c1"} scopeSet=true
+    REPLAY after clear:         heldScopes=[]string{"vo:cart:c1"} scopeSet=false
+
+The fix adds `forgetHeldScope`, used by all three sites that previously open-coded the same
+splice loop, and calls it from the replay clear branch. Naming the halves separately is the
+point: "release" is the side effect, "forget" is the bookkeeping every replay of that step owes.
+
+**The tests assert on releases, not on `heldScopes`.** A slice length is a proxy; the release is
+the externally visible act, and it is what makes this a cross-workflow bug rather than a leak.
+`TestFreshClearReleasesExactlyOnce` pins the behaviour replay reproduces, so "replay releases
+nothing" cannot become true by the fresh path forgetting to release at all, and
+`TestScopeStillHeldIsStillReleased` keeps the fix from degenerating into "never release
+anything". Mutation-proved 2026-09-01: restoring the bug fails the regression test with
+`replay released [vo:cart:c1]`, and an over-broad `forgetHeldScope` fails the splice control.
+
+**The class, and what to do about it next.** Both instances have one shape: *the fresh path
+mutates Go-side session state alongside `recordEvent`, and the replay branch reproduces the
+event but not the state.* Everything else audited was written correctly on both paths
+(`stateStore` via `SetState`/`DeleteState`/`IncrState`, and `SetScope`'s acquire branch). Two
+instances is not obviously a missing abstraction yet, but it is enough to justify the cheaper
+guard: **a property test over `execSession` that drives each durable call fresh and replayed and
+asserts the resulting session state is identical.** That would have caught both without anyone
+knowing to look, and it is the answer to CLAUDE.md's "sweep or mechanism" question here — the
+sites are few, the invariant is one sentence, and the invariant is what keeps rotting.
+
+Re-derive: `go test ./engine/ -run 'TestReplayDoesNotReleaseAScopeItAlreadyCleared|TestFreshClearReleasesExactlyOnce|TestScopeStillHeldIsStillReleased' -count=1 -v`
