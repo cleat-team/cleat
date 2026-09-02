@@ -25,6 +25,30 @@ for. **The labels did not stop, though, and that is the source of the confusion 
 resolves:** work is still stamped `WS-3` because the *ownership map* is still in force, not
 because three streams are running.
 
+> **What this table cannot tell you, added 2026-09-02 after it nearly caused the opposite
+> error.** It counts *authorship of new plan sections*. That cannot distinguish **"no stream is
+> running"** from **"a stream is running and its board is empty"** — and on the day it was
+> written the second was the case: #564 re-derived the WS-1 and WS-2 boards and found every item
+> on both already closed.
+>
+> The conclusion above survives, because #564 checked it independently and adopted it. The
+> *inference* did not: it happened to be right. **Both boards now carry real items again**
+> (§3.12, §3.15, §2.60d, §3.38 for WS-1; the §3.35 phase-5 record shape, §2.35, §1.4 phase F for
+> WS-2), so from here a silent stream means idle, not empty, and this table would read the same
+> either way. Re-derive from the boards, not from this count.
+>
+> **How the near-miss happened is the part worth keeping.** Two sessions, hours apart, each read
+> the other's *unmerged* claim and deferred to it — in opposite directions. #563 measured "one
+> stream writing" and concluded the project was sequential. #564, in review at the same time,
+> asserted "three streams are running again" from three sandboxes existing. Each of us then
+> wrote a correction adopting the other's position: #564's second commit says *"resolved in
+> #563's favour throughout"*, while #565 was drafted to say #564 was right. Nobody was lying and
+> both corrections were sincere; the measured claim was simply stronger than the inferred one,
+> and neither of us checked which was which before conceding.
+>
+> **A claim in an open PR is not evidence.** Re-derive it, or wait for it to land, before
+> correcting something you measured.
+
 ---
 
 ## What survived the supersession
