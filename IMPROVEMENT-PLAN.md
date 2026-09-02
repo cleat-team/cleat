@@ -9842,16 +9842,32 @@ compiled cleanly before and would again if that argument were removed. Recorded 
 `packages/cleat-as/README.md` and `LANGUAGE_SUPPORT.md`, and it is a compile error rather than a
 convention, which is the only reason to trust it.
 
-#### One thing left unfixed, deliberately
+#### The latent break in the transformer — ✅ fixed 2026-09-02
 
-`_hasCleatSdkImport` (`packages/cleat-as/transform/index.js`) probes four property paths for an
-import's module name and returns false for all of them in practice — so the transformer *always*
-injects its own `@cleat/sdk` import, including into sources that already have one. That is why
-the wrapper's `Memory` / `SUSPEND_SENTINEL` / `isWorkflowSuspended` references resolve at all,
-and it has been true since long before this item. It works, but for a reason nobody chose: if a
-future `asc` exposes `moduleName` where the current one does not, detection starts returning true,
-no import is injected, and **every generated wrapper stops compiling** — not only the defer line.
-Left alone here under one-PR-one-thing; it is a latent break in the transformer, not in defers.
+`_hasCleatSdkImport` (`packages/cleat-as/transform/index.js`) probed four property paths for an
+import's module name and returned false for all of them, so the transformer *always* injected its
+own `@cleat/sdk` import — including into sources that already had one. That is why the wrapper's
+`Memory` / `SUSPEND_SENTINEL` / `isWorkflowSuspended` / `runDeferred` references resolved at all.
+
+**Measured rather than reasoned, 2026-09-02.** A probe on the real AS parser, against a fixture
+whose first line is `import { HostCalls, cleatEntry } from "@cleat/sdk"`:
+
+    [PROBE] _hasCleatSdkImport=false needsImport=true
+
+So the guard never fired once. Every generated wrapper compiled *because the detector was
+broken*, and a future `asc` that exposed one of those property paths would have started
+suppressing the import and broken every wrapper whose author had not happened to import all five
+symbols by hand.
+
+**Detection was deleted rather than fixed, and the reason is worth keeping.** A *working*
+detector is worse than none: it would have to inject only the names the author left out, name by
+name, or else suppress an import the wrapper needs. Injecting unconditionally is what already
+happened; making it deliberate costs nothing and removes the failure mode.
+
+The decision rests on one fact, so that fact now has a test:
+`TestASTransform/compiles_when_the_user_imports_the_same_symbols` compiles a workflow that
+imports all five symbols itself, proving AssemblyScript tolerates the duplicate import from the
+same module. Without it, "always inject" is an assumption.
 
 ---
 
