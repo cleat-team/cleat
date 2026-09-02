@@ -417,6 +417,30 @@ func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs
 		return packSleepResult(sleepStatusCompleted, 0)
 	}
 
+	// The same case, reached the other way: this sleep is itself at the replay
+	// frontier -- history is fully consumed and nothing after it was ever
+	// recorded, so this is the sleep the workflow suspended at.
+	//
+	// Every other durable call ends replay by itself when it runs past the end
+	// of history, which is what sets replayJustEnded above. DurableSleep did
+	// not, so it could only resume when some *other* call crossed the frontier
+	// first, in the same segment. In a faithful replay nothing does: every
+	// operation before the sleep was recorded in the previous segment and
+	// replay-matches, so the sleep is always what reaches the end of history.
+	// The workflow woke on time, re-executed to this same point, and suspended
+	// again with a byte-identical history -- and because SuspendUntil was
+	// recomputed to the same already-elapsed instant, next_wake_at was re-armed
+	// in the past and the workflow was re-claimed immediately, forever.
+	// IMPROVEMENT-PLAN 3.67 has the measurements.
+	if s.isReplay && s.stepCount >= len(s.history) {
+		s.exitReplay()
+		// exitReplay arms replayJustEnded for "the next sleep"; this sleep is
+		// that sleep, and it is being completed here, so consume it rather than
+		// leaving it to complete a second, genuinely new sleep without waiting.
+		s.replayJustEnded = false
+		return packSleepResult(sleepStatusCompleted, 0)
+	}
+
 	// Forward execution: suspend until the sleep duration elapses.
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("cleat_sleep(%dms)", durationMs),

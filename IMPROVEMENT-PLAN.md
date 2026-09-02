@@ -8737,7 +8737,7 @@ delete it; write-only persisted state is a trap for the next reader.**
 
 Re-derive: `go test ./engine/ -run TestDeferRegisteredBeforeASuspension -count=1 -v`
 
-### 3.67 A `cleat_sleep` at the replay frontier never resumes — 🔴 **OPEN, CONFIRMED, severity high** (WS-3, found and confirmed 2026-09-01)
+### 3.67 A `cleat_sleep` at the replay frontier never resumes — 🔶 **PARTLY FIXED** (WS-3, found, confirmed and partly fixed 2026-09-01)
 
 Found while building §3.66's regression test, which had to route around it.
 
@@ -8859,13 +8859,44 @@ because the product is broken and go red when it is fixed. The fixture and comma
 it in a couple of minutes; the test to commit is the inverted one, asserting that `stepB.Second`
 *does* run, and it belongs with the fix.
 
-#### Why the obvious fix is not the whole fix
+#### What was fixed, and what was left
 
-Having `DurableSleep` check `s.isReplay && s.stepCount >= len(s.history)` and complete restores
-the pre-`0a02a84` behaviour for a sleep behind recorded events. It does **not** fix a sleep that
-is the workflow's first durable operation: history is empty, so `isReplay` is false and the
-frontier is indistinguishable from a fresh start. Answering that needs either recording the
-sleep again (reverting the local-sleep design) or comparing against real elapsed time, which
-`nowMs` is virtual precisely to avoid. **That is a durable-time design decision, not a patch**,
-and it is not WS-3's to make alone — the compaction codec, the worker's wake scheduling and the
-`Now()` contract are all downstream of it.
+**Fixed:** `DurableSleep` now makes the frontier check itself --
+`s.isReplay && s.stepCount >= len(s.history)` means history is fully consumed and this is the
+sleep the workflow suspended at, so it completes instead of re-suspending. That is what every
+other durable call already did via `exitReplay`, and what `DurableSleep` did for itself before
+`0a02a84`. The branch also *consumes* `replayJustEnded` after calling `exitReplay`, because
+`exitReplay` arms that flag for "the next sleep" and this sleep is that sleep; leaving it armed
+would complete a second, genuinely new sleep without waiting, silently discarding a real delay.
+Both halves mutation-proved.
+
+This covers the measured failure -- `call; sleep; call`, the shape of the real-guest fixture --
+and the regression test asserts that the operation *after* the sleep executes, not merely that
+the segment stopped suspending. That distinction matters: "the sleep resumes" is trivially
+satisfied by a sleep that never suspends at all, which would delete the feature.
+
+**Still broken, measured 2026-09-01 after the fix.** Two cases remain, both of which appear in
+shipped code, so do not read this section as closed:
+
+1. **Two or more consecutive sleeps with no durable event between them.** Sleep records nothing,
+   so once replay ends there is no way to tell which of the sleeps already elapsed. The frontier
+   branch completes the first; the second suspends; the next segment replays and does exactly
+   the same. Measured with `call; sleep; sleep; call` over four segments --
+   `events=1 suspended=true calls=[]` from segment 2 onward, unchanged.
+   **This is not hypothetical:** `examples/subscription/billing.go:122-127` loops
+   `DurableSleep(24h)` with `PollCancellation()` between them, and `PollCancellation` records no
+   event (`engine/signaller.go:115`), so that loop is precisely this shape.
+2. **A sleep that is the workflow's first durable operation.** History is empty, so `isReplay` is
+   false and the frontier is indistinguishable from a fresh start.
+
+Both need the one thing this fix deliberately does not add: a way to know *which* sleeps have
+already elapsed. The options are to record sleep events again -- reverting the local-sleep design
+`0a02a84` introduced -- or to give the engine a "this is a resume" signal from the worker, which
+knows. **That is a durable-time design decision**, touching the compaction codec, wake scheduling
+and the `Now()` contract, and it is not WS-3's to make alone.
+
+The honest summary: a workflow with a single sleep behind recorded events now resumes; a workflow
+that sleeps twice in a row, or sleeps first, still wakes, re-executes to the same point, and
+re-arms `next_wake_at` in the past.
+
+Re-derive: `go test ./engine/ -run 'TestSleepAtTheReplayFrontier|TestFreshSleepStillSuspends|TestReplayedSleepDoesNotSkip' -count=1 -v`
