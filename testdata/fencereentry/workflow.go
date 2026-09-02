@@ -65,3 +65,31 @@ func AfterTheFence(h cleat.HostCalls) (string, error) {
 	}
 	return `{"reentered":true}`, nil
 }
+
+// AllocateForever grows the guest heap until something refuses.
+//
+// It exists for the memory-limit arm of the abnormal-exit measurement. The
+// slice is appended to a package-level sink so the Go compiler cannot prove the
+// allocations dead and remove them -- the same reasoning as SpinForever's
+// returned accumulator, and the same failure if it is dropped: the workflow
+// would return promptly and the test would measure a clean exit while believing
+// it measured an OOM.
+//
+// It registers a defer first, for the same reason SpinForever does: the
+// question is whether an outstanding cleanup is still reachable afterwards.
+func AllocateForever(h cleat.HostCalls) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		_, _ = h.DurableCall("fence-probe", "the_fenced_workflows_defer", `{}`)
+	}); err != nil {
+		return "", err
+	}
+
+	for i := 0; i < 1000000; i++ {
+		sink = append(sink, make([]byte, 1<<20))
+	}
+	return `{"allocated":true}`, nil
+}
+
+// sink retains what AllocateForever allocates. Package-level and never read, so
+// nothing can conclude the allocations are unnecessary.
+var sink [][]byte

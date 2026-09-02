@@ -53,7 +53,8 @@ type reentryRig struct {
 	completeErr    *string
 }
 
-func newReentryRig(t *testing.T, wasmBytes []byte, timeout time.Duration) *reentryRig {
+func newReentryRig(t *testing.T, wasmBytes []byte, timeout time.Duration,
+	extra ...WasmtimeOption) *reentryRig {
 	t.Helper()
 	ctx := context.Background()
 
@@ -63,7 +64,8 @@ func newReentryRig(t *testing.T, wasmBytes []byte, timeout time.Duration) *reent
 	}
 	t.Cleanup(func() { rt.Close(ctx) })
 
-	b, err := NewWasmtimeBackend(ctx, WithWasmtimeExecutionTimeout(timeout))
+	opts := append([]WasmtimeOption{WithWasmtimeExecutionTimeout(timeout)}, extra...)
+	b, err := NewWasmtimeBackend(ctx, opts...)
 	if err != nil {
 		t.Fatalf("NewWasmtimeBackend: %v", err)
 	}
