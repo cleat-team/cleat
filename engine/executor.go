@@ -182,6 +182,28 @@ func (e *Engine) executeWithBackend(
 	// Use a per-execution backend instance to prevent data races on
 	// the handler/work-data fields when Execute is called concurrently.
 	execBackend := backend.PerExecution()
+
+	// A defer segment replays a workflow whose outcome is already decided,
+	// purely to run its outstanding cleanup (IMPROVEMENT-PLAN 3.35 phase 5).
+	// The backend needs to know, because the drain happens on the suspension
+	// the replay ends in, inside the store the backend owns and destroys
+	// before Execute returns.
+	//
+	// Asserted rather than added to WasmBackend: see setDeferPhase. A backend
+	// that does not implement it simply cannot run a defer segment, which is
+	// the honest outcome rather than a silently skipped drain -- the engine
+	// refuses one it cannot honour, below.
+	if e.deferPhase {
+		dp, ok := execBackend.(interface{ setDeferPhase(bool) })
+		if !ok {
+			return "", nil, nil, nil, nil, fmt.Errorf(
+				"host: workflow %s: backend %q cannot run a defer segment; "+
+					"its outstanding defers would be silently skipped",
+				e.workflowID, execBackend.Name())
+		}
+		dp.setDeferPhase(true)
+	}
+
 	res, callErr := execBackend.Execute(execCtx, wasmBytes, entryPoint, input, session)
 	// Defensive fallback, not the primary timeout mechanism. The wasmtime
 	// backend bounds its own execution via epoch interruption tied to this

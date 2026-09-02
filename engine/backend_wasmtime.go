@@ -83,6 +83,16 @@ type wasmtimeBackend struct {
 	// see log() and WithWasmtimeLogger for why that default is a trap.
 	logger *slog.Logger
 
+	// deferPhase marks this execution as a defer segment: the workflow is
+	// being replayed for the sole purpose of running its outstanding defers,
+	// not to make progress. See runGuestDefersAfterSuspend.
+	//
+	// Set per-execution by the engine (executor.go), so it lives on the
+	// PerExecution copy rather than the root, and is deliberately NOT copied
+	// by PerExecution -- a root backend is never in a defer phase, and
+	// inheriting the flag would make every subsequent execution one.
+	deferPhase bool
+
 	// epochStop, when non-nil, stops the background epoch-ticker goroutine
 	// on Close. Only set on the backend returned directly by
 	// NewWasmtimeBackend ("the root") — PerExecution copies share the same
@@ -322,6 +332,92 @@ func (b *wasmtimeBackend) configureStore(ctx context.Context, store *wasmtime.St
 //     left exactly where it was (ran=1, the defer reached the host). Raising
 //     it would hand more memory to a guest that has just proved it cannot be
 //     trusted with what it had.
+//
+// setDeferPhase marks this per-execution backend as running a defer segment.
+//
+// Unexported and reached through an interface assertion in executor.go rather
+// than added to WasmBackend: a defer segment is a wasmtime-path concept today,
+// and widening the backend interface for it would oblige every implementation
+// to have an opinion about a phase it cannot enter.
+func (b *wasmtimeBackend) setDeferPhase(on bool) { b.deferPhase = on }
+
+// runGuestDefersAfterSuspend drains the defer table of a workflow that
+// suspended during a defer segment.
+//
+// IMPROVEMENT-PLAN 3.35 phase 5 / 3.81. A defer segment replays a workflow
+// whose terminal outcome is already decided, purely to run its outstanding
+// cleanup. The common case -- a workflow worth terminating is usually one that
+// is waiting -- is that replay re-suspends on the recorded sleep or await it
+// was sitting in, and never reaches the end of history at all.
+//
+// That suspension is what makes this work, rather than a problem to route
+// around. The guest's own drain is gated on `if !__susSuspended`
+// (wasm/exports.go, writeRunDeferred), so a suspended guest deliberately does
+// NOT drain: the defer table is still populated and the closures are still in
+// the instance's memory. The host calls the drain export itself, here, with
+// ordinary host-call semantics in force.
+//
+// Contrast with runGuestDefersAfterKill, which this deliberately mirrors but
+// does not share code with. That one runs after a trap and must not disturb
+// the error it is about to return; this one runs after a clean suspension,
+// where the calls the defer bodies make are the segment's real work and their
+// events belong in the history. The budget handling is identical and is
+// explained there.
+//
+// 3.81's measurement is why this is not simply "refuse the fresh call and let
+// the guest drain": _cleatRunDeferred takes the whole defer table before
+// running anything, so a refusal that also refuses the defer bodies' calls
+// consumes the cleanup rather than performing it.
+func (b *wasmtimeBackend) runGuestDefersAfterSuspend(
+	store *wasmtime.Store, instance *wasmtime.Instance, entryPoint string,
+) {
+	fn := instance.GetFunc(store, deferRunnerExport)
+	if fn == nil {
+		return
+	}
+
+	budget := b.limits.deferBudget
+	if budget <= 0 {
+		budget = DefaultWasmtimeDeferBudget
+	}
+	ticks := uint64(budget / epochTickInterval)
+	if ticks == 0 {
+		ticks = 1
+	}
+	store.SetEpochDeadline(ticks)
+	if b.limits.instructionLimit > 0 {
+		if err := store.SetFuel(b.limits.instructionLimit); err != nil {
+			b.log().Warn("could not refuel the guest to run its defers on a defer segment",
+				"entry_point", entryPoint, "error", err)
+			return
+		}
+	}
+
+	var ran int64
+	var callErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callErr = fmt.Errorf("wasmtime panic: %v", r)
+			}
+		}()
+		res, err := fn.Call(store)
+		if err != nil {
+			callErr = err
+			return
+		}
+		ran, _ = res.(int64)
+	}()
+
+	if callErr != nil {
+		b.log().Warn("a defer segment's defers could not be run",
+			"entry_point", entryPoint, "error", callErr)
+		return
+	}
+	b.log().Info("ran a defer segment's defers",
+		"entry_point", entryPoint, "defers_run", ran)
+}
+
 func (b *wasmtimeBackend) runGuestDefersAfterKill(
 	store *wasmtime.Store, instance *wasmtime.Instance, entryPoint string, cause error,
 ) {
@@ -652,6 +748,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			}()
 
 			if completeResult == `"__cleat_suspended__"` {
+				if b.deferPhase {
+					b.runGuestDefersAfterSuspend(store, instance, entryPoint)
+				}
 				return &ExecResult{Suspended: true}, nil
 			}
 
@@ -847,6 +946,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		}
 	}
 	if completeResult == `"__cleat_suspended__"` {
+		if b.deferPhase {
+			b.runGuestDefersAfterSuspend(store, instance, entryPoint)
+		}
 		return &ExecResult{Suspended: true}, nil
 	}
 
@@ -897,6 +999,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Check for the suspend sentinel: (1 << 62).
 	if raw == (1 << 62) {
+		if b.deferPhase {
+			b.runGuestDefersAfterSuspend(store, instance, entryPoint)
+		}
 		return &ExecResult{Suspended: true}, nil
 	}
 
