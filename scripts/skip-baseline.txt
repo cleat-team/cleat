@@ -17,6 +17,9 @@ cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
 cmd/cleat-worker	newSignalAuthStore	1
 engine	RegisterBackend	2
+engine	TestAssemblyScriptDefersDoNotRunOnSuspension	1
+engine	TestAssemblyScriptExportsTheDeferRunner	1
+engine	TestAssemblyScriptWorkflowDefersRun	1
 engine	TestAssemblyScriptWorkflowExecute	1
 engine	TestCascadeDelete	2
 engine	TestComponentShortStringResultsAreNotTruncated	1

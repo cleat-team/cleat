@@ -13,11 +13,11 @@ export async function instantiate(module, imports = {}) {
         })();
       },
       plugin_call(pluginNamePtr, pluginNameLen, functionNamePtr, functionNameLen, inputPtr, inputLen, responsePtr, responseMaxLen) {
-        // ../../../../packages/cleat-as/assembly/host-calls/import_plugin_call(i32, i32, i32, i32, i32, i32, i32, i32) => i64
+        // ~lib/@cleat/sdk/assembly/host-calls/import_plugin_call(i32, i32, i32, i32, i32, i32, i32, i32) => i64
         return plugin_call(pluginNamePtr, pluginNameLen, functionNamePtr, functionNameLen, inputPtr, inputLen, responsePtr, responseMaxLen) || 0n;
       },
       plugin_call_streaming(pluginNamePtr, pluginNameLen, functionNamePtr, functionNameLen, inputPtr, inputLen, responsePtr, responseMaxLen) {
-        // ../../../../packages/cleat-as/assembly/host-calls/import_plugin_call_streaming(i32, i32, i32, i32, i32, i32, i32, i32) => i64
+        // ~lib/@cleat/sdk/assembly/host-calls/import_plugin_call_streaming(i32, i32, i32, i32, i32, i32, i32, i32) => i64
         return plugin_call_streaming(pluginNamePtr, pluginNameLen, functionNamePtr, functionNameLen, inputPtr, inputLen, responsePtr, responseMaxLen) || 0n;
       },
     }, Object.assign(Object.create(globalThis), imports.env || {})),
@@ -26,7 +26,7 @@ export async function instantiate(module, imports = {}) {
   const memory = exports.memory || imports.env.memory;
   const adaptedExports = Object.setPrototypeOf({
     __durable_inner_call_all_plugins(h, _input) {
-      // assembly/index/__durable_inner_call_all_plugins(../../../../packages/cleat-as/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      // assembly/index/__durable_inner_call_all_plugins(~lib/@cleat/sdk/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
       h = __retain(__lowerInternref(h) || __notnull());
       _input = __lowerString(_input) || __notnull();
       try {

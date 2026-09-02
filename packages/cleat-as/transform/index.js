@@ -650,7 +650,7 @@ class CleatEntryTransformer {
 
         // Insert @cleat/sdk import at the TOP of the source if needed
         if (needsImport) {
-          let importLine = 'import { HostCalls, Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended';
+          let importLine = 'import { HostCalls, Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended, runDeferred';
           if (needsJsonImport) {
             importLine += ', JsonParser, JsonVal';
           }
@@ -759,6 +759,48 @@ class CleatEntryTransformer {
       code += this._generateSingleWrapper(entry);
     }
 
+    // Only for a module that actually has a workflow in it. A source with no
+    // @cleatEntry must produce NO exports at all -- asserted by
+    // TestASTransform/no_entry_no_wrapper, which this failed when the export
+    // was emitted unconditionally.
+    if (entries.length > 0) {
+      code += this._generateDeferRunnerExport();
+    }
+
+    return code;
+  }
+
+  // ---------------------------------------------------------------
+  // Generate the host's kill-path defer entry point
+  //
+  // IMPROVEMENT-PLAN 3.35 phase 4 / 3.73 piece 4. The wrapper above drains
+  // the defer table when a workflow returns, which covers every workflow that
+  // gets to return. A workflow the HOST killed -- execution fence, instruction
+  // limit, memory ceiling -- never reaches it, and its cleanup would simply
+  // never happen. `runGuestDefersAfterKill` in engine/backend_wasmtime.go
+  // looks up this export by name and calls it.
+  //
+  // Emitted once per source that has at least one entry point, because it is
+  // one export for the whole module rather than one per workflow. Emitting it
+  // per entry would be a duplicate-export compile error the moment a module
+  // declares two workflows.
+  //
+  // This has no error handling, and cannot have any: the SDK builds with
+  // `--runtime stub`, which has no exceptions, so there is nothing to catch. A
+  // defer body that aborts traps the instance -- which is a guest already
+  // being torn down, so the trap costs nothing beyond the remaining bodies.
+  // The Go equivalent recovers; this one has no equivalent to recover with.
+  // ---------------------------------------------------------------
+  _generateDeferRunnerExport() {
+    let code = "";
+    code += `// ---- Host kill-path defer entry point ----\n`;
+    code += `// Called by the host for a workflow it killed, which never reached\n`;
+    code += `// the drain in the wrappers above. Returns how many bodies ran.\n`;
+    code += `// Idempotent: the table is drained before the first body runs, so a\n`;
+    code += `// guest that already ran its defers returns 0 here.\n`;
+    code += `export function __cleat_run_deferred(): i64 {\n`;
+    code += `  return <i64>runDeferred(new HostCalls());\n`;
+    code += `}\n\n`;
     return code;
   }
 
@@ -860,6 +902,26 @@ class CleatEntryTransformer {
     code += `  if (isWorkflowSuspended()) {\n`;
     code += `    return SUSPEND_SENTINEL;\n`;
     code += `  }\n\n`;
+
+    // ------------------------------------------------------------------
+    // Step 4b: Run guest-side defer bodies (IMPROVEMENT-PLAN 3.73)
+    //
+    // AFTER the suspension check, and that order is the whole point. A
+    // suspended workflow has not exited; its defers are still pending, and
+    // firing them at the first cleatSleep would release locks a workflow that
+    // is about to continue still holds.
+    //
+    // The other SDKs get this ordering for free, because they suspend by
+    // unwinding and the drain sits on a path the unwind skips. AssemblyScript
+    // has no exceptions, so the entry point returns normally either way and
+    // the guard has to be written out. An unguarded drain here compiles, runs,
+    // and is wrong.
+    //
+    // The return value is deliberately discarded: the workflow's result is
+    // already decided by the time this runs, and a defer cannot change it.
+    // ------------------------------------------------------------------
+    code += `  // ---- Step 4b: Run deferred cleanup (not on the suspend path) ----\n`;
+    code += `  runDeferred(h);\n\n`;
 
     // ------------------------------------------------------------------
     // Step 5: Write result to output buffer and return

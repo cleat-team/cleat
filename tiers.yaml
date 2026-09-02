@@ -429,6 +429,18 @@ tier2:
            safe use and is replay-consistent by construction. Documented in
            docs/determinism.md and the Temporal migration guide, which had never mentioned
            it despite Temporal's own IsReplaying() being a well-known footgun"
+        - "RESOLVED 2026-09-02 (§3.73): HostCalls.defer registered a DESCRIPTION and nothing
+           else -- the host recorded that a defer existed and no code anywhere could run it,
+           while the doc comment said it registers 'cleanup to run on workflow exit'. Same
+           defect as Go's §3.70, in the fourth and last SDK. deferFunc(h, description, fn,
+           payload) now carries a body, drained LIFO by the generated wrapper. State is
+           passed rather than captured because --runtime stub has no closures, which is this
+           SDK's existing idiom (saga.ts). The guard that matters is the suspend one: unlike
+           the other three SDKs, AssemblyScript does not suspend by unwinding, so the drain
+           is only correct because it sits after an explicit isWorkflowSuspended() check --
+           pinned by TestAssemblyScriptDefersDoNotRunOnSuspension, verified by moving the
+           drain one line earlier. __cleat_run_deferred is emitted too, so §3.35 phase 4's
+           kill-path cleanup reaches AssemblyScript guests"
 
     - id: plugins
       why: 21 built-in, all with unit tests; 10 covered by the integration harness.

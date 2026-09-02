@@ -10,7 +10,7 @@ import {
   HostCalls,
   cleatEntry,
   PluginCallOutcome,
-} from "../../../../../packages/cleat-as/assembly/index";
+} from "@cleat/sdk";
 
 // ---------------------------------------------------------------------------
 // Helper: call a plugin function and build a result entry.
