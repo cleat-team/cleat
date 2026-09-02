@@ -781,7 +781,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Call the export directly (non-Go modules, or Go modules without _start).
 	fn := instance.GetFunc(store, entryPoint)
 	if fn == nil {
-		return nil, fmt.Errorf("host: export %q not found", entryPoint)
+		return nil, fmt.Errorf("host: export %q not found: %w", entryPoint, ErrExportNotFound)
 	}
 
 	t4 := time.Now()

@@ -533,11 +533,12 @@ func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName strin
 	// IMPROVEMENT-PLAN 3.32. A defer that loops held its worker slot until the
 	// process died.
 	//
-	// The handler is whatever ctx carries, which today is nothing: no caller
-	// puts one there, so a defer that makes a host call fails. It already
-	// failed before this change -- by panicking on an unchecked type assertion
-	// and being swallowed -- and now arrives as a recovered error that
-	// runDefers logs.
+	// The handler is whatever ctx carries. That USED to be nothing -- no caller
+	// put one there, so a defer that made a host call panicked on an unchecked
+	// type assertion -- and IMPROVEMENT-PLAN 3.35 phase 2 fixed it: the
+	// executor now passes withHandler(context.Background(), session), which
+	// keeps the immunity to a cancelled execCtx and adds the session. A defer
+	// body reached through here can call the host.
 	//
 	// Read that as a description of the current implementation, NOT as a rule
 	// about what a defer may do. It is neither: a defer is meant to be a
@@ -718,7 +719,10 @@ func (e *Engine) invokePerDeferExports(ctx context.Context, mod api.Module, defe
 		exportName := "cleat_defer_" + deferID
 		fn := mod.ExportedFunction(exportName)
 		if fn == nil {
-			e.log().WarnContext(ctx, "defer export not found", "defer_id", deferID, "description", description, "export_name", exportName)
+			// Debug, not Warn: the legacy per-defer convention is one no SDK
+			// emits, so its absence is the normal case rather than a fault.
+			// See the note in flush.go's runDefers.
+			e.log().DebugContext(ctx, "no per-defer export for this defer", "defer_id", deferID, "description", description, "export_name", exportName)
 			notInvoked[deferID] = description
 			continue
 		}

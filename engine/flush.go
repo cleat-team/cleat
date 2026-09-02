@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -517,6 +518,29 @@ func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[
 			// nothing at all. cmd/cleat-worker's own runDefers has always
 			// logged here; this brings the two into line.
 			if _, err := e.RunDefer(ctx, wasmBytes, deferName, nil); err != nil {
+				// A missing export is not a failed cleanup.
+				//
+				// This pass is the LEGACY per-defer convention: one export per
+				// defer, named cleat_defer_<id>. No guest in any language
+				// emits one -- `grep -rn "cleat_defer_"` finds consumers and no
+				// producers -- so for every SDK-built guest this branch was
+				// reached once per registered defer and said "defer execution
+				// failed" about a convention the guest was never expected to
+				// follow. Since #559 and #560 it could say it immediately
+				// AFTER the real cleanup had succeeded, which is worse than
+				// useless: an operator reading it concludes their cleanup did
+				// not happen when it did.
+				//
+				// errors.Is, not a substring match on the message. Matching the
+				// wording is the same mistake one layer up, and this repo has
+				// already had a check that matched an error message rather than
+				// the condition and reported a broken database as healthy.
+				if errors.Is(err, ErrExportNotFound) {
+					e.log().DebugContext(ctx, "no per-defer export for this defer; the guest drains its own table",
+						"workflow_id", e.workflowID, "defer_id", entry.id,
+						"description", entry.desc, "export", deferName)
+					continue
+				}
 				e.log().WarnContext(ctx, "defer execution failed",
 					"workflow_id", e.workflowID, "defer_id", entry.id,
 					"description", entry.desc, "export", deferName, "error", err)

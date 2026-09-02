@@ -507,7 +507,7 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 
 	fn := mod.ExportedFunction(exportName)
 	if fn == nil {
-		return "", false, fmt.Errorf("host: export %q not found", exportName)
+		return "", false, fmt.Errorf("host: export %q not found: %w", exportName, ErrExportNotFound)
 	}
 
 	mem := mod.Memory()

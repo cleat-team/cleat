@@ -73,7 +73,20 @@ const twoDefersOneExportedWat = `(module
 var deferLogRE = regexp.MustCompile(`msg="defer execution failed"[^\n]*?defer_id=(\S+)`)
 
 // deferNotFoundRE matches invokeDefersOnTrap's other outcome.
-var deferNotFoundRE = regexp.MustCompile(`msg="defer export not found"[^\n]*?defer_id=(\S+)`)
+//
+// The wording moved from "defer export not found" (WARN) to "no per-defer
+// export for this defer" (DEBUG) when a missing legacy export stopped being
+// reported as a failure: no SDK emits cleat_defer_<id>, so its absence is the
+// normal case rather than a fault. The line still has to exist, which is what
+// this regexp is for -- the control below distinguishes "the fall-back was
+// reached" from "the fall-back was deleted".
+var deferNotFoundRE = regexp.MustCompile(`msg="no per-defer export for this defer"[^\n]*?defer_id=(\S+)`)
+
+// deferFallbackRE matches the fresh-module fall-back's record for a defer the
+// live module could not offer. It is DEBUG for the same reason, and is a
+// separate pattern from deferLogRE because a missing export and a failed body
+// are now different events rather than one message with two causes.
+var deferFallbackRE = regexp.MustCompile(`msg="no per-defer export for this defer; the guest drains its own table"[^\n]*?defer_id=(\S+)`)
 
 func countByDeferID(re *regexp.Regexp, logs string) map[string]int {
 	out := map[string]int{}
@@ -151,10 +164,17 @@ func TestDeferBodyRunsOnceAfterATrap(t *testing.T) {
 			"The guest exports cleat_defer_defer-0 and not cleat_defer_defer-1, so "+
 			"invokeDefersOnTrap must say so and hand it on.", notFound["defer-1"], logs)
 	}
-	if failures["defer-1"] != 1 {
+	fallback := countByDeferID(deferFallbackRE, logs)
+	if fallback["defer-1"] != 1 {
 		t.Errorf("defer-1 reached the fresh-module fall-back %d times, want 1.\n\nLogs:\n%s\n\n"+
 			"A defer the live module could not offer must still be attempted, or the "+
-			"fix has turned a doubled defer into a dropped one.", failures["defer-1"], logs)
+			"fix has turned a doubled defer into a dropped one.", fallback["defer-1"], logs)
+	}
+	if failures["defer-1"] != 0 {
+		t.Errorf("defer-1 was reported as a FAILED cleanup %d times.\n\nLogs:\n%s\n\n"+
+			"The guest simply does not export cleat_defer_defer-1, which no SDK "+
+			"does. That is not a failure, and saying so sends an operator looking "+
+			"for cleanup that was never expected to run here.", failures["defer-1"], logs)
 	}
 }
 

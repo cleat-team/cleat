@@ -6190,10 +6190,21 @@ the unfenced path, which for a build with no wasmtime in it is unavoidable rathe
 > kill error still returned. AssemblyScript under `--runtime stub` is the easy case and passing
 > there is not evidence about Java.
 >
-> **Still not covered, and named here so it is not mistaken for done:** (a) the engine's
-> fallback `runDefers` still fires after the backend has already run the defers, so the
-> misleading warning above can be emitted *immediately after the cleanup succeeded*; (b) Python
-> has no kill path at all (§3.73).
+> **Still not covered, and named here so it is not mistaken for done:** Python has no kill path
+> at all (§3.73).
+>
+> **The misleading warning is fixed (2026-09-02).** `ErrExportNotFound` now distinguishes "this
+> module has no such export" from "that export ran and failed", both producers wrap it
+> (`engine/runtime.go`, `engine/backend_wasmtime.go`), and the legacy per-defer fallback logs the
+> first at DEBUG. Matched with `errors.Is`, never by substring: matching the wording is the same
+> mistake one layer up, and this repo has already had a check that matched an error message
+> rather than the condition and reported a broken database as healthy.
+>
+> **One inconsistency found while testing it and deliberately not fixed here:**
+> `runGuestDefersAfterKill` logs `ran the defers of a killed workflow` to `slog.Default()`, not
+> to the engine's configured logger, so an operator who configures a logger never sees the one
+> line that says the cleanup happened. The backend has no logger field, so wiring one is a change
+> to its construction rather than a one-liner.
 
 > **2026-09-02, the wazero path had the same hole and a second one behind it — and phase 2 is
 > now DONE.** `invokeDefersOnTrap` asked for `cleat_defer_<id>` too, so a guest trapped under
