@@ -6168,6 +6168,35 @@ the unfenced path, which for a build with no wasmtime in it is unavoidable rathe
 > instance to re-enter at all, so it needs the replay-based path, which is phase 5 and belongs
 > with WS-2's crash-recovery record shape.
 
+> **2026-09-02, phase 4 was only half wired and the other half was invisible.** #550 put
+> `runGuestDefersAfterKill` in the **Go-on-wasmtime branch only**. #553, #557 and #558 then gave
+> Rust, AssemblyScript and Java a `__cleat_run_deferred` export — and nothing called it, because
+> every non-Go guest leaves through the *direct-export* path, which returned its error with no
+> defer pass at all. **"The guest exports it" and "the host calls it" are two different facts**,
+> and shipping the first while assuming the second is how a killed workflow's lock stays held
+> with the export that would have released it sitting in the module.
+>
+> Measured before the fix, AssemblyScript `spin_forever` under a 2s fence: the workflow was
+> killed, its defer did not run, and the engine's fallback pass logged
+> `defer execution failed ... export=cleat_defer_defer-0 ... not found`. That message names an
+> export naming convention **no guest in any language has ever had** (`grep -rn "cleat_defer_"`
+> finds consumers and no producers), so the one signal an operator had said the cleanup failed
+> for the wrong reason, about the wrong thing.
+>
+> **Java was measured separately rather than inferred**, exactly as the phase-3 note below asks:
+> whether a second export can be called after a kill is a property of the guest's runtime, not of
+> wasmtime, and a TeaVM module has a whole runtime — shadow stack, fiber system, thread-local
+> globals — that an epoch interrupt stops mid-stride. It works: `defers_run=1` for both, with the
+> kill error still returned. AssemblyScript under `--runtime stub` is the easy case and passing
+> there is not evidence about Java.
+>
+> **Still not covered, and named here so it is not mistaken for done:** (a) the *wazero* path has
+> the same gap — `invokeDefersOnTrap` looks for the same non-existent `cleat_defer_<id>`, so a
+> guest trapped under `cleatctl replay` or `cleat run` still loses its cleanup; (b) the engine's
+> fallback `runDefers` still fires after the backend has already run the defers, so the
+> misleading warning above is now emitted *immediately after the cleanup succeeded*; (c) Python
+> has no kill path at all (§3.73).
+
 > **2026-09-02, phase 4's fence case is buildable — measured, not argued.** A real Go SDK guest
 > killed mid-loop by the fence can be re-entered, runs guest code, and its outstanding defer runs
 > and reaches the host, with no production change required. §3.70's subsection "The fence case is
