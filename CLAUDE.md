@@ -272,9 +272,24 @@ promises could not link on the worker at all (§3.55). **Note what a name-only c
 have said** — both sides register the same 56 names, and did then too.
 
 **"Which backend runs this" and "which code path inside that backend runs this" are different
-questions.** The wasmtime backend has three execution paths — core module, native component, and
-decomposition — and they have had three different answers about limits. Tell the limit story
-about the second question, not the first.
+questions.** The wasmtime backend has **two** execution paths — core module and native
+component — and they had different answers about limits until IMPROVEMENT-PLAN §3.31 wrote the
+story down for each. Tell the limit story about the second question, not the first.
+
+There were three. Decomposition was deleted in #528 (2026-09-01) after being measured against
+the only Component Model binary in the repo: the native path reached CPython and ran guest
+code, while decomposition failed at instance 81 of 85. A second, mirror implementation on
+wazero failed at instance 8. Confirm with `grep -rn "func.*ExecuteComponent" --include="*.go" .`
+— exactly one line, `ExecuteComponentCGo`.
+
+**Two things went wrong writing that one-line command, both worth the warning.** The first
+version was `grep -rn "ExecuteComponent\b"`, which returns a hit: a comment in
+`engine/wasmtime_options.go` explaining that the function it names was deleted. A grep a
+*retraction* satisfies is the §1.1 trap, in a file that documents the §1.1 trap. The second was
+`func.*ExecuteComponent(` — anchoring on the open paren, which does not follow the name in
+`ExecuteComponentCGo(`, so it matched nothing at all and the "only X should match" claim beside
+it was false in the other direction. **Run the command and read its output before writing the
+sentence about what it prints.**
 
 ---
 
