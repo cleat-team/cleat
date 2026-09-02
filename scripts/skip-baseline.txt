@@ -19,6 +19,7 @@ cmd/cleat-worker	newSignalAuthStore	1
 engine	RegisterBackend	2
 engine	TestADeferBodyCannotContinueAsNew	1
 engine	TestADeferBodyCannotRegisterAnotherDefer	1
+engine	TestAMissingDeferExportIsNotReportedAsAFailure	1
 engine	TestAssemblyScriptDefersDoNotRunOnSuspension	1
 engine	TestAssemblyScriptExportsTheDeferRunner	1
 engine	TestAssemblyScriptWorkflowDefersRun	1
