@@ -38,16 +38,11 @@ import (
 // interface (store_interface.go), which is what every caller outside this
 // package can reach.
 //
-// There is a FOURTH EventRecord reader in the package, DBEventStream
-// (engine/event_stream.go), and it is deliberately not covered here. Measured
-// 2026-09-03: `grep -rn NewDBEventStream --include=*.go .` finds only its own
-// tests, so nothing constructs one in production, and its query is worse than
-// anything this file fixes -- it selects no `payload` column at all, so every
-// payload-carried field comes back empty, and its WHERE clause is
-// `workflow_id = $1` with **no tenant_id predicate**, so if it were ever wired
-// up it would read across tenants. Testing it here would mean asserting
-// against code with no callers; deleting it or fixing it is a decision for
-// whoever owns that type. IMPROVEMENT-PLAN records it.
+// There used to be a fourth EventRecord reader, DBEventStream
+// (engine/event_stream.go), and this comment used to explain why it was out of
+// scope. It is gone: the whole EventStream abstraction it belonged to had no
+// callers at all, and was deleted rather than fixed. See IMPROVEMENT-PLAN
+// 3.103 for what its query was doing.
 
 // readAllPaths returns the history a store gives back through each of its
 // three read paths, keyed by path name.

@@ -13297,3 +13297,52 @@ original run produced rather than a truncated one. That is a workflow-visible di
 anything in flight — and it is a difference *towards* the recorded value: the fresh run always
 used the full millisecond, and only the read was lossy, so this makes replay agree with the run it
 is replaying instead of diverging from it.
+
+### 3.103 The `EventStream` abstraction had no callers, and one of its two implementations read across tenants — ✅ **FIXED by deletion** (WS-2, 2026-09-03)
+
+`engine/event_stream.go` declared an `EventStream` interface with two implementations,
+`SliceEventStream` and `DBEventStream`, and 658 lines of tests for them. Nothing used any of it.
+Measured 2026-09-03 against `develop` at `546788a`, for every exported name:
+
+```
+for n in EventStream SliceEventStream NewSliceEventStream DBEventStream NewDBEventStream; do
+  grep -rn "\b$n\b" --include="*.go" . \
+    | grep -vE "event_stream\.go|event_stream_test\.go|read_path_parity_test\.go" \
+    | grep -v StreamEventHistory
+done
+```
+
+Every one returns nothing. 976 lines, an exported interface and two exported constructors, and
+the only code that ever called them was their own test file.
+
+**Note the shape of that command, because the first version of it was wrong and said the
+opposite.** It reported 11–25 "external references" for each name, because the `grep -v` filters
+were written against `./engine/event_stream.go` while `grep -rn` was emitting
+`engine/event_stream.go` — so the filters matched nothing and every self-reference counted as
+external. A filter that silently fails to filter reports the code as *live*, which is the safe
+direction to be wrong in but still a wrong number that was about to be written down. **Run the
+command and read its output before writing the sentence about what it prints.**
+
+**Why deletion rather than a fix.** `DBEventStream.ensureLoaded` was a fourth event-history read
+path, and it was worse than the three §3.102 corrected:
+
+- its `SELECT` had **no `payload` column**, so every payload-carried field — the plugin fields,
+  the state fields, the stream fields, everything §3.98 and §3.102 were about — came back empty;
+- its `WHERE` clause was `workflow_id = $1` with **no `tenant_id` predicate**, so wiring it up
+  would have read another tenant's history. That is the same class WS-1 closed in §3.86, §3.91
+  and §3.92, sitting unnoticed in a type nothing constructed.
+
+And it was unfixable in place: `NewDBEventStream(db *sql.DB, workflowID string, pageSize int)`
+takes a bare `*sql.DB` with no tenant context, so the missing predicate needed an exported
+signature change. Fixing it would then have produced a PostgreSQL-only duplicate of
+`StreamEventHistory`, which is already tenant-scoped, payload-carrying, implemented on all three
+dialects, and covered by `engine/read_path_parity_test.go`.
+
+**This is §1.4's lesson a second time.** That section records 350 lines of durability code in
+`engine/flush.go` that had never run; §2.35 cites it as the reason it *"deliberately added no
+mechanism ahead of"* a caller. This is the same thing one file over, and it had acquired a
+tenant-isolation defect while nobody was looking — which is the argument for deleting dead code
+rather than leaving it: an unused path is not inert, it is unreviewed.
+
+`SliceEventStream` went with it. It had no callers either, and an interface with one dead
+implementation is not an abstraction.
