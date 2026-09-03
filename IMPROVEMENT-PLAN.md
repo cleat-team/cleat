@@ -14222,13 +14222,14 @@ the defers.
 
 Remaining: **Rust**, unblocked by §3.87 (#643) and different in shape again —
 `Err(CallError::Suspended)` returned before any field is decoded, rather than a flag or an
-unwind; its SDK half is §3.107 and its end-to-end half is next. **Python** is still blocked on an
-ABI decision and not on effort: it is a Component Model guest whose WIT declares
-`durable-call: func(...) -> string`, so there is no result word to carry bit 31, and
-`extractStringFromPacked` turns the sentinel into `""` — an empty *successful* response.
-Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`.
+unwind; both its halves are §3.107, and with this change all four core-module SDKs cross the
+boundary end to end. **Python** is still blocked on an ABI decision and not on effort: it is a
+Component Model guest whose WIT declares `durable-call: func(...) -> string`, so there is no
+result word to carry bit 31, and `extractStringFromPacked` turns the sentinel into `""` — an
+empty *successful* response. Measured 2026-09-03:
+`extractStringFromPacked(0x80000000, buf) == ""`.
 
-### 3.107 The Rust SDK decodes the defer-segment stop sentinel — 🔶 **SDK HALF DONE; the end-to-end proof and `deferSegmentLanguages` remain** (WS-2, 2026-09-03)
+### 3.107 The Rust SDK decodes the defer-segment stop sentinel — ✅ **FIXED, both halves; `rust` is in `deferSegmentLanguages`** (WS-2, 2026-09-03)
 
 The third of the four SDK halves (§3.105 Java, §3.106 AssemblyScript). Same eight-or-nine
 methods, same ordering contract, same forbidden sleep path.
@@ -14264,9 +14265,53 @@ decoding**, `cleat_sleep_ms` does not, and `stop_requested` goes through `suspen
 The Rust unit tests deliberately do not drive the `HostCalls` methods: those call `extern "C"`
 imports that exist only inside a cleat WASM runtime.
 
-**Not done here, exactly as in §3.105 and §3.106:** `rust` is not added to
-`deferSegmentLanguages`. The end-to-end proof is the next piece, and until it lands the fence
-stays closed.
+#### The end-to-end half
+
+`examples/rust-workflow` already had the fixture, and it is the one worth having. `defer_order`
+makes its body call as
+
+    h.cleat_call("inventory", "body", "{}");
+
+with the return value **discarded** — no `?`, not even a `let _ =`. That is the case this
+section's whole design rests on: six of the eight guarded calls return `(String, Option<String>)`
+rather than `Result`, so a body can drop the error half, and what ends the segment is the flag
+`suspend()` sets and `#[cleat_entry]` reads. A fixture written with `?` would have passed without
+ever exercising the backstop.
+
+`engine/rust_defer_segment_e2e_test.go` runs it as a defer segment: the segment suspends and
+records `[second first]`, the cleanups in LIFO order, and not the body's call. `rust` joins
+`deferSegmentLanguages`.
+
+**Two falsifications, both measured against the real cargo build.**
+
+Removing the `suspend()` call from `stop_requested` — leaving it to return `true` and let the Err
+carry the stop — gives:
+
+    suspended: nil   result: "{\"deferred\":true}"   operations: []
+
+The segment completed the workflow and performed no cleanup, which is exactly what the
+tuple-returning calls make possible and exactly why the routing is not a stylistic choice.
+
+Moving `run_deferred()` above the suspension check in `#[cleat_entry]` gives `defers_run=0` and
+an empty list — §3.81's consumption, the same red the Java and AssemblyScript halves produce for
+the same edit.
+
+#### Three SDKs, three answers to the same question, and only one was wrong
+
+The drains differ in what they do when a body suspends, and the difference decided which SDK had
+a bug:
+
+| SDK | when a defer body suspends mid-drain | stale-flag exposure |
+|---|---|---|
+| Go, Java | the unwind carries the fact away; nothing to read | none |
+| **Rust** | `run_deferred` keeps going — deliberately, because the table is already drained and stopping would drop the rest | none: it never reads the flag |
+| **AssemblyScript** | the drain stops, reading `isWorkflowSuspended()` after each body | **the defect in §3.106** — it read a flag the *body* had set |
+
+Rust's choice is documented in `crates/cleat-sdk/src/defer.rs` as the lesser of two evils and was
+made for a different reason entirely. It happens to be immune. AssemblyScript's is defensible on
+its own terms and was the one that lost a cleanup, because a flag that does not unwind outlives
+the thing that set it. **Worth stating because the two SDKs look like they are doing the same
+thing and are not**, and because the next SDK to grow a drain has to pick one of these answers.
 
 **Remaining after this: Python only, and it is blocked on a decision rather than on effort.** It
 is a Component Model guest whose WIT declares `durable-call: func(...) -> string`, so there is no

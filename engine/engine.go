@@ -571,7 +571,15 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //     transformer-generated wrapper checking isWorkflowSuspended() before it
 //     drains. Membership still means the same thing (the segment runs only the
 //     defers, measured), but read that test's comment for how it gets there.
-var deferSegmentLanguages = map[string]bool{"go": true, "java": true, "assemblyscript": true}
+//   - rust: examples/rust-workflow's defer_order entry point +
+//     engine/rust_defer_segment_e2e_test.go (3.107). That fixture DISCARDS the
+//     error from its body call, which is the case worth having: six of the
+//     eight guarded calls return (String, Option<String>) rather than Result,
+//     so what ends the segment is the flag suspend() sets and #[cleat_entry]
+//     reads, not the Err itself.
+var deferSegmentLanguages = map[string]bool{
+	"go": true, "java": true, "assemblyscript": true, "rust": true,
+}
 
 // RunsOnWasmtime reports whether a detected guest language is served by the
 // wasmtime backend.

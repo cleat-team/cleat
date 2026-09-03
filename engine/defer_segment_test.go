@@ -363,7 +363,9 @@ func TestADeferSegmentPastTheFrontierRunsOnlyTheDefers(t *testing.T) {
 // So the list is asserted exactly. Growing it is a deliberate act that fails
 // here first, and the failure says what has to accompany it.
 func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
-	want := map[string]bool{"go": true, "java": true, "assemblyscript": true}
+	want := map[string]bool{
+		"go": true, "java": true, "assemblyscript": true, "rust": true,
+	}
 	if len(deferSegmentLanguages) != len(want) {
 		t.Fatalf("deferSegmentLanguages = %v, want %v.\n\n"+
 			"Adding a language here means its SDK decodes callSuspendSentinel "+
@@ -382,8 +384,8 @@ func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 // TestADeferSegmentRefusesAGuestThatCannotHearTheStop pins the fail-closed half
 // of IMPROVEMENT-PLAN 3.83.
 //
-// callSuspendSentinel only stops a guest whose SDK decodes it. Two of the five
-// do not yet. An SDK that does not reads the word through the ordinary
+// callSuspendSentinel only stops a guest whose SDK decodes it. One of the five
+// does not yet. An SDK that does not reads the word through the ordinary
 // durable-call layout -- responseLen = 0, errCode = 0 -- and gets an EMPTY
 // SUCCESSFUL RESPONSE: it carries on past the stop, does the new work the
 // segment exists to prevent, and reports the terminated workflow as completed,
@@ -395,7 +397,7 @@ func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 // satisfied by any of the several other ways Execute can fail on a synthetic
 // module -- which is the trap this file's other tests keep hitting.
 func TestADeferSegmentRefusesAGuestThatCannotHearTheStop(t *testing.T) {
-	for _, lang := range []string{"rust", "python"} {
+	for _, lang := range []string{"python"} {
 		t.Run(lang, func(t *testing.T) {
 			ctx := context.Background()
 			rt, err := NewRuntime(ctx, 0, 0)
