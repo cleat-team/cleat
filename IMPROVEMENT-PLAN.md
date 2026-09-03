@@ -12093,7 +12093,7 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
-### 3.92 Three statements the gate found that five audits did not — 🔴 **OPEN, found 2026-09-03 while writing the gate's allowlist** (WS-1, 2026-09-03)
+### 3.92 §3.86 scoped the terminate and left the cascade — 🔴 **OPEN, MEASURED 2026-09-03; found while writing the gate's allowlist** (WS-1, 2026-09-03)
 
 #### First and second: the close-policy cascade
 
@@ -12125,26 +12125,50 @@ The fix is a tenant predicate on all three statements. Children inherit the pare
 in the working path. Not done here: this entry exists so the gate could land without a false
 reason in it, and the fix wants its own change and its own falsification.
 
-#### Third: `adminAppendAudit` reads another tenant's event history
+#### Measured 2026-09-03, on a `cleat_admin` pool
 
-`engine/store_admin.go:482` — `SELECT event_type, operation FROM event_history WHERE
-workflow_id = @p1 AND step = @p2`, no tenant.
+Tenant A holds parent `casc-parent-a` with one `TERMINATE` child. Tenant B, which owns neither,
+calls the ordinary `TerminateWorkflow` on A's parent:
 
-**This one was found by widening where the guard looks, not by thinking harder.** The first
-version of `engine/mssql_tenant_predicate_test.go` globbed `engine/mssql*.go`, which is where
-SQL Server SQL mostly lives — and four files outside it carry `@pN` parameters
-(`store_admin.go`, `store_intent.go`, `store_admin_rereplay.go`, `plugin/migration.go`). The
-guard reported a clean tree for all four without opening them.
-`TestMSSQLUUIDColumnsAreConvertedInProjections` had already learned this and stopped globbing;
-the gate now uses its walk. **A guard defined by where it looks rather than by what it looks
-for is a confident green over the files it does not open** — which is the same failure as the
-`^\S+\s+pending` parse in CLAUDE.md, in a different costume.
+```
+childrenClosedByTerminate(B on A's parent) -> [006f8661-1023-485d-913b-50a9cb1ca153]
+AFTER: tenant A's child status="failed" error_msg="parent workflow terminated"
+```
 
-Widening added exactly one flag and no noise, which is the reassuring part.
+**The resulting state is incoherent, which makes it worse than a plain unauthorised write.**
+Tenant A's parent is untouched and still running — §3.86 did that correctly — while its child is
+failed with `parent workflow terminated`. The error message names a cause that did not happen,
+and A's own audit trail contains nothing that explains it.
 
-**Not measured yet.** Everything above is read off the code; no two-tenant probe has been run
-for any of the three. Do that first — §3.86's own history has an instance of a claim confirmed
-against the file it named and confirmed wrongly.
+#### A third statement was flagged and is NOT a defect, which is the point of demanding reasons
+
+The guard also flagged `engine/store_admin.go:482` —
+`SELECT event_type, operation FROM event_history WHERE workflow_id = @p1 AND step = @p2`, no
+tenant — and the first draft of this entry recorded it as a third leak. **It is not one.** Every
+caller of `adminAppendAudit` (`adminForceResolve` and the three re-replay paths) reaches it only
+after a tenant-scoped `UPDATE` reported `RowsAffected > 0`, so a foreign workflow id has already
+been refused with `adminNotFound`. Its allowlist reason is `scopedByCaller` and that reason is
+true.
+
+Worth keeping because it is the counterexample to this entry's own method: **writing down why an
+exemption is safe finds defects, and it also clears statements that only look like defects.** The
+same discipline produced both results within an hour.
+
+Note also what `adminForceResolve` does that `terminateWorkflowOnce` does not: it checks
+`RowsAffected` and bails before reaching the cascade. That is the deeper fix available here —
+`TerminateWorkflow` cascading for a workflow it did not terminate is the actual bug, and a
+predicate on the cascade statements is the symptom-level version of it. The deeper fix changes
+what the HTTP layer returns for an unknown id (today: 200), so it wants its own change.
+
+#### How the third was found at all
+
+The first version of the gate globbed `engine/mssql*.go`. Four files outside it carry `@pN`
+parameters — `store_admin.go`, `store_intent.go`, `store_admin_rereplay.go`,
+`plugin/migration.go` — and the guard reported a clean tree for all four without opening them.
+`TestMSSQLUUIDColumnsAreConvertedInProjections` had already learned this and stopped globbing; the
+gate now uses its walk. **A guard defined by where it looks rather than by what it looks for is a
+confident green over the files it does not open** — the same failure as CLAUDE.md's
+`^\S+\s+pending` parse, in a different costume. Widening added exactly one flag and no noise.
 
 ### 3.91 The ordinary claim path took every tenant's work on SQL Server — 🟢 **FIXED 2026-09-03; the `-claim-across-tenants` flag was decorative on this dialect** (WS-1, 2026-09-03)
 

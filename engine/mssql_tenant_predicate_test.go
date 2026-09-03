@@ -103,9 +103,10 @@ var tenantPredicateAllowlist = map[string]string{
 	"mssql_signals_promises.go:RejectPromise":            scopedByCaller,
 	"mssql_signals_promises.go:ResolvePromise":           scopedByCaller,
 
-	// THE THREE FINDS. Two came from writing down WHY an exemption was safe
-	// rather than from the scan itself, and the third from widening where the
-	// scan looks:
+	// WHAT THIS GUARD TURNED UP BEFORE IT LANDED. Note that only the first came
+	// from the scan finding something nobody had looked at; the rest came from
+	// writing down WHY each exemption was safe, and one of those turned out to
+	// be safe after all:
 	//
 	//  - claimWorkflowsOnce and claimStickyWorkflowsOnce appeared here when this
 	//    guard was first run and are NOT in this list, because 3.91 fixed them.
@@ -119,11 +120,16 @@ var tenantPredicateAllowlist = map[string]string{
 	"mssql_lifecycle.go:enforceParentClosePolicy":  openFinding,
 	"mssql_lifecycle.go:childrenClosedByTerminate": openFinding,
 
-	//  - adminAppendAudit reads event_history by workflow_id and step with no
-	//    tenant. Found only after the scan stopped being a glob over
-	//    mssql_*.go: it lives in store_admin.go, which the first version of
-	//    this guard never opened. 3.92.
-	"store_admin.go:adminAppendAudit": openFinding,
+	//  - adminAppendAudit was flagged only after the scan stopped being a glob
+	//    over mssql_*.go -- it lives in store_admin.go, which the first version
+	//    of this guard never opened. It is NOT a leak, and the difference is
+	//    the reason this list demands a reason: every caller
+	//    (adminForceResolve and the three re-replay paths) reaches it only
+	//    after a tenant-scoped UPDATE reported RowsAffected > 0, so a foreign
+	//    workflow id has already been refused with adminNotFound. Written down
+	//    as scopedByCaller after checking all four call sites, not assumed --
+	//    the first draft of this entry said openFinding.
+	"store_admin.go:adminAppendAudit": scopedByCaller,
 }
 
 func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
