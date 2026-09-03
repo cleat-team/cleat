@@ -72,9 +72,16 @@ message (`retry exhausted after N attempts`) rather than the host's. That is a r
 recorded as one — see IMPROVEMENT-PLAN.md §3.88 — but it is no longer "nothing on this SDK gets
 here", which is what this paragraph said before the host loop was wired.
 
-Rust has always taken the host path for any policy (`HostCalls::cleat_call_with_retry` calls the
-import directly), so a long-backoff Rust policy is dead-letterable where the Go equivalent is
-not.
+**Both SDKs behave this way as of 2026-09-03.** Rust used to take the host path for *any* policy
+— `HostCalls::cleat_call_with_retry` called the import directly with no threshold — so a
+long-backoff Rust policy was dead-letterable where the Go equivalent was not, and held a worker
+for the length of its backoff. It now applies the same threshold, so the table above is the whole
+story rather than the Go half of it. `cleat.TestBothSDKsAgreeOnTheHostRetryBudget` compares the
+two constants, because nothing at compile time can.
+
+`HostCalls::cleat_call_with_host_retry` (Rust) and `HostCallsImpl.DurableCallWithRetry` (Go) are
+the explicit forms: they demand the host loop whatever the policy's length, and a workflow using
+either is dead-letterable regardless.
 
 Measured by `engine.TestAShortRetryPolicyRunsOnTheHostInOneSegment` and
 `engine.TestALongRetryPolicySuspendsInsteadOfHoldingTheWorker`, which assert the two sides of the

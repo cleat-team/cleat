@@ -123,3 +123,76 @@ func TestARustGuestReachesTheHostRetryLoop(t *testing.T) {
 			execErr, workerDeadLetterPredicate)
 	}
 }
+
+// TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker is the other side
+// of the threshold on the Rust SDK, and the reason the SDK changed.
+//
+// Until 2026-09-03 this SDK took the host path for ANY policy: it called the
+// cleat_call_retry import directly with no threshold, so three attempts two
+// minutes apart held a worker for four minutes -- and since 3.90 gave wall
+// clock its own bound, would have been killed at --wasm-wall-clock-ceiling
+// rather than completing. The Go SDK chose per policy; Rust did not; the same
+// RetryPolicy therefore meant different things. That divergence is the defect,
+// independent of where the threshold eventually lives.
+//
+// Pairing this with TestARustGuestReachesTheHostRetryLoop is the test. That one
+// uses a 2x1ms policy and must still reach the host; this one must not. Either
+// alone would pass against an SDK that always chose one path -- which is
+// exactly the state this change fixed.
+//
+// The suspension comes back CLEAN despite 3.87: cleat_sleep_ms suspends by
+// panicking, which traps under panic=abort, but the host records the
+// suspension before the guest panics and the executor lets that win. So the
+// workflow suspends and resumes correctly while the guest dies on the way out,
+// and its own defer drain does not run. That is 3.87's defect, not this
+// path's, and it is asserted here rather than worked around so that fixing
+// 3.87 does not silently change what this test measures.
+func TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker(t *testing.T) {
+	ctx := context.Background()
+	wasmBytes := buildRustProbeWasm(t)
+
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	caller := &alwaysFailsCounting{service: "always-fails"}
+	eng := NewEngine(rt, caller,
+		WithBackends(WasmtimeLanguages, wt),
+		WithWorkflowID("wf-rust-long-retry"))
+
+	_, _, susp, _, _, execErr := eng.Execute(ctx, wasmBytes, "retry_long_probe",
+		json.RawMessage(`{"user_id":"u","cart":[]}`))
+
+	// No clock pinning, and unlike #612's case that is not a race: the backoff
+	// is 120s, so the sleep's deadline is two minutes ahead of the anchor
+	// whatever the machine's speed. A 1ms backoff would have needed a pinned
+	// clock; this does not.
+	if susp == nil {
+		t.Fatalf("the run did not suspend (err=%v).\n\n"+
+			"Four minutes of backoff must not run on the host: it holds a "+
+			"worker for the duration and exceeds --wasm-wall-clock-ceiling, "+
+			"which kills the invocation. If cleat_call_with_retry stopped "+
+			"consulting HOST_RETRY_BUDGET_MS, the two SDKs disagree again -- "+
+			"see cleat.TestBothSDKsAgreeOnTheHostRetryBudget and "+
+			"IMPROVEMENT-PLAN 3.88.", execErr)
+	}
+	if !strings.Contains(susp.Reason, "cleat_sleep") {
+		t.Fatalf("suspension reason is %q, want one naming cleat_sleep -- the "+
+			"SDK-level loop backs off with a durable sleep", susp.Reason)
+	}
+
+	// One attempt, then the segment ended. The host loop would have dispatched
+	// all three, which is what the sibling test asserts for a short policy.
+	if caller.calls != 1 {
+		t.Fatalf("%d attempts dispatched, want 1.\n\n"+
+			"One attempt then a suspension is the SDK-level loop. Three would "+
+			"mean the host loop took this policy after all.", caller.calls)
+	}
+}
