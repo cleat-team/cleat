@@ -196,6 +196,49 @@ An SDK that does not implement this reads the sentinel as an ordinary result —
 silently continue past the stop. The host therefore refuses to run a defer segment for any guest
 language not known to decode it.
 
+##### Retry refusal — `cleat_call_retry` only, and NOT a sentinel bit
+
+**Decided 2026-09-03, IMPROVEMENT-PLAN §3.94 step 1. Nothing implements this yet.**
+
+When the host declines to run a retry policy because the policy's total backoff exceeds the
+tenant's host-retry budget, it returns an ordinary error result carrying a **new
+`callErrorCode` classification**, not a new sentinel bit:
+
+| field | value |
+|---|---|
+| `errCode` (0-7) | non-zero — this *is* an error result |
+| `callErrorCode` (8-15) | `6` — `RetryPolicyTooLong` |
+| `responseLen` (40-63) | the refusal message, as with any call error |
+
+The guest's obligation is to **retry the call itself**, with its own loop, backing off with a
+durable sleep between attempts. The host records **no event** for a refusal, so replay sees
+nothing and the guest has not consumed an attempt — the same "refuse rather than half-do it"
+shape as the event-cap refusal.
+
+**Why a classification and not a bit, given §3.84 just established a sentinel on this exact
+layout.** The deciding question is what an SDK that has *not* implemented this does, because
+already-deployed guest modules cannot be upgraded in step with the host:
+
+| encoding | an SDK that does not know it |
+|---|---|
+| new sentinel bit, `errCode = 0` | reads a **successful** empty response and runs on with a bogus result — silently wrong |
+| new sentinel bit, `errCode != 0` | a generic call error — but then the bit adds nothing the classification does not |
+| **new `callErrorCode`** | a generic call error: the workflow **fails loudly** rather than proceeding on garbage |
+
+So the bit is either unsafe or redundant. The classification is also the documented extension
+path — `guestCallErrorCodes` in `engine/callerrors.go` says a member may be added while an
+existing value may never change — and it costs no bits in a word where bit 31 is already spent.
+
+The narrowness matters too. §3.84's stop sentinel had to be free in **six** layouts because any
+host call can start fresh work. A retry refusal can only ever come from `cleat_call_retry`, so
+the six-layout constraint that forced a bit does not apply here.
+
+**`RetryPolicyTooLong` must be non-retryable** (`Retryable()` = false). An SDK that treats it as
+retryable would re-issue `cleat_call_retry`, be refused again on the same grounds, and loop.
+
+**The stop sentinel still wins.** Check bit 31 *before* decoding any field, including this
+classification — the ordering requirement above is unchanged, and a refusal is a field.
+
 ##### At-Least-Once Semantics
 
 `cleat_call` provides at-least-once execution, not exactly-once. There is a crash window between the external call completing and the event being persisted to `event_history`. If the worker crashes during this window, replay will not find a recorded event for this step and will re-execute the call.
