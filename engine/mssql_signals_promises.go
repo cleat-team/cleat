@@ -23,8 +23,8 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	//
 	// `target.tenant_id = @p4` in the ON clause is load-bearing -- see
 	// TerminateWorkflow -- and this statement is the one that reads clean and
-	// is not. scripts/mssql-tenant-predicate-audit.py asks whether `tenant_id`
-	// appears anywhere in the statement, and it did: in the INSERT column list
+	// is not. The audit script of the day asked whether `tenant_id` appeared
+	// anywhere in the statement, and it did: in the INSERT column list
 	// below, which scopes the row this call CREATES and says nothing about the
 	// row it MATCHES. A MERGE is an UPDATE when matched, so with an unscoped ON
 	// a caller holding another tenant's workflow id overwrote that workflow's
