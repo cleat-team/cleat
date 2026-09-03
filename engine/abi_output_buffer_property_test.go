@@ -83,15 +83,35 @@ func parseHostFuncWrappers(t *testing.T) []wrapperInfo {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "FuncWrap" || len(call.Args) < 3 {
+			if !ok {
 				return true
 			}
-			mod, ok1 := stringLit(call.Args[0])
-			name, ok2 := stringLit(call.Args[1])
+			// b.hostFunc(linker, module, name, fn), not linker.FuncWrap(module,
+			// name, fn): IMPROVEMENT-PLAN 3.90 routed every registration through
+			// the backend so the guest's epoch budget can be bracketed around
+			// it. Only the argument offset changes.
+			//
+			// FuncWrap is still accepted so this walk keeps working on any
+			// registration that has not moved -- but nothing should be in that
+			// state; scripts/check-hostfunc-budget.sh fails if one is.
+			var argOff int
+			switch sel.Sel.Name {
+			case "hostFunc":
+				argOff = 1
+			case "FuncWrap":
+				argOff = 0
+			default:
+				return true
+			}
+			if len(call.Args) < argOff+3 {
+				return true
+			}
+			mod, ok1 := stringLit(call.Args[argOff])
+			name, ok2 := stringLit(call.Args[argOff+1])
 			if !ok1 || !ok2 || mod != "env" || !strings.HasPrefix(name, "cleat_") {
 				return true
 			}
-			lit, ok := call.Args[2].(*ast.FuncLit)
+			lit, ok := call.Args[argOff+2].(*ast.FuncLit)
 			if !ok {
 				return true
 			}
@@ -226,7 +246,7 @@ func TestOutputBufferHostCallsPassPtrAndMaxLenInOrder(t *testing.T) {
 	// below that so ordinary additions do not trip them.
 	if len(wrappers) < 45 {
 		t.Fatalf("parsed only %d env host-function wrappers, expected at least 45.\n\n"+
-			"The AST walk looks for linker.FuncWrap with a literal \"env\" and a "+
+			"The AST walk looks for b.hostFunc/linker.FuncWrap with a literal \"env\" and a "+
 			"function literal. If registration moved behind a helper, this test "+
 			"examines a fraction of the surface and still passes.", len(wrappers))
 	}

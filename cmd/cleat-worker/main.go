@@ -795,8 +795,20 @@ func main() {
 		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)
 		os.Exit(1)
 	}
+	// A ceiling below the instance timeout is a configuration that cannot mean
+	// what it says: configureStore clamps the epoch deadline to whatever the
+	// context has left, so the guest's execution bound silently becomes the
+	// ceiling and --wasm-instance-timeout stops being the number that decides.
+	if *wasmWallClockCeiling > 0 && *wasmWallClockCeiling < *wasmInstanceTimeout {
+		logger.WarnContext(context.Background(),
+			"--wasm-wall-clock-ceiling is below --wasm-instance-timeout, so the guest's execution bound is effectively the ceiling",
+			"worker_id", workerID,
+			"wall_clock_ceiling", *wasmWallClockCeiling,
+			"instance_timeout", *wasmInstanceTimeout)
+	}
+
 	var wasmtimeBackend engine.WasmBackend = wt
-	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes, "defer_budget", *wasmDeferBudget)
+	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes, "defer_budget", *wasmDeferBudget)
 
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
 	var notifyCh chan struct{}
@@ -871,6 +883,7 @@ func main() {
 		maxQuotaConcurrencyKeys:          *maxQuotaConcurrencyKeys,
 		maxQuotaSchedules:                *maxQuotaSchedules,
 		maxWorkflowDuration:              *maxWorkflowDuration,
+		wasmWallClockCeiling:             *wasmWallClockCeiling,
 		childBindingOverride:             *childBindingOverride,
 		healthCheckInterval:              *healthCheckInterval,
 		encryption:                       payloadEncryption,

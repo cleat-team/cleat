@@ -37,7 +37,7 @@ at the CPU/wall-clock level.
 - **Linear memory isolation**: Each WASM module gets its own linear memory.
   Modules cannot read or write each other's memory.
 - **Resource limits are wired on the backend of record**: the wasmtime
-  backend enforces a wall-clock execution timeout via epoch interruption
+  backend enforces a **guest-execution** timeout via epoch interruption
   (default 30s, `DefaultWasmtimeExecutionTimeout` in
   `engine/wasmtime_options.go`, configurable via `--wasm-instance-timeout`),
   an optional instruction/fuel budget (`--wasm-instruction-limit`), and a
@@ -46,6 +46,19 @@ at the CPU/wall-clock level.
   These bound even a WASM module stuck in a tight loop that never calls back
   into the host — see CLAUDE.md's note that this differs across wasmtime's
   three execution paths (core module, native component, decomposition).
+- **Guest execution and wall clock are bounded separately.**
+  `--wasm-instance-timeout` measures only time the guest is actually running:
+  time it spends blocked in a host call — a service call, a plugin call, a
+  retry backoff — is not charged against it, so a workflow waiting on slow
+  dependencies is not killed as though it were a runaway guest.
+  `--wasm-wall-clock-ceiling` (default 5m) is the bound that covers waiting,
+  and is what stops an invocation blocked on an unresponsive service from
+  holding a worker slot indefinitely. Set the ceiling at or above the instance
+  timeout; below it, the epoch deadline is clamped to whatever the context has
+  left and the ceiling silently becomes the guest's execution bound too (the
+  worker warns at startup). See IMPROVEMENT-PLAN §3.90 for the measurements —
+  before that item the two were one number, and a workflow making three 12s
+  service calls tripped a 30s "runaway" fence.
 
 ### Limitations
 

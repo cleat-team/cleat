@@ -56,6 +56,11 @@ type wasmtimeBackend struct {
 	engine  *wasmtime.Engine
 	handler HostHandler // current execution session
 
+	// budget bounds GUEST EXECUTION rather than wall clock. Per-execution, and
+	// safe here only because Execute runs on a PerExecution() backend.
+	// IMPROVEMENT-PLAN 3.90; see engine/wasmtime_hostbudget.go.
+	budget *hostBudget
+
 	// moduleCache holds compiled wasmtime Modules keyed by xxhash of wasmBytes.
 	// Shared across PerExecution instances to avoid serialized recompilation.
 	moduleCache  *sync.Map
@@ -380,11 +385,12 @@ func (b *wasmtimeBackend) runGuestDefersAfterSuspend(
 	if budget <= 0 {
 		budget = DefaultWasmtimeDeferBudget
 	}
-	ticks := uint64(budget / epochTickInterval)
-	if ticks == 0 {
-		ticks = 1
-	}
-	store.SetEpochDeadline(ticks)
+	// Guest execution, not wall clock -- the defer budget is the case where
+	// that matters most. A defer body's whole purpose is a cleanup call, so
+	// charging the wait for it against a 1s budget spends the budget on the
+	// very thing it exists to allow. IMPROVEMENT-PLAN 3.90.
+	b.budget = newHostBudget(store, budget)
+	b.budget.arm()
 	if b.limits.instructionLimit > 0 {
 		if err := store.SetFuel(b.limits.instructionLimit); err != nil {
 			b.log().Warn("could not refuel the guest to run its defers on a defer segment",
@@ -447,11 +453,12 @@ func (b *wasmtimeBackend) runGuestDefersAfterKill(
 	if budget <= 0 {
 		budget = DefaultWasmtimeDeferBudget
 	}
-	ticks := uint64(budget / epochTickInterval)
-	if ticks == 0 {
-		ticks = 1
-	}
-	store.SetEpochDeadline(ticks)
+	// Guest execution, not wall clock -- the defer budget is the case where
+	// that matters most. A defer body's whole purpose is a cleanup call, so
+	// charging the wait for it against a 1s budget spends the budget on the
+	// very thing it exists to allow. IMPROVEMENT-PLAN 3.90.
+	b.budget = newHostBudget(store, budget)
+	b.budget.arm()
 	if b.limits.instructionLimit > 0 {
 		if err := store.SetFuel(b.limits.instructionLimit); err != nil {
 			b.log().Warn("could not refuel the guest to run its defers",
@@ -596,6 +603,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if err != nil {
 		return nil, err
 	}
+	// The fence bounds guest execution, not wall clock. IMPROVEMENT-PLAN 3.90,
+	// engine/wasmtime_hostbudget.go.
+	b.budget = newHostBudget(store, execTimeout)
 	t1 := time.Now()
 
 	// Configure WASI for Go wasip1 module support.
@@ -713,6 +723,11 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	t2 := time.Now()
 
 	// Instantiate the module.
+	// Arm here rather than relying on configureStore's deadline: on a cold
+	// module everything above -- compilation included -- happened after that
+	// deadline was set, and came out of the guest's budget.
+	b.budget.arm()
+
 	instance, err := linker.Instantiate(store, module)
 	if err != nil {
 		return nil, fmt.Errorf("host: instantiate: %w", err)

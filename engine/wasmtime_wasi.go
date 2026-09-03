@@ -18,7 +18,7 @@ func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
 
 	// reset_adapter_state is required by core modules extracted from Component
 	// Model binaries produced by componentize-py. It is a no-op.
-	if err := linker.FuncWrap("wasi_snapshot_preview1", "reset_adapter_state",
+	if err := b.hostFunc(linker, "wasi_snapshot_preview1", "reset_adapter_state",
 		func() {},
 	); err != nil {
 		return err
@@ -28,10 +28,10 @@ func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
 	// modules. wasmtime-go v44's DefineWasi() may or may not provide them
 	// depending on the exact C library version. Provide fallback stubs;
 	// errors from duplicate definition are benign.
-	_ = linker.FuncWrap("wasi_snapshot_preview1", "environ_get",
+	_ = b.hostFunc(linker, "wasi_snapshot_preview1", "environ_get",
 		func(_ int32, _ int32) int32 { return 0 },
 	)
-	_ = linker.FuncWrap("wasi_snapshot_preview1", "environ_sizes_get",
+	_ = b.hostFunc(linker, "wasi_snapshot_preview1", "environ_sizes_get",
 		func(_ int32, _ int32) int32 { return 0 },
 	)
 
@@ -99,7 +99,7 @@ func zeroVal(t *wasmtime.ValType) wasmtime.Val {
 // getting the arity right.
 func (b *wasmtimeBackend) registerEnvStubs(linker *wasmtime.Linker, abortTy *wasmtime.FuncType) error {
 	if abortTy == nil {
-		_ = linker.FuncWrap("env", "abort", func(_ int32, _ int32, _ int32, _ int32) {})
+		_ = b.hostFunc(linker, "env", "abort", func(_ int32, _ int32, _ int32, _ int32) {})
 		return nil
 	}
 	results := abortTy.Results()
@@ -116,7 +116,7 @@ func (b *wasmtimeBackend) registerEnvStubs(linker *wasmtime.Linker, abortTy *was
 
 func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 	// putwcharsOut
-	if err := linker.FuncWrap("teavm", "putwcharsOut",
+	if err := b.hostFunc(linker, "teavm", "putwcharsOut",
 		func(chars, count int32) {},
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
@@ -124,7 +124,7 @@ func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 		}
 	}
 	// currentTimeMillis
-	if err := linker.FuncWrap("teavm", "currentTimeMillis",
+	if err := b.hostFunc(linker, "teavm", "currentTimeMillis",
 		func() float64 { return 0 },
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
@@ -132,7 +132,7 @@ func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 		}
 	}
 	// logString
-	if err := linker.FuncWrap("teavm", "logString",
+	if err := b.hostFunc(linker, "teavm", "logString",
 		func(ptr int32) {},
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
@@ -140,7 +140,7 @@ func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 		}
 	}
 	// logInt
-	if err := linker.FuncWrap("teavm", "logInt",
+	if err := b.hostFunc(linker, "teavm", "logInt",
 		func(ptr int32) {},
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
@@ -148,7 +148,7 @@ func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 		}
 	}
 	// logOutOfMemory
-	if err := linker.FuncWrap("teavm", "logOutOfMemory",
+	if err := b.hostFunc(linker, "teavm", "logOutOfMemory",
 		func() {},
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
