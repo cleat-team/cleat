@@ -65,6 +65,95 @@ future session should not have to rediscover.
 > drifts from it. Still worth doing, still not what stands between an ambiguous crash and an
 > operator being told about it.
 
+> ## Re-derived 2026-09-03 against `develop` at `470bf17`
+>
+> **The numbered list below is now empty.** Its 2026-09-02 note ends "Nothing in this numbered
+> list is open except §2.35's plugin half"; that closed today in #633, so the note is stale in
+> exactly the direction CLAUDE.md warns about — a status line that was true when written and
+> now reads as open work that is not there.
+>
+> **What WS-2 landed on 2026-09-03**, each one a durability defect found by looking at the
+> carrier rather than at the status marker:
+>
+> | § | PR | what was actually wrong |
+> |---|---|---|
+> | 3.96 | #617 | `StreamFinish` was persisted by neither the payload nor a column, so a recorded plugin stream **error** replayed as a **success** whose chunk content was the error text |
+> | 3.98 | #632 | the database payload carrier had no completeness check at all, unlike the other two carriers. Four fields dropped — `NewVersion` (a versioned continue-as-new replayed from the database restarts as *different code*), `StateKeys` (`ListState` replays empty **and reports success**), and both parent fields |
+> | 2.35 plugin half | #633 | **three of four** streaming plugin failures were misclassified, not the one the section claimed. The same deployment gap was retryable through `PluginCall` and permanently fatal through `PluginCallStreaming` |
+> | 3.97 → 3.102 | #635 | nine read paths, four different answers about the same row. On **PostgreSQL, the default dialect**, `EXTRACT(EPOCH FROM created_at)::BIGINT * 1000` truncated `TimestampMs` — the replay virtual clock — so a workflow resuming after a crash saw a `Now()` up to **999 ms earlier than the run that recorded it** |
+> | — | #629 | the engine suite outgrew the cluster job's 300s timeout: 241s → 291s over two and a half hours of merges, then 300.034s and killed, with **no named failing test** in the log |
+>
+> **The through-line worth keeping.** Three of those four were found the same way: by reading a
+> comment in `engine/compaction.go` that explains why *compaction* carries a field, and then
+> checking whether the *database payload* carried it too. Compaction had a completeness property
+> test (`FuzzCompactionEquivalence`) and the payload had none, so every payload defect was
+> invisible until someone noticed the behaviour it broke. **When one carrier has a mechanism and
+> its sibling does not, the sibling is where the bugs are.**
+>
+> ### Open, as of 2026-09-03
+>
+> Three items, and **all three have a decision at the front rather than an implementation** —
+> which is why none of them was taken today.
+>
+> 1. **§3.75 step 2 — the two-phase terminal transition.** The flagship. Step 1 (#623) landed the
+>    migration and *no Go code*: `grep -rn "pending_terminal_status|defer_phase_deadline"
+>    --include=*.go` returns nothing, and so does `grep -rn '"terminating"'`. §3.81 built the
+>    execution mechanism, `WithDeferPhase`, and `grep -rn WithDeferPhase --include=*.go` finds
+>    **only its own tests** — no production caller. Step 2 is the whole connection.
+>
+>    Two constraints measured 2026-09-03 that the design did not anticipate:
+>
+>    - **It is language-gated.** `deferSegmentLanguages = {"go": true}` (`engine/engine.go:486`)
+>      against `WasmtimeLanguages = [go, assemblyscript, java, rust, python]` (`:464`), and
+>      `engine/executor.go:213` fails the execution **closed** for anything else. So the defer
+>      phase can only run for Go guests, and terminate would mean something different depending
+>      on the workflow's language. That is a `tiers.yaml` change and a product call, not a
+>      detail — D6 decided terminate is asynchronous, not that it is asynchronous *for Go*.
+>    - **The worker needs a second engine.** `e.deferPhase` is read per-execution inside
+>      `Execute` but set as an `EngineOption` at construction, and the worker builds one shared
+>      engine (`cmd/cleat-worker/setup.go:1705`). A second instance sharing the registered
+>      backends is the clean answer; worth deciding before implementing rather than during.
+>
+>    Suggested split, by transition rather than by layer — splitting by layer means landing a
+>    mechanism with no caller, which is what §2.35 refused to do and what §1.4 cost the project
+>    350 lines of never-run code: (1) `TerminateWorkflow` on all three dialects, carrying the
+>    status, claim, segment, finalize and reaper the others reuse; (2) the parent-close
+>    `TERMINATE` arm; (3) `adminForceResolve`.
+>
+> 2. **§2.35's `ServiceCaller` half.** The plugin half is done. What remains is the seven
+>    `ErrorCode` values collapsing into one `Retryable()` bit. It changes retry behaviour for
+>    workflows in flight, so it wants a decision on direction first. Related and also undecided:
+>    whether the four stream-failure causes should get *truthful* codes (`NotFound`,
+>    `PermissionDenied`) — recorded in §2.35, and it has to be answered for **both** call paths
+>    at once or it re-opens the asymmetry #633 just closed, pointing the other way.
+>
+> 3. **`DBEventStream` (`engine/event_stream.go`) — a decision, not a task.** A fourth
+>    `EventRecord` reader. It selects no `payload` column, so every payload-carried field comes
+>    back empty, and its `WHERE` clause is `workflow_id = $1` with **no `tenant_id` predicate**.
+>    `grep -rn NewDBEventStream --include=*.go .` finds only its own tests. The trap: its
+>    constructor takes a bare `*sql.DB` with no tenant context, so **the missing predicate cannot
+>    be fixed without changing an exported signature**. Fix, delete, or leave — all three are
+>    public-API calls. Recorded in §3.102. The cross-tenant `WHERE` is the same class WS-1 closed
+>    in §3.86, §3.91, §3.92.
+>
+> ### One process measurement, because it cost more than any single fix
+>
+> Two PRs were renumbered **seven times between them** on unchanged code — #617 five times
+> (§3.90 → 3.91 → 3.93 → 3.94 → 3.95 → **3.96**) and #635 twice (§3.99 → 3.101 → **3.102**) —
+> and `scripts/skip-budget.txt` was resolved additively **ten times on one line in two days**.
+> Four of the renumbers arrived through rebases that did **not** conflict: the sections were far
+> enough apart that git merged both cleanly, so there was no marker to resolve and
+> `scripts/check-section-numbers.sh` was the only thing that noticed. **Run it after every
+> rebase, not only after a conflicted one** — a clean rebase is evidence the text survived, not
+> the numbering.
+>
+> One of the five was caused by the PR *fixing* an earlier collision: #628 renumbered a duplicate
+> onto 3.95, which is where #617 had just moved to escape #626 taking 3.94. With a single global
+> counter and no serialisation, even the repair collides. Both fixes are repo-wide rather than
+> any one stream's, and both are recorded in §3.96's note: **"Require branches to be up to date
+> before merging"** on `develop`, at the cost of one extra CI cycle per merge, or stop numbering
+> plan sections in one global sequence.
+
 ---
 
 ## This round
@@ -294,9 +383,14 @@ needs rephrasing, not escaping.
 >
 > **2026-09-03: items 2, 5 and 6 are now done as well, and item 3 is half done.** #578 and #602
 > (2, phase F and the checksum defect in it), #591 (5, `AdminReReplay`), #589 (6, the sentinel),
-> #572 (3's engine half). **Nothing in this numbered list is open except §2.35's plugin half.**
-> The list stays because the reasoning under each item is still the reasoning — but read it as
-> history, and take the board in `PARALLEL-WORKSTREAMS.md` as the live one.
+> #572 (3's engine half). The list stays because the reasoning under each item is still the
+> reasoning — but read it as history, and take the board in `PARALLEL-WORKSTREAMS.md` as the
+> live one.
+>
+> **Later on 2026-09-03: §2.35's plugin half closed too (#633), so this numbered list is now
+> entirely history.** An earlier version of this paragraph ended "Nothing in this numbered list
+> is open except §2.35's plugin half", which was true for about six hours. The current open
+> items are in the `Re-derived 2026-09-03` banner above, and none of them is on this list.
 
 1. ~~**§3.24 — an ambiguous outcome classifies as `unknown`.**~~ **Done, 2026-08-31.** `engine.ErrAmbiguous` has existed
    since the first commit and `NewAmbiguousError` is called by nothing but its own test, so
