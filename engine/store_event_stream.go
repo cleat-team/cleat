@@ -88,7 +88,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 		if createdAt.Valid {
-			rec.CreatedAt = createdAt.Time
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 
 		// Decrypt and redact event record.
@@ -148,8 +148,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				       payload,
 				       promise_name, promise_id, promise_result, promise_error,
-				       created_at,
-				       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms
+				       created_at
 				FROM event_history
 				WHERE workflow_id = $1
 				ORDER BY step
@@ -181,13 +180,13 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 					&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 					&payload,
 					&promiseName, &promiseID, &promiseResult, &promiseError,
-					&createdAt, &rec.TimestampMs); err != nil {
+					&createdAt); err != nil {
 					rows.Close()
 					errCh <- err
 					return
 				}
 				if createdAt.Valid {
-					rec.CreatedAt = createdAt.Time
+					applyCreatedAt(&rec, createdAt.Time)
 				}
 
 				rec.Service = service.String

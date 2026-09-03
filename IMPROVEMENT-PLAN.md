@@ -13073,7 +13073,7 @@ That is a real asymmetry and it is broader than §2.35 states — three of the f
 not one — but it is a separate change, and it was unfixable while the error branch could
 not fire on replay at all.
 
-### 3.97 `EventRecord.CreatedAt` comes back on one dialect of three — 🔴 **OPEN, found 2026-09-03** (WS-2, 2026-09-03)
+### 3.97 `EventRecord.CreatedAt` comes back on one dialect of three — ✅ **FIXED 2026-09-03 in §3.102**, which turned out to be the smaller half of the defect (WS-2, 2026-09-03)
 
 `event_history.created_at` is written by every backend and read back by one.
 
@@ -13230,3 +13230,70 @@ the checksum unchanged, and the compatibility test alone would still pass.
 carrying `ParentWorkflowID` and `ParentClosePolicy`, so grepping the name it gave returned nothing
 and the justification read as fabricated. It cost a detour to establish that the mechanism was real
 under another name.
+
+### 3.102 Nine read paths, four different answers about the same row — ✅ **FIXED** (WS-2, 2026-09-03)
+
+Every dialect has three ways to read event history — `LoadEventHistory`,
+`LoadEventHistoryPaginated`, `StreamEventHistory` — so there are nine implementations, each with
+its own `SELECT` and its own scan. Nothing held them to the same answer, and they did not give
+one. Measured 2026-09-03 by writing `TimestampMs: 1756900000123` and reading it back:
+
+| dialect | path | `TimestampMs` | `CreatedAt` |
+|---|---|---|---|
+| PostgreSQL | `LoadEventHistory` | **1756900000000** — truncated to the second | ✅ |
+| PostgreSQL | `LoadEventHistoryPaginated` | **0** — never set | ✅ |
+| PostgreSQL | `StreamEventHistory` | **1756900000000** — truncated | ✅ |
+| MySQL | `LoadEventHistory` | ✅ 1756900000123 | **zero time** |
+| MySQL | `LoadEventHistoryPaginated` | **0** | **zero time** |
+| MySQL | `StreamEventHistory` | ✅ | **zero time** |
+| SQL Server | `LoadEventHistory` | ✅ (Go `UnixMilli`) | **zero time** |
+| SQL Server | `LoadEventHistoryPaginated` | **0** — `created_at` not in the `SELECT` at all | **zero time** |
+| SQL Server | `StreamEventHistory` | ✅ | **zero time** |
+
+**`TimestampMs` is the replay virtual clock.** `execSession.Now` (`engine/lifecycle.go:203`)
+returns the previous history event's `TimestampMs`. So on PostgreSQL — the default dialect — a
+workflow resuming after a crash saw a `Now()` up to **999 ms earlier than the run that recorded
+it**, because `EXTRACT(EPOCH FROM created_at)::BIGINT * 1000` drops the milliseconds the write
+path stored. That is engine-introduced replay non-determinism, and it is the same class
+`compaction.go` already warns about for a *zero* `TimestampMs` — one file over, in prose, about a
+different carrier.
+
+The `0` from the paginated path is not a replay bug — nothing replays from it — but all three of
+its callers are user-facing: `cmd/cleat-worker/api_instances.go`, `cmd/cleat-worker/server.go` and
+`cmd/cleatctl debug`. `TimestampMs` has no `omitempty`, so the admin API returned
+`"timestamp_ms": 0` for every event: not a missing field, a wrong value presented as a real one.
+
+**The fix is one rule rather than nine patches.** Every read path now selects `created_at` and
+nothing else time-shaped, and `applyCreatedAt` (`engine/store_events.go`) derives both fields from
+it. The three different SQL-side `timestamp_ms` expressions are gone, so there is nothing left for
+a tenth read path to copy wrongly. §3.97 — `CreatedAt` populated on PostgreSQL only — falls out of
+the same change and is closed by it.
+
+`engine/read_path_parity_test.go` is the mechanism, and it makes two separate claims on purpose:
+
+- **the paths agree with each other**, by reflecting over every exported `EventRecord` field
+- **and the answer is the one that was written**, because three paths that all return zero agree
+  perfectly
+
+The probe value carries milliseconds that are not a whole second. A round number round-trips
+through a truncating read and proves nothing.
+
+**Not covered, deliberately: `DBEventStream` (`engine/event_stream.go`), a fourth reader.** It is
+worse than anything fixed here — it selects no `payload` column, so every payload-carried field
+comes back empty, and its `WHERE` clause is `workflow_id = $1` with **no `tenant_id` predicate**,
+so if it were wired up it would read across tenants. It has no production callers:
+
+```
+grep -rn "NewDBEventStream" --include="*.go" .    # only its own tests, 2026-09-03
+```
+
+Testing it would mean asserting against code nothing calls, which is the shape §2.35 refused when
+it declined to add a mechanism ahead of a caller. Deleting it or fixing it is a decision for
+whoever owns that type; the cross-tenant `WHERE` is the part worth someone's attention, and it is
+the same class WS-1 has been closing in §3.86, §3.91 and §3.92.
+
+**Behaviour change to be aware of.** PostgreSQL replays now see the millisecond `Now()` the
+original run produced rather than a truncated one. That is a workflow-visible difference for
+anything in flight — and it is a difference *towards* the recorded value: the fresh run always
+used the full millisecond, and only the read was lossy, so this makes replay agree with the run it
+is replaying instead of diverging from it.

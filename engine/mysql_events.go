@@ -146,7 +146,7 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
 		       promise_name, promise_id, promise_result, promise_error,
-		       CAST(UNIX_TIMESTAMP(created_at) * 1000 AS UNSIGNED) AS timestamp_ms,
+		       created_at,
 		       (intent_at IS NOT NULL AND checksum IS NULL) AS pending
 		FROM event_history
 		WHERE workflow_id = ? AND tenant_id = ?
@@ -168,6 +168,12 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+		// NullTime, so a row whose created_at is NULL does not fail the
+		// whole load. It needs parseTime=true on the DSN, which
+		// cleat-worker's --db help and docs/reference/database-backends.md
+		// already require and which mysql_ops.go already depends on -- no
+		// new requirement.
+		var createdAt sql.NullTime
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -176,8 +182,12 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
-			&rec.TimestampMs, &rec.Pending); err != nil {
+			&createdAt, &rec.Pending); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
+		}
+
+		if createdAt.Valid {
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 
 		rec.Service = service.String
@@ -244,7 +254,8 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
-		       promise_name, promise_id, promise_result, promise_error
+		       promise_name, promise_id, promise_result, promise_error,
+		       created_at
 		FROM event_history
 		WHERE workflow_id = ? AND tenant_id = ?
 		ORDER BY step
@@ -266,6 +277,7 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+		var createdAt sql.NullTime
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -273,8 +285,13 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
-			&promiseName, &promiseID, &promiseResult, &promiseError); err != nil {
+			&promiseName, &promiseID, &promiseResult, &promiseError,
+			&createdAt); err != nil {
 			return nil, fmt.Errorf("scan history paginated: %w", err)
+		}
+
+		if createdAt.Valid {
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 
 		rec.Service = service.String
@@ -356,7 +373,7 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				       payload,
 				       promise_name, promise_id, promise_result, promise_error,
-				       CAST(UNIX_TIMESTAMP(created_at) * 1000 AS UNSIGNED) AS timestamp_ms
+				       created_at
 				FROM event_history
 				WHERE workflow_id = ? AND tenant_id = ?
 				ORDER BY step
@@ -379,6 +396,7 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 				var payload sql.NullString
 				var promiseName, promiseID, promiseResult, promiseError sql.NullString
+				var createdAt sql.NullTime
 
 				if err := rows.Scan(&rec.Step, &rec.EventType,
 					&service, &op, &request, &response, &errMsg,
@@ -387,10 +405,14 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 					&payload,
 					&promiseName, &promiseID, &promiseResult, &promiseError,
-					&rec.TimestampMs); err != nil {
+					&createdAt); err != nil {
 					rows.Close()
 					errCh <- err
 					return
+				}
+
+				if createdAt.Valid {
+					applyCreatedAt(&rec, createdAt.Time)
 				}
 
 				rec.Service = service.String

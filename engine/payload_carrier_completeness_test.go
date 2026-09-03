@@ -66,20 +66,15 @@ var payloadExemptFields = map[string]string{
 	"TimestampMs": "derived from a column, not carried: the SELECT computes " +
 		"it as EXTRACT(EPOCH FROM created_at)*1000 rather than reading a " +
 		"stored millisecond value. Asserted below.",
-	"CreatedAt": "column: event_history.created_at, but only PostgreSQL's " +
-		"LoadEventHistory actually returns it. MySQL's SELECT derives " +
-		"timestamp_ms from created_at without reading the column, and SQL " +
-		"Server's reads it, derives TimestampMs, and drops the value -- so " +
-		"EventRecord.CreatedAt is the zero time on two of three dialects. " +
-		"Measured 2026-09-03; see IMPROVEMENT-PLAN 3.97. Not fixed here " +
-		"because it is a different carrier from this file's subject and a " +
-		"wider one: MySQL alone has three read paths (LoadEventHistory, " +
-		"LoadEventHistoryPaginated, StreamEventHistory) and the fix belongs " +
-		"with a test that holds all of them to the same answer, not with two " +
-		"one-line patches that would make this file green over the other four " +
-		"paths. Documented on EventRecord as being for admin timeline " +
-		"visualization and not required for deterministic replay, which is " +
-		"why it is a defect and not a data-loss bug.",
+	"CreatedAt": "column: event_history.created_at, read back by every path on " +
+		"every dialect since IMPROVEMENT-PLAN 3.102. It was PostgreSQL-only when " +
+		"this map was written -- MySQL derived timestamp_ms from created_at " +
+		"without reading the column, and SQL Server read it, derived TimestampMs " +
+		"and dropped the value -- which is what this file's " +
+		"TestThePayloadExemptFieldsAreCarriedByColumnsInstead found. It stays " +
+		"exempt HERE because the payload is not what carries it; " +
+		"engine/read_path_parity_test.go is what holds the nine read paths to " +
+		"the same answer.",
 	"Pending": "derived read (json:\"-\"): computed at load time from " +
 		"intent_at IS NOT NULL AND checksum IS NULL (store_intent.go), never " +
 		"itself a stored value, so a payload has nothing to carry. types.go " +

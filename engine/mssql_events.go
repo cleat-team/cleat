@@ -57,7 +57,7 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
-		rec.TimestampMs = createdAt.UnixMilli()
+		applyCreatedAt(&rec, createdAt)
 		rec.Service = service.String
 		rec.Op = op.String
 		rec.Request = tryDecodeBase64(request.String)
@@ -175,7 +175,7 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					return
 				}
 
-				rec.TimestampMs = createdAt.UnixMilli()
+				applyCreatedAt(&rec, createdAt)
 				rec.Service = service.String
 				rec.Op = op.String
 				rec.Request = tryDecodeBase64(request.String)
@@ -303,7 +303,8 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
-		       promise_name, promise_id, promise_result, promise_error
+		       promise_name, promise_id, promise_result, promise_error,
+		       created_at
 		FROM event_history
 		WHERE workflow_id = @p1 AND tenant_id = @p2
 		ORDER BY step
@@ -325,6 +326,10 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+		// NullTime here rather than the plain time.Time the other two paths
+		// use, because this SELECT did not read created_at at all before
+		// 2026-09-03 and a NULL must not fail the page.
+		var createdAt sql.NullTime
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -332,8 +337,13 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
-			&promiseName, &promiseID, &promiseResult, &promiseError); err != nil {
+			&promiseName, &promiseID, &promiseResult, &promiseError,
+			&createdAt); err != nil {
 			return nil, fmt.Errorf("scan history paginated: %w", err)
+		}
+
+		if createdAt.Valid {
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 
 		rec.Service = service.String
