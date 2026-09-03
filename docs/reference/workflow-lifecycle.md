@@ -13,7 +13,9 @@ left to be rediscovered.
 ## The statuses
 
 `workflow_instances.status` is a `TEXT` column with no `CHECK` constraint
-(`migrations/postgres/001_schema.sql:227`, default `'ready'`). Six values are ever written:
+(`migrations/postgres/001_schema.sql:227`, default `'ready'`). Six values are ever written today,
+and a seventh — `terminating` — has its schema in place but no writer yet (see the defer phase
+below):
 
 | status | terminal? | meaning |
 |---|---|---|
@@ -22,7 +24,8 @@ left to be rediscovered.
 | `done` | **yes** | The workflow returned a result. |
 | `failed` | **yes** | The workflow failed terminally, or its parent's close policy terminated it. |
 | `terminated` | **yes** | Force-terminated by an operator through the admin API. |
-| `dead_lettered` | **yes** | Retries exhausted. |
+| `dead_lettered` | **yes** | Retries exhausted. On the Go SDK this is reachable only through a retry policy short enough to have run on the host — see `IMPROVEMENT-PLAN.md` §3.88. |
+| `terminating` | no | **Not yet written by anything.** The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Schema landed in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
 
 Re-derive the written set with:
 
@@ -155,9 +158,25 @@ defers never ran** (IMPROVEMENT-PLAN §3.75).
 
 ## The planned defer phase, and the status window it introduces
 
-**Status: designed (§3.75), not yet built.** Documented here in advance because it changes what
-`terminate` means to a caller, and that change should be visible before it ships rather than
-discovered afterwards.
+**Status: durable record landed; nothing writes it yet (§3.75 step 1).** Documented here in
+advance because it changes what `terminate` means to a caller, and that change should be visible
+before it ships rather than discovered afterwards.
+
+What exists as of 2026-09-03 is the schema and the vocabulary:
+
+| | |
+|---|---|
+| `workflow_instances.pending_terminal_status` | the outcome to finalize with once the defer phase completes. `NULL` on every row today, which is what "no defer phase is owed" means. |
+| `workflow_instances.defer_phase_deadline` | when the reaper may conclude the phase died and re-queue the workflow. Separate from heartbeat staleness on purpose: a phase whose worker vanished is already caught by the heartbeat sweep, so this bounds the *phase* — a workflow cannot sit in `terminating` forever because its defers trap on every attempt. |
+| `terminating` | the status for the window, per the visibility condition below. |
+
+`migrations/postgres/038_defer_phase_marker.sql`, `mysql/037`, `mssql/041`. Note the numbers do
+not align across dialects and are not meant to; take the next free number above each dialect's
+own high-water mark.
+
+**Nothing reads or writes these yet.** The consumer — the defer segment in the executor — and
+the producers — the three unfenced transitions — are the remaining work. Until then the columns
+are inert and the paragraph at the end of this section still describes current behaviour.
 
 §3.35 phases 1–4 made a workflow's `defer` bodies run on every path where a live instance exists:
 success, error, and every kill the host performs. The three unfenced transitions above are the
@@ -189,7 +208,7 @@ follows from that:
   visible — a caller can tell "terminating, running its cleanup" from "running normally".
 - **The workflow is not re-executed.** The defer segment replays history to reconstruct the
   instance and runs only the registered defers; the workflow body does not run again.
-- **Bounded by a deadline.** The marker carries one, swept by the existing `reaperLoop`, so a
+- **Bounded by a deadline.** `defer_phase_deadline`, swept by the existing `reaperLoop`, so a
   worker that dies mid-defer-phase leaves a workflow the reaper re-queues.
 
 Until this ships, the three unfenced transitions remain terminal-and-immediate, and their defers
