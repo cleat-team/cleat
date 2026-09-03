@@ -327,6 +327,19 @@ rejects it, surfacing as an opaque TLS handshake failure rather than an auth err
 `go test ./engine/` takes ~21 s with PostgreSQL alone and ~50 s with all three. **Check that
 delta** — an unset DSN skips its dialect silently and the suite still prints `ok`.
 
+**Those two absolutes are stale, and a session that trusts them will misread its own run.**
+Measured 2026-09-02 on `develop` at `603fdd9`, `go test ./engine/... -count=1 -p 1` with
+PostgreSQL and MySQL set and no MSSQL DSN: **149 s** for the engine package, 2 m 37 s wall.
+That is three times the "all three" figure with one dialect fewer. It was taken while another
+sandbox was running its own suite (load average 8.6, `221% cpu` for this one), so it is an
+upper bound rather than a replacement number — which is the point: **the delta only works as a
+same-session control.** Run one arm, run the other, compare the two you just took. Do not
+compare today's run against a figure someone wrote down in August, and do not take a timing
+number at all while `ps aux | grep engine.test` shows another stream's run.
+
+What survives is the shape of the check, not the constants: fewer dialects is faster, and a
+run that finishes suspiciously fast tested less than you think.
+
 **Use `-p 1` when running more than one database-backed package in a single invocation.**
 `go test ./engine/ ./cmd/... ./tests/crash/` runs those packages concurrently against one
 database while `CleanupPostgresTestData` deletes from eleven tables unqualified, so a different
@@ -337,6 +350,18 @@ not evidence about the branch, it is evidence about the invocation.
 
 Recreating databases: PostgreSQL `DROP DATABASE cleat WITH (FORCE)`; MySQL
 `docker exec cleat-ws2-mysql mysql -u root -pcleat -e "DROP DATABASE cleat; CREATE DATABASE cleat;"`.
+
+**Done on 2026-09-02 for #594** (`workflow_defs` keyed by `(tenant_id, name, version)`, with
+migrations on all three dialects), following the rule recorded above about recreating after a
+schema change lands on `develop`. Both databases came back clean and `develop` at `603fdd9` is
+green here on PostgreSQL and MySQL — which also says those migrations apply to a *fresh*
+database on both, not only as an ALTER over an existing one. MSSQL skipped for an absent DSN,
+the one legitimate reason; this sandbox still cannot run that dialect at all (see below).
+
+Verified the skip was the only one that mattered rather than assuming it:
+`go test ./engine/ -run 'TestTerminateWorkflowEnforcesParentClosePolicy|TestDeployRecordsTheDeployingTenant' -v`
+shows `PASS/postgres`, `PASS/mysql`, `SKIP/mssql`. A green suite is not evidence that a
+dialect ran; a named subtest is.
 
 **Recreating `cleat` is not enough, and the leftovers fail in a way that reads as a code
 defect.** `cmd/cleat-worker`'s tenant-isolation tests create *per-tenant* databases named
@@ -352,6 +377,26 @@ confirmed environmental by reproducing it on `develop` with the branch stashed �
 before reading a failure like this as yours. List and drop them:
 
     docker --context colima exec cleat-ws2-mysql mysql -uroot -pcleat -N -e "SHOW DATABASES LIKE 'cleat%'"
+
+That line only lists them; this drops every one and puts `cleat` back:
+
+    for db in $(docker --context colima exec cleat-ws2-mysql mysql -uroot -pcleat -N \
+                  -e "SHOW DATABASES LIKE 'cleat%'"); do
+      docker --context colima exec cleat-ws2-mysql mysql -uroot -pcleat -e "DROP DATABASE \`$db\`;"
+    done
+    docker --context colima exec cleat-ws2-mysql mysql -uroot -pcleat -e "CREATE DATABASE cleat;"
+
+`--context colima` rather than a bare `docker exec` for the same reason the line above uses it:
+another stream's `colima start` rewrites the global context, and a bare `docker exec` then
+resolves the container name in whichever profile it left behind. Both forms were run on
+2026-09-02 and both worked, because the default context happened to be `colima` — which is
+exactly the condition that makes the bare form look safe.
+
+**The tenant UUIDs are fixed, not random**, so the leftover set is small and recognisable:
+`00000000…`, `11111111…`, `22222222…`, `33333333…`. All four were present again on
+2026-09-02 after the previous session's killed run — the trap recurs on every interrupted run
+rather than having been a one-off.
+
 **azure-sql-edge ships no `sqlcmd`**, so SQL Server has to be recreated over a Go connection
 or by restarting the container. Do not run `docker compose down -v` — it destroys the user's
 database. Remove containers by name.
