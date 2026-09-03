@@ -1645,7 +1645,41 @@ jobs:
           #
           #   jq -r 'select(.Action=="pass" and .Test==null and
           #          (.Package|endswith("/engine"))) | .Elapsed' test-report.json
-          go test -p 1 -count=1 -timeout=300s -json ./engine/... 2>&1 | tee test-report.json
+          #
+          # 2026-09-03: 300s ran out, and the paragraphs above are the reason
+          # this took a diagnosis rather than a glance. Measured across the
+          # Cluster Integration Tests job's own runs on the same day, all
+          # PostgreSQL-only, oldest first:
+          #
+          #   241.891s  pass
+          #   250.137s  pass
+          #   286.239s  pass
+          #   291.460s  pass
+          #   287.100s  pass
+          #   300.034s  KILLED
+          #
+          # Fifty seconds of growth in about two and a half hours of merges,
+          # which left 9-14s of margin, and then none. Note what the failure
+          # looked like: it landed on a PR that touched IMPROVEMENT-PLAN.md and
+          # some comment text, and the log had no failing test in it at all --
+          # exactly the shape the #472 paragraph above warns about, arriving
+          # again because the ceiling moved into range rather than because a
+          # runner was slow.
+          #
+          # 900s, which is ~3x the current typical duration -- the same
+          # multiple the 180s -> 300s note reasoned to, applied to the number
+          # the suite now actually takes. This is deliberately not matched to
+          # the other two Postgres steps in this file (./tests/exhaustion/...
+          # and ./tests/cluster/...): they still have their headroom, and
+          # raising a ceiling nothing is pressing against buys nothing.
+          #
+          # What this does NOT decide: whether the cluster job should be
+          # running the whole engine suite at all. It exists here to exercise
+          # the engine against a real four-worker cluster, and 290 seconds of
+          # it is mostly tests that do not need one. Narrowing the package set
+          # would cut the job rather than just survive it, but it is a change
+          # to what this job covers and belongs to whoever owns that decision.
+          go test -p 1 -count=1 -timeout=900s -json ./engine/... 2>&1 | tee test-report.json
 
       # This job brings up a real four-worker cluster and a real database, so
       # it has asked for everything its tests need: any skip here means
