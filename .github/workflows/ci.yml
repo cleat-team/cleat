@@ -80,6 +80,14 @@ jobs:
       - name: ABI doc/code consistency guard
         run: scripts/check-doc-consistency.sh
 
+      # Three workstreams append sections to IMPROVEMENT-PLAN.md at once, each
+      # picking the next free number against a develop that has already moved.
+      # The collision exists only in the merge, and a duplicate heading renders
+      # perfectly. Four of them landed on 2026-09-02 alone (1.3, 2.70, 3.77,
+      # 3.78); the damage is the cross-references that rot around them.
+      - name: Plan section-number guard
+        run: scripts/check-section-numbers.sh
+
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
