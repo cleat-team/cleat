@@ -34,12 +34,18 @@ const (
 	xtcTenantB = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
 )
 
-// xtcDefName/xtcDefVersion identify the single workflow_defs row most
-// fixtures below reference. workflow_instances.def_name/def_version FKs into
-// workflow_defs(name, version) regardless of tenant -- workflow_defs is a
-// shared/global registry (see 001_schema.sql's tenant_isolation_defs policy)
-// -- so one definition, deployed once by the default tenant, is enough for
-// fixtures across every tenant used in this file.
+// xtcDefName/xtcDefVersion identify the workflow_defs rows most fixtures below
+// reference -- one PER TENANT, not one shared row. See deployCrossTenantDef,
+// which says the same thing where the work happens.
+//
+// This comment used to say the opposite, and the correction is worth keeping
+// rather than just deleting: workflow_defs was a shared/global registry keyed
+// by (name, version), so a single row deployed by the default tenant satisfied
+// every tenant's foreign key. D7 (IMPROVEMENT-PLAN 3.77, migration
+// postgres/035) made the key (tenant_id, name, version) and widened
+// workflow_instances' FK to match, so that is no longer true. The helper was
+// updated when D7 landed; this header was not, and for a day it contradicted
+// the function sixty lines below it.
 const (
 	xtcDefName    = "cross-tenant-claim-test"
 	xtcDefVersion = 1

@@ -48,6 +48,25 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	return claimed, nil
 }
 
+// claimWorkflowsOnce claims for THIS STORE'S TENANT ONLY.
+//
+// `AND tenant_id` in the candidate SELECT is the whole of that on SQL Server,
+// and it was missing (3.91). dbo.fn_tenant_filter is off for any dbo.cleat_admin
+// login (012_admin_role.sql), and requireCleatAdminMembership checks s.db -- the
+// SAME POOL this runs on -- so on any deployment where ClaimWorkflowsAcrossTenants
+// works at all, this ordinary claim was already returning every tenant's ready
+// work and the -claim-across-tenants flag was guarding a widening that had
+// already happened.
+//
+// The other two dialects disagreed with this one, which is what settled it:
+// MySQL carries `AND tenant_id = ?` here explicitly, and PostgreSQL carries no
+// predicate but claims inside beginTxWithRLS where the application role is
+// genuinely subject to RLS (cross_tenant_claim_test.go tests exactly that, with
+// a non-owning role). SQL Server had neither, so it was the only dialect with
+// nothing enforcing it.
+//
+// Do not "simplify" this by sharing SQL with claimWorkflowsAcrossTenantsOnce.
+// The difference between them is this one predicate, and that is the point.
 func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
@@ -89,10 +108,11 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 			WHERE status = 'ready'
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+			  AND tenant_id = @p4
 			ORDER BY priority ASC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
 		)
-	`, workerID, tqParam, limit)
+	`, workerID, tqParam, limit, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
 	}
@@ -160,6 +180,13 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 	return claimed, nil
 }
 
+// claimStickyWorkflowsOnce claims for this store's tenant only -- see
+// claimWorkflowsOnce for why the predicate is load-bearing (3.91).
+//
+// `sticky_worker_id = @p1` is not a substitute for it. A worker id is not a
+// tenant, and on a fleet where two tenants' workers were configured with the
+// same id -- which nothing prevents, since the id is operator-chosen -- the
+// sticky claim crossed tenants on a match rather than on a guess.
 func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
@@ -202,10 +229,11 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND sticky_worker_id = @p1
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
+			  AND tenant_id = @p4
 			ORDER BY priority ASC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
 		)
-	`, workerID, tqParam, limit)
+	`, workerID, tqParam, limit, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
 	}

@@ -12079,6 +12079,81 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
+### 3.91 The ordinary claim path took every tenant's work on SQL Server — 🟢 **FIXED 2026-09-03; the `-claim-across-tenants` flag was decorative on this dialect** (WS-1, 2026-09-03)
+
+`claimWorkflowsOnce` and `claimStickyWorkflowsOnce` — the **ordinary** claim, not the one whose
+name says `AcrossTenants` — carried no tenant predicate. On a `dbo.cleat_admin` login, which
+§3.86 establishes every multi-tenant SQL Server deployment must use, they returned every tenant's
+ready work.
+
+Measured before the fix, tenant B's ordinary `ClaimWorkflows`:
+
+```
+returned 2 instances:
+    id=probe-tenant-a-wf tenant=AAAAAAAA-AAAA-4AAA-AAAA-AAAAAAAAAAAA
+    id=probe-tenant-b-wf tenant=BBBBBBBB-BBBB-4BBB-BBBB-BBBBBBBBBBBB
+```
+
+**The grant is always present exactly where this matters, which is what makes it more than
+theoretical.** `requireCleatAdminMembership` checks `s.db` — the *same pool* `claimWorkflowsOnce`
+runs on. So on any deployment where `ClaimWorkflowsAcrossTenants` works at all, the ordinary claim
+was already unscoped, and `-claim-across-tenants` was gating a widening that had already happened
+unconditionally. The flag changed which SQL ran; it did not change what the worker could see.
+
+#### The three dialects disagreed, and that is what settled it
+
+| | ordinary claim is scoped by |
+|---|---|
+| MySQL | `AND tenant_id = ?` in the candidate `SELECT`, explicitly |
+| PostgreSQL | nothing in the SQL — it claims inside `beginTxWithRLS`, and the application role does **not** hold `BYPASSRLS`, so RLS really does it. `cross_tenant_claim_test.go` tests precisely that, using a deliberately non-owning role |
+| SQL Server | **nothing, and nothing underneath it either** |
+
+So this was not a judgement call about whether a predicate was warranted. SQL Server was the only
+dialect with no enforcement at any layer, and the fix is to match MySQL.
+
+#### Why four passes missed it, and what that says about the gate
+
+`scripts/mssql-tenant-predicate-audit.py` asks whether `tenant_id` appears anywhere in the
+statement, and for this one it does — twice. The claim projects
+`CONVERT(NVARCHAR(36), INSERTED.tenant_id)` in its `OUTPUT` clause, and carries a long comment
+about that conversion. Neither scopes anything. **The script's count did not move when this was
+fixed**: 66/29 before, 66/29 after, re-derivable with
+
+```
+python3 scripts/mssql-tenant-predicate-audit.py
+```
+
+That is the argument for §3.86's gate being **position-aware** rather than a substring test,
+stated better than the DeliverSignal MERGE stated it. A prototype asking whether `tenant_id`
+appears in a `WHERE`, `ON` or `HAVING` window flags 31 statements where the substring test flags
+29, and the two it adds are these.
+
+#### A case hazard, found by a probe that passed while printing the leak
+
+`CONVERT(NVARCHAR(36), tenant_id)` returns **uppercase**. The first probe compared
+`wf.TenantID == unscopedTenantA` against a lowercase constant, so it reported PASS while its own
+log showed tenant A's workflow in tenant B's claim. Every assertion in the regression test is
+`strings.EqualFold` now.
+
+**The same hazard is live in production code and is not fixed here.**
+`cmd/cleat-worker/setup.go:storeForTenant` compares tenant strings with `==`. If a worker's
+configured tenant is lowercase and the claim hands back uppercase, the worker treats its own
+tenant as foreign and opens a second pool for it — wasteful rather than wrong, since
+`uuid.Parse` accepts either case, but it means the `tenantID == w.storeTenantID` fast path never
+fires on SQL Server. Recorded rather than fixed: it is a different file and a different failure.
+
+#### Regression test
+
+`engine/mssql_admin_login_claim_tenant_test.go`. Both predicates were removed one at a time and
+each turned exactly one case red, naming the claimed rows —
+`tenant B's ORDINARY claim took tenant A's work: claimed [claim-a-plain claim-b-plain]`.
+
+**The third case is the one that had to be there**: `ClaimWorkflowsAcrossTenants` must *still* see
+both tenants. Scoping the ordinary path and accidentally scoping the deliberate one would stop a
+multi-tenant deployment's dispatch loop seeing the tenants it exists to serve, and every
+non-default tenant's workflows would stop running — a worse outcome than the defect. It stayed
+green under both falsifications.
+
 ### 3.90 `--wasm-instance-timeout` is charged for time the guest spends blocked in the host — 🔵 **MEASURED 2026-09-03** (WS-3)
 
 The per-invocation wall-clock fence advances while the guest is parked inside a host call. A
