@@ -11561,6 +11561,21 @@ So a terminated workflow's defer segment can still start a **child workflow** or
 **plugin**. §3.83's own section should be read with that scope: it closed the path its test
 covers, not the frontier.
 
+> **The table above is one short, and this section needs the same caveat it applies to §3.83 —
+> 2026-09-03.** `Fetch` (`engine/lifecycle.go`) was a seventh unguarded fresh path and is not in
+> the inventory, because the inventory was built by reading the entry points a guest uses to
+> reach a *service*, and `cleat_fetch` reaches one without going through the durable-call family.
+> Fixed in §3.104.
+>
+> Go guests were never exposed: `cleat/runtime_workflow.go`'s `DurableFetch` routes through
+> `DurableCall("http", "fetch", ...)`, which this section already guards. The exposure was to the
+> guests that import `cleat_fetch` directly, which is Java and AssemblyScript. Re-derive the
+> current set of guarded paths with:
+>
+> ```
+> grep -rn "stopBeforeNewWork()" --include="*.go" engine/ | grep -v _test.go
+> ```
+
 Re-derive: `grep -n "func (s \*execSession) \(PluginCall\|ChildWorkflow\|DurableAwaitSignals\)" -A 6 engine/*.go`
 
 #### Why this is a mechanism rather than four more `if` statements
@@ -13443,3 +13458,45 @@ rather than leaving it: an unused path is not inert, it is unreviewed.
 
 `SliceEventStream` went with it. It had no callers either, and an interface with one dead
 implementation is not an abstraction.
+
+### 3.104 A defer segment could still make an outbound HTTP request — ✅ **FIXED** (WS-2, 2026-09-03)
+
+§3.84 guarded six fresh paths so a defer segment cannot start new work past the frontier.
+`execSession.Fetch` was the seventh and was not in its inventory: that table was built by reading
+the entry points a guest uses to reach a *service*, and `cleat_fetch` reaches one without going
+through the durable-call family, so it was never a candidate.
+
+**It matters more than "one more path" suggests.** An outbound HTTP request is the most
+externally visible kind of new work there is — it leaves a side effect on someone else's server
+that no amount of unwinding takes back — and the workflow making it has already been recorded as
+terminated. Every other unguarded path §3.84 closed was recoverable by comparison.
+
+**Go guests were never exposed**, which is why the Go-only defer segment never surfaced it:
+`cleat/runtime_workflow.go`'s `DurableFetch` builds a request map and calls
+`DurableCall("http", "fetch", ...)`, so it goes through the path §3.84 guards. The guests that
+import `cleat_fetch` directly reach `execSession.Fetch`, and those are Java
+(`crates/cleat-java`, `cleatFetchRaw`) and AssemblyScript — neither of which can run a defer
+segment yet, because `deferSegmentLanguages` is `{"go": true}`. So this was a hole waiting for
+the SDK work rather than a live defect, and it is closed before that work rather than after.
+
+The fix is the same one line the other six use:
+
+```go
+if s.stopBeforeNewWork() {
+    return callSuspendSentinel
+}
+```
+
+**And the layout question is answered rather than assumed.** `Fetch` returns `packSimpleResult`,
+which is not the layout §3.83's `cleat_call` work used — and a bit that is free in one layout and
+reachable in another is exactly the defect §3.83 exists to record.
+`TestStopSentinelBitsAcrossEveryLayout` measures `packSimpleResult` as
+`free=ff000000ffffff00`, so bit 31 is free; `TestTheStopSentinelIsNotAReachableSimpleResult` in
+`engine/defer_segment_fetch_test.go` re-derives it locally rather than trusting the number in a
+comment.
+
+**Falsified in both directions**, which this one needs: removing the guard makes
+`TestADeferSegmentCannotStartAnHTTPFetch` report the fetcher actually invoked and one event
+recorded, and `TestAnOrdinarySegmentStillFetches` is the other direction — a guard that blocked
+*every* fetch would satisfy the first test just as well. The fetcher is a recording double, so
+"did the request go out" is measured rather than inferred from a return value.

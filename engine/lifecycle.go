@@ -611,6 +611,22 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 		s.exitReplay()
 	}
 
+	// Past the frontier in a defer segment: an outbound HTTP request is new
+	// work, and the most externally visible kind there is -- it leaves a side
+	// effect on someone else's server that no amount of unwinding takes back.
+	//
+	// IMPROVEMENT-PLAN 3.84 guarded six fresh paths and this is the seventh it
+	// did not list. Its table was built by reading the entry points a guest
+	// uses to reach a *service*, and Fetch reaches one without going through
+	// the durable-call family, so it was not in the inventory to begin with.
+	//
+	// packSimpleResult, which is what every return below uses, has bit 31 free
+	// -- TestStopSentinelBitsAcrossEveryLayout measures it as free=ff000000ffffff00
+	// -- so the same universal sentinel works here with no new layout question.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	var response string
 	var fetchErr error
 	if s.engine.fetcher != nil {
