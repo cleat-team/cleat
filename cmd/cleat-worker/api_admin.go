@@ -252,8 +252,13 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 // 501 is separated from 500 deliberately. Every one of these operations was a
 // stub returning "not implemented yet", and the caller was told 500 -- the
 // same answer as a database failure, for an operation that had never existed.
-// force-complete and force-fail are real now; re-replay still is not, and says
-// so in the status line rather than in prose inside a 500 body.
+//
+// All three are real now: re-replay was the last stub, and its body landed
+// with IMPROVEMENT-PLAN 3.20. No store in this repo returns
+// ErrAdminOpNotImplemented any more, so this branch is unreachable from the
+// bundled dialects -- it is kept because WorkflowStore is a public interface
+// and an out-of-tree store may implement some of it and not the rest. See that
+// error's doc comment.
 func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
 	msg := err.Error()
 	switch {

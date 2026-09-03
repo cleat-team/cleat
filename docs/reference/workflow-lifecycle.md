@@ -114,6 +114,25 @@ stateDiagram-v2
 | `running` → `dead_lettered` | `MoveToDeadLetterQueue`, `engine/store_lifecycle.go:505` |
 | `*` → `terminated` | `TerminateWorkflow`, `engine/db.go:1128`, `mysql_ops.go`, `mssql_operations.go` |
 
+### Which terminal transitions close the workflow's children
+
+`enforceParentClosePolicy` runs on every transition that takes a parent out of
+the runnable set, on all three dialects: `CompleteWorkflow`, `FailWorkflow`,
+`FinalizeWorkflowSegment`, `MoveToDeadLetterQueue`, `ContinueAsNew` (which
+closes the current run), `adminForceResolve` (force-complete and force-fail),
+and — since 2026-09-02 — `TerminateWorkflow`.
+
+Re-derive with
+`grep -rn "enforceParentClosePolicy(" --include='*.go' engine/ | grep -v _test`
+and map each hit to its enclosing `func`; the list above is that mapping on
+2026-09-02.
+
+Terminate was the exception until then, and nothing stated why: force-completing
+a parent failed its `TERMINATE` children while terminating the same parent left
+them running. That is a **behaviour change** for anyone who relied on terminate
+being the narrow "stop this one workflow" verb — see `CHANGELOG.md` and
+IMPROVEMENT-PLAN §3.79. `ABANDON` children are unaffected on every path.
+
 ### Fenced and unfenced transitions — the distinction that matters
 
 Most terminal transitions are **fenced** on `(assigned_to, generation)`: the write applies only
