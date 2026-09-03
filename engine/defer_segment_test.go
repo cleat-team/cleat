@@ -260,3 +260,89 @@ func TestADeferSegmentDrainsOnTheSuspension(t *testing.T) {
 			"with its calls refused and consumed the cleanup.", got, want, deferRunnerExport)
 	}
 }
+
+// TestADeferSegmentPastTheFrontierDoesNewWork is a characterization test: it
+// asserts behaviour that is WRONG, so that fixing it fails here and this
+// comment is read.
+//
+// The segment above ends in a suspension, which is the common case -- a
+// workflow worth terminating is usually one that is waiting. A workflow
+// finalized `ready` is the other case: replay reaches the end of recorded
+// history and the guest simply carries on, because nothing tells it to stop.
+//
+// Measured 2026-09-02 on a segment with no history at all, which is that case
+// in its purest form:
+//
+//	operations reaching the ServiceCaller: [body second first]
+//	result: {"status":"ok"}   suspended: false   err: nil
+//
+// Two defects, and the second is the worse one:
+//
+//  1. `body` ran. A defer segment performed the workflow's own side effect,
+//     not its cleanup.
+//  2. The segment returned a successful completion result. A workflow that was
+//     terminated is reported as having finished normally, by the very machinery
+//     meant to clean up after it.
+//
+// The fix is a host-to-guest "stop" on a fresh call, so the guest unwinds with
+// __susSuspended set and lands on the drain path the test above exercises. It
+// needs a sentinel bit in the cleat_call result word that the host can never
+// produce by accident; see
+// TestPackDurableCallResult_SentinelBitsTheHostCannotReach for which bits those
+// are, and why the one IMPROVEMENT-PLAN named is not among them.
+//
+// When that lands, this test flips from asserting `body` is present to
+// asserting it is absent.
+func TestADeferSegmentPastTheFrontierDoesNewWork(t *testing.T) {
+	wasmBytes, _, _, _ := deferPhaseProbeEngine(t, "wf-past-frontier", false)
+
+	rt, err := NewRuntime(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(context.Background()) })
+	wt, err := NewWasmtimeBackend(context.Background())
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(context.Background()) })
+
+	caller := &mockCaller{}
+	eng := NewEngine(rt, caller,
+		WithBackends(WasmtimeLanguages, wt),
+		WithWorkflowID("wf-past-frontier"),
+		WithDeferPhase())
+
+	res, _, susp, _, _, err := eng.Execute(context.Background(), wasmBytes,
+		"defer_order", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if susp != nil {
+		t.Fatalf("the segment suspended; this test measures the path that does " +
+			"NOT suspend, so it no longer measures what it was written for")
+	}
+
+	got := operationsCalled(caller)
+	sawBody := false
+	for _, op := range got {
+		if op == "body" {
+			sawBody = true
+		}
+	}
+	if !sawBody {
+		t.Fatalf("the workflow body did NOT reach the ServiceCaller (%v).\n\n"+
+			"If a stop-on-fresh-call was just implemented, that is the fix "+
+			"landing: invert this test to assert `body` is ABSENT, and update "+
+			"the plan section it names.", got)
+	}
+
+	// The more serious half. A terminated workflow reported as completed is a
+	// status defect, not just a wasted side effect.
+	if res == "" {
+		t.Fatalf("the segment returned no result; this test's second assertion " +
+			"no longer measures anything")
+	}
+	t.Logf("characterized (both WRONG, tracked in the plan): a defer segment past "+
+		"the frontier ran %v and returned %q", got, res)
+}

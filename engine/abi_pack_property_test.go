@@ -148,6 +148,69 @@ func TestPackDurableCallResult_ResponseLenTruncatesAboveItsField(t *testing.T) {
 		"at %d, which keeps this unreachable", field-1, 1<<20)
 }
 
+// TestPackDurableCallResult_SentinelBitsTheHostCannotReach measures which bits
+// of this layout are available for an out-of-band sentinel, because
+// IMPROVEMENT-PLAN 3.81 proposed the wrong one.
+//
+// Phase 5 needs a way for the host to tell a guest "stop, do not do new work"
+// on a call that has run past the end of recorded history. The obvious answer,
+// and the one 3.81 wrote down, is bit 62 -- the bit cleat_await_child and
+// cleat_await_any_child already decode as a suspend sentinel, so it looks like
+// reusing an established convention.
+//
+// It is not available here. Those two pack a 32-bit length at bits 32-63, where
+// bit 62 means a length of 1 GiB. This layout packs a 24-bit responseLen at
+// bits 40-63, where bit 62 means 4 MiB -- and responseLen is bounded by
+// MaxWasmStringLen and OutBufSize, which are package vars set from
+// cmd/cleat-worker's -wasm-max-string-len and -wasm-output-buffer-size. Both
+// are flag.Int with no upper bound, so 4 MiB is operator-reachable and a
+// legitimate response would decode as a suspend.
+//
+// What IS available is bits 16-39, and structurally rather than by a bound:
+// the guest decodes a 32-bit callErrorCode from bits 8-39, but the host
+// parameter is a byte, so 24 of those bits cannot be filled by any input. That
+// asymmetry is already pinned by
+// TestPackDurableCallResult_HostCannotFillCallErrorCode above; this test states
+// the consequence a sentinel can be built on.
+//
+// Measured 2026-09-02: the union over the whole reachable domain is
+// 0xffffff000000ffff.
+func TestPackDurableCallResult_SentinelBitsTheHostCannotReach(t *testing.T) {
+	// Exhaustive over the two byte fields, strided over the 24-bit one. A
+	// stride is enough because OR-ing cannot un-set a bit: any bit reachable
+	// at all is reachable from some sampled responseLen, and the two byte
+	// fields below are covered completely.
+	var everSet uint64
+	for rl := 0; rl < (1 << 24); rl += 997 {
+		for ce := 0; ce < 256; ce++ {
+			for ec := 0; ec < 256; ec++ {
+				everSet |= uint64(packDurableCallResult(rl, byte(ce), byte(ec)))
+			}
+		}
+	}
+
+	const wantFree = 0x000000FFFFFF0000 // bits 16-39
+	if everSet&wantFree != 0 {
+		t.Fatalf("bits 16-39 are no longer free: union is %016x, overlap %016x.\n\n"+
+			"A sentinel placed there would collide with a real result. If "+
+			"callErrorCode was widened past a byte, pick a new range and update "+
+			"IMPROVEMENT-PLAN 3.81.", everSet, everSet&wantFree)
+	}
+
+	// The other half, and the reason this test exists: the bit 3.81 named is
+	// NOT free. If this ever stops holding, responseLen has been narrowed and
+	// bit 62 becomes available after all -- which would be good news, but the
+	// plan says something false until someone reads this.
+	if everSet&(1<<62) == 0 {
+		t.Fatalf("bit 62 is now unreachable by the host (union %016x); it sits "+
+			"inside responseLen, so this means the layout changed. Bit 62 would "+
+			"now be usable as a sentinel here.", everSet)
+	}
+
+	t.Logf("pinned: host-reachable bits are %016x; bits 16-39 are free for a "+
+		"sentinel, bit 62 is not (it is responseLen's 4 MiB bit)", everSet)
+}
+
 // ---- 2. field independence: the property that finds the real defects ----
 
 // TestPackAwaitSignalsResult_FieldsDoNotBleed pins the documented 16-bit limit.
