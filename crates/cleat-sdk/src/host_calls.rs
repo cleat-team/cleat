@@ -2,9 +2,38 @@
 // matching the cleat host runtime ABI from internal/host/imports.go.
 
 use crate::memory;
+use crate::CallError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
+
+/// Marks the segment as suspending and returns the error to propagate.
+///
+/// Every suspend site goes through this rather than constructing
+/// `CallError::Suspended` directly, so the thread-local backstop
+/// (`crate::mark_suspended`) cannot be set on some paths and forgotten on
+/// others. `#[cleat_entry]` reads that flag to catch a body that discards the
+/// `Err` instead of propagating it.
+fn suspend() -> CallError {
+    crate::mark_suspended();
+    CallError::Suspended
+}
+
+/// What `await_signals` returned.
+///
+/// A named struct rather than the `(String, String, bool, Option<String>)`
+/// tuple this used to be: three of those four fields were positional booleans
+/// and strings, and the fourth was an error channel that is now the `Err` arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitedSignal {
+    /// The signal that arrived. Empty when `timed_out`.
+    pub name: String,
+    /// Its payload. Empty when `timed_out`.
+    pub payload: String,
+    /// True when the timeout elapsed before any named signal arrived. This is
+    /// an ordinary outcome, not an error and not a suspension.
+    pub timed_out: bool,
+}
 
 /// All host function imports from the "env" WASM module.
 /// Each returns i64 with a bit-packed result. Strings cross as (ptr, len) pairs.
@@ -347,28 +376,29 @@ impl HostCalls {
     }
 
     /// Sleep for a duration. Preferred over cleat_sleep_ms.
-    pub fn cleat_sleep(&self, d: Duration) -> bool {
+    pub fn cleat_sleep(&self, d: Duration) -> Result<(), CallError> {
         self.cleat_sleep_ms(d.as_millis() as i64)
     }
 
     /// Suspend execution for a duration in milliseconds. Mirrors Go's DurableSleep.
     ///
     /// On a fresh execution the host returns status = 1 (bits 56-63) or the
-    /// direct `SUSPEND_SENTINEL` value. In either case we panic with
-    /// [`SuspendSentinel`] so the export wrapper can propagate the sentinel
-    /// back to the engine. On replay the call returns status = 0 and we return
-    /// `false` (no suspend needed).
-    pub fn cleat_sleep_ms(&self, ms: i64) -> bool {
+    /// direct `SUSPEND_SENTINEL` value. In either case this returns
+    /// `Err(CallError::Suspended)`, and the caller must propagate it with `?`
+    /// so the segment ends here. On replay the call returns status = 0 and this
+    /// returns `Ok(())` -- the sleep is already satisfied and execution
+    /// continues.
+    pub fn cleat_sleep_ms(&self, ms: i64) -> Result<(), CallError> {
         let result = unsafe { imports::cleat_sleep(ms) };
         // Some host runtimes return SUSPEND_SENTINEL directly.
         if result == memory::SUSPEND_SENTINEL {
-            std::panic::panic_any(crate::SuspendSentinel);
+            return Err(suspend());
         }
         let (status, _) = memory::decode_sleep_result(result);
         if status == memory::SLEEP_STATUS_SUSPEND {
-            std::panic::panic_any(crate::SuspendSentinel);
+            return Err(suspend());
         }
-        false
+        Ok(())
     }
 
     /// Get current time in milliseconds since epoch. Mirrors Go's Now().
@@ -426,7 +456,12 @@ impl HostCalls {
     ///
     /// The returned ID is the host's, and is the key the body is stored under,
     /// so the two sides agree about which defer is which.
-    pub fn defer_func<F: FnOnce() + 'static>(&self, f: F) -> (String, Option<String>) {
+    /// The body returns `Result<(), CallError>`: `Err(Failed)` for cleanup that
+    /// did not work, which is logged-and-skipped rather than stopping the
+    /// remaining defers, and `Err(Suspended)` for a body that hit a suspending
+    /// host call, which suspends the segment. It must not `panic!` -- see
+    /// `defer::DeferEntry` for why nothing can catch that here.
+    pub fn defer_func<F: FnOnce() -> Result<(), CallError> + 'static>(&self, f: F) -> (String, Option<String>) {
         // Refused BEFORE the host call -- IMPROVEMENT-PLAN 3.35 phase 4.
         // Registering here used to mint a real defer ID and write a durable
         // `defer` event that nothing could ever run, because run_deferred
@@ -546,7 +581,7 @@ impl HostCalls {
 
 
     /// Await child workflow completion. Mirrors Go's AwaitChild.
-    pub fn await_child(&self, run_id: &str) -> (String, Option<String>) {
+    pub fn await_child(&self, run_id: &str) -> Result<String, CallError> {
         let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let r = unsafe {
             imports::cleat_await_child(
@@ -557,24 +592,22 @@ impl HostCalls {
         // The host returns SUSPEND_SENTINEL when the child has not completed
         // yet — the workflow must suspend.
         if r == memory::SUSPEND_SENTINEL {
-            std::panic::panic_any(crate::SuspendSentinel);
+            return Err(suspend());
         }
         let (result_len, err_code) = memory::decode_simple_result(r);
         if err_code != 0 {
-            return (String::new(), Some(format!("await_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code)));
+            return Err(CallError::Failed(format!("await_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code)));
         }
-        let result = unsafe { memory::read_string(result_buf.as_ptr(), result_len) };
-        (result, None)
+        Ok(unsafe { memory::read_string(result_buf.as_ptr(), result_len) })
     }
 
     /// Await external signals for a duration. Preferred over await_signals_ms.
-    pub fn await_signals(&self, signal_names: &[&str], timeout: Duration) -> (String, String, bool, Option<String>) {
+    pub fn await_signals(&self, signal_names: &[&str], timeout: Duration) -> Result<AwaitedSignal, CallError> {
         self.await_signals_ms(signal_names, timeout.as_millis() as i64)
     }
 
     /// Await external signals in milliseconds. Mirrors Go's AwaitSignals.
-    /// Returns (signal_name, payload, timed_out, error).
-    pub fn await_signals_ms(&self, signal_names: &[&str], timeout_ms: i64) -> (String, String, bool, Option<String>) {
+    pub fn await_signals_ms(&self, signal_names: &[&str], timeout_ms: i64) -> Result<AwaitedSignal, CallError> {
         // JSON-marshal the signal names array, matching Go's adapter.go behavior.
         let names_json = serde_json::to_string(signal_names).unwrap_or_else(|e| { eprintln!("warning: failed to serialize signal names: {}", e); "[]".to_string() });
         let mut sig_name_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
@@ -590,19 +623,19 @@ impl HostCalls {
         // The host returns SUSPEND_SENTINEL when no signal is available and a
         // non-zero timeout has been specified — the workflow must suspend.
         if result == memory::SUSPEND_SENTINEL {
-            std::panic::panic_any(crate::SuspendSentinel);
+            return Err(suspend());
         }
         let (sig_name_len, payload_len, timed_out, err_code) = memory::decode_await_signals_result(result);
         if err_code != 0 {
-            return (String::new(), String::new(), false, Some(format!("await_signals(names={}, timeout_ms={}) failed: host error code {}. Check that the signal names are valid.", names_json, timeout_ms, err_code)));
+            return Err(CallError::Failed(format!("await_signals(names={}, timeout_ms={}) failed: host error code {}. Check that the signal names are valid.", names_json, timeout_ms, err_code)));
         }
-        let sig_name = unsafe { memory::read_string(sig_name_buf.as_ptr(), sig_name_len as u32) };
+        let name = unsafe { memory::read_string(sig_name_buf.as_ptr(), sig_name_len as u32) };
         let payload = if !timed_out && payload_len > 0 {
             unsafe { memory::read_string(payload_buf.as_ptr(), payload_len as u32) }
         } else {
             String::new()
         };
-        (sig_name, payload, timed_out, None)
+        Ok(AwaitedSignal { name, payload, timed_out })
     }
 
     /// Set query state. Mirrors Go's SetQueryState.
@@ -718,12 +751,12 @@ impl HostCalls {
     }
 
     /// Send a signal to a target workflow and wait for a response with a timeout duration. Preferred over send_signal_and_wait_ms.
-    pub fn send_signal_and_wait(&self, target_run_id: &str, signal_name: &str, payload: &str, timeout: Duration) -> Result<String, String> {
+    pub fn send_signal_and_wait(&self, target_run_id: &str, signal_name: &str, payload: &str, timeout: Duration) -> Result<String, CallError> {
         self.send_signal_and_wait_ms(target_run_id, signal_name, payload, timeout.as_millis() as i64)
     }
 
     /// Send a signal to a target workflow and wait for a response in milliseconds. Mirrors Go's SendSignalAndWait.
-    pub fn send_signal_and_wait_ms(&self, target_run_id: &str, signal_name: &str, payload: &str, timeout_ms: i64) -> Result<String, String> {
+    pub fn send_signal_and_wait_ms(&self, target_run_id: &str, signal_name: &str, payload: &str, timeout_ms: i64) -> Result<String, CallError> {
         let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
             imports::cleat_send_signal_and_wait(
@@ -736,12 +769,12 @@ impl HostCalls {
         };
         // The host may return SUSPEND_SENTINEL when the target has not responded yet.
         if result == memory::SUSPEND_SENTINEL {
-            std::panic::panic_any(crate::SuspendSentinel);
+            return Err(suspend());
         }
         let (response_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
-            return Err(err_msg);
+            return Err(CallError::Failed(err_msg));
         }
         let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
         Ok(resp)
@@ -765,8 +798,12 @@ impl HostCalls {
 
     /// Wait for at least min_count signals from the named set, with rejection tracking.
     /// Mirrors Go's AwaitSignalsWithQuorum.
-    /// Returns Ok(Vec<SignalResult>) on success, or Err(String) on error.
-    pub fn await_signals_with_quorum(&self, signal_names: &[String], min_count: i32, max_rejections: i32, timeout_ms: i64) -> Result<Vec<SignalResult>, String> {
+    ///
+    /// The error type is `CallError`, not `String`, so a suspension raised by
+    /// the inner `await_signals_ms` PROPAGATES rather than being flattened into
+    /// a failure message. Flattening it would hand the workflow an `Err` that
+    /// reads like a quorum error for a segment that merely needs to resume.
+    pub fn await_signals_with_quorum(&self, signal_names: &[String], min_count: i32, max_rejections: i32, timeout_ms: i64) -> Result<Vec<SignalResult>, CallError> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
         let mut results: Vec<SignalResult> = Vec::new();
         let mut rejection_count = 0;
@@ -774,22 +811,20 @@ impl HostCalls {
         while (results.len() as i32) < min_count {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.as_millis() == 0 {
-                return Err(format!("quorum timeout after {}ms: got {}/{} signals", timeout_ms, results.len(), min_count));
+                return Err(CallError::Failed(format!("quorum timeout after {}ms: got {}/{} signals", timeout_ms, results.len(), min_count)));
             }
 
             // Gather signal names not yet received as a &[&str].
             let remaining_names: Vec<&str> = signal_names.iter().map(|s| s.as_str()).collect();
-            let (name, payload, timed_out, err) = self.await_signals_ms(&remaining_names, remaining.as_millis() as i64);
-            if let Some(e) = err {
-                return Err(format!("quorum signal error: {}", e));
+            let sig = self.await_signals_ms(&remaining_names, remaining.as_millis() as i64)?;
+            if sig.timed_out {
+                return Err(CallError::Failed(format!("quorum timeout after {}ms: got {}/{} signals", timeout_ms, results.len(), min_count)));
             }
-            if timed_out {
-                return Err(format!("quorum timeout after {}ms: got {}/{} signals", timeout_ms, results.len(), min_count));
-            }
+            let payload = sig.payload.clone();
 
             results.push(SignalResult {
-                name,
-                payload: payload.clone(),
+                name: sig.name,
+                payload: sig.payload,
                 timed_out: false,
             });
 
@@ -800,7 +835,7 @@ impl HostCalls {
                         if rejected {
                             rejection_count += 1;
                             if rejection_count > max_rejections {
-                                return Err(format!("quorum exceeded max rejections ({})", max_rejections));
+                                return Err(CallError::Failed(format!("quorum exceeded max rejections ({})", max_rejections)));
                             }
                         }
                     }
@@ -1110,8 +1145,8 @@ impl HostCalls {
     }
 
     /// Await all children workflows. Returns aggregated JSON results.
-    pub fn await_all_children(&self, run_ids: &[&str]) -> Result<String, String> {
-        let run_ids_json = serde_json::to_string(run_ids).map_err(|e| format!("serialize run_ids: {}", e))?;
+    pub fn await_all_children(&self, run_ids: &[&str]) -> Result<String, CallError> {
+        let run_ids_json = serde_json::to_string(run_ids).map_err(|e| CallError::Failed(format!("serialize run_ids: {}", e)))?;
         let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
             imports::cleat_await_all_children(
@@ -1120,11 +1155,11 @@ impl HostCalls {
             )
         };
         if result == memory::SUSPEND_SENTINEL {
-            std::panic::panic_any(crate::SuspendSentinel);
+            return Err(suspend());
         }
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("await_all_children(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code));
+            return Err(CallError::Failed(format!("await_all_children(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code)));
         }
         let resp = unsafe { memory::read_string(buf.as_ptr(), result_len) };
         Ok(resp)
@@ -1148,8 +1183,8 @@ impl HostCalls {
     }
 
     /// Await any of the given child workflows to complete. Returns the result JSON.
-    pub fn await_any_child(&self, run_ids: &[&str]) -> Result<String, String> {
-        let run_ids_json = serde_json::to_string(run_ids).map_err(|e| format!("serialize run_ids: {}", e))?;
+    pub fn await_any_child(&self, run_ids: &[&str]) -> Result<String, CallError> {
+        let run_ids_json = serde_json::to_string(run_ids).map_err(|e| CallError::Failed(format!("serialize run_ids: {}", e)))?;
         let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
             imports::cleat_await_any_child(
@@ -1158,11 +1193,11 @@ impl HostCalls {
             )
         };
         if result == memory::SUSPEND_SENTINEL {
-            std::panic::panic_any(crate::SuspendSentinel);
+            return Err(suspend());
         }
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("await_any_child(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code));
+            return Err(CallError::Failed(format!("await_any_child(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code)));
         }
         let resp = unsafe { memory::read_string(buf.as_ptr(), result_len) };
         Ok(resp)
@@ -1180,10 +1215,7 @@ impl HostCalls {
 
     /// Typed version of await_child using serde for deserialization.
     pub fn await_child_typed<T: serde::de::DeserializeOwned>(&self, run_id: &str) -> Result<T, String> {
-        let (result_json, err) = self.await_child(run_id);
-        if let Some(e) = err {
-            return Err(e);
-        }
+        let result_json = self.await_child(run_id).map_err(|e| e.to_string())?;
         serde_json::from_str(&result_json).map_err(|e| format!("deserialize result: {}", e))
     }
 
@@ -1215,9 +1247,15 @@ impl HostCalls {
     /// rather than completing. Changed 2026-09-03 while the SDK had no users.
     ///
     /// Use `cleat_call_with_host_retry` to demand the host loop regardless.
+    /// The error type is `CallError` because ONE of the two paths suspends: a
+    /// policy too long for the host loop falls through to `sdk_level_retry`,
+    /// which sleeps between attempts. Which path a policy takes is decided by
+    /// `retry_fits_in_one_segment` before the first attempt, so a caller cannot
+    /// tell from the call site whether this one suspends -- which is exactly
+    /// why it must be able to say so in its type.
     pub fn cleat_call_with_retry<T: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self, service: &str, operation: &str, request: &T, retry_policy: &RetryPolicy,
-    ) -> Result<R, String> {
+    ) -> Result<R, CallError> {
         if !retry_fits_in_one_segment(retry_policy) {
             return self.sdk_level_retry(service, operation, request, retry_policy);
         }
@@ -1234,12 +1272,17 @@ impl HostCalls {
     ///
     /// One history event for the whole logical call, and the only path that
     /// produces the `retries exhausted` prefix the worker dead-letters on.
+    /// It never suspends -- the host loop backs off in-process and returns once
+    /// -- but its error type is `CallError` too, so that the two retry entry
+    /// points are substitutable and a caller can switch between them without
+    /// rewriting its error handling.
     pub fn cleat_call_with_host_retry<T: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self, service: &str, operation: &str, request: &T, retry_policy: &RetryPolicy,
-    ) -> Result<R, String> {
-        let request_json = serde_json::to_string(request).map_err(|e| format!("serialize request: {}", e))?;
+    ) -> Result<R, CallError> {
+        let request_json = serde_json::to_string(request)
+            .map_err(|e| CallError::Failed(format!("serialize request: {}", e)))?;
         let non_retryable_json = serde_json::to_string(&retry_policy.non_retryable_errors)
-            .map_err(|e| format!("serialize non-retryable errors: {}", e))?;
+            .map_err(|e| CallError::Failed(format!("serialize non-retryable errors: {}", e)))?;
         let backoff_coefficient_100x = (retry_policy.backoff_multiplier * 100.0) as i64;
         let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
@@ -1258,10 +1301,11 @@ impl HostCalls {
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
             let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
-            return Err(err_msg);
+            return Err(CallError::Failed(err_msg));
         }
         let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
-        serde_json::from_str(&resp).map_err(|e| format!("deserialize response: {}", e))
+        serde_json::from_str(&resp)
+            .map_err(|e| CallError::Failed(format!("deserialize response: {}", e)))
     }
 
     /// The SDK-level retry loop: one attempt per segment, suspending in between.
@@ -1273,19 +1317,22 @@ impl HostCalls {
     /// `retries exhausted` prefix, so a workflow exhausting a long policy is
     /// not dead-letterable -- on either SDK, now, rather than on one.
     ///
-    /// Note what a suspension costs on THIS SDK: `cleat_sleep_ms` suspends by
-    /// panicking, and under `panic=abort` that traps rather than unwinding
-    /// (IMPROVEMENT-PLAN 3.87). The host records the suspension before the guest
-    /// panics, so the workflow does suspend and resume correctly -- but the
-    /// guest's own defer drain does not run on the way out. That is 3.87's
-    /// defect, not this loop's, and it applies to every Rust suspension
-    /// equally; it is called out here because taking this path is now a thing a
-    /// retry policy can cause.
+    /// This loop SUSPENDS, so its error type is `CallError` rather than
+    /// `String`: the backoff `cleat_sleep_ms` between attempts returns
+    /// `Err(CallError::Suspended)` and it is propagated with `?`, ending the
+    /// segment. On the next segment replay fast-forwards the recorded attempts
+    /// and the same sleep returns `Ok`, so the loop continues where it left off.
+    ///
+    /// Discarding that `Err` would re-issue the call after a sleep that had not
+    /// happened. The compiler caught exactly that here during 3.87 -- the
+    /// `#[must_use]` on `Result` flagged a bare `self.cleat_sleep_ms(..);` --
+    /// which the panic version could not, because a panic left the loop by
+    /// aborting the instance.
     fn sdk_level_retry<T: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self, service: &str, operation: &str, request: &T, retry_policy: &RetryPolicy,
-    ) -> Result<R, String> {
-        let request_json =
-            serde_json::to_string(request).map_err(|e| format!("serialize request: {}", e))?;
+    ) -> Result<R, CallError> {
+        let request_json = serde_json::to_string(request)
+            .map_err(|e| CallError::Failed(format!("serialize request: {}", e)))?;
         let mut last_err = String::new();
 
         for attempt in 1..=retry_policy.max_attempts {
@@ -1293,7 +1340,7 @@ impl HostCalls {
             match err {
                 None => {
                     return serde_json::from_str(&resp_json)
-                        .map_err(|e| format!("deserialize response: {}", e))
+                        .map_err(|e| CallError::Failed(format!("deserialize response: {}", e)))
                 }
                 Some(e) => {
                     if retry_policy
@@ -1301,7 +1348,7 @@ impl HostCalls {
                         .iter()
                         .any(|substr| e.contains(substr.as_str()))
                     {
-                        return Err(e);
+                        return Err(CallError::Failed(e));
                     }
                     last_err = e;
                 }
@@ -1317,14 +1364,14 @@ impl HostCalls {
                 {
                     backoff = retry_policy.maximum_interval_ms as f64;
                 }
-                self.cleat_sleep_ms(backoff as i64);
+                self.cleat_sleep_ms(backoff as i64)?;
             }
         }
 
-        Err(format!(
+        Err(CallError::Failed(format!(
             "durable: call {}.{} retry exhausted after {} attempts: {}",
             service, operation, retry_policy.max_attempts, last_err
-        ))
+        )))
     }
 
     /// Make an HTTP fetch request to an external endpoint.

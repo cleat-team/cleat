@@ -11783,7 +11783,7 @@ Their `SUSPEND_SENTINEL` is `1 << 62`, which is the *await-child* sentinel and a
 mechanism; none of them decodes the stop. Each language's decode and its entry in that map belong
 in one change, with a test that crosses the two halves (§3.73).
 
-### 3.87 The Rust SDK cannot suspend: `catch_unwind` never catches, and the host has been masking the trap — 🔴 **OPEN** (WS-3, 2026-09-02)
+### 3.87 The Rust SDK cannot suspend: `catch_unwind` never catches, and the host has been masking the trap — ✅ **FIXED** (WS-3, 2026-09-03)
 
 `crates/cleat-sdk` suspends by `std::panic::panic_any(SuspendSentinel)`, and `#[cleat_entry]`
 wraps the workflow body in `std::panic::catch_unwind` to intercept it and return
@@ -11854,6 +11854,63 @@ It does not obviously block ordinary Rust workflows *today*, because the mask is
 works. What it costs is unquantified and should not be guessed at here: a trapped guest's linear
 memory is abandoned rather than unwound, so anything a Rust workflow expects `Drop` to do between
 a suspension and the next segment does not happen. Measure that before claiming either way.
+
+#### FIXED 2026-09-03 — suspension is a return value
+
+Requested by WS-2, who were blocked: the §3.84 sentinel decode in Rust is
+pointless until there is something to unwind into.
+
+`CallError::{Suspended, Failed}` replaces the panic. The seven host calls that
+can suspend return `Result<T, CallError>` and workflows propagate with `?`, so
+**the compiler enforces the early return** — a body cannot use a value that was
+never produced. `impl From<CallError> for String` keeps `?` working in the usual
+`Result<T, String>` workflow signature.
+
+A thread-local flag is the backstop, not the mechanism, for the one case the
+type system cannot reach: `let _ = h.cleat_sleep_ms(..)` followed by a value of
+the body's own. `#[cleat_entry]` clears it before the body, checks it after, and
+checks again after the defer drain (a defer body can suspend too).
+
+**`defer.rs` was broken the same way and is fixed with it** (both together, as
+scoped). Its `catch_unwind` isolated a panicking cleanup body — dead under
+`panic=abort`, so the first panicking defer aborted the instance and took the
+remaining bodies with it. Bodies are now `FnOnce() -> Result<(), CallError>`.
+A defer body still must not `panic!`: nothing can catch it on this target, and
+that is documented rather than worked around.
+
+**What the tests are, and one that was deleted.** The mask is why the shape
+matters. `suspend_probe` sets the flag with **no host call in the way**, so
+nothing sets `session.suspendErr` and nothing can hide a trap —
+`TestARustGuestSuspendsCleanly` is therefore the mask-free regression test, and
+under the old SDK its equivalent trapped with `wasm trap: unreachable`.
+
+A Go-side test of the *backstop* was written and then removed, because it could
+not fail: every suspending host call sets `suspendErr`, and `executor.go`
+returns a `SuspendResult` with an empty result string whatever the guest
+returned, so a discarding body looks identical through `Execute` either way.
+Measured — with both flag checks deleted from `#[cleat_entry]` the Go assertion
+still passed. The property is real and is now tested where it is observable,
+`crates/cleat-sdk/tests/suspend_backstop.rs`, which calls the generated export
+directly and reads its return value. Four tests, proven to fail: disabling both
+flag checks fails three and leaves the control passing; removing only the
+pre-body `clear_suspended()` fails exactly the leak test.
+
+**`#[cleat_test]`'s `catch_unwind` is gone too, and it was the reason this
+survived.** It runs on the HOST target, where unwinding works — so the
+suspension mechanism tested green natively while the shipped `wasm32-wasip1`
+build trapped. A test suite passing on a target the product does not ship is
+this file's recurring shape, one layer further out.
+
+`TestTheRustTargetCompilesWithPanicAbort` stays and its message changed: it no
+longer pins why `catch_unwind` fails, but why the SDK cannot use unwinding at
+all. If the target ever gains unwinding the `Result` design is still correct —
+it just stops being forced.
+
+**Still open, and deliberately not in this change:** adding `"rust"` to
+`deferSegmentLanguages`. That is §3.84's follow-up, needs the Rust sentinel
+decode WS-2 was blocked on plus a defer-segment test to back it, and the gate is
+fail-closed today — a Rust guest is refused a defer segment rather than silently
+running its body, which is the correct behaviour to keep until that lands.
 
 #### The fix is a redesign, not a decode
 

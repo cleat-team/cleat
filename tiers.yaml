@@ -145,8 +145,16 @@ tier1:
     # and never builds anything, so it runs on the tier-1 runner -- rustup is preinstalled
     # on the GitHub image -- and pins the mechanism the other two only demonstrate. Tiering
     # follows what a test needs, not which file it lives in.
-    - "^TestARustGuestCannotSuspendByPanicking$"
-    - "^TestThePanicTrapIsMaskedWhereverTheHostSetsSuspendErr$"
+    #
+    # Renamed and reduced from two to one on 2026-09-03 by IMPROVEMENT-PLAN 3.87,
+    # which FIXED the defect these measured. TestARustGuestCannotSuspendByPanicking
+    # became TestARustGuestSuspendsCleanly -- same probe, now asserting the working
+    # behaviour instead of the broken one. TestThePanicTrapIsMasked... is gone: it
+    # pinned the mask that made the trap invisible, and with no trap there is
+    # nothing to mask. Its successor could not fail (see 3.87) and lives in
+    # crates/cleat-sdk/tests/suspend_backstop.rs, which needs no wasm toolchain and
+    # so is not tiered here at all.
+    - "^TestARustGuestSuspendsCleanly$"
     # tier 2 -- rust. engine/rust_host_retry_test.go; needs cargo + wasm32-wasip1.
     #
     # IMPROVEMENT-PLAN 3.88's Rust half: it builds the same example to measure that a Rust
