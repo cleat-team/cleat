@@ -10933,7 +10933,12 @@ prose. A guard added before the four are resolved would be permanently red.
 
 ---
 
-### 3.83 The sentinel §3.81 specified would collide with a real response — 🔶 **CORRECTED AND BUILT for Go guests; four SDKs remain, and are refused rather than run** (WS-3, 2026-09-02)
+### 3.83 The sentinel §3.81 specified would collide with a real response — 🔶 **CORRECTED AND BUILT for `cleat_call` on Go guests; four SDKs and four other call paths remain** (WS-3, 2026-09-02)
+
+> **Scope, added 2026-09-02 the same day: this closed the path its test covers, not the frontier.**
+> `PluginCall`, `PluginCallStreaming`, `ChildWorkflow` and `DurableAwaitSignals` still start new
+> work in a defer segment, and bit 39 is not available in their result layouts. **§3.84** has the
+> per-layout measurement and the universal sentinel that replaces this one.
 
 §3.81 left phase 5 with one correctness gap and named the fix in a sentence: make the
 past-the-frontier call suspend, using *"bit 62 of the result word, exactly as
@@ -11043,3 +11048,64 @@ gone; both tests fail under that mutation.
    the dead-code analyser cannot follow. `Execute` takes `session HostHandler`, so the backend
    never sees the concrete type, and putting the method on that exported interface would break
    external implementors. Baselined rather than restructured, and this is the record of why.
+
+---
+
+### 3.84 A defer segment is stopped on `cleat_call` only; four other paths still start new work — 🔴 **OPEN** (WS-3, 2026-09-02)
+
+§3.83 stopped a defer segment doing new work through `cleat_call`, and that is the path its
+fixture exercises. It is not the only way a guest starts work past the frontier. Measured by
+reading the fresh paths, 2026-09-02:
+
+| entry point | fresh path guarded by `stopBeforeNewWork()`? |
+|---|---|
+| `DurableCall` | ✅ §3.83 |
+| `DurableCallWithRetry` | ✅ §3.83 |
+| `PluginCall` (`engine/plugins.go:175`) | ❌ |
+| `PluginCallStreaming` (`engine/plugins.go:366`) | ❌ |
+| `ChildWorkflow` / `ChildWorkflowWithOptions` (`engine/children.go:15,19`) | ❌ |
+| `DurableAwaitSignals` (`engine/signaller.go:12`) | ❌ |
+
+So a terminated workflow's defer segment can still start a **child workflow** or call a
+**plugin**. §3.83's own section should be read with that scope: it closed the path its test
+covers, not the frontier.
+
+Re-derive: `grep -n "func (s \*execSession) \(PluginCall\|ChildWorkflow\|DurableAwaitSignals\)" -A 6 engine/*.go`
+
+#### Why this is a mechanism rather than four more `if` statements
+
+Those paths return **different result layouts**, and §3.83's bit 39 is not available in them — it
+sits inside `packSimpleResult`'s `runIDLen`. Reusing it would repeat exactly the mistake §3.83
+exists to record, one layout over.
+
+Measured by unioning every result each packer can produce, pinned by
+`TestStopSentinelBitsAcrossEveryLayout`:
+
+| packer | reachable | free |
+|---|---|---|
+| `packDurableCallResult` | `ffffff000000ffff` | `000000ffffff0000` |
+| `packSimpleResult` | `00ffffff000000ff` | `ff000000ffffff00` |
+| `packAwaitChildResult` | `00ffffff000000ff` | `ff000000ffffff00` |
+| `packAwaitSignalsResult` | `ffffffff0001ffff` | `00000000fffe0000` |
+| `packAwaitPromiseResult` | `00ffffff0001ffff` | `ff000000fffe0000` |
+| `packAcquireLockResult` | `000000000000ffff` | `ffffffffffff0000` |
+| `packSleepResult` | `ff0000fffffffc00` | `00ffff00000003ff` |
+
+**There is no bit free in all seven.** `packSleepResult` is what rules it out — and it is also
+the one that needs nothing, because a guest waiting on a sleep already suspends through its own
+status byte (`TestASleepingWorkflowNeverReachesAFreshCall`). Excluding it, **bits 17-31 are free
+in all six layouts that can start new work**, which is where a universal stop sentinel belongs.
+
+§3.83's bit 39 is `cleat_call`-specific and correct only there. That is worth stating plainly
+rather than quietly widening it later: the two facts look like the same fact and are not.
+
+#### What to build
+
+One sentinel at bits 17-31, honoured by every fresh path in the table above, replacing bit 39
+rather than sitting beside it — ABI.md documents bit 39 today, so the SDK-visible contract
+changes once and only once. The guest side is the same masked check §3.83 added, applied at each
+decode site.
+
+The test has to exercise a path that is **not** `cleat_call`, or it re-measures §3.83. A child
+workflow is the clearest: `testdata/deferfunc` would need an entry point that starts one, and the
+assertion is that no child instance row is created while the defers still run.
