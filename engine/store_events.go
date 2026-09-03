@@ -8,7 +8,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 )
+
+// applyCreatedAt sets the two fields every read path derives from the
+// event_history.created_at column, on every dialect.
+//
+// One function because there are nine read paths -- three per dialect -- and
+// before 2026-09-03 they gave four different answers for the same row. Some
+// derived TimestampMs in SQL and truncated it (PostgreSQL's
+// `EXTRACT(EPOCH FROM created_at)::BIGINT * 1000` drops the milliseconds),
+// some derived it in Go and did not, some never set it at all, and only
+// PostgreSQL set CreatedAt. TimestampMs is the replay virtual clock --
+// execSession.Now returns the previous history event's value -- so a truncated
+// or absent one makes a resumed workflow see a Now() the run that recorded it
+// never returned.
+//
+// Deriving both in Go from the one column is what makes the nine agree by
+// construction rather than by nine people remembering. The SQL-side
+// timestamp_ms expressions are gone; there is nothing left for a new read path
+// to copy wrongly.
+func applyCreatedAt(rec *EventRecord, createdAt time.Time) {
+	rec.CreatedAt = createdAt
+	rec.TimestampMs = createdAt.UnixMilli()
+}
 
 func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -24,7 +47,6 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
 		       promise_name, promise_id, promise_result, promise_error,
-		       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms,
 		       created_at,
 		       (intent_at IS NOT NULL AND checksum IS NULL) AS pending
 		FROM event_history
@@ -56,12 +78,12 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
-			&rec.TimestampMs, &createdAt, &rec.Pending); err != nil {
+			&createdAt, &rec.Pending); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
 		if createdAt.Valid {
-			rec.CreatedAt = createdAt.Time
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 		rec.Service = service.String
 		rec.Op = op.String

@@ -299,17 +299,22 @@ func TestPostgresStore_LoadEventHistoryPaginated_SecondPage(t *testing.T) {
 // VerifyWorkflowEvents tests
 // ---------------------------------------------------------------------------
 
-// fullHistoryRow builds a 31-column mock row for LoadEventHistory (called by VerifyWorkflowEvents).
-// Column 28 is timestamp_ms (int64, scanned directly into rec.TimestampMs — must be non-nil).
-// Column 29 is created_at (scanned into sql.NullTime — nil is fine for "invalid").
-// Column 30 is pending, the intent_at IS NOT NULL AND checksum IS NULL expression
+// fullHistoryRow builds a 30-column mock row for LoadEventHistory (called by VerifyWorkflowEvents).
+// Column 28 is created_at (scanned into sql.NullTime — nil is fine for "invalid").
+// Column 29 is pending, the intent_at IS NOT NULL AND checksum IS NULL expression
 // (bool, scanned directly into rec.Pending — must be non-nil). See 1.4 phase D.
+//
+// It was 31 columns until 2026-09-03, when the SELECT's
+// `EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms` was removed:
+// TimestampMs is now derived in Go from created_at, on every read path and
+// every dialect, because the nine paths gave four different answers for the
+// same row and that expression was the one that silently truncated the replay
+// clock to whole seconds.
 func fullHistoryRow(step int, eventType string) []driver.Value {
-	row := make([]driver.Value, 31)
+	row := make([]driver.Value, 30)
 	row[0] = int64(step)
 	row[1] = eventType
-	row[28] = int64(0) // timestamp_ms — must be non-nil (scanned into int64)
-	row[30] = false    // pending — must be non-nil (scanned into bool)
+	row[29] = false // pending — must be non-nil (scanned into bool)
 	return row
 }
 
