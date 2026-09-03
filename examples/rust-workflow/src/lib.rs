@@ -208,3 +208,35 @@ fn defer_order(h: &HostCalls, input: PlaceOrderInput) -> Result<String, String> 
     h.cleat_call("inventory", "body", "{}");
     Ok("{\"deferred\":true}".to_string())
 }
+
+/// A workflow that suspends the only way this SDK knows how, and nothing else.
+///
+/// `HostCalls::cleat_sleep_ms`, `await_child` and `await_signals` all suspend by
+/// `std::panic::panic_any(SuspendSentinel)`, on the documented understanding
+/// that `#[cleat_entry]`'s `catch_unwind` intercepts it and returns
+/// `memory::SUSPEND_SENTINEL` to the host. This entry point raises that panic
+/// directly, with no host call in the way, so a test can measure whether the
+/// interception happens.
+///
+/// It does not. See `engine/rust_suspend_test.go` and IMPROVEMENT-PLAN 3.87.
+/// Keep this entry point: it is the whole of that test's evidence, and it has
+/// no other caller.
+#[cleat_entry]
+fn suspend_probe(_h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    std::panic::panic_any(cleat_sdk::SuspendSentinel);
+}
+
+/// The same suspension, reached through a host call that records it.
+///
+/// `cleat_sleep_ms` panics with `SuspendSentinel` exactly as `suspend_probe`
+/// does, so the guest traps identically -- but the HOST sets session.suspendErr
+/// before returning, and the executor lets a suspension win over the error that
+/// came with it. The run is therefore reported as a clean suspension.
+///
+/// Pairing this with `suspend_probe` is what shows the trap is real and merely
+/// hidden. Keep both; either alone is misleading. IMPROVEMENT-PLAN 3.87.
+#[cleat_entry]
+fn sleep_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    h.cleat_sleep_ms(300_000);
+    Ok("{\"unreachable\":true}".to_string())
+}

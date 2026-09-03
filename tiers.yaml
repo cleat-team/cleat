@@ -134,6 +134,19 @@ tier1:
   exclude_tests:
     # tier 2 -- rust. engine/rust_workflow_test.go; needs cargo + wasm32-unknown-unknown.
     - "^TestRustWorkflow"
+    # tier 2 -- rust. engine/rust_suspend_test.go; needs cargo + wasm32-wasip1.
+    #
+    # IMPROVEMENT-PLAN 3.87's two probes, which build the Rust example to measure that a
+    # Rust guest cannot suspend without trapping. Toolchain-dependent for the same reason
+    # as the entry above, and they skip in the tier-1 gate, where a skip is a failure.
+    #
+    # The THIRD test in that file, TestTheRustTargetCompilesWithPanicAbort, is
+    # deliberately NOT here. It asks `rustc --print cfg` for the target's panic strategy
+    # and never builds anything, so it runs on the tier-1 runner -- rustup is preinstalled
+    # on the GitHub image -- and pins the mechanism the other two only demonstrate. Tiering
+    # follows what a test needs, not which file it lives in.
+    - "^TestARustGuestCannotSuspendByPanicking$"
+    - "^TestThePanicTrapIsMaskedWhereverTheHostSetsSuspendErr$"
     # tier 2 -- java. engine/java_workflow_e2e_test.go; needs a JDK and Gradle.
     - "^TestJavaWorkflowExecute$"
     # tier 2 -- assemblyscript. engine/as_workflow_e2e_test.go and the npx-based
