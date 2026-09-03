@@ -194,13 +194,96 @@ func TestEventFlushSucceedsAsOwner(t *testing.T) {
 
 // applyAppRoleMigration applies 005_app_role.sql. SetupFullSchema builds the
 // tables but does not create the role, and this suite needs it.
+//
+// # Why this takes a dedicated connection and resets it
+//
+// 005_app_role.sql line 52 is `SET search_path = public`, which is
+// SESSION-scoped, not statement-scoped. Handing the file to db.Exec runs it on
+// whichever pooled connection is free and leaves that setting on it, so every
+// later query on the same *sql.DB inherits a search_path the caller never asked
+// for. Measured 2026-09-03 against a live PostgreSQL: before the file,
+// `SHOW search_path` returns `"$user", public`; after it, 40 consecutive
+// queries on the same pool all return `public`.
+//
+// On a database where those two are equivalent -- any DSN whose role has no
+// same-named schema -- this is invisible, which is why it has survived. It is
+// NOT equivalent in CI: ci.yml's cluster and Tier 1 jobs connect as role
+// `cleat`, and `cleat` is also the name of the schema 001_schema.sql creates
+// for assert_tenant_set(). The default `"$user", public` resolves to
+// `cleat, public` there.
+//
+// The symptom is `relation "<table>" does not exist` from a test that has
+// already built its schema and whose neighbours in the same file pass, because
+// only the connection this ran on carries the change. That is a long way from
+// the cause and reads like a broken migration; it cost a full diagnosis on
+// #638. WS3-STATUS.md records the role/schema collision as an environment
+// hazard, and this is the code path that turns it into a test failure.
+//
+// db.Conn pins one physical connection for the life of the returned handle, so
+// RESET ALL is guaranteed to undo the SET on the same session it was set on,
+// before Close returns that connection to the pool.
 func applyAppRoleMigration(t *testing.T, db *sql.DB) {
 	t.Helper()
 	body, err := os.ReadFile("../migrations/postgres/005_app_role.sql")
 	if err != nil {
 		t.Fatalf("reading 005_app_role.sql: %v", err)
 	}
-	if _, err := db.Exec(string(body)); err != nil {
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("reserving a connection for 005_app_role.sql: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, string(body)); err != nil {
 		t.Fatalf("applying 005_app_role.sql: %v", err)
+	}
+	// RESET ALL rather than `RESET search_path`: it undoes every session
+	// parameter the file set, so a future edit adding a second SET does not
+	// reintroduce this silently.
+	if _, err := conn.ExecContext(ctx, `RESET ALL`); err != nil {
+		t.Fatalf("resetting session state after 005_app_role.sql: %v", err)
+	}
+}
+
+// TestApplyingTheAppRoleMigrationLeavesThePoolAlone is the regression test for
+// the leak described above, and it is deliberately about the HELPER rather than
+// about any one test that uses it.
+//
+// The failure it guards is not "this assertion is wrong" but "an unrelated test
+// later in the file cannot see its own tables", which is why a test aimed at
+// any single caller would be the wrong shape. It went undiagnosed through a
+// full local run because the leak is invisible on any DSN whose role has no
+// same-named schema -- so this asserts on search_path directly rather than on
+// any table being reachable, which is the only form that fails everywhere
+// rather than only in CI.
+func TestApplyingTheAppRoleMigrationLeavesThePoolAlone(t *testing.T) {
+	owner := testutil.TestDB(t, testutil.DialectPostgres)
+	testutil.SetupFullSchema(t, owner, testutil.DialectPostgres)
+	defer owner.Close()
+
+	// One connection, so the check cannot pass by being handed a different,
+	// untouched member of the pool.
+	owner.SetMaxOpenConns(1)
+
+	var before string
+	if err := owner.QueryRow(`SHOW search_path`).Scan(&before); err != nil {
+		t.Fatalf("reading search_path before: %v", err)
+	}
+
+	applyAppRoleMigration(t, owner)
+
+	var after string
+	if err := owner.QueryRow(`SHOW search_path`).Scan(&after); err != nil {
+		t.Fatalf("reading search_path after: %v", err)
+	}
+	if after != before {
+		t.Fatalf("applyAppRoleMigration changed the pool's search_path from %q to %q.\n\n"+
+			"005_app_role.sql ends with a session-scoped `SET search_path = public`. "+
+			"Leaking it means every later query on this *sql.DB runs with a path the "+
+			"caller never chose -- harmless where `\"$user\"` names no real schema, and "+
+			"fatal in CI, where the role is `cleat` and so is the schema holding the "+
+			"tables. Restore the RESET ALL on a pinned db.Conn.", before, after)
 	}
 }
