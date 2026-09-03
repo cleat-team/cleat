@@ -11856,3 +11856,96 @@ reachable and §3.75's original question needs answering with this same fixture.
 
 **Do not read this section as clearing `MoveToDeadLetterQueue`.** It moves the reason from one
 unmeasured claim to another, better-supported one. The site is still the fourth candidate.
+---
+
+### 3.89 Resolving an ambiguous call broke the checksum chain above it — ✅ **FIXED** (WS-2, 2026-09-02)
+
+> **Renumbered twice: §3.86 → §3.88 → §3.89, on 2026-09-03, because both earlier numbers were taken while this branch waited on CI.**
+> §3.86 went to WS-1's SQL Server cross-tenant audit (#597, #604, #607), which landed first and
+> is cited in three merged commit subjects. §3.88 then went to WS-3's §3.75 re-derivations
+> (#606), which landed while this branch was rebasing onto the commit *before* it.
+>
+> **`scripts/check-section-numbers.sh` passed on this branch both times and could not have
+> caught either.** It checks that the numbers within one file are unique, and they were — each
+> duplicate lived on `develop`, in a section this branch had never seen. That is the residual
+> §3.82 warns about, and it is now measured four times in one day.
+>
+> **The renumber is not the cost; the re-verification is.** Each collision forced a rebase, and
+> each rebase forced a fresh local suite run before pushing, because the tree under the tests
+> had changed. Four numbers, four rebases, four runs — for a defect whose fix never changed.
+>
+> **The mechanism, not the sweep.** Every stream appends its new section to the end of one file,
+> so two streams appending on the same day collide in the text *and* in the number, every time,
+> by construction. `git log --oneline HEAD..origin/develop` before pushing catches it one
+> collision later rather than preventing it. What would prevent it is not allocating the number
+> until merge — a placeholder in the branch, resolved when the PR lands — or splitting the
+> backlog into per-stream files. Neither is this section's to decide, but recording the count is:
+> **four allocations for one section is the cost of the current arrangement, not bad luck.**
+
+**Mine, from #578**, found by checking a contract rather than by a failure report. The bug is
+one sentence: resolving a pending row in place gives it a checksum it did not have, and every
+row already stored *above* it was chained on that absence.
+
+`previousStoredChecksum` reads the immediately preceding row and gets `""` for a pending one,
+because a pending row's `checksum` is `NULL` — and `VerifyWorkflowEvents` walks the history the
+same way, resetting the chain whenever a row's checksum is missing. The two agree, which is what
+that function's doc comment is about. They stop agreeing the moment the pending row's checksum
+is filled in after a later row has already been written against its absence.
+
+**Measured 2026-09-02**, PostgreSQL and MySQL (this sandbox cannot run MSSQL — see
+`WS2-STATUS.md`):
+
+    verify events: workflow <id> step 1: checksum mismatch
+      (expected e72f419bd3c13b2b, got 9f7782688aa8a164)
+
+**`ResolveCallIntent`'s own doc comment contains the reasoning that stopped being true**, and it
+is worth quoting because it was *correct when written*:
+
+> everything before a pending row has been persisted by definition, because the crash that
+> created the row happened after them. There is nothing in flight to disagree with.
+
+That reasons about rows **before**. It held while the only caller was phase E's `resolveAmbiguity`,
+which resolves the row replay just stopped at — the last row, with nothing above it. Phase F
+(#578) added an operator path and never asked whether the row was still last.
+
+**It is not last on the path an operator actually takes.** `adminForceResolve` appends an audit
+event, so force-fail-then-reconcile — the obvious order, since the workflow is stuck and the
+external service takes time to check — puts a row above the pending call before the operator
+resolves it. A signal delivered to a stopped workflow does the same. So does phase E's own path,
+in that case.
+
+**Severity is set by who runs the verifier.** `cmd/cleat-worker/setup.go` wires
+`VerifyWorkflowEvents` in by default (`--disable-checksum-verification` turns it off), and
+`engine/executor.go` returns a hard error on mismatch when `failOnChecksumMismatch` is set.
+So the rescue path bricked the workflow it was rescuing: resolve the ambiguity, re-replay, and
+the worker refuses to run the workflow at all, reporting what reads as tampering. §3.20's
+re-replay guard sends the operator through `resolve` first, which is exactly the order that
+triggers this.
+
+**Fixed** by re-chaining, in the same transaction as the resolve: `chainRepairsAfter` returns
+the rows above the resolved step, and each dialect's `repairChainAfterResolve` rewrites their
+checksums onto the newly written one. The repair stops at the first pending row above, because
+that row is itself a reset point and everything above it is already chained on `""`.
+
+The common case pays nothing — a pending row is normally last, `chainRepairsAfter` returns
+empty, and the resolve is the single `UPDATE` it always was.
+
+**On the falsification.** Passing `nil` for the repairs reproduces the mismatch on both
+dialects at step 1, with the message above. A second control breaks only `PostgresStore`'s
+repair (chaining from `""` instead of the resolved checksum) and only the PostgreSQL arm fails —
+so the test is measuring each dialect's own SQL rather than a shared Go path.
+
+`TestAdminResolveStep_VerifiesWhenThePendingRowIsLast` is the control in the other direction:
+a "fix" that merely moved the breakage would pass the first test and fail this one.
+
+**The vacuity guard earned its place again.** The first test asserts that something *is* stored
+above step 0 before resolving. Without it, a change that stopped force-fail from appending its
+audit event would leave the test passing while testing nothing at all — which is the shape
+§3.80's guard caught, and how §3.79 was found.
+
+**What this says about the method.** Nothing failed. No test was red, no operator reported it,
+and the two features involved each work on their own. It came out of reading
+`ResolveCallIntent`'s doc comment and asking whether its stated premise still held for a caller
+added after it was written. **A doc comment that explains why something is safe is a contract,
+and a new caller is the event that expires it.** Grep for callers when you change a function;
+grep for *premises* when you add one.

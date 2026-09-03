@@ -45,7 +45,9 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"sort"
 )
 
 // callIntentStore is implemented by the three shipped stores. It is unexported
@@ -449,11 +451,56 @@ var (
 // the engine performing this replay is itself just another claimant, and can
 // itself stall and be reaped mid-resolution. workerID == "" skips the check,
 // per callIntentStore's doc.
+//
+// The later parameter is what keeps the chain verifiable, and it is not
+// optional on any path that can have events above the resolved row. See
+// chainRepairsAfter.
 type callIntentResolver interface {
-	ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error
+	ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64, later []EventRecord) error
 }
 
-func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error {
+// chainRepairsAfter returns the events stored above step, in step order, that
+// have to have their checksums rewritten when step is resolved in place.
+//
+// Resolving gives a pending row a checksum it did not have, and every row
+// already stored above it was chained on its *absence*: previousStoredChecksum
+// reads the immediately preceding row and gets "" for a pending one, which is
+// exactly what VerifyWorkflowEvents does when it walks the history and resets
+// on a missing checksum. Writing the resolved row's checksum without rewriting
+// theirs leaves a history that fails verification at the very next row --
+// reported as tampering, and fatal on a worker, which runs the verifier with
+// failOnChecksumMismatch. IMPROVEMENT-PLAN 3.89.
+//
+// It stops at the first pending row above step, because that row is itself a
+// reset point: everything above it is already chained on "" and stays correct.
+//
+// The common case returns nothing. A pending row is normally the last row --
+// the crash that made it pending stopped the workflow there -- and then this
+// is empty and the resolve is a single UPDATE, as it was before. It is the
+// operator paths that break that assumption: force-fail and force-complete
+// append an audit event above the pending row, and a signal delivered to a
+// stopped workflow lands above it too.
+func chainRepairsAfter(history []EventRecord, step int) []EventRecord {
+	var above []EventRecord
+	for _, rec := range history {
+		if rec.Step > step {
+			above = append(above, rec)
+		}
+	}
+	// Sorted rather than assumed: the break below is only correct in step
+	// order, and every caller happens to pass a LoadEventHistory result that
+	// is already ordered. Depending on that silently is how the next caller
+	// gets it wrong.
+	sort.Slice(above, func(i, j int) bool { return above[i].Step < above[j].Step })
+	for i, rec := range above {
+		if rec.isPendingIntent() {
+			return above[:i]
+		}
+	}
+	return above
+}
+
+func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64, later []EventRecord) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: begin: %w", err)
@@ -499,10 +546,15 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 	if n != 1 {
 		return fmt.Errorf("resolve call intent: step %d: %w (%d rows matched)", rec.Step, errIntentNotPending, n)
 	}
+	// In the same transaction as the resolve, so a crash between them cannot
+	// leave a history that fails verification.
+	if err := s.repairChainAfterResolve(ctx, tx, workflowID, checksum, later); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
-func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error {
+func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64, later []EventRecord) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: begin: %w", err)
@@ -548,10 +600,15 @@ func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, r
 	if n != 1 {
 		return fmt.Errorf("resolve call intent: step %d: %w (%d rows matched)", rec.Step, errIntentNotPending, n)
 	}
+	// In the same transaction as the resolve, so a crash between them cannot
+	// leave a history that fails verification.
+	if err := s.repairChainAfterResolve(ctx, tx, workflowID, checksum, later); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
-func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error {
+func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64, later []EventRecord) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: begin: %w", err)
@@ -597,7 +654,60 @@ func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, r
 	if n != 1 {
 		return fmt.Errorf("resolve call intent: step %d: %w (%d rows matched)", rec.Step, errIntentNotPending, n)
 	}
+	// In the same transaction as the resolve, so a crash between them cannot
+	// leave a history that fails verification.
+	if err := s.repairChainAfterResolve(ctx, tx, workflowID, checksum, later); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// repairChainAfterResolve rewrites the stored checksums of the events above a
+// row that was just resolved in place, so the chain the verifier walks matches
+// the chain the writer left behind. chain is the checksum just written to the
+// resolved row; each subsequent event is re-chained onto it in step order.
+//
+// Three near-identical bodies rather than one, because the placeholder syntax
+// is the only thing that differs and the repo keeps its SQL beside the dialect
+// that speaks it. The loop is one UPDATE per row and runs only on the operator
+// paths -- see chainRepairsAfter for why the ordinary case passes nothing.
+func (s *PostgresStore) repairChainAfterResolve(ctx context.Context, tx *sql.Tx, workflowID, chain string, later []EventRecord) error {
+	for _, rec := range later {
+		chain = computeEventChecksum(rec, chain)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE event_history SET checksum = $1
+			WHERE workflow_id = $2 AND step = $3 AND tenant_id = $4
+		`, chain, workflowID, rec.Step, s.tenantID); err != nil {
+			return fmt.Errorf("resolve call intent: repair chain at step %d: %w", rec.Step, err)
+		}
+	}
+	return nil
+}
+
+func (s *MySQLStore) repairChainAfterResolve(ctx context.Context, tx *sql.Tx, workflowID, chain string, later []EventRecord) error {
+	for _, rec := range later {
+		chain = computeEventChecksum(rec, chain)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE event_history SET checksum = ?
+			WHERE workflow_id = ? AND step = ? AND tenant_id = ?
+		`, chain, workflowID, rec.Step, s.tenantID); err != nil {
+			return fmt.Errorf("resolve call intent: repair chain at step %d: %w", rec.Step, err)
+		}
+	}
+	return nil
+}
+
+func (s *MSSQLStore) repairChainAfterResolve(ctx context.Context, tx *sql.Tx, workflowID, chain string, later []EventRecord) error {
+	for _, rec := range later {
+		chain = computeEventChecksum(rec, chain)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE event_history SET checksum = @p1
+			WHERE workflow_id = @p2 AND step = @p3 AND tenant_id = @p4
+		`, chain, workflowID, rec.Step, s.tenantID); err != nil {
+			return fmt.Errorf("resolve call intent: repair chain at step %d: %w", rec.Step, err)
+		}
+	}
+	return nil
 }
 
 var (
