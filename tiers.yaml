@@ -277,6 +277,31 @@ tier1:
   # emulation was prototyped and works, but costs 6.1x on full scans versus SQL Server's
   # +20% for native RLS -- see IMPROVEMENT-PLAN.md 1.7 for the measurement. Emulating a
   # missing engine feature at 6x is a worse product than stating which engines have it.
+  #
+  # REAFFIRMED 2026-09-03, and the rationale above is incomplete in a way worth fixing
+  # rather than leaving: "MySQL has no RLS" is true but is not what actually keeps MySQL
+  # single-tenant, and reading it that way suggests MySQL has NO isolation mechanism.
+  # It has one, and structurally it is stronger than RLS -- MySQLStoreFactory gives each
+  # tenant its own DATABASE (`cleat_<uuid>`), so one tenant's store cannot name another's
+  # rows at all. cmd/cleat-worker/main.go:380 wires it unconditionally.
+  #
+  # What keeps MySQL single-tenant is that the mechanism is only ever FINISHED for one
+  # tenant. The worker migrates exactly one tenant database at boot --
+  # `mf.TenantDB(ctx, defaultTenantID)` at main.go:613 -- so a second tenant gets a
+  # database created on first use, with no schema, and every operation against it fails
+  # with "Table 'cleat_<uuid>.workflow_instances' doesn't exist". Measured 2026-09-03:
+  # database created, 0 tables, ListWorkflows errors. cmd/cleat-worker's
+  # TestTenantIsolationOverHTTP_MySQL works only because it applies the schema itself.
+  #
+  # DECIDED 2026-09-03: this stays as it is. MySQL is single-tenant only, and a second,
+  # very different implementation of multi-tenancy is not worth building. The consequence
+  # to be aware of is that D1's limitation is enforced by breakage at the point of USE
+  # rather than by a check at the point of tenant creation.
+  #
+  # For per-tenant settings (IMPROVEMENT-PLAN 3.94) this decides the shape: the settings
+  # table ships on all three dialects with one uniform API, and on MySQL it holds the
+  # single tenant's row -- the deployment's settings. No MySQL multi-tenancy work, and no
+  # dialect-specific API.
   tenancy:
     multi_tenant: [postgres, mssql]   # mssql cleared 2026-08-06 by #333
     single_tenant: [postgres, mysql, mssql]
