@@ -56,6 +56,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ABI host-function count goes 59 → 58 on both backends. `CurrentABIVersion` is
   unchanged: nothing that remains changed shape.
 
+- **Terminating a parent now closes its children.** `TerminateWorkflow` never
+  called `enforceParentClosePolicy`, on any dialect, so terminating a parent
+  left its `TERMINATE`-policy children running and its `REQUEST_CANCEL`
+  children unflagged — while force-completing or force-failing the *same*
+  parent closed them. Measured 2026-09-02: a child of a parent closed with
+  `TerminateWorkflow` stayed `ready`; the same child under `AdminForceComplete`
+  went to `failed`.
+
+  Who this breaks: a deployment that relied on `terminate` being the narrow
+  "stop this one workflow" verb. Its children now close with it —
+  `TERMINATE` children are failed with `parent workflow terminated`, and
+  `REQUEST_CANCEL` children have cancellation requested. `ABANDON` children are
+  unaffected, as they always were.
+
+  The design document says this is what should happen (*"`enforceParentClosePolicy`
+  runs on parent terminal transition"*, *"children are cancelled with their
+  parent, preventing orphan workflows"*), and the deciding argument is internal
+  consistency: `adminForceResolve` is an operator verb on an unclaimed workflow
+  setting a terminal status with a direct `UPDATE` — the same shape as
+  `TerminateWorkflow` in every respect — and it enforced the policy. See
+  IMPROVEMENT-PLAN §3.79.
+
 ### Added
 
 - **`allowed_signals` can be set.** `GET` and `PUT
@@ -75,6 +97,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with an empty list and nothing sets one at start time, so enabling the flag
   denies every signal until callers are granted per workflow. Grant first, then
   enable. See `docs/reference/worker-config.md`.
+
+- **An operator can resolve a call left ambiguous by a crash.** `POST
+  /api/admin/instances/{id}/steps/{step}/resolve`, with `X-Confirm:
+  resolve-step` and `{"response": "..."}`, records an outcome for a durable
+  call that was in flight when the process died.
+
+  Such a call leaves a pending row, and replay reports it as `[AMBIGUOUS]` and
+  says to check the external service before retrying — with nowhere to put the
+  answer. An `AmbiguityResolver` could supply one, but the resolve path returns
+  immediately when none is configured, which is most deployments, so the
+  workflow reported the same ambiguity on every replay forever.
+
+  The response is written to the event as though the call had returned it,
+  because that is what replay has to see. What keeps it honest is the new
+  `resolved_by` field, written to the same row in the same statement: the
+  outcome is usable by replay and permanently marked as **asserted by an
+  operator rather than observed**. The row must still be pending, so an
+  operator racing a worker cannot overwrite a real result — whoever writes
+  first wins. IMPROVEMENT-PLAN §1.4 phase F.
+
+- **An operator can re-replay a stopped workflow.** `POST
+  /api/admin/instances/{id}/re-replay`, with `X-Confirm: re-replay` and
+  `{"generation": N}`, returns a `failed`, `terminated` or `dead_lettered`
+  workflow to `ready`: the claim, heartbeat and error fields are cleared and
+  the generation is bumped, so a stale worker's late write cannot land. History
+  is **kept** — the workflow resumes from what it recorded rather than starting
+  over. The non-terminal statuses are refused because the dispatcher owns them.
+
+  Re-replay refuses a workflow whose history holds an unresolved ambiguous
+  call, and names the step: replaying one stops again in the same place for the
+  same reason, so it points at the resolve endpoint above instead. This was the
+  last of the three admin operations that was a stub returning
+  `not implemented` on all three dialects. IMPROVEMENT-PLAN §3.20.
+
+- **`GET /api/workflows/{id}/history` reports `err_code` and `resolved_by` per
+  event.** `err_code` is how the caller classified a failed call — the
+  `ErrorCode` a `ServiceCaller` supplied through `CleatError` — recorded at the
+  time of the failure, where history previously collapsed the whole
+  classification to a single retryable-or-not bit. Its vocabulary is the one
+  `workflow_instances.error_code` already stores, so one operator query matches
+  in both tables.
+
+  It is for reading, not for deciding: `err_non_retryable` stays authoritative
+  for retry behaviour, deliberately. The two can legitimately disagree, because
+  the guest's own retry policy travels across the ABI — and deriving
+  retryability from the class instead would let an upgrade change the retry
+  behaviour of workflows already in flight, which is the determinism bug §2.35
+  exists to prevent. Both fields survive history compaction.
+  IMPROVEMENT-PLAN §2.35.
+
+### Fixed
+
+- **Closing a workflow left concurrency slots and sticky-worker assignments
+  held until their TTL.** `releaseWorkflowResources` runs the two best-effort
+  cleanups that follow every commit taking a workflow out of the runnable set.
+  Two paths committed such a transition without it:
+
+  - `MySQLStore.TerminateWorkflow` execed its `UPDATE` and returned, where
+    PostgreSQL and SQL Server both released. One slot per terminated workflow,
+    on a tier-1 dialect (IMPROVEMENT-PLAN §3.76).
+  - `enforceParentClosePolicy`'s TERMINATE arm failed every child of a closing
+    parent and released nothing, **on all three dialects** — so one closing
+    parent stranded a slot per child (IMPROVEMENT-PLAN §3.80).
+
+  Bounded rather than leaked: `concurrency_keys.expires_at` is `NOT NULL` and
+  the reaper deletes expired rows, so the slots freed themselves at the key's
+  TTL. They freed themselves silently, with every workflow queued on those keys
+  waiting out the window for nothing.
 
 ## [0.2.0] - 2026-08-10
 
