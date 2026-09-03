@@ -13645,3 +13645,52 @@ string`, so there is no result word to carry bit 31 — and `extractStringFromPa
 (`engine/component_cgo.go`) currently turns the sentinel into `""`, an empty successful response.
 Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`. That needs an ABI decision
 before any code.
+
+### 3.106 The AssemblyScript SDK could not run a defer segment either, and its stop cannot unwind — 🔶 **SDK HALF DONE; the end-to-end proof and `deferSegmentLanguages` remain** (WS-2, 2026-09-03)
+
+The AssemblyScript half of §3.105's problem: the host marks a refused call in a defer segment
+with bit 31 (§3.84), and this SDK never tested it. Same nine methods, same ordering contract,
+same forbidden sleep path — `packSleepResult` is the one layout where bit 31 is *reachable*, so a
+guard there would read an ordinary sleep result as a stop.
+
+**What is different, and it is the part worth reading.** Go panics, Java throws, and Rust (after
+§3.87) returns `Err(CallError::Suspended)`. Each of those takes the workflow body out of its own
+control flow. **AssemblyScript has no exceptions** — it builds with `--runtime stub` — so a stop
+can only set the suspension flag and hand back an error result. A workflow body that checks
+neither keeps running.
+
+That is a genuinely weaker guarantee and the SDK now says so rather than implying parity. What
+makes it acceptable rather than a hole is **where the enforcement lives**: `stopBeforeNewWork()`
+stays true for the whole segment, so the host refuses *every* subsequent call, not just the first.
+A guest that runs on cannot reach anything durable — it can burn instructions and return a value
+the host discards, because the segment's terminal outcome was decided before it started. The flag
+is how the guest finds out; the host is what makes it true.
+
+This is why `deferSegmentLanguages` membership is about being *verified to unwind on the
+sentinel*: for this SDK the honest claim is narrower, and the end-to-end fixture is what will have
+to establish which claim actually holds.
+
+**Checked from both ends**, as §3.105 is:
+
+| test | where | what it holds |
+|---|---|---|
+| `stop-bit.spec.ts` (5 tests) | as-pect | `stopRequested` fires on bit 31 and on nothing else, and sets the flag |
+| `TestTheAssemblyScriptSDKAgreesOnTheStopBit` | Go | the SDK's constant is the engine's, parsed from the hex literal |
+| `TestEveryASCallTheHostCanRefuseChecksTheStopBit` | Go | all nine methods guard, **and guard before decoding** |
+| `TestTheASSleepPathDoesNotCheckTheStopBit` | Go | `cleatSleepMs` does not, with the reachability reason |
+
+The as-pect tests deliberately do not drive `HostCalls` methods: that harness stubs every
+`@external("env", ...)` import, so such a test would be measuring the stub's return value. The
+existing `defer.spec.ts` says the same thing about `deferFunc`. The structural guarantee is held
+from the Go side instead.
+
+**Not done here, exactly as in §3.105:** `assemblyscript` is not added to
+`deferSegmentLanguages`. The end-to-end proof — a fixture with a defer, run as a segment — is the
+next piece, and until it lands the fence stays closed and AssemblyScript behaves as it does today.
+
+Remaining: **Rust**, unblocked by §3.87 (#643) and different in shape again —
+`Err(CallError::Suspended)` returned before any field is decoded, rather than a flag or an
+unwind. **Python** is still blocked on an ABI decision and not on effort: it is a Component Model
+guest whose WIT declares `durable-call: func(...) -> string`, so there is no result word to carry
+bit 31, and `extractStringFromPacked` turns the sentinel into `""` — an empty *successful*
+response. Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`.
