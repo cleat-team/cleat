@@ -2,13 +2,10 @@ package migration_test
 
 import (
 	"context"
-	"database/sql"
-	"os"
 	"strings"
 	"testing"
 
-	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/lib/pq"
+	"github.com/cleat-team/cleat/migration"
 )
 
 // D1 (tiers.yaml) says MySQL is single-tenant. Until migrations/mysql/038 that
@@ -16,48 +13,47 @@ import (
 // created without complaint, got an unmigrated database on first use, and
 // failed every operation with "Table 'cleat_<uuid>.workflow_instances' doesn't
 // exist" -- a message that names a missing table rather than an unsupported
-// configuration.
+// configuration, far from the cause.
 //
 // The pair below is the test, and neither half means anything alone. The MySQL
 // half asserts the refusal; the PostgreSQL half asserts a second tenant still
 // inserts fine there, so the refusal is MySQL's rule rather than something that
-// broke tenants everywhere. A single-dialect version of this would pass equally
-// well against a migration that made every backend single-tenant.
+// broke tenants everywhere. A single-dialect version would pass equally well
+// against a migration that made every backend single-tenant.
+//
+// Both build their own scratch database and run the shipped migrations into it,
+// rather than using whatever database the environment points at. The first
+// version of this file did the latter and **passed locally while failing in
+// CI**: ci.yml's `support` job provides a bare PostgreSQL service, so
+// `INSERT INTO admin.tenants` came back with
+// `relation "admin.tenants" does not exist`. A test that assumes a migrated
+// database is testing the developer's machine.
+
 func TestMySQLRefusesASecondTenant(t *testing.T) {
-	dsn := os.Getenv("CLEAT_TEST_MYSQL")
-	if dsn == "" {
-		t.Skip("CLEAT_TEST_MYSQL not set")
-	}
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-	// Not a skip: a DSN was supplied, so MySQL was asked for.
-	if err := db.Ping(); err != nil {
-		t.Fatalf("CLEAT_TEST_MYSQL is set but MySQL is unreachable: %v", err)
-	}
+	db := newMySQLScratchDB(t, "cleat_migration_mysql_single_tenant_test")
 	ctx := context.Background()
 
-	// The default tenant must already be there -- 002_defaults seeds it. If it
-	// is not, this test would "pass" by inserting the first tenant
-	// successfully, which measures nothing.
+	r := migration.NewRunner(db, migration.DialectMySQL, migrationsRoot(t))
+	if err := r.Run(ctx); err != nil {
+		t.Fatalf("applying the shipped MySQL migrations failed: %v", err)
+	}
+
+	// 002_defaults seeds exactly one tenant. Checked rather than assumed: with
+	// zero, the insert below succeeds and this test proves nothing; with more
+	// than one, migration 038's unique index could not have been created and
+	// the guard is not in place at all.
 	var n int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants`).Scan(&n); err != nil {
 		t.Fatalf("counting tenants: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("expected exactly 1 tenant before this test, found %d.\n\n"+
-			"With 0, the insert below succeeds and this test proves nothing. "+
-			"With more than 1, migration 038's unique index could not have been "+
-			"created and the guard is not in place at all.", n)
+		t.Fatalf("expected exactly 1 tenant after migrating a fresh database, found %d", n)
 	}
 
-	_, err = db.ExecContext(ctx,
+	_, err := db.ExecContext(ctx,
 		`INSERT INTO tenants (tenant_id, name, display_name) VALUES (?, ?, ?)`,
 		"11111111-2222-3333-4444-555555555555", "second-tenant", "Second Tenant")
 	if err == nil {
-		_, _ = db.ExecContext(ctx, `DELETE FROM tenants WHERE name = 'second-tenant'`)
 		t.Fatalf("a second tenant was created on MySQL.\n\n" +
 			"D1 says MySQL is single-tenant, and migrations/mysql/038 is what " +
 			"makes that true rather than merely stated. Without it the tenant " +
@@ -65,9 +61,9 @@ func TestMySQLRefusesASecondTenant(t *testing.T) {
 			"every operation with a missing-table error far from the cause.")
 	}
 
-	// The error must name the rule, not just fail. That is the whole point --
-	// the pre-038 behaviour also produced an error eventually, just an
-	// unhelpful one in an unrelated place.
+	// The error must name the rule, not merely be an error. That is the whole
+	// point: the pre-038 behaviour also failed eventually, just unhelpfully and
+	// somewhere else.
 	const wantKey = "uq_tenants_mysql_is_single_tenant_only_see_tiers_yaml_d1"
 	if !strings.Contains(err.Error(), wantKey) {
 		t.Fatalf("the insert failed, but not with the single-tenant guard: %v\n\n"+
@@ -77,38 +73,21 @@ func TestMySQLRefusesASecondTenant(t *testing.T) {
 	}
 }
 
-// The control. Same insert, PostgreSQL, must succeed -- 038 is a MySQL-only
-// migration and multi-tenancy is granted there (D1).
+// The control: the same insert on PostgreSQL must succeed. 038 is a MySQL-only
+// migration and D1 grants multi-tenancy on PostgreSQL.
 func TestPostgresStillAcceptsASecondTenant(t *testing.T) {
-	// postgresDSN, not os.Getenv("CLEAT_TEST_POSTGRES"): ci.yml's `support`
-	// job -- the one that runs ./migration/... -- configures CLEAT_TEST_DB and
-	// not CLEAT_TEST_POSTGRES. Reading only the latter would have made this
-	// control SKIP in CI while passing locally, so the assertion above would
-	// have run for weeks with nothing checking that the guard stayed inside
-	// MySQL. That is the failure this whole file is about, one level up.
-	dsn, configured := postgresDSN(t)
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-	if err := db.Ping(); err != nil {
-		if configured {
-			t.Fatalf("configured postgres database is unreachable: %v", err)
-		}
-		t.Skipf("no postgres database configured: %v", err)
-	}
+	db := newScratchDB(t, "cleat_migration_pg_second_tenant_test")
 	ctx := context.Background()
 
-	const name = "second-tenant-control"
-	t.Cleanup(func() {
-		_, _ = db.ExecContext(ctx, `DELETE FROM admin.tenants WHERE name = $1`, name)
-	})
-	_, _ = db.ExecContext(ctx, `DELETE FROM admin.tenants WHERE name = $1`, name)
+	r := migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t))
+	if err := r.Run(ctx); err != nil {
+		t.Fatalf("applying the shipped PostgreSQL migrations failed: %v", err)
+	}
 
 	if _, err := db.ExecContext(ctx,
 		`INSERT INTO admin.tenants (tenant_id, name, display_name) VALUES ($1, $2, $3)`,
-		"11111111-2222-3333-4444-555555555555", name, "Second Tenant Control"); err != nil {
+		"11111111-2222-3333-4444-555555555555", "second-tenant-control",
+		"Second Tenant Control"); err != nil {
 		t.Fatalf("PostgreSQL refused a second tenant: %v\n\n"+
 			"D1 grants multi-tenancy on PostgreSQL. If this now fails, the "+
 			"single-tenant guard leaked out of MySQL -- check that "+
