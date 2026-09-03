@@ -13523,3 +13523,68 @@ comment.
 recorded, and `TestAnOrdinarySegmentStillFetches` is the other direction — a guard that blocked
 *every* fetch would satisfy the first test just as well. The fetcher is a recording double, so
 "did the request go out" is measured rather than inferred from a return value.
+
+### 3.105 The Java SDK could not run a defer segment, because it never decoded the stop sentinel — 🔶 **SDK HALF DONE; the end-to-end proof and `deferSegmentLanguages` remain** (WS-2, 2026-09-03)
+
+`deferSegmentLanguages` is `{"go": true}` and five languages are supported. The reason is not that
+the other four are unfinished in general — it is one specific thing: when the host refuses a call
+in a defer segment it sets bit 31 of the result word (§3.84), and only the Go SDK tests that bit.
+Everything else reads the word through whichever layout the call it made returns, and **every one
+of those readings is a plausible ordinary result**.
+
+This is the Java half of that, and it is deliberately not the whole item.
+
+#### What the Go SDK gets for free and Java does not
+
+`wasm/adapter_metadata.go` generates the Go guest adapter, and `withSuspendCheck` prefixes the
+test onto every decoder that needs one, so a decoder added later cannot forget it. Java's
+`HostCalls.java` is hand-written: 48 `long result = ...` sites, no structure holding any of them
+to the rule. So the check is added *and* the structure is, in `engine/java_sdk_stop_bit_parity_test.go`.
+
+#### Guarding everything would have been wrong, and finding out why is the useful part
+
+The obvious rule — "test the bit at every host call" — is a defect.
+`TestStopSentinelBitsAcrossEveryLayout` measures `packSleepResult` as
+`reachable=ff0000fffffffc00`: **bit 31 is reachable there**, so a guard on `cleatSleepMs` would
+read an ordinary sleep result as a stop. It is also the one call that does not need a sentinel —
+a sleeping guest suspends through its own status byte and never reaches a fresh call.
+
+So the rule is a list, and the list is checked from both ends:
+
+| test | what it holds |
+|---|---|
+| `TestTheJavaSDKAgreesOnTheStopBit` | the SDK's `SUSPEND_STOP_BIT` is the engine's `callSuspendSentinel`, compared as bit *positions* |
+| `TestEveryJavaCallTheHostCanRefuseChecksTheStopBit` | each of the ten methods reaching a host stop site guards, **and guards before decoding** |
+| `TestTheJavaSleepPathDoesNotCheckTheStopBit` | `cleatSleepMs` does **not**, with the reachability reason |
+| `TestTheRequiredJavaGuardsCoverEveryHostStopSite` | the engine's `stopBeforeNewWork()` site count still matches what the list was written against |
+
+#### The count gate had slack, and falsifying it is what showed that
+
+The last test first compared `len(javaCallsTheHostCanRefuse) >= stopSites`. Ten Java methods cover
+seven sites — `PluginCall` has two callers — so **three new stop sites could land before it
+fired**, and adding an eighth left it green. A gate with slack reports green through exactly the
+change it exists to catch. It is an exact pinned count now, and the failure message says to check
+the other side rather than just move the number.
+
+#### Two defects found while auditing rather than by the tests
+
+- `pluginCallOutcome` (`HostCalls.java`) calls the same `importPluginCall` as `pluginCall` and was
+  unguarded. Found by listing all 48 sites rather than by reading the six the design named.
+- §3.104 — `Fetch` was a seventh unguarded fresh path on the **host** side, found the same way.
+  Fixed there, and it is why `cleatFetch` is on the list above.
+
+#### What is deliberately NOT done here
+
+**`java` is not added to `deferSegmentLanguages`.** Membership there means *verified to unwind on
+the sentinel*, end to end, and `engine/defer_segment_test.go` refuses a language without it:
+"a host that emits and a guest that never decodes are two green half-tests and no working
+feature". What exists so far is the guest half plus structural guards. The end-to-end proof needs
+a Java fixture with a defer, built through `buildJavaWasm`, run as a segment — that is the next
+piece, and until it lands the fence stays closed and Java behaves exactly as it does today.
+
+AssemblyScript is the same shape (core module, `decodeCallResult(result: i64)`) and is next.
+Python is **not**: it is a Component Model guest whose WIT declares `durable-call: func(...) ->
+string`, so there is no result word to carry bit 31 — and `extractStringFromPacked`
+(`engine/component_cgo.go`) currently turns the sentinel into `""`, an empty successful response.
+Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`. That needs an ABI decision
+before any code.

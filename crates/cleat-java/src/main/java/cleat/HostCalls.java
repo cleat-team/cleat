@@ -428,6 +428,8 @@ public class HostCalls {
             reqOff, reqLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
 
@@ -778,6 +780,8 @@ public class HostCalls {
             inOff, inLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         int runIdLen = Memory.decodeSimpleExtra(result);
 
@@ -814,6 +818,8 @@ public class HostCalls {
             version,
             policyOff, policyLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         int runIdLen = Memory.decodeSimpleExtra(result);
@@ -990,6 +996,8 @@ public class HostCalls {
             Memory.OUTPUT_OFFSET, sigNameBufSize,
             payloadBufOffset, payloadBufSize);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeAwaitErrCode(result);
         boolean timedOut = Memory.decodeAwaitTimedOut(result);
         int sigNameLen = Memory.decodeAwaitSigNameLen(result);
@@ -1101,6 +1109,8 @@ public class HostCalls {
             inOff, inLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
 
@@ -1135,6 +1145,8 @@ public class HostCalls {
             fnOff, fnLen,
             inOff, inLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
@@ -1201,6 +1213,8 @@ public class HostCalls {
             fnOff, fnLen,
             inOff, inLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeCallErrCode(result);
         int callErrorCode = Memory.decodeCallErrorCode(result);
@@ -2075,6 +2089,8 @@ public class HostCalls {
             heartbeatIntervalMs,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
 
@@ -2176,6 +2192,8 @@ public class HostCalls {
             nreOff, nreLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
 
@@ -2229,6 +2247,8 @@ public class HostCalls {
             hdrOff, hdrLen,
             bodyOff, bodyLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
