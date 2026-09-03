@@ -12359,7 +12359,7 @@ PostgreSQL's `SELECT` without also removing its scan target made the test fail w
 assertion. It was red, and red for the wrong reason. Replacing the column with `'' AS tenant_id`
 keeps the arity and fails on the assertion, which is the thing being proven.
 
-### 3.95 `cleatctl restore-workflow` names a backup command that does not exist, and assigns every restored row to the default tenant — 🔴 **OPEN, found 2026-09-03** (WS-1, 2026-09-03)
+### 3.95 `cleatctl restore-workflow` is removed — 🟢 **DECIDED AND DONE 2026-09-03; the three questions below were answered by deleting the thing that raised them** (WS-1, 2026-09-03)
 
 Found while investigating something else — whether any writer puts a NULL in MySQL's nullable
 `tenant_id` columns. None does; the answer to that question is in the last section here. Looking
@@ -12422,20 +12422,43 @@ definition of that name — a different program after D7 — or trips the FK. Th
 `workflow_defs` was a global registry keyed by `(name, version)`; D7 is what made it matter, the
 same way it made §3.86's `LoadWASM` reachable.
 
-#### What to do about it — not decided
+#### Decided 2026-09-03: removed
 
-Three separable questions, and they do not have to be answered together:
+The owner's call, in their words: *"restore-workflow seems a half-baked idea. Let's remove it."*
+`cmd/cleatctl/restore.go` and its tests are deleted, along with the dispatch case, the help line,
+and the mention in `droptenant.go`'s list of DBA-only operations.
 
-- **Should the missing `backup-workflow` be written, or should restore stop naming it?** The
-  cheaper honest fix is to stop claiming a producer that does not exist; the useful one is to
-  write it. `tiers.yaml`'s rule applies either way: do not claim support the manifest does not
-  grant.
-- **Should restore carry the tenant?** Either take a `--tenant` flag, or read `tenant_id` from the
-  NDJSON row (which requires the backup side to export it — see the first question), or refuse
-  outright when the target is not the default tenant.
-- **Should it write `def_version`?** Independent of tenancy and cheap.
+**What decided it was not the defect list above** — it was that the feature never cohered:
 
-Not started. Recorded here so the finding is a written thing rather than a note in a session.
+- It arrived as one line in a bulk port of forty-odd items (`5181ae2b`, *"CLI: cleat cost
+  calculator, NDJSON restore tool"*). No design note, no `tiers.yaml` entry, nothing in the docs
+  beyond its own help text.
+- The producer it named never existed.
+- All twelve of its tests ran against `mockRestoreDB` — *"a minimal SQL driver mock that always
+  succeeds on Exec"* — asserting on **stdout** (`"2 event_history rows"`, `"Restore complete"`).
+  No test ever inserted a real row, which is exactly why the missing `tenant_id` and `def_version`
+  survived: the tests pinned the NDJSON parsing and the progress reporting, and nothing checked
+  the SQL was right.
+
+So it parsed a format nothing wrote, into a schema it did not fully populate, verified by tests
+that did not use a database.
+
+**And the comparison that settled it.** DBOS has no per-workflow export/import pair. Its CLI
+operates on workflows already in the database — `cancel`, `resume` (from the last completed step),
+`fork` (new execution from step N, copying prior results), `restart` (fork from step 0) — and for
+actual data loss it delegates to PostgreSQL: a new instance from a backup, rolled forward through
+archived logs via point-in-time recovery. That is an architectural position, not a gap. Durable
+state lives in Postgres, so disaster recovery is a Postgres problem, and PITR restores the whole
+database consistently. A single-workflow file export cannot: it replays one workflow's rows
+outside the transaction that wrote them, and `restore-workflow` explicitly did not restore
+`workflow_defs`, schedules or tenants — the rows its own rows point at.
+
+cleat already has the useful half of that space in `cleatctl replay` and `cleatctl debug`.
+
+**What is NOT removed, deliberately.** Nothing else changes. The `--db`/`CLEAT_DB_URL` DBA path
+stays, and `check-db`, `drop-tenant` and `versions purge/gc` still use it. If per-workflow rescue
+is wanted later, the shape to copy is DBOS's — operate on what is in the database — rather than
+a file format with no writer.
 
 ### 3.92 §3.86 scoped the terminate and left the cascade — 🟢 **FIXED 2026-09-03; found by the gate's allowlist demanding a reason, not by its scan** (WS-1, 2026-09-03)
 

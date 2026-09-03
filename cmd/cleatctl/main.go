@@ -79,8 +79,6 @@ func main() {
 		runDeploy(ctx, store, db, args[1:])
 	case "cost":
 		runCost(args[1:])
-	case "restore-workflow":
-		runRestoreWorkflow(ctx, store, db, args[1:])
 	case "replay":
 		runReplay(ctx, store, db, args[1:])
 	case "debug":
@@ -111,7 +109,6 @@ Commands:
   deploy workflow <name> <wasm>   deploy a new workflow WASM binary
   deploy plugin <name> <wasm>     deploy a plugin WASM binary
   cost [flags]                    estimate monthly operational costs
-  restore-workflow <id> <file>    restore a single workflow from NDJSON backup
   replay <id> --entry-point <n>   replay a workflow's event history for diagnostics
   check-db [--verbose]            verify database connectivity and schema health
   debug <id> [--entry-point <n>] [--watch]  step-through workflow event replay

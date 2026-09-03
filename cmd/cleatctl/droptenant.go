@@ -28,7 +28,7 @@ import (
 // resolves "the operator running the deployment"). Building that identity
 // layer just to hang this one destructive command off it is a separate,
 // much bigger piece of work than Finding S3, so this command instead joins
-// check-db, restore-workflow, and versions purge/gc as a DBA-only
+// check-db and versions purge/gc as a DBA-only
 // operation: it authenticates the same way they do, by requiring a
 // PostgreSQL connection string with sufficient privilege (--db /
 // CLEAT_DB_URL), not a tenant API key. Whoever can run cleatctl against the
