@@ -38,18 +38,18 @@ pub fn cleat_entry(_attr: TokenStream, item: TokenStream) -> TokenStream {
     entry::cleat_entry_impl(item.into()).into()
 }
 
-/// Marks a function as a cleat test that safely handles [`SuspendSentinel`].
+/// Marks a function as a cleat test that safely handles workflow suspension.
 ///
 /// This is a lightweight wrapper for native (non-WASM) test execution. It
-/// wraps the function body in `std::panic::catch_unwind` and, if a
-/// [`SuspendSentinel`] panic is caught, converts it to a test-friendly
-/// result so the test does not crash.
+/// runs the function body and, if anything in it suspended the workflow,
+/// converts that to a test-friendly success so the test does not fail for an
+/// outcome that is ordinary.
 ///
 /// Unlike `#[cleat_entry]`, this attribute does NOT generate WASM exports,
 /// does NOT require a `&HostCalls` parameter, and does NOT perform JSON
 /// deserialization. It is intended for `#[cfg(test)]` modules where the
 /// workflow code may call `HostCalls` methods that panic with
-/// [`SuspendSentinel`].
+/// [`cleat_sdk::CallError::Suspended`].
 ///
 /// ## Supported signatures
 ///
@@ -60,7 +60,7 @@ pub fn cleat_entry(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// #[cleat_test]
 /// fn test_workflow_logic() {
 ///     let mut mock = MockHostCalls::new();
-///     // test code that may encounter SuspendSentinel
+///     // test code that may suspend the workflow
 /// }
 ///
 /// #[cleat_test]
@@ -71,7 +71,7 @@ pub fn cleat_entry(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// ## Behavior on SuspendSentinel
+/// ## Behavior on suspension
 ///
 /// - For `fn test() -> ()`: the function returns (passes) silently.
 /// - For `fn test() -> Result<(), E>`: the function returns `Ok(())`.

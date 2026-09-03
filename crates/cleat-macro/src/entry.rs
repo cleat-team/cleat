@@ -169,44 +169,66 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
 
             let h = cleat_sdk::HostCalls;
 
-            let result = std::panic::catch_unwind(|| {
-                #inner_name(#(#inner_call_args),*)
-            });
+            // Clear before the body runs, not only after. One WASM instance
+            // can serve more than one call, and a flag left set by an earlier
+            // segment would suspend this one before it did anything.
+            cleat_sdk::clear_suspended();
 
-            match result {
-                Ok(inner_result) => {
-                    // Run the workflow's own defers before reporting, so
-                    // anything they record lands inside this segment. On the
-                    // error path too -- a defer is FOR the run that did not
-                    // finish the way it meant to -- but NOT on suspension,
-                    // which is the Err arm below: a suspended workflow has not
-                    // exited and its cleanup is still pending.
-                    cleat_sdk::run_deferred();
-                    match cleat_sdk::format_cleat_result(inner_result) {
-                        Ok(output_json) => {
-                            // Normalize through host encoding/json for cross-language
-                            // determinism (sorted keys, canonical float representation).
-                            if let Some(canonical) = cleat_sdk::HostCalls.json_stringify(&output_json) {
-                                let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &canonical) };
-                                cleat_sdk::memory::encode_export_result(0, n)
-                            } else {
-                                // Fallback: write original JSON if normalization fails.
-                                let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &output_json) };
-                                cleat_sdk::memory::encode_export_result(0, n)
-                            }
-                        }
-                        Err(err_msg) => {
-                            let err_json = serde_json::json!({"error": err_msg}).to_string();
-                            let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &err_json) };
-                            cleat_sdk::memory::encode_export_result(1, n)
-                        }
+            // Called directly. This used to be wrapped in
+            // `std::panic::catch_unwind` to intercept a `SuspendSentinel`
+            // panic, which could never work: wasm32-wasip1 builds with
+            // panic=abort, so the panic aborted -- `unreachable`, a trap --
+            // and the catch arm was dead code. IMPROVEMENT-PLAN 3.87.
+            let inner_result = #inner_name(#(#inner_call_args),*);
+
+            // Suspension is decided by the flag, not by the body's return
+            // value, and it is checked BEFORE the result is formatted.
+            //
+            // Checking the flag rather than only matching on
+            // `Err(CallError::Suspended)` is what makes this robust: a body
+            // that receives the Err and discards it -- `let _ = h.sleep_ms(..)`
+            // -- still returns a value of its own, and reporting that value
+            // would complete a workflow the host has already recorded as
+            // suspended. That is precisely the failure the panic version had,
+            // so the replacement must not reintroduce it.
+            //
+            // run_deferred is NOT called here. A suspended workflow has not
+            // exited and its cleanup is still pending; firing it at the first
+            // sleep would release locks a workflow that is about to continue
+            // still holds.
+            if cleat_sdk::is_suspended() {
+                return cleat_sdk::memory::SUSPEND_SENTINEL;
+            }
+
+            // Run the workflow's own defers before reporting, so anything they
+            // record lands inside this segment. On the error path too -- a
+            // defer is FOR the run that did not finish the way it meant to.
+            cleat_sdk::run_deferred();
+
+            // A defer body can itself suspend, so the flag is re-read after the
+            // drain. Without this the segment would report a result for a
+            // workflow whose cleanup asked to continue in a later segment.
+            if cleat_sdk::is_suspended() {
+                return cleat_sdk::memory::SUSPEND_SENTINEL;
+            }
+
+            match cleat_sdk::format_cleat_result(inner_result) {
+                Ok(output_json) => {
+                    // Normalize through host encoding/json for cross-language
+                    // determinism (sorted keys, canonical float representation).
+                    if let Some(canonical) = cleat_sdk::HostCalls.json_stringify(&output_json) {
+                        let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &canonical) };
+                        cleat_sdk::memory::encode_export_result(0, n)
+                    } else {
+                        // Fallback: write original JSON if normalization fails.
+                        let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &output_json) };
+                        cleat_sdk::memory::encode_export_result(0, n)
                     }
                 }
-                Err(panic_err) => {
-                    if panic_err.downcast_ref::<cleat_sdk::SuspendSentinel>().is_some() {
-                        return cleat_sdk::memory::SUSPEND_SENTINEL;
-                    }
-                    std::panic::resume_unwind(panic_err);
+                Err(err_msg) => {
+                    let err_json = serde_json::json!({"error": err_msg}).to_string();
+                    let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &err_json) };
+                    cleat_sdk::memory::encode_export_result(1, n)
                 }
             }
         }

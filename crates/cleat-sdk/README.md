@@ -47,12 +47,39 @@ Transforms a function into a `#[no_mangle]` WASM export with the ABI signature
 - Function must **not** be `async` (WASM does not support futures).
 
 **Generated wrapper behavior:**
-- Wraps the body in `std::panic::catch_unwind` to intercept
-  `SuspendSentinel` panics and propagate suspension back to the host.
+- Calls the body directly. Suspension is a **return value**, not a panic:
+  every host call that can suspend returns `Result<T, CallError>`, and the
+  workflow propagates it with `?`.
+- After the body returns, checks `cleat_sdk::is_suspended()` and returns the
+  host's sentinel value if set — the backstop for a body that discards the
+  `Err` instead of propagating it.
 - Normalizes output JSON through the host's `encoding/json` for cross-language
   deterministic serialization.
-- On panic with `SuspendSentinel`, returns the sentinel value to the host
-  engine (workflow suspension). All other panics are re-dispatched.
+
+> This wrapper used to intercept a `SuspendSentinel` panic with
+> `std::panic::catch_unwind`. That could never work: `wasm32-wasip1` builds with
+> `panic=abort` (`rustc --print cfg --target wasm32-wasip1 | grep panic`), so
+> there is no unwinding and the panic aborted — `unreachable`, a trap. Every
+> Rust suspension was a trapped guest, masked because the host records its own
+> suspension on those paths and lets it win over the error beside it. See
+> IMPROVEMENT-PLAN §3.87.
+
+**Suspension in a workflow body:**
+
+```rust
+#[cleat_entry]
+fn order(h: &HostCalls, input: Input) -> Result<Output, String> {
+    h.cleat_sleep_ms(60_000)?;          // suspends; resumes in a later segment
+    let result = h.await_child(&run_id)?;
+    Ok(Output { result })
+}
+```
+
+`CallError` converts into `String`, so `?` works in a workflow returning
+`Result<T, String>` without any annotation.
+
+**A defer body must not panic.** Nothing can catch it — the guest aborts.
+Return `Err(CallError::Failed(..))` instead; the remaining defers still run.
 
 **Compile-time validation errors:**
 
@@ -209,8 +236,8 @@ Key test harness methods:
 | `assert_not_called(service, op)` | Verify call was not made |
 | `assert_state(key, value)` | Verify workflow state |
 
-The `#[cleat_test]` attribute (from `cleat_macro`) wraps tests in
-`catch_unwind` so `SuspendSentinel` panics are safely intercepted:
+The `#[cleat_test]` attribute (from `cleat_macro`) treats a suspension as an
+ordinary outcome rather than a test failure:
 
 ```rust
 use cleat_macro::cleat_test;
@@ -218,9 +245,14 @@ use cleat_macro::cleat_test;
 #[cleat_test]
 fn test_workflow_with_suspend() {
     let mut mock = MockHostCalls::new();
-    // Test code that may encounter SuspendSentinel
+    // Test code that may suspend the workflow
 }
 ```
+
+Note these tests run on the **host** target, where unwinding exists. That is
+only safe because nothing in the suspension path relies on unwinding any more —
+before §3.87 it did, so the suspend mechanism tested green here and trapped in
+the shipped `wasm32-wasip1` build.
 
 ## Typed Plugins
 

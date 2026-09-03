@@ -200,45 +200,67 @@ fn defer_order(h: &HostCalls, input: PlaceOrderInput) -> Result<String, String> 
     let user = input.user_id.clone();
     h.defer_func(move || {
         HostCalls.cleat_call("notifications", "first", &format!("{{\"user\":\"{}\"}}", user));
+        Ok(())
     });
     h.defer_func(|| {
         HostCalls.cleat_call("notifications", "second", "{}");
+        Ok(())
     });
 
     h.cleat_call("inventory", "body", "{}");
     Ok("{\"deferred\":true}".to_string())
 }
 
-/// A workflow that suspends the only way this SDK knows how, and nothing else.
+/// Suspension declared with NO host call in the way -- the mask-free probe.
 ///
-/// `HostCalls::cleat_sleep_ms`, `await_child` and `await_signals` all suspend by
-/// `std::panic::panic_any(SuspendSentinel)`, on the documented understanding
-/// that `#[cleat_entry]`'s `catch_unwind` intercepts it and returns
-/// `memory::SUSPEND_SENTINEL` to the host. This entry point raises that panic
-/// directly, with no host call in the way, so a test can measure whether the
-/// interception happens.
+/// Before IMPROVEMENT-PLAN 3.87 this raised
+/// `std::panic::panic_any(SuspendSentinel)` and `#[cleat_entry]` was documented
+/// as intercepting it with `catch_unwind`. It never could: `wasm32-wasip1`
+/// builds with `panic=abort`, so the panic aborted -- `unreachable`, a trap --
+/// and every Rust suspension was a trapped guest.
 ///
-/// It does not. See `engine/rust_suspend_test.go` and IMPROVEMENT-PLAN 3.87.
-/// Keep this entry point: it is the whole of that test's evidence, and it has
-/// no other caller.
+/// Why no host call: the suspending host functions (`cleat_sleep`,
+/// `cleat_await_child`, `cleat_await_signals`) record the suspension on the
+/// HOST before returning, and `engine/executor.go` lets that win over any error
+/// beside it. A probe that went through one of them would report a clean
+/// suspension whether the guest worked or trapped -- which is exactly how this
+/// bug hid for as long as the SDK existed. Setting the flag directly leaves the
+/// host with nothing recorded, so the only thing that can produce a suspension
+/// here is the guest's own wrapper.
+///
+/// Keep this entry point; `engine/rust_suspend_test.go` is its only caller.
 #[cleat_entry]
 fn suspend_probe(_h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
-    std::panic::panic_any(cleat_sdk::SuspendSentinel);
+    cleat_sdk::mark_suspended();
+    Ok("{\"unreachable\":true}".to_string())
 }
 
-/// The same suspension, reached through a host call that records it.
-///
-/// `cleat_sleep_ms` panics with `SuspendSentinel` exactly as `suspend_probe`
-/// does, so the guest traps identically -- but the HOST sets session.suspendErr
-/// before returning, and the executor lets a suspension win over the error that
-/// came with it. The run is therefore reported as a clean suspension.
-///
-/// Pairing this with `suspend_probe` is what shows the trap is real and merely
-/// hidden. Keep both; either alone is misleading. IMPROVEMENT-PLAN 3.87.
+/// The ordinary shape: a real sleep, propagated with `?`.
 #[cleat_entry]
 fn sleep_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
-    h.cleat_sleep_ms(300_000);
+    // The `?` is the mechanism -- the compiler will not let the value be used,
+    // so the segment ends here.
+    h.cleat_sleep_ms(300_000)?;
     Ok("{\"unreachable\":true}".to_string())
+}
+
+/// The same sleep, DISCARDED rather than propagated -- the backstop probe.
+///
+/// This is the case the type system cannot reach: `let _ = ...` throws the
+/// `Err(CallError::Suspended)` away and the body returns a value of its own.
+/// Reporting that value would complete a workflow the host has already recorded
+/// as suspended -- the exact failure the panic version had, reintroduced by the
+/// fix for it.
+///
+/// `#[cleat_entry]` checks `cleat_sdk::is_suspended()` before it formats the
+/// result, so the body's value must never reach the host. The test asserts on
+/// the returned result string, not on the suspension: the host records this
+/// sleep itself, so `susp != nil` here proves nothing on its own.
+/// IMPROVEMENT-PLAN 3.87.
+#[cleat_entry]
+fn sleep_discard_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let _ = h.cleat_sleep_ms(300_000);
+    Ok("{\"discarded_the_suspension\":true}".to_string())
 }
 
 /// A workflow that exhausts a retry policy through the HOST-side retry loop.
