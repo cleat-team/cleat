@@ -733,7 +733,14 @@ jobs:
           set -o pipefail
           # Unquoted on purpose: some matrix entries list several package patterns
           # and rely on word splitting. Values are controlled by this file only.
-          go test -race -count=1 ${{ matrix.package.flags }} -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
+          # -timeout 30m, not Go's 10-minute default. The Tier 1 Gate hit that
+          # default on 2026-09-03 -- ran=6546 pass=6543 fail=0, then "panic:
+          # test timed out after 10m0s" -- because it configures all three
+          # DSNs. This job configures PostgreSQL only and still finishes well
+          # inside 10m, so this is insurance rather than a fix: the number that
+          # matters is the one the suite grows into, and -race makes this job
+          # the slower of the two per test.
+          go test -race -count=1 -timeout 30m ${{ matrix.package.flags }} -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
 
       # A warning here was not enough. This job spun up a Postgres service it
       # could not reach, skipped every Postgres-backed test, emitted exactly

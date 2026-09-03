@@ -234,13 +234,32 @@ LOG="${TIER_GATE_LOG:-$REPO_ROOT/tier-gate.log}"
 # -p 1 is required: engine/testutil's CleanupPostgresTestData is an unqualified
 # DELETE FROM across eleven tables, so packages run concurrently against one database
 # delete each other's fixtures mid-test.
+# GO_TEST_TIMEOUT, because Go's default is 10 minutes and this gate outgrew it.
+#
+# Measured 2026-09-03 on a runner: `ran=6546 pass=6543 fail=0 skip=2` followed by
+# `panic: test timed out after 10m0s` and `FAIL github.com/cleat-team/cleat/engine
+# 600.038s`. Zero failing tests, and the job still went red -- which is the shape
+# CLAUDE.md's "Is this result real?" section is about, read in the other
+# direction: a red that is not a failure.
+#
+# This gate is the invocation that hits it because it is the one that sets all
+# three DSNs. The ci.yml matrix runs the same packages against PostgreSQL only
+# and finishes inside the default, which is why this surfaced here first rather
+# than everywhere.
+#
+# 30m, not 45m: the workflow's own timeout-minutes is 45, and Go's timeout has to
+# fire FIRST or the runner kills the job and prints no goroutine dump -- the
+# difference between "which test was hanging" and "the job stopped". It also has
+# to cover two sequential invocations, the root module and each tier-1 module.
+GO_TEST_TIMEOUT="${GO_TEST_TIMEOUT:-30m}"
+
 note "running root module: $(echo "$PKGS" | tr '\n' ' ')"
 # SKIP_ARGS is empty when tier1.exclude_tests is empty, so the unfiltered run is the
 # default and the filter has to be asked for in the manifest.
 SKIP_ARGS=""
 [ -n "$SKIP_RE" ] && SKIP_ARGS="-skip $SKIP_RE"
 # shellcheck disable=SC2086
-(cd "$REPO_ROOT" && go test -count=1 -p 1 -v $SKIP_ARGS $PKGS) >> "$LOG" 2>&1
+(cd "$REPO_ROOT" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $SKIP_ARGS $PKGS) >> "$LOG" 2>&1
 TEST_RC=$?
 
 # Separate Go modules must be tested from inside their own directory; `go test
@@ -250,7 +269,7 @@ for md in $MODDIRS; do
   [ -f "$REPO_ROOT/$md/go.mod" ] || { fail "tiers.yaml names module '$md' but $md/go.mod does not exist"; continue; }
   note "running module: $md"
   # shellcheck disable=SC2086
-  (cd "$REPO_ROOT/$md" && go test -count=1 -p 1 -v $SKIP_ARGS ./...) >> "$LOG" 2>&1
+  (cd "$REPO_ROOT/$md" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $SKIP_ARGS ./...) >> "$LOG" 2>&1
   rc=$?
   [ "$rc" = "0" ] || TEST_RC=$rc
 done

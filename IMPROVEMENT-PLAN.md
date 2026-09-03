@@ -12292,6 +12292,64 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
+### 3.108 The Tier 1 Gate ran on Go's 10-minute default and the engine suite outgrew it — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
+
+`scripts/tier-gate.sh` invoked `go test` with no `-timeout`, so Go's 10-minute per-package default
+applied while the job itself allowed 45. Measured on a runner, 2026-09-03:
+
+```
+tier-gate: ran=6546 pass=6543 fail=0 skip=2
+panic: test timed out after 10m0s
+FAIL  github.com/cleat-team/cleat/engine  600.038s
+```
+
+**Zero failing tests, and the job went red.** That is CLAUDE.md's "Is this result real?" section read
+in the other direction — a red that is not a failure. It arrived on an unrelated PR whose change
+was confined to `cmd/cleat-worker`, so the first honest question was whether the change could have
+caused it, and it could not: the engine suite does not import that package.
+
+#### Why this gate and not the ci.yml matrix
+
+Both run the same packages. The gate sets **all three DSNs**; `ci.yml`'s `Test Go (engine)` matrix
+entry configures PostgreSQL only, and CLAUDE.md's own table records what that is worth — 2544
+tests in 16s against no DSN, 3846 in 60s against three. The gate is simply the invocation running
+the suite that got long. `ci.yml`'s entry carries `flags: -p 1` and no timeout either, so it has
+the same latent defect and now carries an explicit 30m as insurance rather than as a fix.
+
+#### 30m, and why not 45m
+
+The workflow's `timeout-minutes` is 45. Go's timeout has to fire **first**, or the runner kills the
+job and prints no goroutine dump — the difference between "which test was hanging" and "the job
+stopped". It also has to cover two sequential invocations, the root module and each tier-1 module.
+
+`GO_TEST_TIMEOUT` is overridable so a slow machine can raise it without editing the script.
+
+#### Verification, and what it could not cover
+
+The gate cannot run on this machine: it fails its own preconditions first, wanting `CLEAT_CRASH_DB`
+and `componentize-py` and `wasm-tools`. So the plumbing was proven directly instead, with the same
+quoting the script uses:
+
+```
+$ GO_TEST_TIMEOUT=1ms  go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" ./auth/
+panic: test timed out after 1ms
+$ GO_TEST_TIMEOUT=30m  go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" ./auth/
+ok    github.com/cleat-team/cleat/auth  0.398s
+```
+
+**The first attempt at that check was vacuous and is worth recording.** It ran against `./wasmrw/`,
+which has no test files, so `1ms` produced `[no test files]` and no timeout — a check that would
+have passed against a broken flag. The package has to actually run tests for the assertion to mean
+anything.
+
+#### Related
+
+This is the third timeout of the same family in two days. #629 raised the cluster job's 300s after
+the engine suite outgrew it; this session hit Go's 10-minute default repeatedly on local
+three-dialect runs (380s, 442s, 473s, 503s, 987s, 1533s — the spread is machine load, not the
+suite). The suite is growing and the defaults were set when it was smaller; expect the next one
+rather than being surprised by it.
+
 ### 3.101 Terminate and signal told the caller which workflow ids are real — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
 
 Two routes answered something other than 404 for a workflow the caller does not own, and the two
