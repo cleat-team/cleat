@@ -145,7 +145,11 @@ type PluginCallStreamChunkEvent struct {
 	Input      string
 	Output     string
 	ChunkIndex int
-	Finish     bool
+	// ErrCode is the call error code the guest was told when this chunk
+	// records a stream-level failure; zero on an ordinary chunk. See
+	// EventRecord.StreamErrCode.
+	ErrCode int
+	Finish  bool
 }
 
 func (e PluginCallStreamChunkEvent) Step() int       { return e.step }
@@ -314,6 +318,7 @@ func EventRecordFromEvent(e Event) EventRecord {
 			PluginName: ev.PluginName, PluginFunc: ev.FuncName,
 			PluginInput: ev.Input, PluginOutput: ev.Output,
 			StreamChunkIndex: ev.ChunkIndex, StreamFinish: ev.Finish,
+			StreamErrCode: ev.ErrCode,
 		}
 	case CreatePromiseEvent:
 		return EventRecord{
@@ -413,6 +418,7 @@ func EventFromRecord(r EventRecord) Event {
 			step: r.Step, PluginName: r.PluginName, FuncName: r.PluginFunc,
 			Input: r.PluginInput, Output: r.PluginOutput,
 			ChunkIndex: r.StreamChunkIndex, Finish: r.StreamFinish,
+			ErrCode: r.StreamErrCode,
 		}
 	case EventTypeCreatePromise:
 		return CreatePromiseEvent{

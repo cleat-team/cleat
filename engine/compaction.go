@@ -222,6 +222,14 @@ type CompactedEvent struct {
 	StreamChunkIndex int  `json:"sci,omitempty"`
 	StreamFinish     bool `json:"scf,omitempty"`
 
+	// StreamErrCode mirrors EventRecord.StreamErrCode: the call error code the
+	// guest was told for a stream-level failure. Without it a compacted stream
+	// error replays as callErrorUnknown regardless of what the fresh run
+	// reported, so the same step would be retryable before compaction and not
+	// after -- engine-introduced non-determinism of the same shape as the
+	// TimestampMs note above.
+	StreamErrCode int `json:"sec,omitempty"`
+
 	// StateKeys mirrors EventRecord.StateKeys for a state_mutation event with
 	// StateOp=="list" (ListState). lifecycle.go's ListState replay path reads
 	// it back verbatim; the other state_mutation ops (set/increment/has)
@@ -475,6 +483,7 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.PluginError = ev.PluginError
 			ce.StreamChunkIndex = ev.StreamChunkIndex
 			ce.StreamFinish = ev.StreamFinish
+			ce.StreamErrCode = ev.StreamErrCode
 		case EventTypeDurableSend:
 			ce.Service = ev.Service
 			ce.Op = ev.Op
@@ -641,6 +650,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.PluginError = ce.PluginError
 			rec.StreamChunkIndex = ce.StreamChunkIndex
 			rec.StreamFinish = ce.StreamFinish
+			rec.StreamErrCode = ce.StreamErrCode
 		case EventCodeDurableSend:
 			// extractCompactionState has captured Service/Op/Request for this
 			// type since it was added; this reconstruction case was simply

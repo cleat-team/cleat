@@ -2177,6 +2177,57 @@ The same constraint forces the streaming plugin family to a single code: every s
 whether a missing registry, a blocked guard or the function itself erroring, is recorded by
 `recordStreamError` and comes back through one replay site that cannot tell them apart.
 
+> **The streaming half is fixed — 2026-09-03 (WS-2), and the asymmetry was wider than this
+> paragraph says.** It is *three* of the four causes, not one. Measured by running both paths
+> against the same condition:
+>
+> | condition | `PluginCall` | `PluginCallStreaming`, before |
+> |---|---|---|
+> | no registry configured | `callErrorUnknown` | `callErrorUnknown` ✅ |
+> | function not registered | `callFailureCode` (retryable) | `callErrorUnknown` ❌ |
+> | call guard rejects | `callFailureCode` (retryable) | `callErrorUnknown` ❌ |
+> | the function returns an error | `callFailureCode` (retryable) | `callErrorUnknown` ❌ |
+>
+> So the identical deployment gap, or the identical plugin error, was retryable to a workflow
+> *calling* a plugin and permanently fatal to one *streaming* from it.
+>
+> **What the fix stores is the code, not the cause.** `EventRecord.StreamErrCode` holds what the
+> guest was actually told, so replay hands back a value rather than re-deriving a
+> classification. A stored *cause* would still need a cause-to-code mapping on the replay side,
+> and changing that mapping later would silently change the retryability of steps already
+> recorded — which is the exact determinism bug the paragraph above is guarding against.
+>
+> **Why this did not break workflows in flight.** The key is written only when non-zero, so
+> every chunk already in `event_history` keeps its byte-identical payload and its stored
+> checksum, and decodes to 0 — which *is* `callErrorUnknown`, which is exactly what those
+> failures reported when they were fresh. Determinism is per recorded step, not across eras: an
+> event recorded before the change replays the way it always did, and only events recorded from
+> now on carry the corrected code.
+>
+> **It was unfixable until §3.96 landed**, because the error branch could not fire on replay at
+> all: `StreamFinish` was persisted by neither the payload nor a column, so a recorded stream
+> failure came back as an ordinary chunk and replayed as a *success* whose content was the error
+> text. Fixing the classification of a branch that never ran would have been a change with no
+> observable behaviour and a test that could not fail.
+>
+> `freshPluginCallStreaming`'s four sites now go through one function, `streamFailure`, which
+> records and returns from a single `code` argument. Four sites each writing a record and then
+> packing a constant is four chances for those to drift, and the drift would not surface as a
+> broken test — it would surface as a workflow that retried on the first run and gave up on the
+> replay. `TestStreamFailureRecordsTheCodeItReturns` asserts the two halves agree.
+>
+> **Still open in this section:** the `ServiceCaller` half — the seven `ErrorCode` values and
+> the one bit they collapse into. Nothing here changes that. What changed is that the streaming
+> family no longer contradicts the non-streaming one while we decide.
+>
+> Not attempted: giving the causes *truthful* codes — `NotFound` for an unregistered function,
+> `PermissionDenied` for a guard rejection. Both exist in the guest enum and both are
+> non-retryable, and both would be better than `Unavailable`. But the non-streaming path reports
+> `callFailureCode` for those same two conditions, so doing it here alone would re-open the
+> asymmetry pointing the other way, and doing it on both paths changes the retry behaviour of
+> workflows in flight. That is a separate decision about both paths at once, not a detail of
+> this one.
+
 **The fix is to persist the code alongside the event** (a column, or a field in the `payload`
 JSONB). Once it round-trips, classification at the `ServiceCaller` boundary becomes possible —
 a caller that knows a 404 from a connection reset can say so, and replay will agree.
