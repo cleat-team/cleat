@@ -14,21 +14,26 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// TestDeployOverAnotherTenantsNameIsRefusedOverHTTP is the HTTP half of
+// TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP is the HTTP half of
 // IMPROVEMENT-PLAN 3.12.
 //
-// The store-level property is tested in engine (a deploy must not replace a
-// definition owned by another tenant). This is the layer a customer actually
-// meets, and the reason it needs its own test is the same one §1.7 established:
-// a correct store reached through a handler that reports the wrong thing is
-// still a wrong product. Specifically, the endpoint returned 500 for every
-// error, so a name another tenant holds -- an ordinary, expected client
-// situation -- would have read as a server fault, paged whoever owns the
-// alerts, and told the caller nothing actionable.
+// The store-level property is tested in engine (two tenants each hold their own
+// definition of one name). This is the layer a customer actually meets, and the
+// reason it needs its own test is the one §1.7 established: a correct store
+// reached through a handler that reports the wrong thing is still a wrong
+// product.
 //
-// It also pins the part that must NOT leak: the response says the name is
-// taken, never who holds it.
-func TestDeployOverAnotherTenantsNameIsRefusedOverHTTP(t *testing.T) {
+// **This test used to assert a 409**, and that was right while
+// workflow_defs was keyed by (name, version): a name another tenant held was an
+// ordinary client situation that the endpoint reported as a 500, which would
+// have paged whoever owns the alerts and told the caller nothing actionable.
+//
+// D7 (IMPROVEMENT-PLAN 3.77) put the tenant in the key, so there is no conflict
+// left to report. The assertion inverts rather than relaxes: B's deploy must
+// SUCCEED, and both tenants must then read back their own bytes. The old
+// "must not name the owning tenant" check is gone with it -- nothing is refused,
+// so there is no refusal to leak through.
+func TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed deploy ownership test")
 	}
@@ -89,17 +94,12 @@ func TestDeployOverAnotherTenantsNameIsRefusedOverHTTP(t *testing.T) {
 		t.Fatalf("tenant A's own deploy: status = %d, body = %s", code, body)
 	}
 
-	code, body := deploy(tenantB, defName, []byte{0x00, 0x61, 0x73, 0x6d, 0xBB})
-	if code != http.StatusConflict {
-		t.Errorf("tenant B deploying over tenant A's name: status = %d, want %d (409); body = %s",
-			code, http.StatusConflict, body)
-	}
-	if strings.Contains(body, tenantA) {
-		t.Errorf("the refusal names the owning tenant %s, which the caller has no business learning: %s",
-			tenantA, body)
+	if code, body := deploy(tenantB, defName, []byte{0x00, 0x61, 0x73, 0x6d, 0xBB}); code != http.StatusCreated {
+		t.Errorf("tenant B deploying a name tenant A also uses: status = %d, want %d (201); body = %s",
+			code, http.StatusCreated, body)
 	}
 
-	// And A's definition is intact, which is the property the status code is
+	// And A's definition is untouched, which is the property the status code is
 	// only reporting on.
 	storeA, _, err := factory.OpenStore(ctx, tenantA)
 	if err != nil {
@@ -110,9 +110,26 @@ func TestDeployOverAnotherTenantsNameIsRefusedOverHTTP(t *testing.T) {
 		t.Fatalf("GetWorkflowDef(A): %v", err)
 	}
 	if defA == nil {
-		t.Fatalf("tenant A's definition is gone after tenant B's refused deploy")
+		t.Fatalf("tenant A's definition is gone after tenant B deployed the same name")
 	}
 	if len(defA.WASMBytes) == 0 || defA.WASMBytes[len(defA.WASMBytes)-1] != 0xAA {
 		t.Errorf("tenant A's definition carries %#v, not A's own bytes", defA.WASMBytes)
+	}
+
+	// And the direction that only became assertable with D7: B has its own
+	// definition, not a view of A's and not nothing.
+	storeB, _, err := factory.OpenStore(ctx, tenantB)
+	if err != nil {
+		t.Fatalf("open store for tenant B: %v", err)
+	}
+	defB, err := storeB.GetWorkflowDef(ctx, defName, 1)
+	if err != nil {
+		t.Fatalf("GetWorkflowDef(B): %v", err)
+	}
+	if defB == nil {
+		t.Fatalf("tenant B's own definition is missing after a 201")
+	}
+	if len(defB.WASMBytes) == 0 || defB.WASMBytes[len(defB.WASMBytes)-1] != 0xBB {
+		t.Errorf("tenant B reads %#v, want its own bytes ending 0xBB", defB.WASMBytes)
 	}
 }

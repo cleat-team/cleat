@@ -227,6 +227,31 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 		t.Fatalf("setupTestData: DeployWorkflowDef: %v", err)
 	}
 
+	// The runs below are started for DefaultTenantUUID explicitly, while the
+	// deploy above lands under whatever tenant the store carries -- which for
+	// some callers is not the default. Since D7 the FK on workflow_instances
+	// carries tenant_id (IMPROVEMENT-PLAN 3.77), so the default tenant needs
+	// its own row of the same definition or those runs are refused.
+	//
+	// Done through a tenant-scoped store rather than by changing the runs to
+	// use the store's tenant: the callers that pass a non-default tenant here
+	// are asserting exactly that mismatch, so making it disappear would remove
+	// what they test.
+	switch st := store.(type) {
+	case *PostgresStore:
+		if err := st.WithTenant(DefaultTenantUUID).DeployWorkflowDef(context.Background(), def); err != nil {
+			t.Fatalf("setupTestData: DeployWorkflowDef(default tenant): %v", err)
+		}
+	case *MySQLStore:
+		if err := st.WithTenant(DefaultTenantUUID).DeployWorkflowDef(context.Background(), def); err != nil {
+			t.Fatalf("setupTestData: DeployWorkflowDef(default tenant): %v", err)
+		}
+	case *MSSQLStore:
+		if err := st.WithTenant(DefaultTenantUUID).DeployWorkflowDef(context.Background(), def); err != nil {
+			t.Fatalf("setupTestData: DeployWorkflowDef(default tenant): %v", err)
+		}
+	}
+
 	// Create workflow instances in various states for testing
 	now := time.Now()
 

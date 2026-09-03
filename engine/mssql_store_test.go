@@ -262,6 +262,18 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	}
 
 	nonDefaultTenant := "11111111-1111-1111-1111-111111111111"
+
+	// The runs below are deliberately started for a NON-default tenant, and
+	// since D7 the FK on workflow_instances carries tenant_id
+	// (IMPROVEMENT-PLAN 3.77), so that tenant needs its own definition row.
+	// Seeded here rather than by changing the runs to the default tenant,
+	// because the cross-tenant mismatch is what this test is about.
+	if _, err := db.Exec(`
+		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue, tenant_id)
+		VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
+		"test-wf", 1, []byte("wasm"), "[]", "default", nonDefaultTenant); err != nil {
+		t.Fatalf("insert workflow_def (non-default tenant): %v", err)
+	}
 	store := NewMSSQLStore(db, "default")
 
 	// The assertions below read workflow_instances directly to check what

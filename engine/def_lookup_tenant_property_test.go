@@ -222,3 +222,62 @@ func TestDefinitionLookupsAnswerOnlyAboutTheCallersTenant(t *testing.T) {
 		})
 	}
 }
+
+// TestLatestVersionResolvesWithinTheCallersTenant covers the failure mode the
+// read property above cannot see, and it is the more dangerous of the two.
+//
+// "Resolve the latest version of this name" is an aggregate -- MAX(version) --
+// so it returns exactly one row whether or not the tenant is in the predicate.
+// Unscoped it does not error and does not hand back somebody else's row: it
+// hands back somebody else's NUMBER. The caller then starts a workflow on a
+// version of its own definition that may not exist, or runs code its tenant
+// never deployed, and nothing anywhere reports a problem.
+//
+// So the fixture is deliberately lopsided. Tenant A holds v1, v2 and v3 of a
+// name; tenant B holds only v1. An unscoped MAX picks 3; B's own answer is 1. A
+// symmetric fixture -- both tenants at the same version -- could not tell the
+// two apart, which is the trap this file's header is about in miniature.
+func TestLatestVersionResolvesWithinTheCallersTenant(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			storeA, storeB, _ := twoTenantStores(t, backend)
+			ctx := context.Background()
+			const name = "version-skew"
+
+			for _, v := range []int{1, 2, 3} {
+				if err := storeA.DeployWorkflowDef(ctx, &WorkflowDef{
+					Name: name, Version: v, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d, byte(v)},
+					ABIVersion: 1, MinVersion: 1,
+				}); err != nil {
+					t.Fatalf("tenant A deploy v%d: %v", v, err)
+				}
+			}
+			if err := storeB.DeployWorkflowDef(ctx, &WorkflowDef{
+				Name: name, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d, 0xB1},
+				ABIVersion: 1, MinVersion: 1,
+			}); err != nil {
+				t.Fatalf("tenant B deploy v1: %v", err)
+			}
+
+			gotB, err := storeB.ResolveLatestVersion(ctx, name)
+			if err != nil {
+				t.Fatalf("ResolveLatestVersion(B): %v", err)
+			}
+			if gotB != 1 {
+				t.Errorf("tenant B resolved %q to version %d, want its own 1 -- "+
+					"tenant A holds v3 of that name, so %d is A's number", name, gotB, gotB)
+			}
+
+			// The control, so a bug that forced every answer to 1 could not
+			// pass this test: A's own answer really is 3.
+			gotA, err := storeA.ResolveLatestVersion(ctx, name)
+			if err != nil {
+				t.Fatalf("ResolveLatestVersion(A): %v", err)
+			}
+			if gotA != 3 {
+				t.Errorf("tenant A resolved %q to version %d, want 3", name, gotA)
+			}
+		})
+	}
+}

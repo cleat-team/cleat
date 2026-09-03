@@ -485,6 +485,10 @@ func TestMySQLIntegration_ClaimWorkflowsAcrossTenants(t *testing.T) {
 	const otherTenant = "11111111-1111-1111-1111-111111111111"
 
 	deployTestDef(t, s, "test-workflow", 1)
+	// otherTenant needs its own definition row: since D7 the FK on
+	// workflow_instances carries tenant_id (IMPROVEMENT-PLAN 3.77), so a run
+	// started for a tenant that has no definition of that name is refused.
+	deployTestDef(t, s.WithTenant(otherTenant), "test-workflow", 1)
 
 	// Both rows land in the one database mysqlIntegrationStore opens -- there
 	// is no MySQLStoreFactory here, so "tenant" is only ever the tenant_id

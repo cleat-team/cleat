@@ -300,11 +300,11 @@ func (s *MySQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 	} else {
 		_, err = s.db.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
-			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
+			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated AND tenant_id = ?), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
 			        COALESCE((SELECT t.task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS t), 'default'),
 			        ?, ?)
-		`, runID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID, priority)
+		`, runID, defName, defName, s.tenantID, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID, priority)
 	}
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
@@ -337,11 +337,11 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 	} else {
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
-			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
+			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated AND tenant_id = ?), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
 			        COALESCE((SELECT t.task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS t), 'default'),
 			        ?, ?)
-		`, childID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID, priority)
+		`, childID, defName, defName, s.tenantID, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID, priority)
 	}
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)

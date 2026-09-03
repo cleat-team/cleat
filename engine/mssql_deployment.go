@@ -293,34 +293,18 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	}
 	defer tx.Rollback()
 
-	var owner sql.NullString
-	err = tx.QueryRowContext(ctx, `
-		SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id))
-		FROM workflow_defs WITH (UPDLOCK, HOLDLOCK)
-		WHERE name = @p1 AND version = @p2
-	`, def.Name, def.Version).Scan(&owner)
-	switch {
-	case err == nil:
-		if !canAdoptDef(owner.String, s.tenantID) {
-			return defOwnershipError(def.Name, def.Version)
-		}
-	case errors.Is(err, sql.ErrNoRows):
-		// Does not exist yet; the MERGE inserts it.
-	default:
-		return fmt.Errorf("deploy workflow def: read owner: %w", err)
-	}
-
+	// No ownership check: under (tenant_id, name, version) another tenant's
+	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
 		MERGE workflow_defs AS target
-		USING (SELECT @p1 AS name, @p2 AS version) AS source
-		ON target.name = source.name AND target.version = source.version
+		USING (VALUES (@p1, @p2)) AS source(name, version)
+		ON target.tenant_id = @p8 AND target.name = source.name AND target.version = source.version
 		WHEN MATCHED THEN UPDATE SET
 			wasm_bytes = @p3,
 			abi_version = @p4,
 			min_version = @p5,
 			plugin_deps = @p6,
-			deprecated = @p7,
-			tenant_id = @p8
+			deprecated = @p7
 		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
 		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8);
 	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, string(pluginDepsJSON), def.Deprecated, s.tenantID)
@@ -443,8 +427,8 @@ func (s *MSSQLStore) ResolveLatestVersion(ctx context.Context, defName string) (
 	var version int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT ISNULL(MAX(version), 0) FROM workflow_defs
-		WHERE name = @p1 AND deprecated = 0
-	`, defName).Scan(&version)
+		WHERE name = @p1 AND deprecated = 0 AND tenant_id = @p2
+	`, defName, s.tenantID).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("resolve latest version: %w", err)
 	}

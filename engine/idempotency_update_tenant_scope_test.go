@@ -47,16 +47,12 @@ func TestIdempotencyResultUpdatesAreScopedToTenant(t *testing.T) {
 	const tenantB = "d1d1d1d1-d1d1-4d1d-9d1d-d1d1d1d1d1d1"
 	const decoyTenant = "d2d2d2d2-d2d2-4d2d-9d2d-d2d2d2d2d2d2"
 
-	// One shared definition (workflow_defs is tenant-global by design; see
-	// migrations/postgres/001_schema.sql's comment on tenant_isolation_defs).
-	storeAdmin := NewPostgresStore(db)
+	// One definition per tenant. This used to read "one shared definition
+	// (workflow_defs is tenant-global by design)" -- true until D7 put the
+	// tenant in the key (IMPROVEMENT-PLAN 3.77), which is exactly the design
+	// that comment described and this change reverses.
 	const defName = "idem-scope-def"
-	if err := storeAdmin.DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
-		ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	deployDefForTenants(t, db, defName, 1, tenantB, decoyTenant)
 
 	storeB := NewPostgresStore(db).WithTenant(tenantB)
 

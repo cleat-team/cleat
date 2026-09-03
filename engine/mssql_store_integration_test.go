@@ -356,6 +356,9 @@ func TestMSSQLIntegration_ClaimWorkflowsAcrossTenants(t *testing.T) {
 	deployWorkflowDef(t, store, "xtenant-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
 
 	const otherTenant = "11111111-1111-1111-1111-111111111111"
+	// Each seeded tenant needs its own definition row: the FK on
+	// workflow_instances carries tenant_id since D7 (IMPROVEMENT-PLAN 3.77).
+	deployWorkflowDef(t, store.WithTenant(otherTenant), "xtenant-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
 
 	ownID := uuid.New().String()
 	otherID := uuid.New().String()
@@ -2819,6 +2822,9 @@ func TestMSSQLIntegration_GetWorkflowByID_TenantScoped(t *testing.T) {
 
 	tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	// One definition per tenant since D7 (IMPROVEMENT-PLAN 3.77).
+	deployWorkflowDef(t, store.WithTenant(tenantA), "ten-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
+	deployWorkflowDef(t, store.WithTenant(tenantB), "ten-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
 
 	// Insert workflows for tenant A and tenant B.
 	wfA := uuid.New().String()

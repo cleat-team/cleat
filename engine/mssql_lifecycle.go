@@ -758,7 +758,7 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
 		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS VARCHAR(MAX)),
-		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
+		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
 		        @p5, @p6)
 	`, newRunID, defName, defVersion, newInput, s.tenantID, priority)
 	if err != nil {
@@ -1004,7 +1004,7 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
 			VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
-			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
+			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
 			        @p5, @p6)
 		`, runID, defName, defVersion, string(input), tenantID, priority)
 		if err != nil {
@@ -1024,7 +1024,7 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
 		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
-		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
+		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
 		        @p5, @p6)
 	`, runID, defName, defVersion, string(input), tenantID, priority)
 	if err != nil {

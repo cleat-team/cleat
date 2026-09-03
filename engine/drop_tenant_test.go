@@ -359,11 +359,9 @@ func TestDropTenant_OldVersionLeavesDataBehind(t *testing.T) {
 	const tenant = "01d00000-0000-4000-8000-00000000001d"
 	const defName = "drop-tenant-old-def"
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenant) // registered before any possible t.Fatalf below
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// For the tenant whose instances this fixture seeds: workflow_instances_def_fkey
+	// carries tenant_id since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenant)
 	dropTenantFixture(t, ctx, adminDB, tenant, defName, "old", false, false)
 
 	before := countDropTenantRows(t, ctx, adminDB, tenant)
@@ -419,11 +417,9 @@ func TestDropTenant_APIKeyFailureRollsBackEverything(t *testing.T) {
 	const tenant = "01d00002-0000-4000-8000-000000000002"
 	const defName = "drop-tenant-old-apikey-def"
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenant)
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// For the tenant whose instances this fixture seeds: workflow_instances_def_fkey
+	// carries tenant_id since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenant)
 	dropTenantFixture(t, ctx, adminDB, tenant, defName, "oldapikey", true, false)
 
 	before := countDropTenantRows(t, ctx, adminDB, tenant)
@@ -465,11 +461,9 @@ func TestDropTenant_RoleDropFailureRollsBackEverything(t *testing.T) {
 	const tenant = "01d00001-0000-4000-8000-000000000001"
 	const defName = "drop-tenant-old-role-def"
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenant)
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// For the tenant whose instances this fixture seeds: workflow_instances_def_fkey
+	// carries tenant_id since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenant)
 	dropTenantFixture(t, ctx, adminDB, tenant, defName, "oldrole", false, true)
 
 	before := countDropTenantRows(t, ctx, adminDB, tenant)
@@ -510,11 +504,9 @@ func TestDropTenant_DeletesAllTenantData(t *testing.T) {
 	// fixture call itself fails partway through via t.Fatalf.
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenantA)
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenantB)
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// For the tenant whose instances this fixture seeds: workflow_instances_def_fkey
+	// carries tenant_id since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenantA, tenantB)
 	dropTenantFixture(t, ctx, adminDB, tenantA, defName, "a", true, true)
 	dropTenantFixture(t, ctx, adminDB, tenantB, defName, "b", true, true)
 

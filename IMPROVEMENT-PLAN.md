@@ -5761,7 +5761,7 @@ end-to-end test, and an unsettled security model. §2.23 fixed its tenant *attri
   and went with it, along with its generated Python binding.
 - `GetChildResultInSchema` went too — it existed only to read back what this wrote.
 
-### 3.77 Names are per-tenant — D7, and it is three tables rather than one — 🔵 **DECIDED 2026-09-02, not yet built**
+### 3.77 Names are per-tenant — D7, and it is three tables rather than one — 🔶 **`workflow_defs` DONE 2026-09-02; schedules and tags remain**
 
 The owner's decision, in their words: *"It doesn't make any sense for one tenant to need to
 worry about clashes with some other tenant's workflows."* Recorded as **D7** in `tiers.yaml`.
@@ -5901,6 +5901,73 @@ simplification bolted onto the migration; it is what the migration *means*.
 
 Doing them in the other order leaves a window where the tree is incorrect rather than merely
 under-defended.
+
+#### Step 2 — `workflow_defs`, done 2026-09-02
+
+Migrations `postgres/035`, `mysql/034`, `mssql/038`: drop the three foreign keys, swap the
+primary key to `(tenant_id, name, version)`, re-add the foreign keys with `tenant_id` in them.
+Guarded on current shape, following migration `010`'s precedent for `idempotency_keys`.
+
+**The adoption machinery is gone**, which is what option 4 bought over the alternatives:
+`engine/def_ownership.go` (`canAdoptDef`, `ErrWorkflowDefOwnedByAnotherTenant`,
+`defOwnershipError`), the ownership lookup in all three deploy paths, PostgreSQL's repeated SQL
+guard and its `23505` mapping, and the API's `409` arm. All three deploys are now plain upserts
+on the tenant's own row, because there is no longer a collision to adjudicate.
+
+**`TestDeployDoesNotOverwriteAnotherTenantsDefinition` became
+`TestTwoTenantsEachHoldTheirOwnDefinitionOfOneName`.** Its old assertion — B's deploy is
+*refused* — is not weaker now, it is wrong: B is not colliding with anything. The replacement
+asserts what §3.12 said it deliberately could not, that both tenants deploy `order-processor`,
+both succeed, and each reads back its own bytes.
+
+**What the change actually required, beyond the schema.** The key swap made ~24 inline
+`workflow_defs` subqueries ambiguous, in two classes that fail very differently:
+
+| | how it fails |
+|---|---|
+| `(SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?)` in `StartNewRun` and friends — 6 sites | **Loudly.** `pq: more than one row returned by a subquery used as an expression (21000)` the moment two tenants hold one name. |
+| `(SELECT MAX(version) ...)` resolving "latest" — 9 sites | **Silently.** An aggregate returns exactly one row either way. Unscoped it returns *another tenant's number*, so a child workflow starts on a version of its own definition that may not exist, or runs code its tenant never deployed. Nothing reports anything. |
+
+The second is why `TestLatestVersionResolvesWithinTheCallersTenant` exists and why its fixture
+is lopsided: tenant A holds v1–v3 of a name, tenant B holds only v1. An unscoped `MAX` picks 3;
+B's own answer is 1. A symmetric fixture could not tell the two apart.
+
+**Falsified, four ways, and two of them taught something:**
+
+| removed | result |
+|---|---|
+| migration `035` (rebuild the schema without it) | 🔴 `TestTwoTenantsEachHoldTheirOwnDefinitionOfOneName/postgres` — the migration is what makes two tenants able to hold one name at all. |
+| MySQL's tenant predicate on `ResolveLatestVersion` | 🔴 *"tenant B resolved `version-skew` to version 3, want its own 1 — 3 is A's number."* The silent class, caught. |
+| PostgreSQL's tenant predicate on the `task_queue` subquery | 🔴 **only on tests using the admin/superuser connection**, with `pq: more than one row returned by a subquery (21000)`. |
+| — the same, on RLS-enforcing paths | 🟢 **stays green.** PostgreSQL's policy covers the missing predicate there. |
+
+The last two rows are the finding worth carrying: **the predicate is load-bearing exactly where
+RLS is bypassed**, which is not only tests — it is the product's own admin and superuser paths.
+A green result from an RLS-enforcing connection says nothing about those, and the first
+falsification attempt here passed for precisely that reason before being re-run against the
+right test.
+
+Note that step 1's property test did **not** catch these, and could not have: it covers the
+store-method *read* boundary, and these are inline subqueries inside `INSERT` statements. Two
+different surfaces, and knowing which one a test covers is the difference between a green run
+that means something and one that does not.
+
+**A dialect divergence the migration exposed rather than created.** `001_schema.sql` declares
+`workflow_defs.tenant_id` three ways — `NOT NULL DEFAULT` on PostgreSQL and SQL Server, plain
+`CHAR(36)` (nullable, no default) on MySQL — and `002_defaults.sql` backfills it on the first
+two with no MySQL counterpart. Latent until the column joined the primary key, which forces
+`NOT NULL` on MySQL and made every insert omitting it fail with
+`Error 1364: Field 'tenant_id' doesn't have a default value`. `mysql/034` backfills, then
+constrains, in that order.
+
+**Residual, named rather than relied on quietly.** Three name-to-version resolvers are *not*
+tenant-scoped, because they are free functions on a bare `*sql.DB` with no tenant in hand:
+`latestVersion` and `latestCompatibleVersion` (`engine/child_version.go`) and
+`WorkflowLoader.ResolveLatestVersion` (`engine/versioned_loader.go`). Scoping them is a
+signature change reaching their callers. In a deployment they run on the RLS-enforcing
+connection and are covered — but that is a dependency on a layer rather than a predicate, which
+is the shape this project keeps getting caught by, so it is written down here rather than
+assumed.
 
 #### Sequencing
 

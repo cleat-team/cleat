@@ -136,7 +136,9 @@ func TestRunDropTenant_DryRunDeletesNothing(t *testing.T) {
 
 	const tenant = "d70e0000-0000-4000-8000-000000000001"
 	const defName = "cleatctl-drop-tenant-dryrun-def"
-	if err := engine.NewPostgresStore(db).DeployWorkflowDef(ctx, &engine.WorkflowDef{
+	// Deployed AS the tenant whose instance is seeded below: since D7 the FK on
+	// workflow_instances carries tenant_id (IMPROVEMENT-PLAN 3.77).
+	if err := engine.NewPostgresStore(db).WithTenant(tenant).DeployWorkflowDef(ctx, &engine.WorkflowDef{
 		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
 	}); err != nil {
 		t.Fatalf("DeployWorkflowDef: %v", err)
@@ -205,7 +207,9 @@ func TestRunDropTenant_YesFlagDeletesWithoutPrompt(t *testing.T) {
 
 	const tenant = "d70e0000-0000-4000-8000-000000000003"
 	const defName = "cleatctl-drop-tenant-yes-def"
-	if err := engine.NewPostgresStore(db).DeployWorkflowDef(ctx, &engine.WorkflowDef{
+	// Deployed AS the tenant whose instance is seeded below: since D7 the FK on
+	// workflow_instances carries tenant_id (IMPROVEMENT-PLAN 3.77).
+	if err := engine.NewPostgresStore(db).WithTenant(tenant).DeployWorkflowDef(ctx, &engine.WorkflowDef{
 		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
 	}); err != nil {
 		t.Fatalf("DeployWorkflowDef: %v", err)
