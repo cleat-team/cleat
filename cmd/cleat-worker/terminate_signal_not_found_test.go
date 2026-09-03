@@ -77,6 +77,20 @@ func tsRoutes() []tsRoute {
 				}
 			},
 		},
+		// Added after the fact: cancel was the third route taking an id from
+		// the URL path without checking it, and it answered 200
+		// "cancellation_requested" for a workflow it had not cancelled. Its two
+		// siblings, retry and query-state, turned out not to need the check --
+		// see the comment on handleCancel for why.
+		{
+			name: "cancel", prefix: "/api/workflows/", path: "cancel", body: `{"reason":"x"}`,
+			arm: func(ms *mockStore, reached *bool) {
+				ms.requestCancellationFn = func(context.Context, string, string) error {
+					*reached = true
+					return nil
+				}
+			},
+		},
 	}
 }
 
