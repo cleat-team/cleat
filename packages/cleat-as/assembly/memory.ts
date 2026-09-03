@@ -30,6 +30,23 @@ export const OUTPUT_OFFSET: usize = 10551296;
  */
 export const SUSPEND_SENTINEL: i64 = 0x4000000000000000;
 
+/**
+ * Bit 31 of a host-call result: the host is refusing this call because the
+ * workflow is in a defer segment and the call would start new work.
+ *
+ * Distinct from `SUSPEND_SENTINEL`, which is bit 62 and is what the guest
+ * returns to the host from an export. This one travels the other way — host to
+ * guest, inside an ordinary result word — and bit 31 was chosen because it is
+ * the one bit free in all six result layouts a call that can start fresh work
+ * returns. See IMPROVEMENT-PLAN 3.84 and ABI.md.
+ *
+ * The engine's copy is `callSuspendSentinel` in `engine/memory.go`. The two
+ * must agree, and nothing in either language can see the other, so
+ * `TestTheAssemblyScriptSDKAgreesOnTheStopBit` in `engine/` reads this file and
+ * pins the value.
+ */
+export const SUSPEND_STOP_BIT: i64 = 0x80000000;
+
 // ──────────────────────────────────────────────
 // Internal status constants
 // ──────────────────────────────────────────────
@@ -418,6 +435,42 @@ export function resetWorkflowSuspended(): void {
 /** Set the suspension flag — called by HostCalls methods. */
 export function setWorkflowSuspended(): void {
   _workflowSuspended = true;
+}
+
+/**
+ * Report whether the host refused this call because the workflow is running as
+ * a defer segment, setting the suspension flag if so.
+ *
+ * **Call this before decoding any field of the result.** Order is the contract,
+ * not a style preference: in the await-signals layout bit 31 lands inside the
+ * timed-out field, which `decodeAwaitSignalsResult` reads as
+ * `(r >> 16) & 0xFFFF`, so a caller that decoded first would turn a stop into
+ * an ordinary timeout and the workflow would carry on — doing the new work the
+ * defer segment exists to prevent, with nothing to see.
+ *
+ * **This SDK cannot unwind, and that makes the guarantee weaker here than in
+ * the others.** Go panics, Java throws, Rust returns `Err(CallError::Suspended)`
+ * — each of those takes the workflow body out of its own control flow. This
+ * runtime has no exceptions (`--runtime stub`), so all a stop can do is set the
+ * flag and hand the caller an error result. A workflow body that ignores both
+ * keeps running.
+ *
+ * What makes that acceptable rather than a hole is where the enforcement lives:
+ * the host refuses *every* call for the rest of the segment, not just the first
+ * one, so a guest that runs on cannot reach anything durable. It can burn
+ * instructions and return a value the host discards, because the segment's
+ * terminal outcome was decided before it started. The flag is how the guest
+ * finds out; the host is what makes it true.
+ *
+ * @param result the raw result word from a host call
+ * @returns `true` if the host refused the call
+ */
+export function stopRequested(result: i64): bool {
+  if ((result & SUSPEND_STOP_BIT) !== 0) {
+    setWorkflowSuspended();
+    return true;
+  }
+  return false;
 }
 
 // ──────────────────────────────────────────────

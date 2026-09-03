@@ -23,6 +23,7 @@ import {
   SCRATCH_BASE,
   OUTPUT_OFFSET,
   setWorkflowSuspended,
+  stopRequested,
   isInDeferPhase,
 } from "./memory";
 
@@ -1021,6 +1022,13 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // The host refuses new work in a defer segment (IMPROVEMENT-PLAN 3.84);
+    // ask before decoding, because bit 31 overlaps a real field in one of
+    // these layouts. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new CleatCallOutcome("", "cleat: refused in a defer segment", 0);
+    }
+
     // Decode the packed result
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
@@ -1099,6 +1107,14 @@ export class HostCalls {
     );
 
     // Decode the packed result (same bit layout as cleat_call)
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new CleatCallOutcome("", "cleat: host refused this call -- the workflow is running its defer phase", 0);
+    }
+
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
 
@@ -1163,6 +1179,14 @@ export class HostCalls {
     );
 
     // Decode the packed result (same bit layout as cleat_call)
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new CleatCallOutcome("", "cleat: host refused this call -- the workflow is running its defer phase", 0);
+    }
+
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
 
@@ -1492,6 +1516,14 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new DurableResult<string>("", "cleat: host refused this call -- the workflow is running its defer phase");
+    }
+
     let decoded = decodeSimpleResult(result);
 
     if (decoded.errCode !== 0) {
@@ -1531,6 +1563,14 @@ export class HostCalls {
       OUTPUT_OFFSET as i32,
       OUT_BUF_SIZE,
     );
+
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new DurableResult<string>("", "cleat: host refused this call -- the workflow is running its defer phase");
+    }
 
     let decoded = decodeSimpleResult(result);
 
@@ -1718,6 +1758,14 @@ export class HostCalls {
       payloadOffset as i32,
       payloadMaxLen,
     );
+
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new AwaitSignalsOutcome("", "", false, "cleat: host refused this call -- the workflow is running its defer phase");
+    }
 
     let decoded = decodeAwaitSignalsResult(result);
 
@@ -1937,6 +1985,14 @@ export class HostCalls {
     );
 
     // Decode the packed result (same bit layout as cleat_call)
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new PluginCallOutcome("", "cleat: host refused this call -- the workflow is running its defer phase", 0);
+    }
+
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
 
@@ -1992,6 +2048,14 @@ export class HostCalls {
     );
 
     // Decode the packed result (same bit layout as plugin_call)
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new PluginCallOutcome("", "cleat: host refused this call -- the workflow is running its defer phase", 0);
+    }
+
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
 
@@ -2933,6 +2997,14 @@ export class HostCalls {
       OUTPUT_OFFSET as i32,
       OUT_BUF_SIZE,
     );
+
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new FetchResult(0, "", "", "cleat: host refused this call -- the workflow is running its defer phase");
+    }
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0 || decoded.extra === 0) {
