@@ -44,11 +44,19 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 	return int(n), tx.Commit()
 }
 
+// GetQueryState reads one key of a workflow's query state.
+//
+// Tenant-predicated for the reason on TerminateWorkflow: the id comes from the
+// URL path of two separate handlers (cmd/cleat-worker/server.go's
+// handleGetWorkflow and handleGetQueryState).
+// This one is a read, so the consequence is disclosure rather than damage --
+// query state is whatever the workflow chose to publish about itself.
 func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	var value sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT JSON_VALUE(query_state, '$.' + @p2) FROM workflow_instances WHERE id = @p1
-	`, workflowID, key).Scan(&value)
+		SELECT JSON_VALUE(query_state, '$.' + @p2)
+		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p3
+	`, workflowID, key, s.tenantID).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -170,6 +178,29 @@ func (s *MSSQLStore) releaseWorkflowConcurrencyKeysOnce(ctx context.Context, wor
 	return tx.Commit()
 }
 
+// TerminateWorkflow marks a workflow terminated.
+//
+// `AND tenant_id` here, and on the five other statements this commit touched,
+// is load-bearing rather than defensive; the reasoning is the same as
+// ClaimDueSchedule's and is written out there. What is different about this
+// group is WHERE THE ID COMES FROM. The schedule and definition statements key
+// on a name the tenant chose; these key on a generated workflow id that
+// arrives from outside -- every one of them is reachable from an HTTP handler
+// that takes the id straight out of the URL path
+// (cmd/cleat-worker/app.go:handleDeadLetterTerminate, handleWorkflowRetry;
+// server.go's query, signal and cancel routes).
+//
+// 3.77 argued that a generated id needs no predicate because a UUID cannot be
+// guessed. That argument covers the plumbing statements, whose ids the engine
+// read back from a row it had already scoped, and it does not cover these:
+// unguessability is a claim about what an attacker knows, and a workflow id
+// travels -- through logs, support tickets, a URL, a user who has since left
+// the tenant. Knowing one is enough to terminate somebody else's workflow on a
+// cleat_admin connection, which is every multi-tenant SQL Server deployment.
+//
+// Each handler resolves its store through apiServer.scopedStore, so the
+// authenticated tenant was already on the store at every one of these sites
+// and simply was not reaching the SQL.
 func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return withRollbackGuaranteedRetry(ctx, "terminate workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		return s.terminateWorkflowOnce(ctx, workflowID, reason)
@@ -190,8 +221,8 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 		    completed_at = GETDATE(),
 		    assigned_to = NULL,
 		    generation = generation + 1
-		WHERE id = @p1
-	`, sql.Named("p1", workflowID), sql.Named("p2", reason))
+		WHERE id = @p1 AND tenant_id = @p3
+	`, sql.Named("p1", workflowID), sql.Named("p2", reason), sql.Named("p3", s.tenantID))
 	if err != nil {
 		return fmt.Errorf("terminate workflow: %w", err)
 	}

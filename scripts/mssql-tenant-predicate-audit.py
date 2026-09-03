@@ -16,13 +16,25 @@ reports the whole surface at once so the remaining count is a number rather than
 
 What it is NOT
 --------------
-This is a REPORT, not a gate. It is deliberately not wired into CI yet, because the statements
-it still flags are a different class -- they key on a generated id (workflow_instances(id),
-event_history(workflow_id)) where a UUID cannot be guessed -- and turning it into a failing
-check means first deciding whether that argument is good enough, which is a product call rather
-than a cleanup. Making it a gate with an allowlist is the next step 3.86 describes; when that
-happens this file grows a baseline and moves under a _test.go, following
+This is a REPORT, not a gate. Making it a gate with an allowlist is the next step 3.86
+describes; when that happens this file grows a baseline and moves under a _test.go, following
 engine/mssql_uuid_projection_test.go, which is the same shape and already runs in every job.
+
+Two things that gate will need, both learned from the control-plane pass (3.86):
+
+1. ITS ALLOWLIST MUST SAY WHY. What this reports now is not one population. The statements that
+   take their id from an HTTP request were fixed 2026-09-03; what remains is plumbing whose ids
+   the engine read back from rows it had already scoped, running on stores
+   cmd/cleat-worker/setup.go:storeFor re-scopes per instance -- safe BY CONSTRUCTION, not
+   because a UUID cannot be guessed. Recording the weaker reason would re-merge them.
+
+2. THE CHECK BELOW IS A SUBSTRING TEST AND THAT IS NOT ENOUGH. `tenant_id in low` cannot tell a
+   filter from a projection. DeliverSignal's MERGE named tenant_id in its INSERT column list --
+   scoping the row it CREATES -- while its ON clause matched any tenant's row, so this script
+   counted it as already predicated while it was overwriting other tenants' signal payloads. A
+   gate has to ask WHERE the column appears. Left as-is here deliberately: tightening the
+   classifier changes the number this file reports, and that belongs in the same change as the
+   baseline rather than silently shifting a count other documents quote.
 
 The table list is DERIVED from the security-policy bindings in the migrations rather than
 hardcoded, so a table brought under the policy later is covered without anyone remembering.
