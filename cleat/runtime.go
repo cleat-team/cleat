@@ -471,6 +471,16 @@ const (
 	CallErrorNotFound                       // non-retryable
 	CallErrorInvalidRequest                 // non-retryable
 	CallErrorPermissionDenied               // non-retryable
+	// CallErrorRetryPolicyTooLong means the host declined to run this retry
+	// policy in one segment because its worst-case total backoff exceeds the
+	// tenant's host-retry budget. The call did NOT happen and the host
+	// recorded no event, so no attempt has been consumed; the caller should
+	// run the policy itself, suspending between attempts.
+	//
+	// Non-retryable on purpose, and the default `Retryable()` arm gives that
+	// for free. Re-issuing cleat_call_retry would be refused again on
+	// identical grounds and loop forever -- see ABI.md, "Retry refusal".
+	CallErrorRetryPolicyTooLong // non-retryable
 )
 
 // CallError is a structured error returned by DurableCall and its variants.

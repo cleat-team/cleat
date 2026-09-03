@@ -40,6 +40,7 @@ var sdkCallErrorCodes = []struct {
 	{"NotFound", cleat.CallErrorNotFound},
 	{"InvalidRequest", cleat.CallErrorInvalidRequest},
 	{"PermissionDenied", cleat.CallErrorPermissionDenied},
+	{"RetryPolicyTooLong", cleat.CallErrorRetryPolicyTooLong},
 }
 
 // TestEngineMirrorMatchesSDKValues checks the numbers, in both directions: no

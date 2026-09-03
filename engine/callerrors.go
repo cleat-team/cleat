@@ -37,6 +37,17 @@ const (
 	// callErrorInvalidRequest is the classification for a request the host
 	// refused to interpret. See badParamDurableCall in memory.go.
 	callErrorInvalidRequest byte = 4
+	// callErrorRetryPolicyTooLong is the classification for a cleat_call_retry
+	// whose policy the host declined to run in one segment, because its
+	// worst-case total backoff exceeds the tenant's resolved host-retry
+	// budget. The call is not made and no event is recorded, so the guest has
+	// not consumed an attempt and replay sees nothing.
+	//
+	// Non-retryable: re-issuing the same policy would be refused on identical
+	// grounds. The guest's obligation is to run the policy itself, suspending
+	// between attempts. See ABI.md, "Retry refusal -- cleat_call_retry only,
+	// and NOT a sentinel bit".
+	callErrorRetryPolicyTooLong byte = 6
 )
 
 // callFailureCode is the code reported for a call that the *service* failed
@@ -83,6 +94,7 @@ var guestCallErrorCodes = []GuestCallErrorCode{
 	{Name: "NotFound", Code: 3, Retryable: false},
 	{Name: "InvalidRequest", Code: 4, Retryable: false},
 	{Name: "PermissionDenied", Code: 5, Retryable: false},
+	{Name: "RetryPolicyTooLong", Code: 6, Retryable: false},
 }
 
 // GuestCallErrorCodes returns the engine's copy of the guest SDK's
