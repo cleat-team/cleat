@@ -37,7 +37,7 @@ import (
 //     THAT PRODUCES IT: this comment and the help text both used to name
 //     "cleatctl backup-workflow", and no such command exists -- cleatctl's
 //     dispatch in main.go has nine and none is a backup. Producing the file is
-//     currently the operator's problem. IMPROVEMENT-PLAN 3.93, which also
+//     currently the operator's problem. IMPROVEMENT-PLAN 3.95, which also
 //     records that tiers.yaml already carries this same defect against
 //     scheduledbackup, in the mirror image: there, the backup was claimed and
 //     the restore was missing.
@@ -346,7 +346,7 @@ Limitations:
   - Restored rows are assigned to the DEFAULT TENANT, whichever tenant the
     workflow belonged to, because these inserts do not carry tenant_id.
     Restoring a non-default tenant's workflow will appear to succeed and that
-    tenant will still not see it. IMPROVEMENT-PLAN 3.93.
+    tenant will still not see it. IMPROVEMENT-PLAN 3.95.
   - The backup file format is NDJSON; ensure the file is well-formed.
 
 Environment:
