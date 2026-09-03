@@ -13,6 +13,21 @@ pub const OUTPUT_OFFSET: u32 = SCRATCH_BASE + OUT_BUF_SIZE; // 0xA10000
 /// Suspend sentinel (1 << 62). Matches runtime.go line 153.
 pub const SUSPEND_SENTINEL: i64 = 1 << 62;
 
+/// Bit 31 of a host-call result: the host is refusing this call because the
+/// workflow is in a defer segment and the call would start new work.
+///
+/// Distinct from [`SUSPEND_SENTINEL`], which is bit 62 and is what the guest
+/// returns to the host from an export. This one travels the other way -- host
+/// to guest, inside an ordinary result word -- and bit 31 was chosen because it
+/// is the one bit free in all six result layouts a call that can start fresh
+/// work returns. See IMPROVEMENT-PLAN 3.84 and ABI.md.
+///
+/// The engine's copy is `callSuspendSentinel` in `engine/memory.go`. The two
+/// must agree, and nothing in either language can see the other, so
+/// `TestTheRustSDKAgreesOnTheStopBit` in `engine/` reads this file and pins the
+/// value.
+pub const SUSPEND_STOP_BIT: i64 = 1 << 31;
+
 /// Read a string from WASM linear memory at (ptr, len).
 /// Matches readWasmString in memory.go.
 ///
