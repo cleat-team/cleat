@@ -5761,7 +5761,7 @@ end-to-end test, and an unsettled security model. §2.23 fixed its tenant *attri
   and went with it, along with its generated Python binding.
 - `GetChildResultInSchema` went too — it existed only to read back what this wrote.
 
-### 3.77 Names are per-tenant — D7, and it is three tables rather than one — 🔶 **`workflow_defs` DONE 2026-09-02; schedules and tags remain**
+### 3.77 Names are per-tenant — D7, and it is three tables rather than one — 🔶 **`workflow_defs` and `workflow_schedules` DONE 2026-09-02; `workflow_tags` remains**
 
 The owner's decision, in their words: *"It doesn't make any sense for one tenant to need to
 worry about clashes with some other tenant's workflows."* Recorded as **D7** in `tiers.yaml`.
@@ -5968,6 +5968,57 @@ signature change reaching their callers. In a deployment they run on the RLS-enf
 connection and are covered — but that is a dependency on a layer rather than a predicate, which
 is the shape this project keeps getting caught by, so it is written down here rather than
 assumed.
+
+#### Step 3 — `workflow_schedules`, done 2026-09-02
+
+Migrations `postgres/036`, `mysql/035`, `mssql/039`: swap the primary key from `(name)` to
+`(tenant_id, name)`. **No foreign keys to drop** — nothing references this table on any dialect
+(`grep -rEn 'REFERENCES [a-z]*\.?workflow_schedules' migrations/*/*.sql` returns nothing, and the
+schema qualifier in that pattern is the correction step 2 records having got wrong).
+
+Guarded on current shape and **verified idempotent by applying each file a second time by hand**
+after the runner had already applied it, since the runner records a migration as done and would
+never re-run it. All three then report `(tenant_id, name)`.
+
+**No Go changes were needed, and that is a result rather than an absence.** Checked rather than
+assumed:
+
+- the three stores' schedule statements already carry `tenant_id` — on SQL Server as of §3.86,
+  which is why that landed first;
+- the scheduler loop re-scopes `schStore` to `sch.TenantID` before its first store call, so the
+  definition lookup, overlap check, run and CAS are all tenant-scoped;
+- the cron idempotency key is already `cron:<tenant>:<name>:<instant>`, so two tenants firing
+  the same schedule name at the same instant derive different keys;
+- `admin.get_due_schedules()` already returns `tenant_id`, which is what the worker re-scopes on;
+- no in-memory state anywhere is keyed on schedule name alone;
+- guest-created schedules use `scheduleIDFor(tenantID, workflowID, stepCount)` and never
+  collided. **The colliding case was always operator-named schedules** — `cleat schedule create
+  nightly-report` — which is why §3.12's original survey did not see this table.
+
+**Only the loud failure class exists here**, unlike step 2. `workflow_defs` had a silent one —
+`MAX(version)` resolvers returning another tenant's number — because it is read by aggregate.
+Every schedule read is a whole row or a listing, so a missing predicate surfaces as somebody
+else's row rather than as a plausible wrong number. That is why this step's test file is short
+and `def_lookup_tenant_property_test.go` is not.
+
+**Falsified on all three dialects, each against a throwaway database built without the
+migration** (not the shared test databases, which were already migrated — a falsification that
+cannot rebuild the schema is measuring the database rather than the change):
+
+| dialect | error |
+|---|---|
+| postgres | `duplicate key value violates unique constraint "workflow_schedules_pkey" (23505)` |
+| mysql | `Error 1062 (23000): Duplicate entry 'nightly-report' for key 'workflow_schedules.PRIMARY'` |
+| mssql | `Violation of PRIMARY KEY constraint 'pk_workflow_schedules' ... duplicate key value is (nightly-report)` |
+
+Then restored and re-run **against those same databases**, so the guarded `ALTER` is exercised
+on an already-built schema and not only on a fresh install.
+
+**MySQL needed the identical `tenant_id` stanza `034` needed** — backfill, then `NOT NULL
+DEFAULT` — because `001_schema.sql` declares the column nullable with no default there and
+`002_defaults.sql` has no MySQL counterpart. Two tables in, that is no longer a quirk of one
+migration: **the divergence belongs in `001_schema.sql`**, and `workflow_tags` will need the
+stanza a third time if it is not fixed at the source first.
 
 #### Sequencing
 
