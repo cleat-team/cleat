@@ -154,6 +154,10 @@ tier1:
     # producing the error the worker dead-letters on. Same toolchain dependency, same
     # reason -- it would skip in the tier-1 gate, where a skip is a failure.
     - "^TestARustGuestReachesTheHostRetryLoop$"
+    # tier 2 -- rust. The other side of 3.88's threshold: a policy too long to hold a
+    # worker for must suspend rather than reach the host loop. Same toolchain dependency
+    # as the entry above -- both build examples/rust-workflow.
+    - "^TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker$"
     # tier 2 -- java. engine/java_workflow_e2e_test.go; needs a JDK and Gradle.
     - "^TestJavaWorkflowExecute$"
     # tier 2 -- assemblyscript. engine/as_workflow_e2e_test.go and the npx-based

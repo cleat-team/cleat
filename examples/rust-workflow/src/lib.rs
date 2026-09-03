@@ -276,3 +276,30 @@ fn retry_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String>
         h.cleat_call_with_retry("always-fails", "op", &serde_json::json!({}), &policy)?;
     Ok("{\"unreachable\":true}".to_string())
 }
+
+/// A retry policy too long to hold a worker for, on the Rust SDK.
+///
+/// The mirror of testdata/deferfunc's DeferOnLongRetryPolicy, and the other
+/// side of the threshold from `retry_probe`. IMPROVEMENT-PLAN 3.88: three
+/// attempts two minutes apart is four minutes of waiting, which must suspend
+/// between attempts rather than run on the host -- holding a worker that long
+/// would exceed --wasm-wall-clock-ceiling and get the invocation killed, where
+/// suspending completes it.
+///
+/// Before 2026-09-03 this SDK took the host path for ANY policy, so this entry
+/// point would have held the worker for four minutes. Keep it: it and
+/// `retry_probe` together are what stop the threshold regressing to
+/// always-host or always-SDK, and neither alone would catch that.
+#[cleat_entry]
+fn retry_long_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let policy = cleat_sdk::RetryPolicy {
+        max_attempts: 3,
+        initial_interval_ms: 120_000,
+        backoff_multiplier: 1.0,
+        maximum_interval_ms: 120_000,
+        non_retryable_errors: vec![],
+    };
+    let _: serde_json::Value =
+        h.cleat_call_with_retry("always-fails", "op", &serde_json::json!({}), &policy)?;
+    Ok("{\"unreachable\":true}".to_string())
+}

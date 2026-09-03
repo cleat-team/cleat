@@ -12031,9 +12031,27 @@ Either alone would pass against a build that always chose one path.
 **Operator-visible consequence, and the docs moved with it:** the dead-letter queue is now
 reachable from Go — but only through a short policy.
 `docs/operations/workflow-retention.md` and `docs/reference/worker-config.md` said "nothing on
-this SDK enters that state"; they now carry the threshold table instead. A long-backoff Rust
-policy remains dead-letterable where the Go equivalent is not, since Rust takes the host path for
-any policy.
+this SDK enters that state"; they now carry the threshold table instead.
+
+**The Rust SDK now applies the same threshold** (decided 2026-09-03: "Rust should get the same
+behavior... no one is using the SDK yet"). It previously called the import directly for any
+policy, so the same `RetryPolicy` held a worker for four minutes on Rust and suspended on Go —
+and since §3.90 gave wall clock its own bound, the Rust path would have been *killed* at
+`--wasm-wall-clock-ceiling` rather than completing. `cleat_call_with_host_retry` is the explicit
+bypass, mirroring Go's `DurableCallWithRetry`.
+
+Pinned from both sides on both SDKs, four tests, and each pair would pass against an
+implementation that always chose one path:
+
+| SDK | short policy | long policy |
+|---|---|---|
+| Go | `TestAShortRetryPolicyRunsOnTheHostInOneSegment` | `TestALongRetryPolicySuspendsInsteadOfHoldingTheWorker` |
+| Rust | `TestARustGuestReachesTheHostRetryLoop` | `TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker` |
+
+Plus `cleat.TestBothSDKsAgreeOnTheHostRetryBudget`, which reads the Rust constant out of the
+source and compares it to the Go one — the threshold is written twice, in two languages, and
+nothing at compile time can make the two agree. **That test is a stopgap and says so: §3.93 moves
+the threshold host-side, at which point both constants and the test disappear.**
 
 #### The two rewritten tests, and why that is the design working
 
@@ -12563,3 +12581,130 @@ suspending — is now deliverable. The in-host loop's backoff is spent inside a 
 longer consumes the guest's execution budget, and the wall-clock ceiling that does cover it
 defaults to 5m rather than 30s. The remaining work there is the missing
 `HostCallsImpl.DurableCallWithRetry` method.
+
+### 3.93 Execution limits are process-wide, and one of them is compiled into the guest — 🔵 **DESIGN + PLAN, not started** (WS-3, 2026-09-03)
+
+**Requirement, 2026-09-03:** each tenant must be able to override the default time thresholds
+without affecting other tenants, so that several microservices — or several organisations —
+sharing one cleat deployment can manage their own settings.
+
+We have none of that structure. This section is the design and the plan; nothing is built.
+
+#### What exists today
+
+| knob | scope | mechanism |
+|---|---|---|
+| `--wasm-instance-timeout` | whole worker process | flag (§3.90) |
+| `--wasm-wall-clock-ceiling` | whole worker process | flag (§3.90) |
+| `--max-workflow-duration` | whole worker process | flag |
+| `--max-quota-events` | whole worker process | flag |
+| `--concurrency` | whole worker process | flag |
+| `hostRetryBudget` / `HOST_RETRY_BUDGET_MS` | **compiled into the guest** | SDK constant (§3.88) |
+
+`admin.tenants` has five columns — `tenant_id`, `name`, `display_name`, `created_at`,
+`suspended`. There is no tenant-scoped configuration table and no read path for one anywhere in
+the tree. `suspended` is the only per-tenant behavioural switch that exists. Re-derive with
+
+```
+awk '/CREATE TABLE IF NOT EXISTS admin.tenants/,/^\);/' migrations/postgres/001_schema.sql
+grep -rn "tenant_id" cmd/cleat-worker/config.go     # 0 -- no flag is tenant-scoped
+```
+
+#### The part that is a layering problem, not a missing table
+
+Five of the six are flags, and a flag can be replaced by a per-tenant lookup. **The retry
+threshold cannot**, because it is not a deployment setting at all: it is a compile-time constant
+baked into each workflow's WASM module, in both SDKs. So an operator cannot change it, per-tenant
+or globally, and two tenants differ only by compiling their workflows differently — which is the
+workflow *author* deciding, not the platform administering. Adding a settings table would not
+help, because the guest has already chosen a path before the host is consulted.
+
+**The fix is to move the decision to where the information already is.** The host receives the
+entire policy in `cleat_call_retry` — max attempts, initial interval, backoff coefficient, max
+interval. It also knows the tenant. So the host can apply the tenant's threshold and, when a
+policy is too long, **refuse the call with a sentinel** that tells the guest to fall back to its
+own durable-sleep loop.
+
+Three things follow, and the third is the reason this is worth the ABI change:
+
+1. The threshold becomes tenant-administrable in the natural place.
+2. The duplicated constant across two languages disappears, and so does
+   `cleat.TestBothSDKsAgreeOnTheHostRetryBudget` — a test that exists only because nothing at
+   compile time can make two languages agree on a number.
+3. **Every future SDK gets the behaviour for free.** As a guest-side constant, Python, Java and
+   AssemblyScript would each need their own copy and their own agreement test. As a host refusal,
+   they need only honour a sentinel they must already honour for §3.84.
+
+An ABI change was authorised for this on 2026-09-03.
+
+#### Design
+
+**A. The sentinel.** `cleat_call_retry` gains a refusal meaning "this policy is too long to run
+here; retry it yourself". §3.84 built exactly this machinery — the stop sentinel at **bit 31**,
+free in all six result layouts that can start fresh work, with a mandatory check-before-decode
+ordering recorded in `ABI.md`. This is a second, distinct signal on one operation, so it needs
+its own bit or its own encoding in the existing error space; `packDurableCallResult` already
+carries an error code, which is the cheaper option and should be preferred over spending another
+bit. **Decide that before writing code, and record the layout in `ABI.md` either way.**
+
+Note what the guest must then do: fall back to the SDK-level loop *without* having consumed an
+attempt. The host refusing must record no event, so replay sees nothing — the same
+"refuse rather than half-do it" shape as §3.84's event-cap refusal (`eventCapCallError`).
+
+**B. The settings store.** A tenant-scoped settings table, read at dispatch and carried on the
+execution alongside `tenantID`, which the engine already has. Values, all optional with the flag
+as the default:
+
+- `wasm_instance_timeout_ms` — guest execution
+- `wasm_wall_clock_ceiling_ms` — wall clock including host wait
+- `host_retry_budget_ms` — the threshold above
+- (`max_quota_events`, `max_workflow_duration_ms` are the obvious next two, and the design should
+  not preclude them)
+
+**C. Resolution and bounds.** A tenant must not be able to raise a limit past what the operator
+allows, or a shared deployment has no protection at all. So each flag becomes a **ceiling**, and
+the tenant's value is clamped to it rather than replacing it. `--wasm-wall-clock-ceiling`'s
+relationship to `--wasm-instance-timeout` (§3.90: a ceiling below the instance timeout silently
+becomes the guest's execution bound) has to hold per tenant too, and the same startup warning
+becomes a per-tenant validation.
+
+#### The constraint that shapes this: D1
+
+**Per-tenant settings are only meaningful where tenant isolation is enforced.** `tiers.yaml` D1
+grants multi-tenancy on **PostgreSQL and SQL Server only**, because MySQL has no row-level
+security feature at all. A settings table on MySQL is readable and writable by every tenant, so
+this feature is either postgres+mssql, or it needs an explicit story for how MySQL degrades —
+most likely "MySQL is single-tenant, so the flags *are* the tenant's settings", which is
+consistent and costs nothing.
+
+**This is a tiers.yaml decision, not an implementation detail.** Settle it there before building.
+
+#### Plan, in order
+
+1. **Decide the sentinel encoding** — new error code in `packDurableCallResult` versus a new
+   result bit. Record in `ABI.md` with the per-layout table §3.84 established. No code yet.
+2. **Settle the MySQL story in `tiers.yaml`** as a numbered decision, per D1 above.
+3. **The settings store**: migration on three dialects (next free above each dialect's
+   high-water mark — re-derive, §3.75's recorded numbers were stale within a day), the store
+   read path, and the clamp-to-flag resolution. Tenant-scoped writes need the same RLS treatment
+   as every other tenant table; on mssql that means the `FILTER PREDICATE` policy, which
+   §3.86/§3.91 have been finding gaps in all week.
+4. **Move the retry threshold host-side**: host applies the resolved budget, refuses with the
+   sentinel, records no event. Delete `hostRetryBudget`, `HOST_RETRY_BUDGET_MS`,
+   `retryFitsInOneSegment`, `retry_fits_in_one_segment`, and
+   `cleat.TestBothSDKsAgreeOnTheHostRetryBudget`. Both SDKs honour the refusal; the four
+   threshold tests in §3.88 stay and should pass unchanged, which is the point of keeping them.
+5. **Resolve the two timeouts per tenant** in the executor and the wasmtime backend.
+6. **Per-tenant validation** replacing §3.90's startup warning.
+
+#### What to be suspicious of when building this
+
+- **A per-tenant limit that is never exercised.** The failure mode is a settings row that is
+  written, read, and then ignored because the value reaches the executor but not the backend, or
+  reaches the backend but after `configureStore`. §3.90 is the precedent: the timeout was applied
+  in two places and fixing one changed nothing observable. **Test through the engine with two
+  tenants whose values differ, and assert the difference — not that one tenant's value is
+  honoured.**
+- **A test that proves isolation against a wide-open policy.** CLAUDE.md's standing warning: a
+  cross-tenant assertion passed against a wide-open security policy because the store's own SQL
+  carried `tenant_id = ?`. Break the specific layer and watch.
