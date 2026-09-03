@@ -11961,3 +11961,82 @@ and the two features involved each work on their own. It came out of reading
 added after it was written. **A doc comment that explains why something is safe is a contract,
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
+
+### 3.90 `--wasm-instance-timeout` is charged for time the guest spends blocked in the host — 🔵 **MEASURED 2026-09-03** (WS-3)
+
+The per-invocation wall-clock fence advances while the guest is parked inside a host call. A
+workflow that makes slow service calls and computes almost nothing spends its runaway budget
+waiting, and dies with `execution time limit exceeded` — a message that points at the wrong half
+of the system.
+
+#### Mechanism
+
+`startEpochTicker` (`engine/backend_wasmtime.go:168`) increments the wasmtime engine epoch every
+50ms on a free-running goroutine. `configureStore` sets a per-invocation deadline of
+`timeout / 50ms` ticks (`:283`). Nothing brackets a host function:
+
+```
+grep -rn "store.SetEpochDeadline(" --include="*.go" . | grep -v _test   # 3: :283, :387, :454
+```
+
+Anchor on the call, not the name: `grep -rn "SetEpochDeadline"` returns **5**, and the two extra
+lines are comments *describing* the mechanism — a grep its own documentation satisfies.
+
+The other two call sites are worth knowing, because they are not setup and they are the reason
+fix (1) below is cheap. `:387` and `:454` grant a **fresh** deadline for the defer pass on a
+workflow the fence already killed, sized from `DefaultWasmtimeDeferBudget`. So re-granting a
+deadline part-way through a run is an existing, exercised move, not a new capability — it is
+simply never done around a host call.
+
+So the deadline is real time since the invocation began, not guest execution. The sibling fence
+does not behave this way — `--wasm-instruction-limit` is wasmtime fuel, which only decrements on
+guest instructions. **The two fences answer different questions and only one of them says so.**
+
+#### Measured
+
+`engine/instance_timeout_hostwait_test.go`, wasmtime, darwin/arm64, 2026-09-03. The fixture is
+`deferfunc`'s `defer_order`, which makes exactly one call; the caller blocks for `delay` on it.
+
+| delay | budget | outcome |
+|---|---|---|
+| 0 | 1s | trap |
+| 0 | 2s | completes |
+| 4s | 5s | trap |
+| 6s | 8s | completes |
+| 9s | 8s | trap |
+
+Host wait is charged roughly 1:1 on top of the fixture's own sub-2s cost.
+
+**The first row is why the shipped test controls on the budget rather than on the delay.** The
+obvious control — "no delay, same small budget, must still complete" — fails: a 1s budget is too
+small for this fixture whatever the caller does, so the trap happens either way and the
+experiment measures nothing. The shipped pair holds the delay fixed at 5s and varies only the
+budget (3s → trap, 30s → completes), which is the only form in which the trap is attributable.
+
+#### Why it matters
+
+- **Default 30s.** Three 12s service calls in one segment is an ordinary workflow, not a runaway
+  one, and it trips the fence.
+- **The error misdirects.** `execution time limit exceeded (30s wall-clock budget; configure with
+  --wasm-instance-timeout)` reads as a guest that would not stop. Nothing in it says the time was
+  spent waiting on a service.
+- **It bounds the in-host retry design.** §3.88 item 2's answer is that a retry completing within
+  a few minutes should keep the worker rather than suspend, which is what the host-side loop
+  behind `cleat_call_retry` already does. That loop backs off with `time.After` **inside a host
+  call**, so it spends the guest's budget: an in-host retry longer than the remaining budget kills
+  the workflow it was retrying for.
+
+#### Two ways to fix, and they differ in what the fence then means
+
+1. **Extend the deadline across the host wait** — add the wait's ticks back before returning to
+   the guest. The fence keeps meaning "runaway guest", which is what its own flag text claims, and
+   this stops being a constraint on retry at all. The primitive is already in use on the defer
+   path (`:387`, `:454`), so this is breadth — every blocking host function has to bracket its
+   wait — rather than a new mechanism.
+2. **Bound the in-host branch by the remaining budget**, falling back to durable sleep past it.
+   Cheaper and local to the retry loop, but leaves every other slow host call still charged, so
+   the misdirecting error above stays.
+
+These are not exclusive and (1) is the one worth doing regardless of the retry question, because
+the defect predates it. Not started; recorded with the measurement so the retry work does not
+have to rediscover it.
