@@ -55,6 +55,28 @@ tested but is not wired into any background loop, so dead-lettered workflows
 are retained indefinitely regardless of either retention flag. That is a
 separate, pre-existing gap outside the scope of this change.
 
+**A Go workflow does not currently reach `dead_lettered` at all**, so on the
+tier-1 SDK this exclusion is about a state nothing enters. The worker's
+dead-letter branch is a substring test for `retries exhausted`
+(`cmd/cleat-worker/setup.go`), and the engine mints that phrase only in its
+*host-side* retry loop behind the `cleat_call_retry` import. `wasm/usage.go`
+wires that import on the guest symbol `DurableCallWithRetry`, which
+`HostCallsImpl` does not define -- the only guest-facing form is
+`DurableCallWithOptions`, which falls back to SDK-level retry and produces a
+different message. Rust's `HostCalls::cleat_call_with_retry` calls the import
+directly, so the state is reachable there.
+
+Measured by `engine.TestAnExhaustedRetryRunsItsDefersAndIsNotDeadLetterable`,
+which exhausts a policy on a Go guest and asserts the terminal error does not
+match the worker's predicate. Re-derive the wiring with
+
+    grep -c "func (h \*HostCallsImpl) DurableCallWithRetry" cleat/runtime.go   # 0
+
+This is recorded rather than fixed: whether the Go SDK should expose the
+host-side retry loop is an open product question, IMPROVEMENT-PLAN.md 3.88
+item 2. Until it is answered, do not plan around dead-lettering as a Go
+workflow's failure mode.
+
 Within one batch (bounded to 10,000 workflow IDs, to avoid a single
 long-running transaction against a table that can be millions of rows deep):
 

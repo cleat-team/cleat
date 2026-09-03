@@ -547,7 +547,9 @@ appears in `ListWorkflows` or the admin dashboard, and its outcome (result,
 error, status) is gone. Off by default -- an operator opts in after deciding
 how long their own audit/compliance requirements need a workflow's outcome
 retrievable. `dead_lettered` workflows are never affected by this flag; they
-have their own (separate, currently unwired) deletion path.
+have their own (separate, currently unwired) deletion path -- and on the Go
+SDK nothing currently enters that state, so the exclusion is moot there. See
+`docs/operations/workflow-retention.md` and IMPROVEMENT-PLAN.md 3.88.
 
 Any remaining `event_history` for a purged workflow is deleted in the same
 pass. See `docs/operations/workflow-retention.md` for the full design
