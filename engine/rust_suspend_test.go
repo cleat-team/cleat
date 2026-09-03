@@ -12,7 +12,7 @@ import (
 )
 
 // The Rust SDK's suspend mechanism does not work, and the host has been hiding
-// it. IMPROVEMENT-PLAN 3.86.
+// it. IMPROVEMENT-PLAN 3.87.
 //
 // crates/cleat-sdk suspends by std::panic::panic_any(SuspendSentinel), and
 // #[cleat_entry] wraps the workflow body in std::panic::catch_unwind to
@@ -73,7 +73,7 @@ func TestTheRustTargetCompilesWithPanicAbort(t *testing.T) {
 			"SuspendSentinel in crates/cleat-macro's #[cleat_entry] wrapper. If "+
 			"unwinding is now available, the SDK's documented mechanism may "+
 			"actually work -- recheck the two tests below and "+
-			"IMPROVEMENT-PLAN 3.86.\n\nrustc --print cfg said:\n%s", out)
+			"IMPROVEMENT-PLAN 3.87.\n\nrustc --print cfg said:\n%s", out)
 	}
 }
 
@@ -114,7 +114,7 @@ func TestARustGuestCannotSuspendByPanicking(t *testing.T) {
 			"SuspendSentinel, delete this test, revisit " +
 			"TestThePanicTrapIsMaskedWhereverTheHostSetsSuspendErr, and add " +
 			"\"rust\" to deferSegmentLanguages with a defer-segment test to back " +
-			"it. See IMPROVEMENT-PLAN 3.86.")
+			"it. See IMPROVEMENT-PLAN 3.87.")
 	}
 	if err == nil {
 		t.Fatalf("expected a trap, got no error at all (susp=%v)", susp != nil)
@@ -175,7 +175,7 @@ func TestThePanicTrapIsMaskedWhereverTheHostSetsSuspendErr(t *testing.T) {
 			"The mask is the finding: this run must come back CLEAN even though "+
 			"the guest trapped, because the host set session.suspendErr before "+
 			"the guest panicked. An error here means the mask is gone -- which "+
-			"would be an improvement, and means IMPROVEMENT-PLAN 3.86 and the "+
+			"would be an improvement, and means IMPROVEMENT-PLAN 3.87 and the "+
 			"test above both need rewriting.", err)
 	}
 	if susp == nil {

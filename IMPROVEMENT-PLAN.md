@@ -11475,7 +11475,7 @@ Their `SUSPEND_SENTINEL` is `1 << 62`, which is the *await-child* sentinel and a
 mechanism; none of them decodes the stop. Each language's decode and its entry in that map belong
 in one change, with a test that crosses the two halves (§3.73).
 
-### 3.86 The Rust SDK cannot suspend: `catch_unwind` never catches, and the host has been masking the trap — 🔴 **OPEN** (WS-3, 2026-09-02)
+### 3.87 The Rust SDK cannot suspend: `catch_unwind` never catches, and the host has been masking the trap — 🔴 **OPEN** (WS-3, 2026-09-02)
 
 `crates/cleat-sdk` suspends by `std::panic::panic_any(SuspendSentinel)`, and `#[cleat_entry]`
 wraps the workflow body in `std::panic::catch_unwind` to intercept it and return
@@ -11551,8 +11551,38 @@ a suspension and the next segment does not happen. Measure that before claiming 
 
 The SDK needs a suspension path that does not unwind: a thread-local "suspended" flag set by the
 host-call wrappers, checked by `#[cleat_entry]` after the body returns, with every intermediate
-call site returning early. That is a change to the shape of every `HostCalls` method, and it
-should be measured against the Python, Java and AssemblyScript SDKs first — **AssemblyScript and
-Python may have the same defect for the same reason**, and if so this is one mechanism rather
-than four fixes (CLAUDE.md, "ask whether the answer is a sweep or a mechanism"). Nothing here has
-measured them.
+call site returning early. That is a change to the shape of every `HostCalls` method.
+
+#### It is Rust alone — asked as a sweep, and the answer is one fix
+
+The first draft of this section said "AssemblyScript and Python may have the same defect for the
+same reason", on CLAUDE.md's "ask whether the answer is a sweep or a mechanism". Checked, it is
+not a sweep. **AssemblyScript already has the design proposed above**, and says so in its own
+docs (`packages/cleat-as/assembly/defer.ts`):
+
+> Go, Rust, Python and Java all suspend by unwinding — a panic, a raise, a thrown `SuspendSignal`
+> — so their drain sits on a path the unwind skips. This SDK has no exceptions, so suspension is
+> a *flag* (`isWorkflowSuspended()`) and the entry point returns normally either way.
+
+That grouping is right about the mechanism and misses the distinction that decides this section:
+**whose unwinder**.
+
+| SDK | suspends by | unwinder |
+|---|---|---|
+| Go | `panic(cleat.ErrSuspend)` | the Go runtime compiled into the guest |
+| Python | `raise SuspendSentinel()` (`host_calls.py`) | CPython's, inside the interpreter |
+| Java | `throw new SuspendSignal()` (`HostCalls.java`) | the JVM runtime's, inside the guest |
+| AssemblyScript | a flag, no unwinding at all | — |
+| **Rust** | `panic_any` + `catch_unwind` | **the wasm target's, which does not exist** |
+
+Every other language ships its own unwinder inside the guest binary. Rust is the only one that
+asks the *target* for it, and `wasm32-wasip1` answers `panic="abort"`. That is why this is one
+SDK's defect and not four.
+
+Read rather than run, and the distinction matters: the AssemblyScript conclusion is settled by
+construction — a language with no exceptions cannot have an uncaught one. Python's and Java's rest
+on where their unwinder lives, which is an argument about how those runtimes are compiled, not a
+measurement. What would settle each is the same probe this section already has for Rust: an entry
+point that raises the SDK's own suspend signal with no host call in the way, so nothing can set
+`session.suspendErr` and mask the result. Neither is installed here — `componentize-py`,
+`wasm-tools` and a gradle binary are all absent — so neither was run.

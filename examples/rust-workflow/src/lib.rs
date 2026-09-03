@@ -218,7 +218,7 @@ fn defer_order(h: &HostCalls, input: PlaceOrderInput) -> Result<String, String> 
 /// directly, with no host call in the way, so a test can measure whether the
 /// interception happens.
 ///
-/// It does not. See `engine/rust_suspend_test.go` and IMPROVEMENT-PLAN 3.86.
+/// It does not. See `engine/rust_suspend_test.go` and IMPROVEMENT-PLAN 3.87.
 /// Keep this entry point: it is the whole of that test's evidence, and it has
 /// no other caller.
 #[cleat_entry]
@@ -234,7 +234,7 @@ fn suspend_probe(_h: &HostCalls, _input: PlaceOrderInput) -> Result<String, Stri
 /// came with it. The run is therefore reported as a clean suspension.
 ///
 /// Pairing this with `suspend_probe` is what shows the trap is real and merely
-/// hidden. Keep both; either alone is misleading. IMPROVEMENT-PLAN 3.86.
+/// hidden. Keep both; either alone is misleading. IMPROVEMENT-PLAN 3.87.
 #[cleat_entry]
 fn sleep_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
     h.cleat_sleep_ms(300_000);
