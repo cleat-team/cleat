@@ -792,12 +792,26 @@ class CleatEntryTransformer {
   // ---------------------------------------------------------------
   _generateDeferRunnerExport() {
     let code = "";
-    code += `// ---- Host kill-path defer entry point ----\n`;
-    code += `// Called by the host for a workflow it killed, which never reached\n`;
-    code += `// the drain in the wrappers above. Returns how many bodies ran.\n`;
+    code += `// ---- Host-called defer entry point ----\n`;
+    code += `// Called by the host for a workflow it killed, and for a defer\n`;
+    code += `// segment, neither of which reaches the drain in the wrappers above.\n`;
+    code += `// Returns how many bodies ran.\n`;
     code += `// Idempotent: the table is drained before the first body runs, so a\n`;
     code += `// guest that already ran its defers returns 0 here.\n`;
+    code += `//\n`;
+    code += `// resetWorkflowSuspended() first, and it is load-bearing rather than\n`;
+    code += `// tidy. This is a HOST ENTRY POINT, and the flag means "the thing\n`;
+    code += `// currently running asked to suspend" -- so every entry from the host\n`;
+    code += `// must start with it clear, which is why Step 3 of each workflow\n`;
+    code += `// wrapper does the same. Without it the flag arrives already set from\n`;
+    code += `// the segment that just ended (a defer segment stops the body's call\n`;
+    code += `// by setting exactly this flag), runDeferred reads it after the FIRST\n`;
+    code += `// body as "that body suspended", and stops -- running one defer and\n`;
+    code += `// silently dropping the rest. Measured 2026-09-03 on a two-defer\n`;
+    code += `// fixture: defers_run=1, operations [second], the first cleanup gone.\n`;
+    code += `// See engine/as_defer_segment_e2e_test.go.\n`;
     code += `export function __cleat_run_deferred(): i64 {\n`;
+    code += `  resetWorkflowSuspended();\n`;
     code += `  return <i64>runDeferred(new HostCalls());\n`;
     code += `}\n\n`;
     return code;
