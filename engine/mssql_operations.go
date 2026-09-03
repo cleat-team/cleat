@@ -201,6 +201,9 @@ func (s *MSSQLStore) releaseWorkflowConcurrencyKeysOnce(ctx context.Context, wor
 // Each handler resolves its store through apiServer.scopedStore, so the
 // authenticated tenant was already on the store at every one of these sites
 // and simply was not reaching the SQL.
+//
+// Since 3.92 a terminate that matches no row returns ErrWorkflowNotFound and
+// does not run the parent-close cascade. See terminateWorkflowOnce.
 func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return withRollbackGuaranteedRetry(ctx, "terminate workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		return s.terminateWorkflowOnce(ctx, workflowID, reason)
@@ -214,7 +217,7 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'terminated',
 		    error_msg = @p2,
@@ -225,6 +228,16 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 	`, sql.Named("p1", workflowID), sql.Named("p2", reason), sql.Named("p3", s.tenantID))
 	if err != nil {
 		return fmt.Errorf("terminate workflow: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("terminate workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Not wrapped, so withRollbackGuaranteedRetry's
+		// isMSSQLRollbackGuaranteed check sees it plainly and returns rather
+		// than retrying a lookup that will keep answering the same thing.
+		return ErrWorkflowNotFound
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("terminate workflow commit: %w", err)

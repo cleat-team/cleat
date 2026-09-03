@@ -66,6 +66,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -168,8 +169,12 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 	ctx := context.Background()
 
 	t.Run("TerminateWorkflow", func(t *testing.T) {
-		if err := storeB.TerminateWorkflow(ctx, cpWorkflowA, "not yours"); err != nil {
-			t.Fatalf("TerminateWorkflow across tenants: %v", err)
+		// ErrWorkflowNotFound, not nil -- 3.92's root fix. The predicate added
+		// here in 3.86 made the UPDATE match no row; the root fix made the call
+		// report that instead of returning success. The status assertion below
+		// is unchanged and is still what proves A's workflow was untouched.
+		if err := storeB.TerminateWorkflow(ctx, cpWorkflowA, "not yours"); !errors.Is(err, ErrWorkflowNotFound) {
+			t.Fatalf("TerminateWorkflow across tenants returned %v, want ErrWorkflowNotFound", err)
 		}
 		if got := instanceField(t, storeA, "status", cpWorkflowA, unscopedTenantA); got == "terminated" {
 			t.Errorf("tenant B terminated tenant A's workflow: A's status is %q", got)
