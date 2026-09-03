@@ -5973,13 +5973,112 @@ assumed.
 
 One table per PR, `workflow_defs` first because it is the one with foreign keys and therefore
 the one that settles the hazard above. `workflow_schedules` and `workflow_tags` are unreferenced
-and should be cheap once the pattern exists. Migration numbers are **not** reserved here: take
+and should be cheap once the pattern exists.
+
+**"Cheap" was right about the migration and wrong about the table.** Scoping
+`workflow_schedules` turned up §3.86: five SQL Server schedule statements with no tenant
+predicate, on a connection where the security policy is switched off, letting one tenant delete
+and disable another's cron schedules over the HTTP API. That is a live defect on today's
+schema, not a consequence of this change — but it is one this change would sharpen, because
+under `PRIMARY KEY (name)` an unqualified statement at least matches a single row, and under
+`(tenant_id, name)` a single `DELETE` would take every tenant's `nightly-report` at once. It is
+fixed separately and first, for the same reason step 1 preceded step 2: doing it the other way
+round leaves a window where the tree is incorrect rather than merely under-defended.
+
+The general lesson for the two tables still to come: **check what the name-keyed statements
+lean on before changing what the name means.** The predicate audit is the prerequisite, and it
+is not visible from the migration. Migration numbers are **not** reserved here: take
 the next free number above each dialect's high-water mark at the time of writing, per #563.
 
 **Do not expect the query sites to be the expensive part.** `workflow_defs` appears in 103
 non-test Go lines and 164 test lines (`grep -rn workflow_defs --include='*.go'`, 2026-09-02),
 but most already carry `tenant_id` in their predicates — §3.10, §3.11 and §3.12's writer fix
 went through them. The expensive part is the migration, and the count is a poor proxy for it.
+
+### 3.86 SQL Server's cross-tenant exemption is per-connection, and five schedule statements had no predicate of their own — 🔶 **SCHEDULES FIXED 2026-09-02; the same audit is owed on every other table** (WS-1)
+
+Found while scoping §3.77 step 3 (`workflow_schedules`), and it is not part of that change:
+it is true on today's schema, needs no migration, and is reachable from the ordinary HTTP API.
+
+#### The two facts, and why they only matter together
+
+**1. `dbo.fn_tenant_filter` admits an entire connection.** `migrations/mssql/012_admin_role.sql`
+redefines it as
+
+```sql
+RETURN SELECT 1 AS access
+    WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)
+       OR IS_ROLEMEMBER(N'cleat_admin') = 1;
+```
+
+`IS_ROLEMEMBER` is a property of the login, not of the statement, so a `cleat_admin` connection
+has **no filtering on any table the policy is bound to** — not just the ones it needs.
+
+**2. A multi-tenant SQL Server deployment must grant that role.** Not "might have": a
+non-default tenant's workflows do not run at all unless the dispatch loop can see across
+tenants, which is what migrations 023/024 exist for. `GetDueSchedulesAcrossTenants` and the
+cross-tenant claim both call `requireCleatAdminMembership` and fail loudly without it. And
+`MSSQLStore.WithTenant` returns `cp := *s` — a copy sharing `s.db`. One pool, one login. So on
+a working multi-tenant deployment, **every tenant-scoped store the worker hands to a request is
+running unfiltered**, and the Go predicate is the whole of the isolation.
+
+That is the same conclusion §3.11 reached for MySQL, arrived at from the opposite direction:
+MySQL has no policy to lean on, SQL Server has one that is switched off for exactly the
+deployments that need it most.
+
+**PostgreSQL does not have this problem, and the contrast is the design lesson.** There the
+exemption is a separate role, `cleat_dispatcher`, owning a `SECURITY DEFINER` function; the
+application role keeps `BYPASSRLS` off, so the widening is scoped to one function body. SQL
+Server puts the exemption in the predicate, and a predicate cannot tell which statement is
+asking. `engine/mssql_schedules.go` recorded this as a simplification — *"a connection either
+sees across tenants for both or for neither"*, offered as one grant to audit instead of
+PostgreSQL's two. It is the same fact; only the sign was wrong.
+
+#### Measured, not reasoned — four of five reachable over HTTP
+
+Two tenant-scoped stores over one `cleat_admin` pool, calling the store methods
+`cmd/cleat-worker/server.go:993-1005` reaches through `scopedStore` on an authenticated
+request. **Names differ between the tenants**, so none of this depends on §3.77:
+
+| statement | what tenant B did to tenant A |
+|---|---|
+| `DeleteSchedule` | deleted A's `tenant-a-nightly-report` outright |
+| `SetScheduleEnabled` | disabled A's `tenant-a-billing-sweep` — still listed, still shows a `next_run_at`, never fires |
+| `UpdateScheduleNextRun` | moved A's `tenant-a-reconcile` 72 hours out |
+| `GetDueSchedules` | the *tenant-scoped* reader returned A's rows |
+| `ClaimDueSchedule` | advanced A's schedule and reported the claim succeeded |
+
+All five statements read `WHERE name = @p1` with no `tenant_id`. Fixed by adding the predicate
+to each; `engine/mssql_admin_login_schedule_tenant_test.go` is the regression test, and each of
+the five was watched red first and red for its own message.
+
+The quiet ones are worse than the deletion. A deleted schedule is at least a thing that is
+gone; a disabled one is listed in the dashboard, enabled-looking, with a future `next_run_at`,
+and simply never fires — and nobody attributes that to another tenant.
+
+**Why the test skips rather than fails when the pool is not a `cleat_admin` member.**
+`MSSQLAdminDB` returns the plain pool unchanged when the schema carries no security policies,
+and with no policy there is no exemption to be tested — a genuine environmental precondition.
+The test asserts `IS_ROLEMEMBER` explicitly rather than assuming, because passing on a filtered
+connection would be a green result measuring nothing.
+
+#### What is NOT fixed
+
+Schedules only. The reasoning covers **every SQL Server statement that carries no tenant
+predicate**, and the count is not known — the ones fixed here were found by reading one file
+while scoping something else, which is not a method.
+
+The sweep this needs is a property test over the boundary rather than an audit of statements,
+for the reason CLAUDE.md gives and §3.77 step 1 demonstrated: reading SQL tells you which
+statements have `AND tenant_id`, only running them tells you which ones leak. The shape is
+already written — `def_lookup_tenant_property_test.go` — and wants generalising to *every*
+store method on a `cleat_admin` connection, which is a different fixture rather than a
+different idea.
+
+Whether the exemption should be restructured to match PostgreSQL's — a `SECURITY DEFINER`-style
+narrowing so the application login never holds it — is the larger question and is **not**
+decided here. It is the fix that would make the sweep unnecessary rather than merely complete,
+and it is a schema change to a security policy, so it belongs in review and not in this entry.
 
 ### 3.12 One tenant's deploy silently replaces another's workflow code — 🔵 **OVERWRITE CLOSED; THE NAMESPACE DECISION IS MADE** (WS-1, 2026-08-05; D7 2026-09-02)
 
