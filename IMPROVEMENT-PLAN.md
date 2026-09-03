@@ -5761,7 +5761,7 @@ end-to-end test, and an unsettled security model. §2.23 fixed its tenant *attri
   and went with it, along with its generated Python binding.
 - `GetChildResultInSchema` went too — it existed only to read back what this wrote.
 
-### 3.77 Names are per-tenant — D7, and it is three tables rather than one — 🔶 **`workflow_defs` and `workflow_schedules` DONE 2026-09-02; `workflow_tags` remains**
+### 3.77 Names are per-tenant — D7, and it is three tables rather than one — ✅ **DONE 2026-09-03; all three tables**
 
 The owner's decision, in their words: *"It doesn't make any sense for one tenant to need to
 worry about clashes with some other tenant's workflows."* Recorded as **D7** in `tiers.yaml`.
@@ -6019,6 +6019,62 @@ DEFAULT` — because `001_schema.sql` declares the column nullable with no defau
 `002_defaults.sql` has no MySQL counterpart. Two tables in, that is no longer a quirk of one
 migration: **the divergence belongs in `001_schema.sql`**, and `workflow_tags` will need the
 stanza a third time if it is not fixed at the source first.
+
+#### Step 4 — `workflow_tags`, done 2026-09-03. D7 complete.
+
+Migrations `postgres/037`, `mysql/036`, `mssql/040`: primary key `(workflow_name, tag)` →
+`(tenant_id, workflow_name, tag)`. No foreign keys to drop, and — unlike the other two —
+`fk_workflow_tags_def` **already carried the tenant**, because `035`/`034`/`038` widened it when
+they changed `workflow_defs`' key. One Go statement named the old key,
+`PostgresStore.SetWorkflowTag`'s `ON CONFLICT (workflow_name, tag)`; MySQL's
+`ON DUPLICATE KEY UPDATE` is implicit and follows the new key for free, and SQL Server's `MERGE`
+already matched on the tenant as of §3.86.
+
+**This closed a gap step 2 opened rather than one that predated it.** Before `035` two tenants
+could not both hold a definition called `order-processor`, so both tagging it `stable` never
+arose. After `035` they could hold the definition and still could not tag it — D7 was half true
+for a day: names were per-tenant, the pointers into them were not.
+
+**The three dialects answered that half-state three different ways, and the spread is the
+finding:**
+
+| dialect | what happened when tenant B tagged a name it legitimately held |
+|---|---|
+| postgres | `new row violates row-level security policy (USING expression) for table "workflow_tags" (42501)` — the `ON CONFLICT DO UPDATE` tried to update **A's** row and the policy refused the result. **Reads like a misconfiguration; was a key.** |
+| mssql | `Violation of PRIMARY KEY constraint 'pk_workflow_tags' ... (order-processor, stable)`. Loud and honest. |
+| mysql | **No error.** B's insert became an `UPDATE` of A's row, so A's `stable` moved to B's version — and B's own next read returned *nothing*, because the row still carries A's `tenant_id` while B's `SELECT` is scoped. |
+
+The MySQL row is the one worth carrying: **the tenant that caused the damage is the one least
+able to see it.** Bounded by D1 — MySQL is single-tenant-only for want of RLS — but the shape is
+§3.12's defect on a different table, and the fix is the same: the statement is unchanged, the
+key it matches on is not.
+
+**Fixtures are lopsided on version throughout** (A holds v1–v2 tagged to v2, B holds v1 tagged
+to v1) for the reason step 2's `MAX(version)` test records: both tenants tagging the same
+version would pass against a key that ignored the tenant entirely.
+
+**Falsified on all three dialects** against throwaway databases built without the migrations,
+then restored and re-run against those same databases so the guarded `ALTER` is exercised on an
+already-built schema; then each migration applied a second time by hand, since the runner
+records one as done and would never re-run the guard. All three end at
+`(tenant_id, workflow_name, tag)`.
+
+**MySQL needed the `tenant_id` stanza a third time, with one difference worth reading.** On this
+table `tenant_id` is part of a foreign key, and MySQL treats a NULL foreign-key column as
+satisfying the constraint — so a row whose tenant is NULL today is *unchecked*, and the backfill
+makes it checked. If the default tenant has no matching `workflow_defs` row the `UPDATE` fails
+with `Error 1452` rather than silently repointing a tag. That is the right outcome and the
+migration says so.
+
+**Which leaves the divergence itself unfixed, and now measured.** `001_schema.sql` declares
+`tenant_id` three ways and `002_defaults.sql` backfills it on two dialects; five MySQL tables
+still carry it nullable with no default — `concurrency_keys`, `event_history`,
+`workflow_routing`, `workflow_signals` and, until this migration, `workflow_tags`. It is **not**
+a tidy-up to fold into a later step: fixing `001_schema.sql` helps no existing database
+(`CREATE TABLE IF NOT EXISTS` never revises a column), so the mechanism would be one migration
+constraining all of them — and making `event_history.tenant_id` NOT NULL is a real change to the
+highest-volume table in the schema, on which nothing has checked whether a writer relies on NULL.
+Decide it deliberately; it is no longer in D7's path.
 
 #### Sequencing
 
