@@ -59,6 +59,20 @@ at the CPU/wall-clock level.
   worker warns at startup). See IMPROVEMENT-PLAN §3.90 for the measurements —
   before that item the two were one number, and a workflow making three 12s
   service calls tripped a 30s "runaway" fence.
+- **A tenant can tighten the wall-clock ceiling for itself, and cannot loosen
+  it.** `tenant_settings.wasm_wall_clock_ceiling_ms` (all three dialects) is
+  an optional per-tenant override so that several microservices or
+  organisations sharing one deployment can manage their own limits. The flag
+  is a **ceiling**: the tenant's value is clamped to it, never substituted for
+  it, so a tenant on a shared deployment cannot grant itself more than the
+  operator allowed. `NULL` means "no override" and is distinct from zero —
+  zero means *unbounded* at the point of use, so a `CHECK` constraint on each
+  dialect refuses non-positive values, which is a privilege boundary rather
+  than input validation. The table is tenant-scoped like any other: an RLS
+  policy on PostgreSQL, a `FILTER PREDICATE` security policy on SQL Server,
+  and on MySQL neither is needed because D1 makes it single-tenant. See
+  IMPROVEMENT-PLAN §3.94 step 3. The instance timeout and the retry budget
+  have columns but are **not yet consulted** — §3.94 steps 5b and 4.
 
 ### Limitations
 

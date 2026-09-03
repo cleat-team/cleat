@@ -313,6 +313,15 @@ tier1:
   # table ships on all three dialects with one uniform API, and on MySQL it holds the
   # single tenant's row -- the deployment's settings. No MySQL multi-tenancy work, and no
   # dialect-specific API.
+  #
+  # SHIPPED 2026-09-03, migrations/{postgres/039,mysql/039,mssql/042}_tenant_settings.sql.
+  # Isolation follows this entry rather than being decided separately: an RLS policy on
+  # PostgreSQL, a TenantFilter_Settings FILTER PREDICATE on SQL Server, and NEITHER on
+  # MySQL -- because 038 above makes a second tenant impossible, so there is no
+  # cross-tenant read to prevent. Both policies are proven by breaking them and watching
+  # (engine/tenant_settings_rls_test.go, engine/mssql_tenant_settings_test.go); a settings
+  # table is the worst place to have an isolation gap, since every tenant would be able to
+  # rewrite every other tenant's execution limits.
   tenancy:
     multi_tenant: [postgres, mssql]   # mssql cleared 2026-08-06 by #333
     single_tenant: [postgres, mysql, mssql]

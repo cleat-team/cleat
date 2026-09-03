@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"sync"
 	"sync/atomic"
 
 	"github.com/tetratelabs/wazero"
@@ -56,10 +57,20 @@ type Engine struct {
 	wasmInstanceTimeout    time.Duration
 	wasmWallClockCeiling   time.Duration
 	defaultWorkflowTimeout time.Duration
-	deferPassBudget        time.Duration // total for one runDefers pass; see WithDeferPassBudget
-	deferPhase             bool          // this execution is a defer segment; see WithDeferPhase
-	nowFn                  func() int64  // wall clock for sleep-deadline decisions; see WithClock
-	workflowStartMs        int64         // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
+
+	// This tenant's overrides for the two fields above, read from the store
+	// once per execution and clamped to them. See engine/tenant_settings.go.
+	// The Once is not for cross-workflow sharing -- an Engine carries one
+	// workflowID and one tenantID, so it cannot be shared -- but so that the
+	// two wallClockCeiling call sites in executor.go cost one query between
+	// them rather than one each.
+	tenantSettingsOnce  sync.Once
+	tenantSettingsValue TenantSettings
+
+	deferPassBudget time.Duration // total for one runDefers pass; see WithDeferPassBudget
+	deferPhase      bool          // this execution is a defer segment; see WithDeferPhase
+	nowFn           func() int64  // wall clock for sleep-deadline decisions; see WithClock
+	workflowStartMs int64         // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
 
 	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 
@@ -323,12 +334,18 @@ func WithWasmWallClockCeiling(d time.Duration) EngineOption {
 }
 
 // wallClockCeiling is the deadline the executor applies, with the fallback
-// described on WithWasmWallClockCeiling resolved.
-func (e *Engine) wallClockCeiling() time.Duration {
-	if e.wasmWallClockCeiling > 0 {
-		return e.wasmWallClockCeiling
+// described on WithWasmWallClockCeiling resolved and this tenant's override
+// clamped to it (3.94 step 3).
+//
+// The clamp direction is the point: the flag is a CEILING, so a tenant can
+// lower its own wall-clock bound but never raise it past what the operator
+// granted. See ClampToCeiling for why that has to hold and what would break it.
+func (e *Engine) wallClockCeiling(ctx context.Context) time.Duration {
+	operator := e.wasmWallClockCeiling
+	if operator <= 0 {
+		operator = e.wasmInstanceTimeout
 	}
-	return e.wasmInstanceTimeout
+	return ClampToCeiling(e.tenantSettings(ctx).WasmWallClockCeiling, operator)
 }
 
 // WithDefaultWorkflowTimeout sets the total workflow timeout.
