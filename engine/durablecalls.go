@@ -35,7 +35,9 @@ func FreshCallCount() int64 { return atomic.LoadInt64(&freshCallCount) }
 // callSuspendSentinel instead of executed.
 //
 // True only inside a defer segment (WithDeferPhase), for a call the workflow
-// BODY is making past the end of its recorded history. A defer segment exists
+// BODY is making past the end of its recorded history. Every host call that can
+// start fresh work consults it, not just this one -- plugin calls, child
+// workflows and a fresh signal await all reach it (3.84). A defer segment exists
 // to run a terminated workflow's cleanup; running its body as well performs the
 // side effect the termination was meant to stop, and lets the segment return a
 // completion result for a workflow that did not complete. Both were measured --

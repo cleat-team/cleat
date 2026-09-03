@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math/bits"
 	"math/rand"
 	"testing"
 )
@@ -322,9 +323,29 @@ func TestStopSentinelBitsAcrossEveryLayout(t *testing.T) {
 			"be possible, which would simplify 3.84.", sleep, commonFree)
 	}
 
+	// The survey exists to choose the sentinel, so the sentinel has to be held
+	// to it. Without this the constant could drift back to a bit that is free
+	// in one layout and an ordinary value in another -- which is exactly what
+	// bit 39 was, and what 3.84 replaced.
+	if uint64(callSuspendSentinel)&^commonFree != 0 {
+		t.Fatalf("callSuspendSentinel = %016x has bits outside the region free in "+
+			"all six layouts (%016x).\n\n"+
+			"A sentinel is only a sentinel where the host cannot produce it. Bit 39 "+
+			"read as a stop in packDurableCallResult and as a 128-byte run ID in "+
+			"packSimpleResult, which is why it is not the value here any more. See "+
+			"IMPROVEMENT-PLAN 3.84.", uint64(callSuspendSentinel), commonFree)
+	}
+	if bits.OnesCount64(uint64(callSuspendSentinel)) != 1 {
+		t.Fatalf("callSuspendSentinel = %016x sets %d bits, want exactly 1.\n\n"+
+			"A single bit with every other field zero is what lets a guest that "+
+			"tests by whole-word equality and one that masks both recognise it.",
+			uint64(callSuspendSentinel), bits.OnesCount64(uint64(callSuspendSentinel)))
+	}
+
 	t.Logf("pinned: bits 17-31 (%016x) are free in all six layouts that can start "+
-		"new work; packSleepResult covers them and needs no sentinel, because a "+
-		"sleeping guest already suspends", wantCommonFree)
+		"new work; callSuspendSentinel = %016x sits inside them; packSleepResult "+
+		"covers them and needs no sentinel, because a sleeping guest already "+
+		"suspends", wantCommonFree, uint64(callSuspendSentinel))
 }
 
 // ---- 2. field independence: the property that finds the real defects ----

@@ -430,3 +430,103 @@ func TestADeferSegmentRefusesAGuestThatCannotHearTheStop(t *testing.T) {
 		})
 	}
 }
+
+// countingChildStore records every child start the engine attempts.
+//
+// The observable has to be the store, not the caller: a child workflow does not
+// go through the ServiceCaller at all, so operationsCalled cannot see one
+// either started or refused. Choosing the observable is the same problem this
+// file's header describes for the cancellation probe, one path over.
+type countingChildStore struct {
+	stubWorkflowStore
+	started []string
+}
+
+func (c *countingChildStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
+	c.started = append(c.started, defName)
+	return "run-" + defName, nil
+}
+
+func (c *countingChildStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
+	c.started = append(c.started, defName)
+	return "run-" + defName, nil
+}
+
+// TestADeferSegmentDoesNotStartAChildWorkflow is 3.84's test, and it has to
+// exercise a path that is NOT cleat_call or it re-measures 3.83.
+//
+// A child workflow is the sharpest of the four remaining paths. A durable
+// call's side effect belongs to some other service; a child workflow's is a row
+// in this system's own workflow_instances, scheduled and claimable, which
+// outlives the segment that created it. A defer segment for a TERMINATED
+// workflow that starts one has manufactured live work on behalf of a workflow
+// that is over.
+//
+// It also cannot reuse 3.83's sentinel bit. cleat_child_workflow returns a
+// 32-bit run-ID length at bits 32-63, where bit 39 means a 128-byte run ID --
+// an ordinary value, not a sentinel. That is why 3.84 replaced the bit rather
+// than adding a second guard, and why this test is not a duplicate of the one
+// above.
+//
+// Note which layer holds which half up, because this test does NOT check the
+// bit. Measured 2026-09-02: setting callSuspendSentinel back to 1<<39 and
+// updating the decoder to match leaves this test GREEN, because both sides
+// still agree -- the defect bit 39 carries is that a legitimate 128-byte run ID
+// collides with it, and no end-to-end run produces one. The bit choice is held
+// up by TestStopSentinelBitsAcrossEveryLayout, which fails on that same
+// mutation with "has bits outside the region free in all six layouts".
+//
+// What this test does hold up, measured the same way: removing the host guard
+// in children.go starts the child; removing withSuspendCheck from the
+// ChildWorkflow decoder makes the run fail instead of suspend.
+func TestADeferSegmentDoesNotStartAChildWorkflow(t *testing.T) {
+	ctx := context.Background()
+	wasmBytes, _, _, _ := deferPhaseProbeEngine(t, "wf-child-frontier", false)
+
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	children := &countingChildStore{}
+	caller := &mockCaller{}
+	eng := NewEngine(rt, caller,
+		WithBackends(WasmtimeLanguages, wt),
+		WithWorkflowID("wf-child-frontier"),
+		WithChildWorkflowStore(children),
+		WithDeferPhase())
+
+	res, _, susp, _, _, err := eng.Execute(ctx, wasmBytes,
+		"defer_child_workflow", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if susp == nil {
+		t.Fatalf("the segment did not suspend; it returned %q, reporting a "+
+			"terminated workflow as having finished normally.", res)
+	}
+
+	if len(children.started) != 0 {
+		t.Fatalf("the segment started child workflows %v.\n\n"+
+			"A terminated workflow's cleanup pass created live, claimable work. "+
+			"cleat_child_workflow needs the same stop cleat_call has -- and not "+
+			"3.83's bit 39, which is an ordinary run-ID length in this layout. "+
+			"See IMPROVEMENT-PLAN 3.84.", children.started)
+	}
+
+	// The other half, as always: stopping the body must not stop the cleanup.
+	// Without this, a segment that refuses everything passes the assertion
+	// above while consuming the defer table it exists to run.
+	got := operationsCalled(caller)
+	if len(got) != 1 || got[0] != "after_child" {
+		t.Fatalf("defer calls were %v, want [after_child].\n\n"+
+			"Empty means the guest did not drain its defer table -- the stop "+
+			"reached the child-workflow call and then swallowed the cleanup too.", got)
+	}
+}

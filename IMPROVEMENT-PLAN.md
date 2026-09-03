@@ -11051,7 +11051,7 @@ gone; both tests fail under that mutation.
 
 ---
 
-### 3.84 A defer segment is stopped on `cleat_call` only; four other paths still start new work — 🔴 **OPEN** (WS-3, 2026-09-02)
+### 3.84 A defer segment is stopped on `cleat_call` only; four other paths still start new work — ✅ **FIXED** (WS-3, 2026-09-02)
 
 §3.83 stopped a defer segment doing new work through `cleat_call`, and that is the path its
 fixture exercises. It is not the only way a guest starts work past the frontier. Measured by
@@ -11196,3 +11196,83 @@ The first test's second assertion is the half that would otherwise be missing: i
 dispatched calls, both defer bodies. Asserting only that the refused call is absent passes just
 as well against a guest that was killed outright and ran no cleanup — which is what the old
 `CloseWithExitCode` did on the runtime where it worked.
+
+#### What was built — 2026-09-02
+
+One sentinel, **bit 31**, replacing bit 39 rather than sitting beside it, honoured by all six
+paths and decoded by seven Go SDK call sites.
+
+Host side, each after its own replay check so a replaying guest is untouched:
+`DurableCall`, `DurableCallWithRetry` (already), `PluginCall`, `PluginCallStreaming`,
+`childWorkflowWithVersion` — which serves both `ChildWorkflow` and `ChildWorkflowWithOptions` —
+and `DurableAwaitSignals`.
+
+Guest side, `wasm/adapter_metadata.go`: the check moved out of `DurableCall`'s literal into
+`withSuspendCheck`, which every stoppable decoder's `ResultStmts` now goes through. That is a
+mechanism rather than seven copies for the reason CLAUDE.md gives — a decoder added later gets
+the check by construction, and the ordering cannot be got wrong per-site.
+
+#### `DurableCallWithRetry` was already broken, and this is how it was found
+
+The host returned the sentinel from `DurableCallWithRetry` (§3.83, `engine/durablecalls.go:302`)
+and **the Go SDK never decoded it there**. A workflow body that used the retrying call in a defer
+segment read bit 39 as `responseLen = 0, errCode = 0` — an empty successful response — and ran
+on. That is precisely the failure `deferSegmentLanguages` exists to prevent, inside the one
+language the gate declares supported.
+
+Nothing caught it because the gate is per-*language* and the omission was per-*call*. Worth
+stating as a general shape: a fail-closed list keyed on one axis says nothing about a gap on
+another. The `withSuspendCheck` wrapper is the answer to that, not a wider list.
+
+Re-derive that it is closed: `grep -c "withSuspendCheck(" wasm/adapter_metadata.go` — **8**: one
+per stoppable call plus the `func` that defines it. The first draft of this line said 7 and was
+wrong for that reason, which is the rule two sections up about running the command before writing
+the sentence about what it prints. For the seven call sites alone,
+`grep -c "ResultStmts: withSuspendCheck("`.
+
+#### Why the bit moved, and which test holds that up
+
+"Free" was measured in #595 as *the host cannot produce it*. That is necessary and not
+sufficient, and the gap between the two decided the design:
+
+- Bit 39 is free in `packDurableCallResult` alone. In `packSimpleResult` and
+  `packAwaitChildResult` it sits inside a 32-bit length at bits 32-63, where it means a
+  **128-byte run ID** — an ordinary value a real child workflow produces.
+- In the await-signals layout, bits 17-31 fall inside the **timed-out field**, which the Go SDK
+  reads as `(r>>16) & 0xFFFF != 0`. A decoder that filled its fields before testing the sentinel
+  would read a stop as an ordinary timeout and continue. So the ordering in `withSuspendCheck` is
+  a contract, not a style choice, and ABI.md says so.
+
+`TestStopSentinelBitsAcrossEveryLayout` now asserts `callSuspendSentinel` lies inside the region
+free in all six layouts, and that it sets exactly one bit. **That is the only test that holds the
+bit choice up** — measured 2026-09-02, setting the constant back to `1<<39` and updating the
+decoder to match leaves `TestADeferSegmentDoesNotStartAChildWorkflow` green, because both sides
+still agree and no end-to-end run produces a 128-byte run ID. The end-to-end test proves the stop
+reaches a second path; the property test proves the bit is the right one. Neither substitutes for
+the other, and the comment on each says which.
+
+#### The new end-to-end test, and why a child workflow
+
+`TestADeferSegmentDoesNotStartAChildWorkflow` with a new `defer_child_workflow` entry point in
+`testdata/deferfunc`. A child workflow is the sharpest of the four: a durable call's side effect
+belongs to another service, but a child workflow writes a row into this system's own
+`workflow_instances`, scheduled and claimable, outliving the segment. A defer segment for a
+terminated workflow that starts one has manufactured live work on behalf of a workflow that is
+over.
+
+The observable is the **store**, not the `ServiceCaller` — a child workflow never reaches the
+caller, so `operationsCalled` cannot see one either started or refused. Same problem as the
+cancellation probe at the top of that file, one path over.
+
+Both halves are asserted together, as in §3.83: no child started, **and** the defer body's call
+still made. Proved able to fail 2026-09-02 by removing the host guard (child starts) and by
+removing `withSuspendCheck` from the `ChildWorkflow` decoder (the run fails instead of
+suspending).
+
+#### Still open
+
+The four non-Go SDKs. `deferSegmentLanguages` remains `{"go": true}`, so a defer segment for a
+Rust, Python, Java or AssemblyScript guest fails closed rather than silently running the body.
+Their `SUSPEND_SENTINEL` is `1 << 62`, which is the *await-child* sentinel and a different
+mechanism; none of them decodes the stop. Each language's decode and its entry in that map belong
+in one change, with a test that crosses the two halves (§3.73).
