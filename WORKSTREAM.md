@@ -262,7 +262,7 @@ unanswered.
 > | MySQL RLS (§1.7) | **Answered 2026-08-06 by D1** — MySQL is single-tenant only, a documented product boundary. README and `docs/reference/multi-tenancy.md` already say so. |
 > | concurrency-key re-entrancy (§3.39) | **Answered and fixed 2026-08-31.** |
 > | the defer-design decisions (§3.35) | **Answered; phases 1–4 shipped**, the last on 2026-09-02. Phase 5 is open but is *not* blocked on you — it is blocked on WS-2 agreeing a durable-record shape with WS-3, which is a cross-stream question the two streams can settle. |
-> | `workflow_defs` namespacing (§3.12) | **Still yours, and now the only one.** Is the workflow-definition namespace per-tenant or global? The overwrite half is closed either way; the answer decides whether a multi-session key change happens. |
+> | `workflow_defs` namespacing (§3.12) | **Answered 2026-09-02 by D7, and implemented 2026-09-03.** Per-tenant: *"it doesn't make any sense for one tenant to need to worry about clashes with some other tenant's workflows."* It turned out to be three tables, not one, and all three shipped (#594, #601, #605). Note this row is itself the lesson below in miniature -- it said "still yours, and now the only one" for a day after `tiers.yaml` recorded D7. |
 > | positioning (Phase 4) | **Still yours.** |
 >
 > The general lesson, since this list is the third place it has bitten: an escalation is only

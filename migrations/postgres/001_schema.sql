@@ -524,6 +524,22 @@ ALTER TABLE workflow_promises ENABLE ROW LEVEL SECURITY;
 -- Editing an already-applied migration is safe here because the change is a
 -- comment: migration.Runner records applied files by name and does not
 -- checksum them, so a database that has 001 recorded is unaffected.
+--
+-- SUPERSEDED 2026-09-02 BY migrations/postgres/035_workflow_defs_tenant_in_key.sql.
+-- Everything above this line describes a state that no longer exists: D7
+-- (tiers.yaml) made definition names per-tenant, so there is no adoption to
+-- smooth, and 035 replaces this policy with a plain
+-- `tenant_id = cleat.assert_tenant_set()`. canAdoptDef and
+-- engine/def_ownership.go, named above, were DELETED in the same change.
+--
+-- The DDL below is left exactly as it was, because migrations apply in order
+-- and rewriting an applied one would give a fresh database a different history
+-- from an upgraded one. But read it the way IMPROVEMENT-PLAN 1.1 records
+-- learning the hard way: for anything defined by CREATE POLICY / CREATE OR
+-- REPLACE, find the HIGHEST-NUMBERED migration that defines it before
+-- concluding anything. Checking a claim against the file the claim named
+-- confirmed a bug that had already been fixed, and the confirmation was
+-- worthless.
 DROP POLICY IF EXISTS tenant_isolation_defs ON workflow_defs;
 CREATE POLICY tenant_isolation_defs ON workflow_defs
     FOR ALL USING (

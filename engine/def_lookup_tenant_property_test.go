@@ -39,21 +39,42 @@ package engine
 //     -- "tenant B learned another tenant's WASM is non-empty" -- with no error
 //     anywhere. MySQL has no policy underneath, so the Go predicate is the whole
 //     of the isolation (§3.11).
-//   - The one way PostgreSQL DOES hand a definition across tenants is by design.
-//     `tenant_isolation_defs` is
+//   - The one way PostgreSQL DID hand a definition across tenants was by design.
+//     `tenant_isolation_defs` was
 //     `USING (tenant_id = assert_tenant_set() OR tenant_id = '00000000-...')`,
-//     so a default-tenant definition is readable by every tenant. That OR clause
-//     is the read side of the adoption window and goes when canAdoptDef goes.
-//     Deliberately NOT pinned here: a test that enshrines behaviour the next
-//     change deletes is churn.
+//     so a default-tenant definition was readable by every tenant -- the read
+//     side of the adoption window. **That clause is gone**, dropped by
+//     migration 035 along with canAdoptDef when D7 landed, exactly as this
+//     comment predicted. The policy is now plain
+//     `tenant_id = cleat.assert_tenant_set()`. Confirm with
+//     `grep -rn "assert_tenant_set() OR" migrations/postgres/*.sql`, which
+//     matches nothing. Not pinning it was right: a test enshrining it would
+//     have had to be deleted with it.
 //
 // Also noted while building this: an index on exactly the tuple the new key
 // needs -- `idx_defs_tenant_name_version ON workflow_defs(tenant_id, name,
-// version)` -- already exists on all three dialects, so the migration has one to
-// promote rather than one to build over a populated table.
+// version)` -- already existed on all three dialects, so the migration had one
+// to promote rather than one to build over a populated table. It is now the
+// primary key.
+//
+// WHAT THIS FILE ASSERTS CHANGED MEANING WHEN D7 LANDED, and that is the part
+// worth reading before editing it. The property above is "tenant B sees
+// NOTHING", and its fixture seeds only tenant A -- so it is still true and
+// still worth having. But it is no longer the whole property, because B is now
+// entitled to its OWN definition of the same name. "Sees nothing" and "sees its
+// own" are different claims, and a test asserting the first will pass happily
+// while the second is broken: that is exactly how 3.86's LoadWASM defect
+// survived, handing tenant B tenant A's compiled code while every assertion
+// here stayed green.
+//
+// TestDefinitionLookupsAnswerAboutTheCallersOwnRowsWhenBothHoldTheName below is
+// the second half. It runs the same fourteen methods with BOTH tenants holding
+// the name, so a lookup that answers about the wrong tenant is caught rather
+// than merely a lookup that answers when it should not.
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -277,6 +298,200 @@ func TestLatestVersionResolvesWithinTheCallersTenant(t *testing.T) {
 			}
 			if gotA != 3 {
 				t.Errorf("tenant A resolved %q to version %d, want 3", name, gotA)
+			}
+		})
+	}
+}
+
+// TestDefinitionLookupsAnswerAboutTheCallersOwnRowsWhenBothHoldTheName is the
+// property the file above cannot express, because its fixture gives the name to
+// one tenant only.
+//
+// D7 (3.77) made two tenants holding "order-processor" ordinary. From that
+// point "tenant B sees nothing" stopped being the whole requirement: B must see
+// ITS OWN definition and never A's, and a lookup that confuses the two returns
+// a plausible answer rather than an empty one. 3.86 is what that looks like in
+// practice -- LoadWASM handed tenant B tenant A's compiled code, and every
+// assertion in the older property stayed green throughout, because its fixture
+// never gave B a row to confuse.
+//
+// The fixture is deliberately lopsided in three ways at once, because each one
+// catches a different wrong answer:
+//
+//   - A holds v1 and v2, B holds only v1 -- so a version-resolving lookup that
+//     ignores the tenant returns 2 where B's answer is 1.
+//   - the WASM bytes differ (0xAA vs 0xBB) -- so a byte-returning lookup that
+//     reads the wrong row is caught even though both rows exist and are the
+//     same length.
+//   - only A has a tag and a routing rule -- so B's tag and routing lookups
+//     must still answer empty, which is the OLD property, retained rather than
+//     replaced.
+//
+// Runs on tenant-SCOPED stores, so on PostgreSQL and SQL Server the policy is
+// doing the work and this is a check that the policy is actually bound. 3.86
+// covers the same surface on a cleat_admin connection where it is not; both are
+// needed, and neither substitutes for the other.
+func TestDefinitionLookupsAnswerAboutTheCallersOwnRowsWhenBothHoldTheName(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			storeA, storeB, _ := twoTenantStores(t, backend)
+			ctx := context.Background()
+
+			const aByte, bByte = 0xAA, 0xBB
+			for _, v := range []int{1, 2} {
+				if err := storeA.DeployWorkflowDef(ctx, &WorkflowDef{
+					Name: probeDefName, Version: v,
+					WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d, aByte},
+					ABIVersion: 1, MinVersion: 1,
+				}); err != nil {
+					t.Fatalf("tenant A deploy v%d: %v", v, err)
+				}
+			}
+			if err := storeB.DeployWorkflowDef(ctx, &WorkflowDef{
+				Name: probeDefName, Version: 1,
+				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d, bByte},
+				ABIVersion: 1, MinVersion: 1,
+			}); err != nil {
+				t.Fatalf("tenant B deploy v1: %v", err)
+			}
+			if err := storeA.SetWorkflowTag(ctx, probeDefName, 2, probeTag); err != nil {
+				t.Fatalf("tenant A SetWorkflowTag: %v", err)
+			}
+			if err := storeA.SetRoutingRule(ctx, probeDefName, 2, 1.0); err != nil {
+				t.Fatalf("tenant A SetRoutingRule: %v", err)
+			}
+
+			// Fixture check. Without it every "B sees its own" assertion could
+			// hold against a fixture where A deployed nothing at all.
+			if got, err := storeA.ListVersions(ctx, probeDefName); err != nil || len(got) != 2 {
+				t.Fatalf("fixture is broken: tenant A sees versions %v (err %v), want two", got, err)
+			}
+
+			for _, tc := range []struct {
+				name string
+				// wrong reports what tenant B got wrong, or "" for correct.
+				wrong func() string
+			}{
+				{"LoadWASM — B's own compiled code, not A's", func() string {
+					b, err := storeB.LoadWASM(ctx, probeDefName, 1)
+					if err != nil {
+						return fmt.Sprintf("could not load its own definition: %v", err)
+					}
+					if len(b) == 0 {
+						return "loaded nothing for a definition it deployed"
+					}
+					if b[len(b)-1] != bByte {
+						return fmt.Sprintf("loaded WASM ending 0x%02X, want its own 0x%02X -- "+
+							"its workflow would execute tenant A's code", b[len(b)-1], bByte)
+					}
+					return ""
+				}},
+				{"GetWorkflowDef — B's own record", func() string {
+					d, err := storeB.GetWorkflowDef(ctx, probeDefName, 1)
+					if err != nil {
+						return fmt.Sprintf("errored on its own definition: %v", err)
+					}
+					if d == nil {
+						return "got no record for a definition it deployed"
+					}
+					if len(d.WASMBytes) == 0 || d.WASMBytes[len(d.WASMBytes)-1] != bByte {
+						return "got a record carrying tenant A's bytes"
+					}
+					return ""
+				}},
+				{"ListVersions — B holds only v1", func() string {
+					v, err := storeB.ListVersions(ctx, probeDefName)
+					if err != nil {
+						return fmt.Sprintf("errored: %v", err)
+					}
+					if len(v) != 1 || v[0] != 1 {
+						return fmt.Sprintf("sees versions %v, want exactly [1] -- v2 is tenant A's", v)
+					}
+					return ""
+				}},
+				{"ResolveLatestVersion — B's latest is 1, A's is 2", func() string {
+					v, err := storeB.ResolveLatestVersion(ctx, probeDefName)
+					if err != nil {
+						return fmt.Sprintf("errored: %v", err)
+					}
+					if v != 1 {
+						return fmt.Sprintf("resolved v%d, want its own v1 -- %d is tenant A's number", v, v)
+					}
+					return ""
+				}},
+				{"ValidateVersion — v2 exists only for A", func() string {
+					ok, err := storeB.ValidateVersion(ctx, probeDefName, 2)
+					if err == nil && ok {
+						return "confirms v2 exists; only tenant A deployed v2"
+					}
+					return ""
+				}},
+				{"ListWorkflowDefs — one row, B's", func() string {
+					ds, err := storeB.ListWorkflowDefs(ctx, probeDefName)
+					if err != nil {
+						return fmt.Sprintf("errored: %v", err)
+					}
+					if len(ds) != 1 {
+						return fmt.Sprintf("lists %d definitions, want exactly its own 1", len(ds))
+					}
+					return ""
+				}},
+				{"GetWorkflowTag — A tagged, B did not", func() string {
+					v, err := storeB.GetWorkflowTag(ctx, probeDefName, probeTag)
+					if err == nil && v > 0 {
+						return fmt.Sprintf("resolved tag %q to v%d; only tenant A tagged", probeTag, v)
+					}
+					return ""
+				}},
+				{"ResolveVersionByTag — the run-start path", func() string {
+					v, err := storeB.ResolveVersionByTag(ctx, probeDefName, probeTag)
+					if err == nil && v > 0 {
+						return fmt.Sprintf("would start a run on v%d from tenant A's tag", v)
+					}
+					return ""
+				}},
+				{"GetWorkflowTags — A's tags are not B's", func() string {
+					m, err := storeB.GetWorkflowTags(ctx, probeDefName)
+					if err == nil && len(m) > 0 {
+						return fmt.Sprintf("enumerated tags %v; only tenant A tagged", m)
+					}
+					return ""
+				}},
+				{"GetRoutingRules — A routed, B did not", func() string {
+					rs, err := storeB.GetRoutingRules(ctx, probeDefName)
+					if err == nil && len(rs) > 0 {
+						return fmt.Sprintf("read %d routing rules; only tenant A routed", len(rs))
+					}
+					return ""
+				}},
+				{"PickVersionByRouting — A's split must not steer B", func() string {
+					v, err := storeB.PickVersionByRouting(ctx, probeDefName)
+					if err == nil && v == 2 {
+						return "picked v2 from tenant A's routing rule; B has no v2"
+					}
+					return ""
+				}},
+				{"GetWASMLength — B's own", func() string {
+					n, err := storeB.GetWASMLength(ctx, probeDefName, 2)
+					if err == nil && n > 0 {
+						return "reports a length for v2, which only tenant A deployed"
+					}
+					return ""
+				}},
+			} {
+				tc := tc
+				t.Run(tc.name, func(t *testing.T) {
+					if wrong := tc.wrong(); wrong != "" {
+						t.Errorf("tenant B %s", wrong)
+					}
+				})
+			}
+
+			// The control. Every assertion above would also hold if B's own
+			// rows had silently failed to arrive, so check A still sees its.
+			if v, err := storeA.ResolveLatestVersion(ctx, probeDefName); err != nil || v != 2 {
+				t.Errorf("tenant A resolves v%d (err %v), want its own v2", v, err)
 			}
 		})
 	}
