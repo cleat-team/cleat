@@ -24,6 +24,7 @@ engine	field lastCancellationCheck
 engine	field metrics
 engine	func (*FaultInjector).applyLatencySleep
 engine	func (*ShardedStore).tryEachShard
+engine	func (*execSession).setDeferDrain
 engine	func Dialect.batchLimit
 engine	func Dialect.intervalExpr
 engine	func Dialect.nowExpr

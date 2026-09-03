@@ -145,6 +145,36 @@ Make a recorded API call to an external service.
 
 If `errCode == 0`, the response buffer contains valid JSON. If `errCode == 1`, the response buffer contains an error message string.
 
+##### Suspend sentinel — check this before decoding any field
+
+If **bit 39** is set, the word is not a result. It is the host telling the guest to stop and
+unwind without doing new work, and the SDK must propagate a suspend exactly as it does for
+`cleat_await_child` (§1) rather than decoding the fields.
+
+```
+0x0000008000000000  (1 << 39)
+```
+
+The host emits it for a call made by the workflow body during a *defer segment* — a replay whose
+only purpose is to run an already-terminated workflow's outstanding defers. Calls made by the
+defer bodies themselves are **not** stopped, so an SDK must not treat the sentinel as "this
+workflow is over"; it means "this call must not happen".
+
+**Test it with a mask (`result & (1 << 39)`), not equality.** The host currently emits exactly
+`1 << 39` with every other field zero, so a whole-word comparison also works today, but this is a
+payload-carrying word and the mask is the form that stays correct.
+
+Note this is a *different* bit from the `1 << 62` used by the workflow-export return and by
+`cleat_await_child`. It has to be. Those pack a 32-bit length at bits 32-63, where bit 62 means a
+length of 1 GiB; this layout packs a 24-bit `responseLen` at bits 40-63, where the same bit means
+4 MiB — reachable, since the host's buffer limits are operator-settable with no upper bound. Bits
+16-39 carry no information here: the host writes `callErrorCode` as a single byte, so bits 16-39
+cannot be set by any real result.
+
+An SDK that does not implement this reads the sentinel as `responseLen = 0, errCode = 0` — an
+empty *successful* response — and will silently continue past the stop. The host therefore
+refuses to run a defer segment for any guest language not known to decode it.
+
 ##### At-Least-Once Semantics
 
 `cleat_call` provides at-least-once execution, not exactly-once. There is a crash window between the external call completing and the event being persisted to `event_history`. If the worker crashes during this window, replay will not find a recorded event for this step and will re-execute the call.

@@ -244,6 +244,35 @@ func packDurableCallResult(responseLen int, callErrorCode, errCode byte) int64 {
 	return int64(uint64(responseLen)<<40 | uint64(callErrorCode)<<8 | uint64(errCode))
 }
 
+// callSuspendSentinel tells a guest to stop and unwind without doing new work.
+//
+// The host returns it from a durable call made by a workflow body that has
+// replayed past the end of its recorded history during a defer segment
+// (WithDeferPhase). The guest unwinds with its suspend flag set, skips its own
+// defer drain, and the host then runs __cleat_run_deferred on the live
+// instance -- the path runGuestDefersAfterSuspend already takes.
+//
+// Bit 39, and the choice is load-bearing. IMPROVEMENT-PLAN 3.81 specified bit
+// 62, on the grounds that cleat_await_child and cleat_await_any_child already
+// decode it as a suspend. Those pack a 32-bit length at bits 32-63, where bit
+// 62 means 1 GiB. This layout packs a 24-bit responseLen at bits 40-63, where
+// the same bit means 4 MiB -- and MaxWasmStringLen and OutBufSize are package
+// vars set from -wasm-max-string-len and -wasm-output-buffer-size, both
+// flag.Int with no upper bound. A legitimate response would decode as a
+// suspend. See IMPROVEMENT-PLAN 3.83.
+//
+// Bits 16-39 are safe structurally rather than by a bound: the guest decodes a
+// 32-bit callErrorCode from bits 8-39, but packDurableCallResult's parameter is
+// a byte, so those 24 bits cannot be filled by any input. Pinned by
+// TestPackDurableCallResult_SentinelBitsTheHostCannotReach, which asserts both
+// that bits 16-39 are free and that bit 62 is not.
+//
+// The value is exactly 1<<39 with every other field zero, so a guest that
+// tests it by whole-word equality (Rust's SUSPEND_SENTINEL check) and one that
+// masks (AssemblyScript's) both recognise it. The mask form is correct for a
+// payload-carrying word and is what new decoders should use.
+const callSuspendSentinel int64 = 1 << 39
+
 // badParamDurableCall is the bad-parameter result for the host functions whose
 // guest adapter decodes the packDurableCallResult layout: cleat_call,
 // cleat_call_retry, cleat_call_heartbeat, cleat_plugin_call and
