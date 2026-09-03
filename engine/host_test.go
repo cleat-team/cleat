@@ -3244,6 +3244,12 @@ func TestPluginCallStreamingReplay_MultipleChunks(t *testing.T) {
 	}
 }
 
+// Covers the in-memory branch only. This assigns s.history directly, so its
+// StreamFinish is a field the store could not produce until IMPROVEMENT-PLAN
+// 3.96 -- the flag was written by neither eventRecordToPayload nor a column,
+// and this test passed throughout. engine/stream_finish_persistence_test.go
+// is the version that puts the same record through the real encoder and
+// decoder first, and it is the one that fails when the flag is not persisted.
 func TestPluginCallStreamingReplay_StreamError(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true

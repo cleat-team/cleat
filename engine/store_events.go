@@ -313,6 +313,24 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.PluginError != "" {
 			payload["plugin_error"] = rec.PluginError
 		}
+		// The two fields that say WHICH chunk this is. Neither was written
+		// here or carried by a column, so both were lost the moment history
+		// came back from the database rather than from memory, and
+		// stream_finish is the one that matters: recordStreamError marks a
+		// stream-level failure as a single chunk with Finish set, and
+		// replayPluginCallStreaming recognises that failure by exactly that
+		// flag. Without it a recorded FAILURE replays as a SUCCESS whose
+		// chunk content is the error text. IMPROVEMENT-PLAN 3.96.
+		//
+		// Only when set, so every event written before this change produces a
+		// byte-identical payload and its stored checksum still verifies --
+		// the same discipline error_non_retryable and error_code use above.
+		if rec.StreamChunkIndex > 0 {
+			payload["stream_chunk_index"] = rec.StreamChunkIndex
+		}
+		if rec.StreamFinish {
+			payload["stream_finish"] = true
+		}
 	case "scope_acquired":
 		if rec.ScopeKey != "" {
 			payload["scope_key"] = rec.ScopeKey
@@ -644,6 +662,15 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["plugin_error"].(string); ok {
 			rec.PluginError = v
+		}
+		// Absent on every stream chunk written before 3.96, which replays as
+		// it always did: index 0 and not finished. A float64 because that is
+		// what encoding/json produces for a JSON number.
+		if v, ok := m["stream_chunk_index"].(float64); ok {
+			rec.StreamChunkIndex = int(v)
+		}
+		if v, ok := m["stream_finish"].(bool); ok {
+			rec.StreamFinish = v
 		}
 	case "scope_acquired":
 		if v, ok := m["scope_key"].(string); ok {

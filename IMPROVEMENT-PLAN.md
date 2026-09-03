@@ -12730,3 +12730,112 @@ consistent and costs nothing.
 - **A test that proves isolation against a wide-open policy.** CLAUDE.md's standing warning: a
   cross-tenant assertion passed against a wide-open security policy because the store's own SQL
   carried `tenant_id = ?`. Break the specific layer and watch.
+
+### 3.96 A recorded plugin stream error replayed as a success — ✅ **FIXED** (WS-2, 2026-09-03)
+
+> **Numbered 3.90 when it was committed, then 3.91, 3.93, 3.94, 3.95, and now 3.96 — renumbered
+> five times on five successive rebases, because #613, #619, #624, #626 and #628 each took the
+> number while this branch was open.** Tenth number collision in two days, and the seventh for
+> this stream. §3.89 records the
+> mechanism and it holds here unchanged: every stream appends its new section to the end of
+> one file, so two streams appending on the same day collide in the text *and* in the number,
+> by construction. `check-section-numbers.sh` passed on this branch before the rebase and
+> could not have caught it — it checks uniqueness within one file, and the duplicate lived on
+> `develop` in a section this branch had never seen. The renumber is cheap; the re-verification
+> it forces is not.
+>
+> **The second renumber says something the first did not: picking "one past the highest" is
+> not a fix, it is a race this branch loses every time it is open across a merge.** 3.91 was
+> free when this branch claimed it and taken by the time the branch could be pushed. The
+> number is only safe at the moment of merge, so the last thing to do before pushing is
+> re-derive it against `origin/develop` — `git show origin/develop:IMPROVEMENT-PLAN.md |
+> grep -oE '^### 3\.[0-9]+ ' | sort -t. -k2 -n | tail -1` — and not trust the one that
+> passed `check-section-numbers.sh` locally, which by construction cannot see the other side.
+>
+> **The third and fourth renumbers found the failure mode that re-derivation does not cover:
+> the number arrived in a rebase that did not conflict.** #624 appended its section far enough from this one that
+> git merged both cleanly, so there was no marker to resolve and nothing to prompt a re-check —
+> the tree was clean, the rebase said "Successfully rebased", and the file held two §3.93
+> headings. `check-section-numbers.sh` is what caught it, which is the argument for running it
+> after *every* rebase and not only after a conflicted one. A clean rebase is not evidence that
+> the numbering survived; it is only evidence that the text did.
+>
+> **The fourth renumber is the same trap a second time, twenty minutes later, and it says the
+> per-branch check cannot be made to work.** #626 took 3.94 while this branch held it, appended
+> far enough away to merge cleanly again, and `check-section-numbers.sh` caught it again. Four
+> renumbers on one unchanged patch is not four unlucky days; it is what a
+> last-writer-wins-on-a-shared-counter looks like when three streams append to one file. The
+> fixes are structural, and both are outside this section: **require branches to be up to date
+> before merging**, so the second PR has to rebase and re-run rather than landing on a base its
+> checks never saw, or stop numbering sections in a single global sequence at all. Recorded
+> here rather than done here because it is a repository setting or a document-wide convention,
+> and either is a call for the three streams together.
+>
+> **Fifth renumber, and this one was caused by a PR fixing the collisions.** #628 renumbered a
+> duplicate onto 3.95, which is where this branch had just moved to escape #626 taking 3.94 —
+> so the cleanup itself took the number the cleanup had freed. That is the clearest statement
+> of the problem available: with a single global counter and no serialisation, even the repair
+> collides, and picking "one past the highest" is a bet that nothing merges before the push.
+
+`recordStreamError` marks a stream-level plugin failure as a single chunk with
+`StreamFinish` set, and `replayPluginCallStreaming` recognises that failure by exactly
+that flag:
+
+```go
+if len(collected) == 1 && collected[0].Finish {
+    // return the error
+}
+```
+
+**`StreamFinish` was never persisted.** Neither `eventRecordToPayload` nor any column
+carried it, so it survived only for as long as the record stayed in memory. Replay on a
+worker that loaded its history from the database sees `Finish: false`, the error branch
+cannot fire, and the collected chunks are marshalled and returned as a **success** whose
+content is the error text. `StreamChunkIndex` was lost the same way.
+
+Measured before the fix, through the real store on both configured dialects:
+
+| | |
+|---|---|
+| `StreamFinish` in, PostgreSQL and MySQL | `true` |
+| `StreamFinish` out | **`false`** on both |
+| the guest's error code on replay | **`0`** — success |
+
+So this is §2.35's constraint violated in the direction that matters: fresh reports a
+failure, replay reports a success, for the same step.
+
+**The existing test could not see it, and how it could not is the general lesson.**
+`engine/host_test.go`'s `TestPluginCallStreamingReplay_StreamError` covers this exact
+branch and passed throughout, because it assigns `s.history` directly — a history the
+store cannot produce. The assertion was held up by an in-memory struct field while the
+layer under test dropped it. The new tests differ in one respect only: the record goes
+through the real encoder and decoder first.
+
+#### The fix, and why it needs no migration
+
+Both fields join the `plugin_call_stream_chunk` arms of `eventRecordToPayload` and
+`populateFromPayload`, **written only when set**. `payload` is JSONB and the stored
+checksum is a hash of exactly these bytes, so an absent key leaves every stream chunk
+already in `event_history` byte-identical and still verifying. Same discipline as
+`error_non_retryable` (§2.35) and `resolved_by` (§1.4 phase F).
+
+That compatibility claim is asserted rather than argued:
+`TestAPre391StreamChunkStillMatchesItsStoredChecksum` pins the literal checksum of a
+pre-3.96 chunk. **The literal was taken by running the computation against `develop`'s
+encoder** — `git stash push engine/store_events.go`, run, `git stash pop` — not by
+copying what the new code printed, which would have pinned the bug. The first draft of
+that test carried an invented literal; it failed, which is the only reason the real
+measurement got made.
+
+Falsified, each for its own reason: reverting the fix turns the replay test red with
+`errCode=0` (the guest told SUCCESS) and the round-trip test red on the dropped flag,
+while both compatibility tests stay green — they guard against the fix over-reaching, so
+they are falsified the other way, by writing the keys unconditionally, which turns both
+red including the checksum.
+
+**Not fixed here: §2.35's plugin residual**, which is the next item. All four stream
+failure causes still report one code, so a stream function erroring is non-retryable to
+the guest where the identical non-streaming failure is retryable (`callFailureCode`).
+That is a real asymmetry and it is broader than §2.35 states — three of the four causes,
+not one — but it is a separate change, and it was unfixable while the error branch could
+not fire on replay at all.
