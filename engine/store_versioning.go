@@ -11,6 +11,20 @@ import (
 	"github.com/google/uuid"
 )
 
+// SetWorkflowTag assigns a tag to a specific version, replacing any existing
+// assignment of that tag within this tenant.
+//
+// The ON CONFLICT target must name the whole primary key. PostgreSQL matches a
+// conflict target against an actual unique constraint, so after migration 037
+// widened the key to (tenant_id, workflow_name, tag) the old two-column target
+// does not merely behave differently -- it fails outright with
+//
+//	there is no unique or exclusion constraint matching the ON CONFLICT
+//	specification (42P10)
+//
+// which is the loud half of the failure 3.77 step 2 describes. Six statements
+// named workflow_defs' old key that way and CI found them, not local testing,
+// because the ones that mattered were in packages a targeted run never touched.
 func (s *PostgresStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -21,7 +35,7 @@ func (s *PostgresStore) SetWorkflowTag(ctx context.Context, workflowName string,
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_tags (workflow_name, version, tag, tenant_id)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (workflow_name, tag) DO UPDATE SET version = EXCLUDED.version, created_at = now()
+		ON CONFLICT (tenant_id, workflow_name, tag) DO UPDATE SET version = EXCLUDED.version, created_at = now()
 	`, workflowName, version, tag, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("set workflow tag: %w", err)

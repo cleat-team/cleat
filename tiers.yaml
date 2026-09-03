@@ -1079,14 +1079,24 @@ tier3:
 #       and it had no settled answer for whose tenant the child belonged to. Cross-pool
 #       work goes through the other pool's API. Nothing in tiers.yaml claimed it at any
 #       tier, and no end-to-end test exercised it. See IMPROVEMENT-PLAN 3.78.
-#   D7  DECIDED 2026-09-02. NAMES ARE PER-TENANT. One tenant must never have to
-#       worry about clashing with another tenant's names, so every primary key over
-#       a user-chosen name carries the tenant. Three tables do not today --
+#   D7  DECIDED 2026-09-02, IMPLEMENTED 2026-09-03. NAMES ARE PER-TENANT. One tenant
+#       must never have to worry about clashing with another tenant's names, so every
+#       primary key over a user-chosen name carries the tenant. Three tables did not:
 #       workflow_defs(name, version), workflow_schedules(name) and
-#       workflow_tags(workflow_name, tag) -- and all three were measured colliding
-#       on all three dialects. Keys over a GENERATED id are unaffected and stay as
-#       they are: a UUID cannot be chosen, so it cannot clash. See
-#       IMPROVEMENT-PLAN 3.12 and 3.77.
+#       workflow_tags(workflow_name, tag), all three measured colliding on all three
+#       dialects. All three now key on (tenant_id, ...) -- migrations postgres
+#       035/036/037, mysql 034/035/036, mssql 038/039/040. Keys over a GENERATED id
+#       are unaffected and stay as they are: a UUID cannot be chosen, so it cannot
+#       clash. See IMPROVEMENT-PLAN 3.12 and 3.77.
+#
+#       What the decision COST, recorded because the register is where the next
+#       person looks: it deleted the default-tenant adoption window (canAdoptDef and
+#       its 409 path), because under a per-tenant key two tenants deploying one name
+#       is not a collision to adjudicate. And it exposed 3.86 -- SQL Server's tenant
+#       filter is disabled for any dbo.cleat_admin connection, which a multi-tenant
+#       deployment must use, so ten statements over these tables had no tenant
+#       predicate of their own and one tenant could delete another's schedules and
+#       repoint their deployment tags. That audit is NOT finished.
 #
 # D1-D4 were settled together on 2026-08-06; D5-D8 have been added since, and this
 # register was still saying "all four" until D7 was recorded. New ones go here with
