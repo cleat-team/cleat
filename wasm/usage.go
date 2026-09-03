@@ -43,6 +43,19 @@ var hostFunctions = []HostFunction{
 	{"cleat_call", "DurableCallJSON"},
 	{"cleat_call", "DurableCallWithOptions"},
 	{"cleat_call", "DurableCallJSONWithOptions"},
+	// ...and cleat_call_retry, because these are the ergonomic forms that carry
+	// a RetryPolicy. Without these two lines the import is never wired for
+	// them, so cleat/runtime.go's host-retry branch is unreachable and every
+	// Go retry policy silently becomes an SDK-level loop that suspends once per
+	// backoff -- N segments where Rust's identical policy is one, and not
+	// dead-letterable where Rust's is. IMPROVEMENT-PLAN 3.88.
+	//
+	// A guest that uses these WITHOUT a RetryPolicy pays one unused import
+	// entry; the host registers only what a module asks for
+	// (wasmtimeBackend.skipIfNotNeeded), so the cost is the import list, not a
+	// host function that runs.
+	{"cleat_call_retry", "DurableCallWithOptions"},
+	{"cleat_call_retry", "DurableCallJSONWithOptions"},
 	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
 	// Sleep
 	{"cleat_sleep", "DurableSleep"},
