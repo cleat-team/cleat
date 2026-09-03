@@ -31,9 +31,35 @@ func FreshStepCount() int64 { return atomic.LoadInt64(&freshStepCount) }
 // FreshCallCount returns the total fresh DurableCall count from the atomic counter.
 func FreshCallCount() int64 { return atomic.LoadInt64(&freshCallCount) }
 
+// stopBeforeNewWork reports whether this call must be refused with
+// callSuspendSentinel instead of executed.
+//
+// True only inside a defer segment (WithDeferPhase), for a call the workflow
+// BODY is making past the end of its recorded history. A defer segment exists
+// to run a terminated workflow's cleanup; running its body as well performs the
+// side effect the termination was meant to stop, and lets the segment return a
+// completion result for a workflow that did not complete. Both were measured --
+// IMPROVEMENT-PLAN 3.83.
+//
+// The defer bodies' own calls must go through, and the host does not need the
+// guest to tell it which is which: the host invokes __cleat_run_deferred itself
+// (runGuestDefersAfterSuspend), so it brackets that call with inDeferDrain.
+// 3.81 assumed a guest-to-host signal was needed here and it is not.
+func (s *execSession) stopBeforeNewWork() bool {
+	return s.engine != nil && s.engine.deferPhase && !s.inDeferDrain
+}
+
+// setDeferDrain brackets the host's own call to the guest's defer runner. It
+// is unexported and reached by interface assertion from the backend, so no
+// caller outside the engine can permit new work in a defer segment.
+func (s *execSession) setDeferDrain(on bool) { s.inDeferDrain = on }
+
 func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	if s.isReplay {
 		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+	}
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
 	}
 	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 }
@@ -252,6 +278,9 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	}
 	if s.isReplay {
 		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+	}
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
 	}
 	return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
 		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,

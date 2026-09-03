@@ -201,6 +201,17 @@ func (e *Engine) executeWithBackend(
 					"its outstanding defers would be silently skipped",
 				e.workflowID, execBackend.Name())
 		}
+		// And the guest has to be able to hear the stop. An SDK that does not
+		// decode callSuspendSentinel reads it as an empty successful response
+		// and runs on -- doing the new work the segment exists to prevent,
+		// with nothing to see. Fail closed rather than silently.
+		if lang := wasm.DetectLanguage(wasmBytes); !deferSegmentLanguages[lang] {
+			return "", nil, nil, nil, nil, fmt.Errorf(
+				"host: workflow %s: guest language %q has no defer-segment support; "+
+					"its SDK does not decode the suspend sentinel, so the segment "+
+					"would run the workflow body instead of only its defers",
+				e.workflowID, lang)
+		}
 		dp.setDeferPhase(true)
 	}
 

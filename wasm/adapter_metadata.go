@@ -30,6 +30,14 @@ var adapterDefs = map[string]adapterDef{
 			{"requestJSON", "string"},
 		},
 		ResultStmts: []string{
+			// The host returns callSuspendSentinel (bit 39) when this call is
+			// the workflow body making NEW work inside a defer segment. Tested
+			// before any field is decoded, because the sentinel is not a
+			// response: bits 16-39 are unreachable by the host's packer, so no
+			// real result can set it. See IMPROVEMENT-PLAN 3.83.
+			"if uint64(result)&(1<<39) != 0 {",
+			"	panic(cleat.ErrSuspend)",
+			"}",
 			"responseLen := uint32(uint64(result) >> 40)",
 			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",

@@ -10866,7 +10866,7 @@ prose. A guard added before the four are resolved would be permanently red.
 
 ---
 
-### 3.83 The sentinel §3.81 specified would collide with a real response — 🔵 **MEASURED AND CORRECTED; the fix is not yet built** (WS-3, 2026-09-02)
+### 3.83 The sentinel §3.81 specified would collide with a real response — 🔶 **CORRECTED AND BUILT for Go guests; four SDKs remain, and are refused rather than run** (WS-3, 2026-09-02)
 
 §3.81 left phase 5 with one correctness gap and named the fix in a sentence: make the
 past-the-frontier call suspend, using *"bit 62 of the result word, exactly as
@@ -10926,12 +10926,53 @@ distinction that matters is not "wider margin" but **structural versus contingen
 cannot be filled because of the function signature, not because a limit currently sits below
 them.
 
-#### What is not yet built
+#### What was built
 
-The host side (a stop-on-fresh-call in defer phase, which needs no guest signal — the host
-invokes `__cleat_run_deferred` itself in `runGuestDefersAfterSuspend`, so it already knows
-whether a call comes from the body or from a defer body) and the guest decode across all five
-SDKs. All five already carry a `SUSPEND_SENTINEL`, but they do not agree on how they test it —
-Rust checks `result == SUSPEND_SENTINEL` (whole-word equality), AssemblyScript masks
-`(result & (1 << 62)) != 0`. A payload-carrying word needs the mask form, so that disagreement
-has to be settled as part of the change rather than assumed away.
+`callSuspendSentinel` (`engine/memory.go`), **bit 39**, returned by `DurableCall` and
+`DurableCallWithRetry` when `stopBeforeNewWork()` holds — a defer segment, a call the workflow
+*body* is making, past the frontier. The guest unwinds with its suspend flag set, skips its own
+drain, and the host runs `__cleat_run_deferred` on the live instance.
+
+The value is exactly `1<<39` with every other field zero, so both SDK idioms recognise it: Rust's
+whole-word `result == SUSPEND_SENTINEL` and AssemblyScript's mask. New decoders should mask.
+
+**The host needs no guest signal, which §3.81 assumed it would.** The host invokes the defer
+runner itself, so it brackets that call with `inDeferDrain` and already knows which side of the
+boundary a call comes from. That was the "real prerequisite" §3.81 named, and it did not exist.
+
+`TestADeferSegmentPastTheFrontierRunsOnlyTheDefers` asserts **both halves together**, and has to:
+"the body was stopped" is satisfied by a segment that stops the cleanup too, which is exactly
+§3.81's destructive outcome. Proved able to fail both ways — removing the sentinel gives *"the
+segment did not suspend; it returned `{"status":"ok"}`"*, and removing the `inDeferDrain` bracket
+gives *"the defer bodies recorded `[]`, want `[second first]`"*, which is §3.81's consumed
+cleanup reproduced exactly.
+
+#### Four SDKs cannot hear the stop, and are refused rather than run
+
+Only the Go SDK decodes it so far (`wasm/adapter_metadata.go`). **An SDK that does not reads the
+word through the ordinary layout and gets `responseLen=0, errCode=0` — an empty *successful*
+response.** It would carry on past the stop, do the new work, and report the terminated workflow
+as completed, silently.
+
+So `deferSegmentLanguages` (`engine/engine.go`) gates the segment and the engine refuses a
+language not in it. Membership means *verified to unwind on the sentinel*, in the same sense as
+`WasmtimeLanguages`.
+
+**The test for that gate was vacuous when first written, and its own mutation is what caught
+it.** It carried a polite `t.Skipf("%s now decodes the sentinel; move it to the positive test")`
+— so widening the map to all five made every subtest *skip*, and the suite printed `ok`. A guard
+that cannot fail when the thing it guards is removed is not a guard.
+`TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified` now pins the map exactly and the skip is
+gone; both tests fail under that mutation.
+
+#### What is still open
+
+1. **The four remaining SDK decodes** — Rust, Python, Java, AssemblyScript. Each is a constant
+   and a masked check before the fields are read, plus one test that crosses the boundary; add
+   the language to `deferSegmentLanguages` in the same change, which
+   `TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified` forces to be deliberate.
+2. **`(*execSession).setDeferDrain` is in `scripts/deadcode-baseline.txt`.** It is not test-only:
+   it is called from `runGuestDefersAfterSuspend` through an anonymous-interface assertion, which
+   the dead-code analyser cannot follow. `Execute` takes `session HostHandler`, so the backend
+   never sees the concrete type, and putting the method on that exported interface would break
+   external implementors. Baselined rather than restructured, and this is the record of why.

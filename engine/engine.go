@@ -423,6 +423,26 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 // See IMPROVEMENT-PLAN.md 2.72 and 1.5/2.28.
 var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python"}
 
+// deferSegmentLanguages are the guest languages whose SDK decodes
+// callSuspendSentinel, and so can be run as a defer segment.
+//
+// Membership means *verified to unwind on the sentinel*, in the same sense as
+// WasmtimeLanguages above -- not "ought to". A guest whose SDK does not decode
+// it reads the word through the normal durable-call layout and gets
+// responseLen=0, errCode=0: an EMPTY SUCCESSFUL RESPONSE. It would carry on
+// past the stop, do the new work the segment exists to prevent, and report the
+// terminated workflow as completed -- the exact defect of IMPROVEMENT-PLAN
+// 3.83, silently, with no error anywhere.
+//
+// That failure mode is why this is a list rather than a comment. The host half
+// and the guest half of a sentinel are two green tests and no working feature
+// unless something crosses them (3.73); this list is what makes the uncrossed
+// languages fail loudly instead.
+//
+// Add a language here in the same change that lands its decode, with a test
+// that exercises it end to end.
+var deferSegmentLanguages = map[string]bool{"go": true}
+
 // RunsOnWasmtime reports whether a detected guest language is served by the
 // wasmtime backend.
 //

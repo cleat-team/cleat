@@ -441,6 +441,12 @@ type execSession struct {
 	// originalInput stores the initial workflow input for auto-ContinueAsNew.
 	originalInput string
 
+	// inDeferDrain is true only while the host is running the guest's defer
+	// table itself, inside a defer segment. It is what lets a defer body make
+	// the durable calls its cleanup needs while the workflow body's own calls
+	// are stopped -- see stopBeforeNewWork.
+	inDeferDrain bool
+
 	// autoContinueAsNewTriggered is set to true after the event cap is hit
 	// to prevent repeated triggers during the same execution segment.
 	autoContinueAsNewTriggered bool

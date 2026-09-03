@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -261,39 +262,38 @@ func TestADeferSegmentDrainsOnTheSuspension(t *testing.T) {
 	}
 }
 
-// TestADeferSegmentPastTheFrontierDoesNewWork is a characterization test: it
-// asserts behaviour that is WRONG, so that fixing it fails here and this
-// comment is read.
+// TestADeferSegmentPastTheFrontierRunsOnlyTheDefers is the regression test for
+// IMPROVEMENT-PLAN 3.83.
 //
-// The segment above ends in a suspension, which is the common case -- a
-// workflow worth terminating is usually one that is waiting. A workflow
-// finalized `ready` is the other case: replay reaches the end of recorded
-// history and the guest simply carries on, because nothing tells it to stop.
+// The segment above ends in a suspension the guest reached on its own, which is
+// the common case -- a workflow worth terminating is usually one that is
+// waiting. A workflow finalized `ready` is the other case: replay reaches the
+// end of recorded history and the guest simply carries on, because nothing
+// tells it to stop.
 //
-// Measured 2026-09-02 on a segment with no history at all, which is that case
-// in its purest form:
+// Before the fix, measured on a segment with no history at all -- that case in
+// its purest form:
 //
 //	operations reaching the ServiceCaller: [body second first]
 //	result: {"status":"ok"}   suspended: false   err: nil
 //
-// Two defects, and the second is the worse one:
+// Two defects, and the second is the worse one. `body` ran, so the segment
+// performed the workflow's own side effect rather than its cleanup. And the
+// segment returned a successful completion result, so a terminated workflow is
+// reported as having finished normally by the machinery meant to clean up
+// after it.
 //
-//  1. `body` ran. A defer segment performed the workflow's own side effect,
-//     not its cleanup.
-//  2. The segment returned a successful completion result. A workflow that was
-//     terminated is reported as having finished normally, by the very machinery
-//     meant to clean up after it.
+// The host now returns callSuspendSentinel for a durable call the workflow
+// BODY makes past the frontier. The guest unwinds with its suspend flag set,
+// skips its own drain, and the host runs the defer table itself.
 //
-// The fix is a host-to-guest "stop" on a fresh call, so the guest unwinds with
-// __susSuspended set and lands on the drain path the test above exercises. It
-// needs a sentinel bit in the cleat_call result word that the host can never
-// produce by accident; see
-// TestPackDurableCallResult_SentinelBitsTheHostCannotReach for which bits those
-// are, and why the one IMPROVEMENT-PLAN named is not among them.
-//
-// When that lands, this test flips from asserting `body` is present to
-// asserting it is absent.
-func TestADeferSegmentPastTheFrontierDoesNewWork(t *testing.T) {
+// This test asserts BOTH halves, which is the point. "The body was stopped" is
+// satisfied by a segment that stops everything, including the cleanup -- which
+// is precisely the destructive outcome 3.81 measured, where refusing every
+// fresh call consumes the defer table instead of running it. So the absence of
+// `body` and the presence of the cleanup calls have to be asserted together;
+// either one alone passes for a broken implementation.
+func TestADeferSegmentPastTheFrontierRunsOnlyTheDefers(t *testing.T) {
 	wasmBytes, _, _, _ := deferPhaseProbeEngine(t, "wf-past-frontier", false)
 
 	rt, err := NewRuntime(context.Background(), 0, 0)
@@ -318,31 +318,115 @@ func TestADeferSegmentPastTheFrontierDoesNewWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if susp != nil {
-		t.Fatalf("the segment suspended; this test measures the path that does " +
-			"NOT suspend, so it no longer measures what it was written for")
+
+	// The segment must not report an outcome for a workflow whose outcome was
+	// already decided. This is the half that was a status defect rather than a
+	// wasted side effect.
+	if susp == nil {
+		t.Fatalf("the segment did not suspend; it returned result %q. A defer "+
+			"segment that runs to completion reports a terminated workflow as "+
+			"having finished normally.", res)
 	}
 
 	got := operationsCalled(caller)
-	sawBody := false
 	for _, op := range got {
 		if op == "body" {
-			sawBody = true
+			t.Fatalf("the workflow body reached the ServiceCaller: %v.\n\n"+
+				"A defer segment performed the workflow's own side effect. The "+
+				"host must return callSuspendSentinel for a body call past the "+
+				"frontier.", got)
 		}
 	}
-	if !sawBody {
-		t.Fatalf("the workflow body did NOT reach the ServiceCaller (%v).\n\n"+
-			"If a stop-on-fresh-call was just implemented, that is the fix "+
-			"landing: invert this test to assert `body` is ABSENT, and update "+
-			"the plan section it names.", got)
-	}
 
-	// The more serious half. A terminated workflow reported as completed is a
-	// status defect, not just a wasted side effect.
-	if res == "" {
-		t.Fatalf("the segment returned no result; this test's second assertion " +
-			"no longer measures anything")
+	// And the other half: stopping the body must not stop the cleanup. Both
+	// defers, in LIFO order, with their calls reaching the caller -- which only
+	// happens if the host bracketed its own drain with inDeferDrain.
+	want := []string{"second", "first"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("the defer bodies recorded %v, want exactly %v.\n\n"+
+			"An empty list is the 3.81 failure: the drain ran with its calls "+
+			"stopped too, which CONSUMES the cleanup rather than skipping it, "+
+			"because _cleatRunDeferred takes the whole table before running "+
+			"anything.", got, want)
 	}
-	t.Logf("characterized (both WRONG, tracked in the plan): a defer segment past "+
-		"the frontier ran %v and returned %q", got, res)
+}
+
+// TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified pins the list itself.
+//
+// This exists because the test below could not catch its own mutation. It was
+// written with a t.Skipf for "this language now decodes the sentinel, move it
+// to the positive test", which is the polite thing to write and made the test
+// vacuous: widening deferSegmentLanguages to all five made every subtest SKIP,
+// and the suite printed ok. A guard that cannot fail when the thing it guards
+// is removed is not a guard.
+//
+// So the list is asserted exactly. Growing it is a deliberate act that fails
+// here first, and the failure says what has to accompany it.
+func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
+	want := map[string]bool{"go": true}
+	if len(deferSegmentLanguages) != len(want) {
+		t.Fatalf("deferSegmentLanguages = %v, want %v.\n\n"+
+			"Adding a language here means its SDK decodes callSuspendSentinel "+
+			"and something crosses the boundary end to end -- a host that emits "+
+			"and a guest that never decodes are two green half-tests and no "+
+			"working feature (IMPROVEMENT-PLAN 3.73). Update this test in the "+
+			"same change.", deferSegmentLanguages, want)
+	}
+	for lang := range want {
+		if !deferSegmentLanguages[lang] {
+			t.Fatalf("deferSegmentLanguages is missing %q", lang)
+		}
+	}
+}
+
+// TestADeferSegmentRefusesAGuestThatCannotHearTheStop pins the fail-closed half
+// of IMPROVEMENT-PLAN 3.83.
+//
+// callSuspendSentinel only stops a guest whose SDK decodes it. Four of the five
+// do not yet. An SDK that does not reads the word through the ordinary
+// durable-call layout -- responseLen = 0, errCode = 0 -- and gets an EMPTY
+// SUCCESSFUL RESPONSE: it carries on past the stop, does the new work the
+// segment exists to prevent, and reports the terminated workflow as completed,
+// with nothing anywhere to see.
+//
+// So the engine refuses the segment for a language not in
+// deferSegmentLanguages, rather than running one it cannot stop. This asserts
+// the refusal AND that it names the language, because "some error occurred" is
+// satisfied by any of the several other ways Execute can fail on a synthetic
+// module -- which is the trap this file's other tests keep hitting.
+func TestADeferSegmentRefusesAGuestThatCannotHearTheStop(t *testing.T) {
+	for _, lang := range []string{"rust", "python", "java", "assemblyscript"} {
+		t.Run(lang, func(t *testing.T) {
+			ctx := context.Background()
+			rt, err := NewRuntime(ctx, 0, 0)
+			if err != nil {
+				t.Fatalf("NewRuntime: %v", err)
+			}
+			t.Cleanup(func() { rt.Close(ctx) })
+			wt, err := NewWasmtimeBackend(ctx)
+			if err != nil {
+				t.Fatalf("NewWasmtimeBackend: %v", err)
+			}
+			t.Cleanup(func() { wt.Close(ctx) })
+
+			eng := NewEngine(rt, &mockCaller{},
+				WithBackends(WasmtimeLanguages, wt),
+				WithWorkflowID("wf-"+lang),
+				WithDeferPhase())
+
+			_, _, _, _, _, err = eng.Execute(ctx, wasmWithLanguage(lang),
+				"anything", json.RawMessage(`{}`))
+			if err == nil {
+				t.Fatalf("a defer segment ran on a %s guest, whose SDK cannot "+
+					"decode the stop; it would have done new work silently", lang)
+			}
+			if !strings.Contains(err.Error(), "no defer-segment support") ||
+				!strings.Contains(err.Error(), lang) {
+				t.Fatalf("Execute failed with %q.\n\nThat is not the refusal this "+
+					"test is for -- it must name the language and say the segment "+
+					"was refused, or a module that failed to load for an unrelated "+
+					"reason would pass this test.", err)
+			}
+		})
+	}
 }

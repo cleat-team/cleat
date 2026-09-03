@@ -393,6 +393,20 @@ func (b *wasmtimeBackend) runGuestDefersAfterSuspend(
 		}
 	}
 
+	// Bracket the drain so the defer bodies' own durable calls are permitted
+	// while the workflow body's are stopped. Without this the segment refuses
+	// the cleanup calls too -- and because _cleatRunDeferred takes the whole
+	// defer table before running anything, that CONSUMES the cleanup rather
+	// than skipping it: the lock is not released, the charge is not refunded,
+	// and the registrations are gone. Measured in IMPROVEMENT-PLAN 3.81.
+	//
+	// Asserted rather than required: a handler that does not implement it is a
+	// backend running without an engine session, which has no calls to stop.
+	if d, ok := b.handler.(interface{ setDeferDrain(bool) }); ok {
+		d.setDeferDrain(true)
+		defer d.setDeferDrain(false)
+	}
+
 	var ran int64
 	var callErr error
 	func() {
