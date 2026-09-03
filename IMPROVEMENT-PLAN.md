@@ -11586,3 +11586,107 @@ measurement. What would settle each is the same probe this section already has f
 point that raises the SDK's own suspend signal with no host call in the way, so nothing can set
 `session.suspendErr` and mask the result. Neither is installed here — `componentize-py`,
 `wasm-tools` and a gradle binary are all absent — so neither was run.
+
+### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — 🔵 **MEASURED, no code** (WS-3, 2026-09-03)
+
+§3.75 tells whoever builds it to re-derive two things first. Both were done 2026-09-03. One comes
+out clean and one does not come out the way the section expects, so this is recorded before the
+migration rather than discovered during it.
+
+#### 1. The per-dialect inventory — clean
+
+§3.75 warns about its own method: the inventory was written by reading the PostgreSQL
+implementation and generalising, which is exactly how §3.76 was found (MySQL's
+`TerminateWorkflow` released nothing while the other two dialects did). It asks for a per-dialect
+re-derivation before step 2, because "the same generalisation could be hiding in the parent-close
+arm or `adminForceResolve`".
+
+It is not. All three sites now call the release on all three dialects:
+
+| site | postgres | mysql | mssql |
+|---|---|---|---|
+| `TerminateWorkflow` | `db.go:1150` | `mysql_ops.go:1200` | `mssql_operations.go:201` |
+| parent-close `TERMINATE` | `store_lifecycle.go:499` | `mysql_lifecycle.go:938` | `mssql_lifecycle.go:1106` |
+| `adminForceResolve` | `store_admin.go:230` | `:340` | `:450` |
+
+The parent-close arm goes through `releaseTerminatedChildren`, which is one shared helper called
+from three places — re-derive with
+
+```
+grep -rn "releaseTerminatedChildren(" --include="*.go" engine/ | grep -v _test.go   # 4: 3 callers + the definition
+```
+
+So step 1 has **three symmetric sites** to move the release behind the defer segment, not a mix.
+That is the answer §3.75 wanted and it is the cheap half of this section.
+
+#### 2. `MoveToDeadLetterQueue` — the question is not the one §3.75 asks
+
+§3.75 reads this site as an exception to its inventory: fenced on a live claim, called by the
+worker that holds it after a segment failed, so its defers should already have run. It says that
+is "a reading of the call site, not a measurement", and asks for the measurement — "If it turns
+out a workflow can reach the dead-letter queue without a segment having executed, it is a fourth
+row rather than an exception."
+
+Trying to build that measurement turned up something else. The worker's entire dead-letter
+predicate is a substring match:
+
+```
+grep -n 'strings.Contains(errMsg, "retries exhausted")' cmd/cleat-worker/setup.go   # 2544
+```
+
+and that substring is minted in exactly one place — the **host-side** retry loop, behind the
+`cleat_call_retry` import:
+
+```
+grep -n '"retries exhausted: "' engine/durablecalls.go                              # 422
+```
+
+A Go guest does not appear able to reach it. `wasm/usage.go:73` wires that import on the guest
+symbol `DurableCallWithRetry`, and no such method exists:
+
+```
+grep -c "func (h \*HostCallsImpl) DurableCallWithRetry" cleat/runtime.go            # 0
+```
+
+The only guest-facing form is `DurableCallWithOptions` with `opts.Retry`, whose host branch is
+guarded on the import having been wired — so it falls back to SDK-level retry and mints its own
+message ("retry exhausted after N attempts"), which the predicate does not match. Rust's
+`HostCalls::cleat_call_with_retry` calls the import directly, so the substring is reachable
+there.
+
+If that holds, the answer to §3.75's question is not "its defers already ran" but **"nothing on
+the Go SDK reaches it"** — and `MoveToDeadLetterQueue` still needs no marker, for a different
+reason, with a separate defect behind it.
+
+#### Why this is 🔵 and not a fix
+
+**The measurement is not finished, and the honest thing is to say which parts are which.**
+
+Measured, one run on wasmtime with a Go guest: a workflow using `DurableCallWithOptions` with a
+2-attempt policy against an always-failing service made **one** attempt and suspended, and its
+terminal error carried the SDK-level message rather than the host's. Read, not run: everything
+above about *why* — the usage-driven wiring, the missing method, the Rust contrast.
+
+What was not established is why the run suspends after one attempt instead of exhausting. SDK-level
+retry backs off with a durable sleep, and a sleep whose deadline is ahead of real time suspends
+the run — but pinning `WithWorkflowStartTime` and `WithClock` far apart did not change the
+behaviour, so that explanation is incomplete. An earlier version of the same test **did** reach
+exhaustion, under a different package-level `nowMs`, which is the ordering hazard §3.87 hit one
+file over.
+
+A test was written and then reverted rather than shipped. It would have asserted a state whose
+mechanism its author could not explain, which is the failure this document's §1.1 trap and
+CLAUDE.md's "Is this result real?" are both about — and a green assertion over an unexplained
+state is worse than no test, because it reads as understanding.
+
+#### What to do next, in order
+
+1. Settle the suspension: instrument the SDK retry loop's backoff on a Go guest and find what
+   actually suspends it. That is the blocker for any assertion about this path.
+2. Then decide whether the Go SDK should expose the host retry loop at all. If it should, the
+   dead-letter queue becomes reachable and §3.75's original question needs answering after all —
+   with the fixture from step 1.
+3. Only then build §3.75 step 1 against the three symmetric sites above.
+
+**Do not read this section as clearing `MoveToDeadLetterQueue`.** It moves the reason from one
+unmeasured claim to another, better-supported one. The site is still the fourth candidate.
