@@ -22,7 +22,7 @@ import (
 // This test is a stopgap by design. The threshold is currently a GUEST-side
 // compile-time constant, which is the wrong layer for it: an operator cannot
 // change it, and a tenant cannot be given their own value, because the decision
-// is taken before the host is ever consulted. IMPROVEMENT-PLAN 3.93 moves it
+// is taken before the host is ever consulted. IMPROVEMENT-PLAN 3.94 moves it
 // host-side, where the policy already arrives in full. **When that lands, both
 // constants disappear and so does this test.**
 func TestBothSDKsAgreeOnTheHostRetryBudget(t *testing.T) {
@@ -33,7 +33,7 @@ func TestBothSDKsAgreeOnTheHostRetryBudget(t *testing.T) {
 		t.Fatalf("reading %s: %v\n\n"+
 			"This test compares a Go constant against a Rust one by reading the "+
 			"Rust source. If the SDK moved, re-point it -- do not delete it "+
-			"unless the threshold itself has moved host-side (3.93), which is "+
+			"unless the threshold itself has moved host-side (3.94), which is "+
 			"the only thing that makes the comparison unnecessary.", rustSrc, err)
 	}
 
@@ -65,7 +65,7 @@ func TestBothSDKsAgreeOnTheHostRetryBudget(t *testing.T) {
 			"Go %v (%dms), Rust %dms.\n\n"+
 			"An identical RetryPolicy would run on the host on one SDK and "+
 			"suspend on the other. Change both, or move the threshold "+
-			"host-side per IMPROVEMENT-PLAN 3.93 and delete both constants.",
+			"host-side per IMPROVEMENT-PLAN 3.94 and delete both constants.",
 			hostRetryBudget, goMs, rustMs)
 	}
 

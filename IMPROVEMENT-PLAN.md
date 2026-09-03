@@ -12050,7 +12050,7 @@ implementation that always chose one path:
 
 Plus `cleat.TestBothSDKsAgreeOnTheHostRetryBudget`, which reads the Rust constant out of the
 source and compares it to the Go one — the threshold is written twice, in two languages, and
-nothing at compile time can make the two agree. **That test is a stopgap and says so: §3.93 moves
+nothing at compile time can make the two agree. **That test is a stopgap and says so: §3.94 moves
 the threshold host-side, at which point both constants and the test disappear.**
 
 #### The two rewritten tests, and why that is the design working
@@ -12582,7 +12582,7 @@ longer consumes the guest's execution budget, and the wall-clock ceiling that do
 defaults to 5m rather than 30s. The remaining work there is the missing
 `HostCallsImpl.DurableCallWithRetry` method.
 
-### 3.93 Execution limits are process-wide, and one of them is compiled into the guest — 🔵 **DESIGN + PLAN, not started** (WS-3, 2026-09-03)
+### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🔵 **DESIGN + PLAN, not started** (WS-3, 2026-09-03)
 
 **Requirement, 2026-09-03:** each tenant must be able to override the default time thresholds
 without affecting other tenants, so that several microservices — or several organisations —
@@ -12681,8 +12681,30 @@ consistent and costs nothing.
 
 #### Plan, in order
 
-1. **Decide the sentinel encoding** — new error code in `packDurableCallResult` versus a new
-   result bit. Record in `ABI.md` with the per-layout table §3.84 established. No code yet.
+1. ~~**Decide the sentinel encoding**~~ — ✅ **decided 2026-09-03, recorded in `ABI.md`**
+   ("Retry refusal — `cleat_call_retry` only, and NOT a sentinel bit"). A new `callErrorCode`
+   classification, `6` = `RetryPolicyTooLong`, with `errCode` non-zero. **Not** a sentinel bit,
+   and the reason is what an SDK that has not implemented it does — already-deployed guest
+   modules cannot be upgraded in step with the host:
+
+   | encoding | an SDK that does not know it |
+   |---|---|
+   | new bit, `errCode = 0` | reads a **successful** empty response and runs on with a bogus result — silently wrong |
+   | new bit, `errCode != 0` | a generic call error — but then the bit adds nothing the classification does not |
+   | **new `callErrorCode`** | a generic call error: the workflow fails loudly rather than proceeding on garbage |
+
+   So a bit is either unsafe or redundant. The classification is also the documented extension
+   path (`guestCallErrorCodes`: a member may be added, an existing value may never change) and
+   costs no bits in a word where bit 31 is already spent by §3.84.
+
+   Two constraints fell out of writing it down. `RetryPolicyTooLong` must be **non-retryable**,
+   or an SDK treating it as retryable re-issues `cleat_call_retry`, is refused on the same
+   grounds, and loops. And the host must record **no event** for a refusal, so replay sees
+   nothing and the guest has not consumed an attempt — the same shape as the event-cap refusal.
+
+   Worth noting why §3.84's answer does not transfer: the stop sentinel had to be free in **six**
+   layouts because any host call can start fresh work. A retry refusal can only come from
+   `cleat_call_retry`, so the constraint that forced a bit there does not apply here.
 2. **Settle the MySQL story in `tiers.yaml`** as a numbered decision, per D1 above.
 3. **The settings store**: migration on three dialects (next free above each dialect's
    high-water mark — re-derive, §3.75's recorded numbers were stale within a day), the store
