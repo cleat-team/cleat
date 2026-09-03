@@ -46,14 +46,19 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// adminLoginSchedulingStores returns two tenant-scoped stores over one
-// cleat_admin pool: the shape a multi-tenant SQL Server worker actually runs.
+// adminLoginStores returns two tenant-scoped stores over one cleat_admin
+// pool: the shape a multi-tenant SQL Server worker actually runs.
+//
+// Named for the connection rather than for schedules, because the mechanism is
+// table-independent -- 3.86's audit reaches every SQL Server statement that
+// leans on dbo.fn_tenant_filter instead of carrying a predicate, and
+// mssql_admin_login_tags_tenant_test.go is the second caller.
 //
 // Note what this does NOT do. It does not grant anything, weaken a policy or
 // reach past the store API. The connection is the one the product requires for
 // cross-tenant dispatch and the calls are the ones the HTTP handler makes
 // (cmd/cleat-worker/server.go:993-1005, through scopedStore).
-func adminLoginSchedulingStores(t *testing.T) (a, b *MSSQLStore) {
+func adminLoginStores(t *testing.T) (a, b *MSSQLStore) {
 	t.Helper()
 	backend := &MSSQLBackend{}
 	if !backend.Enabled() {
@@ -133,7 +138,7 @@ func scheduleNamed(t *testing.T, s *MSSQLStore, name string) *Schedule {
 // The names differ, so this does not depend on 3.77's key change at all: B is
 // naming a schedule it does not own and the statement finds it anyway.
 func TestAdminLoginDeleteScheduleCannotCrossTenants(t *testing.T) {
-	storeA, storeB := adminLoginSchedulingStores(t)
+	storeA, storeB := adminLoginStores(t)
 	const name = "tenant-a-nightly-report"
 	mustCreateSchedule(t, storeA, name)
 
@@ -156,7 +161,7 @@ func TestAdminLoginDeleteScheduleCannotCrossTenants(t *testing.T) {
 // and therefore worse to diagnose: the row is still listed, still shows a
 // next_run_at, and never fires.
 func TestAdminLoginSetScheduleEnabledCannotCrossTenants(t *testing.T) {
-	storeA, storeB := adminLoginSchedulingStores(t)
+	storeA, storeB := adminLoginStores(t)
 	const name = "tenant-a-billing-sweep"
 	mustCreateSchedule(t, storeA, name)
 
@@ -178,7 +183,7 @@ func TestAdminLoginSetScheduleEnabledCannotCrossTenants(t *testing.T) {
 // own. Moving another tenant's next_run_at backwards fires their workflow
 // early; forwards suppresses it.
 func TestAdminLoginUpdateScheduleNextRunCannotCrossTenants(t *testing.T) {
-	storeA, storeB := adminLoginSchedulingStores(t)
+	storeA, storeB := adminLoginStores(t)
 	const name = "tenant-a-reconcile"
 	mustCreateSchedule(t, storeA, name)
 
@@ -210,7 +215,7 @@ func TestAdminLoginUpdateScheduleNextRunCannotCrossTenants(t *testing.T) {
 // answers with every tenant's rows on this connection, a worker configured for
 // per-tenant dispatch fires other tenants' workflows under its own tenant.
 func TestAdminLoginGetDueSchedulesStaysWithinItsTenant(t *testing.T) {
-	storeA, storeB := adminLoginSchedulingStores(t)
+	storeA, storeB := adminLoginStores(t)
 	ctx := context.Background()
 
 	due := Schedule{
@@ -245,7 +250,7 @@ func TestAdminLoginGetDueSchedulesStaysWithinItsTenant(t *testing.T) {
 // advances whichever row the unqualified predicate reaches first, and the CAS
 // on next_run_at is what the delivery guarantee rests on.
 func TestAdminLoginClaimDueScheduleCannotCrossTenants(t *testing.T) {
-	storeA, storeB := adminLoginSchedulingStores(t)
+	storeA, storeB := adminLoginStores(t)
 	ctx := context.Background()
 	const name = "tenant-a-claimable"
 	mustCreateSchedule(t, storeA, name)

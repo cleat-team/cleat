@@ -81,7 +81,7 @@ engine	TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow	1
 engine	TestTheHostRunsDefersOfAKilledJavaWorkflow	1
 engine	TestTheWazeroPathRunsDefersOfATrappedWorkflow	1
 engine	TestUnauthenticatedQueryRejection	2
-engine	adminLoginSchedulingStores	1
+engine	adminLoginStores	1
 engine	bootstrapScratchDB	1
 engine	buildAssemblyScriptWasm	1
 engine	buildFixtureWasm	1
