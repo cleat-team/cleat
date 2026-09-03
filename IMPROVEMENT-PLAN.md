@@ -12353,11 +12353,24 @@ close the gap; that is an environment change rather than a repo one.
 succeeds against a listener that accepts and then closes — which is precisely what `EOF` is. The
 probe and the failure are the same event read two ways.
 
-**And this run does not verify the fix in this entry.** The engine package finished in `361.962s`,
-comfortably inside the old 10-minute default, because the `mssql` arm failed fast instead of
-running. Zero timeout panics is consistent with the fix working and equally consistent with the
-fix being unnecessary at that speed. What actually proves the plumbing is the direct check below,
-with the same quoting the script uses:
+**The local run did not verify the fix, and CI then did.** The container run's engine package
+finished in `361.962s`, comfortably inside the old 10-minute default, because the `mssql` arm
+failed fast instead of running — zero timeout panics there is consistent with the fix working and
+equally consistent with it being unnecessary at that speed.
+
+The confirmation came from the gate itself, on the two PRs either side of the change:
+
+| | `Tier 1 Gate` |
+|---|---|
+| #650, without the fix | `panic: test timed out after 10m0s`, `FAIL … engine 600.038s`, `ran=6546 pass=6543 fail=0` |
+| #654, with it | **pass, 24m10s** |
+
+Same gate, same suite, and the job ran well past the wall it previously hit. That is the
+verification; it is a comparison across two branches rather than a controlled A/B, and it is worth
+saying so, but the only difference the gate sees between them is the timeout.
+
+What proves the *plumbing* — that `GO_TEST_TIMEOUT` reaches the invocation at all — is still the
+direct check below, with the same quoting the script uses:
 
 ```
 $ GO_TEST_TIMEOUT=1ms  go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" ./auth/
