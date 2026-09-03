@@ -1469,7 +1469,7 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{{
 			"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
 			"worker-1", now, now, nil, nil, nil, nil, nil,
-			int64(3), int64(0), "",
+			int64(3), int64(0), "", DefaultTenantUUID, // tenant_id (3.99)
 		}}},
 	}, nil)
 	defer db.Close()

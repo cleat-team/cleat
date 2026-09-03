@@ -108,12 +108,25 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 		return st, true
 	}
 
+	// This check was inert on two of three dialects until 3.99: PostgreSQL and
+	// SQL Server's GetWorkflowByID did not SELECT tenant_id at all, so
+	// wf.TenantID was "" and the comparison below was `"" != "<caller uuid>"`
+	// -- true for every request, including the caller's own. Every
+	// /api/admin/instances/* route answered 404 whenever --require-auth was on.
+	// It failed CLOSED, which is why nothing noticed: the gate was doing its
+	// job for attackers and for everybody else equally.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return nil, false
 	}
-	if wf == nil || wf.TenantID != caller.String() {
+	// EqualFold, not ==. A UUID is case-insensitive by definition, and SQL
+	// Server hands one back as whatever CONVERT produced -- uppercase, until
+	// GetWorkflowByID started wrapping it in LOWER(). Normalising at the source
+	// is the real fix; this is here so that a dialect which stops doing so
+	// fails visibly in a test rather than by 404ing every request forever.
+	// IMPROVEMENT-PLAN 3.99.
+	if wf == nil || !strings.EqualFold(wf.TenantID, caller.String()) {
 		// Same response for "does not exist" and "belongs to someone else",
 		// deliberately: distinguishing them turns this endpoint into an oracle
 		// for which workflow IDs are real.
