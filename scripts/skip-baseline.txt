@@ -99,6 +99,8 @@ engine/testutil	SuiteTestDB	2
 engine/testutil	TestDB	4
 internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
 migration	TestIdempotencyTenantMigrationPreservesExistingKeys	1
+migration	TestMySQLRefusesASecondTenant	1
+migration	TestPostgresStillAcceptsASecondTenant	1
 migration	mssqlCredentials	2
 migration	mssqlDSNAs	1
 migration	mssqlDSNAsSA	1

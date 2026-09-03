@@ -12726,11 +12726,29 @@ consistent and costs nothing.
    says so.
 
    That eliminated the option this step existed to consider — putting the settings table in
-   MySQL's per-tenant database — since nothing migrates those databases. **Worth stating
-   plainly: D1's limitation is enforced by breakage at the point of use, not by a check at
-   the point of tenant creation.** Creating a second MySQL tenant succeeds and produces
-   confusing runtime errors later. That is accepted rather than fixed, per the same decision;
-   it is recorded here so the next person to meet it does not read it as a new bug.
+   MySQL's per-tenant database — since nothing migrates those databases.
+
+   **And it turned up a second thing, now fixed rather than recorded.** D1's limitation was
+   enforced by breakage at the point of *use*, not by a check at the point of creation: a
+   second MySQL tenant could be created without complaint and failed later with a
+   missing-table error, far from the cause. `migrations/mysql/038_single_tenant_guard.sql`
+   refuses the insert with a duplicate-key error naming
+   `uq_tenants_mysql_is_single_tenant_only_see_tiers_yaml_d1` — the rule and where the rule
+   is written down.
+
+   A singleton unique key rather than a trigger, and that is a MySQL restriction rather than
+   a preference: a trigger may not read the table it is defined on, so
+   `BEFORE INSERT ... IF (SELECT COUNT(*) FROM tenants) > 0 THEN SIGNAL` is not expressible.
+   A declarative constraint also holds against any client, where a Go check would hold
+   against one — and there is no Go chokepoint to use anyway:
+   `auth.TenantStore.CreateTenant` has **no non-test callers** and its SQL is
+   PostgreSQL-only (`admin.tenants`, `$1`, `RETURNING`).
+
+   Tested as a pair, `migration/mysql_single_tenant_test.go`: MySQL refuses and the error
+   names the key; PostgreSQL still accepts a second tenant, so the guard is MySQL's rule
+   rather than something that broke tenants everywhere. Negative control observed rather
+   than assumed — with the migration unapplied the MySQL half fails with "a second tenant
+   was created on MySQL", the exact pre-fix behaviour.
 3. **The settings store**: migration on three dialects (next free above each dialect's
    high-water mark — re-derive, §3.75's recorded numbers were stale within a day), the store
    read path, and the clamp-to-flag resolution. Tenant-scoped writes need the same RLS treatment

@@ -293,10 +293,21 @@ tier1:
   # database created, 0 tables, ListWorkflows errors. cmd/cleat-worker's
   # TestTenantIsolationOverHTTP_MySQL works only because it applies the schema itself.
   #
-  # DECIDED 2026-09-03: this stays as it is. MySQL is single-tenant only, and a second,
-  # very different implementation of multi-tenancy is not worth building. The consequence
-  # to be aware of is that D1's limitation is enforced by breakage at the point of USE
-  # rather than by a check at the point of tenant creation.
+  # DECIDED 2026-09-03: MySQL is single-tenant only, and a second, very different
+  # implementation of multi-tenancy is not worth building.
+  #
+  # ENFORCED 2026-09-03, migrations/mysql/038_single_tenant_guard.sql. Until that file the
+  # limitation was enforced by breakage at the point of USE rather than by a check at the
+  # point of creation: a second tenant could be created without complaint and failed later
+  # with a missing-table error, far from the cause. A singleton unique key on tenants now
+  # refuses the insert with
+  #   Duplicate entry '1' for key
+  #   'tenants.uq_tenants_mysql_is_single_tenant_only_see_tiers_yaml_d1'
+  # which names the rule and where the rule is written down. A unique key rather than a
+  # trigger because MySQL forbids a trigger from reading the table it is defined on, so
+  # the obvious COUNT(*) guard is not expressible -- and a declarative constraint holds
+  # against any client rather than only against a Go chokepoint, of which there is none:
+  # auth.TenantStore.CreateTenant has no non-test callers and its SQL is PostgreSQL-only.
   #
   # For per-tenant settings (IMPROVEMENT-PLAN 3.94) this decides the shape: the settings
   # table ships on all three dialects with one uniform API, and on MySQL it holds the
