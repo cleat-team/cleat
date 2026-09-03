@@ -97,6 +97,21 @@ func enableMSSQLTenantPolicies(t *testing.T, db *sql.DB) {
 	}
 	src += "\n" + string(promisesData)
 
+	// 042 adds a ninth policy (dbo.tenant_settings, IMPROVEMENT-PLAN 3.94 step
+	// 3) in its own file, for the same reason 031 did, and it is invisible to
+	// the scan above for the same reason. Folded in here so the "applied" set
+	// stays the set the shipped schema actually protects rather than the set
+	// that happened to live in 001_schema.sql.
+	//
+	// A settings table is the worst place to lose a policy: every tenant would
+	// be able to read and rewrite every other tenant's execution limits.
+	settingsPath := filepath.Join("..", "migrations", "mssql", "042_tenant_settings.sql")
+	settingsData, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", settingsPath, err)
+	}
+	src += "\n" + string(settingsData)
+
 	policies := mssqlPolicyRe.FindAllStringSubmatch(src, -1)
 	if len(policies) == 0 {
 		t.Fatalf("could not find any CREATE SECURITY POLICY in %s or %s", path, promisesPath)

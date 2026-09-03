@@ -12772,7 +12772,7 @@ longer consumes the guest's execution budget, and the wall-clock ceiling that do
 defaults to 5m rather than 30s. The remaining work there is the missing
 `HostCallsImpl.DurableCallWithRetry` method.
 
-### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🔵 **DESIGN + PLAN, not started** (WS-3, 2026-09-03)
+### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🟡 **IN PROGRESS: steps 1–3 done, 4–6 open** (WS-3, 2026-09-03)
 
 **Requirement, 2026-09-03:** each tenant must be able to override the default time thresholds
 without affecting other tenants, so that several microservices — or several organisations —
@@ -12939,17 +12939,114 @@ consistent and costs nothing.
    rather than something that broke tenants everywhere. Negative control observed rather
    than assumed — with the migration unapplied the MySQL half fails with "a second tenant
    was created on MySQL", the exact pre-fix behaviour.
-3. **The settings store**: migration on three dialects (next free above each dialect's
-   high-water mark — re-derive, §3.75's recorded numbers were stale within a day), the store
-   read path, and the clamp-to-flag resolution. Tenant-scoped writes need the same RLS treatment
-   as every other tenant table; on mssql that means the `FILTER PREDICATE` policy, which
-   §3.86/§3.91 have been finding gaps in all week.
+3. ~~**The settings store**~~ — ✅ **done 2026-09-03.** `tenant_settings` on three dialects
+   (`migrations/{postgres/039,mysql/039,mssql/042}_tenant_settings.sql`), a read path per
+   dialect, and clamp-to-flag resolution in `engine/tenant_settings.go`. **One consumer is
+   wired**: the wall-clock ceiling, at both `executor.go` sites. The instance timeout is step
+   5b and the retry budget is step 4; see "what is deliberately not wired" below.
+
+   Four decisions worth the words, because each of them was the difference between a feature
+   and a hole:
+
+   **`NULL` means "no override" and is distinct from zero.** Zero is already meaningful at the
+   point of use — `executor.go` tests `ceiling > 0` before applying a bound, so zero means
+   *unbounded*. Storing an absent override as 0 would both make "leave this to the operator"
+   inexpressible and let a row written to set one field silently unbound the other two.
+
+   **The `CHECK` constraints are a privilege boundary, not input validation.** Clamping is what
+   keeps a tenant from raising its own limits, and clamping needs a positive value: with 0
+   allowed, a tenant writes 0, resolution reads "unbounded", and the clamp hands back *more*
+   than the operator granted. Refused in the database on all three dialects, and again in
+   `tenantSettingsFromMillis`. MySQL is the dialect where this can silently not hold — `CHECK`
+   is parsed and ignored before 8.0.16 — so `TestMySQLTenantSettings` asserts the refusal
+   rather than trusting the pinned image.
+
+   **Clamp, never substitute, and the rule is not general.** `ClampToCeiling` is safe only
+   because every setting here bounds a resource the tenant consumes, so smaller is safer. A
+   future setting where *larger* is the safe direction (a minimum retention, a floor on an
+   interval) would need the opposite comparison, and reusing this function for it would grant
+   exactly the escalation it exists to prevent. Its doc comment says so.
+
+   **Deletion is by foreign key, not by a fifteenth line in `admin.drop_tenant`.** §3.32's
+   function enumerates fourteen tables by hand; `ON DELETE CASCADE` cannot be forgotten and
+   composes with it (the function deletes `admin.tenants` last). That relies on referential
+   integrity actions not being subject to the FORCE'd RLS policy on the same table, which is
+   asserted rather than assumed — `TestDroppingATenantDropsItsSettings`.
+
+   `TenantSettingsReader` is an **optional** interface rather than a hundredth `WorkflowStore`
+   method, because `WorkflowStore` has ten implementations and six of them are mocks. The cost
+   is the failure mode: a store that stops satisfying it degrades to flag defaults with nothing
+   failing. `engine/tenant_settings_wiring_test.go` closes that with compile-time assertions on
+   the three real stores, plus a test that `ShardedStore` deliberately does *not* implement it —
+   a sharded deployment has no single settings row, and picking one of the three defensible
+   semantics by accident would give a tenant its settings on some workflows and the flags on
+   others.
+
+   **What is deliberately not wired, and how that stays honest.** An unconsumed field reads like
+   a working knob, so `TestOnlyTheWallClockCeilingIsWiredYet` asserts that setting
+   `WasmInstanceTimeout` or `HostRetryBudget` changes nothing observable. It fails the day
+   either starts having an effect, which is the day this section and those doc comments need
+   updating.
+
+   **The migration was wrong in a way no local run could show, and CI caught it.** PostgreSQL's
+   default `search_path` is `"$user", public`, and `001_schema.sql` creates a schema called
+   `cleat` — so on any deployment connecting as role `cleat`, an unqualified `CREATE TABLE`
+   lands in `cleat` rather than `public`. `001` through `004` each open with
+   `SET search_path = public;` and `001`'s header records the trap costing "the shipped cluster
+   deployment is broken by nothing more than its own username". 039 omitted it, because it is
+   only the **third** PostgreSQL migration ever to create a table (001, 032, 039) — `ALTER` on
+   an unqualified name falls through `cleat` to `public`, so 006–038 never needed the line and
+   the convention had no recent example.
+
+   It passed locally and failed `Cluster Integration Tests` and `Tier 1 Gate` with
+   `relation "tenant_settings" does not exist` — from a test that had just built its schema,
+   with its three neighbours in the same file passing. The difference is the DSN role: this
+   sandbox connects as `postgres` (no such schema, so the path collapses to `public`), CI as
+   `cleat`. Reproduced deterministically by creating a database owned by role `cleat` and
+   pointing the suite at it — `cleat.tenant_settings` beside `public.workflow_instances`,
+   twice out of two — then confirmed fixed the same way. **A migration that only creates
+   tables under one role name is not covered by a local run under another.**
+
+   That investigation also turned up a **separate, pre-existing defect not fixed here**:
+   `applyAppRoleMigration` (engine/flush_rls_test.go) hands `005_app_role.sql` to `db.Exec`,
+   and that file ends with a session-scoped `SET search_path = public`. Measured: before it,
+   `SHOW search_path` returns `"$user", public`; after it, 40 consecutive queries on the same
+   pool return `public`. Harmless wherever `"$user"` names no real schema, which is why it has
+   survived — but it silently rewrites the search_path of every later query on a shared pool.
+   One PR, one thing, so it is filed rather than bundled; the fix is a pinned `db.Conn` plus
+   `RESET ALL`, with a regression test on the helper.
+
+   **Two things went wrong writing the tests, both instances of this file's recurring theme.**
+   The first negative control asserted that dropping the RLS policy makes the other tenant's row
+   *visible*; PostgreSQL defaults to DENY when RLS is enabled with no policy at all, so it
+   returned 0 and the control failed against a correct implementation. Replacing the predicate
+   with `USING (true)` is the right break — and it is also the exact scenario CLAUDE.md names,
+   a cross-tenant assertion passing against a wide-open policy. The second: fixture cleanup was
+   registered with `t.Cleanup`, which runs *after* the test body's `defer owner.Close()`, so
+   every delete ran against a closed pool and failed silently. Three rows survived a green run
+   and the next run failed on a duplicate key rather than on anything it was testing. Both tests
+   now pre-clean, which also survives a crashed run.
 4. **Move the retry threshold host-side**: host applies the resolved budget, refuses with the
    sentinel, records no event. Delete `hostRetryBudget`, `HOST_RETRY_BUDGET_MS`,
    `retryFitsInOneSegment`, `retry_fits_in_one_segment`, and
    `cleat.TestBothSDKsAgreeOnTheHostRetryBudget`. Both SDKs honour the refusal; the four
    threshold tests in §3.88 stay and should pass unchanged, which is the point of keeping them.
-5. **Resolve the two timeouts per tenant** in the executor and the wasmtime backend.
+5. **Resolve the two timeouts per tenant.** Split in two by where the bound lives, and only
+   the first half is done:
+   - ~~5a, the executor's **wall-clock ceiling**~~ — ✅ **done with step 3.** It is a context
+     deadline, so it needed only `e.wallClockCeiling(ctx)` at both `executor.go` sites.
+     `TestTwoTenantsGetDifferentWallClockCeilings` asserts the *difference* between two
+     tenants, plus the clamp, through `executeWithBackend` rather than by calling the
+     resolver — the failure this section warns about is a value read correctly and then not
+     reaching the place that uses it. Proven to fail two ways, one mutation per claim:
+     ignoring the tenant value trips the tightening assertion, substituting instead of
+     clamping trips only the escalation assertion.
+   - **5b, the backend's **instance timeout**** — 🔴 open. This one is an *epoch* deadline set
+     inside `configureStore` on the per-execution backend clone, so a per-tenant value needs a
+     way to reach it: a `WasmBackend` interface change, touching five implementers. That is the
+     seam this work was split on, and it is where §3.90's "applied in two places" hazard lives —
+     note that `configureStore` already tightens the epoch deadline to `ctx`'s when `ctx` is
+     nearer, so 5a has *partly* affected it already, in the tightening direction only.
 6. **Per-tenant validation** replacing §3.90's startup warning.
 
 #### What to be suspicious of when building this

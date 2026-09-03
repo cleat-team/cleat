@@ -165,7 +165,7 @@ func (e *Engine) executeWithBackend(
 	// wall clock, so a workflow waiting on slow services died here instead,
 	// with "execution timed out" rather than "execution time limit exceeded"
 	// and at the same moment.
-	if ceiling := e.wallClockCeiling(); ceiling > 0 {
+	if ceiling := e.wallClockCeiling(execCtx); ceiling > 0 {
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
 		defer cancel()
@@ -431,7 +431,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	// wall clock, so a workflow waiting on slow services died here instead,
 	// with "execution timed out" rather than "execution time limit exceeded"
 	// and at the same moment.
-	if ceiling := e.wallClockCeiling(); ceiling > 0 {
+	if ceiling := e.wallClockCeiling(execCtx); ceiling > 0 {
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
 		defer cancel()
