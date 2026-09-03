@@ -125,7 +125,7 @@ tests/cluster	testStore	3
 tests/cross-language	buildRustWasm	1
 tests/cross-language	requireCargo	1
 tests/exhaustion	clusterDB	1
-tests/integrity	TestPendingSentinelDetection	1
+tests/integrity	TestPendingIntentDetection	1
 tests/integrity	TestReplayDivergenceDetection	2
 tests/integrity	TestReplayHashConsistency	1
 tests/integrity	TestReplayStressBasic	1

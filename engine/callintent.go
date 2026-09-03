@@ -92,14 +92,18 @@ func (e *Engine) intentStore() (callIntentStore, error) {
 // isPendingIntent reports whether a replayed event was left mid-flight by a
 // crash: the call was dispatched and the outcome never recorded.
 //
-// Two sources, deliberately. Pending is the live one, read from intent_at and
-// checksum by LoadEventHistory. pendingSentinel is the representation the
-// deleted flushCallIntent would have written; nothing in any deployment ever
-// wrote it, but the detector for it predates this work, tests/integrity
-// exercises it directly, and keeping it costs one comparison. It should go when
-// phase E retires the constant.
+// One source. Pending is read from intent_at and checksum by LoadEventHistory,
+// which is what IMPROVEMENT-PLAN 1.4 phase D made the live representation.
+//
+// This used to also match a "__CLEAT_PENDING_INTENT__" sentinel in Err, the
+// representation the deleted flushCallIntent would have written. Nothing in any
+// deployment ever wrote it -- the write side was deleted rather than wired in,
+// because every completion path guarded its upsert on `error IS NULL`, so a
+// sentinel row could never be completed and would have stuck forever. The
+// comment here said it should go when phase E retired the constant; E and F are
+// both done, so it has (1.4 phase F tail).
 func (r EventRecord) isPendingIntent() bool {
-	return r.Pending || r.Err == pendingSentinel
+	return r.Pending
 }
 
 // ambiguousCall identifies the replayed call that was left mid-flight. It is

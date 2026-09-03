@@ -12,11 +12,6 @@ import (
 	_ "github.com/lib/pq"
 )
 
-// pendingSentinel is the sentinel value used by the engine to mark a DurableCall
-// whose external call was dispatched but whose outcome was not persisted before
-// a crash. Exported as engine.PendingSentinel from internal/host/engine.go.
-const pendingSentinel = engine.PendingSentinel
-
 // ---- Mock caller ----
 
 // ambigRecorder records all service calls for test assertions.
@@ -218,12 +213,12 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 }
 
 // =========================================================================
-// Test 2: Pending sentinel detection
+// Test 2: Pending intent detection
 //
 // Scenario: After a successful workflow execution, we modify the event history
-// so that one event has Err=pendingSentinel — simulating the case where the
+// so that one event is marked Pending — simulating the case where the
 // external call was dispatched but the response was lost in a crash. On replay,
-// the engine should detect the pending sentinel and signal ambiguity.
+// the engine should detect the pending intent and signal ambiguity.
 //
 // Expected outcomes by injection point:
 //   - Step 4 (shipping.CreateShipment): Replay returns an error because
@@ -236,7 +231,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 //     PlaceOrder).
 //
 // =========================================================================
-func TestPendingSentinelDetection(t *testing.T) {
+func TestPendingIntentDetection(t *testing.T) {
 	wasmBytes := buildStressWasm(t)
 
 	ctx := context.Background()
@@ -310,7 +305,13 @@ func TestPendingSentinelDetection(t *testing.T) {
 			}
 
 			modifiedHistory := cloneHistory(history)
-			modifiedHistory[tt.injectStep].Err = pendingSentinel
+			// Pending, not a sentinel in Err. The engine's live representation
+			// of "dispatched, outcome never recorded" is the Pending field,
+			// read from intent_at and checksum (1.4 phase D). The
+			// "__CLEAT_PENDING_INTENT__" sentinel this used to inject was
+			// retired with 1.4 phase F's tail: nothing ever wrote it, so a test
+			// that injected it was exercising a detector no crash could trigger.
+			modifiedHistory[tt.injectStep].Pending = true
 			modifiedHistory[tt.injectStep].Response = ""
 
 			rt2, err := engine.NewRuntime(ctx, 0, 0)
