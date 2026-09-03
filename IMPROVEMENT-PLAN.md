@@ -12169,7 +12169,7 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
-### 3.93 `cleatctl restore-workflow` names a backup command that does not exist, and assigns every restored row to the default tenant — 🔴 **OPEN, found 2026-09-03** (WS-1, 2026-09-03)
+### 3.95 `cleatctl restore-workflow` names a backup command that does not exist, and assigns every restored row to the default tenant — 🔴 **OPEN, found 2026-09-03** (WS-1, 2026-09-03)
 
 Found while investigating something else — whether any writer puts a NULL in MySQL's nullable
 `tenant_id` columns. None does; the answer to that question is in the last section here. Looking
