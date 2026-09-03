@@ -42,6 +42,46 @@ public final class Memory {
     public static final long SUSPEND_SENTINEL = 1L << 62;
 
     /**
+     * Bit 31 of a host-call result: the host is refusing this call because the
+     * workflow is in a defer segment and the call would start new work.
+     *
+     * <p>Distinct from {@link #SUSPEND_SENTINEL}, which is bit 62 and is what
+     * the guest returns to the host from an export. This one travels the other
+     * way -- host to guest, inside an ordinary result word -- and bit 31 was
+     * chosen because it is the one bit free in all six result layouts a call
+     * that can start fresh work returns. See IMPROVEMENT-PLAN 3.84 and ABI.md.
+     *
+     * <p>The engine's copy is {@code callSuspendSentinel} in
+     * {@code engine/memory.go}. The two must agree, and nothing in either
+     * language can see the other, so {@code TestTheJavaSDKAgreesOnTheStopBit}
+     * in {@code engine/} reads this file and pins the value.
+     */
+    public static final long SUSPEND_STOP_BIT = 1L << 31;
+
+    /**
+     * Throw {@link SuspendSignal} if the host set {@link #SUSPEND_STOP_BIT} on
+     * a result word.
+     *
+     * <p><b>Call this before decoding any field of the result.</b> Order is the
+     * contract, not a style preference: in the await-signals layout bit 31 lands
+     * inside the timed-out field, which {@link #decodeAwaitTimedOut} reads as
+     * {@code (result >>> 16) & 0xFFFF}, so a caller that decoded first would
+     * turn a stop into an ordinary timeout and the workflow would run on --
+     * doing the new work the defer segment exists to prevent, with nothing to
+     * see. {@code SuspendStopBitTest.decodingFirstWouldReadAStopAsATimeout}
+     * asserts that overlap rather than leaving it as a claim here, and
+     * {@code wasm/adapter_metadata.go} records the same trap for the generated
+     * Go adapter.
+     *
+     * @param result the raw result word from a host call
+     */
+    public static void throwIfStopped(long result) {
+        if ((result & SUSPEND_STOP_BIT) != 0) {
+            throw new SuspendSignal();
+        }
+    }
+
+    /**
      * Error code for non-retryable terminal errors.
      * Returned as the errCode in {@link #encodeExportResult(int, int)} when
      * a {@link TerminalError} is thrown by the workflow method.
