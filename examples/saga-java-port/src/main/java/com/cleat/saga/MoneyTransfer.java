@@ -319,6 +319,44 @@ public class MoneyTransfer {
         return resultObject("unreachable", Boolean.TRUE);
     }
 
+    /**
+     * Two defers, then one call of the workflow's own.
+     *
+     * <p>The Java counterpart of {@code testdata/deferfunc}'s {@code DeferOrder},
+     * and it exists for one test: a DEFER SEGMENT run on this entry point must
+     * record the two cleanup calls and NOT the body's.
+     *
+     * <p>That is the end-to-end half of IMPROVEMENT-PLAN 3.105. The SDK half --
+     * {@code Memory.throwIfStopped} on every host call that can be refused --
+     * was checked by unit tests on both sides of the boundary, but a guest that
+     * decodes the sentinel and a host that emits it are two green half-tests
+     * and no working feature until something crosses. This is the thing that
+     * crosses.
+     *
+     * <p>The order is load-bearing and so is the body call's position. Both
+     * defers are registered before the body calls anything, so a stop that
+     * arrives at the body's call has a full defer table behind it -- which is
+     * the case 3.81 measured going wrong, where the drain ran with its calls
+     * refused and CONSUMED the cleanup rather than performing it. If the body
+     * called first, an empty table would pass a test that proves nothing.
+     *
+     * <p>Cleanup operations are named rather than numbered because LIFO is the
+     * assertion: "second" must reach the host before "first".
+     */
+    @CleatEntry(name = "defer_order")
+    public static Map<String, Object> deferOrder(HostCalls h, String input) {
+        h.deferFunc(() -> h.cleatCall("cleanup", "first", "{}"));
+        h.deferFunc(() -> h.cleatCall("cleanup", "second", "{}"));
+
+        // In a defer segment this throws SuspendSignal from inside cleatCall,
+        // so nothing below runs and the generated wrapper returns
+        // SUSPEND_SENTINEL without draining -- leaving the table for the host.
+        // In an ordinary segment it is an ordinary call and everything below
+        // runs, which is the control the test needs.
+        h.cleatCall("work", "body", "{}");
+        return resultObject("status", "ok");
+    }
+
     @CleatEntry(name = "get_transfer_status")
     public static Map<String, Object> getTransferStatus(HostCalls h, String input) {
         // This entry point demonstrates a read-only workflow.
