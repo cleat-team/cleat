@@ -12220,6 +12220,62 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
+### 3.101 Terminate and signal told the caller which workflow ids are real — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
+
+Two routes answered something other than 404 for a workflow the caller does not own, and the two
+answers differed from each other and from what an unknown id produced:
+
+```
+POST /api/dead-letters/{id}/terminate   200 {"status":"terminated"}, having done nothing
+POST /api/workflows/{id}/signal         500 "Violation of PRIMARY KEY pk_workflow_signals"
+```
+
+**Neither was a leak.** §3.86 put `AND tenant_id` on the terminate's `UPDATE` and on
+`DeliverSignal`'s `MERGE` `ON` clause, so nothing crossed. What crossed was **information about
+which ids are real**: an unknown id produced a different response from a real one belonging to
+somebody else, so both routes answered a question the caller was not entitled to ask.
+
+`cmd/cleat-worker/api_admin.go` had already written this reasoning down for the admin API —
+*"It answers 404, never 403: 403 would confirm that the workflow exists, which is itself
+information the caller is not entitled to"* — and these two routes predate it. The fix is to route
+them through the same `callerOwnsTarget` helper rather than to invent a second mechanism.
+
+**This depended on §3.99.** `callerOwnsTarget` compares `wf.TenantID`, which `GetWorkflowByID` did
+not populate on PostgreSQL or SQL Server, so until that was fixed the helper answered 404 to
+everyone and could not be reused for anything. That is why §3.99 came first.
+
+#### What the test asserts, and why status codes alone would not do
+
+`cmd/cleat-worker/terminate_signal_not_found_test.go` asserts three things per route:
+
+- the **owner** still gets 200 and the store *is* reached — without this, a handler that 404s
+  unconditionally passes everything else;
+- another tenant's workflow gets 404 **and the store is not reached** — a handler can answer 404
+  after having already applied the operation, which is the weakness
+  `TestAdminRoutesRejectCrossTenantTarget` records;
+- an unknown id and a foreign id produce **byte-identical bodies**. This is the one the file exists
+  for. A test that only checked for 404 would pass against an implementation answering 404 for a
+  foreign id and a differently-worded 404 for an unknown one, which is still an oracle.
+
+Both handlers were reverted to `scopedStore` one at a time; each turned exactly one case red, with
+*"the store was reached for another tenant's workflow; the status code says 200 but the operation
+was applied"*.
+
+**The 500 is not what the test demonstrates**, and the file says so. It was measured against a live
+SQL Server while §3.86 was being written; the mock here does not simulate the primary-key
+violation, so reverting the fix shows a 200. The test asserts the handler property, which holds
+whatever the store would have gone on to do.
+
+#### Not done here
+
+The same shape applies to `handleWorkflowRetry`, `handleCancel` and `handleGetQueryState` — one
+line each. They are left alone because the scope asked for was terminate and signal; widening it
+silently is how a reviewable change becomes an unreviewable one.
+
+Also still open, and recorded in §3.92: `terminateWorkflowOnce` does not check `RowsAffected`
+before running the parent-close cascade. This entry stops the *caller* learning anything, and does
+not change what the store does when reached.
+
 ### 3.99 The admin API answered 404 to its rightful owner on two of three dialects — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
 
 `GetWorkflowByID` did not `SELECT tenant_id` on PostgreSQL or SQL Server, so
@@ -12302,7 +12358,7 @@ PostgreSQL's `SELECT` without also removing its scan target made the test fail w
 `sql: expected 16 destination arguments in Scan, not 17` — a driver arity error, not the
 assertion. It was red, and red for the wrong reason. Replacing the column with `'' AS tenant_id`
 keeps the arity and fails on the assertion, which is the thing being proven.
-### 3.93 `cleatctl restore-workflow` names a backup command that does not exist, and assigns every restored row to the default tenant — 🔴 **OPEN, found 2026-09-03** (WS-1, 2026-09-03)
+
 ### 3.95 `cleatctl restore-workflow` names a backup command that does not exist, and assigns every restored row to the default tenant — 🔴 **OPEN, found 2026-09-03** (WS-1, 2026-09-03)
 
 Found while investigating something else — whether any writer puts a NULL in MySQL's nullable

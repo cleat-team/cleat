@@ -190,7 +190,14 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 }
 
 func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Request, id string) {
-	st, ok := s.scopedStore(w, r)
+	// callerOwnsTarget, not scopedStore. TerminateWorkflow's UPDATE carries
+	// `AND tenant_id` since 3.86, so a foreign id already changed nothing --
+	// but it changed nothing and returned 200, which reads to the caller as
+	// "terminated" and to an operator as a workflow that ignored a terminate.
+	// This answers 404 instead, and answers the SAME 404 for an id that does
+	// not exist anywhere, which is the point: distinguishing the two would
+	// turn this route into an oracle for which workflow ids are real.
+	st, ok := s.callerOwnsTarget(w, r, id)
 	if !ok {
 		return
 	}
