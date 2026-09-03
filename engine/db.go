@@ -1125,6 +1125,25 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 
 // TerminateWorkflow force-terminates a workflow, setting status to 'terminated'.
 // Unlike FailWorkflow, this does not require the worker to own the workflow.
+// A terminate that matched no row does NOT cascade, and returns
+// ErrWorkflowNotFound rather than nil (3.92).
+//
+// This used to exec the UPDATE, ignore how many rows it touched, and run
+// enforceParentClosePolicy unconditionally afterwards. Once 3.86 put
+// `AND tenant_id` on the UPDATE, a cross-tenant terminate stopped matching the
+// parent -- and went on to close that parent's CHILDREN anyway, because the
+// close-policy statements key on parent_workflow_id. 3.92 scoped those too;
+// this is the root the predicates were the symptom-level twin of, and
+// adminForceResolve has always done it this way: check RowsAffected, return
+// not-found, never reach the cascade.
+//
+// ErrWorkflowNotFound deliberately does not distinguish "no such workflow" from
+// "another tenant's" -- see its doc comment. That is the same boundary 3.101
+// draws at the HTTP layer, and it is why this returns one error rather than two.
+//
+// Note that an ALREADY-terminated workflow still matches: the UPDATE carries no
+// status filter, so terminate stays idempotent and only a genuinely absent (or
+// other-tenant) row returns not-found.
 func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -1132,7 +1151,7 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'terminated',
 		    error_msg = $2,
@@ -1143,6 +1162,13 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 	`, workflowID, reason)
 	if err != nil {
 		return fmt.Errorf("terminate workflow: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("terminate workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrWorkflowNotFound
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("terminate workflow commit: %w", err)

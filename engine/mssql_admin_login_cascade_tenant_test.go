@@ -36,6 +36,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -89,8 +90,12 @@ func TestAdminLoginTerminateCascadeReachesOnlyTheCallersOwnChildren(t *testing.T
 		childA := seedParentWithChild(t, storeA, unscopedTenantA, "casc-parent-a", "TERMINATE")
 		childB := seedParentWithChild(t, storeB, unscopedTenantB, "casc-parent-b", "TERMINATE")
 
-		if err := storeB.TerminateWorkflow(ctx, "casc-parent-a", "not yours"); err != nil {
-			t.Fatalf("cross-tenant TerminateWorkflow: %v", err)
+		// ErrWorkflowNotFound, not nil. This asserted nil until 3.92's root fix,
+		// which is the old contract: the terminate matched no row and said so
+		// by returning success. Refusing explicitly is strictly stronger, and
+		// the assertions below still check that the cascade did not run.
+		if err := storeB.TerminateWorkflow(ctx, "casc-parent-a", "not yours"); !errors.Is(err, ErrWorkflowNotFound) {
+			t.Fatalf("cross-tenant TerminateWorkflow returned %v, want ErrWorkflowNotFound", err)
 		}
 		if status, msg := instanceStatus(t, storeA, childA, unscopedTenantA); status == "failed" {
 			t.Errorf("tenant B terminated a parent it does not own and tenant A's CHILD was "+
@@ -152,8 +157,12 @@ func TestAdminLoginTerminateCascadeReachesOnlyTheCallersOwnChildren(t *testing.T
 		childA := seedParentWithChild(t, storeA, unscopedTenantA, "casc-rc-a", "REQUEST_CANCEL")
 		childB := seedParentWithChild(t, storeB, unscopedTenantB, "casc-rc-b", "REQUEST_CANCEL")
 
-		if err := storeB.TerminateWorkflow(ctx, "casc-rc-a", "not yours"); err != nil {
-			t.Fatalf("cross-tenant TerminateWorkflow: %v", err)
+		// ErrWorkflowNotFound, not nil. This asserted nil until 3.92's root fix,
+		// which is the old contract: the terminate matched no row and said so
+		// by returning success. Refusing explicitly is strictly stronger, and
+		// the assertions below still check that the cascade did not run.
+		if err := storeB.TerminateWorkflow(ctx, "casc-rc-a", "not yours"); !errors.Is(err, ErrWorkflowNotFound) {
+			t.Fatalf("cross-tenant TerminateWorkflow returned %v, want ErrWorkflowNotFound", err)
 		}
 		if got := instanceField(t, storeA, "cancellation_requested", childA, unscopedTenantA); got != "0" {
 			t.Errorf("tenant B flagged tenant A's REQUEST_CANCEL child cancelled: "+

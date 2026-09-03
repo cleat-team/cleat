@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -480,14 +481,22 @@ func TestGap_RetryWorkflow_BeginError(t *testing.T) {
 // TerminateWorkflow
 // ---------------------------------------------------------------------------
 
+// TestGap_TerminateWorkflow asserts the not-found contract, not the absence of
+// an error.
+//
+// It used to require nil. newNoopDB reports zero rows affected for every
+// statement, and until 3.92 TerminateWorkflow ignored that and returned nil --
+// so "a terminate that matched nothing succeeded" was the behaviour this test
+// pinned. That is the defect, and the test encoded it.
 func TestGap_TerminateWorkflow(t *testing.T) {
 	db := newNoopDB(t)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
 	err := store.TerminateWorkflow(testCtx, "wf-1", "user requested")
-	if err != nil {
-		t.Fatalf("TerminateWorkflow: %v", err)
+	if !errors.Is(err, ErrWorkflowNotFound) {
+		t.Fatalf("TerminateWorkflow against a store that matches no rows returned %v, "+
+			"want ErrWorkflowNotFound", err)
 	}
 }
 

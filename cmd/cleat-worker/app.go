@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -209,6 +210,15 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 		json.NewDecoder(r.Body).Decode(&req)
 	}
 	if err := st.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
+		// 3.92: the store now reports a terminate that matched nothing rather
+		// than returning nil. callerOwnsTarget above has already answered 404
+		// for an id this tenant does not own, so reaching here means the row
+		// went away between the two -- still a 404, and the same one, because
+		// ErrWorkflowNotFound does not distinguish "gone" from "not yours".
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			s.writeError(w, 404, "not found")
+			return
+		}
 		s.writeError(w, 500, err.Error())
 		return
 	}

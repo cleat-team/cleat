@@ -12532,7 +12532,7 @@ stays, and `check-db`, `drop-tenant` and `versions purge/gc` still use it. If pe
 is wanted later, the shape to copy is DBOS's — operate on what is in the database — rather than
 a file format with no writer.
 
-### 3.92 §3.86 scoped the terminate and left the cascade — 🟢 **FIXED 2026-09-03; found by the gate's allowlist demanding a reason, not by its scan** (WS-1, 2026-09-03)
+### 3.92 §3.86 scoped the terminate and left the cascade — 🟢 **FIXED 2026-09-03, symptom and root; found by the gate's allowlist demanding a reason, not by its scan** (WS-1, 2026-09-03)
 
 #### First and second: the close-policy cascade
 
@@ -12624,10 +12624,66 @@ exemption is safe finds defects, and it also clears statements that only look li
 same discipline produced both results within an hour.
 
 Note also what `adminForceResolve` does that `terminateWorkflowOnce` does not: it checks
-`RowsAffected` and bails before reaching the cascade. That is the deeper fix available here —
-`TerminateWorkflow` cascading for a workflow it did not terminate is the actual bug, and a
-predicate on the cascade statements is the symptom-level version of it. The deeper fix changes
-what the HTTP layer returns for an unknown id (today: 200), so it wants its own change.
+`RowsAffected` and bails before reaching the cascade. That is the deeper fix, and it is **now
+done** — see below.
+
+#### The root fix, 2026-09-03: don't cascade for a workflow you didn't terminate
+
+All three dialects now check `RowsAffected` and return `ErrWorkflowNotFound` instead of `nil`,
+before committing and before the cascade. `adminForceResolve` has always worked this way; terminate
+is now in line with it.
+
+`ErrWorkflowNotFound` is reused rather than a new error invented, and its existing doc comment is
+the reason: it *"deliberately does not distinguish 'no such workflow' from 'another tenant's
+workflow'. Splitting them would make the endpoint an existence oracle."* That is the same boundary
+§3.101 drew at the HTTP layer, so the store and the handler now agree by construction.
+`handleDeadLetterTerminate` maps the sentinel to the same 404 `callerOwnsTarget` already returns.
+
+Terminate stays **idempotent**: the `UPDATE` carries no status filter, so re-terminating an already
+terminated workflow still matches its row and returns nil. Only a genuinely absent — or
+other-tenant — row reports not-found.
+
+**What this is and is not.** §3.101 routed the HTTP terminate through `callerOwnsTarget`, and
+§3.92's predicates already scope the cascade statements, so the cross-tenant harm is closed twice
+over. This change's observable contribution is the **error contract**: the call no longer tells a
+caller it terminated something when it terminated nothing. The not-cascading is defence behind
+those two, for library callers and for the day a predicate is removed.
+
+**A test assertion was written and then deleted for being unfalsifiable**, which is worth
+recording because it is the same trap §3.86's `DeliverSignal` wake fell into. The first draft
+asserted that an unmatched terminate leaves a real child alone. It cannot fail: within one tenant
+an unmatched terminate is an id no row carries, so the cascade's `UPDATE`s key on
+`parent_workflow_id` and match nothing, and `releaseWorkflowResources`' two calls match nothing
+either — there is no observable difference. Removing the guard on any dialect turned the test red
+on the *error*, never on the child. The assertion was removed rather than kept as decoration; the
+cross-tenant case it was reaching for is covered by
+`engine/mssql_admin_login_cascade_tenant_test.go`.
+
+What remains and does falsify: the error contract (each dialect turned red on its own), the
+positive control that a real terminate still closes its `TERMINATE` children (removing the cascade
+turns it red with *"the close policy is no longer being enforced at all"* — this is §3.79's
+subject and the thing a careless fix would break), and idempotency.
+
+**Three existing tests encoded the old contract, and two of them were written by this session.**
+`TestGap_TerminateWorkflow` ran against `newNoopDB`, which reports zero rows affected for every
+statement, and asserted `err == nil` — so "a terminate that matched nothing succeeded" was pinned
+as correct behaviour. The other two are §3.86's and §3.92's own cross-tenant tests: both did
+
+```go
+if err := storeB.TerminateWorkflow(ctx, tenantAsWorkflow, "not yours"); err != nil {
+    t.Fatalf("cross-tenant TerminateWorkflow: %v", err)
+}
+```
+
+— asserting that a terminate aimed at another tenant's workflow **succeeds**, because at the time
+it did: §3.86's predicate made the `UPDATE` match nothing and the call returned nil anyway. All
+three now assert `ErrWorkflowNotFound`, which is strictly stronger, and their existing assertions
+about what was *not* touched are unchanged and still carry the tenancy proof.
+
+That two of them were mine is the point worth keeping: a test written against the behaviour of the
+day pins that behaviour, including the part of it that was wrong. The first skip-budget measurement of this change was taken off that failing
+run and discarded: `check-skip-budget.sh` reports `failed=1` for exactly this reason, and a skip
+count off a failing run is not a measurement.
 
 #### How the third was found at all
 
