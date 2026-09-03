@@ -119,6 +119,13 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		s.exitReplay()
 	}
 
+	// Past the frontier in a defer segment: starting a child workflow is new
+	// work, and unlike a durable call it leaves a row behind that outlives the
+	// segment. See IMPROVEMENT-PLAN 3.84.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	// Resolve child version by priority:
 	//   1. Explicit version from ChildWorkflowOptions (version > 0 from WASM ABI)
 	//   2. Runtime override (engine.childBindingOverride)

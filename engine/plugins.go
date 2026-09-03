@@ -178,6 +178,9 @@ func (s *execSession) PluginCall(ctx context.Context, m api.Module,
 	if s.isReplay {
 		return s.replayPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 	}
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 	return s.freshPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 }
 
@@ -368,6 +371,9 @@ func (s *execSession) PluginCallStreaming(ctx context.Context, m api.Module,
 	responsePtr, responseMaxLen uint32) int64 {
 	if s.isReplay {
 		return s.replayPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+	}
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
 	}
 	return s.freshPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 }

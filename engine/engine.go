@@ -428,11 +428,13 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //
 // Membership means *verified to unwind on the sentinel*, in the same sense as
 // WasmtimeLanguages above -- not "ought to". A guest whose SDK does not decode
-// it reads the word through the normal durable-call layout and gets
-// responseLen=0, errCode=0: an EMPTY SUCCESSFUL RESPONSE. It would carry on
-// past the stop, do the new work the segment exists to prevent, and report the
-// terminated workflow as completed -- the exact defect of IMPROVEMENT-PLAN
-// 3.83, silently, with no error anywhere.
+// it reads the word through whichever layout the call it made returns, and
+// every one of those readings is a plausible ordinary result: responseLen=0,
+// errCode=0 from a durable call is an EMPTY SUCCESSFUL RESPONSE, and bit 31 in
+// the await-signals layout lands in the timed-out field and reads as a
+// TIMEOUT. It would carry on past the stop, do the new work the segment exists
+// to prevent, and report the terminated workflow as completed -- the exact
+// defect of IMPROVEMENT-PLAN 3.83, silently, with no error anywhere.
 //
 // That failure mode is why this is a list rather than a comment. The host half
 // and the guest half of a sentinel are two green tests and no working feature

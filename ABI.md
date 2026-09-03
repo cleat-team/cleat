@@ -145,14 +145,14 @@ Make a recorded API call to an external service.
 
 If `errCode == 0`, the response buffer contains valid JSON. If `errCode == 1`, the response buffer contains an error message string.
 
-##### Suspend sentinel — check this before decoding any field
+##### Stop sentinel — check this before decoding any field
 
-If **bit 39** is set, the word is not a result. It is the host telling the guest to stop and
+If **bit 31** is set, the word is not a result. It is the host telling the guest to stop and
 unwind without doing new work, and the SDK must propagate a suspend exactly as it does for
 `cleat_await_child` (§1) rather than decoding the fields.
 
 ```
-0x0000008000000000  (1 << 39)
+0x0000000080000000  (1 << 31)
 ```
 
 The host emits it for a call made by the workflow body during a *defer segment* — a replay whose
@@ -160,20 +160,41 @@ only purpose is to run an already-terminated workflow's outstanding defers. Call
 defer bodies themselves are **not** stopped, so an SDK must not treat the sentinel as "this
 workflow is over"; it means "this call must not happen".
 
-**Test it with a mask (`result & (1 << 39)`), not equality.** The host currently emits exactly
-`1 << 39` with every other field zero, so a whole-word comparison also works today, but this is a
-payload-carrying word and the mask is the form that stays correct.
+**The same bit, on every host call that can start fresh work.** It is not specific to
+`cleat_call`:
+
+| host call | result layout |
+|---|---|
+| `cleat_call`, `cleat_call_retry` | `responseLen` 40-63, `callErrorCode` 8-39, `errCode` 0-7 |
+| `cleat_plugin_call`, `cleat_plugin_call_streaming` | as `cleat_call` |
+| `cleat_child_workflow`, `cleat_child_workflow_with_options` | `runIDLen` 32-63, `errCode` 0-31 |
+| `cleat_await_signals` | `sigNameLen` 48-63, `payloadLen` 32-47, `timedOut` 16-31, `errCode` 0-15 |
+
+`cleat_sleep` is deliberately absent. Its 56-bit duration field covers bit 31, and it needs no
+sentinel: a sleeping guest already suspends through its status byte before any fresh call.
+
+**Check the sentinel before reading any field, not after.** This is a hard ordering requirement,
+not a style preference. In the `cleat_await_signals` layout bit 31 falls inside the timed-out
+field, which SDKs read as `(result >> 16) & 0xFFFF != 0` — so a decoder that fills its fields
+first sees an ordinary *timeout*, returns normally, and the guest runs on past a stop it was
+told about.
+
+**Test it with a mask (`result & (1 << 31)`), not equality.** The host currently emits exactly
+`1 << 31` with every other field zero, so a whole-word comparison also works today, but these
+are payload-carrying words and the mask is the form that stays correct.
 
 Note this is a *different* bit from the `1 << 62` used by the workflow-export return and by
-`cleat_await_child`. It has to be. Those pack a 32-bit length at bits 32-63, where bit 62 means a
-length of 1 GiB; this layout packs a 24-bit `responseLen` at bits 40-63, where the same bit means
-4 MiB — reachable, since the host's buffer limits are operator-settable with no upper bound. Bits
-16-39 carry no information here: the host writes `callErrorCode` as a single byte, so bits 16-39
-cannot be set by any real result.
+`cleat_await_child`, and a different bit from the `1 << 39` earlier revisions of this document
+specified. Bit 62 is a 1 GiB length in the 32-bit-length layouts and 4 MiB in `cleat_call`'s,
+both reachable, since the host's buffer limits are operator-settable with no upper bound. Bit 39
+is free in `cleat_call`'s layout only: in the run-ID layouts it means a 128-byte run ID, an
+ordinary value. **Bit 31 is the only region free across all six** — bits 17-31 are, and bit 31 is
+the one used.
 
-An SDK that does not implement this reads the sentinel as `responseLen = 0, errCode = 0` — an
-empty *successful* response — and will silently continue past the stop. The host therefore
-refuses to run a defer segment for any guest language not known to decode it.
+An SDK that does not implement this reads the sentinel as an ordinary result — an empty
+*successful* response from `cleat_call`, a *timeout* from `cleat_await_signals` — and will
+silently continue past the stop. The host therefore refuses to run a defer segment for any guest
+language not known to decode it.
 
 ##### At-Least-Once Semantics
 

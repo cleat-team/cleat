@@ -74,6 +74,14 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 		s.exitReplay()
 	}
 
+	// A fresh await is new work: it records an await_signals event and suspends
+	// the run, so a defer segment that reached this point would leave the
+	// terminated workflow waiting for a signal instead of finishing its
+	// cleanup. See IMPROVEMENT-PLAN 3.84.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	// Fresh execution: check signal store first.
 	if s.engine.signalStore != nil {
 		names := splitSignalNames(signalNames)

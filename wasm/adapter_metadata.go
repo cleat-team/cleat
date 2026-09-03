@@ -20,6 +20,33 @@ type adapterParam struct {
 	Type string // "string", "int64", "[]string"
 }
 
+// suspendSentinelStmts is the guest-side half of callSuspendSentinel
+// (engine/memory.go), and it must run before any field of the result is
+// decoded.
+//
+// The sentinel is bit 31, which is free in all six result layouts a host call
+// that starts fresh work can return. "Free" means the host cannot produce it,
+// not that these decoders would otherwise ignore it: in the await-signals
+// layout bit 31 lands inside the timed-out field, read below as
+// `(r>>16)&0xFFFF != 0`, so checking fields first would turn a stop into an
+// ordinary timeout and the guest would run on. Order is the contract.
+//
+// See IMPROVEMENT-PLAN 3.84 and ABI.md.
+var suspendSentinelStmts = []string{
+	"if uint64(result)&(1<<31) != 0 {",
+	"	panic(cleat.ErrSuspend)",
+	"}",
+}
+
+// withSuspendCheck prefixes the sentinel test onto a decoder's statements. Every
+// host call the host can refuse mid-segment goes through it, so the check
+// cannot be forgotten by a decoder that is added later.
+func withSuspendCheck(stmts ...string) []string {
+	out := make([]string, 0, len(suspendSentinelStmts)+len(stmts))
+	out = append(out, suspendSentinelStmts...)
+	return append(out, stmts...)
+}
+
 var adapterDefs = map[string]adapterDef{
 	"DurableCall": {
 		FieldName:  "DurableCall",
@@ -29,15 +56,7 @@ var adapterDefs = map[string]adapterDef{
 			{"operation", "string"},
 			{"requestJSON", "string"},
 		},
-		ResultStmts: []string{
-			// The host returns callSuspendSentinel (bit 39) when this call is
-			// the workflow body making NEW work inside a defer segment. Tested
-			// before any field is decoded, because the sentinel is not a
-			// response: bits 16-39 are unreachable by the host's packer, so no
-			// real result can set it. See IMPROVEMENT-PLAN 3.83.
-			"if uint64(result)&(1<<39) != 0 {",
-			"	panic(cleat.ErrSuspend)",
-			"}",
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
 			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
@@ -50,7 +69,7 @@ var adapterDefs = map[string]adapterDef{
 			`	}`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
-		},
+		),
 	},
 	"DurableSleep": {
 		FieldName: "DurableSleep",
@@ -83,7 +102,7 @@ var adapterDefs = map[string]adapterDef{
 			{"signalNames", "[]string"},
 			{"timeoutMs", "int64"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"signalNameLen := uint32(uint64(result) >> 48)",
 			"payloadLen := uint32((uint64(result) >> 32) & 0xFFFF)",
 			"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
@@ -92,7 +111,7 @@ var adapterDefs = map[string]adapterDef{
 			`	return "", "", false, fmt.Errorf("cleat_await_signals: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
 			"}",
 			"return unsafe.String(&signalNameBuf[0], int(signalNameLen)), unsafe.String(&payloadBuf[0], int(payloadLen)), timedOut, nil",
-		},
+		),
 	},
 	"DurableDefer": {
 		FieldName:  "DurableDefer",
@@ -238,14 +257,14 @@ var adapterDefs = map[string]adapterDef{
 			{"name", "string"},
 			{"inputJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"runIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("cleat_child_workflow: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
 			"}",
 			"return unsafe.String(&runIDBuf[0], int(runIDLen)), nil",
-		},
+		),
 	},
 	"ChildWorkflowWithOptions": {
 		FieldName:  "ChildWorkflowWithOptions",
@@ -257,14 +276,14 @@ var adapterDefs = map[string]adapterDef{
 			{"parentClosePolicy", "string"},
 			{"priority", "int"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"runIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("cleat_child_workflow_with_options: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
 			"}",
 			"return unsafe.String(&runIDBuf[0], int(runIDLen)), nil",
-		},
+		),
 	},
 	"AwaitChild": {
 		FieldName:  "AwaitChild",
@@ -356,7 +375,7 @@ var adapterDefs = map[string]adapterDef{
 			{"maxIntervalMs", "int64"},
 			{"nonRetryableErrorsJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
 			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
@@ -369,7 +388,7 @@ var adapterDefs = map[string]adapterDef{
 			`	}`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
-		},
+		),
 	},
 	"DurableCallWithHeartbeat": {
 		FieldName:  "DurableCallWithHeartbeat",
@@ -504,14 +523,14 @@ var adapterDefs = map[string]adapterDef{
 			{"functionName", "string"},
 			{"inputJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("plugin_call: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
-		},
+		),
 	},
 	"AcquireLock": {
 		FieldName:  "AcquireLock",
@@ -633,7 +652,7 @@ var adapterDefs = map[string]adapterDef{
 			{"functionName", "string"},
 			{"inputJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
@@ -649,7 +668,7 @@ var adapterDefs = map[string]adapterDef{
 			"}",
 			"close(ch)",
 			"return ch, nil",
-		},
+		),
 	},
 }
 

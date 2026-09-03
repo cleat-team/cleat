@@ -131,3 +131,26 @@ func DeferContinuesAsNew(h cleat.HostCalls, input string) (string, error) {
 	h.DurableCall("cleanup", "body", `{}`)
 	return `{"ok":true}`, nil
 }
+
+// DeferChildWorkflow starts a CHILD WORKFLOW as its body's new work, and
+// registers cleanup first.
+//
+// IMPROVEMENT-PLAN 3.84. The other entry points here reach the host through
+// cleat_call, which is the one path 3.83's stop sentinel covered. A child
+// workflow goes through cleat_child_workflow, returns a different result
+// layout, and -- unlike a durable call, whose side effect is somebody else's
+// problem -- leaves a workflow_instances row behind that outlives the segment.
+// So it is the sharpest test of whether the stop reaches a second path: the
+// assertion is that no child is started while the defers still run.
+func DeferChildWorkflow(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_child", `{}`)
+	}); err != nil {
+		return "", err
+	}
+
+	if _, err := h.ChildWorkflow("some-child", `{}`); err != nil {
+		return "", err
+	}
+	return `{"status":"ok"}`, nil
+}

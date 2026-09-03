@@ -246,32 +246,50 @@ func packDurableCallResult(responseLen int, callErrorCode, errCode byte) int64 {
 
 // callSuspendSentinel tells a guest to stop and unwind without doing new work.
 //
-// The host returns it from a durable call made by a workflow body that has
-// replayed past the end of its recorded history during a defer segment
-// (WithDeferPhase). The guest unwinds with its suspend flag set, skips its own
-// defer drain, and the host then runs __cleat_run_deferred on the live
-// instance -- the path runGuestDefersAfterSuspend already takes.
+// The host returns it from any host call that would start fresh work during a
+// defer segment (WithDeferPhase) -- a workflow body that has replayed past the
+// end of its recorded history. The guest unwinds with its suspend flag set,
+// skips its own defer drain, and the host then runs __cleat_run_deferred on the
+// live instance, the path runGuestDefersAfterSuspend already takes.
 //
-// Bit 39, and the choice is load-bearing. IMPROVEMENT-PLAN 3.81 specified bit
-// 62, on the grounds that cleat_await_child and cleat_await_any_child already
-// decode it as a suspend. Those pack a 32-bit length at bits 32-63, where bit
-// 62 means 1 GiB. This layout packs a 24-bit responseLen at bits 40-63, where
-// the same bit means 4 MiB -- and MaxWasmStringLen and OutBufSize are package
-// vars set from -wasm-max-string-len and -wasm-output-buffer-size, both
-// flag.Int with no upper bound. A legitimate response would decode as a
-// suspend. See IMPROVEMENT-PLAN 3.83.
+// Bit 31, and the choice is load-bearing twice over.
 //
-// Bits 16-39 are safe structurally rather than by a bound: the guest decodes a
-// 32-bit callErrorCode from bits 8-39, but packDurableCallResult's parameter is
-// a byte, so those 24 bits cannot be filled by any input. Pinned by
-// TestPackDurableCallResult_SentinelBitsTheHostCannotReach, which asserts both
-// that bits 16-39 are free and that bit 62 is not.
+// It is not bit 62. IMPROVEMENT-PLAN 3.81 specified bit 62 on the grounds that
+// cleat_await_child and cleat_await_any_child already decode it as a suspend.
+// Those pack a 32-bit length at bits 32-63, where bit 62 means 1 GiB. The
+// durable-call layout packs a 24-bit responseLen at bits 40-63, where the same
+// bit means 4 MiB -- and MaxWasmStringLen and OutBufSize are package vars set
+// from -wasm-max-string-len and -wasm-output-buffer-size, both flag.Int with no
+// upper bound. A legitimate response would decode as a suspend. See 3.83.
 //
-// The value is exactly 1<<39 with every other field zero, so a guest that
-// tests it by whole-word equality (Rust's SUSPEND_SENTINEL check) and one that
-// masks (AssemblyScript's) both recognise it. The mask form is correct for a
-// payload-carrying word and is what new decoders should use.
-const callSuspendSentinel int64 = 1 << 39
+// It is not bit 39 either, which is what 3.83 shipped. Bit 39 is free in
+// packDurableCallResult and nowhere else: in packSimpleResult and
+// packAwaitChildResult it sits inside a 32-bit length at bits 32-63, where it
+// means a 128-byte run ID -- an ordinary value. One sentinel has to hold across
+// every layout a stopped guest might be waiting on, so 3.83's bit is correct
+// for cleat_call alone and was replaced rather than widened. See 3.84.
+//
+// Bit 31 is free in all six layouts that can start fresh work, measured by
+// unioning every result each packer can produce and pinned by
+// TestStopSentinelBitsAcrossEveryLayout: the common free window is bits 17-31.
+// packSleepResult is the seventh and shares no free bit with the others, which
+// is why the window is stated over six -- a sleeping guest suspends through its
+// own status byte and never reaches a fresh call
+// (TestASleepingWorkflowNeverReachesAFreshCall).
+//
+// "Free" here means the host cannot produce it, which is what makes it usable
+// as a sentinel. It does not mean every SDK's existing decode ignores it, and
+// those are different claims: in the await-signals layout bits 17-31 fall
+// inside the timed-out field, which the Go SDK reads as
+// `(r>>16)&0xFFFF != 0`, so a decoder that checked its fields before checking
+// the sentinel would read a stop as an ordinary timeout and run on. Every
+// decode site therefore tests the sentinel FIRST, and deferSegmentLanguages
+// fails the segment closed for any SDK not known to do so.
+//
+// The value is exactly 1<<31 with every other field zero, so a guest that tests
+// it by whole-word equality and one that masks both recognise it. The mask form
+// is correct for a payload-carrying word and is what new decoders should use.
+const callSuspendSentinel int64 = 1 << 31
 
 // badParamDurableCall is the bad-parameter result for the host functions whose
 // guest adapter decodes the packDurableCallResult layout: cleat_call,
