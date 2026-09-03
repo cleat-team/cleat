@@ -50,15 +50,21 @@ func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	return schedules, rows.Err()
 }
 
+// DeleteSchedule removes one of this tenant's schedules.
+//
+// The tenant predicate is not belt-and-braces over dbo.fn_tenant_filter, it is
+// the whole of the isolation on the connection this actually runs on. See the
+// note above ClaimDueSchedule.
 func (s *MSSQLStore) DeleteSchedule(ctx context.Context, name string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM workflow_schedules WHERE name = @p1`, name)
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM workflow_schedules WHERE name = @p1 AND tenant_id = @p2`, name, s.tenantID)
 	return err
 }
 
 func (s *MSSQLStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_schedules SET enabled = @p2 WHERE name = @p1
-	`, name, enabled)
+		UPDATE workflow_schedules SET enabled = @p2 WHERE name = @p1 AND tenant_id = @p3
+	`, name, enabled, s.tenantID)
 	return err
 }
 
@@ -77,9 +83,9 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
 		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WITH (READPAST, UPDLOCK, ROWLOCK)
-		WHERE enabled = 1 AND next_run_at <= SYSUTCDATETIME()
+		WHERE enabled = 1 AND next_run_at <= SYSUTCDATETIME() AND tenant_id = @p1
 		ORDER BY next_run_at
-	`)
+	`, s.tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -106,8 +112,9 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 
 func (s *MSSQLStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_schedules SET last_run_at = SYSUTCDATETIME(), next_run_at = @p2 WHERE name = @p1
-	`, name, nextRun)
+		UPDATE workflow_schedules SET last_run_at = SYSUTCDATETIME(), next_run_at = @p2
+		WHERE name = @p1 AND tenant_id = @p3
+	`, name, nextRun, s.tenantID)
 	return err
 }
 
@@ -517,13 +524,33 @@ func scheduleInputJSON(input json.RawMessage) string {
 
 // ClaimDueSchedule advances a schedule's next_run_at, but only if it still
 // holds expectedNextRun. See the interface doc for why this is a CAS.
+//
+// `AND tenant_id` on this and the four statements above it is load-bearing
+// rather than defensive, and the reason is specific to SQL Server.
+// dbo.fn_tenant_filter admits any connection whose login is a member of
+// dbo.cleat_admin, regardless of SESSION_CONTEXT (012_admin_role.sql) -- and a
+// multi-tenant deployment must grant that role, because
+// GetDueSchedulesAcrossTenants and ClaimReadyAcrossTenants require it and
+// without them a non-default tenant's workflows never fire at all. WithTenant
+// copies the store and shares s.db, so on such a deployment every
+// tenant-scoped store is running unfiltered and a name-only predicate reaches
+// every tenant's rows.
+//
+// PostgreSQL does not have this problem because its exemption is a separate
+// role owning a SECURITY DEFINER function; the application role keeps
+// BYPASSRLS off. Here the exemption is in the predicate, which cannot tell
+// which statement is asking, so each statement has to say so itself.
+//
+// Measured in engine/mssql_admin_login_schedule_tenant_test.go: without these
+// predicates one tenant deletes, disables and reschedules another tenant's
+// cron schedules through the ordinary HTTP API.
 func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_schedules
 		SET next_run_at = @p2, last_run_at = SYSUTCDATETIME(),
 		    last_run_id = CASE WHEN @p4 = '' THEN last_run_id ELSE @p4 END
-		WHERE name = @p1 AND next_run_at = @p3
-	`, name, newNextRun, expectedNextRun, runID)
+		WHERE name = @p1 AND next_run_at = @p3 AND tenant_id = @p5
+	`, name, newNextRun, expectedNextRun, runID, s.tenantID)
 	if err != nil {
 		return false, fmt.Errorf("ClaimDueSchedule: %w", err)
 	}
