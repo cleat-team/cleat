@@ -12705,7 +12705,50 @@ consistent and costs nothing.
    Worth noting why §3.84's answer does not transfer: the stop sentinel had to be free in **six**
    layouts because any host call can start fresh work. A retry refusal can only come from
    `cleat_call_retry`, so the constraint that forced a bit there does not apply here.
-2. **Settle the MySQL story in `tiers.yaml`** as a numbered decision, per D1 above.
+2. ~~**Settle the MySQL story in `tiers.yaml`**~~ — ✅ **decided 2026-09-03: option C.** The
+   settings table ships on **all three dialects with one uniform API**, and on MySQL it holds
+   the single tenant's row — the deployment's settings. No MySQL multi-tenancy work, no
+   dialect-specific API.
+
+   Recorded against D1 rather than as a new decision, because D1 already decides this; what
+   was wrong was its *rationale*. "MySQL has no RLS" is true but is not what keeps MySQL
+   single-tenant, and reading it that way suggests MySQL has no isolation mechanism at all.
+   It has one, and structurally it is stronger than RLS: `MySQLStoreFactory` gives each tenant
+   its own **database**, wired unconditionally at `cmd/cleat-worker/main.go:380`.
+
+   **What keeps MySQL single-tenant is that the mechanism is only ever finished for one
+   tenant.** The worker migrates exactly one tenant database at boot —
+   `mf.TenantDB(ctx, defaultTenantID)`, `main.go:613` — so a second tenant gets a database
+   created on first use, with no schema. Measured 2026-09-03 through the factory: database
+   created, **0 tables**, `ListWorkflows` → `Table 'cleat_<uuid>.workflow_instances' doesn't
+   exist`. `cmd/cleat-worker`'s `TestTenantIsolationOverHTTP_MySQL` passes only because it
+   calls `testutil.SetupMySQLFullSchema` on each tenant database itself, and its own comment
+   says so.
+
+   That eliminated the option this step existed to consider — putting the settings table in
+   MySQL's per-tenant database — since nothing migrates those databases.
+
+   **And it turned up a second thing, now fixed rather than recorded.** D1's limitation was
+   enforced by breakage at the point of *use*, not by a check at the point of creation: a
+   second MySQL tenant could be created without complaint and failed later with a
+   missing-table error, far from the cause. `migrations/mysql/038_single_tenant_guard.sql`
+   refuses the insert with a duplicate-key error naming
+   `uq_tenants_mysql_is_single_tenant_only_see_tiers_yaml_d1` — the rule and where the rule
+   is written down.
+
+   A singleton unique key rather than a trigger, and that is a MySQL restriction rather than
+   a preference: a trigger may not read the table it is defined on, so
+   `BEFORE INSERT ... IF (SELECT COUNT(*) FROM tenants) > 0 THEN SIGNAL` is not expressible.
+   A declarative constraint also holds against any client, where a Go check would hold
+   against one — and there is no Go chokepoint to use anyway:
+   `auth.TenantStore.CreateTenant` has **no non-test callers** and its SQL is
+   PostgreSQL-only (`admin.tenants`, `$1`, `RETURNING`).
+
+   Tested as a pair, `migration/mysql_single_tenant_test.go`: MySQL refuses and the error
+   names the key; PostgreSQL still accepts a second tenant, so the guard is MySQL's rule
+   rather than something that broke tenants everywhere. Negative control observed rather
+   than assumed — with the migration unapplied the MySQL half fails with "a second tenant
+   was created on MySQL", the exact pre-fix behaviour.
 3. **The settings store**: migration on three dialects (next free above each dialect's
    high-water mark — re-derive, §3.75's recorded numbers were stale within a day), the store
    read path, and the clamp-to-flag resolution. Tenant-scoped writes need the same RLS treatment

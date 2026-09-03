@@ -406,7 +406,7 @@ test-go/plugins	1	# measured: TestNextRun_Feb29NonLeapYear, a real scheduler gap
 # 6 -> 7: TestMSSQLPayloadConstraintsAcceptJSONScalars (3.18), which applies the
 # real migrations to a scratch database and needs a live SQL Server. Runs for
 # real in multi-db-ci.yml's test-mssql job, which has one.
-test-go/support	11	# was 7; +4 for 3.37's MSSQL-gated admin-role tests in ./migration/
+test-go/support	12	# 2026-09-03: was 11; +1 for TestMySQLRefusesASecondTenant in ./migration/, which skips in this PostgreSQL-only job because CLEAT_TEST_MYSQL is unset. **+1, not +2**: its control, TestPostgresStillAcceptsASecondTenant, uses migration's own postgresDSN helper, which reads CLEAT_TEST_POSTGRES *or* CLEAT_TEST_DB -- and ci.yml's support job sets the latter. Reading only CLEAT_TEST_POSTGRES would have skipped the control here while it passed locally, which is a control that does not run. was 7; +4 for 3.37's MSSQL-gated admin-role tests in ./migration/
 # The four in ./migration/ are all "this job configures PostgreSQL only":
 #
 #   TestIdempotencyTenantMigrationPreservesExistingKeys/{mysql,mssql}
