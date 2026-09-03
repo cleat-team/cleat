@@ -508,11 +508,38 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 
 // SetWorkflowTag assigns a tag to a specific version.
 // Uses MERGE so reassigning a tag updates in place.
+//
+// `AND target.tenant_id` in the ON clause is load-bearing, and this is the
+// quietest of the five statements 3.86 covers on this table. Without it the
+// MERGE MATCHES another tenant's row and updates it: nothing is inserted,
+// nothing errors, and that tenant's "stable" now points at a version they
+// never promoted -- a tag decides which code a run executes, so this changes
+// what somebody else's workflows do.
+//
+// Not visible from a tenant-scoped connection, which is why it survived. There
+// dbo.fn_tenant_filter hides the other tenant's row, the MERGE falls through
+// to WHEN NOT MATCHED, and the INSERT trips the primary key. Loud, and the
+// opposite conclusion. It is only on a dbo.cleat_admin login -- which a
+// multi-tenant deployment must use -- that the filter is off and the match
+// succeeds. See the note above ClaimDueSchedule in mssql_schedules.go.
+//
+// Shaped like DeployWorkflowDef's MERGE on purpose: the tenant is compared to
+// a BOUND PARAMETER (`target.tenant_id = @p4`) rather than to a projected
+// source column. The first version of this wrote
+// `USING (SELECT ... CAST(@p4 AS UNIQUEIDENTIFIER) AS tenant_id) ... ON
+// target.tenant_id = source.tenant_id`, which is equivalent SQL but trips
+// TestMSSQLUUIDColumnsAreConvertedInProjections -- that guard is a textual
+// scan and reads `tenant_id = ... tenant_id` in a join predicate as a
+// projection. It is a false positive (nothing is scanned into Go from an ON
+// clause), and the fix is to match the existing form rather than to weaken a
+// guard that exists because two real bugs got past review.
 func (s *MSSQLStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
 	_, err := s.db.ExecContext(ctx, `
 		MERGE workflow_tags AS target
-		USING (SELECT @p1 AS workflow_name, @p2 AS tag) AS source
-		ON target.workflow_name = source.workflow_name AND target.tag = source.tag
+		USING (VALUES (@p1, @p2)) AS source(workflow_name, tag)
+		ON target.tenant_id = @p4
+		   AND target.workflow_name = source.workflow_name
+		   AND target.tag = source.tag
 		WHEN MATCHED THEN UPDATE SET
 			version = @p3,
 			created_at = SYSUTCDATETIME()
@@ -528,8 +555,8 @@ func (s *MSSQLStore) SetWorkflowTag(ctx context.Context, workflowName string, ve
 // RemoveWorkflowTag deletes a tag assignment.
 func (s *MSSQLStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
 	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2
-	`, workflowName, tag)
+		DELETE FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
+	`, workflowName, tag, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("remove workflow tag: %w", err)
 	}
@@ -540,8 +567,8 @@ func (s *MSSQLStore) RemoveWorkflowTag(ctx context.Context, workflowName string,
 func (s *MSSQLStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	var version int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2
-	`, workflowName, tag).Scan(&version)
+		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
+	`, workflowName, tag, s.tenantID).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("get workflow tag: tag %q not found for workflow %s", tag, workflowName)
 	}
@@ -554,8 +581,8 @@ func (s *MSSQLStore) GetWorkflowTag(ctx context.Context, workflowName string, ta
 // GetWorkflowTags returns all tag -> version mappings for a workflow.
 func (s *MSSQLStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tag, version FROM workflow_tags WHERE workflow_name = @p1
-	`, workflowName)
+		SELECT tag, version FROM workflow_tags WHERE workflow_name = @p1 AND tenant_id = @p2
+	`, workflowName, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("get workflow tags: %w", err)
 	}
@@ -681,8 +708,8 @@ func (s *MSSQLStore) ResolveVersionByTag(ctx context.Context, workflowName strin
 	}
 	var version int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2
-	`, workflowName, tag).Scan(&version)
+		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
+	`, workflowName, tag, s.tenantID).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("resolve version by tag: tag %q not found for workflow %s", tag, workflowName)
 	}

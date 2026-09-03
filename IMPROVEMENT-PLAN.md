@@ -6046,7 +6046,7 @@ non-test Go lines and 164 test lines (`grep -rn workflow_defs --include='*.go'`,
 but most already carry `tenant_id` in their predicates — §3.10, §3.11 and §3.12's writer fix
 went through them. The expensive part is the migration, and the count is a poor proxy for it.
 
-### 3.86 SQL Server's cross-tenant exemption is per-connection, and five schedule statements had no predicate of their own — 🔶 **SCHEDULES FIXED 2026-09-02; the same audit is owed on every other table** (WS-1)
+### 3.86 SQL Server's cross-tenant exemption is per-connection, and the statements that lean on it have no predicate of their own — 🔶 **SCHEDULES AND TAGS FIXED 2026-09-02 (10 statements); the audit is still owed on every other table** (WS-1)
 
 Found while scoping §3.77 step 3 (`workflow_schedules`), and it is not part of that change:
 it is true on today's schema, needs no migration, and is reachable from the ordinary HTTP API.
@@ -6113,11 +6113,59 @@ and with no policy there is no exemption to be tested — a genuine environmenta
 The test asserts `IS_ROLEMEMBER` explicitly rather than assuming, because passing on a filtered
 connection would be a green result measuring nothing.
 
+#### Second table — `workflow_tags`, fixed 2026-09-02
+
+Found by asking the question this entry ends with, of the next table §3.77 was going to touch.
+Five more statements, same defect: `SetWorkflowTag`'s `MERGE`, `RemoveWorkflowTag`,
+`GetWorkflowTag`, `GetWorkflowTags` and `ResolveVersionByTag`, all keyed on
+`workflow_name`/`tag` with no tenant.
+
+**Tags are a worse thing to get wrong than schedules, and it is worth being precise about
+why.** A tag is not data *about* a workflow — it is the pointer that decides **which version
+runs**, because `ResolveVersionByTag` turns `"stable"` into a version number at start time.
+Repointing another tenant's `stable` does not corrupt a row; it changes the code their next run
+executes. That is §3.12's outcome reached through a different table.
+
+Measured on a `cleat_admin` pool with names tenant B does not own:
+
+| statement | what tenant B did to tenant A |
+|---|---|
+| `GetWorkflowTag` | read A's `stable` → v2 |
+| `GetWorkflowTags` | enumerated A's tags without needing to guess one: `map[stable:2]` |
+| `ResolveVersionByTag` | resolved A's `stable` → v2 |
+| `RemoveWorkflowTag` | deleted A's tag; A's own read then says *not found* |
+| `SetWorkflowTag` | **repointed A's `stable` from v2 to v1, silently** |
+
+**The last one could not have been found from a tenant-scoped connection, and would have
+reported the opposite.** There `dbo.fn_tenant_filter` hides A's row, so the `MERGE` falls
+through to `WHEN NOT MATCHED` and the `INSERT` trips the primary key — loud, and looks like
+correct rejection. Only on a `cleat_admin` login is the filter off, the match succeeds, and the
+update lands. Which connection a test runs on decides which answer it gets.
+
+**The `MERGE` is shaped like `DeployWorkflowDef`'s on purpose.** Writing the tenant as a
+projected source column —
+`USING (SELECT ... CAST(@p4 AS UNIQUEIDENTIFIER) AS tenant_id) ... ON target.tenant_id =
+source.tenant_id` — is equivalent SQL but trips
+`TestMSSQLUUIDColumnsAreConvertedInProjections`, whose scan is textual and reads
+`tenant_id = ... tenant_id` in a **join predicate** as a projection. It is a false positive,
+and the fix is to match the existing `ON target.tenant_id = @p4` form rather than to weaken a
+guard that exists because two real bugs got past review. Second time this has been hit; the
+comment on `SetWorkflowTag` now says so at the site.
+
+**A MySQL finding recorded here rather than acted on.** The same probe on MySQL showed
+`SetWorkflowTag` silently overwriting the other tenant's row — B's write succeeds, A's `stable`
+moves to B's version, and **B's own subsequent read returns nothing**, because the row it
+updated carries A's `tenant_id` and B's `SELECT` is scoped. Bounded by D1: MySQL is documented
+single-tenant-only for want of row-level security, so this is not a supported configuration.
+§3.77 step 4 removes it anyway, by putting the tenant in the key that `ON DUPLICATE KEY`
+matches on.
+
 #### What is NOT fixed
 
-Schedules only. The reasoning covers **every SQL Server statement that carries no tenant
-predicate**, and the count is not known — the ones fixed here were found by reading one file
-while scoping something else, which is not a method.
+Schedules and tags. The reasoning covers **every SQL Server statement that carries no tenant
+predicate**, and the count is still not known — both sets were found by reading one file while
+scoping something else, which is not a method. That it found five the first time and five again
+the second is the argument for stopping the file-at-a-time approach, not for continuing it.
 
 The sweep this needs is a property test over the boundary rather than an audit of statements,
 for the reason CLAUDE.md gives and §3.77 step 1 demonstrated: reading SQL tells you which
