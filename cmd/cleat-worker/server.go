@@ -565,7 +565,15 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id string) {
-	st, ok := s.scopedStore(w, r)
+	// callerOwnsTarget, and it must run BEFORE the allowed-signals check below.
+	// That check answers 403, which confirms the workflow exists -- fine for a
+	// caller who owns it, an existence oracle for one who does not.
+	//
+	// Delivering to another tenant's id used to reach the store and fail with a
+	// primary-key violation surfaced as a 500 (3.86): safe, because the MERGE's
+	// ON clause is tenant-scoped, but a 500 distinguishable from the 201 an
+	// unknown id produced. Same 404 for both now.
+	st, ok := s.callerOwnsTarget(w, r, id)
 	if !ok {
 		return
 	}
