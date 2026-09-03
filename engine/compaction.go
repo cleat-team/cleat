@@ -235,8 +235,11 @@ type CompactedEvent struct {
 	// parent terminates (store_lifecycle.go's enforceParentClosePolicy).
 	// Preserved anyway so the reconstructed event is a faithful copy rather
 	// than a replay-sufficient-but-lossy one, and so the general round-trip
-	// property test (TestEventRecordFieldsSurviveCompaction) does not need a
-	// bespoke exemption for a field that is, in fact, cheap to carry through.
+	// property check (FuzzCompactionEquivalence, via eventFieldsMatch and
+	// compactionExemptFields) does not need a bespoke exemption for a field
+	// that is, in fact, cheap to carry through. The same argument is why
+	// engine/store_events.go now carries both keys in the child_workflow
+	// payload arm.
 	ParentWorkflowID  string `json:"pwid,omitempty"`
 	ParentClosePolicy string `json:"pcp,omitempty"`
 
@@ -646,7 +649,7 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			// which service/operation/payload the fire-and-forget call was
 			// for. Found by FuzzCompactionEquivalence within the first second
 			// of real mutation after the round-trip comparator was made
-			// reflection-based (see TestEventRecordFieldsSurviveCompaction).
+			// reflection-based (see eventFieldsMatch).
 			rec.Service = ce.Service
 			rec.Op = ce.Op
 			rec.Request = ce.Request

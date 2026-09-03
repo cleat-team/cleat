@@ -211,9 +211,34 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.RunID != "" {
 			payload["run_id"] = rec.RunID
 		}
+		// Neither is read back on replay -- children.go's replay path consumes
+		// RunID only, and ParentClosePolicy is enforced against live store
+		// state when a parent terminates. Carried anyway, for the reason
+		// compactedEvent gives for carrying the same two: the reconstructed
+		// event should be a faithful copy rather than a replay-sufficient-but-
+		// lossy one, and it costs a line each. It also keeps them out of
+		// payloadExemptFields, which is where a field stops being checked.
+		if rec.ParentWorkflowID != "" {
+			payload["parent_workflow_id"] = rec.ParentWorkflowID
+		}
+		if rec.ParentClosePolicy != "" {
+			payload["parent_close_policy"] = rec.ParentClosePolicy
+		}
 	case "continue_as_new":
 		if rec.NewInput != "" {
 			payload["new_input"] = rec.NewInput
+		}
+		// ContinueAsNewWithVersion reads rec.NewVersion straight off the
+		// replayed event (lifecycle.go) to decide which version to restart as.
+		// Written here by nothing and carried by no column, so a versioned
+		// continue-as-new whose history came back from the database restarted
+		// as version 0 -- "current version" -- and could run the wrong code.
+		// Measured on PostgreSQL and MySQL: 3 in, 0 out.
+		//
+		// Only when set, so every event written before this change produces a
+		// byte-identical payload and its stored checksum still verifies.
+		if rec.NewVersion != 0 {
+			payload["new_version"] = rec.NewVersion
 		}
 	case "plugin_call":
 		if rec.PluginName != "" {
@@ -258,6 +283,18 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 		if rec.StateOp != "" {
 			payload["state_op"] = rec.StateOp
+		}
+		// ListState's replay path writes rec.StateKeys to the guest verbatim
+		// (lifecycle.go). Written here by nothing and carried by no column, so
+		// a ListState replayed from the database handed the guest an empty
+		// result where the fresh run handed it the keys -- and reported success
+		// while doing it, because StateKey and StateOp both survive, so the
+		// divergence guard ahead of it passes. Measured on PostgreSQL and
+		// MySQL: ["user:a","user:b"] in, "" out.
+		//
+		// Only when set, as above.
+		if rec.StateKeys != "" {
+			payload["state_keys"] = rec.StateKeys
 		}
 	case "run_detached":
 		if rec.DetachedName != "" {
@@ -573,9 +610,21 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["run_id"].(string); ok {
 			rec.RunID = v
 		}
+		if v, ok := m["parent_workflow_id"].(string); ok {
+			rec.ParentWorkflowID = v
+		}
+		if v, ok := m["parent_close_policy"].(string); ok {
+			rec.ParentClosePolicy = v
+		}
 	case "continue_as_new":
 		if v, ok := m["new_input"].(string); ok {
 			rec.NewInput = v
+		}
+		// Absent on every continue_as_new written before this change, which
+		// replays as it always did: version 0, meaning current. A float64
+		// because that is what encoding/json produces for a JSON number.
+		if v, ok := m["new_version"].(float64); ok {
+			rec.NewVersion = int(v)
 		}
 	case "plugin_call":
 		if v, ok := m["plugin_name"].(string); ok {
@@ -622,6 +671,11 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["state_op"].(string); ok {
 			rec.StateOp = v
+		}
+		// Absent on every state_mutation written before this change, which
+		// replays as it always did: no keys.
+		if v, ok := m["state_keys"].(string); ok {
+			rec.StateKeys = v
 		}
 	case "run_detached":
 		if v, ok := m["detached_name"].(string); ok {
