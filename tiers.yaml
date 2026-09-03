@@ -168,11 +168,76 @@ tier1:
     - "^TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker$"
     # tier 2 -- java. engine/java_workflow_e2e_test.go; needs a JDK and Gradle.
     - "^TestJavaWorkflowExecute$"
+    # tier 2 -- java. engine/java_defer_segment_e2e_test.go (3.105); needs a JDK and Gradle.
+    #
+    # Both of them: the defer-segment test and its control. The control is the reason the
+    # segment test means anything -- it runs the SAME entry point with no defer phase and
+    # asserts [body second first], which is what separates "the stop is conditional on the
+    # segment" from "this guest stopped working". Excluding one and not the other would
+    # leave a pair whose halves run in different jobs.
+    - "^TestJavaDeferSegmentRunsOnlyTheDefers$"
+    - "^TestJavaOrdinarySegmentRunsTheBody$"
     # tier 2 -- assemblyscript. engine/as_workflow_e2e_test.go and the npx-based
     # transform/vet checks; all need node.
     - "^TestAssemblyScriptWorkflowExecute$"
+    # tier 2 -- assemblyscript. engine/as_defer_segment_e2e_test.go (3.106); needs node.
+    #
+    # No control alongside it, unlike the Java pair above: TestAssemblyScriptWorkflowDefersRun
+    # in engine/as_workflow_e2e_test.go already plays that part and is covered by the
+    # ^TestAssemblyScript prefix the e2e job selects on.
+    - "^TestAssemblyScriptDeferSegmentRunsOnlyTheDefers$"
     - "^TestASTransform$"
     - "^TestVetAS$"
+    #
+    # ------------------------------------------------------------------------
+    # 2026-09-03, IMPROVEMENT-PLAN 3.109. Everything below builds a tier-2
+    # toolchain and was running in this gate anyway.
+    #
+    # The entries above this block are the ones somebody NOTICED. The list read
+    # as though it excluded three tier-2 languages; it excluded `^TestRustWorkflow`
+    # (a prefix, so all five Rust tests) and then exactly one test each for Java
+    # and AssemblyScript. Eleven more built a JDK or ran `npm ci` here.
+    #
+    # tier1-gate.yml says of itself "What this job deliberately does NOT
+    # provide: Rust, Node, a JDK or Gradle." That is true of its own setup
+    # steps and false of the runner: the GitHub image preinstalls node, npm,
+    # java and gradle. So these tests did not skip. They ran, and `npm ci` is
+    # not cheap. Measured, one test per run -- whichever AssemblyScript test
+    # happened to go first, because the cost is paid once per package:
+    #
+    #   #644 merge  TestAssemblyScriptWorkflowDefersRun      7.55s  engine 375.850s  ok
+    #   later       TestAssemblyScriptWorkflowDefersRun    137.27s  engine 501.455s  ok
+    #   #647        TestAssemblyScriptWorkflowDefersRun    263.22s  engine 600.053s  TIMEOUT
+    #   #651        TestAssemblyScriptWorkflowDefersRun    426.84s  engine 600.053s  TIMEOUT
+    #   #652        TestAssemblyScriptDeferSegmentRunsO... 272.87s  engine 600.050s  TIMEOUT
+    #
+    # `fail=0` on all three timeouts: no test failed, the package ran out of
+    # time. Three PRs were blocked in one afternoon by a gate reporting that
+    # tier 1 was broken because a tier-2 toolchain was slow.
+    #
+    # Re-derive the whole list, rather than trusting this one:
+    # engine/tier2_toolchain_tests_placement_test.go walks the engine test
+    # sources for anything that REACHES buildJavaWasm, buildAssemblyScriptWasm
+    # or buildRustWasm -- transitively, because a test can reach a builder
+    # through a helper -- and fails unless each is both excluded here and
+    # selected by e2e-cross-language.yml. Two of the eleven were found only by
+    # that reachability step; a direct-call grep called them toolchain-free.
+    #
+    # Named individually rather than by prefix on purpose. `^TestAssemblyScript`
+    # would also take TestAssemblyScriptImportsAllExist and
+    # TestTheAssemblyScriptSDKAgreesOnTheStopBit, which build nothing and cost
+    # nothing and belong in this gate. Tiering follows what a test NEEDS.
+    - "^TestAssemblyScriptWorkflowDefersRun$"
+    - "^TestAssemblyScriptDefersDoNotRunOnSuspension$"
+    - "^TestAssemblyScriptExportsTheDeferRunner$"
+    - "^TestADeferBodyCannotContinueAsNew$"
+    - "^TestADeferBodyCannotRegisterAnotherDefer$"
+    - "^TestAMissingDeferExportIsNotReportedAsAFailure$"
+    - "^TestTheBackendLogsToTheConfiguredLogger$"
+    - "^TestTheWazeroPathRunsDefersOfATrappedWorkflow$"
+    - "^TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow$"
+    - "^TestJavaExportsTheDeferRunner$"
+    - "^TestTheHostRunsDefersOfAKilledJavaWorkflow$"
     # TestComponentPythonBinary was excluded here, as tier 3 -- component decomposition.
     # Removed 2026-09-01: the path it covered was deleted (IMPROVEMENT-PLAN 3.65), so the
     # test, wasm/component_test.go and wasm/component.go went with it and there is nothing

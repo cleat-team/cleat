@@ -170,6 +170,25 @@ jobs:
       # -short=false overrides any default -short so WASM integration tests
       #   are not skipped; -count=1 bypasses Go's test cache.
       # The -run regex matches only cross-language E2E tests.
+      #
+      # It is longer than it looks like it should be, and the extra alternatives
+      # are not decoration. This job is the ONLY one that installs Rust, Node,
+      # a JDK and Gradle, so a toolchain-building test this regex does not
+      # match runs nowhere at all -- it skips in every other job, silently,
+      # because a skip and a pass print the same thing.
+      #
+      # `TestRust|TestPython|TestAssemblyScript|TestJava` selects by language
+      # PREFIX, and ten tests build a toolchain while being named for what they
+      # do instead. Three of them -- TestARustGuestSuspendsCleanly,
+      # TestARustGuestReachesTheHostRetryLoop and
+      # TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker -- were
+      # already excluded from the tier-1 gate as tier 2, so on 2026-09-03 they
+      # were running in NO job. "TestARust" does not contain "TestRust".
+      #
+      # Do not prune this by hand.
+      # engine/tier2_toolchain_tests_placement_test.go derives the required set
+      # from the source and fails if an alternative is missing (IMPROVEMENT-PLAN
+      # 3.109).
       # ------------------------------------------------------------------
       - name: Run cross-language E2E tests
         shell: bash
@@ -186,7 +205,7 @@ jobs:
           set -o pipefail
           go test -count=1 -short=false -timeout=10m \
             -v \
-            -run "TestRust|TestPython|TestAssemblyScript|TestJava" \
+            -run "TestRust|TestARust|TestPython|TestAssemblyScript|TestJava|TestADeferBody|TestAMissingDeferExport|TestTheBackendLogsToTheConfiguredLogger|TestTheHostRunsDefersOfAKilled|TestTheWazeroPathRunsDefers" \
             ./engine/... 2>&1 | tee e2e-report.txt
 
       # tests/cross-language was in UNWIRED_SUITES: seven tests covering
