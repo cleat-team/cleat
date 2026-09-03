@@ -542,11 +542,22 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 			// does not consult concurrency_keys. See
 			// engine/fence_lost_callers_test.go.
 			//
-			// TerminateWorkflow is the unowned-writer primitive: it matches
-			// on id alone and bumps generation, so it also wins the race
-			// against a worker that claimed the run in the window since
-			// StartNewRun — that worker's own fenced write then returns
-			// ErrFenceLost and it stops.
+			// TerminateWorkflow is the unowned-writer primitive: it does not
+			// fence on assigned_to or generation, and it bumps generation, so
+			// it wins the race against a worker that claimed the run in the
+			// window since StartNewRun — that worker's own fenced write then
+			// returns ErrFenceLost and it stops.
+			//
+			// This used to say "it matches on id alone", and that stopped
+			// being true in 3.86: MySQL and SQL Server now carry an explicit
+			// `AND tenant_id`, and PostgreSQL's runs inside beginTxWithRLS
+			// where the policy narrows it to one tenant. Nothing here breaks
+			// -- runID was created by the StartNewRun above on this same
+			// request-scoped store, so the tenant matches by construction --
+			// but the property the sentence named is gone, and it is the
+			// property a reader would rely on when moving this call. What is
+			// still true is the fencing half, which is what makes it work
+			// here.
 			if err := st.TerminateWorkflow(context.Background(), runID, "concurrency key conflict: "+concurrencyKey); err != nil {
 				// The run is live and will execute despite the 409 below.
 				// Report it rather than letting the client believe the key
