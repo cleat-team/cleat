@@ -16,14 +16,31 @@ Written 2026-08-06 during a GitHub Actions outage. **Supersedes `PARALLEL-WORKST
 
 | | 2026-08 | 2026-09 |
 |---|---|---|
-| WS-1 | 12 | 0 |
-| WS-2 | 8 | 0 |
-| WS-3 | 10 | 11 |
+| WS-1 | 11 | 9 |
+| WS-2 | 8 | 12 |
+| WS-3 | 9 | 21 |
 
-Measured 2026-09-02. One stream has been writing since 2026-09-01, which is what this file asked
-for. **The labels did not stop, though, and that is the source of the confusion this note
-resolves:** work is still stamped `WS-3` because the *ownership map* is still in force, not
-because three streams are running.
+**Re-measured 2026-09-03, and the conclusion this table used to carry is now false.** It read
+`WS-1 12/0`, `WS-2 8/0`, `WS-3 10/11` when measured on 2026-09-02, and the sentence under it said
+*"One stream has been writing since 2026-09-01, which is what this file asked for."* Every cell has
+moved, two of them from zero, and all three streams wrote in September. The file's own
+re-derivation command is what showed it.
+
+So the concurrency claim in this file's title — *one at a time* — **does not describe how this
+project is being worked today**, whatever it recommends. That is a statement about the measurement,
+not an argument for or against the practice; what three concurrent streams cost is recorded in
+§3.100 and in `scripts/skip-budget.txt`'s history, and it is not nothing.
+
+**The August figures moved too, by one each for WS-1 and WS-3, and that is worth not
+hand-waving.** A count of *past* months should be stable. It is not, so either a section's label
+or date was edited after the fact, or a section was removed — §3.95's `restore-workflow` entry was
+rewritten on 2026-09-03 and one command was deleted outright. Whichever it was, it means this
+table is a measurement of the file's current text and not a ledger of what happened, and it should
+be read that way.
+
+**The labels did not stop, and that remains the source of the confusion the note below
+resolves:** work is stamped `WS-1`/`WS-2`/`WS-3` because the *ownership map* is in force. The
+difference from 2026-09-02 is that the stamps now also reflect three streams actually running.
 
 > **What this table cannot tell you, added 2026-09-02 after it nearly caused the opposite
 > error.** It counts *authorship of new plan sections*. That cannot distinguish **"no stream is
@@ -36,6 +53,16 @@ because three streams are running.
 > (§3.12, §3.15, §2.60d, §3.38 for WS-1; the §3.35 phase-5 record shape, §2.35, §1.4 phase F for
 > WS-2), so from here a silent stream means idle, not empty, and this table would read the same
 > either way. Re-derive from the boards, not from this count.
+>
+> **That item list is now historical, checked 2026-09-03.** §3.12 and §3.15 have closed, and
+> §2.60d no longer matches a section heading at all. §3.38 is still open and still
+> `OBSERVED, not reproduced`. The instruction above survives; the examples did not, which is the
+> ordinary way a list of *current* items ages.
+>
+> Worth adding because it is the case this paragraph warns about, live: **WS-1's board was empty
+> again on 2026-09-03**, at the end of a day with twelve merges on it. A reader checking this file
+> for whether that stream is running would get no signal from the count — which is exactly why the
+> instruction is to re-derive from the boards.
 >
 > **How the near-miss happened is the part worth keeping.** Two sessions, hours apart, each read
 > the other's *unmerged* claim and deferred to it — in opposite directions. #563 measured "one
