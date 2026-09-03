@@ -12975,6 +12975,70 @@ grep -n "created_at" engine/store_events.go engine/mysql_events.go engine/mssql_
 `docs/reference/database-backends.md` already require it, and `engine/mysql_ops.go` already scans
 `sql.NullTime` in several places.
 
+### 3.100 A merge's own verification is cancelled by the next merge — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
+
+Six workflows carried
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+```
+
+and all six run on `push` to `develop` as well as on `pull_request`. On a push `github.ref` is
+`refs/heads/develop` for **every** merge, so consecutive merges share one concurrency group and
+each cancels the one before it. CLAUDE.md already names this — *"A merge's own `develop` run can be
+cancelled by the next merge landing seconds later, and `cancelled` is not `success`"* — as
+something to watch for when verifying. It was also true of the repo's own CI, unwatched.
+
+#### Why it matters more than a lost run
+
+**The post-merge run is the only place some guards can work at all.** `check-section-numbers.sh`
+exists to catch collisions that, in its own CI comment's words, *"exist only in the merge"* — two
+PRs each picking the next free number against a develop that has since moved. From a pre-merge base
+it cannot see them by construction. So the run that can catch them is precisely the run being
+cancelled.
+
+Measured on develop, 2026-09-03:
+
+```
+gh run list --branch develop --workflow ci.yml --limit 20
+completed/cancelled  16:50:09  1f79398a
+completed/failure    16:05:39  c2b937d1
+completed/failure    15:55:22  4575be85
+completed/cancelled  15:46:59  9480ee50
+completed/cancelled  12:52:48  b3ea16d4
+```
+
+Three cancelled and two failed in one afternoon. **The two failures are the more interesting
+half**: the mechanism worked, develop went red on the duplicate `3.93`, and nobody — including the
+author of one of the two colliding PRs — looked. So this entry fixes the cancellation and does not
+claim to have fixed the noticing.
+
+Seven section-number collisions and five additive skip-budget resolutions were resolved by hand on
+2026-09-03 alone; every one was created by merging rather than authored against a shared base.
+
+#### The fix
+
+`cancel-in-progress: ${{ github.event_name == 'pull_request' }}` in all six. On a pull request it
+still cancels, which is the setting's real purpose — pushing twice to a branch should not run the
+suite twice. On a push it never does, so each merge's verification completes.
+
+The cost is real and worth stating: develop now runs the full suite once per merge rather than once
+per burst of merges. On a day like 2026-09-03 that is several more full runs. That is the price of
+the post-merge run existing at all.
+
+`scripts/check-workflow-concurrency.sh` keeps it from coming back, and runs in the lint job beside
+the section-number guard it protects. Falsified both ways: restoring `cancel-in-progress: true` in
+one workflow fails it by name, and pointing its glob at nothing makes it `exit 1` rather than
+report a clean scan of nothing.
+
+#### Not fixed here
+
+**Nobody watches develop.** A red post-merge run is now guaranteed to exist, and still nothing
+routes it to a person. Options are a notification, or a job that opens an issue on failure, and
+both are choices about how this project wants to be interrupted rather than a defect to close.
+
 ### 3.98 The database payload carried none of four fields the replay path reads — ✅ **FIXED** (WS-2, 2026-09-03)
 
 An `EventRecord` passes through three carriers, and two of them had something checking that every
