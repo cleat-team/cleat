@@ -211,7 +211,7 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 	_, err := db.Exec(`
 		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
 		VALUES ('versioned-workflow', 1, $1, ARRAY['place_order'])
-		ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = $1
+		ON CONFLICT (tenant_id, name, version) DO UPDATE SET wasm_bytes = $1
 	`, v1WASM)
 	if err != nil {
 		t.Fatalf("Insert workflow_def v1: %v", err)
@@ -220,7 +220,7 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 	_, err = db.Exec(`
 		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points)
 		VALUES ('versioned-workflow', 2, $1, ARRAY['place_order'])
-		ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = $1
+		ON CONFLICT (tenant_id, name, version) DO UPDATE SET wasm_bytes = $1
 	`, v2WASM)
 	if err != nil {
 		t.Fatalf("Insert workflow_def v2: %v", err)

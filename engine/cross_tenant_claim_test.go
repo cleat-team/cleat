@@ -101,14 +101,26 @@ func crossTenantClaimDB(t *testing.T) (adminDB, appDB *sql.DB, teardown func()) 
 // workflow_instances.
 func deployCrossTenantDef(t *testing.T, adminDB *sql.DB) {
 	t.Helper()
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(context.Background(), &WorkflowDef{
-		Name:       xtcDefName,
-		Version:    xtcDefVersion,
-		WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
-		ABIVersion: 1,
-		MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("deploy shared cross-tenant test def: %v", err)
+	// One definition PER TENANT, not one shared definition.
+	//
+	// Until D7 (IMPROVEMENT-PLAN 3.77) workflow_defs was keyed by
+	// (name, version) with no tenant, so a single row satisfied every tenant's
+	// foreign key and this helper deployed once. Under
+	// (tenant_id, name, version) each tenant owns its own row, and a workflow
+	// started by tenant B against tenant A's definition is refused by
+	// workflow_instances_def_fkey -- which is the point of the change, so the
+	// fixture moves rather than the constraint.
+	for _, tenant := range []string{DefaultTenantUUID, xtcTenantA, xtcTenantB} {
+		if err := NewPostgresStore(adminDB).WithTenant(tenant).DeployWorkflowDef(
+			context.Background(), &WorkflowDef{
+				Name:       xtcDefName,
+				Version:    xtcDefVersion,
+				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				ABIVersion: 1,
+				MinVersion: 1,
+			}); err != nil {
+			t.Fatalf("deploy cross-tenant test def for %s: %v", tenant, err)
+		}
 	}
 }
 
@@ -416,7 +428,9 @@ func TestClaimWorkflowsAcrossTenants_ColumnsMatchTheGoScan(t *testing.T) {
 	// A def distinct from xtcDefName, so def_name really is an
 	// end-to-end-unique sentinel and not something another fixture also
 	// happens to write.
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(ctx, &WorkflowDef{
+	// Deployed as wantTenant, because the instance below is that tenant's and
+	// workflow_instances_def_fkey now carries tenant_id (D7 / 3.77).
+	if err := NewPostgresStore(adminDB).WithTenant(wantTenant).DeployWorkflowDef(ctx, &WorkflowDef{
 		Name:       wantDefName,
 		Version:    1,
 		WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},

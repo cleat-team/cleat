@@ -1216,18 +1216,11 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err := st.DeployWorkflowDef(ctx, def); err != nil {
-		// A name another tenant already holds is the caller's situation, not a
-		// server fault: 409, and no mention of who holds it. Everything else
-		// stays a 500. IMPROVEMENT-PLAN 3.12.
-		if errors.Is(err, engine.ErrWorkflowDefOwnedByAnotherTenant) {
-			slog.Warn("deploy refused: workflow definition belongs to another tenant",
-				"name", def.Name, "version", def.Version)
-			s.writeJSON(w, http.StatusConflict, map[string]string{
-				"error": fmt.Sprintf("a workflow definition named %q version %d already exists and is not yours",
-					def.Name, def.Version),
-			})
-			return
-		}
+		// The 409 arm that used to be here is gone with the shared namespace it
+		// existed for: a name another tenant holds is no longer a conflict,
+		// because each tenant has its own (tenant_id, name, version) row and a
+		// deploy simply creates or updates the caller's own. IMPROVEMENT-PLAN
+		// 3.77 / D7.
 		slog.Error("deploy workflow def failed", "error", err)
 		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deploy: " + err.Error()})
 		return

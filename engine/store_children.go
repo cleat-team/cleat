@@ -23,7 +23,7 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES (gen_random_uuid(), $1,
-		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated) END,
+		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated AND tenant_id = $6) END,
 		        'ready', $2, $3,
 		        COALESCE(NULLIF($5, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
@@ -58,8 +58,8 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 	// Debug: check what MAX(version) resolves to.
 	var resolvedVersion int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE((SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated), -1)`,
-		defName).Scan(&resolvedVersion); err != nil {
+		`SELECT COALESCE((SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated AND tenant_id = $2), -1)`,
+		defName, s.tenantID).Scan(&resolvedVersion); err != nil {
 		resolvedVersion = -2
 	}
 	s.log().DebugContext(ctx, "StartChildWorkflowAtomic",
@@ -69,7 +69,7 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES ($1, $2,
-		        CASE WHEN $5 > 0 THEN $5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $2 AND NOT deprecated) END,
+		        CASE WHEN $5 > 0 THEN $5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $2 AND NOT deprecated AND tenant_id = $7) END,
 		        'ready', $3, $4,
 		        COALESCE(NULLIF($6, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'),

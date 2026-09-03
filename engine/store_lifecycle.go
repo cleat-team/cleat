@@ -208,7 +208,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $4), 'default'),
 			$4, $5, now() - INTERVAL '1 millisecond')
 		RETURNING id
 		`, defName, defVersion, newInput, s.tenantID, priority).Scan(&newRunID)
@@ -705,7 +705,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
 			VALUES ($1, $2, $3, 'ready', $4,
-			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
+			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
 			$5, $6, now() - INTERVAL '1 millisecond')
 		`, runID, defName, defVersion, input, tenantID, priority)
 		if err != nil {
@@ -726,7 +726,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
 		VALUES ($1, $2, $3, 'ready', $4,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
 			$5, $6, now() - INTERVAL '1 millisecond')
 	`, runID, defName, defVersion, input, tenantID, priority)
 	if err != nil {

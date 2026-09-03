@@ -127,7 +127,7 @@ func deploySpin(t *testing.T, db *sql.DB) {
 			(name, version, wasm_bytes, entry_points, min_version,
 			 max_history_length, dag_spec, task_queue, abi_version, plugin_deps)
 		VALUES ('spin', 1, $1, ARRAY['spin'], 1, 10000, '{}'::jsonb, $2, 1, '{}'::jsonb)
-		ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes`,
+		ON CONFLICT (tenant_id, name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes`,
 		wasm, taskQueue)
 	if err != nil {
 		t.Fatalf("deploying the spin definition: %v", err)

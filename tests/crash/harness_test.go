@@ -467,16 +467,30 @@ func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
 	}
 
 	// tenant_id must be set explicitly. workflow_defs' RLS policy is
-	// `tenant_id = assert_tenant_set() OR tenant_id = <default>`, and NULL
-	// satisfies neither, so a definition inserted without one is invisible to
-	// the worker's cleat_app connection. The symptom is not a permission error
-	// -- it is "wasm not found: crashcall v1", which reads like a build problem.
+	// `tenant_id = assert_tenant_set()`, and NULL does not satisfy it, so a
+	// definition inserted without one is invisible to the worker's cleat_app
+	// connection. The symptom is not a permission error -- it is "wasm not
+	// found: crashcall v1", which reads like a build problem.
+	//
+	// The policy used to carry `OR tenant_id = <default>` as well; D7 removed
+	// that clause along with the adoption window it served (IMPROVEMENT-PLAN
+	// 3.77), so the tenant here matters more than it did, not less.
+	//
+	// ON CONFLICT names the full primary key, which is (tenant_id, name,
+	// version) since D7. This fixture writes the INSERT by hand rather than
+	// calling DeployWorkflowDef, so it does not get the store's version of
+	// this statement for free -- and a hand-written copy of a production
+	// statement is the same shape as the ReadDir-and-Exec migration loop this
+	// file's header describes replacing. It is left hand-written because the
+	// fixture deliberately sets columns DeployWorkflowDef does not expose
+	// (entry_points, task_queue, dag_spec), but it is worth knowing that this
+	// is the second copy and it broke when the first one changed.
 	if _, err := db.Exec(`
 		INSERT INTO workflow_defs
 			(name, version, wasm_bytes, entry_points, min_version,
 			 max_history_length, dag_spec, task_queue, abi_version, plugin_deps, tenant_id)
 		VALUES ('crashcall', 1, $1, ARRAY['three_charges'], 1, 10000, '{}'::jsonb, $2, 1, '{}'::jsonb, $3)
-		ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes,
+		ON CONFLICT (tenant_id, name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes,
 			task_queue = EXCLUDED.task_queue, tenant_id = EXCLUDED.tenant_id`,
 		wasm, taskQueue, defaultTenant); err != nil {
 		t.Fatalf("deploying the crashcall definition: %v", err)

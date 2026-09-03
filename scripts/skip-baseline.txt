@@ -11,7 +11,7 @@ cmd/cleat	runVetCmd	1
 cmd/cleat-bench	TestHelperProcess	1
 cmd/cleat-gen-plugin	TestHelperProcess	1
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
-cmd/cleat-worker	TestDeployOverAnotherTenantsNameIsRefusedOverHTTP	1
+cmd/cleat-worker	TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1

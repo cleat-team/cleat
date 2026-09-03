@@ -573,9 +573,9 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
 			VALUES (?, ?, ?, 'ready', ?,
-			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
+			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
 			        ?, ?)
-		`, runID, defName, defVersion, input, defName, defVersion, tenantID, priority)
+		`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -593,9 +593,9 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
 		VALUES (?, ?, ?, 'ready', ?,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
 		        ?, ?)
-	`, runID, defName, defVersion, input, defName, defVersion, tenantID, priority)
+	`, runID, defName, defVersion, input, defName, defVersion, tenantID, tenantID, priority)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -628,9 +628,9 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
 		VALUES (?, ?, ?, 'ready', ?,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?), 'default'),
 		        ?, ?)
-	`, newRunID, defName, defVersion, newInput, defName, defVersion, s.tenantID, priority)
+	`, newRunID, defName, defVersion, newInput, defName, defVersion, s.tenantID, s.tenantID, priority)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}

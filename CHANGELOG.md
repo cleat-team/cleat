@@ -12,6 +12,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **Workflow definition names are now per-tenant.** `workflow_defs`' primary key
+  becomes `(tenant_id, name, version)`, and the three foreign keys that reference
+  it — from `workflow_instances`, `workflow_tags` and `workflow_routing` — carry
+  `tenant_id` too. Migrations `postgres/035`, `mysql/034`, `mssql/038`.
+
+  Two tenants can now each hold their own `order-processor`. Previously the name
+  was a shared namespace: the second tenant to deploy one was refused, and before
+  that (pre-0.2.0) it silently overwrote the first.
+
+  **Consequences.** A deploy no longer returns `409` for a name another tenant
+  holds — there is no conflict to report. `ErrWorkflowDefOwnedByAnotherTenant` is
+  removed, along with the default-tenant adoption window that let a definition
+  deployed before per-tenant ownership stay reachable by every tenant; on
+  PostgreSQL that also removes `OR tenant_id = '00000000-...'` from
+  `tenant_isolation_defs`, bringing it into line with SQL Server, which never had
+  it. A workflow started for a tenant that has not deployed the definition it
+  names is refused by the foreign key.
+
+  **MySQL only:** `workflow_defs.tenant_id` was nullable with no default, unlike
+  the other two dialects. `mysql/034` backfills `NULL`s to the default tenant and
+  makes the column `NOT NULL DEFAULT`, as a primary-key column must be.
+
+  See IMPROVEMENT-PLAN §3.77 and D7 in `tiers.yaml`.
+
 - **Cross-schema child workflows are removed.** The `cleat_child_workflow_in_schema`
   host call, the `cleat:host-calls/durable-extended-children` component interface,
   the `--peer-schemas` worker flag and the corresponding surface in the Go, Rust,

@@ -174,7 +174,7 @@ func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, priority, tenant_id)
 		VALUES (@p1, @p2,
-		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0) END,
+		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0 AND tenant_id = @p8) END,
 		        'ready', @p3, @p4,
 		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),
 		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'), @p7, @p8)
@@ -200,7 +200,7 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, priority, tenant_id)
 		VALUES (@p1, @p2,
-		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0) END,
+		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0 AND tenant_id = @p8) END,
 		        'ready', @p3, @p4,
 		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),
 		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'), @p7, @p8)

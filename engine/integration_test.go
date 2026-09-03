@@ -734,6 +734,13 @@ func TestRLSTenantIsolation(t *testing.T) {
 	if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 		t.Fatalf("DeployWorkflowDef: %v", err)
 	}
+	// B needs its own definition of the same name: since D7 the FK on
+	// workflow_instances carries tenant_id (IMPROVEMENT-PLAN 3.77). That two
+	// tenants can hold one name at all is the change; before it, this second
+	// deploy would have been refused.
+	if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+		t.Fatalf("DeployWorkflowDef(B): %v", err)
+	}
 
 	runIDA := fmt.Sprintf("rls-test-a-%d", time.Now().UnixNano())
 	runIDB := fmt.Sprintf("rls-test-b-%d", time.Now().UnixNano())

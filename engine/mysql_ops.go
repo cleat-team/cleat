@@ -726,21 +726,8 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	}
 	defer tx.Rollback()
 
-	var owner sql.NullString
-	err = tx.QueryRowContext(ctx,
-		`SELECT tenant_id FROM workflow_defs WHERE name = ? AND version = ? FOR UPDATE`,
-		def.Name, def.Version).Scan(&owner)
-	switch {
-	case err == nil:
-		if !canAdoptDef(owner.String, s.tenantID) {
-			return defOwnershipError(def.Name, def.Version)
-		}
-	case errors.Is(err, sql.ErrNoRows):
-		// Does not exist yet; the insert below creates it.
-	default:
-		return fmt.Errorf("DeployWorkflowDef: read owner: %w", err)
-	}
-
+	// No ownership check: under (tenant_id, name, version) another tenant's
+	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -749,8 +736,7 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			abi_version = VALUES(abi_version),
 			min_version = VALUES(min_version),
 			plugin_deps = VALUES(plugin_deps),
-			deprecated = VALUES(deprecated),
-			tenant_id = VALUES(tenant_id)
+			deprecated = VALUES(deprecated)
 	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: %w", err)

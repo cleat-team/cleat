@@ -10,12 +10,17 @@ package engine
 // information leak, it is code replacement: tenant B decides what tenant A's
 // workflows execute, by picking a name.
 //
-// This file asserts the bounded property (3.12): a deploy must never replace a
-// definition owned by another tenant. It deliberately does NOT assert that two
-// tenants can each hold their own "order-processor" -- that needs the primary
-// key to carry the tenant, and with it three foreign keys per dialect and an
-// audit of ~96 query sites. The name is still a global namespace afterwards;
-// what changes is that squatting it is loud rather than silent.
+// 3.12 asserted the bounded property: a deploy must never replace a definition
+// owned by another tenant. It deliberately did NOT assert that two tenants can
+// each hold their own "order-processor", because that needed the tenant in the
+// primary key.
+//
+// D7 put it there (3.77), so this file now asserts the thing 3.12 could not:
+// two tenants each hold their own definition of one name, and neither can see
+// or disturb the other's. That is strictly stronger. The old shape -- B's
+// deploy is REFUSED -- was the best available answer under a shared namespace;
+// under a per-tenant one, refusing would be wrong, because B is not colliding
+// with anything.
 
 import (
 	"bytes"
@@ -60,10 +65,13 @@ func readDefTenantID(t *testing.T, backend StoreBackend, name string, version in
 	return owner
 }
 
-// TestDeployDoesNotOverwriteAnotherTenantsDefinition is the property: after
-// tenant B deploys a definition whose name tenant A already owns, A's bytes
-// must still be A's.
-func TestDeployDoesNotOverwriteAnotherTenantsDefinition(t *testing.T) {
+// TestTwoTenantsEachHoldTheirOwnDefinitionOfOneName is the D7 property: both
+// tenants deploy "order-processor", both succeed, and each reads back its own.
+//
+// It replaces TestDeployDoesNotOverwriteAnotherTenantsDefinition, whose
+// assertion that B's deploy fails is now the wrong expectation rather than a
+// weaker one -- see the file header.
+func TestTwoTenantsEachHoldTheirOwnDefinitionOfOneName(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
@@ -95,15 +103,13 @@ func TestDeployDoesNotOverwriteAnotherTenantsDefinition(t *testing.T) {
 				t.Fatalf("tenant A's own first deploy failed: %v", err)
 			}
 
-			// B's deploy of a name it does not own must not succeed silently.
-			// Refusing is the fix; succeeding is the defect. Either way, what
-			// the next assertion checks is A's bytes.
-			errB := storeB.DeployWorkflowDef(ctx, &WorkflowDef{
+			// B deploys the same name. Under (tenant_id, name, version) this is
+			// not a collision at all: it creates B's own row.
+			if err := storeB.DeployWorkflowDef(ctx, &WorkflowDef{
 				Name: defName, Version: 1, WASMBytes: bBytes,
 				ABIVersion: 1, MinVersion: 1,
-			})
-			if errB == nil {
-				t.Errorf("tenant B deployed over tenant A's definition %q and was told it succeeded", defName)
+			}); err != nil {
+				t.Fatalf("tenant B could not deploy %q, a name tenant A also uses: %v", defName, err)
 			}
 
 			gotA, err := storeA.GetWorkflowDef(ctx, defName, 1)
@@ -117,6 +123,20 @@ func TestDeployDoesNotOverwriteAnotherTenantsDefinition(t *testing.T) {
 				t.Errorf("tenant A's definition %q now carries %#v, not A's %#v -- "+
 					"tenant B replaced the code A's workflows execute",
 					defName, gotA.WASMBytes, aBytes)
+			}
+
+			// And the other direction, which is what makes this stronger than
+			// the 3.12 property it replaces: B has its OWN definition, not a
+			// view of A's and not nothing.
+			gotB, err := storeB.GetWorkflowDef(ctx, defName, 1)
+			if err != nil {
+				t.Fatalf("GetWorkflowDef(B): %v", err)
+			}
+			if gotB == nil {
+				t.Fatalf("tenant B's own definition %q is missing after it deployed", defName)
+			}
+			if !bytes.Equal(gotB.WASMBytes, bBytes) {
+				t.Errorf("tenant B reads %#v for %q, want its own %#v", gotB.WASMBytes, defName, bBytes)
 			}
 
 			// A must still be able to deploy over its own definition: this is

@@ -98,13 +98,9 @@ func TestConcurrencyKeysRLS_LayerSeparation(t *testing.T) {
 
 	// Fixtures: one workflow per tenant (concurrency_keys.workflow_id has an
 	// FK to workflow_instances(id)), and one concurrency key per tenant.
-	adminStore := NewPostgresStore(adminDB)
 	const defName = "rls-gap-ck-def"
-	if err := adminStore.DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// Once per tenant since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenantA, tenantB)
 	wfA := fmt.Sprintf("rls-gap-ck-a-%d", time.Now().UnixNano())
 	wfB := fmt.Sprintf("rls-gap-ck-b-%d", time.Now().UnixNano())
 	for tenant, wf := range map[string]string{tenantA: wfA, tenantB: wfB} {
@@ -203,13 +199,9 @@ func TestWorkflowUpdateRequestsRLS_LayerSeparation(t *testing.T) {
 	const tenantA = "d0000000-0000-4000-8000-00000000000a"
 	const tenantB = "d0000000-0000-4000-8000-00000000000b"
 
-	adminStore := NewPostgresStore(adminDB)
 	const defName = "rls-gap-ur-def"
-	if err := adminStore.DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// Once per tenant since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenantA, tenantB)
 	wfA := fmt.Sprintf("rls-gap-ur-a-%d", time.Now().UnixNano())
 	wfB := fmt.Sprintf("rls-gap-ur-b-%d", time.Now().UnixNano())
 	storeA := NewPostgresStore(adminDB).WithTenant(tenantA)

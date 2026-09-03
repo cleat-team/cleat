@@ -205,56 +205,23 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	// IMPROVEMENT-PLAN 3.12.
 	tenantID := s.tenantID
 
-	// Take the existing row's ownership under lock before writing over it.
-	//
-	// On PostgreSQL this SELECT runs inside the RLS transaction, so a
-	// definition owned by another tenant is not visible here at all and the
-	// INSERT below hits the primary key instead -- which is why the unique
-	// violation is mapped to the ownership error rather than surfaced as
-	// `duplicate key value violates unique constraint`, a message that says
-	// nothing about what actually went wrong.
-	var owner sql.NullString
-	err = tx.QueryRowContext(ctx,
-		`SELECT tenant_id::text FROM workflow_defs WHERE name = $1 AND version = $2 FOR UPDATE`,
-		def.Name, def.Version).Scan(&owner)
-	switch {
-	case err == nil:
-		if !canAdoptDef(owner.String, tenantID) {
-			return defOwnershipError(def.Name, def.Version)
-		}
-	case errors.Is(err, sql.ErrNoRows):
-		// No row visible: either it does not exist, or RLS is hiding another
-		// tenant's. The INSERT distinguishes them.
-	default:
-		return fmt.Errorf("deploy workflow def: read owner: %w", err)
-	}
-
-	// The guard is repeated in SQL rather than trusted to the read above: a
-	// concurrent deploy of a name that did not exist a moment ago cannot be
-	// excluded by a row lock on a row that was not there.
-	res, err := tx.ExecContext(ctx, `
+	// No ownership check: under (tenant_id, name, version) another tenant's
+	// definition of the same name is a different row, so there is nothing to
+	// adjudicate. The ON CONFLICT below can now only fire for this tenant's own
+	// redeploy of the same version, which is an ordinary upsert.
+	// IMPROVEMENT-PLAN 3.77.
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (name, version) DO UPDATE SET
+		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 			wasm_bytes = EXCLUDED.wasm_bytes,
 			abi_version = EXCLUDED.abi_version,
 			min_version = EXCLUDED.min_version,
 			plugin_deps = EXCLUDED.plugin_deps,
-			deprecated = EXCLUDED.deprecated,
-			tenant_id = EXCLUDED.tenant_id
-		WHERE workflow_defs.tenant_id = EXCLUDED.tenant_id
-		   OR workflow_defs.tenant_id = $9
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, tenantID, DefaultTenantUUID)
+			deprecated = EXCLUDED.deprecated
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, tenantID)
 	if err != nil {
-		if isPostgresUniqueViolation(err) {
-			return defOwnershipError(def.Name, def.Version)
-		}
 		return fmt.Errorf("deploy workflow def: %w", err)
-	}
-	// DO UPDATE ... WHERE that matches nothing reports zero rows, and that is
-	// the refusal: the row exists, is visible, and belongs to someone else.
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return defOwnershipError(def.Name, def.Version)
 	}
 	return tx.Commit()
 }
@@ -450,8 +417,8 @@ func (s *PostgresStore) ResolveLatestVersion(ctx context.Context, defName string
 	var version int
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(version), 0) FROM workflow_defs
-		WHERE name = $1 AND NOT deprecated
-	`, defName).Scan(&version)
+		WHERE name = $1 AND NOT deprecated AND tenant_id = $2
+	`, defName, s.tenantID).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("resolve latest version: %w", err)
 	}
