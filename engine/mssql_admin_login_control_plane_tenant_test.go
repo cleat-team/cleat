@@ -57,8 +57,9 @@ package engine
 // The DeliverSignal one is the one to read twice. Its MERGE already named
 // tenant_id -- in the INSERT column list, which scopes the row the call
 // CREATES and says nothing about the row it MATCHES -- so
-// scripts/mssql-tenant-predicate-audit.py counted it as already predicated and
-// it is not in the 34 that script reported. A substring check cannot see the
+// the substring audit script counted it as already predicated and it is not in
+// the 34 that script reported. (That script has since been replaced by
+// engine/mssql_tenant_predicate_test.go, which asks where the column appears.) A substring check cannot see the
 // difference between a filter and a projection; the gate 3.86 describes needs
 // to ask WHERE the column appears.
 

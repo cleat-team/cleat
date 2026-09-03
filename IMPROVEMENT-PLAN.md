@@ -6102,7 +6102,7 @@ non-test Go lines and 164 test lines (`grep -rn workflow_defs --include='*.go'`,
 but most already carry `tenant_id` in their predicates — §3.10, §3.11 and §3.12's writer fix
 went through them. The expensive part is the migration, and the count is a poor proxy for it.
 
-### 3.86 SQL Server's cross-tenant exemption is per-connection, and the statements that lean on it have no predicate of their own — 🔶 **29 STATEMENTS FIXED across schedules, tags, definitions and the control plane; 29 remain, every one of them scoped by its caller, and the gate is the next step** (WS-1, 2026-09-03)
+### 3.86 SQL Server's cross-tenant exemption is per-connection, and the statements that lean on it have no predicate of their own — 🟢 **31 STATEMENTS FIXED across schedules, tags, definitions, the control plane and the claim path (§3.91); the gate is in place and the remaining 27 are an allowlist with reasons, not a backlog** (WS-1, 2026-09-03)
 
 Found while scoping §3.77 step 3 (`workflow_schedules`), and it is not part of that change:
 it is true on today's schema, needs no migration, and is reachable from the ordinary HTTP API.
@@ -6273,12 +6273,15 @@ whether the text carries `tenant_id`, tables derived from the `ADD FILTER PREDIC
 Thirteen SQL literals, not twelve, because `ListWorkflowDefs` carries two -- the named branch
 and the empty-name one. **I wrote 60/35 into this table from arithmetic and the re-derivation
 said 61/34**; the command below is why that error lasted a paragraph instead of shipping.
-Re-derive (2026-09-03) with `scripts/mssql-tenant-predicate-audit.py`, which derives the table
-list from the `ADD FILTER PREDICATE` bindings in `migrations/mssql/*.sql` rather than
-hardcoding it:
+These three columns were produced by `scripts/mssql-tenant-predicate-audit.py`, which asked
+whether `tenant_id` appeared **anywhere** in the statement. **That script has been deleted** and
+`engine/mssql_tenant_predicate_test.go` replaced it, because the substring question gave a wrong
+answer twice — see §3.91 and the `DeliverSignal` MERGE below. The numbers above are kept as the
+history they are; they are not re-derivable, and the basis changed rather than the tree. What is
+re-derivable is the current state, and it is a list in the tree rather than a count:
 
 ```
-python3 scripts/mssql-tenant-predicate-audit.py
+go test ./engine/ -run TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
 ```
 
 
@@ -6361,21 +6364,32 @@ change to an HTTP contract and belongs in its own PR.
 
 **Three tables, five statements, five statements, twelve statements — all found by reading one
 file while scoping something else.** That is not a method, and the fourth file would not be
-either. The next step is the guard that produced the table above: derive the tenant-scoped
-tables from the migrations, scan the store's SQL literals, and fail at authoring time on any
-statement that touches one without a tenant predicate or an allowlist entry giving a reason.
-`TestMSSQLUUIDColumnsAreConvertedInProjections` is exactly this shape already and is the
-precedent to copy. **Not written yet** — recorded here so the estimate is a number rather than
-"unknown".
+either. **The guard is now written**: `engine/mssql_tenant_predicate_test.go`, shaped after
+`TestMSSQLUUIDColumnsAreConvertedInProjections`. It derives the tenant-scoped tables from the
+`ADD FILTER PREDICATE` bindings in the migrations, scans the store's SQL literals, and fails at
+authoring time on any statement touching one without a tenant predicate or an allowlist entry
+giving a reason. No SQL Server required, so it runs in every job.
+
+It asks **where** the column appears — in a `WHERE`, `ON` or `HAVING`, or, for an `INSERT`
+(which has no rows to leak), in the column list it writes. That is the difference that matters:
+its substring-matching ancestor passed the `DeliverSignal` MERGE and both claim statements
+(§3.91), and has been deleted rather than left to give a second opinion.
+
+Falsified six ways, each red for its own reason: a real predicate removed, the MERGE `ON`
+unscoped, §3.91's claim predicate removed, an allowlist entry deleted, a stale allowlist entry
+added, and the migration parse broken (which `Fatal`s rather than passing vacuously).
 
 #### What is NOT fixed
 
-The guard that would stop this recurring, and the 29 statements that remain. Those 29 are now a
+The 27 statements that remain. The guard that would stop this recurring **is done** — see
+above. Those 27 are now a
 **characterised** population rather than a leftover: every one is plumbing whose id the engine
 read back from a row it had already scoped, running on a store `storeFor` scoped to the
 instance's own tenant. Adding predicates there would be a no-op in every working path — 29
 regression tests proving something the caller already guarantees — so they are deliberately not
-swept. Re-derive the count with `scripts/mssql-tenant-predicate-audit.py` (29 as of 2026-09-03).
+swept. They are no longer a count to re-derive: since 2026-09-03 they are the 27 entries of
+`tenantPredicateAllowlist` in `engine/mssql_tenant_predicate_test.go`, each carrying the reason
+that is actually true of it, and the gate fails if one is added, removed or left stale.
 
 **The allowlist the gate needs must say "scoped by construction", not "guessing is hard".** The
 two are different claims and only the first is true of what remains; recording the weaker one
@@ -12079,6 +12093,83 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
+### 3.92 §3.86 scoped the terminate and left the cascade — 🔴 **OPEN, MEASURED 2026-09-03; found while writing the gate's allowlist** (WS-1, 2026-09-03)
+
+#### First and second: the close-policy cascade
+
+`terminateWorkflowOnce` calls `enforceParentClosePolicy(ctx, workflowID)` **unconditionally after
+its commit**, and does not look at how many rows the terminate touched. §3.86 added
+`AND tenant_id` to the terminate itself, so a cross-tenant terminate now matches no parent — and
+then cascades into that parent's **children** anyway, because both of the close-policy statements
+key on `parent_workflow_id = @p1` with no tenant, as does `childrenClosedByTerminate`.
+
+So after §3.86 the parent is protected and its children are not:
+
+```sql
+UPDATE workflow_instances SET status = 'failed', error_msg = 'parent workflow terminated'
+    WHERE parent_workflow_id = @p1 AND parent_close_policy = 'TERMINATE' AND ...
+UPDATE workflow_instances SET cancellation_requested = 1
+    WHERE parent_workflow_id = @p1 AND parent_close_policy = 'REQUEST_CANCEL' AND ...
+```
+
+**How it was found is the point.** It was about to be written into
+`engine/mssql_tenant_predicate_test.go`'s allowlist as `scopedByCaller` — "the id came from a row
+already read under a predicate" — and that reason is false: the id is the one the HTTP caller
+supplied, and nothing between the two checks whether it belonged to anyone. The scan did not find
+this; **writing down why the exemption was safe** did. Both entries are marked `openFinding` and
+point here, so the gate stays green without granting anything.
+
+The fix is a tenant predicate on all three statements. Children inherit the parent's tenant
+(`StartChildWorkflow` and `StartChildWorkflowAtomic` both insert `tenant_id = s.tenantID`), and
+`enforceParentClosePolicy` runs on the store that owns the parent, so scoping them changes nothing
+in the working path. Not done here: this entry exists so the gate could land without a false
+reason in it, and the fix wants its own change and its own falsification.
+
+#### Measured 2026-09-03, on a `cleat_admin` pool
+
+Tenant A holds parent `casc-parent-a` with one `TERMINATE` child. Tenant B, which owns neither,
+calls the ordinary `TerminateWorkflow` on A's parent:
+
+```
+childrenClosedByTerminate(B on A's parent) -> [006f8661-1023-485d-913b-50a9cb1ca153]
+AFTER: tenant A's child status="failed" error_msg="parent workflow terminated"
+```
+
+**The resulting state is incoherent, which makes it worse than a plain unauthorised write.**
+Tenant A's parent is untouched and still running — §3.86 did that correctly — while its child is
+failed with `parent workflow terminated`. The error message names a cause that did not happen,
+and A's own audit trail contains nothing that explains it.
+
+#### A third statement was flagged and is NOT a defect, which is the point of demanding reasons
+
+The guard also flagged `engine/store_admin.go:482` —
+`SELECT event_type, operation FROM event_history WHERE workflow_id = @p1 AND step = @p2`, no
+tenant — and the first draft of this entry recorded it as a third leak. **It is not one.** Every
+caller of `adminAppendAudit` (`adminForceResolve` and the three re-replay paths) reaches it only
+after a tenant-scoped `UPDATE` reported `RowsAffected > 0`, so a foreign workflow id has already
+been refused with `adminNotFound`. Its allowlist reason is `scopedByCaller` and that reason is
+true.
+
+Worth keeping because it is the counterexample to this entry's own method: **writing down why an
+exemption is safe finds defects, and it also clears statements that only look like defects.** The
+same discipline produced both results within an hour.
+
+Note also what `adminForceResolve` does that `terminateWorkflowOnce` does not: it checks
+`RowsAffected` and bails before reaching the cascade. That is the deeper fix available here —
+`TerminateWorkflow` cascading for a workflow it did not terminate is the actual bug, and a
+predicate on the cascade statements is the symptom-level version of it. The deeper fix changes
+what the HTTP layer returns for an unknown id (today: 200), so it wants its own change.
+
+#### How the third was found at all
+
+The first version of the gate globbed `engine/mssql*.go`. Four files outside it carry `@pN`
+parameters — `store_admin.go`, `store_intent.go`, `store_admin_rereplay.go`,
+`plugin/migration.go` — and the guard reported a clean tree for all four without opening them.
+`TestMSSQLUUIDColumnsAreConvertedInProjections` had already learned this and stopped globbing; the
+gate now uses its walk. **A guard defined by where it looks rather than by what it looks for is a
+confident green over the files it does not open** — the same failure as CLAUDE.md's
+`^\S+\s+pending` parse, in a different costume. Widening added exactly one flag and no noise.
+
 ### 3.91 The ordinary claim path took every tenant's work on SQL Server — 🟢 **FIXED 2026-09-03; the `-claim-across-tenants` flag was decorative on this dialect** (WS-1, 2026-09-03)
 
 `claimWorkflowsOnce` and `claimStickyWorkflowsOnce` — the **ordinary** claim, not the one whose
@@ -12113,14 +12204,17 @@ dialect with no enforcement at any layer, and the fix is to match MySQL.
 
 #### Why four passes missed it, and what that says about the gate
 
-`scripts/mssql-tenant-predicate-audit.py` asks whether `tenant_id` appears anywhere in the
-statement, and for this one it does — twice. The claim projects
+`scripts/mssql-tenant-predicate-audit.py` asked whether `tenant_id` appeared anywhere in the
+statement, and for this one it did — twice. The claim projects
 `CONVERT(NVARCHAR(36), INSERTED.tenant_id)` in its `OUTPUT` clause, and carries a long comment
 about that conversion. Neither scopes anything. **The script's count did not move when this was
-fixed**: 66/29 before, 66/29 after, re-derivable with
+fixed**: 66/29 before, 66/29 after.
+
+That script has since been **deleted** in favour of `engine/mssql_tenant_predicate_test.go`,
+which asks where the column appears and flags this statement. Re-derive with
 
 ```
-python3 scripts/mssql-tenant-predicate-audit.py
+go test ./engine/ -run TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
 ```
 
 That is the argument for §3.86's gate being **position-aware** rather than a substring test,

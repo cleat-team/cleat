@@ -4,8 +4,9 @@ package engine
 // "AcrossTenants" -- claimed every tenant's ready work on SQL Server.
 //
 // This is 3.86's mechanism reaching the statement that matters most, and it was
-// missed by three hand audits and by scripts/mssql-tenant-predicate-audit.py,
-// which looks for `tenant_id` anywhere in the statement and finds it: the claim
+// missed by three hand audits and by the substring audit script that
+// mssql_tenant_predicate_test.go has since replaced: it looked for `tenant_id`
+// anywhere in the statement and found it, because the claim
 // projects CONVERT(NVARCHAR(36), INSERTED.tenant_id) in its OUTPUT clause, and
 // carries a long comment about that conversion. Neither scopes anything. A
 // position-aware check -- does the column appear in a WHERE, an ON or a HAVING
