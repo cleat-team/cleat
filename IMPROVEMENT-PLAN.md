@@ -12137,6 +12137,84 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
+### 3.93 `cleatctl restore-workflow` names a backup command that does not exist, and assigns every restored row to the default tenant — 🔴 **OPEN, found 2026-09-03** (WS-1, 2026-09-03)
+
+Found while investigating something else — whether any writer puts a NULL in MySQL's nullable
+`tenant_id` columns. None does; the answer to that question is in the last section here. Looking
+for one turned this up instead.
+
+#### 1. The producer does not exist
+
+`cmd/cleatctl/restore.go` names `cleatctl backup-workflow` twice as the tool that produces its
+input — once in the doc comment, once in the user-facing help text `printRestoreUsage` prints.
+**There is no such command.** `cleatctl`'s dispatch (`cmd/cleatctl/main.go`) has nine commands and
+none of them is a backup. Re-derive:
+
+```
+grep -rn 'case "backup' --include="*.go" .        # no output
+grep -rn "backup-workflow" --include="*.go" .     # only restore.go's own prose
+```
+
+**This is the same defect `tiers.yaml` already records against `scheduledbackup`** (line ~522):
+*"claimed … 'manual backup/restore via HTTP API and CLI commands'. Neither was true: there is no
+restore implementation anywhere in the package … An operator configuring this to satisfy an
+off-host backup requirement found out only at restore time."* Here it is the mirror image — the
+restore ships and the backup is the missing half — which suggests the pattern to check for is
+"one end of a round trip documented in terms of the other", not "backup specifically".
+
+`restore-workflow` itself is real: it is dispatched at `main.go:82`, listed in the help at
+`main.go:114`, and has tests (`cmd/cleatctl/restore_test.go`). The NDJSON format is documented, and
+the help says "or compatible tools", so an operator can hand-produce the file. That is the only way
+to use it.
+
+#### 2. Every restored row lands under the default tenant
+
+None of the four inserters names `tenant_id`: `insertWorkflowInstance`, `insertEventHistory`,
+`insertWorkflowSignal`, `insertWorkflowPromise`. On PostgreSQL — the only dialect this command
+supports, per its own comment at `restore.go:191` and its `$1`/`ON CONFLICT` syntax —
+`event_history.tenant_id` is `NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000'`. Measured
+2026-09-03:
+
+```sql
+CREATE TEMP TABLE probe (LIKE event_history INCLUDING DEFAULTS);
+INSERT INTO probe (workflow_id, step, event_type) VALUES ('probe-wf', 0, 'x');
+-- event_history omitting tenant_id -> 00000000-0000-0000-0000-000000000000
+```
+
+So restoring a **non-default** tenant's workflow silently writes it under the default tenant. The
+command reports success and the owning tenant still cannot see the workflow.
+
+**This is NOT a cross-tenant security defect, and the distinction matters.** `restore-workflow` is
+DBA-only by design — `droptenant.go:31` groups it with `check-db` and `versions purge` as
+operations that authenticate with a PostgreSQL DSN rather than a tenant API key. Whoever can run
+it can already read every tenant's rows directly. Nothing is disclosed that the caller did not
+already have. It is a data-integrity bug: a restore that reports success and did not restore
+anything the owner can see.
+
+#### 3. `def_version` is omitted too, and since D7 that is now load-bearing
+
+`insertWorkflowInstance` writes `(id, def_name, status, input, result, error, created_at)` — no
+`def_version`. Since D7 (§3.77, migration `postgres/035`) `workflow_instances`' foreign key is
+`(tenant_id, def_name, def_version)`, so a restored row either binds to the **default tenant's**
+definition of that name — a different program after D7 — or trips the FK. This was harmless while
+`workflow_defs` was a global registry keyed by `(name, version)`; D7 is what made it matter, the
+same way it made §3.86's `LoadWASM` reachable.
+
+#### What to do about it — not decided
+
+Three separable questions, and they do not have to be answered together:
+
+- **Should the missing `backup-workflow` be written, or should restore stop naming it?** The
+  cheaper honest fix is to stop claiming a producer that does not exist; the useful one is to
+  write it. `tiers.yaml`'s rule applies either way: do not claim support the manifest does not
+  grant.
+- **Should restore carry the tenant?** Either take a `--tenant` flag, or read `tenant_id` from the
+  NDJSON row (which requires the backup side to export it — see the first question), or refuse
+  outright when the target is not the default tenant.
+- **Should it write `def_version`?** Independent of tenancy and cheap.
+
+Not started. Recorded here so the finding is a written thing rather than a note in a session.
+
 ### 3.92 §3.86 scoped the terminate and left the cascade — 🟢 **FIXED 2026-09-03; found by the gate's allowlist demanding a reason, not by its scan** (WS-1, 2026-09-03)
 
 #### First and second: the close-policy cascade

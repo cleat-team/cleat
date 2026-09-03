@@ -33,8 +33,14 @@ import (
 //     reference the given workflow ID.
 //   - ON CONFLICT DO NOTHING is used, so restoring a workflow that already
 //     exists is safe (no-op).
-//   - The backup must be in NDJSON format produced by cleatctl backup-workflow
-//     or a compatible tool.
+//   - The backup must be in NDJSON format. THERE IS NO COMMAND IN THIS REPO
+//     THAT PRODUCES IT: this comment and the help text both used to name
+//     "cleatctl backup-workflow", and no such command exists -- cleatctl's
+//     dispatch in main.go has nine and none is a backup. Producing the file is
+//     currently the operator's problem. IMPROVEMENT-PLAN 3.93, which also
+//     records that tiers.yaml already carries this same defect against
+//     scheduledbackup, in the mirror image: there, the backup was claimed and
+//     the restore was missing.
 //   - Tenants, schedules, and workflow_defs are NOT restored by this command.
 func runRestoreWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
 	if len(args) < 2 {
@@ -317,8 +323,11 @@ func printRestoreUsage() {
 Restore a single workflow instance from an NDJSON backup file.
 
 The backup file should be in newline-delimited JSON format where each line
-contains a JSON object with "table" and "row" fields. This format is produced
-by cleatctl backup-workflow or compatible tools.
+contains a JSON object with "table" and "row" fields.
+
+NOTE: no command in cleat produces this file. You must generate it yourself.
+An earlier version of this help named "cleatctl backup-workflow"; that command
+does not exist.
 
 Supported tables:
   workflow_instances    (1 row per workflow, required)
@@ -334,6 +343,10 @@ Limitations:
   - ON CONFLICT DO NOTHING is used throughout, so re-running restore on an
     already-restored workflow is safe (it becomes a no-op).
   - Workflow_defs and schedules are NOT restored by this command.
+  - Restored rows are assigned to the DEFAULT TENANT, whichever tenant the
+    workflow belonged to, because these inserts do not carry tenant_id.
+    Restoring a non-default tenant's workflow will appear to succeed and that
+    tenant will still not see it. IMPROVEMENT-PLAN 3.93.
   - The backup file format is NDJSON; ensure the file is well-formed.
 
 Environment:
