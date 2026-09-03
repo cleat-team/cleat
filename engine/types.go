@@ -203,6 +203,22 @@ type EventRecord struct {
 	// Stream chunk fields.
 	StreamChunkIndex int  `json:"stream_chunk_index,omitempty"`
 	StreamFinish     bool `json:"stream_finish,omitempty"`
+	// StreamErrCode is the call error code the guest was told when this chunk
+	// records a stream-level failure -- what recordStreamError packed into the
+	// durable-call result, not a classification derived again later.
+	//
+	// The code rather than the cause, deliberately. replayPluginCallStreaming
+	// has to hand the guest the same code the fresh run did, and reading back
+	// what was reported is the only version of that which cannot drift: a
+	// stored cause would still need a cause-to-code mapping on the replay
+	// side, and changing that mapping would silently change the retryability
+	// of steps already recorded.
+	//
+	// Zero means "not recorded", which is also callErrorUnknown -- and that is
+	// the right reading for every stream chunk written before IMPROVEMENT-PLAN
+	// 2.35's plugin half, because callErrorUnknown is exactly what those
+	// failures reported when they were fresh.
+	StreamErrCode int `json:"stream_err_code,omitempty"`
 
 	// Update handler fields.
 	UpdateHandlerName string `json:"update_handler_name,omitempty"`

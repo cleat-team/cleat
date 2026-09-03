@@ -54,7 +54,7 @@ func TestAStreamErrorIsStillAnErrorAfterItsHistoryIsReloaded(t *testing.T) {
 	// invented for the test. If recordStreamError stops setting StreamFinish
 	// this test should stop claiming to cover it.
 	probe := newTestExecSession()
-	probe.recordStreamError("test-plugin", "Echo", `{}`, "plugin_call_streaming: boom")
+	probe.recordStreamError("test-plugin", "Echo", `{}`, "plugin_call_streaming: boom", callFailureCode)
 	if len(probe.history) != 1 {
 		t.Fatalf("recordStreamError recorded %d events, want 1", len(probe.history))
 	}

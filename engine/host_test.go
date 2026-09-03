@@ -3359,9 +3359,19 @@ func TestPluginCallStreamingFresh_FuncNotFound(t *testing.T) {
 
 	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
 
-	errCode := uint32(result & 0xFFFFFFFF)
+	// decodeCallResultGuest, not a 32-bit mask. The mask that used to be here
+	// spanned bits 0-31, which is the 8-bit errCode AND the low 24 bits of the
+	// 32-bit call error code -- so it read 1 only while the classification
+	// happened to be 0. IMPROVEMENT-PLAN 2.35's plugin half made this site
+	// report callFailureCode and the mask started returning 513, which looks
+	// like a broken result rather than a test reading the wrong field.
+	_, callErr, errCode := decodeCallResultGuest(result)
 	if errCode != 1 {
 		t.Errorf("expected errCode=1 (not found), got %d", errCode)
+	}
+	if callErr != uint32(callFailureCode) {
+		t.Errorf("expected call error %d (callFailureCode, matching PluginCall for the "+
+			"same condition), got %d", callFailureCode, callErr)
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -3382,9 +3392,19 @@ func TestPluginCallStreamingFresh_FuncError(t *testing.T) {
 
 	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
 
-	errCode := uint32(result & 0xFFFFFFFF)
+	// decodeCallResultGuest, not a 32-bit mask. The mask that used to be here
+	// spanned bits 0-31, which is the 8-bit errCode AND the low 24 bits of the
+	// 32-bit call error code -- so it read 1 only while the classification
+	// happened to be 0. IMPROVEMENT-PLAN 2.35's plugin half made this site
+	// report callFailureCode and the mask started returning 513, which looks
+	// like a broken result rather than a test reading the wrong field.
+	_, callErr, errCode := decodeCallResultGuest(result)
 	if errCode != 1 {
 		t.Errorf("expected errCode=1 (func error), got %d", errCode)
+	}
+	if callErr != uint32(callFailureCode) {
+		t.Errorf("expected call error %d (callFailureCode, matching PluginCall for the "+
+			"same condition), got %d", callFailureCode, callErr)
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -3629,9 +3649,19 @@ func TestPluginCallStreamingFresh_CallGuardRejection(t *testing.T) {
 
 	result := s.PluginCallStreaming(context.Background(), nil, "secure-plugin", "GetSecrets", `{}`, 0, 0)
 
-	errCode := uint32(result & 0xFFFFFFFF)
+	// decodeCallResultGuest, not a 32-bit mask. The mask that used to be here
+	// spanned bits 0-31, which is the 8-bit errCode AND the low 24 bits of the
+	// 32-bit call error code -- so it read 1 only while the classification
+	// happened to be 0. IMPROVEMENT-PLAN 2.35's plugin half made this site
+	// report callFailureCode and the mask started returning 513, which looks
+	// like a broken result rather than a test reading the wrong field.
+	_, callErr, errCode := decodeCallResultGuest(result)
 	if errCode != 1 {
 		t.Errorf("expected errCode=1 (call guard rejection), got %d", errCode)
+	}
+	if callErr != uint32(callFailureCode) {
+		t.Errorf("expected call error %d (callFailureCode, matching PluginCall for the "+
+			"same condition), got %d", callFailureCode, callErr)
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry (error event), got %d", len(s.history))

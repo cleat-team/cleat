@@ -381,8 +381,13 @@ func (s *execSession) PluginCallStreaming(ctx context.Context, m api.Module,
 // recordStreamError records a synthetic stream chunk event representing a
 // stream-level error (e.g. registry not found, call guard rejection). This
 // ensures replayPluginCallStreaming can reproduce the same error result.
-
-func (s *execSession) recordStreamError(pluginName, functionName, inputJSON, errMsg string) {
+//
+// code is the call error code the guest is about to be told, stored so replay
+// can report the same one instead of deriving it a second time. Prefer
+// streamFailure below, which records and returns together; this stays
+// separate only because the tests that check what gets recorded call it
+// directly.
+func (s *execSession) recordStreamError(pluginName, functionName, inputJSON, errMsg string, code byte) {
 	rec := EventRecord{
 		Step:             s.stepCount,
 		EventType:        EventTypePluginCallStreamChunk,
@@ -392,8 +397,28 @@ func (s *execSession) recordStreamError(pluginName, functionName, inputJSON, err
 		PluginOutput:     errMsg,
 		StreamChunkIndex: 0,
 		StreamFinish:     true,
+		StreamErrCode:    int(code),
 	}
 	s.recordEvent(rec)
+}
+
+// streamFailure records a stream-level failure and returns the packed result
+// the guest sees, deriving both from one `code` argument.
+//
+// One function for both halves on purpose. The failure this prevents is the
+// one recordedFailureCode's comment describes for the non-streaming path: a
+// fresh run and the replay of it classifying the same step differently. Four
+// call sites each writing a record and then packing a constant is four chances
+// for those to drift apart, and the drift would not show up as a broken test
+// -- it would show up as a workflow that retried on the first run and gave up
+// on the replay.
+func (s *execSession) streamFailure(ctx context.Context, m api.Module,
+	pluginName, functionName, inputJSON, errMsg string, code byte,
+	responsePtr, responseMaxLen uint32) int64 {
+
+	s.recordStreamError(pluginName, functionName, inputJSON, errMsg, code)
+	written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
+	return packDurableCallResult(int(written), code, 1)
 }
 
 func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module,
@@ -403,26 +428,34 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	// Look up the streaming plugin function.
 	if s.engine.pluginStreamRegistry == nil {
 		errMsg := "plugin_call_streaming: no plugin stream registry configured"
-		s.recordStreamError(pluginName, functionName, inputJSON, errMsg)
-		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-		return packDurableCallResult(int(written), callErrorUnknown, 1)
+		// callErrorUnknown, matching the non-streaming path's own answer for
+		// the same condition (freshPluginCallInternal): a worker with no
+		// registry is not a service that might succeed next time.
+		return s.streamFailure(ctx, m, pluginName, functionName, inputJSON, errMsg,
+			callErrorUnknown, responsePtr, responseMaxLen)
 	}
 
 	fn, ok := s.engine.pluginStreamRegistry.Lookup(pluginName, functionName)
 	if !ok {
 		errMsg := fmt.Sprintf("plugin stream function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
-		s.recordStreamError(pluginName, functionName, inputJSON, errMsg)
-		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-		return packDurableCallResult(int(written), callErrorUnknown, 1)
+		// callFailureCode, which is what freshPluginCallInternal reports for an
+		// unregistered function: the lookup failure becomes fnErr there and
+		// fnErr packs callFailureCode. This site used to report
+		// callErrorUnknown, so the same deployment gap was retryable to a
+		// workflow calling the plugin and non-retryable to one streaming from
+		// it. IMPROVEMENT-PLAN 2.35.
+		return s.streamFailure(ctx, m, pluginName, functionName, inputJSON, errMsg,
+			callFailureCode, responsePtr, responseMaxLen)
 	}
 
 	// Check plugin call guard for streaming calls too.
 	if s.engine.pluginCallGuard != nil && s.callerPluginName != "" {
 		if err := s.engine.pluginCallGuard.Check(s.callerPluginName, pluginName); err != nil {
 			errMsg := err.Error()
-			s.recordStreamError(pluginName, functionName, inputJSON, errMsg)
-			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-			return packDurableCallResult(int(written), callErrorUnknown, 1)
+			// callFailureCode, as above: the guard rejection becomes fnErr on
+			// the non-streaming path and packs callFailureCode there.
+			return s.streamFailure(ctx, m, pluginName, functionName, inputJSON, errMsg,
+				callFailureCode, responsePtr, responseMaxLen)
 		}
 	}
 
@@ -444,9 +477,12 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	chunkCh, err := fn(callCtx, inputJSON)
 	if err != nil {
 		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: %v", pluginName, functionName, err)
-		s.recordStreamError(pluginName, functionName, inputJSON, errMsg)
-		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
-		return packDurableCallResult(int(written), callErrorUnknown, 1)
+		// The stream function itself failed. This is the direct analogue of a
+		// non-streaming plugin call returning an error, which packs
+		// callFailureCode -- so the identical failure was retryable through
+		// PluginCall and non-retryable through PluginCallStreaming.
+		return s.streamFailure(ctx, m, pluginName, functionName, inputJSON, errMsg,
+			callFailureCode, responsePtr, responseMaxLen)
 	}
 
 	var collected []plugin.StreamEvent
@@ -503,6 +539,10 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 
 	var collected []plugin.StreamEvent
 	index := 0
+	// The code recorded alongside the chunk, used only in the single-finished-
+	// chunk case below where there is exactly one record and so no ambiguity
+	// about which one it came from.
+	var recordedErrCode byte
 
 	// Read consecutive stream chunk events from history.
 	for s.stepCount < len(s.history) {
@@ -513,6 +553,7 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 		if !s.advanceReplayStep(ctx, &rec) {
 			return 0
 		}
+		recordedErrCode = byte(rec.StreamErrCode)
 
 		chunk := plugin.StreamEvent{
 			Index:   rec.StreamChunkIndex,
@@ -532,16 +573,22 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 	// error recorded by recordStreamError. Return it with error status to
 	// match what freshPluginCallStreaming produced on the error path.
 	//
-	// The whole streaming family reports callErrorUnknown -- non-retryable --
-	// rather than the callFailureCode the non-streaming path uses, and it has
-	// to: every stream failure, whether a missing registry, a blocked guard or
-	// the function itself erroring, is recorded by recordStreamError and comes
-	// back through this one site, which cannot tell them apart. One replay
-	// site means one code. Splitting them needs the class persisted
-	// (IMPROVEMENT-PLAN 2.35).
+	// The code comes off the record rather than from a constant here, which is
+	// what lets fresh and replay agree while the fresh classification changes
+	// underneath them. This site used to report callErrorUnknown for all four
+	// causes, because none of them was distinguishable once they arrived as
+	// one synthetic chunk -- and three of the four should have matched the
+	// non-streaming path's callFailureCode. IMPROVEMENT-PLAN 2.35.
+	//
+	// StreamErrCode is absent on every chunk written before that change and so
+	// reads back as 0 == callErrorUnknown, which is exactly what those
+	// failures reported when they were fresh: an event recorded then still
+	// replays the way it always did, and only events recorded from now on
+	// carry the corrected code. That is the property 2.35 asks for --
+	// determinism is per recorded step, not across eras.
 	if len(collected) == 1 && collected[0].Finish {
 		written, _ := s.writeResult(ctx, m, responsePtr, collected[0].Content, responseMaxLen)
-		return packDurableCallResult(int(written), callErrorUnknown, 1)
+		return packDurableCallResult(int(written), recordedErrCode, 1)
 	}
 
 	// Return collected chunks as JSON.

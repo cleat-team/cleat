@@ -368,6 +368,13 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.StreamFinish {
 			payload["stream_finish"] = true
 		}
+		// The code the guest was told. Only when set, so every chunk written
+		// before IMPROVEMENT-PLAN 2.35's plugin half keeps its exact payload
+		// and its stored checksum -- and decodes to 0, which is
+		// callErrorUnknown, which is what those failures actually reported.
+		if rec.StreamErrCode != 0 {
+			payload["stream_err_code"] = rec.StreamErrCode
+		}
 	case "scope_acquired":
 		if rec.ScopeKey != "" {
 			payload["scope_key"] = rec.ScopeKey
@@ -725,6 +732,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["stream_finish"].(bool); ok {
 			rec.StreamFinish = v
+		}
+		if v, ok := m["stream_err_code"].(float64); ok {
+			rec.StreamErrCode = int(v)
 		}
 	case "scope_acquired":
 		if v, ok := m["scope_key"].(string); ok {
