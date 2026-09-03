@@ -12326,9 +12326,38 @@ stopped". It also has to cover two sequential invocations, the root module and e
 
 #### Verification, and what it could not cover
 
-The gate cannot run on this machine: it fails its own preconditions first, wanting `CLEAT_CRASH_DB`
-and `componentize-py` and `wasm-tools`. So the plumbing was proven directly instead, with the same
-quoting the script uses:
+**The gate CAN run on this machine, and the first version of this entry said it could not.** It
+fails its preconditions when run on the host — `componentize-py` cannot run natively on macOS at
+all — but `scripts/docker/python-toolchain.Dockerfile` exists for exactly that reason and is
+`FROM golang:1.26-bookworm`, so it carries Go and both tools. Run 2026-09-03:
+
+```
+docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+  -e CLEAT_TEST_POSTGRES='postgres://postgres:postgres@host.docker.internal:5432/cleat?sslmode=disable' \
+  -e CLEAT_TEST_DB=...  -e CLEAT_TEST_MYSQL=...  -e CLEAT_TEST_MSSQL=... \
+  -e CLEAT_CRASH_DB='postgres://cleat:cleat@host.docker.internal:5433/cleat?sslmode=disable' \
+  cleat-py-toolchain bash scripts/tier-gate.sh
+```
+
+`ran=7435 pass=7218 fail=203 skip=14`. It runs.
+
+**One dialect does not survive the hop, and it is worth writing down.** All 203 failures are the
+`mssql` arm, every one `ping MSSQL test DB: EOF`. SQL Server lives in a *colima* context on this
+machine while the toolchain image runs under Docker Desktop, so the path is container → Docker
+Desktop VM → host → colima VM, and the TDS pre-login handshake does not survive it. Neither
+`host.docker.internal` nor the host's LAN address helps, and `encrypt=disable` does not either.
+PostgreSQL and MySQL are reachable and pass. Running SQL Server under Docker Desktop too would
+close the gap; that is an environment change rather than a repo one.
+
+**A port probe said the port was OPEN and that meant nothing.** `(exec 3<>/dev/tcp/host/1433)`
+succeeds against a listener that accepts and then closes — which is precisely what `EOF` is. The
+probe and the failure are the same event read two ways.
+
+**And this run does not verify the fix in this entry.** The engine package finished in `361.962s`,
+comfortably inside the old 10-minute default, because the `mssql` arm failed fast instead of
+running. Zero timeout panics is consistent with the fix working and equally consistent with the
+fix being unnecessary at that speed. What actually proves the plumbing is the direct check below,
+with the same quoting the script uses:
 
 ```
 $ GO_TEST_TIMEOUT=1ms  go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" ./auth/
