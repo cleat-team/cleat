@@ -11474,3 +11474,85 @@ Rust, Python, Java or AssemblyScript guest fails closed rather than silently run
 Their `SUSPEND_SENTINEL` is `1 << 62`, which is the *await-child* sentinel and a different
 mechanism; none of them decodes the stop. Each language's decode and its entry in that map belong
 in one change, with a test that crosses the two halves (§3.73).
+
+### 3.86 The Rust SDK cannot suspend: `catch_unwind` never catches, and the host has been masking the trap — 🔴 **OPEN** (WS-3, 2026-09-02)
+
+`crates/cleat-sdk` suspends by `std::panic::panic_any(SuspendSentinel)`, and `#[cleat_entry]`
+wraps the workflow body in `std::panic::catch_unwind` to intercept it and return
+`memory::SUSPEND_SENTINEL` to the host. `crates/cleat-sdk/README.md` describes exactly that:
+"catch_unwind so `SuspendSentinel` panics are safely intercepted".
+
+**`wasm32-wasip1` builds with `panic=abort`.** There is no unwinding on that target, so
+`catch_unwind` cannot catch anything: the panic aborts, which in WASM is the `unreachable`
+instruction, which is a trap. Every Rust suspension is a trapped guest.
+
+Ask the compiler rather than believing this paragraph:
+
+```
+rustc --print cfg --target wasm32-wasip1 | grep panic     # panic="abort"
+```
+
+#### Why it has never looked broken
+
+The paths that suspend also set `session.suspendErr` on the **host** side — `cleat_sleep`,
+`cleat_await_child` and `cleat_await_signals` all record their own suspension before returning to
+the guest. `engine/executor.go` then deliberately lets a suspension win over the error that
+accompanied it:
+
+```go
+if callErr != nil && session.suspendErr == nil {   // <- the trap is discarded here
+```
+
+So the trap is thrown away and the run is reported as a clean suspension. The guest died; the
+workflow suspended; nothing anywhere says so. That is the same "a signal that is accurate but
+attached to the wrong question" shape as §3.85's `res == nil`, one layer up — and it is why
+§3.85's guard matters beyond the event cap it was found through.
+
+The mask holds only where the host sets `suspendErr` itself. §3.84's stop sentinel does not: the
+host refuses the call and leaves the guest to unwind on its own. **That is how this was found** —
+adding the Rust decode for §3.84 turned an invisible trap into a visible one.
+
+#### Measured
+
+`engine/rust_suspend_test.go`, against a real `wasm32-wasip1` release build on wasmtime, with two
+new entry points in `examples/rust-workflow` that exist only for it:
+
+| test | entry point | result |
+|---|---|---|
+| `TestARustGuestCannotSuspendByPanicking` | `suspend_probe` — raises the SDK's suspend panic with no host call in the way | **traps**, `wasm trap: unreachable` |
+| `TestThePanicTrapIsMaskedWhereverTheHostSetsSuspendErr` | `sleep_probe` — the same panic, reached through `cleat_sleep` | **clean suspension**, `err == nil` |
+
+The pair is the point; either alone is misleading. The first without the second reads as a bug in
+one probe. The second without the first reads as a working SDK.
+
+`TestTheRustTargetCompilesWithPanicAbort` pins the mechanism by asking `rustc`, so the day the
+target gains unwinding the assertion fails and points here.
+
+The masking test needs `WithWorkflowStartTime` and `WithClock` pinned, and that is worth
+recording rather than just doing. `seedNowMs` falls back to the package-level `nowMs` atomic when
+there is no history and no start time, and other tests in `engine` move it; with a small seed the
+sleep's deadline is already past, `DurableSleep` returns "completed" rather than suspending, and
+the test fails **only when run alongside them**. It passed in isolation and failed in the full
+suite, which is the reading this whole section is about, one level up.
+
+#### What this blocks, and what it does not
+
+It blocks **"rust" joining `deferSegmentLanguages`**, which is the §3.84 follow-up this was
+started as. The gate is fail-closed, so a Rust guest is refused a defer segment today rather than
+silently running its body — the correct behaviour, arrived at for a different reason than the one
+recorded in §3.83.
+
+It does not obviously block ordinary Rust workflows *today*, because the mask is load-bearing and
+works. What it costs is unquantified and should not be guessed at here: a trapped guest's linear
+memory is abandoned rather than unwound, so anything a Rust workflow expects `Drop` to do between
+a suspension and the next segment does not happen. Measure that before claiming either way.
+
+#### The fix is a redesign, not a decode
+
+The SDK needs a suspension path that does not unwind: a thread-local "suspended" flag set by the
+host-call wrappers, checked by `#[cleat_entry]` after the body returns, with every intermediate
+call site returning early. That is a change to the shape of every `HostCalls` method, and it
+should be measured against the Python, Java and AssemblyScript SDKs first — **AssemblyScript and
+Python may have the same defect for the same reason**, and if so this is one mechanism rather
+than four fixes (CLAUDE.md, "ask whether the answer is a sweep or a mechanism"). Nothing here has
+measured them.
