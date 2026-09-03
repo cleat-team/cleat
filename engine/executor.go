@@ -130,6 +130,16 @@ func (e *Engine) executeWithBackend(
 		execRunID:    e.workflowID,
 		tenantID:     e.tenantID,
 		stepCallback: e.stepCallback,
+		// originalInput and eventCount were set only in executeCompiled, the
+		// wazero path that CLI tooling uses. This is the backend path -- the
+		// one a worker runs -- and without them the event cap did two wrong
+		// things there and only there. eventCount restarted at 0 each segment,
+		// so a cap meant to bound a whole workflow bounded one segment of it
+		// and a workflow that suspends often never reached it. originalInput
+		// was "", so the ContinueAsNew the cap records carried empty input and
+		// the continued run started with none.
+		originalInput: string(input),
+		eventCount:    e.initialEventCount,
 	}
 
 	execCtx, stepCancel := context.WithCancel(ctx)
@@ -293,7 +303,14 @@ func (e *Engine) executeWithBackend(
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
 	}
 
-	if res.Suspended || session.suspendErr != nil {
+	// res may be nil here. Every error return in the wasmtime backend is
+	// `return nil, err`, and this line is reached with callErr != nil whenever
+	// session.suspendErr is also set -- the check above deliberately lets a
+	// suspension win over the error that accompanied it. `res.Suspended` then
+	// dereferences nil, in no recover, killing the worker process rather than
+	// failing the workflow. The event cap was one way in (see freshCall); this
+	// guard closes the shape rather than that one caller.
+	if (res != nil && res.Suspended) || session.suspendErr != nil {
 		se := session.suspendErr
 		if se == nil {
 			se = &SuspendError{Reason: "workflow suspended"}
@@ -319,7 +336,13 @@ func (e *Engine) executeWithBackend(
 			if e.state != nil {
 				priority = e.state.Priority()
 			}
-			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, res.Result, session.queryState, priority)
+			// Same nil res as above: a suspension can arrive alongside a
+			// backend error, and there is no result to carry when it does.
+			result := ""
+			if res != nil {
+				result = res.Result
+			}
+			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 			if cnErr != nil {
 				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 			}

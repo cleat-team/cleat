@@ -104,6 +104,18 @@ func GuestCallErrorCodes() []GuestCallErrorCode {
 // non-retryable: repeating it is the one thing a cancelled workflow must not do.
 const cancelledCallError = "workflow cancelled"
 
+// eventCapCallError is the message a durable call reports when the workflow has
+// reached --max-quota-events and the engine has decided to continue it as new.
+//
+// Like cancelledCallError this is a refusal, not a failure: the call was never
+// dispatched, so no side effect happened and there is nothing to retry. The
+// guest sees an error, unwinds through its entry-point wrapper -- draining its
+// defers on the way, as it does for an explicit ContinueAsNew -- and the
+// executor reports the continue_as_new suspension that freshCall recorded
+// before refusing. The run that starts next carries a reset event count and
+// makes this call for real.
+const eventCapCallError = "event cap reached; workflow continuing as new"
+
 // recordedFailureCode maps a recorded call failure to the code the guest sees.
 //
 // Both the fresh path and the replay path must go through this function. A

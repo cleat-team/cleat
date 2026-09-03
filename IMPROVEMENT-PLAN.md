@@ -11109,3 +11109,90 @@ decode site.
 The test has to exercise a path that is **not** `cleat_call`, or it re-measures §3.83. A child
 workflow is the clearest: `testdata/deferfunc` would need an entry point that starts one, and the
 assertion is that no child instance row is created while the defers still run.
+
+### 3.85 `--max-quota-events` killed the worker process, and the cap never counted the workflow — ✅ **FIXED** (WS-3, 2026-09-02)
+
+`cleat-worker --max-quota-events N` is meant to bound a runaway workflow: at N events the engine
+records a `ContinueAsNew` and the workflow restarts as a fresh run with a reset count. Measured
+2026-09-02 on wasmtime with a Go SDK guest, it did something else — it segfaulted the worker
+**process**, and it did so on a workflow that stays in the queue, so the next worker to claim it
+died too.
+
+Re-derive the crash on the tree before this fix:
+
+```
+git stash && go test ./engine/ -run TestTheEventCapContinuesAsNewInsteadOfKillingTheWorker
+```
+
+Note what that prints: not a red assertion but
+
+```
+--- FAIL: TestTheEventCapContinuesAsNewInsteadOfKillingTheWorker
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x10]
+```
+
+#### Two nil dereferences, and the first one hid the second
+
+1. `freshCall` called `m.CloseWithExitCode(ctx, 0)` on the `api.Module` it was handed.
+   `engine/wasmtime_hostfuncs.go:48` passes **`nil`** for that argument — every wasmtime host
+   function does — so on the only backend a worker has, this was a method call on a nil
+   interface. The wazero path passes a real module, which is why the CLI tooling never showed it.
+
+2. That panic did not fail the workflow. `ContinueAsNew` on the line above had already set
+   `session.suspendErr`, and `engine/executor.go`'s error branch is guarded by
+   `callErr != nil && session.suspendErr == nil` — a deliberate "a suspension wins over the error
+   that came with it". So control fell through to `res.Suspended` with **`res` nil**, because
+   every error return in the wasmtime backend is `return nil, err`. That dereference is inside no
+   `recover`.
+
+The second is the one that kills the process, and it is not covered by the first: measured by
+reverting one fix at a time, the refusal alone still segfaults, because a refused guest returns
+an error and the backend answers `return nil, err` for that too. Both fixes are load-bearing.
+
+#### The fix is a refusal, not a new ABI
+
+The cap branch now writes `eventCapCallError` and returns `errCode=1` instead of closing the
+module and handing the guest an empty **success**. A refusal needs no module handle and no new
+sentinel: the guest's own error path unwinds it and drains its defer table on the way out, which
+is the same shape an explicit `ContinueAsNew` already has, where the guest returns normally
+through the wrapper that runs the defers. `suspendErr` is already set, so the executor still
+reports a `continue_as_new` suspension rather than the error the guest returned.
+
+This is deliberately *not* §3.84's stop sentinel. §3.84 needs a sentinel because a defer segment
+must stop a guest that is *replaying* without failing it; the event cap is ending the run either
+way, so the mechanism §3.83's tests already measured — "a refused fresh call makes the guest
+unwind and drain" — is sufficient and is language-agnostic, which the sentinel is not.
+
+#### The cap was also measuring the wrong thing
+
+`executeWithBackend` — the backend path, the one a worker takes — never set two `execSession`
+fields that `executeCompiled` (wazero, CLI tooling) does. Both defaults are silently wrong:
+
+- **`eventCount`** restarted at `0` every segment instead of seeding from
+  `WithInitialEventCount`, which `cmd/cleat-worker/setup.go:1682` loads from the stored
+  `event_count`. So a cap meant to bound a whole workflow bounded a single segment of it, and a
+  workflow that suspends often never reached it at all. Nothing reports a cap that does not fire.
+- **`originalInput`** was `""`, and `freshCall` records the `ContinueAsNew` with it. A workflow
+  the cap continued therefore **restarted with no input**. The continued run is a valid run of the
+  same workflow, just one handed `""` instead of its arguments — so there is nothing to see beyond
+  the wrong behaviour.
+
+Both were one omission in one struct literal. The second is the more dangerous, and it is the
+reason this section is not filed as a crash fix: the crash is loud, and losing a workflow's input
+across a continue-as-new is not.
+
+#### Tests
+
+`engine/eventcap_test.go`, all three on real wasmtime with the Go SDK:
+
+| test | proved able to fail by |
+|---|---|
+| `TestTheEventCapContinuesAsNewInsteadOfKillingTheWorker` | reverting either guard — SIGSEGV, twice |
+| `TestTheEventCapDoesNotDispatchTheCallItRefused` | dropping the `eventCount` seed; the trip lands on a defer body and the workflow body's call is dispatched |
+| `TestTheContinuedRunKeepsTheWorkflowInput` | dropping the `originalInput` seed; input comes back `""` |
+
+The first test's second assertion is the half that would otherwise be missing: it requires **2**
+dispatched calls, both defer bodies. Asserting only that the refused call is absent passes just
+as well against a guest that was killed outright and ran no cleanup — which is what the old
+`CloseWithExitCode` did on the runtime where it worked.

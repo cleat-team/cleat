@@ -102,9 +102,28 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		}
 		s.engine.log().InfoContext(ctx, "auto-ContinueAsNew triggered", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "event_count", s.eventCount, "max", s.engine.maxEventsPerWorkflow)
 		s.ContinueAsNew(ctx, m, s.originalInput)
-		m.CloseWithExitCode(ctx, 0)
-		written, _ := s.writeResult(ctx, m, responsePtr, "", responseMaxLen)
-		return packDurableCallResult(int(written), 0, 0)
+		// Refuse the call rather than closing the module.
+		//
+		// This branch used to call m.CloseWithExitCode to stop the guest and
+		// then hand it an empty SUCCESS, which is two bugs. The wasmtime host
+		// functions pass a nil api.Module (wasmtime_hostfuncs.go), so on the
+		// only backend a worker runs, m.CloseWithExitCode was a method call on
+		// a nil interface -- a nil dereference every time an operator's
+		// --max-quota-events cap was reached. It did not surface as a workflow
+		// failure: ContinueAsNew above had already set session.suspendErr, so
+		// executor.go's "callErr != nil && suspendErr == nil" branch did not
+		// take it, and control reached `res.Suspended` with a nil res. That
+		// second dereference is in no recover, so the worker PROCESS died, and
+		// died again on every worker that picked the workflow up.
+		//
+		// A refusal needs no module handle and no new ABI. The guest's own
+		// error path unwinds it, which drains its defer table on the way out --
+		// the same shape an explicit ContinueAsNew already has, where the guest
+		// returns normally and its wrapper runs the defers. suspendErr is
+		// already set, so the executor still reports a continue_as_new
+		// suspension rather than the error the guest returned.
+		written, _ := s.writeResult(ctx, m, responsePtr, eventCapCallError, responseMaxLen)
+		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
 	s.eventCount++
 
