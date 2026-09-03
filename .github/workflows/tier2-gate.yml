@@ -56,7 +56,23 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs, never a push run.
+  #
+  # github.ref is refs/heads/develop for EVERY merge, so with an unconditional
+  # `true` consecutive merges share one concurrency group and each cancels the
+  # one before it. That is how a merge's own verification gets discarded --
+  # `cancelled` is not `success`, and nothing downstream reads it as a failure.
+  #
+  # It is not hypothetical here. The lint job below runs the plan
+  # section-number guard, whose whole purpose is to catch collisions that
+  # "exist only in the merge"; on 2026-09-03 three develop runs were cancelled
+  # and two more failed unnoticed while duplicate section numbers sat on
+  # develop. A guard that only ever runs against a pre-merge base cannot see
+  # that class, and cancelling the post-merge run removes the one place it can.
+  #
+  # On a pull_request this still cancels, which is the setting's real purpose:
+  # pushing twice to a branch should not run the suite twice.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
