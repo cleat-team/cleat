@@ -965,7 +965,8 @@ type Worker struct {
 	maxQuotaSchedules int
 
 	// Maximum wall-clock duration per workflow execution (0 = no limit).
-	maxWorkflowDuration time.Duration
+	maxWorkflowDuration  time.Duration
+	wasmWallClockCeiling time.Duration
 
 	// childBindingOverride overrides the child binding policy for all tenants
 	// on this worker. This is a worker-level, cross-tenant setting intended for
@@ -1617,6 +1618,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithMaxQuotaSchedules(w.maxQuotaSchedules),
 		engine.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
 		engine.WithWASMInstanceTimeout(w.wasmInstanceTimeout),
+		engine.WithWasmWallClockCeiling(w.wasmWallClockCeiling),
 		engine.WithChildBindingPolicy(childBindingPolicy),
 		engine.WithChildBindingOverride(w.childBindingOverride),
 	}

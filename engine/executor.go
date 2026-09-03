@@ -157,10 +157,17 @@ func (e *Engine) executeWithBackend(
 		defer cancel()
 	}
 
-	// Apply per-execution WASM instance timeout if configured.
-	if e.wasmInstanceTimeout > 0 {
+	// Apply the wall-clock ceiling if configured.
+	//
+	// NOT wasmInstanceTimeout, which is the epoch fence and bounds guest
+	// EXECUTION (IMPROVEMENT-PLAN 3.90). Applying that here as well is what
+	// made the epoch fence's exclusion of host wait unobservable: both bounded
+	// wall clock, so a workflow waiting on slow services died here instead,
+	// with "execution timed out" rather than "execution time limit exceeded"
+	// and at the same moment.
+	if ceiling := e.wallClockCeiling(); ceiling > 0 {
 		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, e.wasmInstanceTimeout)
+		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
 		defer cancel()
 	}
 
@@ -416,10 +423,17 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		defer cancel()
 	}
 
-	// Apply per-execution WASM instance timeout if configured.
-	if e.wasmInstanceTimeout > 0 {
+	// Apply the wall-clock ceiling if configured.
+	//
+	// NOT wasmInstanceTimeout, which is the epoch fence and bounds guest
+	// EXECUTION (IMPROVEMENT-PLAN 3.90). Applying that here as well is what
+	// made the epoch fence's exclusion of host wait unobservable: both bounded
+	// wall clock, so a workflow waiting on slow services died here instead,
+	// with "execution timed out" rather than "execution time limit exceeded"
+	// and at the same moment.
+	if ceiling := e.wallClockCeiling(); ceiling > 0 {
 		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, e.wasmInstanceTimeout)
+		execCtx, cancel = context.WithTimeout(execCtx, ceiling)
 		defer cancel()
 	}
 

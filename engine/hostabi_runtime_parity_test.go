@@ -301,15 +301,34 @@ func wasmtimeRegisteredNames(t *testing.T) map[string]string {
 			if !ok {
 				return true
 			}
-			// linker.FuncWrap(module, name, fn) and linker.FuncNew(module, name, ty, fn)
-			if sel.Sel.Name != "FuncWrap" && sel.Sel.Name != "FuncNew" {
+			// Three spellings, differing only in where the module/name pair
+			// starts:
+			//
+			//	b.hostFunc(linker, module, name, fn)   -- IMPROVEMENT-PLAN 3.90
+			//	linker.FuncWrap(module, name, fn)
+			//	linker.FuncNew(module, name, ty, fn)
+			//
+			// 3.90 routed every registration through the backend so the guest's
+			// epoch budget can be bracketed around it. This test compares the
+			// wasmtime and wazero host-ABI surfaces by NAME, so missing a
+			// spelling does not make it fail -- it makes it see fewer names on
+			// one side and report a parity gap that is really a parse gap. That
+			// is what happened when 3.90 landed, and it is why the count check
+			// at the bottom of this file exists.
+			var argOff int
+			switch sel.Sel.Name {
+			case "hostFunc":
+				argOff = 1
+			case "FuncWrap", "FuncNew":
+				argOff = 0
+			default:
 				return true
 			}
-			if len(call.Args) < 2 {
+			if len(call.Args) < argOff+2 {
 				return true
 			}
-			mod, ok1 := stringLit(call.Args[0])
-			name, ok2 := stringLit(call.Args[1])
+			mod, ok1 := stringLit(call.Args[argOff])
+			name, ok2 := stringLit(call.Args[argOff+1])
 			if !ok1 || !ok2 || mod != "env" || !strings.HasPrefix(name, "cleat_") {
 				return true
 			}
@@ -351,7 +370,7 @@ func TestNeitherRuntimeHasHostFunctionsTheOtherLacks(t *testing.T) {
 	if len(wasmtimeNames) < floor {
 		t.Fatalf("found only %d cleat_* registrations in wasmtime_hostfuncs*.go, "+
 			"expected at least %d.\n\n"+
-			"The AST walk looks for linker.FuncWrap/FuncNew with a literal \"env\" "+
+			"The AST walk looks for b.hostFunc/linker.FuncWrap/FuncNew with a literal \"env\" "+
 			"module and a literal name. If registration moved behind a helper or a "+
 			"variable, this walk sees nothing and reports parity it never checked.",
 			len(wasmtimeNames), floor)

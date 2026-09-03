@@ -18,7 +18,7 @@ func (b *wasmtimeBackend) registerCleatScheduleCron(linker *wasmtime.Linker) err
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_schedule_cron", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_schedule_cron", func(caller *wasmtime.Caller,
 		wfPtr, wfLen, cronPtr, cronLen, tzPtr, tzLen, inputPtr, inputLen,
 		idPtr, idMaxLen int32) int64 {
 		h := b.handler
@@ -52,7 +52,7 @@ func (b *wasmtimeBackend) registerCleatDeleteCron(linker *wasmtime.Linker) error
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_delete_cron", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_delete_cron", func(caller *wasmtime.Caller,
 		idPtr, idLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -72,7 +72,7 @@ func (b *wasmtimeBackend) registerCleatListCrons(linker *wasmtime.Linker) error 
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_list_crons", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_list_crons", func(caller *wasmtime.Caller,
 		outPtr, outMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)

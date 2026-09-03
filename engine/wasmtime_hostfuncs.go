@@ -21,7 +21,7 @@ func (b *wasmtimeBackend) registerCleatCall(linker *wasmtime.Linker, completeRes
 	if b.skipIfNotNeeded("cleat_call") {
 		return nil
 	}
-	return linker.FuncWrap("env", "cleat_call", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_call", func(caller *wasmtime.Caller,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen int32) int64 {
 		t0 := time.Now()
 		h := b.handler
@@ -59,7 +59,7 @@ func (b *wasmtimeBackend) registerCleatComplete(linker *wasmtime.Linker, complet
 	if b.skipIfNotNeeded("cleat_complete") {
 		return nil
 	}
-	return linker.FuncWrap("env", "cleat_complete", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_complete", func(caller *wasmtime.Caller,
 		status int32, resultPtr int32, resultLen int32) int64 {
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
@@ -81,7 +81,7 @@ func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_poll_work") {
 		return nil
 	}
-	return linker.FuncWrap("env", "cleat_poll_work", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_poll_work", func(caller *wasmtime.Caller,
 		entryNamePtr int32, entryNameMaxLen int32,
 		argsPtr int32, argsMaxLen int32) int64 {
 		buf, _, err := callerMemBuf(caller)

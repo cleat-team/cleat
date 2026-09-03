@@ -54,6 +54,7 @@ type Engine struct {
 	workerID               string
 	generation             int64 // generation this workerID claimed the workflow under; see WithGeneration
 	wasmInstanceTimeout    time.Duration
+	wasmWallClockCeiling   time.Duration
 	defaultWorkflowTimeout time.Duration
 	deferPassBudget        time.Duration // total for one runDefers pass; see WithDeferPassBudget
 	deferPhase             bool          // this execution is a defer segment; see WithDeferPhase
@@ -286,9 +287,48 @@ func (e *Engine) fencingEnabled() bool {
 	return e.workerID != "" && e.generation != 0 && e.workflowStore != nil
 }
 
-// WithWASMInstanceTimeout sets the per-execution WAT timeout.
+// WithWASMInstanceTimeout bounds GUEST EXECUTION for one invocation.
+//
+// It is the epoch fence, and since IMPROVEMENT-PLAN 3.90 it measures only time
+// the guest is actually running: a host call made on the guest's behalf -- a
+// service call, a plugin call, a DB write, a retry loop's backoff -- costs it
+// nothing. See engine/wasmtime_hostbudget.go.
+//
+// It is NOT a bound on how long an invocation may take in wall-clock terms.
+// That is WithWasmWallClockCeiling, and the two are deliberately separate
+// because they answer different questions: "is this guest runaway?" and "has
+// this been going too long?".
 func WithWASMInstanceTimeout(d time.Duration) EngineOption {
 	return func(e *Engine) { e.wasmInstanceTimeout = d }
+}
+
+// WithWasmWallClockCeiling bounds the WALL CLOCK of one invocation, including
+// time spent inside host calls, as a context deadline.
+//
+// This exists because until IMPROVEMENT-PLAN 3.90 there was no such thing:
+// wasmInstanceTimeout was applied BOTH as the epoch fence and as a context
+// deadline, so the two questions above had one answer and a workflow waiting on
+// slow services died as though it were a runaway guest. Separating them is what
+// lets an in-host retry loop keep its worker for the duration of a short policy
+// (3.88) without the guest being killed for waiting.
+//
+// d <= 0 keeps the pre-3.90 behaviour -- the ceiling falls back to
+// wasmInstanceTimeout -- so an embedder that sets only the instance timeout
+// keeps the wall-clock bound it already had rather than silently losing it.
+// Pass a large value to raise the ceiling; there is deliberately no way to
+// remove it entirely, because an un-timed host call would otherwise hold a
+// worker slot forever.
+func WithWasmWallClockCeiling(d time.Duration) EngineOption {
+	return func(e *Engine) { e.wasmWallClockCeiling = d }
+}
+
+// wallClockCeiling is the deadline the executor applies, with the fallback
+// described on WithWasmWallClockCeiling resolved.
+func (e *Engine) wallClockCeiling() time.Duration {
+	if e.wasmWallClockCeiling > 0 {
+		return e.wasmWallClockCeiling
+	}
+	return e.wasmInstanceTimeout
 }
 
 // WithDefaultWorkflowTimeout sets the total workflow timeout.

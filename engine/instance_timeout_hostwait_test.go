@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// The instance timeout is charged for time the guest spends BLOCKED IN A HOST
-// CALL, not just for time it spends executing. IMPROVEMENT-PLAN 3.90.
+// The instance timeout bounds GUEST EXECUTION, and used not to.
+// IMPROVEMENT-PLAN 3.90.
 //
 // --wasm-instance-timeout (default 30s, cmd/cleat-worker/config.go:117) is
 // enforced by wasmtime epoch interruption. The mechanism is a free-running
@@ -53,12 +53,45 @@ func (c *hostWaitCaller) Call(_ context.Context, service, _, _ string) (string, 
 }
 
 // runWithHostWait executes the deferfunc fixture's defer_order entry point --
-// which makes exactly one "work" call -- under a given instance timeout.
-func runWithHostWait(t *testing.T, delay, timeout time.Duration) (string, error) {
+// which makes exactly one "work" call -- with the EPOCH fence set to budget and
+// no context deadline at all.
+//
+// Isolating the epoch fence is the point, and getting this wrong is what the
+// first version of this test did. --wasm-instance-timeout is applied TWICE:
+// once as the epoch deadline (configureStore) and once as a context deadline
+// (executor.go:163, `context.WithTimeout(execCtx, e.wasmInstanceTimeout)`).
+// They bound the same wall clock by different means, so an end-to-end test
+// through engine.WithWASMInstanceTimeout cannot say which one fired -- and with
+// host wait excluded from the epoch, the context deadline fires instead and the
+// run still fails, with a different message ("execution timed out" rather than
+// "execution time limit exceeded").
+//
+// So the backend gets WithWasmtimeExecutionTimeout and the engine gets no
+// instance timeout. What this measures is exactly the epoch fence.
+func runWithHostWait(t *testing.T, delay, budget time.Duration) (string, error) {
+	t.Helper()
+	return runFixtureUnderEpochBudget(t, "deferfunc", "defer_order", delay, budget)
+}
+
+// runSpinningGuest executes a guest that loops forever without returning to the
+// host, under the same isolated epoch budget.
+//
+// testdata/fencereentry's spin_forever is the repo's canonical runaway: it
+// registers a defer and then never leaves the loop, which is the case
+// --wasm-instance-timeout exists for and the case epoch interruption is
+// documented to catch ("bounds even a WASM module stuck in a tight loop that
+// never calls back into the host").
+func runSpinningGuest(t *testing.T, budget time.Duration) error {
+	t.Helper()
+	_, err := runFixtureUnderEpochBudget(t, "fencereentry", "spin_forever", 0, budget)
+	return err
+}
+
+func runFixtureUnderEpochBudget(t *testing.T, fixture, entryPoint string, delay, budget time.Duration) (string, error) {
 	t.Helper()
 	ctx := context.Background()
 
-	wasmBytes, err := os.ReadFile(buildFixtureWasm(t, "deferfunc"))
+	wasmBytes, err := os.ReadFile(buildFixtureWasm(t, fixture))
 	if err != nil {
 		t.Fatalf("reading fixture: %v", err)
 	}
@@ -67,7 +100,100 @@ func runWithHostWait(t *testing.T, delay, timeout time.Duration) (string, error)
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	t.Cleanup(func() { rt.Close(ctx) })
-	wt, err := NewWasmtimeBackend(ctx)
+	wt, err := NewWasmtimeBackend(ctx, WithWasmtimeExecutionTimeout(budget))
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	// No WithWASMInstanceTimeout: that would also install a context deadline,
+	// and this test is about the epoch fence alone.
+	eng := NewEngine(rt, &hostWaitCaller{delay: delay},
+		WithBackends(WasmtimeLanguages, wt),
+		WithWorkflowID("wf-epoch-budget"))
+
+	res, _, _, _, _, err := eng.Execute(ctx, wasmBytes, entryPoint, json.RawMessage(`{}`))
+	return res, err
+}
+
+// TestTheInstanceTimeoutExcludesHostWait is the fix, and its control is the
+// half that keeps the fix honest.
+//
+// Both runs use the SAME budget and the SAME guest. The only difference is
+// where the time goes: one spends it waiting on the host, the other spends it
+// executing. The first must now complete and the second must still trap, and
+// neither assertion means anything without the other -- a change that simply
+// disabled the fence would pass the first alone.
+//
+// Before engine/wasmtime_hostbudget.go, measured 2026-09-03 on this tree:
+//
+//	| delay | budget | outcome   |
+//	|-------|--------|-----------|
+//	| 0     | 1s     | trap      |
+//	| 0     | 2s     | completes |
+//	| 4s    | 5s     | trap      |  <- the defect
+//	| 6s    | 8s     | completes |
+//	| 9s    | 8s     | trap      |
+//
+// The 4s/5s row is the one this test now inverts. Note the 0/1s row too: it is
+// why the control varies where the time is spent rather than how much budget
+// there is. An earlier version of this test controlled with "no delay, same
+// small budget, must complete" and that FAILED -- the fixture cannot finish in
+// 1s whatever the caller does, so the trap happened either way and the
+// experiment measured nothing.
+func TestTheInstanceTimeoutExcludesHostWait(t *testing.T) {
+	const budget = 3 * time.Second
+
+	// Host wait far exceeding the whole budget. The guest's own cost is under
+	// 2s, so with host wait excluded this has room; with it charged, as before,
+	// this is the case that trapped.
+	res, err := runWithHostWait(t, 8*time.Second, budget)
+	if err != nil {
+		t.Fatalf("an 8s host call under a %v budget failed: %v\n\n"+
+			"Host wait is not supposed to be charged to the guest. Either the "+
+			"bracket in engine/wasmtime_hostbudget.go is not covering "+
+			"cleat_call, or something re-set the epoch deadline after it. "+
+			"IMPROVEMENT-PLAN 3.90.", budget, err)
+	}
+	if res == "" {
+		t.Fatalf("the run completed but returned no result")
+	}
+
+	// The control: same budget, no host wait, a guest that simply does not
+	// stop. The fence must still fire -- this is the runaway case the flag
+	// exists for, and it is the assertion that a "fix" which merely widened or
+	// disabled the deadline would fail.
+	if err := runSpinningGuest(t, budget); err == nil {
+		t.Fatalf("a guest spinning with no host call completed under a %v "+
+			"budget.\n\n"+
+			"The fence is gone. Excluding host wait must not stop the deadline "+
+			"firing on a guest that never calls back into the host -- that "+
+			"guest never enters a bracket, so its deadline should never be "+
+			"re-armed. Without this half, the assertion above is satisfied by "+
+			"simply removing the fence.", budget)
+	} else if !strings.Contains(err.Error(), "execution time limit exceeded") {
+		t.Fatalf("the spinning guest failed for the wrong reason: %v\n\n"+
+			"Expected the instance-timeout fence. Some other failure means "+
+			"this control is no longer measuring the fence at all.", err)
+	}
+}
+
+// runEndToEnd executes under BOTH bounds the way a worker does: the epoch fence
+// via the backend, and the wall-clock ceiling via the engine.
+func runEndToEnd(t *testing.T, fixture, entryPoint string, delay, instanceTimeout, ceiling time.Duration) (string, error) {
+	t.Helper()
+	ctx := context.Background()
+
+	wasmBytes, err := os.ReadFile(buildFixtureWasm(t, fixture))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx, WithWasmtimeExecutionTimeout(instanceTimeout))
 	if err != nil {
 		t.Fatalf("NewWasmtimeBackend: %v", err)
 	}
@@ -75,74 +201,68 @@ func runWithHostWait(t *testing.T, delay, timeout time.Duration) (string, error)
 
 	eng := NewEngine(rt, &hostWaitCaller{delay: delay},
 		WithBackends(WasmtimeLanguages, wt),
-		WithWorkflowID("wf-host-wait"),
-		WithWASMInstanceTimeout(timeout))
+		WithWorkflowID("wf-two-bounds"),
+		WithWASMInstanceTimeout(instanceTimeout),
+		WithWasmWallClockCeiling(ceiling))
 
-	res, _, _, _, _, err := eng.Execute(ctx, wasmBytes, "defer_order", json.RawMessage(`{}`))
+	res, _, _, _, _, err := eng.Execute(ctx, wasmBytes, entryPoint, json.RawMessage(`{}`))
 	return res, err
 }
 
-// TestTheInstanceTimeoutIsChargedForHostWait holds both runs, deliberately.
+// TestTheTwoBoundsAnswerDifferentQuestions is the deliverable, and all three
+// runs share one instance timeout so the only thing varying is what consumes
+// the time and how much ceiling there is.
 //
-// The comparison IS the assertion, so it must not be possible to run half of
-// it. The two runs differ in ONE variable -- the budget -- and share the same
-// 5s of host wait and the same guest, so a difference in outcome cannot be
-// explained by the guest being slow or by the delay itself being fatal.
-//
-// That pairing is not decoration; the obvious version of this test is wrong.
-// The first control here was "no delay, same small budget, must complete", and
-// it FAILED: a 1s budget is too small for this fixture whatever the caller
-// does, so the trap it was controlling for happens either way and the
-// experiment measured nothing. Measured 2026-09-03 on this tree: with no delay
-// at all, a 1s budget traps and a 2s budget completes. Hence a control that
-// varies the budget rather than the delay.
-//
-// Measured 2026-09-03, wasmtime, darwin/arm64. Re-derive with
-//
-//	go test ./engine/ -run TestTheInstanceTimeoutIsChargedForHostWait -v
-//
-// | delay | budget | outcome  |
-// |-------|--------|----------|
-// | 0     | 2s     | completes|
-// | 4s    | 5s     | trap     |
-// | 6s    | 8s     | completes|
-// | 9s    | 8s     | trap     |
-//
-// which is host wait consuming the budget roughly 1:1 on top of the fixture's
-// own sub-2s cost.
-func TestTheInstanceTimeoutIsChargedForHostWait(t *testing.T) {
-	const hostWait = 5 * time.Second
+// Before IMPROVEMENT-PLAN 3.90 there was only one number. --wasm-instance-timeout
+// was both the epoch fence and a context deadline, so "this guest is runaway"
+// and "this has been going too long" had the same answer, and a workflow
+// waiting on slow services was killed as though it were spinning. Case 1 is
+// what that cost: it failed before this change and is the whole point of it.
+func TestTheTwoBoundsAnswerDifferentQuestions(t *testing.T) {
+	const instance = 3 * time.Second
 
-	// Budget below the wait. The wait alone exceeds it, so this traps on any
-	// machine -- there is no timing race here, which is the point of choosing
-	// a delay larger than the budget rather than a delay near it.
-	res, err := runWithHostWait(t, hostWait, 3*time.Second)
-	if err == nil {
-		t.Fatalf("a %v host call completed under a 3s instance budget, returning %q.\n\n"+
-			"That is the BEHAVIOUR WE WANT and this test asserts the broken one. "+
-			"If the epoch deadline is now paused or extended across host calls, "+
-			"the fence measures guest execution rather than wall clock: delete "+
-			"this half, keep the control below, and revisit IMPROVEMENT-PLAN "+
-			"3.90 and the in-host retry bound it constrains.", hostWait, res)
-	}
-	if !strings.Contains(err.Error(), "execution time limit exceeded") {
-		t.Fatalf("expected the instance-timeout fence to fire, got: %v.\n\n"+
-			"Some other failure means this run is no longer measuring what the "+
-			"budget is charged for.", err)
-	}
-
-	// The control, and the only variable that changed is the budget. Same
-	// caller, same delay, same guest. 5s of wait plus the fixture's own sub-2s
-	// cost sits far inside 30s, so this completing is what makes the trap above
-	// attributable to the budget rather than to the delay being fatal in itself.
-	res, err = runWithHostWait(t, hostWait, 30*time.Second)
+	// 1. Waiting far longer than the guest is allowed to RUN, but inside the
+	//    ceiling. This is the ordinary case -- a couple of slow service calls
+	//    -- and it must complete.
+	res, err := runEndToEnd(t, "deferfunc", "defer_order", 8*time.Second, instance, 30*time.Second)
 	if err != nil {
-		t.Fatalf("the same %v host call failed under a 30s budget: %v\n\n"+
-			"Without this run completing, the trap above says nothing -- it "+
-			"would be consistent with the delay failing the workflow for some "+
-			"other reason entirely. Do not delete this half.", hostWait, err)
+		t.Fatalf("an 8s host call under a %v instance timeout and a 30s ceiling failed: %v\n\n"+
+			"This is the case 3.90 exists to fix. If the error says \"execution "+
+			"timed out\" the ceiling is not being applied and the executor is "+
+			"still using wasmInstanceTimeout as its context deadline; if it "+
+			"says \"execution time limit exceeded\" the epoch bracket in "+
+			"engine/wasmtime_hostbudget.go is not covering cleat_call.", instance, err)
 	}
 	if res == "" {
-		t.Fatalf("the run under a 30s budget returned no result")
+		t.Fatalf("case 1 completed but returned no result")
+	}
+
+	// 2. The ceiling still bounds waiting. Same host call, ceiling below it --
+	//    a worker must not be held indefinitely by an unresponsive service, and
+	//    this is the assertion that the fix did not simply remove a bound.
+	if _, err := runEndToEnd(t, "deferfunc", "defer_order", 8*time.Second, instance, 4*time.Second); err == nil {
+		t.Fatalf("an 8s host call completed under a 4s wall-clock ceiling.\n\n" +
+			"The ceiling is not enforced, so nothing bounds an invocation " +
+			"blocked in a host call. That is a worse failure than the one 3.90 " +
+			"set out to fix.")
+	} else if !strings.Contains(err.Error(), "execution timed out") {
+		t.Fatalf("the ceiling fired with the wrong error: %v\n\n"+
+			"Expected the executor's context-deadline path. \"execution time "+
+			"limit exceeded\" would mean the epoch fence fired instead, which "+
+			"would mean host wait is being charged to the guest again.", err)
+	}
+
+	// 3. And the epoch fence still bounds RUNNING, under a ceiling far above
+	//    it. A generous wall-clock ceiling must not let a runaway guest live
+	//    past the instance timeout -- otherwise raising the ceiling silently
+	//    raises the runaway bound too.
+	if _, err := runEndToEnd(t, "fencereentry", "spin_forever", 0, instance, 60*time.Second); err == nil {
+		t.Fatalf("a spinning guest completed under a %v instance timeout.", instance)
+	} else if !strings.Contains(err.Error(), "execution time limit exceeded") {
+		t.Fatalf("the spinning guest was stopped by the wrong bound: %v\n\n"+
+			"Expected the epoch fence at %v, not the 60s ceiling. If this is "+
+			"\"execution timed out\" the guest ran for a full minute before "+
+			"anything stopped it, and --wasm-instance-timeout no longer bounds "+
+			"runaway guests at all.", err, instance)
 	}
 }

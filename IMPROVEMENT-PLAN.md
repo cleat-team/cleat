@@ -12248,7 +12248,7 @@ multi-tenant deployment's dispatch loop seeing the tenants it exists to serve, a
 non-default tenant's workflows would stop running — a worse outcome than the defect. It stayed
 green under both falsifications.
 
-### 3.90 `--wasm-instance-timeout` is charged for time the guest spends blocked in the host — 🔵 **MEASURED 2026-09-03** (WS-3)
+### 3.90 `--wasm-instance-timeout` is charged for time the guest spends blocked in the host — ✅ **FIXED** (WS-3, 2026-09-03)
 
 The per-invocation wall-clock fence advances while the guest is parked inside a host call. A
 workflow that makes slow service calls and computes almost nothing spends its runaway budget
@@ -12312,17 +12312,88 @@ budget (3s → trap, 30s → completes), which is the only form in which the tra
   call**, so it spends the guest's budget: an in-host retry longer than the remaining budget kills
   the workflow it was retrying for.
 
-#### Two ways to fix, and they differ in what the fence then means
+#### Fixed: the epoch fence now measures guest execution
 
-1. **Extend the deadline across the host wait** — add the wait's ticks back before returning to
-   the guest. The fence keeps meaning "runaway guest", which is what its own flag text claims, and
-   this stops being a constraint on retry at all. The primitive is already in use on the defer
-   path (`:387`, `:454`), so this is breadth — every blocking host function has to bracket its
-   wait — rather than a new mechanism.
-2. **Bound the in-host branch by the remaining budget**, falling back to durable sleep past it.
-   Cheaper and local to the retry loop, but leaves every other slow host call still charged, so
-   the misdirecting error above stays.
+`engine/wasmtime_hostbudget.go`. Every wasmtime host function is registered through
+`b.hostFunc`, which brackets the guest's budget: entering a host function charges the guest for
+what it just ran, leaving one re-arms the epoch deadline with what is left. Host wait costs the
+guest nothing.
 
-These are not exclusive and (1) is the one worth doing regardless of the retry question, because
-the defect predates it. Not started; recorded with the measurement so the retry work does not
-have to rediscover it.
+Uniform rather than selective, and deliberately so — picking out "the ones that block" is a
+judgment call repeated 67 times, and the set is not obvious (a service call blocks, but so does a
+DB write behind an event record, a plugin call, and a WASI stub that touches a file). The
+invariant is "the guest is not running while the host is", true at every one of those boundaries.
+`scripts/check-hostfunc-budget.sh` enforces it, because the failure mode of a missed site is
+silent: the host function still works, it just quietly charges its wait.
+
+Two things fell out of the same change:
+
+- **Module compilation stopped being charged.** `configureStore` sets the deadline when the store
+  is created, which on a cold module is before compilation. `arm()` immediately before
+  `linker.Instantiate` resets it at the moment the guest actually starts.
+- **The defer budget stopped being spent on the cleanup call.** A defer body's whole purpose is a
+  cleanup call, so charging the wait for it against a 1s budget spent the budget on the very
+  thing it exists to allow.
+
+Tested in `engine/instance_timeout_hostwait_test.go`: an 8s host call completes under a 3s epoch
+budget, and — the control that keeps it honest — a guest spinning with no host call still traps
+under the same budget. Verified by mutation: with the bracket removed the first half fails with
+`execution time limit exceeded`, the right reason.
+
+#### The second enforcement, found by the first fix failing
+
+`--wasm-instance-timeout` was applied **twice**:
+
+| | mechanism | when it fires |
+|---|---|---|
+| epoch deadline | `configureStore` → `SetEpochDeadline` | interrupts the guest mid-execution |
+| context deadline | `executor.go:163` and `:419` | noticed at `:251`, only once the call returns |
+
+Both bounded **wall clock**, so fixing only the epoch half changed nothing an operator could
+observe: the run that died with `execution time limit exceeded` died with `execution timed out`
+instead, at the same wall-clock point. **The measurement above was of the epoch fence and was
+correct; it was not the whole enforcement.** An end-to-end test through
+`engine.WithWASMInstanceTimeout` cannot tell the two apart, which is why the epoch-only test sets
+its budget via the backend option `WithWasmtimeExecutionTimeout` and gives the engine no instance
+timeout at all.
+
+#### Fixed: the two questions now have two numbers
+
+A context deadline is immutable, so it cannot be credited the way an epoch deadline can. The fix
+is to stop asking it the wrong question:
+
+- **`--wasm-instance-timeout`** (default 30s) bounds **guest execution**. Epoch fence.
+- **`--wasm-wall-clock-ceiling`** (default **5m**, new) bounds **wall clock including host wait**.
+  Context deadline. This is what stops an invocation blocked on an unresponsive service from
+  holding a worker slot indefinitely — the protection the old context deadline was really
+  providing, now named for what it does.
+
+`WithWasmWallClockCeiling(0)` falls back to `wasmInstanceTimeout`, so an embedder that sets only
+the instance timeout keeps the wall-clock bound it already had rather than silently losing it.
+There is deliberately no way to remove the ceiling entirely.
+
+A ceiling **below** the instance timeout is a configuration that cannot mean what it says —
+`configureStore` clamps the epoch deadline to whatever the context has left, so the guest's
+execution bound silently becomes the ceiling. The worker warns at startup rather than rejecting
+it, since it is a degradation rather than an error.
+
+Measured, `engine/instance_timeout_hostwait_test.go`, three runs sharing one 3s instance timeout
+so only the ceiling and what consumes the time vary:
+
+| case | host wait | ceiling | outcome | bound that decided |
+|---|---|---|---|---|
+| ordinary slow dependency | 8s | 30s | completes | neither |
+| unresponsive dependency | 8s | 4s | `execution timed out` | ceiling |
+| runaway guest | none, spins | 60s | `execution time limit exceeded` | instance timeout |
+
+The third row is the one that keeps the other two honest: a generous ceiling must not raise the
+runaway bound. Case 1 fails without the fix — verified by mutation, reverting the executor to
+`e.wasmInstanceTimeout` reproduces `execution timed out` exactly.
+
+#### What this unblocks
+
+§3.88's decision — a retry loop completing within a few minutes keeps its worker rather than
+suspending — is now deliverable. The in-host loop's backoff is spent inside a host call, so it no
+longer consumes the guest's execution budget, and the wall-clock ceiling that does cover it
+defaults to 5m rather than 30s. The remaining work there is the missing
+`HostCallsImpl.DurableCallWithRetry` method.
