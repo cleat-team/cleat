@@ -11724,7 +11724,7 @@ point that raises the SDK's own suspend signal with no host call in the way, so 
 `session.suspendErr` and mask the result. Neither is installed here — `componentize-py`,
 `wasm-tools` and a gradle binary are all absent — so neither was run.
 
-### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — 🔵 **MEASURED, no code** (WS-3, 2026-09-03)
+### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — 🔵 **MEASURED; step 1 settled and tested 2026-09-03** (WS-3, 2026-09-03)
 
 §3.75 tells whoever builds it to re-derive two things first. Both were done 2026-09-03. One comes
 out clean and one does not come out the way the section expects, so this is recorded before the
@@ -11804,22 +11804,51 @@ Measured, one run on wasmtime with a Go guest: a workflow using `DurableCallWith
 terminal error carried the SDK-level message rather than the host's. Read, not run: everything
 above about *why* — the usage-driven wiring, the missing method, the Rust contrast.
 
-What was not established is why the run suspends after one attempt instead of exhausting. SDK-level
-retry backs off with a durable sleep, and a sleep whose deadline is ahead of real time suspends
-the run — but pinning `WithWorkflowStartTime` and `WithClock` far apart did not change the
-behaviour, so that explanation is incomplete. An earlier version of the same test **did** reach
-exhaustion, under a different package-level `nowMs`, which is the ordering hazard §3.87 hit one
-file over.
+What was not established at the time was why the run suspends after one attempt instead of
+exhausting. **Settled 2026-09-03; see the step 1 result below.** A test was written and then
+reverted rather than shipped, because it would have asserted a state whose mechanism its author
+could not explain — a green assertion over an unexplained state is worse than no test, because it
+reads as understanding.
 
-A test was written and then reverted rather than shipped. It would have asserted a state whose
-mechanism its author could not explain, which is the failure this document's §1.1 trap and
-CLAUDE.md's "Is this result real?" are both about — and a green assertion over an unexplained
-state is worse than no test, because it reads as understanding.
+#### Step 1, settled — an SDK retry backoff suspends the workflow
+
+`cleat/runtime.go`'s SDK-level retry loop backs off with `h.DurableSleep(backoff)`, a **durable**
+sleep, which suspends whenever its deadline is ahead of the engine's wall clock. So an SDK-level
+retry is not a loop inside one segment: **every backoff suspends the workflow and the retry
+resumes in the next segment after replay.** A 3-attempt policy with 1s backoffs is three segments,
+each replaying the history so far. Nothing had written that down.
+
+Why the earlier clock pinning failed is the part worth keeping, because it is what cost the
+session. `DurableSleep`'s anchor is `max(session nowMs, Now())`, and `Now()` reads the **last
+recorded event's** timestamp — which the first attempt's call event has just written at real wall
+time. That overrides any `WithWorkflowStartTime` seed in the past, so a clock pinned relative to
+the seed is *behind* the anchor and the sleep suspends anyway. A backoff completes only when the
+clock is ahead of **real** time.
+
+Measured, `engine/retry_backoff_test.go`, both directions asserted because the failing one is the
+one that misled:
+
+| clock | outcome |
+|---|---|
+| real | 1 attempt, suspends, reason `cleat_sleep(1ms)` |
+| seeded start + clock ahead of the seed | same — the event timestamp wins |
+| clock a day ahead of real time | exhausts in one segment |
+
+**Step 2's measurement follows from it**, and is in the same file: with the backoffs completing,
+an exhausted policy runs its defers on the way out (the cleanup call is dispatched) and its
+terminal error carries the SDK's own `retry exhausted after 2 attempts` — **not** the worker's
+`retries exhausted` predicate. So the reading above holds: a Go workflow that exhausts its retries
+is not dead-letterable, and `MoveToDeadLetterQueue` needs no marker because nothing on this SDK
+reaches it.
+
+That leaves item 2 of the order below as the live question, and it is a product one: whether the
+Go SDK should expose the host retry loop at all. If it should, the dead-letter queue becomes
+reachable and §3.75's original question needs answering with this same fixture.
 
 #### What to do next, in order
 
-1. Settle the suspension: instrument the SDK retry loop's backoff on a Go guest and find what
-   actually suspends it. That is the blocker for any assertion about this path.
+1. ~~Settle the suspension~~ — ✅ done 2026-09-03, `engine/retry_backoff_test.go`. It is the
+   backoff's own durable sleep; see the step 1 result above.
 2. Then decide whether the Go SDK should expose the host retry loop at all. If it should, the
    dead-letter queue becomes reachable and §3.75's original question needs answering after all —
    with the fixture from step 1.
