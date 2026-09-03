@@ -86,6 +86,31 @@ func ReReplay(ctx context.Context, store WorkflowStore, workflowID string, gener
 		operator = "unknown"
 	}
 
+	// Refuse to re-replay into an unresolved ambiguity. A history whose last
+	// call was left mid-flight by a crash replays straight back into
+	// [AMBIGUOUS] -- the workflow stops again, in the same place, for the same
+	// reason, and the operator has spent a generation bump to learn nothing.
+	//
+	// This is a judgement rather than something the 3.20 contract states. The
+	// alternative is to proceed and let replay report it, which is defensible:
+	// it keeps re-replay a pure status reset. It loses the one thing the
+	// operator needs, which is *which step* to reconcile -- and phase F now
+	// gives them somewhere to put the answer, so pointing at it is more useful
+	// than reproducing the failure.
+	if history, herr := store.LoadEventHistory(ctx, workflowID); herr == nil {
+		for _, rec := range history {
+			if rec.isPendingIntent() {
+				return fmt.Errorf("re-replay: workflow %s has an unresolved ambiguous call at step %d "+
+					"(%s.%s): re-replaying would report it again. Check the external service and record "+
+					"the outcome with POST /api/admin/instances/%s/steps/%d/resolve first",
+					workflowID, rec.Step, rec.Service, rec.Op, workflowID, rec.Step)
+			}
+		}
+	}
+	// A failed history load is deliberately not fatal here: it would turn a
+	// read this operation does not otherwise need into a reason the operation
+	// cannot run. The store call below is the one that must succeed.
+
 	if err := store.AdminReReplay(ctx, workflowID, generation, operator); err != nil {
 		return fmt.Errorf("re-replay: %w", err)
 	}
