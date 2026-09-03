@@ -12839,3 +12839,97 @@ the guest where the identical non-streaming failure is retryable (`callFailureCo
 That is a real asymmetry and it is broader than §2.35 states — three of the four causes,
 not one — but it is a separate change, and it was unfixable while the error branch could
 not fire on replay at all.
+
+### 3.97 `EventRecord.CreatedAt` comes back on one dialect of three — 🔴 **OPEN, found 2026-09-03** (WS-2, 2026-09-03)
+
+`event_history.created_at` is written by every backend and read back by one.
+
+| dialect | `timestamp_ms` | `CreatedAt` | why |
+|---|---|---|---|
+| PostgreSQL | derived from `created_at` | ✅ populated | the SELECT lists `created_at` and scans it (`engine/store_events.go`) |
+| MySQL | derived from `created_at` | ❌ zero time | the SELECT computes `UNIX_TIMESTAMP(created_at)*1000` and never reads the column (`engine/mysql_events.go`) |
+| SQL Server | derived in Go | ❌ zero time | the SELECT *does* read `created_at`, scans it into a local, sets `rec.TimestampMs = createdAt.UnixMilli()`, and drops the value (`engine/mssql_events.go`) |
+
+Measured 2026-09-03 through `AppendEventHistory` / `LoadEventHistory` on PostgreSQL and MySQL;
+the SQL Server row is read from the code, because this sandbox cannot run that dialect. Found by
+`TestThePayloadExemptFieldsAreCarriedByColumnsInstead`
+(`engine/payload_carrier_completeness_test.go`), whose whole purpose is to check the "a column
+carries it" claims in `payloadExemptFields` rather than restate them — the first exemption it
+checked turned out to be true on one dialect out of three.
+
+**Not a durability defect.** `CreatedAt` is documented on `EventRecord` as being for admin
+timeline visualization and is not read by any replay path, which is why §3.98 exempts it from the
+payload carrier rather than carrying it. What breaks is a timeline: an admin view of a workflow's
+history shows the zero time on two of the three backends.
+
+**Why it is not fixed alongside §3.98, when the patch is two lines.** Because two lines is the
+wrong size for it. `LoadEventHistory` is one of three read paths per dialect —
+`LoadEventHistoryPaginated` and `StreamEventHistory` are the others, and MySQL's streaming query
+does not select `created_at` either. Fixing the one path the test happens to call would turn the
+assertion green over five paths it never touched, which is the exact shape of green result
+CLAUDE.md's "Is this result real?" section is about. The fix belongs with a test that holds
+**every read path on every dialect to the same `EventRecord` for the same row**, which is a
+different and more useful piece of work than three sed edits.
+
+Re-derive the gap:
+
+```
+grep -n "created_at" engine/store_events.go engine/mysql_events.go engine/mssql_events.go
+```
+
+`parseTime=true` is not a blocker for the MySQL half: `cleat-worker`'s `--db` help text and
+`docs/reference/database-backends.md` already require it, and `engine/mysql_ops.go` already scans
+`sql.NullTime` in several places.
+
+### 3.98 The database payload carried none of four fields the replay path reads — ✅ **FIXED** (WS-2, 2026-09-03)
+
+An `EventRecord` passes through three carriers, and two of them had something checking that every
+field survives.
+
+| carrier | check |
+|---|---|
+| compaction (`compactedEvent`) | `FuzzCompactionEquivalence`, reflection over every exported field against `compactionExemptFields` |
+| typed events (`engine/events.go`) | `TestEvent_RoundTrip` |
+| **the database payload** (`eventRecordToPayload` / `populateFromPayload`) | **nothing** — per-event-type tests only, one written after each defect |
+
+So a field that no arm wrote was invisible until something noticed the behaviour it broke. Four
+were missing, and every one of them was found by reading a comment in `engine/compaction.go`
+explaining why *compaction* carries the field:
+
+| field | consequence, measured on PostgreSQL and MySQL |
+|---|---|
+| `NewVersion` | `ContinueAsNewWithVersion` reads it straight off the replayed event. Wrote 3, read 0 — and 0 means "current version", so a versioned continue-as-new replayed from the database **restarts as different code than the run that recorded it** |
+| `StateKeys` | `ListState`'s replay path writes it to the guest verbatim. Wrote `["user:a","user:b"]`, read `""` — and `StateKey` and `StateOp` both survive, so the divergence guard ahead of it passes and the empty result is handed over **as a success** |
+| `ParentWorkflowID`, `ParentClosePolicy` | not read on replay; carried for the reason `compactedEvent` gives for carrying the same two — a faithful copy rather than a replay-sufficient-but-lossy one, at a line each, and one fewer exemption |
+
+§3.96 was the third instance of the same shape and was found the same way; this section is the
+mechanism that would have found all of them.
+
+**What the new test checks, and what it does not.**
+`TestEveryEventRecordFieldTheDatabasePayloadMustCarryDoesCarry` asserts that every non-exempt
+field survives the round trip for *at least one* event type. It does **not** assert that the field
+survives for the event type that produces it — deriving that association needs a per-type table,
+and the table is the thing that would go stale. The narrower claim still catches the defect: a
+field written into no arm at all survives for zero event types.
+`TestTheFieldsTheReplayPathReadsSurviveTheStore` covers the specific pairs through a real
+database, which is what rules out "the payload drops it but a column saves it".
+
+`payloadExemptFields` carries a reason per field, audited individually, and
+`TestThePayloadExemptFieldsAreCarriedByColumnsInstead` checks the ones that claim a column —
+without which a wrong reason reads as an audit. It immediately found §3.97.
+
+**Compatibility.** All four keys are written only when the field is non-zero, so every event
+already in `event_history` produces a byte-identical payload and still verifies against its stored
+checksum. `TestRecordsWrittenBeforeTheseKeysStillMatchTheirStoredChecksums` pins three literals,
+each **measured against the encoder without this change** (stash the file, run, unstash) rather
+than copied from what the new code prints, which would pin whatever it happens to do.
+`TestSettingTheNewFieldsChangesTheChecksum` is the other direction, and it is the one an
+only-when-set guard can get wrong invisibly: a key written outside the checksummed payload leaves
+the checksum unchanged, and the compatibility test alone would still pass.
+
+**Also fixed here:** two comments in `engine/compaction.go` cited a property test named
+`TestEventRecordFieldsSurviveCompaction`, which has never existed — the real mechanism is
+`FuzzCompactionEquivalence` via `eventFieldsMatch`. One of the two was the stated justification for
+carrying `ParentWorkflowID` and `ParentClosePolicy`, so grepping the name it gave returned nothing
+and the justification read as fabricated. It cost a detour to establish that the mechanism was real
+under another name.
