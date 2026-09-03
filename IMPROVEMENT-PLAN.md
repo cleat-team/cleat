@@ -11724,7 +11724,7 @@ point that raises the SDK's own suspend signal with no host call in the way, so 
 `session.suspendErr` and mask the result. Neither is installed here — `componentize-py`,
 `wasm-tools` and a gradle binary are all absent — so neither was run.
 
-### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — 🔵 **MEASURED; step 1 settled and tested 2026-09-03** (WS-3, 2026-09-03)
+### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — 🔵 **MEASURED; steps 1 and 2 settled 2026-09-03, step 3 not started** (WS-3, 2026-09-03)
 
 §3.75 tells whoever builds it to re-derive two things first. Both were done 2026-09-03. One comes
 out clean and one does not come out the way the section expects, so this is recorded before the
@@ -11790,6 +11790,18 @@ guarded on the import having been wired — so it falls back to SDK-level retry 
 message ("retry exhausted after N attempts"), which the predicate does not match. Rust's
 `HostCalls::cleat_call_with_retry` calls the import directly, so the substring is reachable
 there.
+
+**That last sentence was a reading of a call chain, and it is now measured.**
+`engine/rust_host_retry_test.go` runs a Rust guest whose `retry_probe` entry point exhausts a
+2-attempt policy against an always-failing service, and asserts three things that only hold
+together on the host path: **no suspension**, **two attempts dispatched inside the one segment**,
+and a terminal error containing `retries exhausted`. All three hold. So the divergence is real
+and measured on both sides — the identical policy is one segment and dead-letterable on Rust,
+N segments and not dead-letterable on Go.
+
+The Go half of the same assertion is written the other way round in
+`TestAnExhaustedRetryRunsItsDefersAndIsNotDeadLetterable`, deliberately: each asserts its own
+SDK's current behaviour, so whichever one changes first fails and names the other.
 
 If that holds, the answer to §3.75's question is not "its defers already ran" but **"nothing on
 the Go SDK reaches it"** — and `MoveToDeadLetterQueue` still needs no marker, for a different
@@ -11861,10 +11873,38 @@ reachable and §3.75's original question needs answering with this same fixture.
 
 1. ~~Settle the suspension~~ — ✅ done 2026-09-03, `engine/retry_backoff_test.go`. It is the
    backoff's own durable sleep; see the step 1 result above.
-2. Then decide whether the Go SDK should expose the host retry loop at all. If it should, the
-   dead-letter queue becomes reachable and §3.75's original question needs answering after all —
-   with the fixture from step 1.
+2. ~~Decide whether the Go SDK should expose the host retry loop at all~~ — ✅ **answered
+   2026-09-03; see the decision below.** It should, for short policies.
 3. Only then build §3.75 step 1 against the three symmetric sites above.
+
+#### The decision, and what it turns into work
+
+**A retry loop that completes within a few minutes should keep the worker while it runs, the way
+non-durable code would.** That is frequent, ordinary behaviour and it should not be surprising.
+Only longer durations are worth paying multiple segments and a replay for.
+
+That is precisely what the host-side loop already does, and — per the measurement above — already
+does correctly from a guest. So this is not a new mechanism, it is a missing connection on one
+SDK. The work, smallest first:
+
+1. **Give `HostCallsImpl` a `DurableCallWithRetry` method.** `cleat/runtime.go:1079` already
+   delegates to the import when `h.durableCallWithRetry != nil`; the field is never set because
+   `wasm/usage.go:73` wires `cleat_call_retry` on a guest symbol that does not exist, so the
+   scanner never marks the import used. Roughly a passthrough.
+2. **Decide the boundary, and it is not free-floating** — see §3.90. An in-host backoff is spent
+   *inside a host call*, and the instance-timeout fence is charged for that time, so today the
+   ceiling on "keep the worker" is whatever remains of `--wasm-instance-timeout` (default 30s),
+   not "a few minutes". Extending the epoch deadline across host waits (§3.90 fix 1) removes the
+   ceiling and is worth doing on its own merits; without it the boundary is an artifact rather
+   than a policy.
+3. **Then §3.75's original dead-letter question genuinely needs answering**, because the queue
+   stops being unreachable from Go. `MoveToDeadLetterQueue` goes back to being a candidate fourth
+   marker site on the merits rather than by default.
+
+**And one thing is a defect regardless of the boundary chosen:** the same `CallOptions{Retry:}`
+means "one segment, dead-letterable" on Rust and "N segments, not dead-letterable" on Go, with
+nothing in the API saying so. Whichever semantics win, the two SDKs agreeing is not a matter of
+taste.
 
 **Do not read this section as clearing `MoveToDeadLetterQueue`.** It moves the reason from one
 unmeasured claim to another, better-supported one. The site is still the fourth candidate.

@@ -240,3 +240,39 @@ fn sleep_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String>
     h.cleat_sleep_ms(300_000);
     Ok("{\"unreachable\":true}".to_string())
 }
+
+/// A workflow that exhausts a retry policy through the HOST-side retry loop.
+///
+/// This is the half of the retry story the Go SDK cannot reach.
+/// `HostCalls::cleat_call_with_retry` calls the `cleat_call_retry` import
+/// directly, so the loop -- attempts, backoff, exhaustion -- runs on the host
+/// inside a single host call, and the whole thing is ONE history event and ONE
+/// segment. Go's `DurableCallWithOptions` falls back to an SDK-level loop that
+/// backs off with a durable sleep instead, turning an N-attempt policy into N
+/// segments; see `engine/retry_backoff_test.go`.
+///
+/// The error the host mints when the policy exhausts is prefixed
+/// `retries exhausted: `, which is exactly the substring the worker's
+/// dead-letter predicate matches (`cmd/cleat-worker/setup.go`). So the two SDKs
+/// currently disagree about whether an exhausting retry is dead-letterable, and
+/// this entry point is the evidence for the Rust side of that.
+///
+/// Intervals are 1ms because the point is the exhaustion, not the wait. Unlike
+/// the Go fixture this does not make the timing load-bearing: the host loop
+/// sleeps in-process and never consults a clock the test can race.
+///
+/// Keep this entry point: it is the whole of `engine/rust_host_retry_test.go`'s
+/// evidence and has no other caller.
+#[cleat_entry]
+fn retry_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let policy = cleat_sdk::RetryPolicy {
+        max_attempts: 2,
+        initial_interval_ms: 1,
+        backoff_multiplier: 1.0,
+        maximum_interval_ms: 1,
+        non_retryable_errors: vec![],
+    };
+    let _: serde_json::Value =
+        h.cleat_call_with_retry("always-fails", "op", &serde_json::json!({}), &policy)?;
+    Ok("{\"unreachable\":true}".to_string())
+}

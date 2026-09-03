@@ -147,6 +147,13 @@ tier1:
     # follows what a test needs, not which file it lives in.
     - "^TestARustGuestCannotSuspendByPanicking$"
     - "^TestThePanicTrapIsMaskedWhereverTheHostSetsSuspendErr$"
+    # tier 2 -- rust. engine/rust_host_retry_test.go; needs cargo + wasm32-wasip1.
+    #
+    # IMPROVEMENT-PLAN 3.88's Rust half: it builds the same example to measure that a Rust
+    # guest reaches the HOST-side retry loop, running the whole policy in one segment and
+    # producing the error the worker dead-letters on. Same toolchain dependency, same
+    # reason -- it would skip in the tier-1 gate, where a skip is a failure.
+    - "^TestARustGuestReachesTheHostRetryLoop$"
     # tier 2 -- java. engine/java_workflow_e2e_test.go; needs a JDK and Gradle.
     - "^TestJavaWorkflowExecute$"
     # tier 2 -- assemblyscript. engine/as_workflow_e2e_test.go and the npx-based
