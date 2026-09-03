@@ -328,14 +328,44 @@ another stream rather than a hypothetical.
 
 ### The board
 
+> **Re-derived 2026-09-03 against `develop` at `1eebb01`. Three of the seven rows below
+> describe closed work, and the two marked 🔶 are the expensive kind** — a 🔶 with a
+> reason attached is read as a plan, so a reader budgets for `AdminReReplay`'s "replay
+> semantics" and for finding a replacement for a test that never depended on the sentinel.
+> Both were closed by PRs this stream merged (#589, #591). Corrected in place below rather
+> than deleted, so the next reader can see what the row claimed.
+>
+> **What is actually open on this board is one engineering item and one watch.**
+>
+> | | |
+> |---|---|
+> | §2.35's **plugin half** | The engine half shipped in #572; the plan's own update says "Plugins are what is left." |
+> | §2.11 residual | ⚪ Watch, do not hunt. Unchanged. |
+>
+> **§2.35's plugin half is unblocked, and the thing that unblocked it is #572 itself.**
+> `engine/plugins.go:538` still carries the comment that states the blocker — *"Splitting them
+> needs the class persisted (IMPROVEMENT-PLAN 2.35)"* — and the class is persisted now. Four
+> distinguishable causes go into `recordStreamError` (no registry, function not registered, a
+> blocked call guard, the function erroring) and all four come back out of one replay site as
+> `callErrorUnknown`. The guard rejection is the one worth naming: it is a permission denial
+> reported as *unknown* while `CallErrorPermissionDenied` sits unused in the enum.
+>
+> The governing constraint still binds and is why this is not a one-line change: **fresh and
+> replay must classify identically**, so the fresh path may only start reporting a sharper code
+> once the replay path can read the same one back — which means an event recorded before the
+> change must keep replaying as `callErrorUnknown`, the behaviour it was recorded under.
+>
+> `engine/plugins.go` is not in any stream's **Owns** list. §2.35 is WS-2's item, so this is
+> WS-2's to take; noted rather than assumed.
+
 | item | what |
 |---|---|
 | **The defer-phase record shape (§3.35 phase 5)** | ✅ **ANSWERED 2026-09-02 — §3.75, #569.** Do not take this; read the answer. It reframes the question rather than picking one of the two options below: both assumed defers run *after* the workflow is terminal, and they no longer do, so the paths that matter need no new record at all. What is left is the three sites that set a terminal status by direct `UPDATE` and so never build an instance to run defers in — `TerminateWorkflow`, the parent-close TERMINATE arm, and `adminForceResolve`. The framing is kept below because it is what WS-3 was blocked on, and the answer only makes sense against it. ~~🔴 Take this first, and it is a design answer, not a PR.~~ WS-3 has phases 1–4 of `defer` shipped and is explicitly declining to start phase 5 without WS-2: making the defer phase survive a `kill -9` needs it to be *its own durable, resumable unit with a reaper*, which the plan states is **the same record shape as §1.4's crash recovery** (`IMPROVEMENT-PLAN.md` §3.35, "Phase 5 is not scheduled"). Both streams and the plan now independently agree on that, so the coordination cost has already been paid and what is missing is the answer. The concrete question: does a defer phase become another `event_history` row under phase D's existing pending discipline — `intent_at IS NOT NULL AND checksum IS NULL`, resolved through `ResolveCallIntent` — or its own table with its own reaper? **WS-2 should answer it before starting §2.35, not after**, because §2.35 changes the same rows and doing them in the other order means designing the record twice. Deliverable is a written shape in §1.4 or §3.35 that WS-3 can build against; the migration to carry it is WS-3's, in their range. |
 | **§2.35 residual** | ✅ **DONE 2026-09-02 — #572.** `EventRecord.ErrCode` carries the class the caller supplied, through the `payload` JSONB and compaction; no migration, because `payload` is JSONB. **This row was written while the PR was open and says 🔴; it is the ordinary lag rather than a disagreement.** Two things in the original framing did not survive contact and are worth keeping: the class deliberately does **not** feed the guest-visible code, because `DurableCallWithRetry`'s `nonRetryableErrors` comes from the *guest's* retry policy and can legitimately disagree with the caller's `CleatError` — so this is history and operator surface, not a guest-facing change. And the objection that had kept it open ("no ServiceCaller returns anything but a bare `fmt.Errorf`") was a stale comment in `callerrors.go`, true when written and false since `dbServiceCaller` began returning `CleatError`; it cost a session before being corrected. Original text follows. 🔴 **The real remaining engineering item, and it is schema work with no cheap version.** `ErrorCode`'s seven values still have no path into history: `event_history` has an `error TEXT` column and no `error_code` — verify with `awk '/CREATE TABLE.*event_history/,/^\);/' migrations/postgres/001_schema.sql`. `workflow_instances.error_code` exists and is populated, so the classification survives per *workflow* and is lost per *event*, which is why replay re-derives one bit where the fresh run had seven values. The governing constraint is unchanged and is what makes this worth doing: **fresh and replay must classify identically**, or retryability changes between a run and its replay. |
 | **§1.4 phase F** | ✅ **DONE 2026-09-02.** `engine.ResolveStep` + `POST /api/admin/instances/{id}/steps/{step}/resolve`. **It needed no new SQL**: phase E had already built `ResolveCallIntent` on all three dialects and left it reachable from one caller, `resolveAmbiguity`, which returns immediately when no `AmbiguityResolver` is configured — so the mechanism was complete and unreachable while the workflow's own error text told the operator to go and check the external service. The three #297 lessons below all applied. Original text follows. Admin force-resolve for a *pending* step. Its prerequisite §3.20 shipped (#297) and `adminForce` in `engine/store_admin.go` is the shape it extends — including the three things #297 learned the hard way: apply the operation to the tenant-scoped store rather than `s.store`, give the audit record an `eventRecordToPayload` arm or it sits outside the checksum chain, and expect a concurrent writer to be able to take the step number. Worth sequencing after the record-shape answer above, since "resolve a pending unit" is the same verb phase 5 needs. |
 | **§2.60d** | 🔶 **Now carried on WS-1's board**, because the mechanism lands in `engine/testutil/`, which is WS-1's. Still WS-2's constraint in practice: it is the reason a green run on a reused database means little and the reason a multi-package invocation needs `-p 1`. |
-| **`AdminReReplay`** | 🔶 **Still a stub, and it now answers 501 rather than 500** — `engine/store_admin_stubs.go`. Honest, and not fixable by a fourth `UPDATE`: it needs the replay semantics phases D–F build. Naturally lands after phase F. |
-| **retire `pendingSentinel`** | 🔶 Still detected alongside `Pending` because `tests/integrity` exercises it directly — `engine/types.go:399`, exported as `PendingSentinel` for that test. Cleanup, belongs with phase E's tail. |
+| **`AdminReReplay`** | ✅ **DONE 2026-09-02 — #591 (`f90d12b`), which DELETED `engine/store_admin_stubs.go`.** Real bodies on all three dialects in `engine/store_admin_rereplay.go` (`:51` Postgres, `:94` MySQL, `:139` SQL Server). The row below was right that it needed the replay semantics phases D–F build and that it would land after phase F — it did, and then this row went on describing a file that no longer exists. Original text follows. 🔶 Still a stub, and it now answers 501 rather than 500 — `engine/store_admin_stubs.go`. Honest, and not fixable by a fourth `UPDATE`: it needs the replay semantics phases D–F build. Naturally lands after phase F. |
+| **retire `pendingSentinel`** | ✅ **DONE 2026-09-02 — #589, "retire the pending sentinel nothing ever wrote".** Gone from the tree: `grep -rn endingSentinel --include="*.go" .` returns nothing, and `engine/types.go:399` is now unrelated `ReplayStepAction` code. **The row's stated REASON was wrong, not merely stale**, and that is the part worth keeping: it said the sentinel survived *because* `tests/integrity` exercised it directly, which framed the job as "find a replacement for that test". Nothing ever wrote the sentinel, so there was nothing to replace — the test asserts on the `Pending` field, and says so at `tests/integrity/ambiguity_detection_test.go:308`. A board row that carries a reason makes the next reader plan against the reason; when the reason is the wrong shape, the row costs more than a bare 🔶 would. Original text follows. 🔶 Still detected alongside `Pending` because `tests/integrity` exercises it directly — `engine/types.go:399`, exported as `PendingSentinel` for that test. Cleanup, belongs with phase E's tail. |
 | **§2.11 residual** | ⚪ **Watch, do not hunt.** "A claim for 3 returned 10" is still unexplained; the SQL in both forms, `ShardedStore` and a retry wrapper are all ruled out, and §2.17's backstop now detects an over-claim, releases the excess and logs the evidence. Do not spend a session re-deriving what 24,000 claims failed to reproduce. |
 
 ### Closed since this board was written — with what closed it
@@ -343,6 +373,9 @@ another stream rather than a hypothetical.
 | item | closed by |
 |---|---|
 | **§2.35 residual** the error class per event | #572. `EventRecord.ErrCode` in the payload JSONB, no migration. |
+| **`AdminReReplay`** | #591 (`f90d12b`). Real bodies on all three dialects in `engine/store_admin_rereplay.go`; the same commit deleted `engine/store_admin_stubs.go`. |
+| **retire `pendingSentinel`** | #589. Nothing ever wrote it, so there was no behaviour to preserve; `grep -rn endingSentinel --include="*.go" .` is empty. |
+| **§1.4 phase F's checksum defect** | #602. `ResolveStep` on a row that was no longer the last one left every event above it failing verification — §3.89. Phase F shipping is not the same fact as phase F being correct. The gap between them was about **15 hours** — #578 merged 2026-09-02T21:44Z, #602 2026-09-03T12:25Z (`gh pr view <n> --json mergedAt`) — and it was closed by re-reading the doc comment's stated premise against a caller added after it was written, not by a failing test. |
 | **§1.4 phase F** admin resolve of a pending step | `engine.ResolveStep`, built on phase E's `ResolveCallIntent`. |
 | **§3.20** force-resolve stubs | #297. Real bodies on all three dialects in `engine/store_admin.go`; `grep -rn 'not implemented yet' engine/*.go` now returns only comments recording the removal. |
 | **§1.4 phases B, C, D, E** | #308 (D, `event_history.intent_at` + `commit intent → dispatch → commit outcome`), #316 (the crash scenario), #335 (E, `AmbiguityResolver` + persisted resolution). The dead `flushCallIntent`/`completeCallEvent` pair was deleted and reimplemented as `engine/callintent.go` + `engine/store_intent.go`, reachable from a real deployment via `--write-ahead-intent-ops`. |
