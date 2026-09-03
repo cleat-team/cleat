@@ -1037,7 +1037,7 @@ func runDeploy(args []string) {
 	_, err = db.Exec(
 		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue)
 		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
-		 ON CONFLICT (name, version) DO UPDATE SET
+		 ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 		   wasm_bytes = EXCLUDED.wasm_bytes,
 		   abi_version = EXCLUDED.abi_version,
 		   plugin_deps = EXCLUDED.plugin_deps,

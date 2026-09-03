@@ -163,7 +163,7 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 // SQL: INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version)
 //
 //	VALUES ($1, $2, $3, $4, $5, $6)
-//	ON CONFLICT (name, version) DO UPDATE SET
+//	ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 //	  wasm_bytes = $3, abi_version = $4, plugin_deps = $5, min_version = $6,
 //	  deprecated = false, created_at = now()
 func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, wasmBytes []byte, pluginDeps map[string]string, minVersion int) error {
@@ -175,7 +175,7 @@ func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, w
 	_, err = l.db.ExecContext(ctx, `
 		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version)
 		VALUES ($1, $2, $3, 1, $4, $5)
-		ON CONFLICT (name, version) DO UPDATE SET
+		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 			wasm_bytes = EXCLUDED.wasm_bytes,
 			abi_version = EXCLUDED.abi_version,
 			plugin_deps = EXCLUDED.plugin_deps,
