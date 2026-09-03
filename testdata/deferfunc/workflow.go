@@ -6,7 +6,11 @@
 // ran leaves it present, in a position that also pins the ORDER.
 package main
 
-import "github.com/cleat-team/cleat/cleat"
+import (
+	"time"
+
+	"github.com/cleat-team/cleat/cleat"
+)
 
 // DeferOrder registers two defer bodies and then makes one call of its own.
 // A correct run records: body, then the two defers in LIFO order --
@@ -153,4 +157,32 @@ func DeferChildWorkflow(h cleat.HostCalls, input string) (string, error) {
 		return "", err
 	}
 	return `{"status":"ok"}`, nil
+}
+
+// DeferOnRetriesExhausted registers cleanup and then exhausts a retry policy.
+//
+// Two things are observable in one run, and IMPROVEMENT-PLAN 3.88 needs both:
+// whether an exhausting retry stays inside one segment, and whether the terminal
+// error it produces is one the worker would dead-letter.
+//
+// The intervals are 1ms rather than the default second because the point is the
+// exhaustion, not the wait. That does NOT make the backoff cheap -- see
+// engine/retry_backoff_test.go, where a 1ms backoff suspends the workflow like
+// any other durable sleep.
+func DeferOnRetriesExhausted(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_exhaustion", `{}`)
+	}); err != nil {
+		return "", err
+	}
+
+	_, err := h.DurableCallWithOptions(cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
+			MaxAttempts:        2,
+			InitialInterval:    time.Millisecond,
+			BackoffCoefficient: 1.0,
+			MaxInterval:        time.Millisecond,
+		},
+	}, "always-fails", "op", `{}`)
+	return "", err
 }
