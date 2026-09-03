@@ -11006,9 +11006,23 @@ shows a reset chain segment.
 
 #### What WS-3 can build against
 
-- Add the marker + deadline column to `workflow_instances`, in the migration range that is
-  free above each dialect's high-water mark (postgres `034`, mysql `033`, mssql `037` as of
-  2026-09-02 — they are **not** aligned).
+- ~~Add the marker + deadline column to `workflow_instances`~~ — ✅ **done 2026-09-03.**
+  `migrations/postgres/038_defer_phase_marker.sql`, `mysql/037`, `mssql/041`:
+  `pending_terminal_status` (the outcome to apply, `NULL` = no phase owed) and
+  `defer_phase_deadline`. **The numbers above were already stale when read** — the note said
+  postgres `034`, mysql `033`, mssql `037` as of 2026-09-02, and the high-water marks were
+  `037`/`036`/`040` a day later. Re-derive rather than trusting a recorded number:
+
+      for d in postgres mysql mssql; do ls migrations/$d/*.sql | sed 's#.*/##;s/_.*//' | tr '\n' ' '; echo; done
+
+  No `CHECK` constraint to amend — `workflow_instances.status` is plain `TEXT`, checked before
+  writing the migrations rather than assumed, since a constrained column would have made this
+  three larger files. Verified by running: `go test ./migration/` green on all three dialects
+  (which applies the shipped files and re-applies them to prove idempotency), plus a direct
+  catalogue probe confirming 2 of 2 columns present on each. `engine/testutil` builds its schema
+  from the shipped migrations, so there is no second schema definition to keep in step.
+  `docs/reference/workflow-lifecycle.md` carries the vocabulary, including `terminating` as a
+  seventh status with schema but no writer.
 - Change the two host-driven terminal sites to mark rather than finalize, and move
   `releaseWorkflowResources` behind the defer segment on those paths.
 - Add the defer segment to the executor: replay, run defers, finalize with the recorded outcome.
