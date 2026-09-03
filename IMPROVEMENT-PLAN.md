@@ -12050,7 +12050,7 @@ implementation that always chose one path:
 
 Plus `cleat.TestBothSDKsAgreeOnTheHostRetryBudget`, which reads the Rust constant out of the
 source and compares it to the Go one — the threshold is written twice, in two languages, and
-nothing at compile time can make the two agree. **That test is a stopgap and says so: §3.93 moves
+nothing at compile time can make the two agree. **That test is a stopgap and says so: §3.95 moves
 the threshold host-side, at which point both constants and the test disappear.**
 
 #### The two rewritten tests, and why that is the design working
@@ -12582,7 +12582,29 @@ longer consumes the guest's execution budget, and the wall-clock ceiling that do
 defaults to 5m rather than 30s. The remaining work there is the missing
 `HostCallsImpl.DurableCallWithRetry` method.
 
-### 3.93 Execution limits are process-wide, and one of them is compiled into the guest — 🔵 **DESIGN + PLAN, not started** (WS-3, 2026-09-03)
+### 3.95 Execution limits are process-wide, and one of them is compiled into the guest — 🔵 **DESIGN + PLAN, not started** (WS-3, 2026-09-03)
+
+> **Numbered 3.93 when #625 merged; renumbered to 3.95 on 2026-09-03 because #624 had already
+> taken 3.93 an hour earlier.** The content is WS-3's and is untouched — only the number moved,
+> along with its four references (one in this file, three in
+> `cleat/host_retry_budget_parity_test.go`). 3.94 is skipped rather than reused because PR #617
+> is in flight holding it; a gap is harmless and a second collision is not. The rule applied is
+> the one that needs no judgement: **the section that merged second takes the new number.**
+>
+> **Both PRs passed `scripts/check-section-numbers.sh` and the duplicate still reached
+> `develop`, which is the part worth keeping.** The script is not weak — it checks uniqueness
+> within one file and did that correctly — but a PR's CI runs against the merge of its own head
+> into the base *as it stood when the checks ran*. #625's checks finished before #624 merged, so
+> the run that would have seen both never happened, and nothing re-ran afterwards. For roughly
+> an hour `develop` failed its own gate, which blocks every open PR in every workstream rather
+> than only the one that caused it. Re-derive the state at any time with
+> `git show origin/develop:IMPROVEMENT-PLAN.md | grep -oE '^### [0-9]+\.[0-9]+ ' | sort | uniq -d`.
+>
+> The mechanism that closes this is **"Require branches to be up to date before merging"** on
+> the `develop` branch protection rule, which forces the second PR to rebase and re-run. That is
+> a repository setting rather than a code change, so it is recorded here rather than applied:
+> it would also slow every merge down by one CI cycle, which is a trade the three streams should
+> make deliberately.
 
 **Requirement, 2026-09-03:** each tenant must be able to override the default time thresholds
 without affecting other tenants, so that several microservices — or several organisations —
