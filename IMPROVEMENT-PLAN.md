@@ -6102,7 +6102,7 @@ non-test Go lines and 164 test lines (`grep -rn workflow_defs --include='*.go'`,
 but most already carry `tenant_id` in their predicates — §3.10, §3.11 and §3.12's writer fix
 went through them. The expensive part is the migration, and the count is a poor proxy for it.
 
-### 3.86 SQL Server's cross-tenant exemption is per-connection, and the statements that lean on it have no predicate of their own — 🔶 **23 STATEMENTS FIXED across schedules, tags and definitions; 34 remain and the audit needs a mechanism, not a fourth file** (WS-1, 2026-09-03)
+### 3.86 SQL Server's cross-tenant exemption is per-connection, and the statements that lean on it have no predicate of their own — 🔶 **29 STATEMENTS FIXED across schedules, tags, definitions and the control plane; 29 remain, every one of them scoped by its caller, and the gate is the next step** (WS-1, 2026-09-03)
 
 Found while scoping §3.77 step 3 (`workflow_schedules`), and it is not part of that change:
 it is true on today's schema, needs no migration, and is reachable from the ordinary HTTP API.
@@ -6265,10 +6265,10 @@ Statements in `engine/mssql*.go` touching a table bound to `dbo.fn_tenant_filter
 whether the text carries `tenant_id`, tables derived from the `ADD FILTER PREDICATE` bindings in
 `migrations/mssql/*.sql` rather than hardcoded:
 
-| | 2026-09-03, before this fix | after |
-|---|---|---|
-| carry a tenant predicate | 48 | 61 |
-| do not | **47** | **34** |
+| | 2026-09-03, before | after the three tables | after the control plane |
+|---|---|---|---|
+| carry a tenant predicate | 48 | 61 | 66 |
+| do not | **47** | **34** | **29** |
 
 Thirteen SQL literals, not twelve, because `ListWorkflowDefs` carries two -- the named branch
 and the empty-name one. **I wrote 60/35 into this table from arithmetic and the re-derivation
@@ -6282,12 +6282,82 @@ python3 scripts/mssql-tenant-predicate-audit.py
 ```
 
 
-The 34 that remain are **not** the same class. They key on a *generated* id —
+The 34 that remained at that point were **not** the same class. They key on a *generated* id —
 `workflow_instances(id)`, `event_history(workflow_id)`, `workflow_signals(workflow_id)` — where
 §3.77's table already argued a UUID cannot be guessed. That is a weaker guarantee than a tenant
 predicate (an id that leaks becomes a capability: on an unfiltered connection, knowing another
-tenant's workflow id is enough to terminate it), but it is a different argument and it needs
+tenant's workflow id is enough to terminate it), but it is a different argument and it needed
 deciding rather than sweeping.
+
+**Decided 2026-09-03, and the decision split the population rather than answering it** — the
+next subsection is that split. Five of the 34 take their id from an HTTP request and are fixed;
+the remaining 29 are scoped by their caller and are deliberately left.
+
+#### Fourth group — the control plane, fixed 2026-09-03, and the argument that was doing two jobs
+
+The 34 above were left alone because they key on a generated id, and §3.77's table argued a UUID
+cannot be guessed. Splitting that population by **where the id comes from** shows the argument
+was covering two different things and is only true of one:
+
+- **Five methods take the id from outside.** `TerminateWorkflow`, `RetryWorkflow`,
+  `RequestCancellation`, `GetQueryState` and `DeliverSignal` are each reachable from an HTTP
+  handler that reads the id straight out of the URL path — `cmd/cleat-worker/app.go`'s
+  dead-letter terminate and workflow retry, `server.go`'s query, signal and cancel routes.
+  Unguessability is a claim about what an attacker knows, not about the code, and a workflow id
+  travels: into logs, a support ticket, a URL, a user who has since left the tenant.
+- **The rest are plumbing**, and are safe for a *different* reason that had been hidden behind
+  the same sentence: their ids come from rows the engine already read under a predicate, and
+  `cmd/cleat-worker/setup.go:storeFor` re-scopes the store to each instance's own tenant before
+  any of them run. They are scoped **by construction**, not by unguessability.
+
+Six SQL literals across the five methods. Measured 2026-09-03 by removing each predicate on its
+own — every removal turned exactly one case red, so the cases are independent rather than one
+fixture failing together:
+
+| statement | what tenant B did to tenant A |
+|---|---|
+| `TerminateWorkflow` | A's status is `terminated` |
+| `RetryWorkflow` | A's dead-lettered workflow: status is `ready` |
+| `RequestCancellation` | A's `cancellation_requested` is `1` |
+| `GetQueryState` | B read `tenant-a-only` |
+| `DeliverSignal` MERGE | **overwrote A's pending signal payload**: A reads `{"from":"tenant-b"}` |
+| `DeliverSignal` wake | A's `next_wake_at` moved to now — A was **scheduled to run** on a signal it cannot read |
+
+`engine/mssql_admin_login_control_plane_tenant_test.go` is the regression test.
+
+**The `DeliverSignal` MERGE was not in the 34, and that is the finding worth keeping.** The
+audit script asks whether `tenant_id` appears anywhere in the statement; it did — in the
+`INSERT` column list, which scopes the row the call *creates* and says nothing about the row it
+*matches*. A `MERGE` is an `UPDATE` when matched, so an unscoped `ON` clause let a caller
+holding another tenant's workflow id overwrite that workflow's pending payload, and the wake
+below it then ran the workflow. **A substring check cannot tell a filter from a projection**, so
+the gate below needs to ask *where* the column appears. Re-derived with a position-aware probe:
+seven statements name `tenant_id` outside any `WHERE`/`ON`/`HAVING` window, and six of those are
+plain `INSERT`s (nothing to filter) plus the deliberately unscoped cross-tenant claim. The
+`MERGE` was the only real one.
+
+**Each case carries a positive control, and that is not decoration.** The failure mode of adding
+`AND tenant_id` is not a leak, it is a statement that now matches nothing at all —
+`TerminateWorkflow` does not check rows affected, so a predicate naming the wrong column would
+make every terminate a silent no-op while the cross-tenant assertions still passed.
+
+**One statement must NOT get a predicate, and the sweep would have broken it.** `BatchHeartbeat`
+(`engine/mssql_lifecycle.go`) is keyed on `WHERE assigned_to = @p1` with no id at all, and is
+called on the worker's own store (`cmd/cleat-worker/setup.go:1876`). Under `claim-across-tenants`
+a worker legitimately holds instances of many tenants; a tenant predicate there would silently
+stop heartbeating the others and they would be reaped as stale. Note also that the "a UUID
+cannot be guessed" argument does not even *apply* to it — there is no id in the predicate to be
+unguessable. Left alone deliberately, with the reason at the site.
+
+**A residual, recorded rather than fixed.** Since the `MERGE`'s `ON` is now tenant-scoped, a
+cross-tenant delivery to a signal the victim already holds falls through to the `INSERT` branch
+and `pk_workflow_signals` refuses it — safe, but a 500, and distinguishable from delivering to
+an id that exists nowhere (which still succeeds, creating a harmless orphan row under the
+caller's own tenant). That is a weak cross-tenant existence oracle. The key itself is right and
+should not change: `workflow_id` is generated and globally unique, so "one pending signal per
+workflow per name" is a global truth, and putting `tenant_id` in that key would *allow* two
+tenants to hold a signal for the same workflow. Turning the refusal into a clean not-found is a
+change to an HTTP contract and belongs in its own PR.
 
 **Three tables, five statements, five statements, twelve statements — all found by reading one
 file while scoping something else.** That is not a method, and the fourth file would not be
@@ -6300,9 +6370,16 @@ precedent to copy. **Not written yet** — recorded here so the estimate is a nu
 
 #### What is NOT fixed
 
-The 34 generated-id statements above, and the guard that would stop this recurring. The count
-is no longer unknown, which is the one thing that has improved: it is 34 as of 2026-09-03,
-re-derivable with `scripts/mssql-tenant-predicate-audit.py`.
+The guard that would stop this recurring, and the 29 statements that remain. Those 29 are now a
+**characterised** population rather than a leftover: every one is plumbing whose id the engine
+read back from a row it had already scoped, running on a store `storeFor` scoped to the
+instance's own tenant. Adding predicates there would be a no-op in every working path — 29
+regression tests proving something the caller already guarantees — so they are deliberately not
+swept. Re-derive the count with `scripts/mssql-tenant-predicate-audit.py` (29 as of 2026-09-03).
+
+**The allowlist the gate needs must say "scoped by construction", not "guessing is hard".** The
+two are different claims and only the first is true of what remains; recording the weaker one
+would re-merge the populations this entry just separated.
 
 The sweep this needs is a property test over the boundary rather than an audit of statements,
 for the reason CLAUDE.md gives and §3.77 step 1 demonstrated: reading SQL tells you which

@@ -20,10 +20,33 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	defer tx.Rollback()
 
 	// Use MERGE for upsert semantics (equivalent to ON CONFLICT DO UPDATE).
+	//
+	// `target.tenant_id = @p4` in the ON clause is load-bearing -- see
+	// TerminateWorkflow -- and this statement is the one that reads clean and
+	// is not. scripts/mssql-tenant-predicate-audit.py asks whether `tenant_id`
+	// appears anywhere in the statement, and it did: in the INSERT column list
+	// below, which scopes the row this call CREATES and says nothing about the
+	// row it MATCHES. A MERGE is an UPDATE when matched, so with an unscoped ON
+	// a caller holding another tenant's workflow id overwrote that workflow's
+	// pending signal payload with its own, and the wake below then ran it. That
+	// blind spot is why the gate 3.86 describes needs a position-aware check
+	// rather than a substring one.
+	//
+	// USING (VALUES ...) rather than USING (SELECT @p1 AS ...), which is what
+	// this statement said until the tenant predicate was added to the ON
+	// clause. TestMSSQLUUIDColumnsAreConvertedInProjections is a textual scan
+	// whose projection span runs from a SELECT to the next terminator, and a
+	// USING (SELECT ...) has no terminator before the ON -- so `target.tenant_id`
+	// in the join predicate was read as an unconverted projection and the guard
+	// failed the build. Third time that shape has come up; DeployWorkflowDef's
+	// MERGE is the form that passes, and matching it is the fix rather than
+	// relaxing the guard, which is right about the defect it was written for.
 	_, err = tx.ExecContext(ctx, `
 		MERGE workflow_signals AS target
-		USING (SELECT @p1 AS workflow_id, @p2 AS signal_name, @p3 AS payload) AS source
-		ON target.workflow_id = source.workflow_id AND target.signal_name = source.signal_name
+		USING (VALUES (@p1, @p2, @p3)) AS source(workflow_id, signal_name, payload)
+		ON target.tenant_id = @p4
+		   AND target.workflow_id = source.workflow_id
+		   AND target.signal_name = source.signal_name
 		WHEN MATCHED THEN UPDATE SET payload = source.payload, delivered_at = SYSUTCDATETIME()
 		WHEN NOT MATCHED THEN INSERT (workflow_id, signal_name, payload, tenant_id)
 		     VALUES (source.workflow_id, source.signal_name, source.payload, @p4);
@@ -32,11 +55,13 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		return err
 	}
 
+	// Scoped for the same reason as the MERGE above: without it, delivering a
+	// signal to an id belonging to another tenant woke that tenant's workflow.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET next_wake_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND status IN ('ready', 'suspended')
-	`, workflowID)
+		WHERE id = @p1 AND status IN ('ready', 'suspended') AND tenant_id = @p2
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return err
 	}

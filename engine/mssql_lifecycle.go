@@ -489,6 +489,22 @@ func (s *MSSQLStore) heartbeatOnce(ctx context.Context, workflowID, workerID str
 // workflow. Individual generation-guarded operations (Heartbeat,
 // CompleteWorkflow, FailWorkflow, etc.) prevent double-execution even if the
 // batch heartbeat refreshes a stale workflow's heartbeat_at.
+//
+// AND THIS ONE MUST NOT GET A TENANT PREDICATE, which is worth saying out loud
+// because every other unscoped statement in this file is a defect and an audit
+// will find this one too (3.86). It is called on the WORKER'S OWN store
+// (cmd/cleat-worker/setup.go's heartbeat loop), and under claim-across-tenants
+// a worker legitimately holds instances belonging to many tenants -- the claim
+// is deliberately cross-tenant and each instance then EXECUTES against a store
+// scoped to its own tenant, but the heartbeat is one statement covering all of
+// them. Scoping it to s.tenantID would silently stop refreshing every other
+// tenant's instances until ReapStaleInstances took them, and nothing would say
+// so.
+//
+// Note also that 3.77's "a generated id cannot be guessed" argument does not
+// apply here in either direction: there is no id in this predicate at all. The
+// key is the worker, and the set of rows a worker may touch is exactly the set
+// it was handed.
 func (s *MSSQLStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
@@ -679,14 +695,19 @@ func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, 
 // RetryWorkflow moves a dead_lettered workflow back to a runnable state.
 // Resets status to 'ready', clears the worker assignment and error fields,
 // and sets next_wake_at to now so the workflow is re-queued immediately.
+//
+// `AND tenant_id` is load-bearing -- see TerminateWorkflow. `status =
+// 'dead_lettered'` narrows the blast radius but does not close it: a workflow
+// another tenant has given up on is exactly the kind whose id has already been
+// pasted into a ticket.
 func (s *MSSQLStore) RetryWorkflow(ctx context.Context, workflowID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
 		    error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND status = 'dead_lettered'
-	`, workflowID)
+		WHERE id = @p1 AND status = 'dead_lettered' AND tenant_id = @p2
+	`, workflowID, s.tenantID)
 	return err
 }
 
@@ -874,6 +895,9 @@ func (s *MSSQLStore) finalizeWorkflowSegmentOnce(ctx context.Context, runID, wor
 }
 
 // RequestCancellation sets the cancellation flag on a workflow.
+//
+// `AND tenant_id` is load-bearing -- see TerminateWorkflow. The id reaches here
+// from cmd/cleat-worker/server.go's handleCancel, out of the URL path.
 func (s *MSSQLStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
 	return withRollbackGuaranteedRetry(ctx, "request cancellation", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		return s.requestCancellationOnce(ctx, workflowID, reason)
@@ -890,8 +914,8 @@ func (s *MSSQLStore) requestCancellationOnce(ctx context.Context, workflowID, re
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET cancellation_requested = 1, cancellation_reason = @p2
-		WHERE id = @p1
-	`, workflowID, reason)
+		WHERE id = @p1 AND tenant_id = @p3
+	`, workflowID, reason, s.tenantID)
 	if err != nil {
 		return err
 	}
