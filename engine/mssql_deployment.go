@@ -231,12 +231,17 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		SELECT id, def_name, def_version, status, input,
 		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
-		       COALESCE(trace_id, '')
+		       COALESCE(trace_id, ''),
+		       -- CONVERT, not the raw column: go-mssqldb scans UNIQUEIDENTIFIER
+		       -- into a Go string as 16 raw storage bytes. Same workaround as
+		       -- the claim queries, and TestMSSQLUUIDColumnsAreConvertedInProjections
+		       -- fails the build without it.
+		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
-		&wf.TraceID)
+		&wf.TraceID, &wf.TenantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

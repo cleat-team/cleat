@@ -12220,6 +12220,89 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
+### 3.99 The admin API answered 404 to its rightful owner on two of three dialects — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
+
+`GetWorkflowByID` did not `SELECT tenant_id` on PostgreSQL or SQL Server, so
+`WorkflowInstance.TenantID` came back as `""`. `cmd/cleat-worker/api_admin.go`'s
+`callerOwnsTarget` — the **only** enforcement point for `/api/admin/instances/*`, because the
+admin store methods take no tenant parameter — compares exactly that field against the
+authenticated caller. `"" != "<caller uuid>"` is true for everyone, including the owner.
+
+So with `--enable-admin-api` and `--require-auth` both on, every admin instance route
+(force-complete, force-fail, re-replay) answered **404 to the tenant that owned the workflow**, on
+PostgreSQL and SQL Server. Measured 2026-09-03, one run across all three dialects:
+
+```
+postgres: wf.TenantID = ""                                      EMPTY
+mysql:    wf.TenantID = "00000000-0000-0000-0000-000000000000"  populated
+mssql:    wf.TenantID = ""                                      EMPTY
+```
+
+#### Why nothing caught it, which is the reusable part
+
+**There is a test, it is correct, and it passes.** `TestAdminRoutesRejectCrossTenantTarget`
+(written for §1.7) exercises the ownership gate with a caller tenant on the request context. Its
+mock returns:
+
+```go
+return &engine.WorkflowInstance{ID: id, TenantID: ownedBy}, nil
+```
+
+The mock populates the field. The test therefore proves the **comparison** is right — it is — and
+says nothing about whether any real store fills in the value being compared. Two of three do not,
+and nothing anywhere compared the mock against the implementations it stands in for.
+
+That is `hostabi_runtime_parity_test.go`'s lesson in a new place: two implementations of one
+contract, each self-consistent, with nothing checking they agree. It is also CLAUDE.md's *"watch
+which layer is holding the test up"* in its most literal form — the layer holding that assertion
+up was the test's own fixture.
+
+**And it failed closed**, which is why no operator report surfaced it: a gate that denies
+everything looks like a gate doing its job. The tell was not a failure anywhere. It was that
+MySQL — the dialect documented single-tenant-only, where this matters least — was the only one
+that scanned the column.
+
+#### The fix
+
+`SELECT tenant_id` on both dialects, and scan it. On SQL Server that is
+`LOWER(CONVERT(NVARCHAR(36), tenant_id))`:
+
+- `CONVERT` because go-mssqldb scans `UNIQUEIDENTIFIER` into a Go string as 16 raw storage bytes
+  (§3.55's defect, and `TestMSSQLUUIDColumnsAreConvertedInProjections` fails the build without it);
+- `LOWER` because `CONVERT` returns **uppercase** and `uuid.UUID.String()` is lowercase, so the
+  comparison would have gone on failing for a second, entirely different reason. This is the
+  hazard §3.91 recorded after a probe passed while printing the leak it was probing for.
+
+`callerOwnsTarget` now uses `strings.EqualFold` as well. Normalising at the source is the real
+fix; the fold is there so a dialect that stops normalising fails visibly rather than by 404ing
+every request forever.
+
+`engine/workflow_tenant_id_populated_test.go` asserts the field at the **store** layer across all
+three dialects, deliberately not at the HTTP layer: the HTTP layer is where a mock can supply the
+value, and that is precisely what hid this. Each dialect was falsified on its own and turned
+exactly one subtest red.
+
+#### Three sqlmock fixtures had to move, and a fourth must not
+
+`engine/db_methods_test.go` and `engine/mssql_store_test.go` drive `GetWorkflowByID` through
+sqlmock with a **hardcoded column list**, so adding `tenant_id` broke their arity with the same
+`expected 16 destination arguments in Scan, not 17` the falsification produced. That is the mock
+being useful: it made the shape change deliberate rather than silent.
+
+**But I then patched a fourth fixture that already had the column**, by matching on a
+`// trace_id` comment rather than checking which test owned the block.
+`engine/mssql_store_mock_test.go`'s row belongs to `ClaimWorkflow` — `match: "SET status =
+'running'"` — and already carried `tenant_id` at position 8, so the extra value broke
+`TestMSSQLStore_ClaimWorkflow_Success` with the mirror-image error, `expected 15 destination
+arguments in Scan, not 14`. Read which test owns a fixture before editing it; a matching comment
+is not ownership.
+
+**One falsification had to be redone**, which is worth recording. Removing `tenant_id` from
+PostgreSQL's `SELECT` without also removing its scan target made the test fail with
+`sql: expected 16 destination arguments in Scan, not 17` — a driver arity error, not the
+assertion. It was red, and red for the wrong reason. Replacing the column with `'' AS tenant_id`
+keeps the arity and fails on the assertion, which is the thing being proven.
+### 3.93 `cleatctl restore-workflow` names a backup command that does not exist, and assigns every restored row to the default tenant — 🔴 **OPEN, found 2026-09-03** (WS-1, 2026-09-03)
 ### 3.95 `cleatctl restore-workflow` names a backup command that does not exist, and assigns every restored row to the default tenant — 🔴 **OPEN, found 2026-09-03** (WS-1, 2026-09-03)
 
 Found while investigating something else — whether any writer puts a NULL in MySQL's nullable

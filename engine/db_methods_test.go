@@ -659,6 +659,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				int64(0),                   // generation
 				int64(0),                   // priority
 				"",                         // trace_id
+				DefaultTenantUUID,          // tenant_id (3.99)
 			}},
 		},
 	}, nil)
@@ -1860,22 +1861,23 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{{
-				"wf-1",       // id
-				"test-wf",    // def_name
-				int64(1),     // def_version
-				"running",    // status
-				[]byte(`{}`), // input
-				nil,          // assigned_to (NULL)
-				nil,          // heartbeat_at (NULL)
-				nil,          // next_wake_at (NULL)
-				nil,          // completed_at (NULL)
-				nil,          // result::text (NULL)
-				nil,          // error_msg (NULL)
-				nil,          // error_code (NULL)
-				nil,          // error_op (NULL)
-				int64(0),     // generation
-				int64(0),     // priority
-				"",           // trace_id (COALESCE)
+				"wf-1",            // id
+				"test-wf",         // def_name
+				int64(1),          // def_version
+				"running",         // status
+				[]byte(`{}`),      // input
+				nil,               // assigned_to (NULL)
+				nil,               // heartbeat_at (NULL)
+				nil,               // next_wake_at (NULL)
+				nil,               // completed_at (NULL)
+				nil,               // result::text (NULL)
+				nil,               // error_msg (NULL)
+				nil,               // error_code (NULL)
+				nil,               // error_op (NULL)
+				int64(0),          // generation
+				int64(0),          // priority
+				"",                // trace_id (COALESCE)
+				DefaultTenantUUID, // tenant_id (3.99)
 			}},
 		},
 	}, nil)
