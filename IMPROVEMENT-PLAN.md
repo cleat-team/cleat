@@ -6102,7 +6102,7 @@ non-test Go lines and 164 test lines (`grep -rn workflow_defs --include='*.go'`,
 but most already carry `tenant_id` in their predicates — §3.10, §3.11 and §3.12's writer fix
 went through them. The expensive part is the migration, and the count is a poor proxy for it.
 
-### 3.86 SQL Server's cross-tenant exemption is per-connection, and the statements that lean on it have no predicate of their own — 🔶 **SCHEDULES AND TAGS FIXED 2026-09-02 (10 statements); the audit is still owed on every other table** (WS-1)
+### 3.86 SQL Server's cross-tenant exemption is per-connection, and the statements that lean on it have no predicate of their own — 🔶 **23 STATEMENTS FIXED across schedules, tags and definitions; 34 remain and the audit needs a mechanism, not a fourth file** (WS-1, 2026-09-03)
 
 Found while scoping §3.77 step 3 (`workflow_schedules`), and it is not part of that change:
 it is true on today's schema, needs no migration, and is reachable from the ordinary HTTP API.
@@ -6216,12 +6216,93 @@ single-tenant-only for want of row-level security, so this is not a supported co
 §3.77 step 4 removes it anyway, by putting the tenant in the key that `ON DUPLICATE KEY`
 matches on.
 
+#### Third table — `workflow_defs`, fixed 2026-09-03, and this one is not a leak
+
+The first two tables let one tenant read or damage another's rows. This one lets **a worker
+execute the wrong tenant's compiled code**, and §3.77 is what made it reachable.
+
+Before migration `035`, two tenants could not both hold a definition called `order-processor`,
+so `WHERE name = @p1 AND version = @p2` identified exactly one row *even on a connection with no
+tenant filtering*. After `035` it does not. On a `dbo.cleat_admin` login that predicate matches
+both tenants' rows and `QueryRow` takes whichever comes back first.
+
+Measured with tenant A holding `order-processor` v1 as `0xAA` and tenant B holding its own v1 as
+`0xBB`:
+
+```
+LoadWASM(A)          -> 0xAA        correct
+LoadWASM(B)          -> 0xAA        TENANT B WAS HANDED TENANT A'S COMPILED CODE
+ListVersions(B)      -> [2 1 1]     B deployed exactly one version
+ListWorkflowDefs(B)  -> 3 rows      B deployed exactly one definition
+PurgeWorkflowDef(B)  -> deleted TENANT A's wasm_bytes as well
+```
+
+So the consequence is not that B learns something about A: B's workflow runs A's program, and
+every check downstream — ABI version, replay history, result — is then about code the tenant
+never deployed. `ListVersions` returning `[2 1 1]` is the visible tell, and nothing was looking.
+
+**Twelve statements**, all in `engine/mssql_deployment.go`: `LoadWASM`, `ListVersions`,
+`LoadWorkflowConfig`, `LoadDAGSpec`, `ListWorkflowDefs` (**both** branches — the empty-name one
+listed every tenant's definitions), `GetWorkflowDef`, `MarkVersionDeprecated`,
+`PurgeWorkflowDef`, `CountActiveInstances`, `ValidateVersion`, `GetRoutingRules`,
+`RemoveRoutingRule`.
+
+**The assertions had to be stronger than §3.77 step 1's, and that is the reusable point.**
+`def_lookup_tenant_property_test.go` asserts *"tenant B sees nothing"* — correct when only one
+tenant could hold a name, and **wrong now**: B is entitled to its own `order-processor`. The new
+file asserts B sees **its own** answer, against a lopsided fixture (A holds v1+v2, B holds v1),
+so "its own" and "the other's" are different values. A symmetric fixture would pass with no fix
+at all. **A tenancy assertion written before D7 may now be asserting the wrong thing**, and that
+is worth checking wherever one exists.
+
+Step 1's file also could not have caught this whatever it asserted, because it runs on
+tenant-scoped stores where the policy does the filtering. Same lesson as the tags file: which
+connection the test runs on decides the answer.
+
+#### The count, finally derived — and why the next step is a guard
+
+Statements in `engine/mssql*.go` touching a table bound to `dbo.fn_tenant_filter`, classified by
+whether the text carries `tenant_id`, tables derived from the `ADD FILTER PREDICATE` bindings in
+`migrations/mssql/*.sql` rather than hardcoded:
+
+| | 2026-09-03, before this fix | after |
+|---|---|---|
+| carry a tenant predicate | 48 | 61 |
+| do not | **47** | **34** |
+
+Thirteen SQL literals, not twelve, because `ListWorkflowDefs` carries two -- the named branch
+and the empty-name one. **I wrote 60/35 into this table from arithmetic and the re-derivation
+said 61/34**; the command below is why that error lasted a paragraph instead of shipping.
+Re-derive (2026-09-03) with `scripts/mssql-tenant-predicate-audit.py`, which derives the table
+list from the `ADD FILTER PREDICATE` bindings in `migrations/mssql/*.sql` rather than
+hardcoding it:
+
+```
+python3 scripts/mssql-tenant-predicate-audit.py
+```
+
+
+The 34 that remain are **not** the same class. They key on a *generated* id —
+`workflow_instances(id)`, `event_history(workflow_id)`, `workflow_signals(workflow_id)` — where
+§3.77's table already argued a UUID cannot be guessed. That is a weaker guarantee than a tenant
+predicate (an id that leaks becomes a capability: on an unfiltered connection, knowing another
+tenant's workflow id is enough to terminate it), but it is a different argument and it needs
+deciding rather than sweeping.
+
+**Three tables, five statements, five statements, twelve statements — all found by reading one
+file while scoping something else.** That is not a method, and the fourth file would not be
+either. The next step is the guard that produced the table above: derive the tenant-scoped
+tables from the migrations, scan the store's SQL literals, and fail at authoring time on any
+statement that touches one without a tenant predicate or an allowlist entry giving a reason.
+`TestMSSQLUUIDColumnsAreConvertedInProjections` is exactly this shape already and is the
+precedent to copy. **Not written yet** — recorded here so the estimate is a number rather than
+"unknown".
+
 #### What is NOT fixed
 
-Schedules and tags. The reasoning covers **every SQL Server statement that carries no tenant
-predicate**, and the count is still not known — both sets were found by reading one file while
-scoping something else, which is not a method. That it found five the first time and five again
-the second is the argument for stopping the file-at-a-time approach, not for continuing it.
+The 34 generated-id statements above, and the guard that would stop this recurring. The count
+is no longer unknown, which is the one thing that has improved: it is 34 as of 2026-09-03,
+re-derivable with `scripts/mssql-tenant-predicate-audit.py`.
 
 The sweep this needs is a property test over the boundary rather than an audit of statements,
 for the reason CLAUDE.md gives and §3.77 step 1 demonstrated: reading SQL tells you which

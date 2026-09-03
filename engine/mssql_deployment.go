@@ -17,8 +17,8 @@ import (
 func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	var wasmBytes []byte
 	err := s.db.QueryRowContext(ctx, `
-		SELECT wasm_bytes FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, defName, defVersion).Scan(&wasmBytes)
+		SELECT wasm_bytes FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, defName, defVersion, s.tenantID).Scan(&wasmBytes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
@@ -43,8 +43,8 @@ func (s *MSSQLStore) GetWASMLength(ctx context.Context, defName string, defVersi
 // ListVersions returns all deployed versions of a workflow.
 func (s *MSSQLStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT version FROM workflow_defs WHERE name = @p1 ORDER BY version DESC
-	`, defName)
+		SELECT version FROM workflow_defs WHERE name = @p1 AND tenant_id = @p2 ORDER BY version DESC
+	`, defName, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list versions: %w", err)
 	}
@@ -65,8 +65,8 @@ func (s *MSSQLStore) ListVersions(ctx context.Context, defName string) ([]int, e
 func (s *MSSQLStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	var maxHistoryLength int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT max_history_length FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, defName, defVersion).Scan(&maxHistoryLength)
+		SELECT max_history_length FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, defName, defVersion, s.tenantID).Scan(&maxHistoryLength)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
@@ -80,8 +80,8 @@ func (s *MSSQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 func (s *MSSQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
 	var raw *[]byte
 	err := s.db.QueryRowContext(ctx, `
-		SELECT dag_spec FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, defName, defVersion).Scan(&raw)
+		SELECT dag_spec FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
@@ -324,13 +324,13 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	if name == "" {
 		rows, err = s.db.QueryContext(ctx, `
 			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
-			FROM workflow_defs ORDER BY name, version DESC
-		`)
+			FROM workflow_defs WHERE tenant_id = @p1 ORDER BY name, version DESC
+		`, s.tenantID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
 			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
-			FROM workflow_defs WHERE name = @p1 ORDER BY version DESC
-		`, name)
+			FROM workflow_defs WHERE name = @p1 AND tenant_id = @p2 ORDER BY version DESC
+		`, name, s.tenantID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list workflow defs: %w", err)
@@ -366,8 +366,8 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
 		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, deprecated
-		FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
+		FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
 		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.Deprecated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -389,8 +389,8 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 // MarkVersionDeprecated sets the deprecated flag on a workflow version.
 func (s *MSSQLStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_defs SET deprecated = @p3 WHERE name = @p1 AND version = @p2
-	`, name, version, deprecated)
+		UPDATE workflow_defs SET deprecated = @p3 WHERE name = @p1 AND version = @p2 AND tenant_id = @p4
+	`, name, version, deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("mark version deprecated: %w", err)
 	}
@@ -400,8 +400,8 @@ func (s *MSSQLStore) MarkVersionDeprecated(ctx context.Context, name string, ver
 // PurgeWorkflowDef permanently deletes a workflow definition.
 func (s *MSSQLStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
 	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, name, version)
+		DELETE FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, name, version, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("purge workflow def: %w", err)
 	}
@@ -413,9 +413,9 @@ func (s *MSSQLStore) CountActiveInstances(ctx context.Context, name string, vers
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
-		WHERE def_name = @p1 AND def_version = @p2
+		WHERE def_name = @p1 AND def_version = @p2 AND tenant_id = @p3
 		  AND status IN ('ready', 'running')
-	`, name, version).Scan(&count)
+	`, name, version, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active instances: %w", err)
 	}
@@ -444,9 +444,9 @@ func (s *MSSQLStore) ValidateVersion(ctx context.Context, defName string, defVer
 	err := s.db.QueryRowContext(ctx, `
 		SELECT CASE WHEN EXISTS (
 			SELECT 1 FROM workflow_defs
-			WHERE name = @p1 AND version = @p2 AND deprecated = 0
+			WHERE name = @p1 AND version = @p2 AND tenant_id = @p3 AND deprecated = 0
 		) THEN 1 ELSE 0 END
-	`, defName, defVersion).Scan(&exists)
+	`, defName, defVersion, s.tenantID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("validate version: %w", err)
 	}
@@ -624,8 +624,8 @@ func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error
 		return fmt.Errorf("remove routing rule: invalid rule id %q: %w", ruleID, err)
 	}
 	_, err = s.db.ExecContext(ctx, `
-		DELETE FROM workflow_routing WHERE id = @p1
-	`, id)
+		DELETE FROM workflow_routing WHERE id = @p1 AND tenant_id = @p2
+	`, id, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: %w", err)
 	}
@@ -636,8 +636,8 @@ func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error
 func (s *MSSQLStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT CONVERT(NVARCHAR(36), id), workflow_name, target_version, weight
-		FROM workflow_routing WHERE workflow_name = @p1
-	`, workflowName)
+		FROM workflow_routing WHERE workflow_name = @p1 AND tenant_id = @p2
+	`, workflowName, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("get routing rules: %w", err)
 	}
