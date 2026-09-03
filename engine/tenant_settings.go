@@ -43,11 +43,14 @@ type TenantSettings struct {
 	// HostRetryBudget overrides the threshold above which a retry policy is
 	// suspended and replayed rather than run in-process (3.88).
 	//
-	// NOT YET CONSUMED, and it cannot be until 3.94 step 4: the threshold is
-	// currently a constant compiled into each guest module (Go's
-	// hostRetryBudget, Rust's HOST_RETRY_BUDGET_MS), so the guest has already
-	// chosen a path before the host is consulted. Step 4 moves the decision
-	// host-side, and this field is what it will read.
+	// Read by Engine.hostRetryBudget, clamped to --host-retry-budget, and
+	// applied in execSession.DurableCallWithRetry: a policy whose worst-case
+	// backoff exceeds it is refused with callErrorCode 6 and the guest runs it
+	// itself, suspending between attempts.
+	//
+	// The threshold used to be a constant compiled into each guest module, so
+	// the guest had already chosen a path before the host was consulted and no
+	// tenant could change it. 3.94 step 4 moved the decision here.
 	HostRetryBudget time.Duration
 }
 

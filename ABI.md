@@ -198,7 +198,12 @@ language not known to decode it.
 
 ##### Retry refusal — `cleat_call_retry` only, and NOT a sentinel bit
 
-**Decided 2026-09-03, IMPROVEMENT-PLAN §3.94 step 1. Nothing implements this yet.**
+**Decided 2026-09-03, IMPROVEMENT-PLAN §3.94 step 1; implemented 2026-09-03 in step 4.**
+
+The host side is `execSession.DurableCallWithRetry` (`engine/durablecalls.go`), which refuses
+after the stop-sentinel check and after the replay return — the ordering below is not advice,
+it is what that function does. The Go SDK decodes it in `DurableCallWithOptions` and the Rust
+SDK as `CallError::RetryPolicyTooLong`; both fall back to their suspending loop.
 
 When the host declines to run a retry policy because the policy's total backoff exceeds the
 tenant's host-retry budget, it returns an ordinary error result carrying a **new

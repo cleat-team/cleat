@@ -178,10 +178,11 @@ func TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker(t *testing.T) {
 		t.Fatalf("the run did not suspend (err=%v).\n\n"+
 			"Four minutes of backoff must not run on the host: it holds a "+
 			"worker for the duration and exceeds --wasm-wall-clock-ceiling, "+
-			"which kills the invocation. If cleat_call_with_retry stopped "+
-			"consulting HOST_RETRY_BUDGET_MS, the two SDKs disagree again -- "+
-			"see cleat.TestBothSDKsAgreeOnTheHostRetryBudget and "+
-			"IMPROVEMENT-PLAN 3.88.", execErr)
+			"which kills the invocation. The HOST refuses this policy "+
+			"(callErrorCode 6, RetryPolicyTooLong) and cleat_call_with_retry "+
+			"falls back to sdk_level_retry, which suspends. If that fallback "+
+			"is gone the guest surfaces the refusal as an error instead -- "+
+			"IMPROVEMENT-PLAN 3.88 and 3.94 step 4.", execErr)
 	}
 	if !strings.Contains(susp.Reason, "cleat_sleep") {
 		t.Fatalf("suspension reason is %q, want one naming cleat_sleep -- the "+

@@ -967,6 +967,7 @@ type Worker struct {
 	// Maximum wall-clock duration per workflow execution (0 = no limit).
 	maxWorkflowDuration  time.Duration
 	wasmWallClockCeiling time.Duration
+	hostRetryBudget      time.Duration
 
 	// childBindingOverride overrides the child binding policy for all tenants
 	// on this worker. This is a worker-level, cross-tenant setting intended for
@@ -1619,6 +1620,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
 		engine.WithWASMInstanceTimeout(w.wasmInstanceTimeout),
 		engine.WithWasmWallClockCeiling(w.wasmWallClockCeiling),
+		engine.WithHostRetryBudget(w.hostRetryBudget),
 		engine.WithChildBindingPolicy(childBindingPolicy),
 		engine.WithChildBindingOverride(w.childBindingOverride),
 	}

@@ -1298,8 +1298,8 @@ impl HostCalls {
 
     /// Durable call with a retry policy, run wherever the policy belongs.
     ///
-    /// A policy whose worst-case total backoff fits in `HOST_RETRY_BUDGET_MS`
-    /// runs on the HOST, inside one segment, holding the worker -- the way
+    /// A policy whose worst-case total backoff fits in the tenant's host-retry
+    /// budget runs on the HOST, inside one segment, holding the worker -- the way
     /// non-durable code would do it, which for a retry finishing in seconds is
     /// what a caller expects. A longer policy suspends between attempts instead,
     /// releasing the worker, at the cost of one segment and one replay per
@@ -1315,25 +1315,40 @@ impl HostCalls {
     /// The error type is `CallError` because ONE of the two paths suspends: a
     /// policy too long for the host loop falls through to `sdk_level_retry`,
     /// which sleeps between attempts. Which path a policy takes is decided by
-    /// `retry_fits_in_one_segment` before the first attempt, so a caller cannot
-    /// tell from the call site whether this one suspends -- which is exactly
-    /// why it must be able to say so in its type.
+    /// the HOST, which refuses a too-long policy with
+    /// `CallError::RetryPolicyTooLong` before making any call -- so a caller
+    /// cannot tell from the call site whether this one suspends, which is
+    /// exactly why it must be able to say so in its type.
+    ///
+    /// The decision used to be made here, against a constant compiled into this
+    /// crate. It moved to the host so a tenant can set its own budget and an
+    /// operator can cap it; IMPROVEMENT-PLAN 3.94 step 4.
     pub fn cleat_call_with_retry<T: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self, service: &str, operation: &str, request: &T, retry_policy: &RetryPolicy,
     ) -> Result<R, CallError> {
-        if !retry_fits_in_one_segment(retry_policy) {
-            return self.sdk_level_retry(service, operation, request, retry_policy);
+        match self.cleat_call_with_host_retry(service, operation, request, retry_policy) {
+            // Refused as too long for one segment. Nothing was called and no
+            // attempt was consumed, so the SDK loop starts from attempt 1.
+            Err(CallError::RetryPolicyTooLong) => {
+                self.sdk_level_retry(service, operation, request, retry_policy)
+            }
+            other => other,
         }
-        self.cleat_call_with_host_retry(service, operation, request, retry_policy)
     }
 
     /// Durable call whose retry policy runs on the HOST, whatever its length.
     ///
     /// The explicit form, and the mirror of Go's
-    /// `HostCallsImpl.DurableCallWithRetry`: it does not consult
-    /// `HOST_RETRY_BUDGET_MS`, because a caller naming this function has asked
-    /// for the host loop specifically. A long policy here holds a worker and can
-    /// exceed the wall-clock ceiling, which is the caller's choice to make.
+    /// `HostCallsImpl.DurableCallWithRetry`: this crate applies no threshold of
+    /// its own, because a caller naming this function has asked for the host
+    /// loop specifically.
+    ///
+    /// The HOST still applies the tenant's budget and can refuse, returning
+    /// `Err(CallError::RetryPolicyTooLong)`. Unlike `cleat_call_with_retry`
+    /// this method does NOT fall back for you. That narrowing is deliberate: a
+    /// long policy here used to be "the caller's choice", and on a shared
+    /// deployment the budget bounds how long one tenant may hold a worker slot,
+    /// so a guest able to opt out would make the limit advisory.
     ///
     /// One history event for the whole logical call, and the only path that
     /// produces the `retries exhausted` prefix the worker dead-letters on.
@@ -1363,8 +1378,13 @@ impl HostCalls {
                 resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
-        let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
+        let (response_len, call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
+            // The host refuses a policy too long for one segment with this
+            // classification. It is not a call failure: nothing was called.
+            if call_error_code == CALL_ERROR_RETRY_POLICY_TOO_LONG {
+                return Err(CallError::RetryPolicyTooLong);
+            }
             let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
             return Err(CallError::Failed(err_msg));
         }
@@ -1726,51 +1746,11 @@ pub struct SignalResult {
     pub timed_out: bool,
 }
 
-/// How much backoff a policy may carry and still be run on the host, inside one
-/// segment, holding the worker.
+/// `callErrorCode` 6 -- the host declined to run a retry policy in one segment.
 ///
-/// **This must equal `cleat.hostRetryBudget` in the Go SDK**, and nothing at
-/// compile time can enforce that across two languages, so
-/// `engine.TestBothSDKsAgreeOnTheHostRetryBudget` compares this literal against
-/// the Go constant. A silent divergence would mean one identical
-/// `RetryPolicy` holding a worker on one SDK and suspending on the other, which
-/// is the exact defect IMPROVEMENT-PLAN 3.88 exists to remove.
-///
-/// Deliberately well below `--wasm-wall-clock-ceiling`'s 5m default rather than
-/// near it: the ceiling covers the WHOLE invocation, so a threshold close to it
-/// would let one retry policy consume the entire budget. See 3.90.
-pub const HOST_RETRY_BUDGET_MS: u64 = 60_000;
-
-/// Whether a policy's worst-case total backoff is small enough to run on the
-/// host.
-///
-/// Worst case, not expected: every attempt fails and every backoff is waited
-/// out in full. A policy is either always in-segment or always suspending,
-/// decided before the first attempt, because one that switched paths part-way
-/// through would produce a history whose shape depended on which services
-/// happened to fail.
-///
-/// Mirrors `retryFitsInOneSegment` in `cleat/runtime.go`, including the detail
-/// that `max_attempts` attempts means `max_attempts - 1` backoffs -- the last
-/// failure is not followed by a wait.
-pub fn retry_fits_in_one_segment(policy: &RetryPolicy) -> bool {
-    let mut total: u64 = 0;
-    let mut interval = policy.initial_interval_ms;
-    for _ in 1..policy.max_attempts {
-        if policy.maximum_interval_ms > 0 && interval > policy.maximum_interval_ms {
-            interval = policy.maximum_interval_ms;
-        }
-        total = total.saturating_add(interval);
-        if total > HOST_RETRY_BUDGET_MS {
-            return false;
-        }
-        if policy.backoff_multiplier > 1.0 {
-            interval = (interval as f64 * policy.backoff_multiplier) as u64;
-        }
-    }
-    true
-}
-
+/// Wire ABI, defined in `ABI.md` and packed by the engine. A value here can be
+/// added but never changed; this crate decodes it and must not guess.
+pub const CALL_ERROR_RETRY_POLICY_TOO_LONG: u32 = 6;
 
 /// Retry policy for cleat_call_with_retry.
 #[derive(Debug, Clone, Serialize, Deserialize)]

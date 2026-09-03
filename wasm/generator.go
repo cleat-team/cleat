@@ -424,7 +424,7 @@ func callErrorMessage(callName string, responseBuf []byte, responseLen uint32, c
 	if responseLen > 0 && int(responseLen) <= len(responseBuf) {
 		return string(responseBuf[:responseLen])
 	}
-	return fmt.Sprintf("%s: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", callName, callErrorCode)
+	return fmt.Sprintf("%s: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied 6=retry_policy_too_long)", callName, callErrorCode)
 }
 
 // hostErrMessage returns the reason a host call wrote into its output buffer.
