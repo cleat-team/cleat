@@ -26,12 +26,22 @@ future session should not have to rediscover.
 > the mechanism lands in `engine/testutil/`. The four that remain are real — each re-checked
 > against the tree, not against the plan's status markers:
 >
-> | item | evidence it is still open |
-> |---|---|
-> | §1.4 phase F | `engine/store_admin.go` implements force-complete/fail; nothing resolves a *pending* step. |
-> | §2.35 residual | `event_history` has `error TEXT` and no `error_code` column — `awk '/CREATE TABLE.*event_history/,/^\);/' migrations/postgres/001_schema.sql`. |
-> | `AdminReReplay` | still in `engine/store_admin_stubs.go`. |
-> | `pendingSentinel` | still in `engine/types.go:399`, exported as `PendingSentinel` for `tests/integrity`. |
+> | item | evidence it is still open | **status 2026-09-03** |
+> |---|---|---|
+> | §1.4 phase F | `engine/store_admin.go` implements force-complete/fail; nothing resolves a *pending* step. | ✅ **DONE** — `engine.ResolveStep` (`engine/admin_intent.go:51`). A defect in it was fixed separately in #602 (§3.89). |
+> | §2.35 residual | `event_history` has `error TEXT` and no `error_code` column — `awk '/CREATE TABLE.*event_history/,/^\);/' migrations/postgres/001_schema.sql`. | ✅ **Engine half done** (#572), and **the evidence column is why this row read as open for longer than it was**: the command is still accurate — there is no `error_code` COLUMN — but the class ships in the `payload` JSONB (`engine/store_events.go:170`), so the check confirms a prediction about the mechanism rather than the fact. Plugin half open. |
+> | `AdminReReplay` | still in `engine/store_admin_stubs.go`. | ✅ **DONE** — #591 deleted that file; real bodies in `engine/store_admin_rereplay.go`. |
+> | `pendingSentinel` | still in `engine/types.go:399`, exported as `PendingSentinel` for `tests/integrity`. | ✅ **DONE** — #589. Nothing ever wrote it, so `tests/integrity` never depended on it. |
+>
+> **A re-derivation is only as good as what it re-derives against, and this table is the
+> example.** Every one of these four checks was run and every one was accurate on the day. Three
+> went stale within a month because they were checks against *this stream's own upcoming work* —
+> the rows closed because WS-2 closed them. The §2.35 row is the interesting failure: its command
+> still passes today and still returns the answer "open", because it looks for a column and the
+> fix landed as a JSONB key. **A check that names a mechanism will confirm the bug forever if the
+> fix arrives by another mechanism** — the same trap CLAUDE.md records for §1.1's `Files:` bullet
+> pointing at `003_procedures.sql` when the fix shipped as `004`. Prefer a check on the OBSERVABLE
+> (does a recorded failure replay with its class?) over one on the implementation.
 >
 > **And there is a new first item that is not on the list below: the durable-record shape for
 > §3.35 phase 5.** WS-3 has phases 1–4 of `defer` shipped and is deliberately not starting
@@ -39,6 +49,13 @@ future session should not have to rediscover.
 > answer is what the one-stream rule exists to prevent. That makes it WS-2's to answer, it is
 > a written design rather than a PR, and it should come **before** §2.35 — both touch the same
 > rows, and doing them in the other order means designing the record twice.
+>
+> **Answered 2026-09-02 — §3.75, #569. Do not take this; read the answer.** It reframes the
+> question rather than choosing between the two options: both assumed defers run *after* the
+> workflow is terminal, and after phases 2–4 they no longer do, so the paths that matter need
+> no new record at all. The execution half is built and measured too (§3.81, WS-3's). **The
+> sequencing advice above was followed and turned out not to matter** — §2.35's engine half
+> landed without touching the defer record, because the record was never needed.
 >
 > Of the "Not mine, and blocked on WS-3" pair below, **§3.23 landed** (fixed 2026-08-31). **A
 > guest-visible `CallErrorAmbiguous` did not** — `grep -rn CallErrorAmbiguous .` is empty and
@@ -274,6 +291,12 @@ needs rephrasing, not escaping.
 > Item 1 is done, item 4 moved to WS-1, and a new first item (the §3.35 phase 5 record shape)
 > sits ahead of all of these. The list is kept because items 2, 3, 5 and 6 are still open and
 > the reasoning under each of them is still the reasoning.
+>
+> **2026-09-03: items 2, 5 and 6 are now done as well, and item 3 is half done.** #578 and #602
+> (2, phase F and the checksum defect in it), #591 (5, `AdminReReplay`), #589 (6, the sentinel),
+> #572 (3's engine half). **Nothing in this numbered list is open except §2.35's plugin half.**
+> The list stays because the reasoning under each item is still the reasoning — but read it as
+> history, and take the board in `PARALLEL-WORKSTREAMS.md` as the live one.
 
 1. ~~**§3.24 — an ambiguous outcome classifies as `unknown`.**~~ **Done, 2026-08-31.** `engine.ErrAmbiguous` has existed
    since the first commit and `NewAmbiguousError` is called by nothing but its own test, so
