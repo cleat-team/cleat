@@ -111,14 +111,14 @@ var tenantPredicateAllowlist = map[string]string{
 	//  - claimWorkflowsOnce and claimStickyWorkflowsOnce appeared here when this
 	//    guard was first run and are NOT in this list, because 3.91 fixed them.
 	//    Four hand audits and a substring script had passed over them.
-	//  - the two below were about to be written down as scopedByCaller, and that
-	//    reason is FALSE. terminateWorkflowOnce calls enforceParentClosePolicy
-	//    unconditionally after its commit -- so since 3.86 scoped the terminate
-	//    itself, a cross-tenant terminate now matches no parent and then
-	//    cascades into another tenant's CHILDREN anyway. The parent is
-	//    protected and the cascade is not. 3.92.
-	"mssql_lifecycle.go:enforceParentClosePolicy":  openFinding,
-	"mssql_lifecycle.go:childrenClosedByTerminate": openFinding,
+	//  - enforceParentClosePolicy and childrenClosedByTerminate were about to be
+	//    written down as scopedByCaller, and that reason was FALSE:
+	//    terminateWorkflowOnce calls the cascade unconditionally after its
+	//    commit, so once 3.86 scoped the terminate itself a cross-tenant
+	//    terminate matched no parent and then failed another tenant's CHILDREN
+	//    anyway. They are NOT in this list because 3.92 fixed them -- and this
+	//    guard is what made that happen, by refusing to accept a name without a
+	//    reason and then failing on the stale entries once the reason was gone.
 
 	//  - adminAppendAudit was flagged only after the scan stopped being a glob
 	//    over mssql_*.go -- it lives in store_admin.go, which the first version

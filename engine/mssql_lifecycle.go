@@ -1105,6 +1105,38 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 // transaction rolled back, and logged when they survive that. The function
 // stays void because its callers treat it as best-effort post-commit cleanup;
 // what changes is that a failure is now observable instead of silent.
+// enforceParentClosePolicy closes the children of a parent that has reached a
+// terminal state.
+//
+// `AND tenant_id` on both steps and on childrenClosedByTerminate is
+// load-bearing (3.92), and the reason is specific to how this is CALLED rather
+// than to the statements themselves: terminateWorkflowOnce invokes this
+// unconditionally after its commit and never looks at how many rows the
+// terminate touched. 3.86 put a tenant predicate on the terminate itself, so a
+// cross-tenant terminate now matches no parent -- and then reached here anyway
+// with an id belonging to somebody else.
+//
+// Measured before the fix, on a dbo.cleat_admin pool with tenant B terminating
+// tenant A's parent:
+//
+//	AFTER: tenant A's child status="failed" error_msg="parent workflow terminated"
+//
+// while A's PARENT was untouched and still running. That is worse than an
+// ordinary unauthorised write: the error message names a cause that did not
+// happen, and nothing in A's history explains it.
+//
+// Children always carry their parent's tenant -- StartChildWorkflow and
+// StartChildWorkflowAtomic both insert tenant_id = s.tenantID -- and this runs
+// on the store that owns the parent, so the predicate changes nothing on the
+// working path.
+//
+// THE DEEPER FIX IS NOT THIS ONE, and is deliberately not taken here.
+// adminForceResolve does what terminateWorkflowOnce does not: it checks
+// RowsAffected and returns adminNotFound before it can reach this function.
+// "Do not cascade for a workflow you did not terminate" is the actual bug;
+// a predicate on the cascade is its symptom-level twin. Closing it properly
+// changes what the HTTP layer returns for an unknown id -- today a 200 -- so
+// it wants its own change and its own argument. 3.92.
 func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
 	steps := []struct {
 		policy string
@@ -1116,6 +1148,7 @@ func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
+		  AND tenant_id = @p2
 	`},
 		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
@@ -1123,6 +1156,7 @@ func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
+		  AND tenant_id = @p2
 	`},
 	}
 
@@ -1141,7 +1175,7 @@ func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 					return err
 				}
 				defer tx.Rollback()
-				if _, err := tx.ExecContext(ctx, step.query, parentWorkflowID); err != nil {
+				if _, err := tx.ExecContext(ctx, step.query, parentWorkflowID, s.tenantID); err != nil {
 					return err
 				}
 				return tx.Commit()
@@ -1168,7 +1202,8 @@ func (s *MSSQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkfl
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
-	`, parentWorkflowID)
+		  AND tenant_id = @p2
+	`, parentWorkflowID, s.tenantID)
 	if err != nil {
 		return nil, err
 	}

@@ -12093,7 +12093,7 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
-### 3.92 §3.86 scoped the terminate and left the cascade — 🔴 **OPEN, MEASURED 2026-09-03; found while writing the gate's allowlist** (WS-1, 2026-09-03)
+### 3.92 §3.86 scoped the terminate and left the cascade — 🟢 **FIXED 2026-09-03; found by the gate's allowlist demanding a reason, not by its scan** (WS-1, 2026-09-03)
 
 #### First and second: the close-policy cascade
 
@@ -12119,11 +12119,21 @@ supplied, and nothing between the two checks whether it belonged to anyone. The 
 this; **writing down why the exemption was safe** did. Both entries are marked `openFinding` and
 point here, so the gate stays green without granting anything.
 
-The fix is a tenant predicate on all three statements. Children inherit the parent's tenant
+Fixed by a tenant predicate on all three statements. Children inherit the parent's tenant
 (`StartChildWorkflow` and `StartChildWorkflowAtomic` both insert `tenant_id = s.tenantID`), and
 `enforceParentClosePolicy` runs on the store that owns the parent, so scoping them changes nothing
-in the working path. Not done here: this entry exists so the gate could land without a false
-reason in it, and the fix wants its own change and its own falsification.
+on the working path. `engine/mssql_admin_login_cascade_tenant_test.go` is the regression test;
+each predicate was removed on its own and turned exactly one case red, naming the harm.
+
+**Every case carries a positive control, and here that is not a formality.** The cascade exists
+because of §3.79 — a terminated parent used to leave its `TERMINATE` children running. A
+predicate that disabled the cascade rather than scoping it would reintroduce exactly that,
+silently, and the cross-tenant half of the test would still pass. So each case also asserts the
+caller's *own* child is still closed.
+
+**Why #616 could not have caught this.** That PR asserted on the parent, and the parent was
+correct. The child is a different row, reached by a different statement, after the transaction has
+already committed.
 
 #### Measured 2026-09-03, on a `cleat_admin` pool
 
@@ -12139,6 +12149,26 @@ AFTER: tenant A's child status="failed" error_msg="parent workflow terminated"
 Tenant A's parent is untouched and still running — §3.86 did that correctly — while its child is
 failed with `parent workflow terminated`. The error message names a cause that did not happen,
 and A's own audit trail contains nothing that explains it.
+
+#### The same statements on the other two dialects — checked, and only one needs anything
+
+| | the cascade is scoped by |
+|---|---|
+| PostgreSQL | nothing in the SQL, but `enforceParentClosePolicy` and `childrenClosedByTerminate` both run under `beginTxWithRLS`, and the application role does not hold `BYPASSRLS` |
+| MySQL | **nothing, and nothing underneath it** — `engine/mysql_lifecycle.go:907` and `:946` key on `parent_workflow_id` alone, and MySQL has no row-level security |
+| SQL Server | fixed here |
+
+**The MySQL half is recorded rather than acted on**, following the precedent §3.86 set for exactly
+this situation with `SetWorkflowTag`: D1 documents MySQL as single-tenant-only for want of
+row-level security, so a multi-tenant MySQL deployment is not a supported configuration and the
+statement cannot be reached across tenants in one that is. Doing it here would put two dialects
+and two different rationales in one change — and the MySQL topology has a wrinkle worth its own
+look, because `MySQLStore` also supports a database-per-tenant arrangement where `tenant_id` is
+not the thing keeping tenants apart.
+
+Note that the gate cannot ever catch the MySQL one: `engine/mssql_tenant_predicate_test.go` is
+SQL Server-specific by construction, because the defect it exists for is the `cleat_admin`
+exemption. Nothing plays that role for MySQL, and nothing needs to while D1 holds.
 
 #### A third statement was flagged and is NOT a defect, which is the point of demanding reasons
 
