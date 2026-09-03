@@ -171,15 +171,50 @@ func setRLSOnFlushTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
 // requested" -- exactly the unfenced INSERT this was before B4.
 //
 // A fenced write can report zero rows affected for two different reasons,
-// and they are not the same thing: the fence was lost, or the row already
-// carries a terminal response/error and the pre-existing
+// and they are not the same thing: the fence was lost, or a row already
+// exists for this step and the pre-existing
 //
 //	ON CONFLICT ... WHERE event_history.response = '' AND error IS NULL
 //
-// clause correctly declined to overwrite it (an idempotent re-flush, not a
-// bug). afterFencedInsert disambiguates the rare zero-rows case with one
-// extra Heartbeat call -- paid only there, not on every write, since the
-// common case (a row was actually written) never reaches it.
+// clause declined to overwrite it (an idempotent re-flush, not a bug).
+// afterFencedInsert disambiguates the rare zero-rows case with one extra
+// Heartbeat call -- paid only there, not on every write, since the common
+// case (a row was actually written) never reaches it.
+//
+// # That clause declines for EVERY existing row, not only a terminal one
+//
+// This paragraph used to say the clause declined because the row "already
+// carries a terminal response/error", which reads as though a row with no
+// outcome yet would be filled in. It would not. **No write path in this
+// repo stores the empty string in `response`** -- every one of them binds it
+// through nullStr, which maps the empty string to NULL, so the comparison
+// the clause makes is NULL against the empty string -- which is NULL, which
+// is not true. Re-derive the bind sites with
+//
+//	grep -rn "nullStr(responseStr)\|nullStr(base64.StdEncoding.EncodeToString(\[\]byte(rec.Response)))" \
+//	  --include="*.go" engine/ | grep -v _test.go
+//
+// -- eight sites on 2026-09-03, across all three dialects, all nullStr.
+//
+// Measured the same day rather than reasoned about: appending step 0 with an
+// empty response and then appending step 0 again with `{"ok":true}` leaves
+// the stored `response` column NULL and the stored checksum unchanged. The
+// DO UPDATE never runs.
+//
+// So this is `DO NOTHING` wearing a WHERE clause, and that is the *correct*
+// behaviour -- it is what MySQL's `INSERT IGNORE` (mysql_events.go) and SQL
+// Server's `WHERE NOT EXISTS` (mssql_events.go) do, so all three dialects
+// agree. Left as it is rather than simplified: rewriting the hottest write
+// path in the engine to change nothing is not worth the risk, and the shape
+// is load-bearing documentation of what the other two do.
+//
+// It matters that it cannot fire, because if it ever did it would leave a
+// stale checksum: the row's stored checksum was computed over the record as
+// first written, and the DO UPDATE changes `response` without recomputing
+// it. That is IMPROVEMENT-PLAN 3.88's defect class exactly. A legacy row
+// holding the empty string rather than NULL -- written by some earlier
+// version, if one ever did -- is the only way to reach it, and none was
+// found.
 //
 // On fence loss this returns ErrFenceLost rather than silently dropping the
 // write. It does not abort the workflow's execution session itself -- that
