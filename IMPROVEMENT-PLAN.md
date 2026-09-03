@@ -13750,3 +13750,50 @@ unwind. **Python** is still blocked on an ABI decision and not on effort: it is 
 guest whose WIT declares `durable-call: func(...) -> string`, so there is no result word to carry
 bit 31, and `extractStringFromPacked` turns the sentinel into `""` — an empty *successful*
 response. Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`.
+### 3.107 The Rust SDK decodes the defer-segment stop sentinel — 🔶 **SDK HALF DONE; the end-to-end proof and `deferSegmentLanguages` remain** (WS-2, 2026-09-03)
+
+The third of the four SDK halves (§3.105 Java, §3.106 AssemblyScript). Same eight-or-nine
+methods, same ordering contract, same forbidden sleep path.
+
+**This one was blocked on §3.87 (#643, WS-3) and is the better for it.** Before that landed, Rust
+suspended by `panic_any` + `catch_unwind` on a target that builds `panic=abort` — so decoding a
+stop would have had nothing to unwind into. #643 replaced the panic with
+`CallError::{Suspended, Failed}` and `?`-propagation, and that makes this the **strongest** of the
+three shapes:
+
+| SDK | how a stop leaves the call | if the body ignores it |
+|---|---|---|
+| Go | `panic(cleat.ErrSuspend)` | cannot — the panic unwinds |
+| Java | `throw SuspendSignal` | cannot — the throw unwinds |
+| **Rust** | `Err(CallError::Suspended)` via `suspend()` | **backstop still ends the segment** |
+| AssemblyScript | a flag plus an error result | keeps running (§3.106) |
+
+The Rust row matters because **six of the eight guarded functions return
+`(String, Option<String>)` rather than `Result`** — `cleat_call`, `child_workflow`,
+`child_workflow_with_options`, `plugin_call`, `plugin_call_streaming`, `cleat_call_heartbeat` — so
+a workflow body can discard the error half. `stop_requested` therefore routes through the existing
+`suspend()` helper rather than constructing `CallError::Suspended` itself, because `suspend()`
+also sets the `#[cleat_entry]` backstop, and that backstop is what still ends the segment.
+`TestTheRustStopGoesThroughSuspend` asserts the routing rather than trusting the comment.
+
+**Eight, not nine:** this SDK has no `call_with_retry`.
+
+**Checked from both ends**, as the other two are: five `cargo test` cases that `stop_requested`
+fires on bit 31 and on nothing else and marks the segment suspending, and four Go tests reading
+the Rust source — the constant matches the engine's, all eight functions guard **and guard before
+decoding**, `cleat_sleep_ms` does not, and `stop_requested` goes through `suspend()`.
+
+The Rust unit tests deliberately do not drive the `HostCalls` methods: those call `extern "C"`
+imports that exist only inside a cleat WASM runtime.
+
+**Not done here, exactly as in §3.105 and §3.106:** `rust` is not added to
+`deferSegmentLanguages`. The end-to-end proof is the next piece, and until it lands the fence
+stays closed.
+
+**Remaining after this: Python only, and it is blocked on a decision rather than on effort.** It
+is a Component Model guest whose WIT declares `durable-call: func(...) -> string`, so there is no
+result word to carry bit 31, and `extractStringFromPacked` turns the sentinel into `""` — an empty
+*successful* response. Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`. The
+two options are a sentinel prefix in the string (matching the existing `"__CLEAT_ERROR__:"`
+convention, but re-opening exactly the collision §3.83 exists to record) or changing the WIT so a
+stop is unrepresentable as a response. The second is the right one and is a public-API change.

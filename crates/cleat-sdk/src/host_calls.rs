@@ -19,6 +19,31 @@ fn suspend() -> CallError {
     CallError::Suspended
 }
 
+/// Reports whether the host refused this call because the workflow is running
+/// as a defer segment, marking the segment as suspending if so.
+///
+/// **Call this before decoding any field of the result.** Order is the
+/// contract, not a style preference: in the await-signals layout bit 31 lands
+/// inside the timed-out field, so a caller that decoded first would turn a stop
+/// into an ordinary timeout and the workflow would run on -- doing the new work
+/// the defer segment exists to prevent, with nothing to see.
+///
+/// It routes through [`suspend`] rather than setting the flag itself, so a stop
+/// is indistinguishable from any other suspension to `#[cleat_entry]`'s
+/// backstop. That matters for the host calls here that return
+/// `(String, Option<String>)` rather than `Result<_, CallError>`: a workflow
+/// body can discard the error half of a tuple, and the backstop is what still
+/// ends the segment when it does. AssemblyScript has no equivalent, which is
+/// why IMPROVEMENT-PLAN 3.106 records a weaker guarantee for that SDK than for
+/// this one.
+fn stop_requested(result: i64) -> bool {
+    if result & memory::SUSPEND_STOP_BIT != 0 {
+        let _ = suspend();
+        return true;
+    }
+    false
+}
+
 /// What `await_signals` returned.
 ///
 /// A named struct rather than the `(String, String, bool, Option<String>)`
@@ -366,6 +391,14 @@ impl HostCalls {
                 resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+        // await-signals layout that bit overlaps a real field, so decoding
+        // first would read a stop as an ordinary result.
+        if stop_requested(result) {
+            return (String::new(), Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
+
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
             let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
@@ -548,6 +581,14 @@ impl HostCalls {
                 run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+        // await-signals layout that bit overlaps a real field, so decoding
+        // first would read a stop as an ordinary result.
+        if stop_requested(result) {
+            return (String::new(), Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
+
         let (run_id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return (String::new(), Some(format!("child_workflow(name=\"{}\") failed: host error code {}. Check that the child workflow name is correct and the workflow definition exists.", name, err_code)));
@@ -571,6 +612,14 @@ impl HostCalls {
                 run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+        // await-signals layout that bit overlaps a real field, so decoding
+        // first would read a stop as an ordinary result.
+        if stop_requested(result) {
+            return (String::new(), Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
+
         let (run_id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return (String::new(), Some(format!("child_workflow_with_options(name=\"{}\", version={}) failed: host error code {}. Check that the child workflow name is correct.", name, opts.version, err_code)));
@@ -625,6 +674,14 @@ impl HostCalls {
         if result == memory::SUSPEND_SENTINEL {
             return Err(suspend());
         }
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+        // await-signals layout that bit overlaps a real field, so decoding
+        // first would read a stop as an ordinary result.
+        if stop_requested(result) {
+            return Err(suspend());
+        }
+
         let (sig_name_len, payload_len, timed_out, err_code) = memory::decode_await_signals_result(result);
         if err_code != 0 {
             return Err(CallError::Failed(format!("await_signals(names={}, timeout_ms={}) failed: host error code {}. Check that the signal names are valid.", names_json, timeout_ms, err_code)));
@@ -726,6 +783,14 @@ impl HostCalls {
                 resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+        // await-signals layout that bit overlaps a real field, so decoding
+        // first would read a stop as an ordinary result.
+        if stop_requested(result) {
+            return (String::new(), Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
+
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
             let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
@@ -1390,6 +1455,14 @@ impl HostCalls {
                 resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+        // await-signals layout that bit overlaps a real field, so decoding
+        // first would read a stop as an ordinary result.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
+
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
             let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
@@ -1482,6 +1555,14 @@ impl HostCalls {
                 resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+        // await-signals layout that bit overlaps a real field, so decoding
+        // first would read a stop as an ordinary result.
+        if stop_requested(result) {
+            return (String::new(), Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
+
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
             let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
@@ -1548,6 +1629,14 @@ impl HostCalls {
                 resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+        // await-signals layout that bit overlaps a real field, so decoding
+        // first would read a stop as an ordinary result.
+        if stop_requested(result) {
+            return (String::new(), Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
+
         let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
         if err_code != 0 {
             let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
@@ -1704,4 +1793,79 @@ pub struct FetchResult {
     pub headers: HashMap<String, String>,
     #[serde(default)]
     pub body: String,
+}
+
+#[cfg(test)]
+mod stop_bit_tests {
+    use super::*;
+
+    // IMPROVEMENT-PLAN 3.84, 3.107. The host marks a call it refuses in a defer
+    // segment with bit 31. Until this existed the Rust SDK read that word
+    // through whichever layout the call it made returns, and every one of those
+    // readings is a plausible ordinary result.
+    //
+    // These test stop_requested and the layout overlap directly. They cannot
+    // drive the HostCalls methods, because those call `extern "C"` imports that
+    // only exist inside a cleat WASM runtime. The structural guarantee that
+    // every method calls stop_requested before decoding is held from the other
+    // side, by engine/rust_sdk_stop_bit_parity_test.go.
+
+    #[test]
+    fn a_refused_call_is_recognised_and_marks_the_segment_suspending() {
+        crate::clear_suspended();
+        assert!(stop_requested(memory::SUSPEND_STOP_BIT));
+        assert!(crate::is_suspended(), "stop_requested must route through suspend() so the \
+            #[cleat_entry] backstop still ends the segment when a workflow body discards the \
+            error half of a tuple return");
+    }
+
+    #[test]
+    fn an_ordinary_success_is_left_alone() {
+        crate::clear_suspended();
+        // A successful cleat_call: response_len=1024 in bits 40-63, err_code=0.
+        let ok: i64 = 1024 << 40;
+        assert!(!stop_requested(ok));
+        assert!(!crate::is_suspended());
+        let (response_len, _, err_code) = memory::decode_cleat_call_result(ok);
+        assert_eq!(response_len, 1024);
+        assert_eq!(err_code, 0);
+    }
+
+    #[test]
+    fn an_ordinary_failure_is_left_alone() {
+        // err_code=1 with a message in the buffer is a normal failure, not a
+        // stop. A guard that fired on any non-zero word would break every error
+        // path in the SDK.
+        crate::clear_suspended();
+        let err: i64 = (12 << 40) | 1;
+        assert!(!stop_requested(err));
+        assert!(!crate::is_suspended());
+    }
+
+    #[test]
+    fn the_stop_bit_is_not_the_export_suspend_sentinel() {
+        // The two travel in opposite directions and confusing them is silent:
+        // SUSPEND_SENTINEL is bit 62, what the guest returns to the host from an
+        // export, and the host never sets it in a result word.
+        crate::clear_suspended();
+        assert_eq!(memory::SUSPEND_STOP_BIT, 1 << 31);
+        assert_eq!(memory::SUSPEND_SENTINEL, 1 << 62);
+        assert_eq!(memory::SUSPEND_STOP_BIT & memory::SUSPEND_SENTINEL, 0);
+        assert!(!stop_requested(memory::SUSPEND_SENTINEL));
+    }
+
+    #[test]
+    fn decoding_first_would_read_a_stop_as_a_timeout() {
+        // Why stop_requested must be called BEFORE any field is decoded, stated
+        // as a test rather than as a comment. In the await-signals layout bit 31
+        // lands inside the timed-out field, so a caller that decoded first would
+        // report a normal timeout and the workflow would carry on -- doing the
+        // new work the defer segment exists to prevent, with nothing to see.
+        //
+        // If this ever fails because the layout moved, the ordering requirement
+        // has not gone away; it has moved to whichever field now overlaps bit 31.
+        let (_, _, timed_out, _) = memory::decode_await_signals_result(memory::SUSPEND_STOP_BIT);
+        assert!(timed_out, "bit 31 no longer lands in the await-signals timed-out field; \
+            re-check which field it overlaps and update the ordering note on stop_requested");
+    }
 }
