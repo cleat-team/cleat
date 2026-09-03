@@ -1016,51 +1016,6 @@ func (h *HostCallsImpl) DurableCallTyped(service, operation string, request, res
 	return nil
 }
 
-// hostRetryBudget bounds how much backoff a policy may carry and still be run
-// on the host, inside one segment, holding the worker.
-//
-// Deliberately well below --wasm-wall-clock-ceiling's 5m default rather than
-// close to it. The ceiling covers the WHOLE invocation -- every call the
-// workflow makes, not just this one -- so a threshold near the ceiling would
-// let a single retry policy consume the entire budget and leave nothing for the
-// rest of the workflow. 60s of backoff spans the ordinary case (a handful of
-// attempts a few seconds apart) with room to spare.
-//
-// Raising this means raising the ceiling too, and the two are not independent:
-// see IMPROVEMENT-PLAN 3.88 and 3.90.
-const hostRetryBudget = 60 * time.Second
-
-// retryFitsInOneSegment reports whether a policy's worst-case total backoff is
-// small enough to run on the host.
-//
-// Worst case, not expected: every attempt fails and every backoff is waited out
-// in full. A policy is either always in-segment or always suspending, decided
-// before the first attempt, because a policy that switched paths part-way
-// through would produce a history whose shape depended on which services
-// happened to fail.
-func retryFitsInOneSegment(rp *RetryPolicy) bool {
-	if rp == nil {
-		return false
-	}
-	total := time.Duration(0)
-	interval := rp.InitialInterval
-	// MaxAttempts attempts means MaxAttempts-1 backoffs; the last failure is
-	// not followed by a wait.
-	for i := 1; i < rp.MaxAttempts; i++ {
-		if rp.MaxInterval > 0 && interval > rp.MaxInterval {
-			interval = rp.MaxInterval
-		}
-		total += interval
-		if total > hostRetryBudget {
-			return false
-		}
-		if rp.BackoffCoefficient > 1 {
-			interval = time.Duration(float64(interval) * rp.BackoffCoefficient)
-		}
-	}
-	return true
-}
-
 // DurableCallWithRetry runs a retry policy on the HOST, in one segment.
 //
 // This is the explicit form of what DurableCallWithOptions picks automatically
@@ -1069,10 +1024,23 @@ func retryFitsInOneSegment(rp *RetryPolicy) bool {
 // Rust SDK has always had (HostCalls::cleat_call_with_retry), so the two SDKs
 // now describe the same capability with the same shape.
 //
-// It does NOT consult hostRetryBudget: a caller naming this function has asked
-// for the host loop specifically. A long policy here will hold a worker and can
-// exceed --wasm-wall-clock-ceiling, which is the caller's choice to make. Use
-// DurableCallWithOptions to have that decided for you.
+// This SDK applies no threshold of its own: a caller naming this function has
+// asked for the host loop specifically. But the HOST still applies the tenant's
+// budget, and it can refuse.
+//
+// That is a deliberate narrowing, and it is what moving the threshold host-side
+// means (§3.94 step 4). This function used to be an escape hatch -- a long
+// policy would hold a worker and could blow through --wasm-wall-clock-ceiling,
+// "which is the caller's choice to make". It is not the caller's choice on a
+// shared deployment: the budget bounds how long one tenant may hold a slot, so
+// a guest that could opt out of it would make the limit advisory.
+//
+// A refused policy comes back as a *CallError with Code
+// CallErrorRetryPolicyTooLong, and unlike DurableCallWithOptions this function
+// does NOT fall back for you -- it has no SDK-level loop to fall back to. The
+// call was not made and no attempt was consumed, so a caller that wants the
+// suspending behaviour should handle that code by calling
+// DurableCallWithOptions, which does it automatically.
 //
 // Returns an error rather than falling back when the import is unavailable,
 // because silently doing something with different durability semantics is how
@@ -1180,13 +1148,24 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 	// default, see 3.90) does not merely waste a worker -- it gets the
 	// invocation killed, where the SDK-level path would have suspended and
 	// completed.
-	if h.durableCallWithRetry != nil && retryFitsInOneSegment(opts.Retry) {
+	// The HOST decides whether this policy fits in one segment. It knows the
+	// tenant's budget; this SDK does not, and a constant compiled in here could
+	// only ever be one operator's answer for every tenant (§3.94 step 4).
+	//
+	// A refusal costs nothing: the host makes no call, records no event, and
+	// consumes no attempt, so falling through to the loop below starts the
+	// policy from attempt 1 with an untouched history.
+	// opts.Retry != nil is load-bearing, not defensive: retryFitsInOneSegment,
+	// which this condition replaces, returned false for a nil policy and so
+	// sent it down the loop below. Dropping the check here would dereference
+	// nil instead.
+	if h.durableCallWithRetry != nil && opts.Retry != nil {
 		rp := opts.Retry
 		nonRetryableJSON, _ := json.Marshal(rp.NonRetryableErrors)
 		if nonRetryableJSON == nil {
 			nonRetryableJSON = []byte("[]")
 		}
-		return h.durableCallWithRetry(
+		resp, err := h.durableCallWithRetry(
 			service, operation, requestJSON,
 			int64(rp.MaxAttempts),
 			rp.InitialInterval.Milliseconds(),
@@ -1194,6 +1173,12 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 			rp.MaxInterval.Milliseconds(),
 			string(nonRetryableJSON),
 		)
+		var ce *CallError
+		if !errors.As(err, &ce) || ce.Code != CallErrorRetryPolicyTooLong {
+			return resp, err
+		}
+		// Refused as too long. Fall through to the SDK-level loop, which
+		// suspends between attempts via DurableSleep.
 	}
 
 	// Fall back to SDK-level retry (one event per attempt).
