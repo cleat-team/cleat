@@ -193,3 +193,33 @@ func DeferOnRetriesExhausted(h cleat.HostCalls, input string) (string, error) {
 	}, "always-fails", "op", `{}`)
 	return "", err
 }
+
+// DeferOnLongRetryPolicy is DeferOnRetriesExhausted with a policy too long to
+// hold a worker for.
+//
+// IMPROVEMENT-PLAN 3.88. The SDK decides between the host-side retry loop (one
+// segment, worker held) and its own DurableSleep loop (one segment per backoff)
+// from the policy's worst-case total backoff, against cleat.hostRetryBudget.
+// Three attempts two minutes apart is four minutes of waiting, which is not
+// something to keep a worker for -- so this must take the SDK path and suspend,
+// where DeferOnRetriesExhausted's 1ms policy takes the host path and does not.
+//
+// The pair is the test: either entry point alone would pass against a build
+// that ignored the threshold and always picked one path.
+func DeferOnLongRetryPolicy(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_long_policy", `{}`)
+	}); err != nil {
+		return "", err
+	}
+
+	_, err := h.DurableCallWithOptions(cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
+			MaxAttempts:        3,
+			InitialInterval:    2 * time.Minute,
+			BackoffCoefficient: 1.0,
+			MaxInterval:        2 * time.Minute,
+		},
+	}, "always-fails", "op", `{}`)
+	return "", err
+}

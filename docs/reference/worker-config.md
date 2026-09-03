@@ -547,8 +547,11 @@ appears in `ListWorkflows` or the admin dashboard, and its outcome (result,
 error, status) is gone. Off by default -- an operator opts in after deciding
 how long their own audit/compliance requirements need a workflow's outcome
 retrievable. `dead_lettered` workflows are never affected by this flag; they
-have their own (separate, currently unwired) deletion path -- and on the Go
-SDK nothing currently enters that state, so the exclusion is moot there. See
+have their own (separate, currently unwired) deletion path. On the Go SDK a
+workflow reaches that state only by exhausting a retry policy short enough to
+have run on the host (see `cleat.hostRetryBudget`); a long-backoff policy
+retries via durable sleep and produces a terminal error the worker's
+dead-letter predicate does not match. See
 `docs/operations/workflow-retention.md` and IMPROVEMENT-PLAN.md 3.88.
 
 Any remaining `event_history` for a purged workflow is deleted in the same

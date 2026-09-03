@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 // IMPROVEMENT-PLAN 3.88 step 1, settled.
@@ -26,6 +25,14 @@ import (
 // loop inside one segment: every backoff suspends the workflow, and the retry
 // resumes in the next segment after replay. A 3-attempt policy with 1s backoffs
 // is three segments.
+//
+// SINCE 3.88's DECISION LANDED, that is the LONG-POLICY path only. A policy
+// whose worst-case total backoff fits in cleat.hostRetryBudget now runs on the
+// host instead: one segment, the worker held for the duration, the way
+// non-durable code would do it. Which path a policy takes is decided before the
+// first attempt, from the policy alone, and the two tests below pin both sides
+// of that threshold. Either alone would pass against a build that always chose
+// one path.
 //
 // Why the earlier clock pinning failed is the part worth keeping. DurableSleep's
 // anchor is `max(session nowMs, Now())`, and Now() reads the LAST RECORDED
@@ -107,79 +114,67 @@ func (c *failOnceRecordingCaller) Call(_ context.Context, service, operation, _ 
 	return `{"ok":true}`, nil
 }
 
-// TestAnSDKRetryBackoffSuspendsTheWorkflow pins the property.
+// TestAShortRetryPolicyRunsOnTheHostInOneSegment is 3.88's decision, measured
+// on the Go SDK.
 //
-// One attempt, then a suspension whose reason names the sleep. This is what an
-// operator's 3-attempt policy actually costs: not one segment with two waits in
-// it, but three segments, each replaying the history so far.
+// A retry finishing quickly should keep its worker rather than suspending --
+// frequent, ordinary behaviour that should not be surprising. Three assertions,
+// and they are the same three the Rust SDK has always satisfied
+// (TestARustGuestReachesTheHostRetryLoop): no suspension, both attempts inside
+// the one segment, and a terminal error the worker would dead-letter.
 //
-// The clock is pinned BEHIND the anchor rather than left real -- see the header.
-// The anchor is the failed call's own event timestamp, stamped from real time
-// regardless of this clock, so a deadline of "anchor + 1ms" sits about three
-// years ahead of t0 and the sleep cannot complete for timing reasons. The
-// sibling test pins the clock a day AHEAD of real time so every backoff
-// completes. Same fixture, same policy, opposite sides of the deadline.
-func TestAnSDKRetryBackoffSuspendsTheWorkflow(t *testing.T) {
-	const t0 int64 = 1_700_000_000_000
-	wasmBytes, eng, caller := retryBackoffEngine(t, "wf-retry-backoff",
-		func() int64 { return t0 })
-
-	res, _, susp, _, _, err := eng.Execute(context.Background(), wasmBytes,
-		"defer_on_retries_exhausted", json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if susp == nil {
-		t.Fatalf("the run did not suspend; it returned %q.\n\n"+
-			"An SDK-level retry backs off with a DURABLE sleep, so the first "+
-			"backoff must end the segment. The clock here is pinned about three "+
-			"years BEHIND the deadline, so this is not the 1ms timing race the "+
-			"header describes -- do not reach for a longer backoff or a retry. "+
-			"If the retry loop stopped using DurableSleep, that is an "+
-			"improvement worth recording in IMPROVEMENT-PLAN 3.88, not a silent "+
-			"change.", res)
-	}
-	if !strings.Contains(susp.Reason, "cleat_sleep") {
-		t.Fatalf("suspension reason is %q, want one naming cleat_sleep.\n\n"+
-			"Some other suspension would mean the backoff is not what ends the "+
-			"segment, and the whole explanation in this file's header is wrong.",
-			susp.Reason)
-	}
-	if len(caller.ops) != 1 {
-		t.Fatalf("%d calls dispatched, want 1: %v.\n\n"+
-			"More than one means the retry loop ran further than the first "+
-			"backoff, which contradicts the suspension above.", len(caller.ops), caller.ops)
-	}
-}
-
-// TestAnExhaustedRetryRunsItsDefersAndIsNotDeadLetterable is 3.88's step 2
-// measurement, which step 1 was blocking.
-//
-// The clock is ahead of REAL time, not of a seeded start time -- see the header.
-// That lets every backoff complete, so the policy exhausts inside one segment
-// and the terminal path is observable in a single run.
-//
-// Two assertions, and they answer different questions. The cleanup call proves
-// the defers ran on the terminal-failure path, which is what 3.75 asks about
-// MoveToDeadLetterQueue. The absent substring proves this workflow would not
-// have been dead-lettered at all.
-func TestAnExhaustedRetryRunsItsDefersAndIsNotDeadLetterable(t *testing.T) {
-	ahead := func() int64 { return time.Now().Add(24 * time.Hour).UnixMilli() }
-	wasmBytes, eng, caller := retryBackoffEngine(t, "wf-retry-exhausted", ahead)
+// The clock is NOT pinned, and that is not an oversight -- see this file's
+// header and #612. The host loop backs off in-process with time.After and never
+// consults the engine clock, so there is no deadline to race. That the pinning
+// this test used to need is now unnecessary is itself evidence of which path
+// ran.
+func TestAShortRetryPolicyRunsOnTheHostInOneSegment(t *testing.T) {
+	wasmBytes, eng, caller := retryBackoffEngine(t, "wf-retry-short", nil)
 
 	_, _, susp, _, _, execErr := eng.Execute(context.Background(), wasmBytes,
 		"defer_on_retries_exhausted", json.RawMessage(`{}`))
 
 	if susp != nil {
-		t.Fatalf("the run suspended with reason %q; a clock a day ahead of real "+
-			"time must let every 1ms backoff complete.", susp.Reason)
+		t.Fatalf("the run suspended with reason %q.\n\n"+
+			"A 1ms-backoff policy is far inside cleat.hostRetryBudget, so it "+
+			"must run on the host in one segment. A suspension means the "+
+			"cleat_call_retry import is not wired -- check wasm/usage.go still "+
+			"maps it on DurableCallWithOptions, since without that entry "+
+			"cleat/runtime.go's host branch is unreachable.", susp.Reason)
 	}
 	if execErr == nil {
 		t.Fatalf("the workflow succeeded; it was supposed to exhaust its policy")
 	}
 
-	// The cleanup ran, inside the segment, on the way out. Whatever the worker
-	// does with the error afterwards, the defers are already done.
+	// Both attempts, in this one segment. The SDK-level path dispatches ONE
+	// call and then suspends for its backoff, which is what the long-policy
+	// test below asserts -- so this count is what tells the two paths apart.
+	if len(caller.ops) != 3 {
+		t.Fatalf("%d operations dispatched, want 3 (two attempts + the defer's "+
+			"cleanup): %v.\n\n"+
+			"Two attempts in one segment is the host loop. One would mean the "+
+			"SDK-level loop ran and suspended for its backoff.",
+			len(caller.ops), caller.ops)
+	}
+
+	// And the consequence for operators, asserted positively now. This
+	// substring is the worker's entire dead-letter predicate
+	// (cmd/cleat-worker/setup.go), minted only by the host loop's exhaustion
+	// path in engine/durablecalls.go. A Go workflow reaching it is what makes
+	// the dead-letter queue a real destination on the tier-1 SDK -- it was not
+	// one before 3.88, and docs/operations/workflow-retention.md said so.
+	const workerDeadLetterPredicate = "retries exhausted"
+	if !strings.Contains(execErr.Error(), workerDeadLetterPredicate) {
+		t.Fatalf("the terminal error is %v, which does not contain %q.\n\n"+
+			"The assertions above say the host loop ran, so its exhaustion "+
+			"message should be here. If it is not, the dead-letter queue is "+
+			"unreachable from this SDK again and "+
+			"docs/operations/workflow-retention.md needs to go back to saying "+
+			"so.", execErr, workerDeadLetterPredicate)
+	}
+
+	// The cleanup still ran on the way out. 3.75 asks whether a workflow can
+	// reach a terminal state with defers outstanding; on this path it cannot.
 	found := false
 	for _, op := range caller.ops {
 		if op == "after_exhaustion" {
@@ -187,39 +182,47 @@ func TestAnExhaustedRetryRunsItsDefersAndIsNotDeadLetterable(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("the defer body's call was not made: %v.\n\n"+
-			"A workflow reached a terminal failure without its cleanup running. "+
-			"That would make IMPROVEMENT-PLAN 3.75's host-driven terminal sites "+
-			"the smaller half of the problem and the guest wrapper's own drain "+
-			"(3.70) the larger one.", caller.ops)
+		t.Fatalf("the defer body's call was not made: %v", caller.ops)
 	}
+}
 
-	// And the gap 3.88 records. The worker dead-letters on
-	// strings.Contains(errMsg, "retries exhausted") (cmd/cleat-worker/setup.go).
-	// The engine mints that prefix only in its HOST-side retry loop, behind the
-	// cleat_call_retry import -- which wasm/usage.go wires on the guest symbol
-	// DurableCallWithRetry, and HostCallsImpl has no such method. So a Go
-	// workflow exhausting a retry policy produces the SDK's own message and is
-	// never dead-lettered.
-	//
-	// Asserted as the broken state deliberately: the day a Go guest can reach
-	// the host retry loop, this fails and points at the section rather than the
-	// change landing silently.
-	const workerDeadLetterPredicate = "retries exhausted"
-	if strings.Contains(execErr.Error(), workerDeadLetterPredicate) {
-		t.Fatalf("the terminal error now contains %q: %v\n\n"+
-			"That is the BEHAVIOUR WE WANT -- a Go workflow that exhausts its "+
-			"retries becoming dead-letterable. Rewrite this to assert the "+
-			"dead-letter path positively, and revisit IMPROVEMENT-PLAN 3.75's "+
-			"MoveToDeadLetterQueue question, currently answered \"not a fourth "+
-			"marker site, because nothing on this SDK reaches it\".",
-			workerDeadLetterPredicate, execErr)
+// TestALongRetryPolicySuspendsInsteadOfHoldingTheWorker is the other side of
+// the threshold, and the reason it exists.
+//
+// Three attempts two minutes apart is four minutes of waiting. Holding a worker
+// for that is the opposite of what durable execution is for -- and it would not
+// merely waste the worker, it would exceed --wasm-wall-clock-ceiling (5m by
+// default, IMPROVEMENT-PLAN 3.90) and get the invocation killed, where
+// suspending completes it. So this must take the SDK path.
+//
+// The clock IS pinned here, behind the deadline, for the reason #612 records:
+// DurableSleep's anchor is the last recorded event's real timestamp, so a
+// real-clock assertion about whether a backoff suspends is a race.
+func TestALongRetryPolicySuspendsInsteadOfHoldingTheWorker(t *testing.T) {
+	const t0 int64 = 1_700_000_000_000
+	wasmBytes, eng, caller := retryBackoffEngine(t, "wf-retry-long",
+		func() int64 { return t0 })
+
+	_, _, susp, _, _, err := eng.Execute(context.Background(), wasmBytes,
+		"defer_on_long_retry_policy", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
-	if !strings.Contains(execErr.Error(), "retry exhausted after 2 attempts") {
-		t.Fatalf("the terminal error is %v.\n\n"+
-			"Expected the SDK-level retry loop's own message. If the message "+
-			"changed, check whether it now matches the worker's dead-letter "+
-			"predicate above -- the two are joined by a string literal and "+
-			"nothing else.", execErr)
+	if susp == nil {
+		t.Fatalf("the run did not suspend.\n\n" +
+			"Four minutes of backoff must not be run on the host: it holds a " +
+			"worker for the duration and exceeds the wall-clock ceiling, which " +
+			"kills the invocation. If cleat.hostRetryBudget was raised, raise " +
+			"--wasm-wall-clock-ceiling with it and revisit both -- they are not " +
+			"independent. IMPROVEMENT-PLAN 3.88 and 3.90.")
+	}
+	if !strings.Contains(susp.Reason, "cleat_sleep") {
+		t.Fatalf("suspension reason is %q, want one naming cleat_sleep", susp.Reason)
+	}
+	if len(caller.ops) != 1 {
+		t.Fatalf("%d calls dispatched, want 1: %v.\n\n"+
+			"The SDK-level loop makes one attempt and suspends for its backoff. "+
+			"More than one would mean the host loop took this policy after all.",
+			len(caller.ops), caller.ops)
 	}
 }

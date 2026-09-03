@@ -11815,7 +11815,7 @@ point that raises the SDK's own suspend signal with no host call in the way, so 
 `session.suspendErr` and mask the result. Neither is installed here — `componentize-py`,
 `wasm-tools` and a gradle binary are all absent — so neither was run.
 
-### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — 🔵 **MEASURED; steps 1 and 2 settled 2026-09-03, step 3 not started** (WS-3, 2026-09-03)
+### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — ✅ **steps 1 and 2 DONE; step 3 (§3.75) not started** (WS-3, 2026-09-03)
 
 §3.75 tells whoever builds it to re-derive two things first. Both were done 2026-09-03. One comes
 out clean and one does not come out the way the section expects, so this is recorded before the
@@ -11968,34 +11968,78 @@ reachable and §3.75's original question needs answering with this same fixture.
    2026-09-03; see the decision below.** It should, for short policies.
 3. Only then build §3.75 step 1 against the three symmetric sites above.
 
-#### The decision, and what it turns into work
+#### The decision, and what it turned into — ✅ built 2026-09-03
 
 **A retry loop that completes within a few minutes should keep the worker while it runs, the way
-non-durable code would.** That is frequent, ordinary behaviour and it should not be surprising.
-Only longer durations are worth paying multiple segments and a replay for.
+non-durable code would.** That is frequent, ordinary behaviour and should not be surprising. Only
+longer durations are worth paying multiple segments and a replay for.
 
-That is precisely what the host-side loop already does, and — per the measurement above — already
-does correctly from a guest. So this is not a new mechanism, it is a missing connection on one
-SDK. The work, smallest first:
+Built as a threshold rather than a switch, because both paths are right for different policies:
 
-1. **Give `HostCallsImpl` a `DurableCallWithRetry` method.** `cleat/runtime.go:1079` already
-   delegates to the import when `h.durableCallWithRetry != nil`; the field is never set because
-   `wasm/usage.go:73` wires `cleat_call_retry` on a guest symbol that does not exist, so the
-   scanner never marks the import used. Roughly a passthrough.
-2. **Decide the boundary, and it is not free-floating** — see §3.90. An in-host backoff is spent
-   *inside a host call*, and the instance-timeout fence is charged for that time, so today the
-   ceiling on "keep the worker" is whatever remains of `--wasm-instance-timeout` (default 30s),
-   not "a few minutes". Extending the epoch deadline across host waits (§3.90 fix 1) removes the
-   ceiling and is worth doing on its own merits; without it the boundary is an artifact rather
-   than a policy.
-3. **Then §3.75's original dead-letter question genuinely needs answering**, because the queue
-   stops being unreachable from Go. `MoveToDeadLetterQueue` goes back to being a candidate fourth
-   marker site on the merits rather than by default.
+| policy's worst-case total backoff | path | segments | worker | dead-letterable |
+|---|---|---|---|---|
+| ≤ `cleat.hostRetryBudget` (60s) | host loop, behind `cleat_call_retry` | 1 | held | yes |
+| > that | SDK loop, `DurableSleep` per backoff | N | released | no |
 
-**And one thing is a defect regardless of the boundary chosen:** the same `CallOptions{Retry:}`
-means "one segment, dead-letterable" on Rust and "N segments, not dead-letterable" on Go, with
-nothing in the API saying so. Whichever semantics win, the two SDKs agreeing is not a matter of
-taste.
+Decided before the first attempt from the policy alone — a policy that switched paths part-way
+through would produce a history whose shape depended on which services happened to fail.
+
+Three changes, and the first is the whole of why this never worked:
+
+1. **`wasm/usage.go` now maps `cleat_call_retry` on `DurableCallWithOptions`** (and the JSON
+   form). It was mapped only on `DurableCallWithRetry`, a method `HostCallsImpl` did not define,
+   so the import was never wired, so `cleat/runtime.go:1079`'s host branch was unreachable and
+   every Go retry policy silently became an SDK-level loop. The delegation code was already
+   there and had presumably never run.
+2. **`HostCallsImpl.DurableCallWithRetry`** exists now — the explicit form, matching Rust's
+   `HostCalls::cleat_call_with_retry`. It does *not* consult the threshold: a caller naming it
+   has asked for the host loop specifically. It returns an error rather than falling back when
+   the import is absent, because silently substituting different durability semantics is how this
+   area went wrong in the first place.
+3. **`hostRetryBudget = 60s`**, deliberately well below `--wasm-wall-clock-ceiling`'s 5m default
+   rather than near it. The ceiling covers the *whole* invocation, so a threshold near it would
+   let one retry policy consume the entire budget. The two are not independent: raising either
+   means revisiting the other.
+
+Why the ceiling matters here at all is §3.90. The host loop backs off with `time.After` **inside
+a host call**, so before that item it spent the guest's execution budget and a policy longer than
+30s killed the workflow it was retrying for.
+
+Measured, `engine/retry_backoff_test.go`, both sides of the threshold:
+
+| fixture | policy | outcome |
+|---|---|---|
+| `defer_on_retries_exhausted` | 2 × 1ms | no suspension, **both** attempts + the defer's cleanup in one segment, terminal error contains `retries exhausted` |
+| `defer_on_long_retry_policy` | 3 × 2min | one attempt, suspends with reason `cleat_sleep`, SDK path |
+
+Either alone would pass against a build that always chose one path.
+
+**Operator-visible consequence, and the docs moved with it:** the dead-letter queue is now
+reachable from Go — but only through a short policy.
+`docs/operations/workflow-retention.md` and `docs/reference/worker-config.md` said "nothing on
+this SDK enters that state"; they now carry the threshold table instead. A long-backoff Rust
+policy remains dead-letterable where the Go equivalent is not, since Rust takes the host path for
+any policy.
+
+#### The two rewritten tests, and why that is the design working
+
+Both of the tests this section shipped earlier failed the moment the import was wired, each with
+the instructions it had been written with:
+
+- `TestAnSDKRetryBackoffSuspendsTheWorkflow` — "if the retry loop stopped using DurableSleep,
+  that is an improvement worth recording in 3.88, not a silent change". Replaced by
+  `TestAShortRetryPolicyRunsOnTheHostInOneSegment` and
+  `TestALongRetryPolicySuspendsInsteadOfHoldingTheWorker`.
+- `TestAnExhaustedRetryRunsItsDefersAndIsNotDeadLetterable` — "that is the BEHAVIOUR WE WANT ...
+  rewrite this to assert the dead-letter path positively, and revisit §3.75's
+  `MoveToDeadLetterQueue` question". Folded into the first of those, asserted positively.
+
+A test asserting a known-broken state is only worth shipping if it says what to do when it flips.
+These did, and neither change could have landed silently.
+
+**§3.75's original dead-letter question is therefore live again**, on the merits rather than by
+default: a Go workflow *can* now reach `MoveToDeadLetterQueue`, so whether it can get there with
+defers outstanding needs the answer §3.75 asked for.
 
 **Do not read this section as clearing `MoveToDeadLetterQueue`.** It moves the reason from one
 unmeasured claim to another, better-supported one. The site is still the fourth candidate.

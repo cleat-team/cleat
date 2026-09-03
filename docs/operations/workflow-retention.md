@@ -55,27 +55,35 @@ tested but is not wired into any background loop, so dead-lettered workflows
 are retained indefinitely regardless of either retention flag. That is a
 separate, pre-existing gap outside the scope of this change.
 
-**A Go workflow does not currently reach `dead_lettered` at all**, so on the
-tier-1 SDK this exclusion is about a state nothing enters. The worker's
-dead-letter branch is a substring test for `retries exhausted`
-(`cmd/cleat-worker/setup.go`), and the engine mints that phrase only in its
-*host-side* retry loop behind the `cleat_call_retry` import. `wasm/usage.go`
-wires that import on the guest symbol `DurableCallWithRetry`, which
-`HostCallsImpl` does not define -- the only guest-facing form is
-`DurableCallWithOptions`, which falls back to SDK-level retry and produces a
-different message. Rust's `HostCalls::cleat_call_with_retry` calls the import
-directly, so the state is reachable there.
+**A Go workflow reaches `dead_lettered` only through a SHORT retry policy**, which is worth
+knowing before planning around it. The worker's dead-letter branch is a substring test for
+`retries exhausted` (`cmd/cleat-worker/setup.go`), and the engine mints that phrase only in its
+*host-side* retry loop behind the `cleat_call_retry` import. Which retry policies reach that loop
+is a threshold, not a given:
 
-Measured by `engine.TestAnExhaustedRetryRunsItsDefersAndIsNotDeadLetterable`,
-which exhausts a policy on a Go guest and asserts the terminal error does not
-match the worker's predicate. Re-derive the wiring with
+| policy's worst-case total backoff | path | dead-letterable |
+|---|---|---|
+| within `cleat.hostRetryBudget` (60s) | host loop, one segment, worker held | **yes** |
+| beyond it | SDK loop, one segment per backoff, suspends between | no |
 
-    grep -c "func (h \*HostCallsImpl) DurableCallWithRetry" cleat/runtime.go   # 0
+So a workflow retrying three times a few seconds apart can be dead-lettered; the same workflow
+retrying three times an hour apart cannot, because its terminal error carries the SDK loop's own
+message (`retry exhausted after N attempts`) rather than the host's. That is a real gap and it is
+recorded as one — see IMPROVEMENT-PLAN.md §3.88 — but it is no longer "nothing on this SDK gets
+here", which is what this paragraph said before the host loop was wired.
 
-This is recorded rather than fixed: whether the Go SDK should expose the
-host-side retry loop is an open product question, IMPROVEMENT-PLAN.md 3.88
-item 2. Until it is answered, do not plan around dead-lettering as a Go
-workflow's failure mode.
+Rust has always taken the host path for any policy (`HostCalls::cleat_call_with_retry` calls the
+import directly), so a long-backoff Rust policy is dead-letterable where the Go equivalent is
+not.
+
+Measured by `engine.TestAShortRetryPolicyRunsOnTheHostInOneSegment` and
+`engine.TestALongRetryPolicySuspendsInsteadOfHoldingTheWorker`, which assert the two sides of the
+threshold. Re-derive the wiring with
+
+    grep -c '"cleat_call_retry", "DurableCallWithOptions"' wasm/usage.go   # 1
+
+which is the entry that makes the host branch reachable at all; without it every Go retry policy
+takes the SDK path regardless of length.
 
 Within one batch (bounded to 10,000 workflow IDs, to avoid a single
 long-running transaction against a table that can be millions of rows deep):
