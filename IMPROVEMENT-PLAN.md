@@ -11830,9 +11830,21 @@ one that misled:
 
 | clock | outcome |
 |---|---|
-| real | 1 attempt, suspends, reason `cleat_sleep(1ms)` |
+| pinned behind the deadline (`t0`, ~3y) | 1 attempt, suspends, reason `cleat_sleep(1ms)` |
 | seeded start + clock ahead of the seed | same — the event timestamp wins |
 | clock a day ahead of real time | exhausts in one segment |
+| **real** | **either — a 1ms race, see below** |
+
+**The `real` row was the first row of this table, asserted as a property, and it is not one.**
+The fixture's backoff is 1ms and the suspend decision is `s.nowMs <= realNowMs()` with
+`s.nowMs = anchor + 1ms`, so on a real clock the question is whether under one millisecond of
+real time passed between `recordEvent` stamping `time.Now()` (`engine/lifecycle.go:153`) and the
+deadline being evaluated. It suspended locally and on #609's own CI, then completed under load on
+#610 — exhausting in-segment and failing with the message the *other* test expects. Fixed by
+pinning that test's clock behind the deadline, trading a 1ms margin for a margin of years;
+reproduced both ways first (`+5ms` → `ops=[op op after_exhaustion]`, exactly CI's failure). The
+two tests now differ only in which side of the deadline the engine clock sits, with no timing in
+either.
 
 **Step 2's measurement follows from it**, and is in the same file: with the backoffs completing,
 an exhausted policy runs its defers on the way out (the cleanup call is dispatched) and its

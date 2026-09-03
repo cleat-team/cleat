@@ -168,7 +168,14 @@ func DeferChildWorkflow(h cleat.HostCalls, input string) (string, error) {
 // The intervals are 1ms rather than the default second because the point is the
 // exhaustion, not the wait. That does NOT make the backoff cheap -- see
 // engine/retry_backoff_test.go, where a 1ms backoff suspends the workflow like
-// any other durable sleep.
+// any other durable sleep whenever its deadline is ahead of the engine's clock.
+//
+// It does make the interval too short to decide anything on the REAL clock: 1ms
+// is less than the time a loaded machine takes to get from recording the failed
+// call event to evaluating the sleep deadline, so on a real clock this fixture
+// suspends or exhausts depending on the load. Both tests over it pin a clock.
+// Raising the interval here would hide that rather than fix it -- the tests
+// choose which side of the deadline they want, and neither waits.
 func DeferOnRetriesExhausted(h cleat.HostCalls, input string) (string, error) {
 	if _, err := h.DurableDeferFunc(func() {
 		h.DurableCall("cleanup", "after_exhaustion", `{}`)
