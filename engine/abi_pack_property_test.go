@@ -211,6 +211,122 @@ func TestPackDurableCallResult_SentinelBitsTheHostCannotReach(t *testing.T) {
 		"sentinel, bit 62 is not (it is responseLen's 4 MiB bit)", everSet)
 }
 
+// TestStopSentinelBitsAcrossEveryLayout answers the question the cleat_call
+// sentinel raised but did not settle: can ONE bit mean "stop" everywhere?
+//
+// IMPROVEMENT-PLAN 3.83 stopped a defer segment doing new work through
+// cleat_call, using bit 39. It did not stop the other ways a guest can start
+// work past the frontier -- PluginCall, PluginCallStreaming, ChildWorkflow,
+// DurableAwaitSignals all have unguarded fresh paths (3.84). Those return
+// DIFFERENT result layouts, so bit 39 is not available in them: it sits inside
+// packSimpleResult's runIDLen, for instance.
+//
+// Measured 2026-09-02, by unioning every result each packer can produce:
+//
+//	packDurableCallResult      reachable=ffffff000000ffff  free=000000ffffff0000
+//	packSimpleResult           reachable=00ffffff000000ff  free=ff000000ffffff00
+//	packAwaitChildResult       reachable=00ffffff000000ff  free=ff000000ffffff00
+//	packAwaitSignalsResult     reachable=ffffffff0001ffff  free=00000000fffe0000
+//	packAwaitPromiseResult     reachable=00ffffff0001ffff  free=ff000000fffe0000
+//	packAcquireLockResult      reachable=000000000000ffff  free=ffffffffffff0000
+//	packSleepResult            reachable=ff0000fffffffc00  free=00ffff00000003ff
+//
+// There is NO bit free in all seven. packSleepResult is the one that rules it
+// out, and it is also the one that does not need a sentinel: a guest waiting on
+// a sleep already suspends through its own status byte, which is what
+// TestASleepingWorkflowNeverReachesAFreshCall measures. Excluding it, bits
+// 17-31 are free in all six layouts that can start new work.
+//
+// So a universal stop sentinel is possible and lives at bits 17-31 -- not at
+// bit 39, which is cleat_call-specific and correct only there.
+func TestStopSentinelBitsAcrossEveryLayout(t *testing.T) {
+	const all = ^uint64(0)
+
+	reach := map[string]uint64{}
+
+	var call uint64
+	for rl := 0; rl < (1 << 24); rl += 997 {
+		for ce := 0; ce < 256; ce += 3 {
+			for ec := 0; ec < 256; ec += 5 {
+				call |= uint64(packDurableCallResult(rl, byte(ce), byte(ec)))
+			}
+		}
+	}
+	reach["packDurableCallResult"] = call
+
+	var simple, awaitChild uint64
+	for x := uint32(0); x < (1 << 24); x += 971 {
+		for e := uint32(0); e < 256; e++ {
+			simple |= uint64(packSimpleResult(byte(e), x))
+			awaitChild |= uint64(packAwaitChildResult(x, e))
+		}
+	}
+	reach["packSimpleResult"] = simple
+	reach["packAwaitChildResult"] = awaitChild
+
+	var sigs uint64
+	for a := uint32(0); a < (1 << 16); a += 97 {
+		for b := uint32(0); b < (1 << 16); b += 101 {
+			sigs |= uint64(packAwaitSignalsResult(a, b, true, 7))
+			sigs |= uint64(packAwaitSignalsResult(a, b, false, 65535))
+		}
+	}
+	reach["packAwaitSignalsResult"] = sigs
+
+	var promise uint64
+	for l := uint32(0); l < (1 << 24); l += 971 {
+		for e := 0; e < 65536; e += 97 {
+			promise |= uint64(packAwaitPromiseResult(l, true, uint16(e)))
+			promise |= uint64(packAwaitPromiseResult(l, false, uint16(e)))
+		}
+	}
+	reach["packAwaitPromiseResult"] = promise
+
+	var lock uint64
+	for e := uint32(0); e < 65536; e++ {
+		lock |= uint64(packAcquireLockResult(true, e))
+		lock |= uint64(packAcquireLockResult(false, e))
+	}
+	reach["packAcquireLockResult"] = lock
+
+	// The six layouts a guest can start NEW work through. Sleep is excluded
+	// deliberately and asserted separately below.
+	const wantCommonFree = 0x00000000FFFE0000 // bits 17-31
+	commonFree := all
+	for name, r := range reach {
+		commonFree &^= r
+		if r == 0 {
+			t.Fatalf("%s produced no bits at all; the driver above stopped "+
+				"exercising it and this test is measuring nothing", name)
+		}
+	}
+	if commonFree != wantCommonFree {
+		t.Fatalf("free-in-all-six = %016x, want %016x.\n\nper-layout reachable: %v\n\n"+
+			"A universal stop sentinel must sit in the common free region. If this "+
+			"moved, a layout gained or lost a field and IMPROVEMENT-PLAN 3.84's "+
+			"choice of bit has to be rechecked.", commonFree, wantCommonFree, reach)
+	}
+
+	// And the reason it is six rather than seven. packSleepResult overlaps the
+	// region entirely, so including it would leave nothing -- pinning this
+	// stops someone "simplifying" the survey by adding sleep back in.
+	var sleep uint64
+	for st := 0; st < 256; st++ {
+		for d := int64(0); d < (1 << 40); d += 7919 * 1024 {
+			sleep |= uint64(packSleepResult(byte(st), d))
+		}
+	}
+	if commonFree&^sleep != 0 {
+		t.Fatalf("packSleepResult (reachable %016x) no longer covers the common "+
+			"free region %016x; a single sentinel across ALL seven layouts may now "+
+			"be possible, which would simplify 3.84.", sleep, commonFree)
+	}
+
+	t.Logf("pinned: bits 17-31 (%016x) are free in all six layouts that can start "+
+		"new work; packSleepResult covers them and needs no sentinel, because a "+
+		"sleeping guest already suspends", wantCommonFree)
+}
+
 // ---- 2. field independence: the property that finds the real defects ----
 
 // TestPackAwaitSignalsResult_FieldsDoNotBleed pins the documented 16-bit limit.
