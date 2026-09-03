@@ -8114,11 +8114,48 @@ non-JSON result is now rejected as a 400 rather than surfacing as three differen
 errors reported as 500; an omitted result means JSON `null`. And `ErrAdminOpNotImplemented`
 separates 501 from 500, so the one operation that genuinely is not built says so.
 
-**`AdminReReplay` is still a stub, deliberately**, and now answers **501** rather than 500.
-It is not the same size as the other two: resetting a workflow to `ready` means it replays
-its recorded history and continues, so it needs the replay semantics §1.4 phases D–F are
-about — not a fourth `UPDATE`. Taking it before those is how the write-ahead intent work got
-built before the observation that would have judged it.
+~~**`AdminReReplay` is still a stub, deliberately**~~ — **implemented 2026-09-02, once §1.4
+phases D–F existed.** It answered **501** rather than 500 in the meantime, which is what made
+the wait honest rather than a silent gap.
+
+The reason it was not the same size as the other two held up: resetting a workflow to `ready`
+means it replays its recorded history and continues, so it needed the replay semantics D–F are
+about, not a fourth `UPDATE`. What that bought, concretely, is the refusal below — impossible to
+write before phase F, because there was nowhere to send the operator.
+
+**Three preconditions, and each needed its own words because the HTTP layer separates them.**
+Only `failed`, `terminated` and `dead_lettered` can be re-replayed. `done` is excluded because
+replay would walk a complete history to its end and finalize again; an operator who wants a
+finished workflow to run again wants a *new run*, which is the dead-letter reprocess path
+(`cmd/cleat-worker/app.go`) — from the definition and input rather than from history. **The two
+are different operations**, and re-replay is the one that preserves completed steps: a workflow
+that failed on its ninth call does not re-issue the first eight. The non-terminal statuses are
+excluded because the dispatcher already owns them, and bumping the generation would pull the
+workflow out from under whichever worker is about to claim it.
+
+That third case is why `adminResolveMiss` could not be reused: it distinguishes *not found* from
+*generation mismatch*, and a status refusal with the generation matching would have been
+reported as a mismatch — sending an operator hunting a concurrent writer that does not exist.
+
+**It refuses to re-replay into an unresolved ambiguity, and that is a judgement rather than
+something §3.20 states.** A history whose last call was left mid-flight replays straight back
+into `[AMBIGUOUS]`: same stop, same place, same reason, one generation spent learning nothing.
+The alternative — proceed and let replay report it — is defensible and keeps re-replay a pure
+status reset. It loses the one thing the operator needs, which is *which step* to reconcile, and
+phase F now gives them somewhere to put the answer. The test asserts that resolving the step
+then lets the re-replay through, so the guard is a redirect rather than a dead end.
+
+**`ErrAdminOpNotImplemented` outlives the stubs it was built for.** No store in this repo returns
+it any more. It and `handleAdminOpError`'s 501 branch are kept because `WorkflowStore` is a public
+interface: an out-of-tree store implementing part of it has the same problem, and 501 is still the
+honest answer. `store_admin_stubs.go` is gone — a file of that name containing no stubs is worse
+than no file.
+
+**A test bug worth recording, because it is the vacuity shape one level down.** The first draft
+passed `wf.Generation+1` to `ReReplay`, assuming `FailWorkflow` bumps the generation. It does not.
+That made the *stale generation* case pass **for the wrong reason** while the happy path failed —
+so a suite containing only the refusal test would have been green and vacuous. The helper now
+re-reads the instance after failing it rather than predicting what the write did.
 
 ### 3.14 `examples/dag` is red on `develop`, and no CI job runs it — ✅ **FIXED**
 

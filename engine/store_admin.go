@@ -63,7 +63,41 @@ import (
 const (
 	adminActionForceComplete = "force_complete"
 	adminActionForceFail     = "force_fail"
+	adminActionReReplay      = "re_replay"
 )
+
+// reReplayableStatuses are the terminal statuses a workflow can be re-replayed
+// out of: it stopped with work left, and resetting it to 'ready' resumes from
+// recorded history rather than starting over.
+//
+// 'done' is excluded deliberately. Replay would walk a complete history to its
+// end and finalize again, doing nothing but writing a second terminal
+// transition. An operator who wants a finished workflow to run again wants a
+// new run -- which is what the dead-letter reprocess path does
+// (cmd/cleat-worker/app.go), from the definition and input rather than from
+// history. The two are different operations and this is the one that preserves
+// completed steps.
+//
+// The non-terminal statuses are excluded because the dispatcher already owns
+// them: re-replaying a 'ready' or 'running' workflow would bump its generation
+// out from under whichever worker holds it.
+var reReplayableStatuses = []string{"failed", "terminated", "dead_lettered"}
+
+// ErrAdminOpNotImplemented marks an admin operation the store genuinely does
+// not implement, as opposed to one that failed.
+//
+// The distinction is the whole reason it exists: cmd/cleat-worker mapped every
+// error from these methods to 500, so "this endpoint was never built" and "the
+// database is broken" were the same answer to a caller.
+//
+// **No store in this repo returns it any more.** It was introduced for
+// AdminReReplay, which was a stub on all three dialects; that body landed with
+// IMPROVEMENT-PLAN 3.20's third piece, so force-complete, force-fail and
+// re-replay are all real now. The error and handleAdminOpError's 501 branch are
+// kept because WorkflowStore is a public interface: an out-of-tree store that
+// implements some of it and not the rest has the same problem this solved, and
+// 501 is still the honest answer for it.
+var ErrAdminOpNotImplemented = errors.New("not implemented")
 
 // adminForce is one force-resolve request: the terminal state to write, and
 // the audit event to record beside it.
