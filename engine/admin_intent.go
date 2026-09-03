@@ -20,8 +20,13 @@ import (
 // caller. ResolveCallIntent is implemented on all three dialects, is
 // tenant-scoped, requires the row to still be pending, and computes the
 // checksum from the preceding row inside its own transaction. This is the
-// admin path to it, and it is deliberately dialect-agnostic rather than three
-// new SQL bodies: the per-dialect work was already done.
+// admin path to it, and ResolveStep itself is dialect-agnostic: the per-dialect
+// work was already done.
+//
+// Not quite all of it, as it turned out. Resolving a row that is no longer the
+// last one has to rewrite the checksums above it, which is three more SQL
+// bodies -- but they live beside the resolve, in store_intent.go, and nothing
+// here has to know which dialect it is talking to. IMPROVEMENT-PLAN 3.89.
 
 // adminActionResolveStep is the audit action name. It is the operation column
 // on the audit event, and handleAdminOpError maps errors by substring, so the
@@ -111,13 +116,19 @@ func ResolveStep(ctx context.Context, store WorkflowStore, workflowID string, st
 		return fmt.Errorf("admin %s: encode step %d: %w", adminActionResolveStep, step, err)
 	}
 
+	// chainRepairsAfter(history, step) is what makes this safe on a row that is
+	// no longer the last one, which is the normal shape here: an operator who
+	// force-failed a stuck workflow first has an audit event sitting above the
+	// pending call. Without it the resolve leaves the very next row failing
+	// checksum verification -- see IMPROVEMENT-PLAN 3.89.
+	//
 	// workerID "" skips the fence, per callIntentStore's doc. An operator is
 	// not a claimant: they are asserting what the external service did, which
 	// is true regardless of who holds the workflow. The row's own
 	// pending predicate is the guard that matters, and it makes a race with a
 	// worker resolving the same step safe -- whoever writes first wins and the
 	// loser gets errIntentNotPending rather than overwriting a resolution.
-	if err := resolver.ResolveCallIntent(ctx, workflowID, completed, payload, "", 0); err != nil {
+	if err := resolver.ResolveCallIntent(ctx, workflowID, completed, payload, "", 0, chainRepairsAfter(history, step)); err != nil {
 		return fmt.Errorf("admin %s: workflow %s step %d: %w", adminActionResolveStep, workflowID, step, err)
 	}
 

@@ -310,7 +310,12 @@ func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (st
 	}
 	payload, _ := eventRecordToPayload(completed)
 
-	if err := store.ResolveCallIntent(ctx, s.workflowID, completed, payload, s.engine.workerID, s.engine.generation); err != nil {
+	// The replay path usually resolves the last row, where chainRepairsAfter
+	// returns nothing -- but not always: a signal delivered while the workflow
+	// was down lands above the pending call, and then the chain needs the same
+	// repair the operator path needs. IMPROVEMENT-PLAN 3.89.
+	if err := store.ResolveCallIntent(ctx, s.workflowID, completed, payload,
+		s.engine.workerID, s.engine.generation, chainRepairsAfter(s.history, rec.Step)); err != nil {
 		s.engine.log().ErrorContext(ctx, "ambiguity was resolved but could not be recorded; reporting ambiguity instead",
 			"workflow_id", s.workflowID, "step", rec.Step, "error", err)
 		return "", false
