@@ -10737,14 +10737,20 @@ something.
 
 #### What is still open
 
-1. **The replay that runs past the end of history.** A workflow finalized `ready` rather than
-   suspended replays to the frontier and then does *new* work, which a defer segment must not
-   permit. Refusing the call is what §3.81 measures as destructive, so the fix is to make that
-   call **suspend** instead — bit 62 of the result word, exactly as `cleat_await_child` and
-   `cleat_await_any_child` already decode it (`wasm/adapter_metadata.go`). The guest then unwinds
-   with `__susSuspended` set, skips its own drain, and lands on the path above. That is an SDK
-   change across all five, but a much smaller one than a new host function, and it is the same
-   bit rather than a new convention.
+1. **The replay that runs past the end of history** — measured, and worse than this section
+   first described. See §3.83. A workflow finalized `ready` rather than suspended replays to the
+   frontier and then does *new* work, which a defer segment must not permit. Refusing the call is
+   what this section measures as destructive, so the fix is to make that call **suspend**
+   instead, after which the guest unwinds with `__susSuspended` set, skips its own drain, and
+   lands on the path above.
+
+   ~~bit 62 of the result word, exactly as `cleat_await_child` and `cleat_await_any_child`
+   already decode it — the same bit rather than a new convention.~~ **That is wrong and would
+   collide with a real response**; §3.83 has the measurement and the bits that are actually
+   available. Reusing an established convention was the whole appeal of the proposal and it is
+   what made it wrong: `cleat_await_child` packs a 32-bit length at bits 32-63, this layout packs
+   a 24-bit one at bits 40-63, and the same bit means 1 GiB in the first and 4 MiB in the
+   second.
 2. **§3.75's two-phase terminal transition** — migration `038` across all three dialects
    (postgres, mysql and mssql high-water marks are 034/033/037 and are **not** aligned), the
    marker and deadline, the three `UPDATE`-driven sites, `reaperLoop`'s predicate, and the
@@ -10820,3 +10826,75 @@ the surrounding prose to decide what it *meant* — `§2.4` is referenced four t
 table that may predate a renumbering, and `§0.2` suggests a section block that no longer exists.
 Guessing would produce exactly the failure described above: a confident pointer at the wrong
 prose. A guard added before the four are resolved would be permanently red.
+
+---
+
+### 3.83 The sentinel §3.81 specified would collide with a real response — 🔵 **MEASURED AND CORRECTED; the fix is not yet built** (WS-3, 2026-09-02)
+
+§3.81 left phase 5 with one correctness gap and named the fix in a sentence: make the
+past-the-frontier call suspend, using *"bit 62 of the result word, exactly as
+`cleat_await_child` and `cleat_await_any_child` already decode it"*. Reusing an established
+convention was the whole appeal. It is also what made it wrong.
+
+#### First, the defect is worse than §3.81 described
+
+Measured 2026-09-02 on a defer segment with no recorded history — the past-the-frontier case in
+its purest form — pinned by `TestADeferSegmentPastTheFrontierDoesNewWork`:
+
+```
+operations reaching the ServiceCaller: [body second first]
+result: {"status":"ok"}   suspended: false   err: nil
+```
+
+| | |
+|---|---|
+| `body` ran | a defer segment performed the workflow's own side effect, not its cleanup |
+| the segment **returned a successful completion result** | a terminated workflow is reported as having finished normally, by the machinery meant to clean up after it |
+
+§3.81 recorded only the first. The second is the more serious: a wasted side effect is a bug, a
+terminated workflow recorded as `done` is a status defect on the same axis as §1.1.
+
+#### Why bit 62 is not available here
+
+The two calls it was borrowed from pack a **32-bit** length at bits 32-63, where bit 62 means a
+length of 1 GiB. `cleat_call` packs a **24-bit** `responseLen` at bits 40-63 (`packDurableCallResult`,
+`engine/memory.go`), where the same bit means **4 MiB**.
+
+4 MiB is reachable. `MaxWasmStringLen` and `OutBufSize` are package vars, not constants, set from
+`cmd/cleat-worker`'s `-wasm-max-string-len` and `-wasm-output-buffer-size` — both `flag.Int` with
+no upper-bound validation (`cmd/cleat-worker/config.go:127-128`, defaults 64 KB and 32 KB). An
+operator who raises them past 4 MiB gets legitimate responses that decode as a suspend.
+
+**This is the ABI-boundary class CLAUDE.md names**, and in the shape it names: not an overflow,
+but a value that means something different on each side of the boundary. It is also the class
+that file says a property test over the boundary finds faster than reading the sites.
+
+#### What is available, and structurally rather than by a bound
+
+Bits **16-39**. The guest decodes a 32-bit `callErrorCode` from bits 8-39, but the host parameter
+is a `byte`, so 24 of those bits cannot be filled by any input at all — an asymmetry already
+pinned by `TestPackDurableCallResult_HostCannotFillCallErrorCode`, which had recorded it as a
+harmless curiosity ("nothing is broken -- it means the error-code space is 8 bits wide in
+practice").
+
+Measured exhaustively over the two byte fields and strided over the 24-bit one — the union of
+every result the host can produce is **`0xffffff000000ffff`**. Re-derive with
+`TestPackDurableCallResult_SentinelBitsTheHostCannotReach`, which asserts both halves: that bits
+16-39 are free, and that bit 62 is **not**, so the day the layout changes the plan stops saying
+something false. Proved able to fail both ways before landing — widening `callErrorCode` past a
+byte fails the first, narrowing `responseLen` to 22 bits fails the second.
+
+A sentinel there is safe regardless of how the buffer flags are set, which bit 62 is not. The
+distinction that matters is not "wider margin" but **structural versus contingent**: bits 16-39
+cannot be filled because of the function signature, not because a limit currently sits below
+them.
+
+#### What is not yet built
+
+The host side (a stop-on-fresh-call in defer phase, which needs no guest signal — the host
+invokes `__cleat_run_deferred` itself in `runGuestDefersAfterSuspend`, so it already knows
+whether a call comes from the body or from a defer body) and the guest decode across all five
+SDKs. All five already carry a `SUSPEND_SENTINEL`, but they do not agree on how they test it —
+Rust checks `result == SUSPEND_SENTINEL` (whole-word equality), AssemblyScript masks
+`(result & (1 << 62)) != 0`. A payload-carrying word needs the mask form, so that disagreement
+has to be settled as part of the change rather than assumed away.
