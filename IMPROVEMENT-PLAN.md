@@ -12515,6 +12515,70 @@ exercised, because nothing on the host has ever produced it here:
 So this is one host-side condition plus one Go adapter, not a five-SDK change. It also means four
 guards fire for the first time on this merge, having never been proved able to fail.
 
+#### The correspondence is now guarded (2026-09-04)
+
+`engine/stop_correspondence_guard_test.go` — `TestTheThreeStopSurfacesAgree`. A host call the
+host can refuse has **three** surfaces, and all three must agree or the refusal is lost on the way
+to some guest:
+
+| | |
+|---|---|
+| host | `if s.stopBeforeNewWork() { return callSuspendSentinel }` |
+| Go guest | the adapter's decoder wrapped in `withSuspendCheck`, testing bit 31 before any field |
+| component guest | a WIT signature returning `result<string, call-failure>` |
+
+Three-way rather than two because §3.110 created the third surface, and a two-way check would
+have let it drift the same way the second one did. Discovery of the *sites* is automatic; only the
+**naming** is declared, in `stopSurfaces`, because the three conventions are not derivable from
+each other — `DurableCallWithRetry` is `durable-call-retry`, not `durable-call-with-retry`. A new
+stop site with no entry fails, which is the property `withSuspendCheck`'s comment already claimed
+and did not have.
+
+**Two asymmetries it surfaced on its first run, neither visible from any single side:**
+
+* `Fetch` is guarded host-side and typed in the WIT, and has **no Go adapter at all** — Go reaches
+  fetch through `DurableCall("http", "fetch", ...)`, so there is nothing to wrap. Exempt with
+  `reasonNoGoAdapter`; §3.104's note is the reason.
+* `DurableAwaitSignals` is guarded host-side *and* in the Go adapter, and its WIT returns `u64`.
+  Exempt with `reasonWitIsStillCoreABI`, which is an **open finding rather than a safe exemption**:
+  the signature still takes out-pointers into the guest's linear memory while the component
+  dispatch writes into a host buffer, so the call has never worked on a component and cannot
+  express `suspended` until it is redesigned (§3.110). The guard's stale-exemption check fails the
+  moment that lands, so it clears itself rather than waiting to be noticed.
+
+Reasons are **constants, not comments** (`reasonNoGoAdapter`, `reasonWitIsStillCoreABI`), so "why
+is this exempt" is answerable by grep and a copied comment cannot make two entries look like they
+share a reason they do not.
+
+**Falsified nine ways**, because a triangle has six directions and the allowlist has its own:
+
+| mutation | message |
+|---|---|
+| host guard removed | `stopSurfaces names "DurableCallWithHeartbeat", which no longer consults stopBeforeNewWork` |
+| Go adapter check removed | `the Go adapter "DurableCallWithHeartbeat" does not use withSuspendCheck` |
+| WIT narrowed to `string` | `WIT function "durable-call-heartbeat" does not return result<string, call-failure>` |
+| new undeclared host site | `engine method "SignalWorkflow" consults stopBeforeNewWork and is not in stopSurfaces` |
+| adapter guards an unrefusable call | `Go adapter "DurableLog" uses withSuspendCheck but no host stop site declares it` |
+| WIT promises an unproducible refusal | `WIT function "durable-poll-signal" returns result<string, call-failure> but no host stop site declares it` |
+| exemption goes stale | `names WIT functions [durable-await-signals] AND carries the exemption "open-finding-wit-is-core-abi"` |
+| WIT scanner matches nothing | `found 0, expected at least 6 -- this scan is matching almost nothing and would pass whatever the tree said` |
+| entry with empty list, no reason | `names no Go adapter and gives no reason` |
+
+The reverse directions are not decoration. **Bit 31 is *reachable* in one layout** —
+`packSleepResult`, measured by `TestStopSentinelBitsAcrossEveryLayout` — so a stray guard there
+would read an ordinary sleep result as a stop. The forward direction cannot see that.
+
+Vacuity is checked **per thing, not per total**: each scan must find a plausible size *and* a
+named member it cannot legitimately lose. A floor alone is satisfied by the wrong things being
+present, which is how an earlier guard in this repo passed while nine AssemblyScript cases were
+invisible behind eight Java and Rust ones.
+
+**What it does not replace.** `java_sdk_stop_bit_parity_test.go` pins the host-site count and
+cross-checks one SDK's methods — it is what caught §3.111 — and Rust and AssemblyScript have
+per-method coverage with **no host-side pin at all**, so a ninth site passes both of them
+silently. This test is about the correspondence; those are about each SDK's own decoders. Both
+are wanted.
+
 #### Not fixed here: the frontier is wider than eight, and the answer is a mechanism
 
 Measured 2026-09-04 — every `execSession` method carrying an `isReplay` check, which is the
