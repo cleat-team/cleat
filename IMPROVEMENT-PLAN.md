@@ -11569,12 +11569,40 @@ prose. A guard added before the four are resolved would be permanently red.
 
 ---
 
-### 3.83 The sentinel §3.81 specified would collide with a real response — 🔶 **CORRECTED AND BUILT for `cleat_call` on Go guests; four SDKs and four other call paths remain** (WS-3, 2026-09-02)
+### 3.83 The sentinel §3.81 specified would collide with a real response — 🟢 **THE REMAINDER IS DONE: all four SDKs and all four call paths landed by 2026-09-04** (WS-3, 2026-09-02)
 
 > **Scope, added 2026-09-02 the same day: this closed the path its test covers, not the frontier.**
 > `PluginCall`, `PluginCallStreaming`, `ChildWorkflow` and `DurableAwaitSignals` still start new
 > work in a defer segment, and bit 39 is not available in their result layouts. **§3.84** has the
 > per-layout measurement and the universal sentinel that replaces this one.
+
+> **And the scope note above is itself finished — recorded 2026-09-04 by WS-1.** The heading said
+> *"four SDKs and four other call paths remain"* for two days after neither was true, which is the
+> §3.36 shape: a marker naming outstanding work over a body whose work had shipped, read by anyone
+> scanning for something to pick up. Measured on develop `b418d30b`:
+>
+> | claimed remaining | state |
+> |---|---|
+> | `PluginCall`, `PluginCallStreaming`, `ChildWorkflow` | guarded — §3.84 |
+> | `DurableAwaitSignals` | guarded — §3.84 (`engine/signaller.go`, 69 lines into the method) |
+> | Rust SDK | 18 `stop_requested` sites |
+> | Java SDK | 10 `Memory.throwIfStopped` sites |
+> | AssemblyScript SDK | 19 `stopRequested` sites |
+> | Python / component | `decodeCallOutcome` masks the sentinel ahead of any field decode, on all 8 dispatchers — §3.110 |
+>
+> `Fetch` (§3.104) and `DurableCallWithHeartbeat` (§3.111) were both added after this note was
+> written and are not in its list of four, which is the other half of why the count could not be
+> trusted: the frontier grew twice while the heading described it as static.
+>
+> The correspondence between the three surfaces is now enforced rather than counted —
+> `TestTheThreeStopSurfacesAgree` (§3.111) — so the next addition fails CI instead of needing a
+> note like this one.
+>
+> **A caution about how this was checked**, because the first attempt got it wrong.
+> `grep -A 40 "func (s *execSession) DurableAwaitSignals("` reports **no** stop check: the guard
+> sits 69 lines into a 111-line method, outside the window. A fixed-size grep window is not a
+> function body, and here it produced a clean false negative on the one path most likely to still
+> be open. Parse to the next `func (s *execSession)` instead.
 
 §3.81 left phase 5 with one correctness gap and named the fix in a sentence: make the
 past-the-frontier call suspend, using *"bit 62 of the result word, exactly as
