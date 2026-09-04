@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 // ExecResult holds the result of a WASM function call.
@@ -29,5 +30,15 @@ type WasmBackend interface {
 	// compilation engine but has its own per-execution mutable state (handler,
 	// work data). This is required by the engine to prevent data races when
 	// Execute is called concurrently from multiple goroutines.
-	PerExecution() WasmBackend
+	//
+	// tenantInstanceTimeout is this tenant's own bound on guest EXECUTION, or
+	// 0 when the tenant set none. It is the tenant's RAW value, deliberately
+	// unclamped: the operator's ceiling lives on the backend
+	// (wasmtimeBackend.limits.executionTimeout, from --wasm-instance-timeout)
+	// and the engine cannot see it, so the clamp happens in the one place both
+	// numbers exist. A backend that ignores this argument is choosing to run
+	// every tenant at the operator's value, which is what the pre-3.94
+	// behaviour was and is safe -- the risk of the argument is a tenant
+	// RAISING its bound, and only the clamp site can permit that.
+	PerExecution(tenantInstanceTimeout time.Duration) WasmBackend
 }

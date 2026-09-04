@@ -198,7 +198,7 @@ func (e *Engine) executeWithBackend(
 
 	// Use a per-execution backend instance to prevent data races on
 	// the handler/work-data fields when Execute is called concurrently.
-	execBackend := backend.PerExecution()
+	execBackend := backend.PerExecution(e.tenantInstanceTimeout(execCtx))
 
 	// A defer segment replays a workflow whose outcome is already decided,
 	// purely to run its outstanding cleanup (IMPROVEMENT-PLAN 3.35 phase 5).
@@ -626,7 +626,7 @@ func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName strin
 		return "", err
 	}
 	if backend != nil {
-		res, err := backend.PerExecution().Execute(ctx, wasmBytes, deferName, input, handlerFromContextOrNil(ctx))
+		res, err := backend.PerExecution(e.tenantInstanceTimeout(ctx)).Execute(ctx, wasmBytes, deferName, input, handlerFromContextOrNil(ctx))
 		if err != nil {
 			return "", err
 		}

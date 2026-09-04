@@ -294,7 +294,7 @@ func TestWasmtimeBackend_PerExecution(t *testing.T) {
 	}
 	defer b.Close(ctx)
 
-	pe := b.PerExecution()
+	pe := b.PerExecution(0)
 	if pe == nil {
 		t.Fatal("PerExecution() returned nil")
 	}

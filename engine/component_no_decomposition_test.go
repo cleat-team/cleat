@@ -75,7 +75,7 @@ func TestComponentOnTheBackendTakesTheNativePathOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = b.Close(ctx) })
 
-	res, err := b.PerExecution().Execute(ctx, wasmBytes, "run", json.RawMessage(`"x"`), &mockHostHandler{})
+	res, err := b.PerExecution(0).Execute(ctx, wasmBytes, "run", json.RawMessage(`"x"`), &mockHostHandler{})
 	if err != nil {
 		t.Fatalf("Execute on a Component Model binary: %v\n\n"+
 			"The native Component Model path is the only one left. If components stop "+
@@ -112,7 +112,7 @@ func TestComponentFailureIsNotFollowedByASecondWorseError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = b.Close(ctx) })
 
-	_, err = b.PerExecution().Execute(ctx, wasmBytes, "no-such-export", json.RawMessage(`"x"`), &mockHostHandler{})
+	_, err = b.PerExecution(0).Execute(ctx, wasmBytes, "no-such-export", json.RawMessage(`"x"`), &mockHostHandler{})
 	if err == nil {
 		t.Fatal("Execute succeeded for an entry point the component does not export")
 	}
