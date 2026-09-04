@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+#
+# Refuse a commit that adds an IMPROVEMENT-PLAN section outside this sandbox's
+# block.
+#
+# WHY THIS IS A HOOK AND NOT A CI CHECK. The CI gate
+# (scripts/check-section-numbers.sh) asserts two things: section numbers are
+# unique, and every 3.x number sits inside SOME declared block. A cross-stream
+# misallocation satisfies both, so the gate is structurally blind to it -- it
+# runs on a shallow checkout, cannot diff against develop to see which numbers a
+# PR added, and could not attribute them anyway, because all three streams
+# commit under one git identity.
+#
+# The sandbox is the only place the stream is known. That is here.
+#
+# The gate's header said this was its limitation on the day it landed. It was
+# realised twice within hours, reported by WS-2 and confirmed on develop:
+#
+#   3.201, 3.202  WS-2's Python SDK work, inside WS-1's block   (e4de0a4, 9353527)
+#   3.300         WS-3's boundary inventory, inside WS-2's      (#697)
+#
+# In both cases the author had started the work before the block rule landed and
+# never re-ran scripts/next-section-number.sh, which answers correctly. Nobody
+# ignored the rule; the rule arrived after the number was already chosen. A
+# check that fires at `git commit` catches exactly that, because it fires when
+# the number reaches the file rather than when the work began.
+#
+# Those three sections were NOT renumbered. Blocks exist to prevent collisions,
+# and no collision is made more likely by a misallocation:
+# next-section-number.sh reads every used number regardless of block, so it
+# never hands out one that is taken. Renumbering would have meant editing two
+# other streams' sections plus 18 references, across streams, while one of them
+# had an open PR citing them. The cost of absorbing is cosmetic; the cost of
+# renumbering is a cross-stream edit. They are recorded as exceptions in
+# scripts/section-blocks.sh.
+#
+# ENABLING. This runs only if hooks are enabled for the clone:
+#
+#   git config core.hooksPath .githooks     # once, per clone
+#
+# which CONTRIBUTING.md already tells contributors to do for the DCO trailer
+# hook alongside this one. If it is unset, nothing here runs and nothing warns
+# -- a real weakness, and the reason this hook is a second line of defence
+# rather than the rule itself. `git commit --no-verify` bypasses it deliberately.
+
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+BLOCKS="$REPO_ROOT/scripts/section-blocks.sh"
+PLAN="IMPROVEMENT-PLAN.md"
+
+# Nothing to say unless the plan is being changed.
+git diff --cached --name-only --diff-filter=ACM -- "$PLAN" | grep -q . || exit 0
+[ -f "$BLOCKS" ] || exit 0
+
+# shellcheck source=scripts/section-blocks.sh
+. "$BLOCKS"
+
+# Added section headings only. -U0 keeps the context lines out, so an unchanged
+# heading near an edit is not read as a new one.
+added="$(git diff --cached -U0 -- "$PLAN" | grep -oE '^\+### [0-9]+\.[0-9]+ ' | sed 's/^+### //; s/ $//' | sort -u)"
+[ -n "$added" ] || exit 0
+
+stream="$(section_stream_for_checkout)"
+if [ -z "$stream" ]; then
+  echo "note: pre-commit cannot tell which stream this checkout is, so the" >&2
+  echo "      section-block check is skipped. Add this sandbox to" >&2
+  echo "      SECTION_SANDBOXES in scripts/section-blocks.sh if it is a new one." >&2
+  exit 0
+fi
+
+bad=""
+while IFS= read -r num; do
+  [ -n "$num" ] || continue
+  case "$num" in
+    3.*) ;;
+    *) continue ;;   # 1.x and 2.x are closed series; the CI gate owns them
+  esac
+  owner="$(section_block_for "${num#3.}")"
+  [ "$owner" = "$stream" ] || bad="$bad  $num  (block belongs to: $owner)"$'\n'
+done <<<"$added"
+
+[ -n "$bad" ] || exit 0
+
+echo "REFUSED: this commit adds $PLAN section(s) outside $stream's block:" >&2
+echo >&2
+printf '%s' "$bad" >&2
+echo >&2
+echo "Blocks are per-stream so that two streams appending at once cannot pick" >&2
+echo "the same number:" >&2
+echo >&2
+section_blocks_summary >&2
+echo >&2
+echo "Your next free number is:" >&2
+echo "    $("$REPO_ROOT/scripts/next-section-number.sh" 2>/dev/null || echo '(run scripts/next-section-number.sh)')" >&2
+echo >&2
+echo "Renumber the heading and every reference to it -- they are load-bearing:" >&2
+echo "    grep -rn '<old number>' --include='*.go' --include='*.md' ." >&2
+echo >&2
+echo "If the misallocation is deliberate and agreed with the other stream," >&2
+echo "record it in scripts/section-blocks.sh and commit with --no-verify." >&2
+exit 1

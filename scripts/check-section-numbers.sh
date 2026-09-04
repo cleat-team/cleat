@@ -46,6 +46,17 @@
 # once both branches have landed. The local helper is what prevents that, and it
 # is a helper, not a gate.
 #
+# THAT LIMITATION WAS REALISED TWICE WITHIN HOURS OF THIS RULE LANDING, reported
+# by WS-2 and confirmed on develop: 3.201 and 3.202 are WS-2's work inside
+# WS-1's block, and 3.300 is WS-3's inside WS-2's. Both authors had started
+# before the rule existed and never re-ran the helper. This gate stayed green
+# for all three, exactly as the paragraph above said it would.
+#
+# .githooks/pre-commit now refuses such a commit in the sandbox, which is the
+# only place the stream is known. It runs only where
+# `git config core.hooksPath .githooks` has been set, so it is a second line of
+# defence rather than the rule itself.
+#
 # Usage: scripts/check-section-numbers.sh [--self-test]
 #
 # --self-test runs the block classifier over known-good and known-bad numbers
