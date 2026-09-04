@@ -30,6 +30,26 @@ SUSPEND_SENTINEL: int = 1 << 62  # 0x4000000000000000
 """Suspend sentinel value returned by export functions when the workflow
 needs to suspend (e.g., for a timer or signal)."""
 
+CALL_SUSPEND_SENTINEL: int = 1 << 31  # 0x80000000
+"""Stop sentinel the HOST returns from a call that would start fresh work.
+
+A different mechanism from :data:`SUSPEND_SENTINEL`, and the two are easy to
+confuse because both mean "stop". The distinction is direction and layout:
+
+* ``SUSPEND_SENTINEL`` (``1 << 62``) is what an *export* returns *to* the host
+  to say the workflow is suspending. It is a whole-word value.
+* ``CALL_SUSPEND_SENTINEL`` (``1 << 31``) is what a *host import* returns *to*
+  the guest during a defer segment, to refuse work the segment exists to
+  prevent. It is a bit inside a packed result word, so it must be tested by
+  mask and it must be tested BEFORE the word's own fields are decoded.
+
+The ordering is not stylistic. Bit 31 lands inside the timed-out field of the
+await-signals layout, so a decoder that reads its fields first sees an ordinary
+timeout and carries on -- which is the failure this constant exists to prevent.
+See ``callSuspendSentinel`` in ``engine/memory.go`` for the host half and why
+bit 31 rather than 62 or 39.
+"""
+
 SLEEP_STATUS_COMPLETED: int = 0
 """Sleep completed normally (replay path)."""
 

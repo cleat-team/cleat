@@ -15793,3 +15793,93 @@ statement must not fail, and the same text in code must. This section carries a
 `adminForceResolve` (§3.20's force-complete and force-fail), transition 3 of 3. It is the same
 shape as this one — a direct terminal `UPDATE` on an unclaimed workflow, on all three dialects —
 and reuses everything §3.112 and this section built.
+
+---
+
+### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+Closes the SDK half of §3.113. Same defect, wider than that entry measured, and two of its
+supporting claims did not survive re-derivation — recorded below rather than edited into §3.113,
+which is WS-1's.
+
+**The defect.** `HostCalls` called a host import and threw the returned word away. The word is
+where the host puts its error code, so a call the host *refused* was indistinguishable from one
+it performed. `signal_workflow` was the stated case: `execSession.SignalWorkflow`
+(`engine/signaller.go:240`) returns `errSignalAuthRequiredInt` when `signalAuthCheck` refuses the
+send and logs it at ERROR host-side, `dispatchSignalWorkflow`
+(`engine/component_callbacks.go:343`) passes it through unchanged via `setResultU64`, and the SDK
+returned `None` on the refusal and `None` on success.
+
+**Two more sites that can fire today, which §3.113 did not name.** `SetState` and `DeleteState`
+(`engine/lifecycle.go:336,412`) return `1` when the replayed event does not match the call the
+guest is now making — a non-determinism report. `stream_set_state` and `stream_delete_state`
+discarded it, so a Python workflow whose replay diverged carried on against a state store the
+host had declined to update. Silent state divergence is the worse of the two defects.
+
+Those three are the whole of what can fire today. The other ten host functions return 0
+unconditionally, so their checks are inert until §3.111's guards land — which is the point of
+doing this first: a guard that sets a bit the guest does not read is not a guard.
+
+    for f in SignalWorkflow SetState DeleteState DurableSend DurableScheduleInvoke \
+             ReplyToSignal SetQueryState ResolvePromise RejectPromise \
+             RegisterUpdateHandler ContinueAsNew ContinueAsNewWithVersion; do
+      echo "== $f"; sed -n "/func (s \*execSession) $f(/,/^}/p" engine/*.go | grep -c 'return 0'
+    done
+
+**The fix is one helper, not 13 edits.** `_check_host_result` in
+`python-sdk/cleat_sdk/host_calls.py` decodes the word in one place: stop sentinel first by mask,
+then the low-byte error code. Twelve call sites pass their result to it. `CALL_SUSPEND_SENTINEL`
+(`1 << 31`) is new in `memory.py` and is deliberately *not* `SUSPEND_SENTINEL` (`1 << 62`), which
+is the opposite direction — what an export returns to the host.
+
+Two calls are excluded, both recorded at the call site:
+
+- `log` — `DurableLog` is non-durable and returns 0 unconditionally. Nothing to read, and
+  raising out of a log call would be a poor trade if there were.
+- `delete_cron` — **`durable-delete-cron` is declared with no return value at all**, the only
+  function in `python-sdk/wit/cleat.wit` that is. A failed cron deletion is unreportable to a
+  component guest. Not fixable from the SDK; needs a WIT change.
+
+**What holds the fix up is the structural test, not the behavioural ones.**
+`TestNoScalarHostCallDiscardsItsResult` parses the SDK and asserts the set of discarding call
+sites equals the two exclusions above, so a fourteenth added later fails on arrival rather than
+when someone thinks to write a test for it. Falsified three ways: reverting `signal_workflow`
+fails with `DID NOT RAISE RuntimeError`; testing the error code *before* the sentinel fails
+exactly one test, reporting a stop as `CallErrorUnavailable (code 2)`; dropping the check at
+`reply_to_signal` — which no behavioural test touches — fails only the structural one.
+
+#### Two corrections to §3.113, both from re-deriving its own scan
+
+**Its table is wrong about `side_effect` and `acquire_lock`: both bind and check.** The scan
+classifies by variable name (`\bresult\s*=|\bres\s*=|\brc\s*=`), so `side_effect`'s `resp = ...`
+reads as a discard; and its body filter is `'_import_cleat_' in body`, which cannot see
+`_import_side_effect` at all — the method is reported in the table but the command cannot
+produce a row for it. An AST scan gives 14 discarding methods, not 9, and a different set:
+
+    python3 -c "
+    import ast,pathlib
+    src=pathlib.Path('python-sdk/cleat_sdk/host_calls.py').read_text()
+    cls=[n for n in ast.parse(src).body if isinstance(n,ast.ClassDef) and n.name=='HostCalls'][0]
+    print([(f.name,n.value.func.id) for f in cls.body if isinstance(f,ast.FunctionDef)
+           for n in ast.walk(f) if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call)
+           and isinstance(n.value.func,ast.Name) and n.value.func.id.startswith('_import')])"
+
+**Its correction to `TestTheThreeStopSurfacesAgree` is right in direction and wrong in scope.**
+§3.113 says §3.111's remaining seven "return `u64`/`s64`", so the `result<string, call-failure>`
+rule is the wrong rule for them. Four do — `durable-signal-workflow`, `durable-send`,
+`durable-acquire-lock`, `durable-schedule-invoke`. **Three return `string`**:
+`durable-send-signal-and-wait`, `side-effect`, `durable-schedule-cron`. For those three the
+`result<...>` rule is exactly right and a signature change *is* the fix, because a string has
+nowhere to put the sentinel — §3.110's situation. Whoever guards them should split the seven
+before touching the rule. Across the whole WIT surface, 8 of 53 functions return `result<...>`:
+
+    python3 -c "
+    import re,pathlib,collections
+    flat=re.sub(r'\s+',' ',pathlib.Path('python-sdk/wit/cleat.wit').read_text())
+    c=collections.Counter((m.group(4) or 'NONE').strip().split('<')[0]
+      for m in re.finditer(r'([a-z0-9-]+): func\((.*?)\)\s*(->\s*([^;]+?))?\s*;',flat))
+    print(sorted(c.items(),key=lambda kv:-kv[1]))"
+
+**Still open, and tracked at §3.202:** `await_signals` binds its result but decodes it wrongly —
+the stop sentinel reads as an ordinary timeout. That is a live hole in the defer-segment stop
+guarantee and is a separate defect from this one.
