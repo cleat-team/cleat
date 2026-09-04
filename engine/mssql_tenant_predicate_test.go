@@ -56,6 +56,9 @@ package engine
 // than sit there granting permission nobody is using.
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -163,7 +166,18 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		for _, st := range mssqlTenantStatements(string(src), path, tables) {
+		for _, st := range mssqlTenantStatements(string(blankGoComments(t, src, path)), path, tables) {
+			// An offending literal outside any function has no name to exempt,
+			// and inventing one is how this guard talked a reader into
+			// exempting an unrelated function -- see blankGoComments. Say where
+			// it is and offer no key.
+			if st.fn == "" {
+				t.Errorf("%s:%d names a tenant-scoped table with no tenant_id, at PACKAGE "+
+					"LEVEL rather than inside a function:\n    %s\n\n"+
+					"There is no function to allowlist. Move the statement into the "+
+					"function that issues it, or scope it.", path, st.line, st.excerpt)
+				continue
+			}
 			key := filepath.Base(path) + ":" + st.fn
 			if _, ok := tenantPredicateAllowlist[key]; ok {
 				used[key] = true
@@ -306,12 +320,41 @@ func filterWindows(flat string) []string {
 
 var funcDeclRe = regexp.MustCompile(`(?m)^func (?:\([^)]*\) )?(\w+)`)
 
+// enclosingFunc names the function whose BODY contains a byte offset, or "" when
+// the offset is outside every function.
+//
+// It used to take the last `func` declaration before the offset, which is not
+// the same question and answers it wrongly for anything at package level after
+// the first function -- a `var` holding a SQL string gets the name of whatever
+// happened to be declared above it. That fabricated name is what made this
+// guard's advice actionable: the failure text offered "<file>:<that name>" as an
+// allowlist key, and on the day it fired the name was `startNewRunOnce`, which
+// really does write workflow_instances. See blankGoComments.
+//
+// Range check via go/ast rather than brace counting, because a brace counter
+// gets a string containing "}" wrong, and being wrong here is how the previous
+// version earned its entry.
 func enclosingFunc(src string, pos int) string {
-	ms := funcDeclRe.FindAllStringSubmatch(src[:pos], -1)
-	if len(ms) == 0 {
-		return "?"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "src.go", src, 0)
+	if err != nil {
+		// Unparseable input: say nothing rather than guess a name. A caller
+		// that gets "" reports the position and offers no key, which is the
+		// safe failure for this function.
+		return ""
 	}
-	return ms[len(ms)-1][1]
+	base := fset.File(f.Pos()).Base()
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		lo, hi := int(fd.Body.Lbrace)-base, int(fd.Body.Rbrace)-base
+		if pos >= lo && pos <= hi {
+			return fd.Name.Name
+		}
+	}
+	return ""
 }
 
 func excerpt(flat string) string {
@@ -328,4 +371,153 @@ func sortedSet(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// blankGoComments replaces every Go comment span with spaces, preserving byte
+// offsets and newlines so line numbers and enclosingFunc still resolve.
+//
+// WHY THIS EXISTS. sqlLiteralRe matches every backtick-delimited span in the
+// file and cannot tell a comment from code. On 2026-09-04 WS-2 was caught by
+// this guard twice in five minutes (IMPROVEMENT-PLAN 3.114): once legitimately,
+// and once because they
+// wrote a comment EXPLAINING the first catch and quoted the offending SQL in
+// backticks. The comment became an offending literal, and the guard failed on
+// the explanation of why it had failed.
+//
+// That is worse than an ordinary false positive, and the reason is the message
+// rather than the match. A literal outside any function was attributed to
+// whichever func happened to precede it -- `startNewRunOnce`, eleven lines
+// away and unrelated -- and the failure text then invited the reader to add
+// `mssql_lifecycle.go:startNewRunOnce` to the allowlist "with a true reason".
+// Following that advice would have silently exempted a function that really
+// does write workflow_instances, for a failure it had nothing to do with. A
+// guard that can talk someone into opening a tenant-isolation hole while they
+// follow its own instructions is worse than no guard, because the instruction
+// carries the guard's authority.
+//
+// go/parser rather than a regex over `//` and `/* */`, because a stripper built
+// from those eats a backtick span containing "//" inside a SQL string -- which
+// would delete real statements from the scan and turn a false positive into a
+// false negative, the one direction a guard must never fail in.
+func blankGoComments(t *testing.T, src []byte, path string) []byte {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, src, parser.ParseComments)
+	if err != nil {
+		// A file this package cannot parse is a fact worth failing on: the scan
+		// would otherwise silently fall back to reading comments as code.
+		t.Fatalf("parsing %s to find its comments: %v", path, err)
+	}
+	out := append([]byte(nil), src...)
+	base := fset.File(f.Pos()).Base()
+	for _, cg := range f.Comments {
+		for _, c := range cg.List {
+			lo, hi := int(c.Pos())-base, int(c.End())-base
+			for i := lo; i < hi && i < len(out); i++ {
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestTheTenantPredicateScanIgnoresGoComments pins the fix for the defect
+// blankGoComments describes: this guard failed on a COMMENT that quoted the SQL
+// from a previous failure, and then named an unrelated function as the one to
+// exempt.
+//
+// Four cases, and the third is the one that matters most. A comment stripper
+// built from `//` and `/* */` regexes eats a backtick span containing "//"
+// inside a SQL string -- which removes a REAL statement from the scan. That
+// turns a loud false positive into a silent false negative, which is the only
+// direction this guard must never fail in.
+func TestTheTenantPredicateScanIgnoresGoComments(t *testing.T) {
+	tables := map[string]bool{"workflow_instances": true}
+	const path = "engine/mssql_synthetic.go"
+
+	cases := []struct {
+		name  string
+		src   string
+		want  int
+		wantF string // expected attribution of the first finding
+		why   string
+	}{
+		{
+			name: "SQL quoted inside a line comment is not a statement",
+			src: "package engine\n" +
+				"// Explaining an earlier failure: the statement was\n" +
+				"// `UPDATE workflow_instances SET status = 'x' WHERE id = @p1`\n" +
+				"func f() { _ = 1 }\n",
+			want: 0,
+			why:  "the guard failed on the explanation of why it had failed",
+		},
+		{
+			name: "SQL quoted inside a block comment is not a statement",
+			src: "package engine\n" +
+				"/* was: `UPDATE workflow_instances SET status = 'x' WHERE id = @p1` */\n" +
+				"func f() { _ = 1 }\n",
+			want: 0,
+			why:  "block comments are the same hazard as line comments",
+		},
+		{
+			name: "the identical text in code IS a statement",
+			src: "package engine\n" +
+				"func g() { _ = `UPDATE workflow_instances SET status = 'x' WHERE id = @p1` }\n",
+			want:  1,
+			wantF: "g",
+			why: "if this does not fire, the stripper has eaten real code and the guard " +
+				"has become a false negative",
+		},
+		{
+			name: "a real literal containing // inside a SQL string is still scanned",
+			src: "package engine\n" +
+				"func h() { _ = `UPDATE workflow_instances SET url = 'https://x/y' WHERE id = @p1` }\n",
+			want:  1,
+			wantF: "h",
+			why: "a regex stripper would treat // inside the string as a comment start and " +
+				"delete the rest of the statement, silently",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mssqlTenantStatements(
+				string(blankGoComments(t, []byte(tc.src), path)), path, tables)
+			if len(got) != tc.want {
+				t.Fatalf("found %d statement(s), want %d.\n\n%s\n\nfound: %+v",
+					len(got), tc.want, tc.why, got)
+			}
+			if tc.want > 0 && got[0].fn != tc.wantF {
+				t.Errorf("attributed to %q, want %q", got[0].fn, tc.wantF)
+			}
+		})
+	}
+}
+
+// TestAPackageLevelStatementIsNotAttributedToAFunction pins the other half:
+// enclosingFunc returning "" rather than the name of whatever declaration
+// happened to precede the literal.
+//
+// The fabricated name is what made the bad advice actionable -- the failure text
+// offered "<file>:<unrelated func>" as an allowlist key, and that function
+// really does write workflow_instances.
+func TestAPackageLevelStatementIsNotAttributedToAFunction(t *testing.T) {
+	const path = "engine/mssql_synthetic.go"
+	src := "package engine\n" +
+		"func unrelatedButEarlier() { _ = 1 }\n\n" +
+		"var q = `UPDATE workflow_instances SET status = 'x' WHERE id = @p1`\n"
+
+	got := mssqlTenantStatements(
+		string(blankGoComments(t, []byte(src), path)), path,
+		map[string]bool{"workflow_instances": true})
+	if len(got) != 1 {
+		t.Fatalf("found %d statements, want 1", len(got))
+	}
+	if got[0].fn != "" {
+		t.Fatalf("attributed the package-level statement to %q.\n\n"+
+			"There is no enclosing function. Naming the preceding declaration invites the "+
+			"reader to allowlist it, and %q writes workflow_instances.", got[0].fn, got[0].fn)
+	}
 }
