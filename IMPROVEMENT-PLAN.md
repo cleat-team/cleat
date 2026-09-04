@@ -8514,7 +8514,7 @@ regression tests. Falsification check: with the `OR` clause removed, exactly
 which should fail closed the way `005_app_role.sql` does, shipping no credential. Draft #333
 stays draft until that lands.
 
-### 3.38 `TestAdminForceResolve_*` failed once after an all-dialect run — 🔶 **OBSERVED, not reproduced** (WS-1, 2026-08-06)
+### 3.38 `TestAdminForceResolve_*` failed once after an all-dialect run — 🔵 **MECHANISM DEMONSTRATED 2026-09-04; it is §2.60d, and the hypothesis recorded here was wrong** (WS-1, 2026-08-06)
 
 Recorded because it cost twenty minutes to rule out of §3.37 and would cost the next person the
 same. Three tests failed in a PostgreSQL-only run of `./engine/...`:
@@ -8538,6 +8538,96 @@ admin/tenant test is worth knowing on its own.
 
 Anyone who sees this in CI should suspect the preceding job's residue before suspecting their
 diff.
+
+#### The hypothesis above is wrong, and the mechanism is §2.60d (2026-09-04)
+
+**Cross-run residue cannot reach these tests.** `PostgresBackend.Setup`
+(`engine/store_backends_test.go:48`) calls `testutil.CleanupPostgresTestData` *before* handing
+the store over, and again at teardown. Whatever the preceding job left is deleted before the
+test body runs. Demonstrated by trying to plant it — twenty `ready` workflows aged an hour, which
+would push the fixture out of `ClaimWorkflows`' `ORDER BY priority ASC, created_at LIMIT 20`
+window:
+
+```
+$ psql -c "INSERT INTO workflow_instances (id, def_name, def_version, status, created_at, next_wake_at)
+           SELECT 'residue-338-'||g, 'admin-force-resolve', 1, 'ready',
+                  now() - interval '1 hour', now() - interval '1 hour'
+           FROM generate_series(1,20) g;"
+$ psql -tAc "SELECT count(*) FROM workflow_instances WHERE status='ready';"    # 20
+$ go test -count=1 -run 'TestAdminForceResolve_' ./engine/
+ok      github.com/cleat-team/cleat/engine  0.701s
+$ psql -tAc "SELECT count(*) FROM workflow_instances WHERE id LIKE 'residue-338-%';"   # 0
+```
+
+The residue is gone and the tests pass. That was the second wrong theory in this section, and it
+is left in rather than deleted because the *shape* of both is the same: reaching for state
+carried between runs, when the setup deletes it.
+
+**What does reproduce it is a concurrent unqualified `DELETE`** — precisely what
+`CleanupPostgresTestData` issues, and what another package's `Setup` runs while this one is
+mid-test. Racing one against the suite fails the exact tests this section names, on demand:
+
+```
+$ ( for i in $(seq 1 400); do psql -q -c "DELETE FROM workflow_instances;"; done ) &
+$ go test -count=6 -run 'TestAdminForceComplete_ResolvesAndAudits|TestAdminForceResolve_' ./engine/
+--- FAIL: TestAdminForceResolve_AuditCollisionRollsBack
+    admin_force_resolve_test.go:447: error = admin force_complete: workflow acr-... not found,
+        want it to name the audit event as the reason
+--- FAIL: TestAdminForceResolve_RefusesAnotherTenant/postgres
+    admin_force_resolve_test.go:388: workflow axt-... not found
+--- FAIL: TestAdminForceComplete_ResolvesAndAudits/postgres
+    admin_force_resolve_test.go:159: workflow afc-... not found
+```
+
+Both tests this section names, and the subtest, from one cause. With the racer stopped,
+`-count=3` is green.
+
+**So this is §2.60d, not a defect of its own.** `SuiteTestDB`'s doc comment already states the
+diagnosis — *"one suite's teardown deletes another's fixtures mid-test ... the failures are
+timing-dependent ... so they read as flakes rather than as one cause, and the standing workaround
+is `-p 1`"*. §3.38 is what that reads like from the other end, three weeks before the sentence
+was written.
+
+**What the demonstration adds to §2.60d.** Part 2's evidence table concluded, from ten runs, that
+*"the failures were stale local state, not package parallelism"* — which was right about those
+failures and is not a statement about whether the engine suite is sensitive to a concurrent wipe.
+It is, on demand, and now there is a command that shows it. The two findings are consistent: the
+mechanism is real and the natural window is narrow, which is exactly why it presents as an
+unreproducible flake.
+
+**And the narrow window was measured here too, as a negative result.** Two real packages sharing
+the database, run the way a developer would:
+
+```
+$ go test -count=1 ./engine/ ./migration/          # no -p 1
+ok  github.com/cleat-team/cleat/engine     204.423s
+ok  github.com/cleat-team/cleat/migration    2.122s
+```
+
+Green. One run is not evidence of safety — `migration` finishes in 2s of a 204s engine run, so it
+holds almost no rows across almost none of the window — but it is the honest counterweight to the
+racer above, and it is why nobody has been able to catch this by re-running the suite.
+
+**The adoption gap is the open part.** §2.60d part 2 built `SuiteTestDB` and records *"still
+open: every other suite that shares the database."* Measured 2026-09-04:
+
+```
+grep -rn "SuiteTestDB(" --include="*.go" . | grep -v packagedb        #  9 sites, 2 packages
+grep -rln "testutil.TestDB(" --include="*.go" . | sed 's|/[^/]*$||' | sort | uniq -c
+     29 engine
+      6 engine/testutil
+      3 cmd/cleat-worker
+      1 each: cmd/cleatctl, tests/{upgrade,soak,scale,plugin-harness,integrity,exhaustion}
+```
+
+`engine` — the largest database-backed package, and the one holding these tests — is entirely on
+the shared database. Moving it is not a swap: `SuiteTestDB` is PostgreSQL-only by design (part 4
+measured that MySQL and SQL Server did not need an equivalent *for the suites that had moved*),
+while `forEachBackend` runs the engine suite on all three. That is a piece of work with its own
+decision in it, and it stays §2.60d's rather than being restated here.
+
+Until then `-p 1` is load-bearing for `./engine/`, and CLAUDE.md's rule about it is the
+protection, not a style preference.
 
 ### 3.33 gosec's 283 findings, triaged — 🔶 **2 fixed, 281 classified** (WS-3, 2026-08-05)
 
