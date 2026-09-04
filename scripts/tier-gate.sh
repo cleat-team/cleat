@@ -8,12 +8,14 @@
 # has already paid for that repeatedly (see scripts/check-skips.sh for four cases), and
 # the sharpest version is still live:
 #
-#   go test ./engine/  with no CLEAT_TEST_* set  -> 2544 tests, 166 skipped, 16s, "ok"
-#   go test ./engine/  with all three DSNs set   -> 3846 tests,   4 skipped, 60s, "ok"
+#   go test ./engine/  with no CLEAT_TEST_* set  -> 3462 passed, 876 skipped, "ok"
+#   go test ./engine/  with all three DSNs set   -> 4510 passed,   4 skipped, "ok"
 #
-# Both print ok. The first one tested no database at all. Nothing in the tree could tell
-# those two runs apart, which is why tier 1 asserts the connection rather than inferring
-# it from a green result.
+# Both print ok. The first one tested no database at all. Measured 2026-09-03; the skipped
+# column is the reliable half and is reproducible to the test, while the wall clock that
+# used to be quoted here no longer separates the two cases (see CLAUDE.md, "Is this result
+# real?"). Nothing in a green result can tell those two runs apart, which is why tier 1
+# checks the DSNs up front rather than inferring anything from one.
 #
 # Usage:
 #   scripts/tier-gate.sh            enforce (exit non-zero on failure or skip)

@@ -34,16 +34,45 @@ a property CI checks rather than a sentence someone wrote.
 Most expensive recurring failure in this project: **a green result that measured nothing.** Check
 these before believing any test outcome.
 
-**An unset DSN skips its dialect silently and the suite still prints `ok`.** Measured 2026-08-06
-on the same tree, same command:
+**An unset DSN skips its dialect silently and the suite still prints `ok`.** Measured 2026-09-03,
+`go test ./engine/` on one tree, each configuration run twice in opposite orders:
 
-| | tests run | skipped | wall |
+| `CLEAT_TEST_*` set | passed | skipped | wall (two runs) |
 |---|---|---|---|
-| no `CLEAT_TEST_*` set | 2544 | 166 | 16s |
-| all three dialects set | 3846 | 4 | 60s |
+| none | 3462 | **876** | 158s, 148s |
+| postgres only | 3813 | **581** | 182s, 163s |
+| all three | 4510 | **4** | 206s, 222s |
 
-Both printed `ok`. **Check the wall-clock delta** — roughly 20s means Postgres only, roughly 60s
-means all three. A green engine run that took 16 seconds tested no database at all.
+All three printed `ok`. **Check the skipped count, not the clock:**
+
+    go test ./engine/ -count=1 -json > /tmp/t.json
+    grep '"Action":"skip"' /tmp/t.json | grep -c '"Test":'   # 4 means all three dialects ran
+    grep '"Action":"fail"' /tmp/t.json | grep -c '"Test":'   # must be 0 -- see two paragraphs down
+
+That column is exact, reproducible, and machine-independent: both orderings gave an identical
+876 / 581 / 4.
+
+**The wall-clock check this file used to recommend is dead — do not use it.** It read "roughly 20s
+means Postgres only, roughly 60s means all three", off a 2026-08-06 measurement of 16s and 60s.
+A no-DSN run now takes about 150s, so a run that tested *no database at all* clears the old
+"all three" threshold by 2.5× — the exact false green this section exists to prevent. And the gap
+between adjacent configurations (~19s from none to postgres-only) is now the same size as
+run-to-run variance on one configuration (postgres-only measured 182s and 163s), so the clock
+cannot separate them even in principle. The suite grew about 8% in test functions over that
+month; the wall times grew tenfold, most of it machine and load.
+
+**A DSN that is set but does not connect looks exactly like one that works.** Setting the variable
+is what stops a test skipping. Connecting is a separate question, and neither the skipped count
+nor the clock asks it — those tests fail on connect instead of skipping. Writing this section I
+reconstructed all three DSNs from memory, got the database name and two passwords wrong, and
+measured a tidy 876 → 581 → 4 progression whose final `4` matched the old table exactly. It was
+1086 connection failures wearing the right costume, and the matching `4` read as corroboration.
+**So count failures too**, or probe first:
+
+    go test ./engine/ -run TestTenantIsolationAcrossDialects -count=1
+
+The DSNs are written down: `WS3-STATUS.md` for this checkout's ports, `PARALLEL-WORKSTREAMS.md`
+for the defaults. Read them rather than rebuilding them from memory.
 
 **Build and test with CGO on — the default.** `CGO_ENABLED=0` does not skip a check. It swaps
 `NewWasmtimeBackend` for the `//go:build !cgo` stub in `engine/backend_wasmtime_stub.go`, which
