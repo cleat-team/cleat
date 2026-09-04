@@ -1020,7 +1020,7 @@ tier2:
         execution fence terminates it while the worker stays healthy and goes on to
         complete an ordinary workflow. Needs real cleat-worker containers enforcing
         --wasm-instance-timeout, which tier2-gate.yml's bare PostgreSQL service cannot
-        provide. Gated at a skip budget of 0 (scripts/skip-budget.txt, key
+        provide. Gated at a skip budget of 0 (scripts/skip-ledger.tsv, key
         "cluster/exhaustion") -- the step sets CLEAT_TEST_DB explicitly, so the test can
         only pass or Fatalf, never skip, in this job.
     - suite: ./tests/plugin-harness/...

@@ -762,7 +762,9 @@ jobs:
       # this warning, and reported green for its entire existence -- nobody
       # reads a warning on a green job. The budget makes it a failure.
       #
-      # Budgets live in scripts/skip-budget.txt, one line per job key. The
+      # Budgets are derived from scripts/skip-ledger.tsv, which holds one line
+      # per REASON a test may skip; a job's budget is the sum of its lines, so
+      # no stream ever edits a shared total. The
       # check also fails when the report is missing or contains no test results
       # at all, because a test step that died before producing output has
       # skipped everything, which is the strongest form of the same bug.

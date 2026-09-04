@@ -241,7 +241,7 @@ go test -short ./...
 # one database; engine/testutil's CleanupPostgresTestData is an unqualified
 # DELETE across eleven tables, so packages run concurrently delete each other's
 # fixtures mid-test. The result looks like a flaky product defect and is not
-# one. See the header of scripts/skip-budget.txt.
+# one. See the header of scripts/skip-ledger.tsv.
 go test -count=1 -p 1 ./...
 
 # Tests for a specific package
