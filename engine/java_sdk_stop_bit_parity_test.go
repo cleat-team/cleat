@@ -197,8 +197,16 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// new stop site fails here, and the fix is to add the Java method that
 	// reaches it to javaCallsTheHostCanRefuse, add the guard in HostCalls.java,
 	// and then move this number.
-	const stopSitesOn20260903 = 7
-	if stopSites != stopSitesOn20260903 {
+	//
+	// Moved 7 -> 8 on 2026-09-04 for IMPROVEMENT-PLAN 3.111, and the check the
+	// message above demands was done rather than assumed: `cleatCallHeartbeat`
+	// was ALREADY in javaCallsTheHostCanRefuse and HostCalls.java already had
+	// `Memory.throwIfStopped(result)` ahead of `decodeCallErrCode`, so Java
+	// needed nothing. The gap was entirely host-side, which is why only the
+	// number moved -- and this test is the reason that was verified instead of
+	// assumed from the Java list being long enough.
+	const stopSitesOn20260904 = 8
+	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+
 			"refuse and does not check: add its method to javaCallsTheHostCanRefuse and the "+
@@ -206,7 +214,7 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 			"corresponding method. Re-derive with:\n\n"+
 			"    grep -rn \"stopBeforeNewWork()\" --include=\"*.go\" engine/ | grep -v _test.go\n\n"+
 			"Do not just move the number -- it is the prompt to check the other side.",
-			stopSites, stopSitesOn20260903)
+			stopSites, stopSitesOn20260904)
 	}
 	t.Logf("engine stop sites: %d; java methods required to guard: %d",
 		stopSites, len(javaCallsTheHostCanRefuse))

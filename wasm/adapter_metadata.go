@@ -400,7 +400,7 @@ var adapterDefs = map[string]adapterDef{
 			{"heartbeatInterval", "time.Duration"},
 			{"onProgress", "func(string)"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
 			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
@@ -413,7 +413,7 @@ var adapterDefs = map[string]adapterDef{
 			`	}`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
-		},
+		),
 	},
 	"Version": {
 		FieldName:  "Version",

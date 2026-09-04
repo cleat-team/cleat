@@ -14,6 +14,25 @@ func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module
 	if s.isReplay {
 		return s.replayCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
 	}
+	// The eighth fresh path, and the last one in the durable-call family --
+	// IMPROVEMENT-PLAN 3.84 guarded DurableCall and DurableCallWithRetry and
+	// did not list this one, so a defer segment could still reach a service
+	// through cleat_call_heartbeat.
+	//
+	// The ordering is DurableCall's, and both halves of it matter: replay
+	// first, because a refusal records no event and a replay that reached this
+	// would find nothing where an event should be; the stop second, because
+	// ABI.md requires bit 31 to win over any field this layout carries.
+	//
+	// This one is worse than an ordinary unguarded call rather than equal to
+	// it. freshCallWithHeartbeat starts a goroutine and a ticker, and every
+	// tick writes an EventTypeHeartbeat through recordEvent -- so an unstopped
+	// heartbeat call in a defer segment does not merely perform the side effect
+	// once, it appends history to a workflow that has already terminated, for
+	// as long as the call runs.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
 }
 
