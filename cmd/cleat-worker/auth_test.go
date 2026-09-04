@@ -71,8 +71,17 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`)
 
-	// Build a minimal handler chain that mirrors what main() does when
-	// --require-auth=true: auth middleware wraps the route mux.
+	// requireAuth=FALSE, deliberately, and this comment used to say the opposite.
+	// It claimed to mirror "what main() does when --require-auth=true" while
+	// passing false -- so a reader checking whether the supported default is
+	// covered found a test that said yes and tested the other mode.
+	//
+	// What this file is actually for is the INVALID-key path, which behaves the
+	// same either way: a key that does not resolve is refused whether or not
+	// auth is required. The supported default's own property -- a request with
+	// NO key is refused rather than defaulted -- is covered by
+	// tenant_isolation_db_test.go's "unauthenticated request is refused, not
+	// defaulted", which builds the server with requireAuth: true.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/workflows/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -98,8 +107,16 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 
-		// The middleware passes through requests without an API key so that
-		// unauthenticated endpoints (healthz, metrics) continue to work.
+		// This is the requireAuth=false behaviour, and the reason given here used
+		// to be wrong twice over: it said the pass-through exists "so that
+		// unauthenticated endpoints (healthz, metrics) continue to work", but
+		// those are exempted BY PATH at auth/middleware.go:66, before the
+		// requireAuth branch is reached -- and the path exercised below is
+		// /api/workflows/my-wf/start, which is not one of them.
+		//
+		// So what this pins is narrow and worth stating exactly: with auth NOT
+		// required, a missing key is not itself an error. Under the supported
+		// default it is a 401, asserted in tenant_isolation_db_test.go.
 		if w.Code != http.StatusOK {
 			t.Errorf("expected HTTP 200 when no auth header is present, got %d", w.Code)
 		}
