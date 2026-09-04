@@ -884,6 +884,7 @@ func main() {
 		maxQuotaSchedules:                *maxQuotaSchedules,
 		maxWorkflowDuration:              *maxWorkflowDuration,
 		wasmWallClockCeiling:             *wasmWallClockCeiling,
+		hostRetryBudget:                  *hostRetryBudget,
 		childBindingOverride:             *childBindingOverride,
 		healthCheckInterval:              *healthCheckInterval,
 		encryption:                       payloadEncryption,

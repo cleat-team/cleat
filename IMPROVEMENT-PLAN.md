@@ -13043,13 +13043,16 @@ longer consumes the guest's execution budget, and the wall-clock ceiling that do
 defaults to 5m rather than 30s. The remaining work there is the missing
 `HostCallsImpl.DurableCallWithRetry` method.
 
-### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🟡 **IN PROGRESS: steps 1–3 done, 4–6 open** (WS-3, 2026-09-03)
+### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🟡 **IN PROGRESS: steps 1–4 done, 5b–6 open** (WS-3, 2026-09-03)
 
 **Requirement, 2026-09-03:** each tenant must be able to override the default time thresholds
 without affecting other tenants, so that several microservices — or several organisations —
 sharing one cleat deployment can manage their own settings.
 
-We have none of that structure. This section is the design and the plan; nothing is built.
+The design and the plan are below. Steps 1–4 and 5a have shipped — the settings table on
+three dialects, per-tenant resolution of the wall-clock ceiling, and the host-side retry
+threshold. 5b and 6 are open. The `What exists today` table below describes the state
+BEFORE this work and is kept as the problem statement; read the step markers for status.
 
 #### What exists today
 
@@ -13297,11 +13300,30 @@ consistent and costs nothing.
    every delete ran against a closed pool and failed silently. Three rows survived a green run
    and the next run failed on a duplicate key rather than on anything it was testing. Both tests
    now pre-clean, which also survives a crashed run.
-4. **Move the retry threshold host-side**: host applies the resolved budget, refuses with the
-   sentinel, records no event. Delete `hostRetryBudget`, `HOST_RETRY_BUDGET_MS`,
-   `retryFitsInOneSegment`, `retry_fits_in_one_segment`, and
-   `cleat.TestBothSDKsAgreeOnTheHostRetryBudget`. Both SDKs honour the refusal; the four
-   threshold tests in §3.88 stay and should pass unchanged, which is the point of keeping them.
+4. ~~**Move the retry threshold host-side**~~ — ✅ **done 2026-09-03.** The host applies the
+   resolved budget in `execSession.DurableCallWithRetry` and refuses with `callErrorCode` 6,
+   making no call and recording no event. `hostRetryBudget`, `HOST_RETRY_BUDGET_MS`,
+   `retryFitsInOneSegment`, `retry_fits_in_one_segment` and
+   `cleat.TestBothSDKsAgreeOnTheHostRetryBudget` are all deleted; `--host-retry-budget` is the
+   operator's ceiling and `DefaultHostRetryBudget` (60s) keeps every engine built without it
+   behaving as before. The §3.88 threshold tests are unmodified and pass.
+
+   Four things worth keeping:
+
+   - **The budget is judged on the policy the GUEST asked for**, before `--max-retries` trims the
+     attempt count. Judging the trimmed policy would accept policies that used to suspend — a
+     behaviour change wearing a refactor's clothes.
+   - **`retryFitsInOneSegment(nil)` returned false**, which routed a nil policy to the SDK loop.
+     The replacement condition would have dereferenced it; the guard is explicit and commented.
+   - **The explicit escape hatches narrow deliberately.** `DurableCallWithRetry` /
+     `cleat_call_with_host_retry` were documented as "the caller's choice" to hold a worker. The
+     host refuses them too now, because a budget a guest can opt out of is advisory. Neither has
+     a loop to fall back to, so both surface the `CallError`.
+   - **The end-to-end Rust test could not tell old from new.** One attempt then a suspension is
+     what BOTH designs produce, so its green proved nothing about this change — and would not
+     have caught a stale `.wasm` either. Deleting the Rust fallback is what discriminates: the
+     test then fails carrying the host's own refusal message, which is also the proof the guest
+     is rebuilt and that the refusal crosses the language boundary.
 5. **Resolve the two timeouts per tenant.** Split in two by where the bound lives, and only
    the first half is done:
    - ~~5a, the executor's **wall-clock ceiling**~~ — ✅ **done with step 3.** It is a context

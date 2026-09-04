@@ -56,6 +56,7 @@ type Engine struct {
 	generation             int64 // generation this workerID claimed the workflow under; see WithGeneration
 	wasmInstanceTimeout    time.Duration
 	wasmWallClockCeiling   time.Duration
+	hostRetryBudgetCeiling time.Duration
 	defaultWorkflowTimeout time.Duration
 
 	// This tenant's overrides for the two fields above, read from the store
@@ -346,6 +347,43 @@ func (e *Engine) wallClockCeiling(ctx context.Context) time.Duration {
 		operator = e.wasmInstanceTimeout
 	}
 	return ClampToCeiling(e.tenantSettings(ctx).WasmWallClockCeiling, operator)
+}
+
+// DefaultHostRetryBudget is the ceiling applied when an operator sets none.
+//
+// It is 60s because that is the value the Go and Rust SDKs each compiled in
+// before §3.94 step 4 moved the decision here, and every engine constructed
+// without WithHostRetryBudget -- which is every test, and every embedded use --
+// must keep behaving the way it did. The four §3.88 threshold tests are the
+// check on that: they are not modified by this change and must stay green.
+//
+// Deliberately well below --wasm-wall-clock-ceiling's 5m default rather than
+// close to it, for the reason the SDK constant gave: the ceiling covers the
+// WHOLE invocation, so a threshold near it would let one retry policy consume
+// the entire budget and leave nothing for the rest of the workflow.
+const DefaultHostRetryBudget = 60 * time.Second
+
+// WithHostRetryBudget sets the operator's CEILING on how much worst-case
+// backoff a retry policy may carry and still be run on the host, inside one
+// segment, holding the worker slot.
+func WithHostRetryBudget(d time.Duration) EngineOption {
+	return func(e *Engine) { e.hostRetryBudgetCeiling = d }
+}
+
+// hostRetryBudget resolves the host-retry budget for the tenant on this
+// execution, clamped to the operator's ceiling.
+//
+// Same clamp direction as wallClockCeiling, and for the same reason: a tenant
+// may lower its own budget -- pushing more policies onto the suspending path,
+// which costs the tenant latency and costs the operator nothing -- but may
+// never raise it and hold a shared worker slot for longer than the operator
+// allowed.
+func (e *Engine) hostRetryBudget(ctx context.Context) time.Duration {
+	operator := e.hostRetryBudgetCeiling
+	if operator <= 0 {
+		operator = DefaultHostRetryBudget
+	}
+	return ClampToCeiling(e.tenantSettings(ctx).HostRetryBudget, operator)
 }
 
 // WithDefaultWorkflowTimeout sets the total workflow timeout.

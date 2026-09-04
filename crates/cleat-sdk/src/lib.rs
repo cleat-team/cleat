@@ -82,6 +82,20 @@ pub use plugins::{
 pub enum CallError {
     /// The workflow must suspend and resume in a later segment.
     Suspended,
+    /// The host declined to run this retry policy in one segment: its
+    /// worst-case total backoff exceeds the tenant's host-retry budget.
+    ///
+    /// The call was NOT made, no event was recorded, and no attempt was
+    /// consumed, so the caller may run the policy itself from attempt 1 --
+    /// which is what `cleat_call_with_retry` does. Non-retryable as itself:
+    /// re-issuing the same policy is refused on identical grounds.
+    ///
+    /// `callErrorCode` 6, `RetryPolicyTooLong` in `ABI.md`. The threshold used
+    /// to be `HOST_RETRY_BUDGET_MS`, a constant compiled into this crate and
+    /// held equal to Go's by a test that scraped one language's source from
+    /// the other. It lives on the host now, per tenant -- IMPROVEMENT-PLAN
+    /// 3.94 step 4.
+    RetryPolicyTooLong,
     /// The host refused or failed the call.
     Failed(String),
 }
@@ -90,6 +104,10 @@ impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CallError::Suspended => write!(f, "workflow suspended"),
+            CallError::RetryPolicyTooLong => write!(
+                f,
+                "retry policy rejected: worst-case backoff exceeds the host-retry budget"
+            ),
             CallError::Failed(msg) => write!(f, "{msg}"),
         }
     }

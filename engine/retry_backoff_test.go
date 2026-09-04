@@ -67,7 +67,7 @@ import (
 
 // retryBackoffEngine builds a Go SDK guest on wasmtime whose only service fails.
 // clock nil means the real wall clock.
-func retryBackoffEngine(t *testing.T, wfID string, clock func() int64) ([]byte, *Engine, *failOnceRecordingCaller) {
+func retryBackoffEngine(t *testing.T, wfID string, clock func() int64, extra ...EngineOption) ([]byte, *Engine, *failOnceRecordingCaller) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -94,6 +94,7 @@ func retryBackoffEngine(t *testing.T, wfID string, clock func() int64) ([]byte, 
 	if clock != nil {
 		opts = append(opts, WithClock(clock))
 	}
+	opts = append(opts, extra...)
 	return wasmBytes, NewEngine(rt, caller, opts...), caller
 }
 

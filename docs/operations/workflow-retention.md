@@ -76,8 +76,14 @@ here", which is what this paragraph said before the host loop was wired.
 — `HostCalls::cleat_call_with_retry` called the import directly with no threshold — so a
 long-backoff Rust policy was dead-letterable where the Go equivalent was not, and held a worker
 for the length of its backoff. It now applies the same threshold, so the table above is the whole
-story rather than the Go half of it. `cleat.TestBothSDKsAgreeOnTheHostRetryBudget` compares the
-two constants, because nothing at compile time can.
+story rather than the Go half of it.
+
+Since §3.94 step 4 neither SDK carries the threshold at all: the **host** applies the tenant's
+budget (`--host-retry-budget` as the operator's ceiling, `tenant_settings.host_retry_budget_ms`
+to lower it) and refuses a policy that exceeds it with `callErrorCode` 6, `RetryPolicyTooLong`.
+The refusal makes no call and records no event, so the guest falls back to its suspending loop
+from attempt 1. Two SDK constants that had to be held equal by a test scraping one language's
+source from the other are now one value, resolved per tenant.
 
 `HostCalls::cleat_call_with_host_retry` (Rust) and `HostCallsImpl.DurableCallWithRetry` (Go) are
 the explicit forms: they demand the host loop whatever the policy's length, and a workflow using

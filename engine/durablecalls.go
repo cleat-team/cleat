@@ -280,11 +280,66 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 }
 
+// retryPolicyFitsBudget reports whether a policy's WORST-CASE total backoff is
+// small enough to run on the host, inside one segment.
+//
+// Worst case, not expected: every attempt fails and every backoff is waited out
+// in full. A policy is either always in-segment or always suspending, decided
+// before the first attempt, because a policy that switched paths part-way
+// through would produce a history whose shape depended on which services
+// happened to fail.
+//
+// This is the arithmetic that used to live in each guest SDK -- Go's
+// retryFitsInOneSegment and Rust's retry_fits_in_one_segment, kept equal by a
+// test that regex-scraped one language's source from the other's. It is
+// transcribed here once, and deleted there; §3.94 step 4 is exactly that move.
+//
+// A budget of zero means unbounded, matching ClampToCeiling's convention that
+// a non-positive limit is "no limit".
+func retryPolicyFitsBudget(maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
+	budget time.Duration) bool {
+
+	if budget <= 0 {
+		return true
+	}
+	total := time.Duration(0)
+	interval := time.Duration(initialIntervalMs) * time.Millisecond
+	maxInterval := time.Duration(maxIntervalMs) * time.Millisecond
+
+	// maxAttempts attempts means maxAttempts-1 backoffs; the last failure is
+	// not followed by a wait.
+	for i := int64(1); i < maxAttempts; i++ {
+		if maxInterval > 0 && interval > maxInterval {
+			interval = maxInterval
+		}
+		total += interval
+		if total > budget {
+			return false
+		}
+		if backoffCoefficient100x > 100 {
+			interval = time.Duration(float64(interval) * float64(backoffCoefficient100x) / 100)
+		}
+	}
+	return true
+}
+
 func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	service, operation, requestJSON string,
 	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
 	nonRetryableErrorsJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
+
+	// Worker-enforced ceiling on retry attempts to prevent runaway retries
+	// from misconfigured WASM modules.  Use the engine-configured limit if
+	// set (it comes from --max-retries on the command line), otherwise the
+	// package-level constant.
+	// The policy the GUEST asked for, before the attempt ceiling below trims
+	// it. The budget check uses this rather than the clamped value so that the
+	// host reaches the same verdict the guest SDKs used to reach on their own
+	// -- they computed on their own policy and knew nothing of --max-retries.
+	// Judging the clamped policy instead would quietly accept a policy that
+	// used to suspend, which is a behaviour change dressed as a refactor.
+	requestedAttempts := maxAttempts
 
 	// Worker-enforced ceiling on retry attempts to prevent runaway retries
 	// from misconfigured WASM modules.  Use the engine-configured limit if
@@ -302,6 +357,22 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	}
 	if s.stopBeforeNewWork() {
 		return callSuspendSentinel
+	}
+
+	// Refuse a policy too long to run in one segment, and refuse it HERE:
+	// after the stop sentinel (ABI.md requires bit 31 to win over any field,
+	// and a refusal is a field) and after the replay return (a refusal records
+	// no event, so replay must never reach this and find nothing).
+	//
+	// No event, no attempt consumed, no call made. The guest runs the policy
+	// itself, suspending between attempts, which is what it used to do when it
+	// made this decision guest-side.
+	if budget := s.engine.hostRetryBudget(ctx); !retryPolicyFitsBudget(
+		requestedAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs, budget) {
+		msg := fmt.Sprintf("retry policy rejected: worst-case backoff exceeds the %s host-retry budget; "+
+			"run the policy in the guest, suspending between attempts", budget)
+		written, _ := s.writeResult(ctx, m, responsePtr, msg, responseMaxLen)
+		return packDurableCallResult(int(written), callErrorRetryPolicyTooLong, 1)
 	}
 	return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
 		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
