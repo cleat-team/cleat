@@ -105,6 +105,29 @@ if [ "$failed" -gt 0 ]; then
   echo "above is not a usable measurement -- do not write it into" >&2
   echo "scripts/skip-budget.txt. Fix the failures and re-measure." >&2
   echo >&2
+  # NAME them. Every workflow step that produces one of these reports redirects
+  # the test output into it -- `go test -json ... > test-report.json 2>&1` --
+  # and no workflow uploads the file. So on a job whose tests fail, the failing
+  # test names exist nowhere a reader can reach: not in the step log, which got
+  # only the shell's exit code, and not in an artifact, because there is none.
+  #
+  # Measured 2026-09-04 on PR #672: `Layer 3 -- Multi-DB` reported
+  # `passed=0 failed=4` and the four names were unavailable. The job could be
+  # seen to have failed and not what failed, which is the same distance from a
+  # usable result as a green run that measured nothing.
+  #
+  # This block is the cheapest place to fix it: this script already parses the
+  # report for the skip list below, already runs in every job that writes one,
+  # and already knows the count it is refusing to act on.
+  echo "Failing tests:" >&2
+  # Same filter discipline as the skip list: keep only test-level events before
+  # rewriting, because sed passes a non-matching line through verbatim and a
+  # package-level fail event would otherwise print as raw JSON.
+  grep '"Action":"fail"' "$REPORT" |
+    grep '"Test":"' |
+    sed -E 's/.*"Package":"([^"]*)".*"Test":"([^"]*)".*/  \1\t\2/' |
+    LC_ALL=C sort -u >&2
+  echo >&2
   echo "If you are running locally: './engine/...' matches two database-backed" >&2
   echo "packages, and without '-p 1' they run concurrently against one database" >&2
   echo "and delete each other's fixtures. See the header of skip-budget.txt." >&2
