@@ -3,9 +3,25 @@
 """
 Extended lifecycle (ABI 2.15)
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
+
+
 
 def continue_as_new_versioned(input: str, new_version: int) -> int:
+    """
+    Continue as new with an explicit version.
+    """
     raise NotImplementedError
-
-def side_effect(result: str) -> str:
+def side_effect(value: str) -> str:
+    """
+    Record non-deterministic computation result in event history.
+    Returns the previously recorded result on replay.
+    """
     raise NotImplementedError

@@ -66,6 +66,8 @@ engine	TestMySQLTenantSettings	1
 engine	TestPluginMigrations_AllDialects	1
 engine	TestPythonComponentExecutionFence	1
 engine	TestPythonCronEndToEnd	1
+engine	TestPythonDeferSegmentRunsOnlyTheDefers	1
+engine	TestPythonOrdinarySegmentRunsTheBody	1
 engine	TestPythonWasmEndToEnd	1
 engine	TestRLSTenantIsolation	1
 engine	TestRustDeferSegmentRunsOnlyTheDefers	1
@@ -97,6 +99,7 @@ engine	buildRustWasm	2
 engine	forEachBackend	1
 engine	mysqlIntegrationStore	2
 engine	openMSSQLTenantStore	2
+engine	pythonDeferSegment	1
 engine	setupMSSQLIntegrationTest	2
 engine	withWasmtimeBackend	1
 engine/testutil	MSSQLTestDB	1

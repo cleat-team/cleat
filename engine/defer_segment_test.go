@@ -364,7 +364,7 @@ func TestADeferSegmentPastTheFrontierRunsOnlyTheDefers(t *testing.T) {
 // here first, and the failure says what has to accompany it.
 func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 	want := map[string]bool{
-		"go": true, "java": true, "assemblyscript": true, "rust": true,
+		"go": true, "java": true, "assemblyscript": true, "rust": true, "python": true,
 	}
 	if len(deferSegmentLanguages) != len(want) {
 		t.Fatalf("deferSegmentLanguages = %v, want %v.\n\n"+
@@ -384,20 +384,68 @@ func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 // TestADeferSegmentRefusesAGuestThatCannotHearTheStop pins the fail-closed half
 // of IMPROVEMENT-PLAN 3.83.
 //
-// callSuspendSentinel only stops a guest whose SDK decodes it. One of the five
-// does not yet. An SDK that does not reads the word through the ordinary
+// callSuspendSentinel only stops a guest whose SDK decodes it. All five now do,
+// which is why this test no longer iterates over any of them -- see below. An
+// SDK that does not reads the word through the ordinary
 // durable-call layout -- responseLen = 0, errCode = 0 -- and gets an EMPTY
 // SUCCESSFUL RESPONSE: it carries on past the stop, does the new work the
 // segment exists to prevent, and reports the terminated workflow as completed,
 // with nothing anywhere to see.
+//
+// Python is not stopped by a sentinel at all: it is a Component Model guest,
+// and the stop is a case of the WIT return type
+// (`outcomes.call-failure.suspended`, python-sdk/wit/cleat.wit). Same fence,
+// same membership test, different mechanism -- the sentinel is a property of
+// the packed i64 word, and a component guest never sees one.
+//
+// **This loop is empty as of 2026-09-04, and that is the thing to be careful
+// about.** deferSegmentLanguages now covers every language in
+// WasmtimeLanguages, so there is no real language left to refuse -- and a
+// `for` over an empty slice is a test that passes because it did nothing,
+// which is exactly the vacuity TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified
+// exists further up this file to have caught once already.
+//
+// So the loop takes its languages from unverifiedDeferSegmentLanguages, which
+// ALWAYS yields at least one: the real difference when there is one, and a
+// synthetic language otherwise. The synthetic case is not a placeholder --
+// it is the case that matters now. The fence's job has changed from "these
+// four cannot hear the stop" to "a sixth language must earn its way onto the
+// list", and a guest declaring a language nothing has verified is precisely
+// what that fence has to refuse.
 //
 // So the engine refuses the segment for a language not in
 // deferSegmentLanguages, rather than running one it cannot stop. This asserts
 // the refusal AND that it names the language, because "some error occurred" is
 // satisfied by any of the several other ways Execute can fail on a synthetic
 // module -- which is the trap this file's other tests keep hitting.
+// unverifiedDeferSegmentLanguages is what the refusal test iterates, and it is
+// written to be incapable of yielding nothing.
+//
+// The real answer is WasmtimeLanguages minus deferSegmentLanguages. That set is
+// empty today, and an empty set would make the test above vacuous rather than
+// passing -- so when it is empty this returns a language no SDK has ever
+// declared instead. `wasm.DetectLanguage` returns the guest's own metadata
+// verbatim (3.83), so a module can declare anything at all, which makes the
+// synthetic case a real input rather than a stand-in for one.
+//
+// Deliberately NOT a hardcoded fake on its own: the day a sixth language joins
+// WasmtimeLanguages without a defer decode, this test must cover it, and a
+// hardcoded list would not notice it had arrived.
+func unverifiedDeferSegmentLanguages() []string {
+	var out []string
+	for _, lang := range WasmtimeLanguages {
+		if !deferSegmentLanguages[lang] {
+			out = append(out, lang)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"nolang"}
+	}
+	return out
+}
+
 func TestADeferSegmentRefusesAGuestThatCannotHearTheStop(t *testing.T) {
-	for _, lang := range []string{"python"} {
+	for _, lang := range unverifiedDeferSegmentLanguages() {
 		t.Run(lang, func(t *testing.T) {
 			ctx := context.Background()
 			rt, err := NewRuntime(ctx, 0, 0)
@@ -411,8 +459,16 @@ func TestADeferSegmentRefusesAGuestThatCannotHearTheStop(t *testing.T) {
 			}
 			t.Cleanup(func() { wt.Close(ctx) })
 
+			// The synthetic language needs a backend registered for it, and
+			// finding that out is what this test is for. Without it, Execute
+			// fails at resolveBackend -- "no WASM backend registered for guest
+			// language" -- one layer ABOVE the fence, and the test would have
+			// been asserting that #503's fail-closed routing works rather than
+			// that the defer-segment fence does. Two layers can both refuse;
+			// only one of them is under test here.
 			eng := NewEngine(rt, &mockCaller{},
 				WithBackends(WasmtimeLanguages, wt),
+				WithBackends([]string{lang}, wt),
 				WithWorkflowID("wf-"+lang),
 				WithDeferPhase())
 

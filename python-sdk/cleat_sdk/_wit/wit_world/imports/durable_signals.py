@@ -3,22 +3,33 @@
 """
 Signal send, receive, and correlation operations.
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
 
 
 
 def durable_await_signals(names: str, timeout_ms: int, sig_name_ptr: int, sig_name_max_len: int, payload_ptr: int, payload_max_len: int) -> int:
     """
     Wait for one or more external signals, with a timeout.
+    Output buffers kept for multi-return (name + payload).
     """
     raise NotImplementedError
 def durable_poll_signal(name: str) -> str:
     """
     Poll for a specific pending signal (non-blocking).
+    Returns the signal payload, or empty string if none.
     """
     raise NotImplementedError
 def durable_send_signal_and_wait(target_run_id: str, signal_name: str, payload: str, timeout_ms: int) -> str:
     """
     Send a signal with correlation and wait for a reply.
+    Returns the response payload string.
     """
     raise NotImplementedError
 def durable_reply_to_signal(correlation_id: str, response: str) -> int:

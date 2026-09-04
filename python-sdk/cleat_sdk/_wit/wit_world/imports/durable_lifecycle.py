@@ -3,12 +3,21 @@
 """
 Workflow lifecycle operations (defer, compaction, cancellation).
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
 
 
 
 def durable_defer(desc: str) -> str:
     """
     Register a deferred cleanup action to run on workflow exit.
+    Returns the generated defer ID.
     """
     raise NotImplementedError
 def durable_continue_as_new(input: str) -> int:
@@ -19,5 +28,6 @@ def durable_continue_as_new(input: str) -> int:
 def durable_poll_cancellation() -> str:
     """
     Check if workflow cancellation has been requested.
+    Returns the cancellation reason string, or empty if not cancelled.
     """
     raise NotImplementedError

@@ -19,6 +19,7 @@ cmd/cleat-worker	func baseDSNFromDSN
 cmd/cleat-worker	var lastFreshStepCount
 cmd/cleatctl	func printCheckDBUsage
 cmd/cleatctl	func printRestoreUsage
+engine	const componentDeferRunnerExport
 engine	const errSignalAuthRequired
 engine	field lastCancellationCheck
 engine	field metrics

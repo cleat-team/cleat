@@ -577,8 +577,28 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //     eight guarded calls return (String, Option<String>) rather than Result,
 //     so what ends the segment is the flag suspend() sets and #[cleat_entry]
 //     reads, not the Err itself.
+//   - python: python-sdk/examples/defer_order_workflow.py +
+//     engine/python_defer_segment_e2e_test.go, which builds a real component
+//     and measures the same two calls (3.110).
+//
+// Python is in the list for the same REASON and by a different MECHANISM, and
+// the difference is worth stating because the paragraphs above do not describe
+// it. It is a Component Model guest: its host calls return
+// `result<string, call-failure>` (python-sdk/wit/cleat.wit), so a stop is a
+// case of the return type rather than a bit in a packed word. There is no
+// sentinel to decode and no ordinary reading to fall into -- an SDK that
+// mishandled the stop would raise, not carry on. That is the whole argument
+// for the WIT change: the failure mode the rest of this comment describes is
+// not available to it. See IMPROVEMENT-PLAN 3.110.
+//
+// This map now covers every language in WasmtimeLanguages, and that changes
+// what the fence below is FOR. It stopped being a list of the languages that
+// work and became the thing a sixth language has to earn its way onto: the
+// engine still fails a defer segment closed for anything absent, so a new
+// backend language starts refused rather than silently running a segment it
+// cannot be stopped in. Do not delete it for being full.
 var deferSegmentLanguages = map[string]bool{
-	"go": true, "java": true, "assemblyscript": true, "rust": true,
+	"go": true, "java": true, "assemblyscript": true, "rust": true, "python": true,
 }
 
 // RunsOnWasmtime reports whether a detected guest language is served by the

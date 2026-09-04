@@ -77,6 +77,36 @@ def test_a_suspending_body_propagates():
         run_deferred()
 
 
+def test_the_hosts_drain_is_not_stopped_by_a_suspending_body():
+    """The other drain, and the opposite answer. IMPROVEMENT-PLAN 3.110.
+
+    The test above is the GUEST draining a workflow that finished: a body that
+    suspends there has to win over the result. This is the HOST draining one
+    that has already suspended, through the ``run-deferred`` export. There is
+    no result left to protect, and the remaining bodies were taken off the
+    table before the first one ran -- so propagating would consume them
+    without running them.
+
+    That is not a hypothetical shape. It is 3.81's destroyed cleanup, and
+    3.106 found it again in the AssemblyScript SDK, where the drain stopped on
+    a flag the workflow BODY had set and exactly one of two cleanups ran.
+    """
+    ran: list[str] = []
+
+    register_defer("first", lambda: ran.append("first"))
+    register_defer("suspends", lambda: (_ for _ in ()).throw(SuspendSentinel()))
+    register_defer("last", lambda: ran.append("last"))
+
+    assert run_deferred(propagate_suspend=False) == 3
+    # LIFO: last, then the suspending one, then first -- and "first" is the
+    # one that proves the drain did not stop.
+    assert ran == ["last", "first"], (
+        "a defer body that suspended mid-drain took the cleanups after it "
+        "with it. They are already off the table, so they do not run later "
+        "either: this is the cleanup being consumed rather than performed."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Through the @cleat_entry wrapper -- the half that was missing entirely.
 # ---------------------------------------------------------------------------

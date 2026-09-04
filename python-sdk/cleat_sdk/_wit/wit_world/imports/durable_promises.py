@@ -3,17 +3,27 @@
 """
 Durable promise create, await, resolve, and reject operations.
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
 
 
 
 def durable_create_promise(name: str, ttl_ms: int) -> str:
     """
     Create a durable promise with the given name.
+    Returns the generated promise ID string.
     """
     raise NotImplementedError
 def durable_await_promise(id: str, timeout_ms: int) -> str:
     """
     Wait for a durable promise to resolve, with a timeout.
+    Returns the resolved value string.
     """
     raise NotImplementedError
 def durable_resolve_promise(id: str, value: str) -> int:
