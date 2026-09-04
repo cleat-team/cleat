@@ -64,17 +64,21 @@ concurrency:
   # part the first fix (#634) got wrong. It stops a *running* run being killed,
   # but GitHub still allows only one pending run per group: when a third push
   # enters an occupied group, the one waiting is cancelled before it ever
-  # starts. Measured on develop between 14:20 and 00:57 on 2026-09-03, with
-  # that fix in place, 11 of 36 `Tier 1 Gate` push runs were cancelled -- each
-  # one with **zero jobs**, killed within seconds of the next merge landing:
+  # starts. Measured on develop after #634 merged (18:20:48Z on 2026-09-03),
+  # 5 of 24 `Tier 1 Gate` push runs were cancelled -- every one with **zero
+  # jobs**, killed within seconds of the next merge landing.
+  #
+  # The job count separates the two mechanisms, and does it cleanly. Of the 22
+  # cancelled gate runs that day, the 17 before #634 have jobs=1 (killed
+  # mid-run) with a single jobs=0 exception, and all 5 after it have jobs=0:
   #
   #   gh run view <cancelled-id> --json jobs --jq '.jobs | length'   # 0
   #   gh run view <success-id>   --json jobs --jq '.jobs | length'   # 1
   #
-  # The gate takes 20-40 minutes and merges land minutes apart, so the queue is
-  # almost always occupied and roughly a third of merges were never verified.
-  # Keying push runs on `github.sha` gives each merge a group of its own: never
-  # queued, so never superseded.
+  # So #634 did exactly what it claimed and no more. The gate takes 20-40
+  # minutes and merges land minutes apart, so the queue is almost always
+  # occupied. Keying push runs on `github.sha` gives each merge a group of its
+  # own: never queued, so never superseded.
   #
   # On a pull_request the group stays per-ref and cancellation is the setting's
   # real purpose: pushing twice to a branch should not run the suite twice.

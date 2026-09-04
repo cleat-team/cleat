@@ -15,15 +15,22 @@
 #      cancelled before it starts. `cancel-in-progress: false` does not
 #      prevent this: it governs the running run, not the queued one.
 #
-# (2) is not theoretical and is not rare. Measured on develop between 14:20 and
-# 00:57 on 2026-09-03, after (1) had been fixed in #634, 11 of 36 `Tier 1 Gate`
-# push runs were cancelled -- each with zero jobs, killed within seconds of the
-# next merge:
+# (2) is not theoretical and is not rare. Measured on develop after #634 merged
+# (18:20:48Z on 2026-09-03), which fixed (1), 5 of 24 `Tier 1 Gate` push runs
+# were cancelled -- every one with zero jobs, killed within seconds of the next
+# merge:
 #
 #   gh run list --workflow="Tier 1 Gate" --branch develop --event push \
-#     --limit 60 --json conclusion,createdAt
+#     --limit 60 --json conclusion,createdAt,databaseId
 #   gh run view <cancelled-id> --json jobs --jq '.jobs | length'   # 0
 #   gh run view <success-id>   --json jobs --jq '.jobs | length'   # 1
+#
+# The job count is what tells the two apart. Of 22 cancelled gate runs that day,
+# the 17 before #634 are jobs=1 (killed mid-run, one jobs=0 exception) and all 5
+# after it are jobs=0. Compare against the merge time in UTC: `git log --date=iso`
+# prints local time with an offset, and reading 14:20:48 -0400 as though it were
+# 14:20:48Z pulls six pre-fix runs into the window and inflates this count to
+# 11 of 36. That is how it was first written down.
 #
 # The fix for both is to give each push its own group and keep cancellation
 # scoped to pull requests, where it is genuinely wanted:
