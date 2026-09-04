@@ -581,15 +581,36 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //     engine/python_defer_segment_e2e_test.go, which builds a real component
 //     and measures the same two calls (3.110).
 //
-// Python is in the list for the same REASON and by a different MECHANISM, and
-// the difference is worth stating because the paragraphs above do not describe
-// it. It is a Component Model guest: its host calls return
-// `result<string, call-failure>` (python-sdk/wit/cleat.wit), so a stop is a
-// case of the return type rather than a bit in a packed word. There is no
-// sentinel to decode and no ordinary reading to fall into -- an SDK that
-// mishandled the stop would raise, not carry on. That is the whole argument
-// for the WIT change: the failure mode the rest of this comment describes is
-// not available to it. See IMPROVEMENT-PLAN 3.110.
+// Python is in the list for the same REASON and by TWO mechanisms, and this
+// paragraph used to describe only one of them. It said: Python is a Component
+// Model guest, its host calls return `result<string, call-failure>`, so a stop
+// is a case of the return type rather than a bit in a packed word -- "there is
+// no sentinel to decode and no ordinary reading to fall into".
+//
+// That is true of 8 of the 53 functions in python-sdk/wit/cleat.wit, and they
+// are exactly the ones 3.110 changed: durable-call, -call-retry,
+// -call-heartbeat, -child-workflow, -child-workflow-with-options, plugin-call,
+// plugin-call-streaming, fetch. Those go through decodeCallOutcome
+// (engine/component_cgo.go), which tests the sentinel first and by mask and
+// hands the guest a `suspended` case it cannot misread. Re-derive:
+//
+//	python3 -c "
+//	import re,pathlib,collections
+//	flat=re.sub(r'\s+',' ',pathlib.Path('python-sdk/wit/cleat.wit').read_text())
+//	print(collections.Counter((m.group(4) or 'NONE').strip().split('<')[0]
+//	  for m in re.finditer(r'([a-z0-9-]+): func\((.*?)\)\s*(->\s*([^;]+?))?\s*;',flat)))"
+//
+// The other 45 return plain scalars or strings, and one of them is a stop site:
+// durable-await-signals returns u64, dispatchAwaitSignals passes the word
+// through with a raw setResultU64, and DurableAwaitSignals returns
+// callSuspendSentinel from stopBeforeNewWork. So the failure mode the rest of
+// this comment describes WAS available to Python, on the one layout where bit
+// 31 lands inside the timed-out field -- a stop decoded as
+// SignalResult(timed_out=True) and the segment ran on. Fixed in 3.202; the
+// guest half is _raise_if_stopped in python-sdk/cleat_sdk/host_calls.py.
+//
+// The general form is worth keeping: "this guest cannot misread a stop" is a
+// claim about a call's RETURN SHAPE, not about a language. Ask it per call.
 //
 // This map now covers every language in WasmtimeLanguages, and that changes
 // what the fence below is FOR. It stopped being a list of the languages that
