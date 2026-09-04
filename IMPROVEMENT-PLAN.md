@@ -13642,33 +13642,51 @@ occupied group, the one waiting is cancelled before it ever starts. Consecutive 
 one group, so they still queued behind each other, so a merge landing during a long run still had
 its verification thrown away — with `cancelled` reported exactly as before.
 
-Measured on develop between 14:20 (when the first fix merged) and 00:57, 2026-09-03:
+Measured on develop after the first fix merged, 18:20:48Z on 2026-09-03:
 
 | workflow | push runs | cancelled |
 |---|---|---|
-| **Tier 1 Gate** | 36 | **11** |
-| CI/CD Pipeline | 36 | 3 |
-| Cross-Language E2E | 36 | 2 |
-| Multi-DB CI | 36 | 2 |
-| Plugin Harness Tests | 36 | 1 |
-| Tier 2 Gate | 36 | 1 |
+| **Tier 1 Gate** | 24 | **5** |
+| CI/CD Pipeline | 24 | 1 |
+| Cross-Language E2E | 24 | 1 |
+| Multi-DB CI | 24 | 1 |
+| Plugin Harness Tests | 24 | 0 |
+| Tier 2 Gate | 24 | 0 |
 
 ```
+CUT=$(python3 -c "
+import datetime,subprocess
+raw=subprocess.check_output(['git','log','-1','--format=%cI','658116d9'],text=True).strip()
+print(datetime.datetime.fromisoformat(raw).astimezone(datetime.timezone.utc)
+        .strftime('%Y-%m-%dT%H:%M:%SZ'))")
 for wf in "CI/CD Pipeline" "Cross-Language E2E" "Multi-DB CI" \
           "Plugin Harness Tests" "Tier 1 Gate" "Tier 2 Gate"; do
   json=$(gh run list --workflow="$wf" --branch develop --event push --limit 60 \
            --json conclusion,createdAt)
-  n=$(echo "$json" | jq '[.[] | select(.createdAt > "2026-09-03T14:20:48Z")] | length')
-  c=$(echo "$json" | jq '[.[] | select(.createdAt > "2026-09-03T14:20:48Z")
-                             | select(.conclusion=="cancelled")] | length')
+  n=$(echo "$json" | jq "[.[] | select(.createdAt > \"$CUT\")] | length")
+  c=$(echo "$json" | jq "[.[] | select(.createdAt > \"$CUT\")
+                             | select(.conclusion==\"cancelled\")] | length")
   printf '%-22s push-runs=%-4s cancelled=%s\n' "$wf" "$n" "$c"
 done
 ```
 
-**Roughly a third of merges never reached the gate at all** — not "ran and passed", not "ran and
-failed", but never started. The rate tracks duration: the gate takes 20-40 minutes and merges land
-minutes apart, so its queue is almost always occupied, while Tier 2 drains fast enough to be hit
-once.
+**A fifth of merges never reached the gate at all** — not "ran and passed", not "ran and failed",
+but never started. The rate tracks duration: the gate takes 20-40 minutes and merges land minutes
+apart, so its queue is almost always occupied, while Tier 2 and Plugin Harness drain fast enough
+never to be hit.
+
+**Those numbers were first written down as 11 of 36, and the error is worth more than the
+correction.** `git log --date=iso` prints the merge time as `2026-09-03 14:20:48 -0400`; feeding
+that clock reading to `gh` as `2026-09-03T14:20:48Z` moves the window four hours early and sweeps
+in six runs from *before* the fix. The count was inflated by 6, the denominator by 12, and the
+resulting claim — "roughly a third" — was wrong in a direction that flattered the finding. The
+`%cI` form (`2026-09-03T14:20:48-04:00`) carries the offset; a clock reading with the offset
+stripped is not a UTC timestamp, and `gh` compares strings.
+
+**What caught it was checking the story for counter-evidence rather than checking the number.**
+The claim was that mechanism (2) evicts *queued* runs, so every cancellation it explains must have
+zero jobs. Six of the "11" had `jobs=1`, meaning something killed them mid-run, which
+`cancel-in-progress: false` should have made impossible — and it had, because they predated it.
 
 The distinguishing observation, and the one that turns this from a plausible story into a measured
 one, is that a cancelled run has **no jobs**:
@@ -13684,6 +13702,18 @@ the queue, which is what separates mechanism (2) from mechanism (1) rather than 
 readings of the same evidence. The timestamps agree: each cancellation lands 1-3 seconds after the
 next merge's run is created, with a third run still in progress ahead of both.
 
+**Across the whole day the split is clean, and it is the strongest evidence here.** All 22
+cancelled `Tier 1 Gate` push runs on 2026-09-03:
+
+| | before #634 (18:20:48Z) | after |
+|---|---|---|
+| `jobs=1` — killed mid-run | 16 | **0** |
+| `jobs=0` — evicted from the queue | 1 | **5** |
+
+#634 removed mechanism (1) completely and did nothing to mechanism (2), which is exactly what it
+claimed to do and exactly what its author checked for. The single pre-fix `jobs=0` run
+(`b3ea16d4`, 12:52:48Z) is mechanism (2) already operating before anyone had named it.
+
 #### The second fix
 
 Give each push a group of its own, so there is no queue to be evicted from:
@@ -13697,6 +13727,37 @@ On a pull request the group stays per-ref and cancellation keeps its real purpos
 group is per-commit, so no two merges ever contend and `cancel-in-progress` never applies. The cost
 stated above gets larger, honestly: develop can now run several gates concurrently during a burst
 rather than serialising them. That is what "each merge is verified" costs.
+
+#### Confirmed by behaviour, 2026-09-04
+
+The point of the correction above is that a claim about CI is settled by CI's history. So this one
+is, before it is written down. `Tier 1 Gate` push runs on develop, before and after the second fix
+(`eb6e7b33`, 01:19Z):
+
+| sha | created | conclusion | jobs |
+|---|---|---|---|
+| `b6562c93` | 00:00:47Z | **cancelled** | 0 |
+| `11f4eba5` | 00:00:55Z | success | 1 |
+| `eb347bfd` | 00:36:36Z | **cancelled** | 0 |
+| `2eeec9e3` | 00:38:44Z | success | 1 |
+| `eb6e7b33` | 01:19:22Z | success | 1 |
+| `920c649f` | 01:20:04Z | success | 1 |
+| `893e3fb0` | 01:41:00Z | success | 1 |
+| `a0072702` | 01:43:19Z | success | 1 |
+
+**`eb6e7b33` and `920c649f` are 42 seconds apart**, and both ran. That is the case the defect was
+made of: under the shared group the second would have entered an occupied queue — the first run
+takes 20-40 minutes — and been cancelled by `893e3fb0` twenty minutes later, with zero jobs, exactly
+as `b6562c93` was cancelled 8 seconds after it was created. Five consecutive merges since the fix,
+five runs, no cancellations.
+
+Re-derive:
+
+```
+gh run list --workflow="Tier 1 Gate" --branch develop --event push --limit 10 \
+  --json databaseId,headSha,conclusion,createdAt
+gh run view <id> --json jobs --jq '.jobs | length'
+```
 
 #### What this says about the guard
 
