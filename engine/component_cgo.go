@@ -134,6 +134,14 @@ package engine
 // }
 //
 // // ok(response)
+// //
+// // PRECONDITION: `s` must be C-allocator storage, and ownership passes to
+// // `v` -- this does NOT copy. The comment above says "every name and every
+// // payload is heap-allocated with the C allocator"; the NAMES are, via
+// // cleat_dup, but the payload half of that invariant is enforced by the Go
+// // caller passing C.CString, not by anything here. A later caller handing
+// // this a literal or a Go pointer breaks it with nothing in this file to
+// // catch it.
 // static void component_val_set_call_ok(wasmtime_component_val_t *v,
 //                                       const char *s, size_t len) {
 //     wasmtime_component_val_t inner;
@@ -160,6 +168,9 @@ package engine
 // }
 //
 // // err(call-failure.failed({code, message}))
+// //
+// // PRECONDITION on `msg`: as component_val_set_call_ok's `s` -- C-allocator
+// // storage, ownership passes to `v`, not copied here.
 // static void component_val_set_call_failed(wasmtime_component_val_t *v,
 //                                           uint32_t code,
 //                                           const char *msg, size_t msglen) {
@@ -342,6 +353,16 @@ func componentCall(
 	}
 	var result C.wasmtime_component_val_t
 	result.kind = C.WASMTIME_COMPONENT_STRING
+	// Ours to release. `result` is embedder storage, which is exactly the case
+	// wasmtime_component_val_delete documents itself for -- "should only be
+	// used when the embedder owns the pointer `value` itself" (val.h). Nothing
+	// released it before, so every call through here retained its result
+	// string.
+	//
+	// Safe on the error path, and not by luck: Go zeroes `result` at
+	// declaration, so a call that fails without writing leaves data=NULL and
+	// size=0 and the delete frees nothing.
+	defer C.wasmtime_component_val_delete(&result)
 	err := C.wasmtime_component_func_call(fn, ctx, &args[0], 1, &result, 1)
 	if err != nil {
 		var msg C.wasm_byte_vec_t
@@ -384,6 +405,18 @@ func componentCallRun(
 		C.make_component_val_string(cInput, C.size_t(len(input))),
 	}
 	var result C.wasmtime_component_val_t
+	// Ours to release, same contract as componentCall above, and it matters
+	// more here: a `run-outcome` is a VARIANT, so the value owns its
+	// discriminant buffer, its payload buffer, and the
+	// wasmtime_component_val_new pointer behind of.variant.val -- three
+	// allocations per execution where the bare string this replaced owned one.
+	//
+	// Ordering: every return below copies out with C.GoStringN before the
+	// deferred delete runs, so no returned Go string points into freed memory.
+	// Measured over 300 executions with a stability assertion on the result --
+	// a use-after-free here shows up as a result that changes between
+	// identical runs, not as a crash. See IMPROVEMENT-PLAN 3.110.
+	defer C.wasmtime_component_val_delete(&result)
 	if err := C.wasmtime_component_func_call(fn, ctx, &args[0], 1, &result, 1); err != nil {
 		var msg C.wasm_byte_vec_t
 		C.get_error_message(err, &msg)
@@ -424,6 +457,11 @@ func componentRunDeferred(
 ) (uint32, error) {
 	ctx := C.store_context(unsafe.Pointer(store.Context()))
 	var result C.wasmtime_component_val_t
+	// A no-op today -- run-deferred returns u32 and a scalar owns nothing --
+	// and here anyway so all three call sites carry the same discipline. The
+	// day this export's return type grows a payload, the leak arrives without
+	// anyone editing this function.
+	defer C.wasmtime_component_val_delete(&result)
 	if err := C.wasmtime_component_func_call(fn, ctx, nil, 0, &result, 1); err != nil {
 		var msg C.wasm_byte_vec_t
 		C.get_error_message(err, &msg)
@@ -918,7 +956,6 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		}
 		return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr)
 	}
-	_ = outBufSz
 
 	if outcome == runOutcomeSuspended {
 		// A suspended guest deliberately does NOT drain its own defer table,
