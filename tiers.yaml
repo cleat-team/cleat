@@ -166,6 +166,15 @@ tier1:
     # worker for must suspend rather than reach the host loop. Same toolchain dependency
     # as the entry above -- both build examples/rust-workflow.
     - "^TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker$"
+    # tier 2 -- rust. engine/rust_defer_segment_e2e_test.go; needs cargo + wasm32-wasip1.
+    #
+    # 3.107's end-to-end proof: it builds examples/rust-workflow and runs defer_order as a
+    # defer segment. Same toolchain dependency as the three entries above, and it was NOT
+    # here on the first push -- the Tier 1 Gate caught it, reporting
+    # "tier 1 skipped 1 test(s)" with this test named. The gate is the thing that knows;
+    # adding an engine test that builds a guest toolchain and not tiering it is the default
+    # mistake, not an unusual one.
+    - "^TestRustDeferSegmentRunsOnlyTheDefers$"
     # tier 2 -- java. engine/java_workflow_e2e_test.go; needs a JDK and Gradle.
     - "^TestJavaWorkflowExecute$"
     # tier 2 -- assemblyscript. engine/as_workflow_e2e_test.go and the npx-based

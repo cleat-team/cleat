@@ -68,6 +68,7 @@ engine	TestPythonComponentExecutionFence	1
 engine	TestPythonCronEndToEnd	1
 engine	TestPythonWasmEndToEnd	1
 engine	TestRLSTenantIsolation	1
+engine	TestRustDeferSegmentRunsOnlyTheDefers	1
 engine	TestRustWorkflowCancelOrder	1
 engine	TestRustWorkflowCompensation	1
 engine	TestRustWorkflowDefersRun	1
