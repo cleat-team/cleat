@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/wasm"
 )
@@ -32,7 +33,7 @@ func (m *mockBackend) Close(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockBackend) PerExecution() WasmBackend { return m }
+func (m *mockBackend) PerExecution(time.Duration) WasmBackend { return m }
 
 // ---------------------------------------------------------------------------
 // wasmWithLanguage constructs a minimal valid WASM binary that has a
@@ -366,4 +367,4 @@ func (b *errBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoint s
 
 func (b *errBackend) Close(ctx context.Context) error { return nil }
 
-func (b *errBackend) PerExecution() WasmBackend { return b }
+func (b *errBackend) PerExecution(time.Duration) WasmBackend { return b }

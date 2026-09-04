@@ -15,6 +15,11 @@ import (
 
 type configurableMockBackend struct {
 	executeFn func(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error)
+
+	// gotInstanceTimeout is the per-tenant instance timeout the engine passed
+	// to PerExecution on the most recent execution. 0 means "the tenant set
+	// none", which is also what an engine with no settings store resolves.
+	gotInstanceTimeout time.Duration
 }
 
 func (b *configurableMockBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
@@ -26,7 +31,15 @@ func (b *configurableMockBackend) Execute(ctx context.Context, wasmBytes []byte,
 
 func (b *configurableMockBackend) Close(ctx context.Context) error { return nil }
 func (b *configurableMockBackend) Name() string                    { return "configurable-mock" }
-func (b *configurableMockBackend) PerExecution() WasmBackend       { return b }
+
+// PerExecution records the per-tenant instance timeout it was handed, so a
+// test can assert what the engine RESOLVED without needing a real wasmtime
+// store. It returns the same backend rather than a copy, deliberately: the
+// recorded value must survive for the assertion.
+func (b *configurableMockBackend) PerExecution(d time.Duration) WasmBackend {
+	b.gotInstanceTimeout = d
+	return b
+}
 
 // ---------------------------------------------------------------------------
 // backendForWasm tests.

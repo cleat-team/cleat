@@ -225,32 +225,42 @@ func TestTwoTenantsGetDifferentWallClockCeilings(t *testing.T) {
 	}
 }
 
-func TestOnlyTheWallClockCeilingIsWiredYet(t *testing.T) {
-	// 3.94 step 3 ships the store and wires ONE of the three settings. The
-	// other two cannot be wired here: the instance timeout needs a WasmBackend
-	// interface change (step 5b) and the retry budget is still a constant
-	// compiled into each guest (step 4).
-	//
-	// An unconsumed field is a trap -- it reads like a working knob. This test
-	// is what makes the gap a checked fact instead: it fails the day either one
-	// starts having an effect, which is the day its doc comment and
-	// IMPROVEMENT-PLAN 3.94 need updating.
+// TestTheThreeSettingsBoundDifferentThings replaces
+// TestOnlyTheWallClockCeilingIsWiredYet, which described a state that no longer
+// exists: all three settings are wired now, the instance timeout by step 5b and
+// the retry budget by step 4.
+//
+// That test also did not do what it said. Its comment promised it would "fail
+// the day either one starts having an effect", but it only ever measured the
+// WALL-CLOCK deadline -- and neither of the other two settings bounds wall
+// clock, so both shipped and it stayed green. A test whose stated trigger it
+// cannot detect is worse than no test, because the next reader trusts it.
+//
+// What is worth keeping is the invariant underneath: the three settings bound
+// three DIFFERENT things and must not leak into each other's bound. That is
+// IMPROVEMENT-PLAN 3.90's whole finding -- wasmInstanceTimeout was once applied
+// as a context deadline as well as an epoch fence, so a workflow waiting on a
+// slow service died of "execution timed out" and the epoch fence's exclusion of
+// host wait was unobservable. This asserts the separation directly.
+func TestTheThreeSettingsBoundDifferentThings(t *testing.T) {
 	flag := []EngineOption{WithWasmWallClockCeiling(300 * time.Second)}
 
 	base := deadlineSeenBy(t, flag, TenantSettings{})
-	withUnwired := deadlineSeenBy(t, flag, TenantSettings{
+	withOthers := deadlineSeenBy(t, flag, TenantSettings{
 		WasmInstanceTimeout: 1 * time.Second,
 		HostRetryBudget:     1 * time.Second,
 	})
 
-	if withUnwired < 200*time.Second {
-		t.Fatalf("setting WasmInstanceTimeout and HostRetryBudget changed the "+
-			"wall-clock deadline (%v vs %v for no settings at all).\n\n"+
-			"If one of them is now wired, that is progress -- but update "+
-			"TenantSettings' doc comments and IMPROVEMENT-PLAN 3.94 in the same "+
-			"change, and replace this test with one that asserts the new effect. "+
-			"If neither is, they have leaked into the wrong bound.",
-			withUnwired, base)
+	if withOthers < 200*time.Second {
+		t.Fatalf("setting WasmInstanceTimeout and HostRetryBudget moved the "+
+			"wall-clock deadline to %v (it is %v when neither is set).\n\n"+
+			"They must not. The instance timeout is an EPOCH fence bounding "+
+			"guest execution, and the retry budget bounds one host call's "+
+			"backoff; neither bounds wall clock. A value leaking into the "+
+			"context deadline is the conflation IMPROVEMENT-PLAN 3.90 removed, "+
+			"and it makes the epoch fence's exclusion of host wait "+
+			"unobservable again.",
+			withOthers, base)
 	}
 }
 

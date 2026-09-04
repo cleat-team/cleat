@@ -13043,16 +13043,17 @@ longer consumes the guest's execution budget, and the wall-clock ceiling that do
 defaults to 5m rather than 30s. The remaining work there is the missing
 `HostCallsImpl.DurableCallWithRetry` method.
 
-### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🟡 **IN PROGRESS: steps 1–4 done, 5b–6 open** (WS-3, 2026-09-03)
+### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🟡 **IN PROGRESS: steps 1–5 done, 6 open** (WS-3, 2026-09-03)
 
 **Requirement, 2026-09-03:** each tenant must be able to override the default time thresholds
 without affecting other tenants, so that several microservices — or several organisations —
 sharing one cleat deployment can manage their own settings.
 
-The design and the plan are below. Steps 1–4 and 5a have shipped — the settings table on
-three dialects, per-tenant resolution of the wall-clock ceiling, and the host-side retry
-threshold. 5b and 6 are open. The `What exists today` table below describes the state
-BEFORE this work and is kept as the problem statement; read the step markers for status.
+The design and the plan are below. Steps 1–5 have shipped — the settings table on three
+dialects, and per-tenant resolution of all three limits: the wall-clock ceiling (5a), the
+host-side retry threshold (4), and the epoch fence (5b). Step 6 is open. The
+`What exists today` table below describes the state BEFORE this work and is kept as the
+problem statement; read the step markers for status.
 
 #### What exists today
 
@@ -13334,12 +13335,35 @@ consistent and costs nothing.
      reaching the place that uses it. Proven to fail two ways, one mutation per claim:
      ignoring the tenant value trips the tightening assertion, substituting instead of
      clamping trips only the escalation assertion.
-   - **5b, the backend's **instance timeout**** — 🔴 open. This one is an *epoch* deadline set
-     inside `configureStore` on the per-execution backend clone, so a per-tenant value needs a
-     way to reach it: a `WasmBackend` interface change, touching five implementers. That is the
-     seam this work was split on, and it is where §3.90's "applied in two places" hazard lives —
-     note that `configureStore` already tightens the epoch deadline to `ctx`'s when `ctx` is
-     nearer, so 5a has *partly* affected it already, in the tightening direction only.
+   - ~~**5b, the backend's instance timeout**~~ — ✅ **done 2026-09-03.** `PerExecution` now
+     takes the tenant's value and the per-execution clone carries it into `configureStore`.
+     Five implementers touched, four of them test doubles.
+
+     **The clamp lives in the backend, not the engine, and that is the one design decision
+     here.** The other two limits clamp in `engine.go` because the operator's value is an
+     Engine field. This one's is not: it is `wasmtimeBackend.limits.executionTimeout`, set
+     from `--wasm-instance-timeout` when the worker constructs the backend, and the Engine
+     never sees it. So the engine passes the tenant's RAW value and the backend clamps, which
+     is the only place both numbers are in scope. `e.wasmInstanceTimeout` is **not** the
+     ceiling to clamp against — §3.90 stopped applying it as an epoch fence and it survives
+     only as `wallClockCeiling`'s fallback, so clamping to it would bound a tenant by a number
+     the operator's flag never set.
+
+     Three tests, because three separate things can be wrong and any one of them green is
+     consistent with the other two broken: the engine hands the value over, the backend clamps
+     rather than substitutes, and the clamped value fences a real guest. The third runs the
+     hand-written infinite loop against a 30s operator bound and a 200ms tenant bound and was
+     fenced after **200.7ms**; had the tenant's value not reached `configureStore` it would
+     have run for 30 seconds, so the elapsed time is the assertion. Both mutations bite only
+     their own test — dropping the value in the executor fails the delivery test alone;
+     ignoring it in the backend fails the clamp and the fence but not delivery.
+
+     **`TestOnlyTheWallClockCeilingIsWiredYet` was replaced, not updated.** It promised to
+     "fail the day either one starts having an effect" and could not: it measured only the
+     wall-clock deadline, which neither of the other two settings bounds, so steps 4 and 5b
+     both shipped underneath it while it stayed green. `TestTheThreeSettingsBoundDifferentThings`
+     keeps the invariant that was actually worth having — the three limits bound three
+     different things and must not leak into each other's bound, which is §3.90's finding.
 6. **Per-tenant validation** replacing §3.90's startup warning.
 
 #### What to be suspicious of when building this

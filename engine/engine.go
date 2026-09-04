@@ -349,6 +349,26 @@ func (e *Engine) wallClockCeiling(ctx context.Context) time.Duration {
 	return ClampToCeiling(e.tenantSettings(ctx).WasmWallClockCeiling, operator)
 }
 
+// tenantInstanceTimeout is this tenant's own bound on guest EXECUTION, or 0
+// when it set none.
+//
+// Deliberately UNCLAMPED, which is the one asymmetry in this file. The other
+// two resolvers (wallClockCeiling, hostRetryBudget) clamp here because the
+// operator's value is an Engine field. The instance timeout's operator value is
+// not: it lives on the backend, set from --wasm-instance-timeout when the
+// worker constructs it, and the Engine never sees it. So the raw value is
+// handed to PerExecution and clamped inside the backend, where both numbers are
+// in scope. See WasmBackend.PerExecution and IMPROVEMENT-PLAN 3.94 step 5b.
+//
+// e.wasmInstanceTimeout is NOT the ceiling to clamp against. It is a separate,
+// engine-level option that 3.90 deliberately stopped applying as an epoch fence
+// -- it survives only as wallClockCeiling's fallback -- so clamping to it here
+// would reintroduce the conflation 3.90 removed, and would bound a tenant by a
+// number the operator's flag never set.
+func (e *Engine) tenantInstanceTimeout(ctx context.Context) time.Duration {
+	return e.tenantSettings(ctx).WasmInstanceTimeout
+}
+
 // DefaultHostRetryBudget is the ceiling applied when an operator sets none.
 //
 // It is 60s because that is the value the Go and Rust SDKs each compiled in

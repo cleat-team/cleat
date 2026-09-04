@@ -57,9 +57,9 @@ type stubWasmBackend struct{}
 func (b *stubWasmBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
 	return nil, nil
 }
-func (b *stubWasmBackend) Close(ctx context.Context) error { return nil }
-func (b *stubWasmBackend) Name() string                    { return "stub" }
-func (b *stubWasmBackend) PerExecution() WasmBackend       { return &stubWasmBackend{} }
+func (b *stubWasmBackend) Close(ctx context.Context) error        { return nil }
+func (b *stubWasmBackend) Name() string                           { return "stub" }
+func (b *stubWasmBackend) PerExecution(time.Duration) WasmBackend { return &stubWasmBackend{} }
 
 func TestWithWorkflowState(t *testing.T) {
 	ws := &stubWorkflowState{version: 3}

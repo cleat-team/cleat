@@ -227,13 +227,27 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 // the data race when Execute is called concurrently. The resource limits
 // configured on the root backend are copied so every execution enforces
 // the same bounds; epochStop is deliberately left nil (see its doc).
-func (b *wasmtimeBackend) PerExecution() WasmBackend {
+//
+// The one limit that is NOT simply copied is executionTimeout, which is
+// resolved per tenant here -- see the clamp below and IMPROVEMENT-PLAN 3.94
+// step 5b.
+func (b *wasmtimeBackend) PerExecution(tenantInstanceTimeout time.Duration) WasmBackend {
+	// Clamp HERE, not at the caller. This is the only place the tenant's value
+	// and the operator's ceiling (limits.executionTimeout, from
+	// --wasm-instance-timeout) are both in scope, and the direction is the
+	// whole point: a tenant may tighten its own execution bound, never widen
+	// it past what the operator granted. ClampToCeiling treats a non-positive
+	// value on either side as "no limit from that side", so a tenant that set
+	// nothing gets the operator's number unchanged.
+	lim := b.limits
+	lim.executionTimeout = ClampToCeiling(tenantInstanceTimeout, b.limits.executionTimeout)
+
 	return &wasmtimeBackend{
 		engine:       b.engine,
 		moduleCache:  b.moduleCache,
 		compileLocks: b.compileLocks,
 		metaCache:    b.metaCache,
-		limits:       b.limits,
+		limits:       lim,
 		// Copied, like limits. A PerExecution copy that dropped the logger
 		// would send every record from the path that actually executes
 		// workflows to slog.Default(), which is the bug this field exists to
