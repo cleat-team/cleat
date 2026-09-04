@@ -15,7 +15,7 @@ import (
 // The database a test runs against must hold the LATEST definition of every
 // routine the migrations ship, not merely some definition of it.
 //
-// IMPROVEMENT-PLAN §3.300 row B5, the highest-ranked unguarded boundary in the
+// IMPROVEMENT-PLAN §3.400 row B5, the highest-ranked unguarded boundary in the
 // C1 inventory.
 //
 // # The gap
@@ -132,7 +132,7 @@ func identsIn(s string) map[string]bool {
 // structurally blind to a class of real change. cleat.assert_tenant_set goes
 // from `IF tid IS NULL THEN` (001) to a version that also rejects the empty
 // string, `IF tid IS NULL OR tid = <empty-string-literal> THEN` (034) -- the fix
-// §3.300 names. (Spelled out rather than quoted: the two adjacent single quotes
+// §3.400 names. (Spelled out rather than quoted: the two adjacent single quotes
 // SQL uses for an empty string were silently rewritten to a Unicode right double
 // quote here once already, which turned the sentence into a claim about a
 // character SQL has no use for.) Every token in the new version appears in the
@@ -413,7 +413,7 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 				text, exists := databaseRoutineText(t, db, d.dialect, name)
 				if !exists {
 					t.Errorf("%s defines routine %s (latest in %s) and the built database "+
-						"does not have it.\n\nThis is §3.300's B5 row firing: the "+
+						"does not have it.\n\nThis is §3.400's B5 row firing: the "+
 						"migrations and the database disagree about what exists.",
 						d.dir, name, latest.migration)
 					continue
