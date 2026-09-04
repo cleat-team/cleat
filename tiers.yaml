@@ -1315,7 +1315,40 @@ tier3:
 #       `extractStringFromPacked(0x80000000, buf) == ""` for the stop, and
 #       TestDispatchDurableCallFailureIsNotAResponse for the failure.
 #
-# D1-D4 were settled together on 2026-08-06; D5-D9 have been added since, and this
+#   D10 DECIDED 2026-09-04. ADMIN FORCE-RESOLVE DOES NOT RUN THE WORKFLOW'S DEFERS.
+#       It stays a one-phase, immediate terminal transition. This is the third and last
+#       of the transitions IMPROVEMENT-PLAN 3.75 inventoried, and it is the one that is
+#       deliberately NOT converted -- so the inventory is closed at two built and one
+#       declined rather than left with an unexplained gap.
+#
+#       The reason is what the verb is for. 3.20 describes force-complete and force-fail
+#       as the escape hatch for "an operator trying to unstick a workflow": it is fenced
+#       on generation but NOT on assigned_to, precisely because the workflow being
+#       force-resolved usually has no live owner. A defer phase requires the guest to
+#       replay successfully. Making the escape hatch depend on that makes it depend on
+#       the thing that is already failing, and an operator whose workflow is wedged
+#       would wait out defer_phase_deadline before the override took effect.
+#
+#       It also has to agree with what 3.114 shipped. Every direct terminal UPDATE now
+#       CLEARS pending_terminal_status, so force-resolve is authoritative over a defer
+#       phase that is already running -- an operator can stop a cleanup that is itself
+#       stuck. Force-resolve both starting a phase and overriding one would have been
+#       two answers to the same question.
+#
+#       WHAT IT COSTS, recorded because the register is where the next person looks.
+#       Guest-side cleanup never runs on this path: a defer body that would have
+#       released an external lock, refunded a charge or closed a remote session does not
+#       run when an operator force-resolves. HOST-side resources are still released --
+#       releaseWorkflowResources runs on this path as it always has, so concurrency keys
+#       and the sticky assignment are freed. The gap is external effects only, and the
+#       operator's remedy is to terminate rather than force-resolve when the workflow is
+#       healthy enough to run its own cleanup.
+#
+#       Nothing about the gate changes: no new test, no new exclusion. The decision is
+#       recorded because it is a deliberate asymmetry between three sibling transitions,
+#       and an asymmetry nobody wrote down reads as an oversight.
+#
+# D1-D4 were settled together on 2026-08-06; D5-D10 have been added since, and this
 # register was still saying "all four" until D7 was recorded. New ones go here with
 # the same shape: what was decided, on what date, and what it changes about what the
 # gate enforces.
