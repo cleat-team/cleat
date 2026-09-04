@@ -7059,7 +7059,7 @@ both are now decisions about *what a defer may do* rather than prerequisites for
 module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
 the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
-### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 PART-BUILT — the defer segment now runs on `TerminateWorkflow` (§3.112), and on neither of the other two terminal transitions** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02; phase 5's first transition 2026-09-04)
+### 3.35 What `defer` is supposed to be — 🟢 **ALL FIVE PHASES DONE: every terminal transition is resolved, two by building and one by decision (D10)** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02; phase 5 closed 2026-09-04)
 
 > **2026-09-02.** Phase 5's record shape is answered (§3.75), and the *execution* half is now
 > built and measured: `WithDeferPhase` replays a workflow purely to run its outstanding defers,
@@ -11474,7 +11474,7 @@ children and flags its `REQUEST_CANCEL` children, where before it did neither. T
 design says should happen, and it removes the orphan the policy exists to prevent — but a
 deployment relying on terminate being narrow will see children close that did not close before.
 
-### 3.81 The defer segment — 🔶 **MECHANISM BUILT AND MEASURED; one of three terminal transitions now uses it (§3.112, 2026-09-04)** (WS-3, 2026-09-02)
+### 3.81 The defer segment — 🟢 **MECHANISM BUILT, MEASURED, AND NOW USED BY EVERY TERMINAL TRANSITION THAT TAKES ONE** (WS-3, 2026-09-02; closed 2026-09-04)
 
 §3.75 answered the record-shape question phase 5 was parked behind, and its answer stands: no
 new durable record is needed, the terminal transition becomes two-phase, and the only new
@@ -11482,6 +11482,27 @@ durable state is a workflow-level marker on the existing reaper. Implementation 
 that design on 2026-09-02 and stopped at the first measurement, which found a hole in the step
 *before* the record shape.
 
+> **Closed 2026-09-04. All three of §3.75's terminal transitions are resolved**, and the
+> distinction between how matters more than the count:
+>
+> | transition | outcome |
+> |---|---|
+> | `TerminateWorkflow` | **built** — §3.112 (#679) |
+> | parent-close `TERMINATE` arm | **built** — §3.114 (#687) |
+> | `adminForceResolve` | **decided against** — D10, `tiers.yaml`: it stays a one-phase, immediate transition and does not run the workflow's defers |
+>
+> The third is not an omission and must not be read as one. A later reader finding
+> `adminForceResolve` bypassing the defer segment is looking at a recorded product decision, not
+> a gap — which is the whole reason D10 is in the register rather than in a commit message.
+>
+> **This heading was corrected twice in one day and was stale both times**, which is worth
+> recording as its own small finding. It said "the terminal transition does not use it yet"
+> after §3.112 shipped, was fixed by #685 to "one of three", and #687 and #689 landed within the
+> hour and made *that* wrong too. A marker on a section whose work is being done by another
+> stream goes stale at the other stream's pace, not at yours. `gh pr list --state open` before
+> writing a count is the cheap defence; the general rule is to prefer a heading that names the
+> *condition* for being done over one that carries a running tally.
+>
 > **`WithDeferPhase` has a production caller as of 2026-09-04 — §3.112 (#679, WS-2).** This
 > section and §3.35 both said the transition "remains" for a day after the first third of it
 > shipped, which is the §1.1/§1.2 cost recorded in CLAUDE.md: a board scan reads a stale heading
