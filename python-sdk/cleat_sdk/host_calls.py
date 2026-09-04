@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from .memory import (
+    CALL_SUSPEND_SENTINEL,
     OUT_BUF_SIZE,
     OUTPUT_OFFSET,
     SCRATCH_BASE,
@@ -413,6 +414,49 @@ _CALL_ERROR_NAMES: dict[int, str] = {
     4: "CallErrorInvalidRequest",
     5: "CallErrorPermissionDenied",
 }
+
+
+def _check_host_result(result: int, what: str) -> int:
+    """Decode a packed host result word, raising on a stop or an error.
+
+    Every host import that returns a scalar goes through here, so the two
+    checks happen in one place and in one order rather than at each call site.
+
+    Order is load-bearing: the stop sentinel is tested FIRST, by mask, before
+    any field of the word is read. Bit 31 is a legal-looking value in several
+    of the layouts the host packs -- in the await-signals layout it sits inside
+    the timed-out field -- so a decoder that reads its fields first sees an
+    ordinary result and carries on past a stop it was supposed to obey. See
+    ``callSuspendSentinel`` in ``engine/memory.go``.
+
+    Parameters
+    ----------
+    result : int
+        The raw word the host import returned.
+    what : str
+        Call description used in the error message, e.g.
+        ``"signal_workflow(target_run_id='abc')"``.
+
+    Returns
+    -------
+    int
+        The word's upper 32 bits, which some callers use as a length or flag.
+        Callers that have nothing to read may ignore it.
+
+    Raises
+    ------
+    SuspendSentinel
+        If the host refused the call because the workflow is stopping.
+    RuntimeError
+        If the host reported a non-zero error code.
+    """
+    r = result & 0xFFFFFFFFFFFFFFFF
+    if r & CALL_SUSPEND_SENTINEL:
+        raise SuspendSentinel()
+    err_code = r & 0xFF
+    if err_code != 0:
+        raise RuntimeError(f"{what} failed: {_error_code_name(err_code)} (code {err_code})")
+    return r >> 32
 
 
 def _error_code_name(code: int) -> str:
@@ -1280,6 +1324,11 @@ class HostCalls:
         message : str
             The log message to record.
         """
+        # Not checked, and not an oversight. DurableLog is non-durable
+        # host-side (engine/durablecalls.go): it records no event, does no
+        # replay matching, and returns 0 unconditionally, so there is nothing
+        # for a check to read. Raising out of a log call would also be a poor
+        # trade even if the host could report something.
         _import_cleat_log(message)
 
     # --------------------------------------------------------------------
@@ -2076,7 +2125,9 @@ class HostCalls:
         value : str
             Query state value (typically a JSON string).
         """
-        _import_set_query_state(key, value)
+        _check_host_result(
+            _import_set_query_state(key, value), f"set_query_state(key={key!r})"
+        )
 
     # --------------------------------------------------------------------
     # 19. set_state — set typed cleat state
@@ -2236,7 +2287,9 @@ class HostCalls:
             State value.  Dicts are JSON-serialised automatically.
         """
         val_str = self._marshal(value)
-        _import_stream_set_state(key, val_str)
+        _check_host_result(
+            _import_stream_set_state(key, val_str), f"stream_set_state(key={key!r})"
+        )
 
     def stream_get_state(self, key: str) -> str:
         """Get a Stream R state value via the host ABI.
@@ -2261,7 +2314,9 @@ class HostCalls:
 
         Calls the host ``durable-stream-state.delete-state`` import.
         """
-        _import_stream_delete_state(key)
+        _check_host_result(
+            _import_stream_delete_state(key), f"stream_delete_state(key={key!r})"
+        )
 
     def stream_incr_state(self, key: str, delta: int = 1) -> int:
         """Atomically increment a Stream R numeric state value via the host ABI.
@@ -2462,7 +2517,10 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        _import_cleat_resolve_promise(promise_id, value)
+        _check_host_result(
+            _import_cleat_resolve_promise(promise_id, value),
+            f"resolve_promise(promise_id={promise_id!r})",
+        )
 
     # --------------------------------------------------------------------
     # 26. reject_promise — reject a cleat promise
@@ -2487,7 +2545,10 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        _import_cleat_reject_promise(promise_id, error)
+        _check_host_result(
+            _import_cleat_reject_promise(promise_id, error),
+            f"reject_promise(promise_id={promise_id!r})",
+        )
 
     # --------------------------------------------------------------------
     # 25. register_update_handler — register an update handler
@@ -2519,7 +2580,10 @@ class HostCalls:
             and returns True if the payload is valid.
         """
         self._update_handlers[name] = (handler, validator)
-        _import_cleat_register_update_handler(name)
+        _check_host_result(
+            _import_cleat_register_update_handler(name),
+            f"register_update_handler(name={name!r})",
+        )
 
     def _handle_update(self, name: str, payload: str) -> str:
         """Internal: look up and invoke a registered update handler.
@@ -2683,7 +2747,7 @@ class HostCalls:
             raise RuntimeError(defer_phase_refusal("continue_as_new"))
 
         input_str = self._marshal(input)
-        _import_cleat_continue_as_new(input_str)
+        _check_host_result(_import_cleat_continue_as_new(input_str), "continue_as_new()")
 
     # --------------------------------------------------------------------
     # 27b. extend_timeout — extend workflow execution timeout
@@ -2746,7 +2810,10 @@ class HostCalls:
             raise RuntimeError(defer_phase_refusal("continue_as_new_versioned"))
 
         input_str = self._marshal(input)
-        _import_continue_as_new_versioned(input_str, new_version)
+        _check_host_result(
+            _import_continue_as_new_versioned(input_str, new_version),
+            f"continue_as_new_versioned(new_version={new_version})",
+        )
 
     # --------------------------------------------------------------------
     # 27d. side_effect — record non-deterministic computation result
@@ -2825,7 +2892,10 @@ class HostCalls:
             Request payload.  Dicts are JSON-serialised automatically.
         """
         req_str = self._marshal(request)
-        _import_cleat_send(service, operation, req_str)
+        _check_host_result(
+            _import_cleat_send(service, operation, req_str),
+            f"send(service={service!r}, operation={operation!r})",
+        )
 
     # --------------------------------------------------------------------
     # 30. schedule_invoke — delayed one-shot
@@ -2856,7 +2926,10 @@ class HostCalls:
             Delay in milliseconds before the invocation is sent.
         """
         req_str = self._marshal(request)
-        _import_cleat_schedule_invoke(service, operation, req_str, delay_ms)
+        _check_host_result(
+            _import_cleat_schedule_invoke(service, operation, req_str, delay_ms),
+            f"schedule_invoke(service={service!r}, operation={operation!r})",
+        )
 
     # --------------------------------------------------------------------
     # 31. plugin_call — plugin host function call
@@ -3093,7 +3166,10 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        _import_cleat_reply_to_signal(correlation_id, response)
+        _check_host_result(
+            _import_cleat_reply_to_signal(correlation_id, response),
+            f"reply_to_signal(correlation_id={correlation_id!r})",
+        )
 
     # --------------------------------------------------------------------
     # 34. await_signals_with_quorum — wait for quorum of signals
@@ -3189,7 +3265,10 @@ class HostCalls:
             The signal payload. Dicts are JSON-serialised automatically.
         """
         payload_str = self._marshal(payload)
-        _import_cleat_signal_workflow(target_run_id, signal_name, payload_str)
+        _check_host_result(
+            _import_cleat_signal_workflow(target_run_id, signal_name, payload_str),
+            f"signal_workflow(target_run_id={target_run_id!r}, signal_name={signal_name!r})",
+        )
 
     # --------------------------------------------------------------------
     # 36b. schedule_cron — create a recurring cron-triggered workflow
@@ -3254,6 +3333,11 @@ class HostCalls:
         RuntimeError
             If the host reports an error deleting the schedule.
         """
+        # Cannot be checked from here: `durable-delete-cron` is declared
+        # with no return value at all in python-sdk/wit/cleat.wit -- the only
+        # function in that file that is. A failed deletion is therefore
+        # unreportable to a component guest, and closing that needs a WIT
+        # change rather than an SDK one. See IMPROVEMENT-PLAN 3.201.
         _import_cleat_delete_cron(schedule_id)
 
     # --------------------------------------------------------------------
