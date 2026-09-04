@@ -44,8 +44,9 @@ func TestTheRustSDKAgreesOnTheStopBit(t *testing.T) {
 		t.Fatalf("no `pub const SUSPEND_STOP_BIT: i64 = 1 << N;` in %s.\n\n"+
 			"A regex that matches nothing passes vacuously, so this is a failure rather "+
 			"than a skip. Either the constant was renamed -- re-point this test -- or the "+
-			"SDK stopped decoding the stop sentinel, in which case 'rust' must not be added "+
-			"to deferSegmentLanguages.", rustMemorySrc)
+			"SDK stopped decoding the stop sentinel, in which case 'rust' must be removed "+
+			"from deferSegmentLanguages, which no longer runs a Rust defer segment safely.",
+			rustMemorySrc)
 	}
 
 	wantShift := -1

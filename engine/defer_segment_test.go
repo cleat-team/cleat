@@ -363,7 +363,7 @@ func TestADeferSegmentPastTheFrontierRunsOnlyTheDefers(t *testing.T) {
 // So the list is asserted exactly. Growing it is a deliberate act that fails
 // here first, and the failure says what has to accompany it.
 func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
-	want := map[string]bool{"go": true, "java": true, "assemblyscript": true}
+	want := map[string]bool{"go": true, "java": true, "rust": true, "assemblyscript": true}
 	if len(deferSegmentLanguages) != len(want) {
 		t.Fatalf("deferSegmentLanguages = %v, want %v.\n\n"+
 			"Adding a language here means its SDK decodes callSuspendSentinel "+
@@ -382,12 +382,17 @@ func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 // TestADeferSegmentRefusesAGuestThatCannotHearTheStop pins the fail-closed half
 // of IMPROVEMENT-PLAN 3.83.
 //
-// callSuspendSentinel only stops a guest whose SDK decodes it. Two of the five
-// do not yet. An SDK that does not reads the word through the ordinary
-// durable-call layout -- responseLen = 0, errCode = 0 -- and gets an EMPTY
-// SUCCESSFUL RESPONSE: it carries on past the stop, does the new work the
-// segment exists to prevent, and reports the terminated workflow as completed,
-// with nothing anywhere to see.
+// callSuspendSentinel only stops a guest whose SDK decodes it. ONE of the five
+// still does not: python has no decode at all, and cannot get one without an
+// ABI change -- it is a Component Model guest whose WIT declares
+// `durable-call: func(...) -> string`, so there is no result word to carry bit
+// 31 at all. The closing paragraphs of 3.106 and 3.107 both record it, with
+// the measurement (extractStringFromPacked(0x80000000, buf) == "", an empty
+// SUCCESSFUL response). An SDK that does not decode
+// reads the word through the ordinary durable-call layout -- responseLen = 0,
+// errCode = 0 -- and gets an EMPTY SUCCESSFUL RESPONSE: it carries on past the
+// stop, does the new work the segment exists to prevent, and reports the
+// terminated workflow as completed, with nothing anywhere to see.
 //
 // So the engine refuses the segment for a language not in
 // deferSegmentLanguages, rather than running one it cannot stop. This asserts
@@ -395,7 +400,10 @@ func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 // satisfied by any of the several other ways Execute can fail on a synthetic
 // module -- which is the trap this file's other tests keep hitting.
 func TestADeferSegmentRefusesAGuestThatCannotHearTheStop(t *testing.T) {
-	for _, lang := range []string{"rust", "python"} {
+	// Down to one. assemblyscript left with 3.106 and rust with 3.107, both on
+	// 2026-09-03; each departure made this test fail on that language first,
+	// which is the pin above working rather than a test needing a nudge.
+	for _, lang := range []string{"python"} {
 		t.Run(lang, func(t *testing.T) {
 			ctx := context.Background()
 			rt, err := NewRuntime(ctx, 0, 0)

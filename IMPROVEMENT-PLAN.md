@@ -14310,15 +14310,16 @@ host-side, for the whole segment — and that the wrapper's suspension check, wh
 means the same thing it means for Go and Java: measured, end to end, that the segment runs only
 the defers.
 
-Remaining: **Rust**, unblocked by §3.87 (#643) and different in shape again —
-`Err(CallError::Suspended)` returned before any field is decoded, rather than a flag or an
-unwind; its SDK half is §3.107 and its end-to-end half is next. **Python** is still blocked on an
-ABI decision and not on effort: it is a Component Model guest whose WIT declares
+Remaining when this was written: **Rust**, unblocked by §3.87 (#643) and different in shape again
+— `Err(CallError::Suspended)` returned before any field is decoded, rather than a flag or an
+unwind. That closed the same day: §3.107 is 🟢 and `rust` is in `deferSegmentLanguages`, so with
+this section's own crossing landed too, **Python is the only one left**, and it is blocked on an
+ABI decision rather than on effort: it is a Component Model guest whose WIT declares
 `durable-call: func(...) -> string`, so there is no result word to carry bit 31, and
 `extractStringFromPacked` turns the sentinel into `""` — an empty *successful* response.
 Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`.
 
-### 3.107 The Rust SDK decodes the defer-segment stop sentinel — 🔶 **SDK HALF DONE; the end-to-end proof and `deferSegmentLanguages` remain** (WS-2, 2026-09-03)
+### 3.107 The Rust SDK decodes the defer-segment stop sentinel — 🟢 **FIXED, both halves; `rust` is in `deferSegmentLanguages`** (WS-2 for the SDK half, WS-3 for the crossing, 2026-09-03)
 
 The third of the four SDK halves (§3.105 Java, §3.106 AssemblyScript). Same eight-or-nine
 methods, same ordering contract, same forbidden sleep path.
@@ -14354,9 +14355,35 @@ decoding**, `cleat_sleep_ms` does not, and `stop_requested` goes through `suspen
 The Rust unit tests deliberately do not drive the `HostCalls` methods: those call `extern "C"`
 imports that exist only inside a cleat WASM runtime.
 
-**Not done here, exactly as in §3.105 and §3.106:** `rust` is not added to
-`deferSegmentLanguages`. The end-to-end proof is the next piece, and until it lands the fence
-stays closed.
+**The crossing landed 2026-09-03 (WS-3)**, and with it `rust` in `deferSegmentLanguages`.
+`engine/rust_defer_segment_e2e_test.go` builds the real cargo module and runs
+`examples/rust-workflow`'s existing `defer_order` entry point — which already had the Java
+fixture's shape, two `defer_func` cleanups plus one body call — as a defer segment. It asserts
+the segment suspends, that both cleanups reach the `ServiceCaller` in LIFO order, and that the
+body's call does not. `TestRustOrdinarySegmentRunsTheBody` is the control: the same entry point
+with no defer phase must record `body, second, first`, which separates "the stop is conditional
+on the segment" from "this guest stopped working".
+
+Watched fail first: with `rust` still out of the list, the segment was refused with
+`guest language "rust" has no defer-segment support`, which is the fence and not the feature.
+
+**Falsified**, measured 2026-09-03 by making `stop_requested` return `false` unconditionally and
+rebuilding:
+
+    suspended: nil   result: {"deferred":true}   operations: []
+
+The segment reported the terminated workflow as completed and performed none of its cleanup —
+the `#[cleat_entry]` wrapper saw no suspension, took its ordinary success path, drained the table
+itself, and each body's call was then refused in turn (§3.81's consumption), leaving the host's
+call to `__cleat_run_deferred` with nothing. Note which assertions caught it: **the suspension
+and the LIFO list. The `body` check did not** — `stopBeforeNewWork` refuses that call host-side
+before the `ServiceCaller` is reached, so `body` stays absent whether or not the guest decodes
+anything. That is the same asymmetry §3.105 recorded for Java, and the test comment says which
+half each assertion guards rather than leaving a reader to assume it covers both.
+
+The control passed under that mutation too, as it should: an ordinary segment never sees bit 31,
+so the control is sensitive to the SDK breaking, not to the decode being deleted. The two tests
+fail for different reasons, which is the point of having both.
 
 **Remaining after this: Python only, and it is blocked on a decision rather than on effort.** It
 is a Component Model guest whose WIT declares `durable-call: func(...) -> string`, so there is no

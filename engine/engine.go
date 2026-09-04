@@ -564,6 +564,9 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //     engine/java_defer_segment_e2e_test.go, which builds the real TeaVM module
 //     and measures that a defer segment records the two cleanup calls and not
 //     the body's (3.105).
+//   - rust: examples/rust-workflow's defer_order entry point +
+//     engine/rust_defer_segment_e2e_test.go, same measurement against the real
+//     cargo build (3.107).
 //   - assemblyscript: examples/as-workflow's defer_order entry point +
 //     engine/as_defer_segment_e2e_test.go (3.106). Note this one does NOT stop
 //     by unwinding -- the SDK has no exceptions, so the body runs on past the
@@ -571,7 +574,7 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //     transformer-generated wrapper checking isWorkflowSuspended() before it
 //     drains. Membership still means the same thing (the segment runs only the
 //     defers, measured), but read that test's comment for how it gets there.
-var deferSegmentLanguages = map[string]bool{"go": true, "java": true, "assemblyscript": true}
+var deferSegmentLanguages = map[string]bool{"go": true, "java": true, "rust": true, "assemblyscript": true}
 
 // RunsOnWasmtime reports whether a detected guest language is served by the
 // wasmtime backend.
