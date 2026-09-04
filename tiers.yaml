@@ -279,6 +279,13 @@ tier1:
   #
   # Consequence, and it is real: this gate can no longer pass natively on macOS, because
   # componentize-py dies there on a Darwin kernel guard. Run it in the container.
+  #
+  # D9 (2026-09-04) is downstream of this line and worth reading next to it: because
+  # python is tier 1, python-sdk/wit/cleat.wit is public API, so changing a host call's
+  # return type is a decision for the register rather than a stream's to take. It also
+  # spends this precondition -- TestPythonDeferSegmentRunsOnlyTheDefers and its control
+  # build a real component in the gate, which is only possible because the two lines
+  # above provision componentize-py and wasm-tools.
   languages: [go, python]
   backend: wasmtime          # CGO required; see CLAUDE.md on why CGO_ENABLED=0 invalidates a run
   dialects: [postgres, mysql, mssql]
@@ -1236,7 +1243,58 @@ tier3:
 #       predicate of their own and one tenant could delete another's schedules and
 #       repoint their deployment tags. That audit is NOT finished.
 #
-# D1-D4 were settled together on 2026-08-06; D5-D8 have been added since, and this
+#   D9  DECIDED 2026-09-04, IMPLEMENTED the same day. ON THE COMPONENT MODEL ABI, A STOP
+#       AND A FAILURE ARE CASES OF A TYPE, NOT VALUES OF THE RESPONSE STRING. This is a
+#       public-API change to a tier-1 language, which is why it is here and not only in
+#       IMPROVEMENT-PLAN 3.110: D2 put python at tier 1, so python-sdk/wit/cleat.wit is
+#       part of what this project promises.
+#
+#       The eight host calls the engine can refuse or that can fail return
+#       `result<string, call-failure>` rather than `string`; the cleat-workflow world's
+#       `run` returns `run-outcome` rather than a string compared against the literal
+#       "__CLEAT_SUSPEND__"; and the world exports `run-deferred` so the host can drain a
+#       suspended guest's defer table on the instance that still holds the closures.
+#
+#       The option NOT taken was a sentinel prefix inside the response string, matching
+#       the "__CLEAT_ERROR__:" convention the WIT already documented. Rejected on two
+#       grounds. It re-opens exactly the collision IMPROVEMENT-PLAN 3.83 exists to record
+#       -- a sentinel a legitimate value can forge -- where the other four SDKs get the
+#       property structurally, from a bit the host cannot fill. And it would leave
+#       python's stop in a different representational class from the other four, which is
+#       how D6's "terminate is ASYNCHRONOUS" quietly comes to mean something different per
+#       language. The convention it was matching turned out to have no producer anywhere in
+#       the host, so it would have been a second documented string nothing wrote.
+#
+#       What it changes about what the gate enforces: `python` is in
+#       engine.deferSegmentLanguages, so the tier-1 gate now runs a Python defer segment
+#       end to end (TestPythonDeferSegmentRunsOnlyTheDefers and its control) where the
+#       engine previously failed the segment closed for that language. Those two are
+#       deliberately NOT in exclude_tests -- D2 already obliges the gate to provision
+#       componentize-py and wasm-tools, and this is the coverage that precondition buys.
+#
+#       What the decision COST, recorded because the register is where the next person
+#       looks:
+#         * every Python workflow must be rebuilt. The world's `run` signature changed, so
+#           a component built against the old WIT does not satisfy the new host. There is
+#           no compatibility window and none was designed: the old shape could not express
+#           a stop at all.
+#         * the SDK's six "__CLEAT_ERROR__:" checks are gone. A workflow that did its own
+#           prefix check on a response must delete it -- it was matching a marker the host
+#           has never written.
+#
+#       On urgency, because it was argued as "nothing is broken today" and that is only
+#       half true. The STOP half was unreachable in production: `WithDeferPhase` has no
+#       production caller, re-derivable with
+#       `grep -rn "WithDeferPhase" --include="*.go" . | grep -v _test.go`, and it becomes a
+#       tier-1 blocker at the moment IMPROVEMENT-PLAN 3.75 step 2 lands. The FAILURE half
+#       was live, with no defer phase involved: `extractStringFromPacked` drops the packed
+#       word's errCode, so a failed durable call reached a Python workflow as an ordinary
+#       successful response carrying the error text, and its callErrorCode -- which decides
+#       retryable from permanent -- was discarded. Measured:
+#       `extractStringFromPacked(0x80000000, buf) == ""` for the stop, and
+#       TestDispatchDurableCallFailureIsNotAResponse for the failure.
+#
+# D1-D4 were settled together on 2026-08-06; D5-D9 have been added since, and this
 # register was still saying "all four" until D7 was recorded. New ones go here with
 # the same shape: what was decided, on what date, and what it changes about what the
 # gate enforces.

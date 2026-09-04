@@ -32,19 +32,41 @@ import (
 
 // componentWithNoImports is the smallest thing that is unambiguously a
 // Component Model binary and can actually instantiate: a core module with a
-// memory and a realloc, lifted to a `(param string) (result string)` export
-// named "run", which is the shape python-sdk/wit/cleat.wit's world declares.
+// memory and a realloc, lifted to a `(param string) (result run-outcome)`
+// export named "run", which is the shape python-sdk/wit/cleat.wit's world
+// declares.
+//
+// The result used to be a bare `string`, and the hand-written core function
+// below returned a two-word (ptr, len) pair for it. `run` returns the
+// `run-outcome` variant now, so the probe returns the variant's canonical
+// layout instead: a u8 discriminant at offset 0 -- 0 is `completed`, the
+// declaration order below -- and the payload string at offsets 4 and 8, the
+// payload being aligned to the widest case rather than packed against the
+// discriminant.
+//
+// It is written out rather than generated because that is the point of a
+// probe: if the canonical layout the host decodes ever stops matching the one
+// the Component Model specifies, this is where it shows, on 30 lines with no
+// componentize-py and no 19 MB binary in between.
+// The type is exported and the lift refers to the EXPORTED index, which is not
+// decoration: a component may not export a function whose type names a type it
+// does not also export, and wasmtime rejects it at compile with
+// "func not valid to be used as export" -- a message about the export, not the
+// type, which is the wrong end to start looking from.
 const componentWithNoImports = `(component
+  (type $outcome (variant (case "completed" string) (case "suspended")))
   (core module $M
     (memory (export "memory") 1)
     (func (export "realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
     (func (export "run") (param i32 i32) (result i32)
-      (i32.store (i32.const 2048) (i32.const 4096))
-      (i32.store (i32.const 2052) (i32.const 0))
+      (i32.store (i32.const 2048) (i32.const 0))
+      (i32.store (i32.const 2052) (i32.const 4096))
+      (i32.store (i32.const 2056) (i32.const 0))
       (i32.const 2048))
   )
   (core instance $i (instantiate $M))
-  (func $lifted (param "input" string) (result string)
+  (export $outcomeX "run-outcome" (type $outcome))
+  (func $lifted (param "input" string) (result $outcomeX)
     (canon lift (core func $i "run")
       (memory $i "memory")
       (realloc (func $i "realloc"))

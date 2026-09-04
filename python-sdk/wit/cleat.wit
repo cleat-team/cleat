@@ -5,19 +5,77 @@
 /// that the WASM runtime provides to guest modules.
 package cleat:host-calls;
 
+/// Why a durable host call produced no response.
+///
+/// A stop and a failure are CASES OF A TYPE here, not values of the response
+/// string. That is the whole point of this interface. The host calls below
+/// used to return a bare ``string`` and encode both in it:
+///
+///   * a failure was documented as an error message prefixed with
+///     ``__CLEAT_ERROR__:`` -- which nothing in the host has ever written.
+///     Measured 2026-09-03, ``grep -rn CLEAT_ERROR`` over the whole tree
+///     matches this file, the Python SDK's six checks for the prefix, and
+///     IMPROVEMENT-PLAN. No producer. A failed call arrived at a Python
+///     workflow as an ordinary successful response carrying the error text.
+///   * a stop had no encoding at all. The core-module ABI signals one with
+///     ``callSuspendSentinel`` (bit 31 of the packed result word, engine/memory.go),
+///     and a lifted ``string`` has no bits to carry it. The component dispatch
+///     took ``responseLen=0`` out of the sentinel and handed the guest ``""`` --
+///     an empty SUCCESSFUL response.
+///
+/// Both are the class CLAUDE.md names at the ABI boundary: not an overflow, a
+/// value that means something different on each side. Neither is expressible
+/// now: ``result<string, call-failure>`` lifts into ``Err`` in the guest, and
+/// no response a service can return produces one.
+interface outcomes {
+    variant call-failure {
+        /// The engine stopped this workflow before the call was started.
+        ///
+        /// Returned only inside a defer segment, for a call the workflow BODY
+        /// is making past the end of its recorded history -- the host-side
+        /// refusal in ``stopBeforeNewWork`` (engine/durablecalls.go). The
+        /// guest must unwind: the segment exists to run a terminated
+        /// workflow's cleanup, and carrying on performs the side effect the
+        /// termination was meant to stop. See IMPROVEMENT-PLAN 3.83.
+        suspended,
+
+        /// The call was attempted and failed.
+        failed(call-error),
+    }
+
+    /// A failed call's message and the host's classification of it.
+    ///
+    /// ``code`` is the packed ABI's ``callErrorCode``
+    /// (``packDurableCallResult``, engine/memory.go), which decides whether an
+    /// SDK raises its retryable or its permanent error class. The component
+    /// dispatch used to drop it along with the error itself, so a Python
+    /// workflow could not have told the two apart even if it had seen the
+    /// failure. Zero means the host offered no classification.
+    record call-error {
+        code: u32,
+        message: string,
+    }
+}
+
 /// Service call operations: recorded, retried, or heartbeated.
 interface durable-call {
+    use outcomes.{call-failure};
+
     /// Make a durable (deterministically replayed) call to an external service.
-    /// Returns the response JSON string on success, or an error string prefixed
-    /// with "__CLEAT_ERROR__:" on failure.
+    ///
+    /// ``ok`` carries the response JSON. ``err`` is a stop or a failure -- see
+    /// ``outcomes``; neither is a string a service could have returned.
     durable-call: func(
         service: string,
         operation: string,
         request: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Make a durable call with server-side retry policy.
-    /// Returns the response JSON string on success, or an error on failure.
+    ///
+    /// The retries happen inside the host and one event is recorded whatever
+    /// the attempt count, so ``err`` here means the policy was exhausted --
+    /// or, for ``suspended``, that the call was never started at all.
     durable-call-retry: func(
         service: string,
         operation: string,
@@ -27,16 +85,29 @@ interface durable-call {
         backoff-coefficient-100x: u64,
         max-interval-ms: u64,
         non-retryable-errors: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Make a durable call with periodic heartbeat/progress updates.
-    /// Returns the response JSON string on success, or an error on failure.
+    ///
+    /// This one cannot return ``suspended`` AT THE TIME OF WRITING (2026-09-04):
+    /// unlike the two above, the host's DurableCallWithHeartbeat does not
+    /// consult ``stopBeforeNewWork``, so a defer segment does not stop it.
+    /// That is a host-side gap on every SDK rather than anything about this
+    /// type -- the eighth such path -- and IMPROVEMENT-PLAN 3.111 (#672) is
+    /// closing it. **Delete this paragraph when that lands**; the type below
+    /// does not change, only this sentence does.
+    ///
+    /// The type is the same shape as its two siblings because the failure half
+    /// applies to it identically, because a third convention for one function
+    /// would be worse, and because it means the host half is the only thing
+    /// missing: the component dispatch already masks the sentinel before any
+    /// field decode, so this signature is a producer away from working.
     durable-call-heartbeat: func(
         service: string,
         operation: string,
         request: string,
         heartbeat-interval-ms: u64,
-    ) -> string;
+    ) -> result<string, call-failure>;
 }
 
 /// Timer, clock, random, and log operations.
@@ -119,12 +190,14 @@ interface durable-signals {
 
 /// Child workflow spawn and await operations.
 interface durable-children {
+    use outcomes.{call-failure};
+
     /// Start a child workflow instance (async).
     /// Returns the child run ID string.
     durable-child-workflow: func(
         name: string,
         input: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Wait for a single child workflow to complete.
     /// Returns the child result JSON string.
@@ -142,7 +215,7 @@ interface durable-children {
         version: u64,
         priority: u64,
         parent-close-policy: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 }
 
 /// Durable promise create, await, resolve, and reject operations.
@@ -227,13 +300,15 @@ interface durable-identity {
 
 /// Plugin host function extension interface.
 interface plugin {
+    use outcomes.{call-failure};
+
     /// Call a plugin host function.
     /// Returns the plugin response JSON string.
     plugin-call: func(
         plugin-name: string,
         function-name: string,
         input: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Call a streaming plugin host function (for workstream D2b).
     /// Returns the streaming event JSON string.
@@ -241,7 +316,7 @@ interface plugin {
         plugin-name: string,
         function-name: string,
         input: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 }
 
 /// Scoped state / virtual object operations (ABI 2.26-2.28)
@@ -294,6 +369,8 @@ interface durable-extended-lifecycle {
 
 /// HTTP fetch (ABI 2.45)
 interface durable-fetch {
+    use outcomes.{call-failure};
+
     /// Perform a durable HTTP fetch.
     /// Returns the response JSON string (status, headers, body).
     fetch: func(
@@ -301,7 +378,7 @@ interface durable-fetch {
         url: string,
         headers: string,
         body: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 }
 
 /// Recurring workflow triggers.
@@ -357,10 +434,52 @@ world cleat-workflow {
     import durable-fetch;
     import durable-cron;
 
+    /// What the guest did with the segment.
+    ///
+    /// A suspension used to be the literal string ``__CLEAT_SUSPEND__``
+    /// returned from ``run``, compared verbatim in engine/component_cgo.go.
+    /// The core-module SDKs signal one out of band -- Go panics, Java throws,
+    /// Rust returns an ``Err``, AssemblyScript sets a flag -- and none of them
+    /// can be confused with a result. This makes the component path say it in
+    /// the type too.
+    /// Two cases, not three: there is no ``failed``, and that is deliberate.
+    ///
+    /// A workflow body that raises is caught by the SDK's entry wrapper and
+    /// turned into a completed step carrying an ``{"error": ...}`` payload.
+    /// That boundary is load-bearing -- an exception that escaped it would
+    /// cross the ABI as a trap and the engine would see a dead guest instead
+    /// of a failed step -- so a ``failed`` case here would either duplicate it
+    /// or invite someone to change what it means. A variant case with no
+    /// producer is worse than no case.
+    variant run-outcome {
+        /// The workflow finished. Carries the serialised result JSON.
+        completed(string),
+
+        /// The workflow did not finish: it is waiting, or the host stopped it
+        /// (``outcomes.call-failure.suspended``). Its defer table is still
+        /// populated -- see ``run-deferred``.
+        suspended,
+    }
+
     /// Main workflow entry point.
     ///
     /// ``args`` is the serialised workflow input JSON. The canonical ABI
     /// handles lifting/lowering the string through linear memory.
-    /// Returns the serialised workflow result JSON.
-    export run: func(args: string) -> string;
+    export run: func(args: string) -> run-outcome;
+
+    /// Drain the guest's defer table and report how many bodies ran.
+    ///
+    /// The host calls this itself, on the SAME instance, after ``run``
+    /// returns ``suspended`` during a defer segment. That is not a detail: the
+    /// host brackets this call so the defer bodies' own durable calls are
+    /// permitted while the workflow body's are stopped
+    /// (``setDeferDrain``, engine/backend_wasmtime.go). A guest that drained
+    /// its own table on the way out would have every cleanup call refused --
+    /// and because the table is taken before the first body runs, that
+    /// CONSUMES the cleanup rather than skipping it: the lock stays held and
+    /// the registration is gone. Measured in IMPROVEMENT-PLAN 3.81.
+    ///
+    /// This is the Component Model counterpart of the core-module
+    /// ``__cleat_run_deferred`` export (``deferRunnerExport``).
+    export run-deferred: func() -> u32;
 }

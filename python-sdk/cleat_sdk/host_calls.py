@@ -49,7 +49,6 @@ from .memory import (
     SUSPEND_SENTINEL,
     decode_await_promise_result,
     decode_await_signals_result,
-    decode_cleat_call_result,
     decode_dual_string_result,
     decode_simple_result,
     decode_sleep_result,
@@ -83,6 +82,12 @@ _NO_WIT_BINDING = (
 # when not running in WASM ― the stubs are replaced by real WASM FFI
 # functions at runtime via the componentize-py host adaptor.
 try:
+    # The outcome types (wit/cleat.wit, interface `outcomes`). A host call that
+    # can be stopped or can fail returns `result<string, call-failure>`, which
+    # componentize-py lifts into "return the string, or raise Err(CallFailure)".
+    # That is what makes a stop unrepresentable as a response: there is no
+    # string a service could return that arrives here as one.
+    from componentize_py_types import Err as _WitErr
     from wit_world.imports.durable_call import (
         durable_call as _import_cleat_call,
     )
@@ -227,6 +232,9 @@ try:
     from wit_world.imports.durable_version import (
         durable_version as _import_cleat_version,
     )
+    from wit_world.imports.outcomes import (
+        CallFailure_Suspended as _CallFailureSuspended,
+    )
     from wit_world.imports.plugin import (
         plugin_call as _import_plugin_call,
     )
@@ -237,6 +245,20 @@ try:
     _USING_WASM = True
 except ImportError:
     _USING_WASM = False
+
+    class _WitErr(Exception):  # type: ignore[no-redef]
+        """Stand-in for componentize-py's Err outside the WASM runtime.
+
+        Never raised here: the import stubs below raise NotImplementedError
+        long before any host call could fail. It exists so ``except _WitErr``
+        in the call paths is a legal expression when the bindings are absent,
+        rather than each of them needing a ``_USING_WASM`` branch.
+        """
+
+        value: Any = None
+
+    class _CallFailureSuspended:  # type: ignore[no-redef]
+        """Stand-in for the suspended case outside the WASM runtime."""
 
 
 T = TypeVar("T")
@@ -316,6 +338,71 @@ _CALL_ERROR_CODE_MAP: dict[int, type[CleatCallError]] = {
     4: CleatCallPermanentError,  # CallErrorInvalidRequest
     5: CleatCallPermanentError,  # CallErrorPermissionDenied
 }
+
+def _unwrap_call_result(service: str, operation: str, result: Any) -> str:
+    """Return a host call's response, or raise for the two cases that are not one.
+
+    Every WIT host call that can be stopped or can fail returns
+    ``result<string, call-failure>``. componentize-py turns the ``err`` case
+    into a raised ``Err`` whose ``.value`` is the ``call-failure`` variant, so
+    this is only ever reached with a plain response -- the raise is handled by
+    :func:`_call_or_raise` around it. This function exists for the *ok* half
+    and for the one thing that half must still not do: treat an error string as
+    a response.
+
+    It used to. ``durable-call`` returned a bare ``string`` documented as
+    carrying ``__CLEAT_ERROR__:`` on failure, and six call sites in this file
+    checked for that prefix -- against a host that has never written it. A
+    failed call arrived as an ordinary successful response holding the error
+    text, and a stopped one as an empty successful response. Both are gone with
+    the prefix; see IMPROVEMENT-PLAN 3.110.
+    """
+    if isinstance(result, str):
+        return result
+    # Not a string and not an Err: the packed-i64 ABI, from a core-module
+    # build. Left to the caller, which knows the layout its import uses.
+    raise TypeError(f"{service}.{operation} returned {type(result).__name__}, not a response string")
+
+
+def _raise_call_failure(service: str, operation: str, failure: Any) -> None:
+    """Raise for a ``call-failure``: a stop unwinds, a failure is an error.
+
+    ``suspended`` is not an error and must not be reported as one. The host
+    returns it for a call the workflow BODY makes past the frontier of a defer
+    segment -- the segment exists to run a terminated workflow's cleanup, and
+    the guest has to unwind so the host can drain the defer table on the
+    instance that still holds the closures. Raising :class:`SuspendSentinel` is
+    what does that: ``@cleat_entry`` catches it and reports
+    ``run-outcome.suspended`` without draining.
+    """
+    if isinstance(failure, _CallFailureSuspended):
+        raise SuspendSentinel()
+
+    # The other case is ``failed(call-error)``, whose payload carries the
+    # message and the host's ``callErrorCode``. The code is what picks the
+    # retryable or the permanent subclass, and the component path used to drop
+    # it -- so a Python workflow could not have told a timeout from a bad
+    # request even if it had seen the failure at all.
+    err = getattr(failure, "value", None)
+    code = getattr(err, "code", 0)
+    message = getattr(err, "message", None)
+    if message is None:
+        message = str(failure)
+    exc_cls = _CALL_ERROR_CODE_MAP.get(code, CleatCallError)
+    raise exc_cls(
+        service=service, operation=operation, message=message, call_error_code=code
+    )
+
+
+def _call_or_raise(service: str, operation: str, fn: Callable[..., Any], *args: Any) -> str:
+    """Invoke a WIT host call and turn its ``err`` case into the right exception."""
+    try:
+        result = fn(*args)
+    except _WitErr as err:
+        _raise_call_failure(service, operation, err.value)
+        raise  # unreachable; _raise_call_failure always raises
+    return _unwrap_call_result(service, operation, result)
+
 
 # Human-readable names for call error codes, matching _CALL_ERROR_CODE_MAP.
 _CALL_ERROR_NAMES: dict[int, str] = {
@@ -1285,7 +1372,10 @@ class HostCalls:
             non_retryable_str = "[]"
             backoff_100x = 100  # 1.0 * 100
 
-            result = _import_cleat_call_retry(
+            return _call_or_raise(
+                service,
+                operation,
+                _import_cleat_call_retry,
                 service,
                 operation,
                 req_str,
@@ -1295,39 +1385,10 @@ class HostCalls:
                 timeout_ms,
                 non_retryable_str,
             )
-            if isinstance(result, str):
-                if result.startswith("__CLEAT_ERROR__:"):
-                    err_msg = result[len("__CLEAT_ERROR__:"):]
-                    self._raise_for_call_error(service, operation, err_msg, 0)
-                return result
-            # Old packed-i64 ABI for the retry path.
-            response_len, call_error_code, err_code = decode_cleat_call_result(result)
-            if err_code != 0:
-                err_msg = read_string(OUTPUT_OFFSET, response_len)
-                if call_error_code != 0:
-                    self._raise_for_call_error(service, operation, err_msg, call_error_code)
-                raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
-            return read_string(OUTPUT_OFFSET, response_len)
         else:
-            # String ABI: durable-call returns response directly as a string.
-            result = _import_cleat_call(
-                service,
-                operation,
-                req_str,
+            return _call_or_raise(
+                service, operation, _import_cleat_call, service, operation, req_str
             )
-            if isinstance(result, str):
-                if result.startswith("__CLEAT_ERROR__:"):
-                    err_msg = result[len("__CLEAT_ERROR__:"):]
-                    raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
-                return result
-            # Fallback: old packed-i64 ABI for non-string result.
-            response_len, call_error_code, err_code = decode_cleat_call_result(result)
-            if err_code != 0:
-                err_msg = read_string(OUTPUT_OFFSET, response_len)
-                if call_error_code != 0:
-                    self._raise_for_call_error(service, operation, err_msg, call_error_code)
-                raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
-            return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
     # 7. call_typed — typed recorded API call
@@ -1405,7 +1466,10 @@ class HostCalls:
         non_retryable_str = json.dumps(retry.non_retryable_errors)
         backoff_100x = round(retry.backoff_coefficient * 100)
 
-        result = _import_cleat_call_retry(
+        return _call_or_raise(
+            service,
+            operation,
+            _import_cleat_call_retry,
             service,
             operation,
             req_str,
@@ -1415,21 +1479,6 @@ class HostCalls:
             retry.max_interval_ms,
             non_retryable_str,
         )
-
-        if isinstance(result, str):
-            if result.startswith("__CLEAT_ERROR__:"):
-                err_msg = result[len("__CLEAT_ERROR__:"):]
-                self._raise_for_call_error(service, operation, err_msg, 0)
-            return result
-
-        response_len, call_error_code, err_code = decode_cleat_call_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
-            if call_error_code != 0:
-                self._raise_for_call_error(service, operation, err_msg, call_error_code)
-            raise RuntimeError(f"call_with_retry({service}.{operation}) failed: {err_msg}")
-
-        return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
     # 9. call_with_heartbeat — long-running call with progress
@@ -1475,24 +1524,15 @@ class HostCalls:
         """
         req_str = self._marshal(request)
 
-        result = _import_cleat_call_heartbeat(service, operation, req_str, heartbeat_interval_ms)
-
-        if isinstance(result, str):
-            if result.startswith("__CLEAT_ERROR__:"):
-                err_msg = result[len("__CLEAT_ERROR__:"):]
-                self._raise_for_call_error(service, operation, err_msg, 0)
-            return result
-
-        response_len, call_error_code, err_code = decode_cleat_call_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
-            if call_error_code != 0:
-                self._raise_for_call_error(service, operation, err_msg, call_error_code)
-            raise RuntimeError(
-                f"call_with_heartbeat({service}.{operation}) failed: {err_msg}"
-            )
-
-        return read_string(OUTPUT_OFFSET, response_len)
+        return _call_or_raise(
+            service,
+            operation,
+            _import_cleat_call_heartbeat,
+            service,
+            operation,
+            req_str,
+            heartbeat_interval_ms,
+        )
 
     # --------------------------------------------------------------------
     # 10. sleep — suspend for a duration
@@ -1914,7 +1954,9 @@ class HostCalls:
             If the host reports an error starting the child.
         """
         input_str = self._marshal(input)
-        return _import_cleat_child_workflow(name, input_str)
+        return _call_or_raise(
+            "child-workflow", name, _import_cleat_child_workflow, name, input_str
+        )
 
     def child_workflow_with_options(
         self, name: str, input: Any, options: ChildWorkflowOptions | None = None
@@ -1947,7 +1989,16 @@ class HostCalls:
         if options is None:
             options = ChildWorkflowOptions()
         input_str = self._marshal(input)
-        return _import_cleat_child_workflow_with_options(name, input_str, options.version, options.priority, "")
+        return _call_or_raise(
+            "child-workflow",
+            name,
+            _import_cleat_child_workflow_with_options,
+            name,
+            input_str,
+            options.version,
+            options.priority,
+            "",
+        )
 
     # --------------------------------------------------------------------
     # 16. await_child — wait for a child workflow
@@ -2842,26 +2893,14 @@ class HostCalls:
         """
         input_str = self._marshal(input)
 
-        result = _import_plugin_call(plugin_name, function_name, input_str)
-
-        if isinstance(result, str):
-            if result.startswith("__CLEAT_ERROR__:"):
-                err_msg = result[len("__CLEAT_ERROR__:"):]
-                self._raise_for_call_error(f"plugin:{plugin_name}", function_name, err_msg, 0)
-            return result
-
-        response_len, call_error_code, err_code = decode_cleat_call_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
-            if call_error_code != 0:
-                self._raise_for_call_error(
-                    f"plugin:{plugin_name}", function_name, err_msg, call_error_code
-                )
-            raise RuntimeError(
-                f"plugin_call(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}"
-            )
-
-        return read_string(OUTPUT_OFFSET, response_len)
+        return _call_or_raise(
+            f"plugin:{plugin_name}",
+            function_name,
+            _import_plugin_call,
+            plugin_name,
+            function_name,
+            input_str,
+        )
 
     # --------------------------------------------------------------------
     # 31b. plugin_call_streaming — streaming plugin host function
@@ -2900,39 +2939,25 @@ class HostCalls:
 
         input_str = self._marshal(input)
 
-        while True:
-            result = _import_plugin_call_streaming(plugin_name, function_name, input_str)
-
-            if isinstance(result, str):
-                if result.startswith("__CLEAT_ERROR__:"):
-                    err_msg = result[len("__CLEAT_ERROR__:"):]
-                    self._raise_for_call_error(
-                        f"plugin:{plugin_name}", function_name, err_msg, 0
-                    )
-                if not result:
-                    break
-                yield _json.loads(result)
-                break
-
-            response_len, call_error_code, err_code = decode_cleat_call_result(result)
-            if err_code != 0:
-                err_msg = (
-                    read_string(OUTPUT_OFFSET, response_len)
-                    if response_len > 0
-                    else "unknown error"
-                )
-                if call_error_code != 0:
-                    self._raise_for_call_error(
-                        f"plugin:{plugin_name}", function_name, err_msg, call_error_code
-                    )
-                raise RuntimeError(
-                    f"plugin_call_streaming(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}"
-                )
-
-            if response_len == 0:
-                break  # End of stream
-
-            event_json = read_string(OUTPUT_OFFSET, response_len)
+        event_json = _call_or_raise(
+            f"plugin:{plugin_name}",
+            function_name,
+            _import_plugin_call_streaming,
+            plugin_name,
+            function_name,
+            input_str,
+        )
+        # One call, one event -- unchanged. The `while True` this replaces
+        # never went round: its string branch yielded once and broke, and the
+        # branch that looped decoded a packed i64 the WIT binding cannot
+        # return. Multi-event streaming over the component ABI does not exist
+        # yet and did not before.
+        #
+        # An empty response is end-of-stream, and that is now the ONLY thing
+        # it can be: a stop arrives as Err(suspended) and a failure as
+        # Err(failed), so neither reaches here wearing the shape of a
+        # finished stream.
+        if event_json:
             yield _json.loads(event_json)
 
     def plugin_call_typed(

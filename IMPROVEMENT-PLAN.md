@@ -10809,6 +10809,11 @@ Where that stands as of 2026-09-02, one row per SDK:
 Python is the only gap left, and it is not an oversight: its WIT world exports one function and
 it runs through `ExecuteComponentCGo`, which has no defer pass at all. Both are set out below.
 
+> **Corrected 2026-09-04 by §3.110:** the world exports two functions now and
+> `ExecuteComponentCGo` has a defer pass. The remaining Python gap is narrower than this
+> paragraph says — the *kill* path, not the export and not the pass. See the note at the end of
+> the Python subsection below.
+
 #### The shape, established on Rust (#553)
 
 Four pieces per language, and every one of them is needed:
@@ -10863,6 +10868,23 @@ The change is designed and cheap — `export run-deferred: func(args: string) ->
 `run`'s shape so `componentCall` needs no new marshalling, plus a component-path defer pass — and
 was deliberately not shipped: componentize-py is SIGKILLed in the WS-3 sandbox, so it could not
 be built even once, and the WIT change affects every Python build rather than only a test.
+
+> **Both blockers above are gone, and one of the two paths is now wired (§3.110, 2026-09-04).**
+> The world exports `run-deferred: func() -> u32` (`componentDeferRunnerExport`), and
+> `ExecuteComponentCGo` has a defer pass — `componentRunGuestDefersAfterSuspend`, bracketed
+> with `setDeferDrain` like its core-module counterpart. So `grep -rn deferRunnerExport
+> engine/*.go` is no longer the re-derivation to run; use `componentDeferRunnerExport`.
+>
+> **The KILL path is still not wired**, and that is the half this subsection is about. §3.110
+> drains a component guest that *suspended*; a component killed by the execution fence returns
+> through `resourceLimitError` and no drain runs, so the sentence above — "a Python workflow
+> killed by the execution fence still loses its cleanup" — remains true. What has changed is
+> that it is no longer structural: the export exists and the host can reach it. What it needs is
+> the care `runGuestDefersAfterKill` takes after a trap — refuel, a separate budget, and not
+> disturbing the error it is about to return — plus a fixture that actually exhausts the fence
+> with defers registered, which `TestPythonComponentExecutionFence` is the obvious place to
+> grow. Not done in §3.110, deliberately: it is a different path with a different failure mode
+> and it needs its own falsification, not a line added to a passing test.
 
 #### Java: done, and it needed §3.74 first (#556)
 
@@ -11657,6 +11679,11 @@ gone; both tests fail under that mutation.
    and a masked check before the fields are read, plus one test that crosses the boundary; add
    the language to `deferSegmentLanguages` in the same change, which
    `TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified` forces to be deliberate.
+
+   **Python turned out not to be one of these**, and the sentence above is why it looked like
+   it was: it has no result word to decode. It is a Component Model guest, so §3.110 made the
+   stop a case of the WIT return type instead — same fence, same membership test, no sentinel.
+   Three of the four remain.
 2. **`(*execSession).setDeferDrain` is in `scripts/deadcode-baseline.txt`.** It is not test-only:
    it is called from `runGuestDefersAfterSuspend` through an anonymous-interface assertion, which
    the dead-code analyser cannot follow. `Execute` takes `session HostHandler`, so the backend
@@ -14449,6 +14476,11 @@ two options are a sentinel prefix in the string (matching the existing `"__CLEAT
 convention, but re-opening exactly the collision §3.83 exists to record) or changing the WIT so a
 stop is unrepresentable as a response. The second is the right one and is a public-API change.
 
+> **Decided and done: §3.110 took the WIT change.** It also found that the
+> `"__CLEAT_ERROR__:"` convention this paragraph offers as a precedent **has no producer
+> anywhere in the host** — so the "existing convention" was a documented string nothing ever
+> wrote, and the option it argued for would have been a second one of those.
+
 ### 3.109 Three tests ran in no job at all, and the tier-1 gate was building tier-2 toolchains — ✅ **FIXED** (WS-2, 2026-09-03)
 
 **§3.108 (WS-1) already fixed the red this started from**, and correctly: `scripts/tier-gate.sh`
@@ -14571,3 +14603,231 @@ then trying to defeat it is not optional here.
 The engine package is still the biggest thing in every job, and §3.108's 30m plus this item's
 ~300s of headroom bought time rather than solving it. It was at 364s two days ago;
 `TestReplayStressBasic` alone is ~150s. The next crossing wants the package or the job split.
+
+---
+
+### 3.110 A stop was not expressible on the component ABI, and neither was a failure — ✅ **FIXED: the WIT says it in the type, and `python` is in `deferSegmentLanguages`** (WS-2, 2026-09-04)
+
+§3.107 closed with Python "blocked on a decision rather than on effort", and named the two
+options: a sentinel prefix inside the response string, or changing the WIT so a stop is
+unrepresentable as a response. This is the second one, taken.
+
+**Recorded as `tiers.yaml` D9, and that is not bookkeeping.** D2 (2026-08-06) put python at
+tier 1, so `python-sdk/wit/cleat.wit` is part of what this project promises — changing a host
+call's return type there belongs in the decision register, with what was decided, when, and
+what it changes about what the gate enforces. WS-3 made that argument while this was in
+flight and it is the right one; the register entry carries both options, the rejection
+reasoning, and what the decision cost.
+
+#### What was actually broken, which was more than the stop
+
+The WIT declared `durable-call: func(...) -> string` and documented the failure case as *"an
+error string prefixed with `__CLEAT_ERROR__:`"*. The Python SDK checked for that prefix in six
+places. **Nothing in the host has ever written it.** Re-derive:
+
+    grep -rn "CLEAT_ERROR" . --exclude-dir=node_modules --exclude-dir=target --exclude-dir=.git -l
+
+Measured 2026-09-03, that matches three files: `python-sdk/wit/cleat.wit`, the SDK's six checks,
+and this document. No producer. So on the component path:
+
+| | what the guest received |
+|---|---|
+| a **failed** call | the error message, as an ordinary successful response |
+| a **stopped** call | `""`, as an ordinary successful response |
+| the failure's `callErrorCode` | discarded — a timeout and a bad request are the same thing |
+
+The stop had no encoding at all, which is what §3.107 recorded. The failure had one that no
+code implemented, which nobody had noticed, because a defect that only shows up when a call
+fails is invisible for as long as calls succeed.
+
+#### What a Python defer segment did, measured before the change
+
+`engine/python_defer_segment_e2e_test.go` with `python` forced into `deferSegmentLanguages`,
+against `python-sdk/examples/defer_order_workflow.py` — two defers registered, then one call of
+the workflow's own body:
+
+```
+result: {"status": "ok"}   suspended: nil   operations: []
+```
+
+**Worse than §3.83's Go measurement in both directions.** There, the body ran and the segment
+returned a completion result. Here the body's call was refused host-side, the guest read the
+refusal as an empty successful response and carried on, and the two defers were **never run at
+all** — the entry wrapper drained the table itself, inside the segment, where every cleanup call
+was refused too. A terminated workflow reported `done`, with its cleanup consumed. The control
+(`TestPythonOrdinarySegmentRunsTheBody`) recorded `[body second first]` throughout, so this was
+the segment, not the fixture.
+
+#### The type
+
+`python-sdk/wit/cleat.wit` gains one interface and one variant:
+
+```wit
+interface outcomes {
+    variant call-failure {
+        suspended,
+        failed(call-error),
+    }
+    record call-error { code: u32, message: string }
+}
+```
+
+and the eight host calls that can be stopped or can fail return
+`result<string, call-failure>` instead of `string`: the three `durable-call` variants, both
+`durable-child-workflow` starts, both `plugin-call`s, and `fetch`. componentize-py lifts the
+`err` case into a raised `Err`, so **there is no argument to any of them that produces a
+response meaning "the call was stopped"**.
+
+The world changes too. `run` returned a `string`, and a suspension was the literal
+`"__CLEAT_SUSPEND__"`, compared verbatim in `engine/component_cgo.go`. It now returns
+
+```wit
+variant run-outcome { completed(string), suspended }
+```
+
+and the world exports `run-deferred: func() -> u32` — the Component Model counterpart of
+`__cleat_run_deferred` (`componentDeferRunnerExport`). That export is what makes the segment
+work: the host calls it itself, on the same instance, bracketed with `setDeferDrain`, exactly as
+`runGuestDefersAfterSuspend` does for a core module.
+
+**Two cases in `run-outcome`, not three.** There is no `failed`: a workflow body that raises is
+caught by `@cleat_entry` and becomes a completed step carrying an `{"error": ...}` payload, and
+that boundary is load-bearing — an exception that escaped it would cross the ABI as a trap and
+the engine would see a dead guest instead of a failed step. A variant case with no producer is
+worse than no case. This was drafted with three and cut after asking who would build one.
+
+#### After
+
+```
+suspended: non-nil   operations: [second first]   defers_run=2
+```
+
+#### Proved able to fail, four ways, each a different piece
+
+| mutation | result |
+|---|---|
+| the SDK ignores `err(suspended)` | `{"error": "cleat call work.body: [0] CallFailure_Suspended()"}` |
+| the host never calls `run-deferred` | `operations: []` |
+| the drain is not bracketed with `setDeferDrain` | **`defers_run=2`, `operations: []`** |
+| the guest drains on suspension instead | guest trap |
+
+The third is §3.81's destroyed cleanup, reproduced on the component path: the drain ran, the
+host logged that it had run two defers, and **not one of them reached the service**, because
+the table is taken before the first body runs and every call inside it was refused. A log line
+saying `defers_run=2` is not evidence that any cleanup happened.
+
+The first is the argument for the whole change, stated as a measurement. With a bare `string`
+an SDK that mishandles the stop reports success; with the type it **cannot**, because there is
+no ordinary reading of an `Err` to fall into. The mutation's failure is loud even though the
+mutation is the same mistake.
+
+#### The fence outlived the gap it was built for, and nearly went vacuous
+
+`deferSegmentLanguages` now covers **every** language in `WasmtimeLanguages`, which changes
+what `TestADeferSegmentRefusesAGuestThatCannotHearTheStop` is testing. Its loop used to run
+over the SDKs that could not hear the stop; with none left, the loop is empty — and a `for`
+over an empty slice is a test that passes because it did nothing. That is the same vacuity
+§3.83 records this file's *other* guard having already been caught by once.
+
+So the loop takes its languages from `unverifiedDeferSegmentLanguages()`, which cannot yield
+nothing: the real difference when there is one, and a synthetic language otherwise. The fence's
+job has changed from "these four cannot hear the stop" to "a sixth language must earn its way
+onto the list", and a guest declaring a language nothing has verified is exactly what it has to
+refuse — `wasm.DetectLanguage` returns the guest's own metadata verbatim (§3.83), so a module
+can declare anything.
+
+**Writing that immediately caught the wrong layer, which is why it is worth recording.** The
+synthetic language failed at `resolveBackend` — *"no WASM backend registered for guest language
+`nolang`"* — one layer **above** the fence, so the test would have been asserting that #503's
+fail-closed routing works rather than that the defer-segment fence does. Its own "the error must
+name the language and say the segment was refused" guard is what reported this instead of
+passing. The test now registers a backend for the synthetic language so the fence is the only
+thing that can refuse it. CLAUDE.md's "watch which layer is holding the test up", in the space
+of one edit.
+
+#### The mechanism, not eight edits
+
+`TestEveryWitCallOutcomeHasADispatcherThatBuildsOne` (engine) parses `cleat.wit` for the
+functions typed `result<string, call-failure>`, walks `witTypeMap` → the `cbType` switch → the
+dispatcher, and asserts it builds one. **Both directions**, because widening a dispatcher
+without widening the WIT is the same defect from the other side. Falsified three ways: reverting
+`dispatchFetch` to `setResultString`, narrowing `fetch` in the WIT, and widening
+`dispatchPollSignal` while its WIT function still says `string`.
+
+The dispatchers construct a `wasmtime_component_val_t` by hand, so a mismatch here compiles,
+links, and produces a value of the wrong shape at the canonical ABI boundary — the class
+CLAUDE.md names.
+
+#### Two smaller things found on the way
+
+**`run_deferred` had the AssemblyScript shape (§3.106) waiting for it.** A defer body that
+suspends mid-drain re-raised, abandoning the cleanups after it — which are already off the
+table, so they never run at all. That was *correct* for the guest's own drain, where a
+suspension has to win over the result, and wrong for the host's, where there is no result left
+to protect. `run_deferred(propagate_suspend=False)` is what the `run-deferred` export passes.
+Pinned by `test_the_hosts_drain_is_not_stopped_by_a_suspending_body`, falsified by removing the
+flag check.
+
+**The checked-in bindings in `python-sdk/cleat_sdk/_wit/` were stale**, and in the direction
+that misleads: their `WitWorld.run` still declared the pointer-based
+`(args_ptr, args_len, out_ptr, max_out_len) -> int` signature that the WIT stopped using long
+ago, and `durable_cron.py` was missing entirely. Nothing imports them — `wit_world` comes from
+componentize-py inside the component — so the staleness was invisible. Regenerated.
+
+#### What this does not do
+
+* **`durable-call-heartbeat` is typed with the others but cannot return `suspended`**, because
+  the host's `DurableCallWithHeartbeat` (engine/heartbeats.go) does not consult
+  `stopBeforeNewWork` at all. That is a **host-side gap on every SDK**, not a component one:
+  a defer segment can start a fresh heartbeat call on a Go guest today too. WS-1 has it as
+  §3.111 (#672), and that PR must also correct this bullet's tense on its rebase, because
+  everything above is present tense and stops being true when it lands.
+
+  **It is the EIGHTH such path, and this bullet said "sixth" until WS-1 re-derived it.**
+  Seven methods consult `stopBeforeNewWork` today: `childWorkflowWithVersion`, `DurableCall`,
+  `DurableCallWithRetry`, `Fetch`, `PluginCall`, `PluginCallStreaming` and
+  `DurableAwaitSignals`. "Sixth" came from §3.84's table, which has six rows — and the rows
+  are not the methods.
+
+  **Three counts differ here and any sentence about this has to say which one it means.**
+  §3.84's table has 6 rows; there are 7 methods, because it merges `ChildWorkflow` and
+  `ChildWorkflowWithOptions` into one row; and there are 8 entry points, because
+  `childWorkflowWithVersion` is one method serving both. §3.104 then added `Fetch` after that
+  table was written, which the table does not show. This document now uses the METHOD count.
+
+  Re-derive, and note the `-v` that the obvious command is missing:
+
+      grep -rn "stopBeforeNewWork()" engine/*.go | grep -v _test | grep -v "func (s \*execSession) stopBeforeNewWork"
+
+  Without the last filter the definition matches its own scan and the total reads one high.
+  Both of us hit that; WS-1 caught it by reading the list rather than the total, which is the
+  only reliable way — a count is exactly the thing that cannot tell you it included itself.
+* **`durable-await-signals` is untouched**, and it is the one host call whose WIT signature is
+  still a core-module ABI in disguise: `(names, timeout-ms, sig-name-ptr, sig-name-max-len,
+  payload-ptr, payload-max-len) -> u64`. Those pointers address the guest's linear memory and
+  the component dispatch writes into a *host* buffer, so the Python SDK reads whatever was at
+  `OUTPUT_OFFSET` — this call has never worked on a component and does not now. It needs the
+  same treatment (a `record` result, not out-params), which is a change to signal handling
+  rather than to this boundary.
+* **Ownership of a callback's result values is still an open question, and the first draft of
+  this bullet got the consequence wrong.** It said the new constructors' use of the C allocator
+  was "correct under either reading". It is not, and WS-1's review caught it: under the reading
+  where wasmtime runs `wasmtime_component_val_delete` over callback results, malloc'd storage
+  is correct and static storage would be a `free()` of a string literal; under the reading
+  where it does not, malloc'd storage **leaks**, once per host call. Nothing in `engine/` ever
+  calls that function — the only occurrences are in the vendored `val.h` — so the choice is a
+  deliberate preference for the leak over the crash, not a choice that is safe both ways. The
+  same applies in the other direction to the `run-outcome` this path reads back, which is the
+  highest-frequency instance: one lifted string per completed workflow.
+
+  The exposure is inherited rather than introduced: `setResultString` has had the same
+  `C.CString` since long before this file. What changed is how many paths carry it. Nothing
+  bounds it today, and settling it needs a measurement rather than a reading of the header.
+
+* **Two `malloc` returns were unchecked, and one failure mode was worse than a crash.** Also
+  from WS-1's review. `cleat_dup` returning NULL reached wasmtime as
+  `discriminant.data = NULL` alongside `discriminant.size = 9` — a nine-byte read from address
+  zero inside wasmtime's own lowering, rather than a clean stop at the allocation. Both sites
+  `abort()` now. The callback has no way to *report* an allocation failure — its error channel
+  is a `wasmtime_error_t` it would also have to allocate — so the only real choice was where
+  the failure becomes visible.

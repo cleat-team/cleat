@@ -17,17 +17,68 @@ from componentize_py_types import Result, Ok, Err, Some
 
 
 
+@dataclass
+class RunOutcome_Completed:
+    value: str
+
+
+@dataclass
+class RunOutcome_Suspended:
+    pass
+
+
+RunOutcome = Union[RunOutcome_Completed, RunOutcome_Suspended]
+"""
+What the guest did with the segment.
+
+A suspension used to be the literal string ``__CLEAT_SUSPEND__``
+returned from ``run``, compared verbatim in engine/component_cgo.go.
+The core-module SDKs signal one out of band -- Go panics, Java throws,
+Rust returns an ``Err``, AssemblyScript sets a flag -- and none of them
+can be confused with a result. This makes the component path say it in
+the type too.
+Two cases, not three: there is no ``failed``, and that is deliberate.
+
+A workflow body that raises is caught by the SDK's entry wrapper and
+turned into a completed step carrying an ``{"error": ...}`` payload.
+That boundary is load-bearing -- an exception that escaped it would
+cross the ABI as a trap and the engine would see a dead guest instead
+of a failed step -- so a ``failed`` case here would either duplicate it
+or invite someone to change what it means. A variant case with no
+producer is worse than no case.
+"""
+
+
+
 class WitWorld(Protocol):
 
     @abstractmethod
-    def run(self, args_ptr: int, args_len: int, out_ptr: int, max_out_len: int) -> int:
+    def run(self, args: str) -> RunOutcome:
         """
         Main workflow entry point.
         
-        ``args-ptr`` / ``args-len`` point to the serialised input in linear
-        memory.  ``out-ptr`` / ``max-out-len`` describe the output buffer.
-        Returns a packed i64: bits 0-31 = error code, bits 32-63 = output
-        length written.
+        ``args`` is the serialised workflow input JSON. The canonical ABI
+        handles lifting/lowering the string through linear memory.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def run_deferred(self) -> int:
+        """
+        Drain the guest's defer table and report how many bodies ran.
+        
+        The host calls this itself, on the SAME instance, after ``run``
+        returns ``suspended`` during a defer segment. That is not a detail: the
+        host brackets this call so the defer bodies' own durable calls are
+        permitted while the workflow body's are stopped
+        (``setDeferDrain``, engine/backend_wasmtime.go). A guest that drained
+        its own table on the way out would have every cleanup call refused --
+        and because the table is taken before the first body runs, that
+        CONSUMES the cleanup rather than skipping it: the lock stays held and
+        the registration is gone. Measured in IMPROVEMENT-PLAN 3.81.
+        
+        This is the Component Model counterpart of the core-module
+        ``__cleat_run_deferred`` export (``deferRunnerExport``).
         """
         raise NotImplementedError
 

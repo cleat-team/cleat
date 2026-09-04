@@ -31,8 +31,39 @@ from typing import Any, get_type_hints
 from .defer import run_deferred
 from .host_calls import HostCalls, SuspendSentinel
 
-# String sentinel for workflow suspension (matches Go side check).
-SUSPEND_SENTINEL_STR = "__CLEAT_SUSPEND__"
+try:
+    from wit_world import RunOutcome_Completed, RunOutcome_Suspended
+except ImportError:  # not running in WASM -- see host_calls._USING_WASM
+
+    class RunOutcome_Completed:  # type: ignore[no-redef]
+        """Stand-in for the generated binding outside the WASM runtime."""
+
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    class RunOutcome_Suspended:  # type: ignore[no-redef]
+        """Stand-in for the generated binding outside the WASM runtime."""
+
+
+class _Suspended:
+    """What the entry wrapper returns when the workflow did not finish.
+
+    A singleton object rather than the string ``"__CLEAT_SUSPEND__"``, which
+    is what this used to be and what engine/component_cgo.go compared the
+    ``run`` export's result against verbatim. That comparison is gone -- a
+    suspension is a case of ``run-outcome`` now (wit/cleat.wit) -- and with it
+    the reason to spell one as text. An object cannot be produced by
+    ``json.dumps`` of anything a workflow returns, which is a stronger
+    statement than "no workflow has returned that string yet".
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<cleat: workflow suspended>"
+
+
+SUSPENDED = _Suspended()
 
 
 # ---------------------------------------------------------------------------
@@ -209,8 +240,8 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
     # Store this wrapper keyed by entry name.
     module._cleat_entry_wrappers[entry_name] = export_wrapper
 
-    def _dispatcher_run(args_str: str) -> str:
-        """WitWorld.run dispatcher -- selects the right entry and delegates."""
+    def _select(args_str: str) -> Any:
+        """Select the right entry wrapper and delegate to it."""
         wrappers = module._cleat_entry_wrappers
         if not wrappers:
             raise RuntimeError("No cleat_entry functions registered")
@@ -239,8 +270,43 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
         modified_json = json.dumps(input_data)
         return wrapper(modified_json)
 
-    wrapped = staticmethod(_dispatcher_run)
-    module.WitWorld = type("WitWorld", (), {"run": wrapped})
+    def _dispatcher_run(args_str: str) -> Any:
+        """WitWorld.run -- the world's entry point, returning a ``run-outcome``.
+
+        The conversion from the wrapper's Python-level result to the WIT
+        variant happens HERE and nowhere else, so ``export_wrapper`` keeps
+        returning a plain JSON string and every test that calls a decorated
+        workflow directly keeps working.
+        """
+        out = _select(args_str)
+        if out is SUSPENDED:
+            return RunOutcome_Suspended()
+        return RunOutcome_Completed(out)
+
+    def _dispatcher_run_deferred() -> int:
+        """WitWorld.run-deferred -- the HOST's drain of the defer table.
+
+        Reached only after ``run`` returned ``suspended`` during a defer
+        segment, and only because the host calls it: the guest deliberately
+        does not drain on suspension. The host brackets this call so the defer
+        bodies' own durable calls go through while the workflow body's are
+        stopped, which is the whole reason the drain is a separate export
+        rather than something the wrapper does on its way out.
+
+        ``propagate_suspend=False`` because there is no result left to protect
+        and the bodies are already off the table -- see run_deferred's
+        docstring for the two drains and why they differ.
+        """
+        return run_deferred(propagate_suspend=False)
+
+    module.WitWorld = type(
+        "WitWorld",
+        (),
+        {
+            "run": staticmethod(_dispatcher_run),
+            "run_deferred": staticmethod(_dispatcher_run_deferred),
+        },
+    )
 
 
 def cleat_entry(name: str | None = None) -> Callable:
@@ -384,7 +450,7 @@ def cleat_entry(name: str | None = None) -> Callable:
                 # continue still holds. The final segment replays the entry
                 # point, re-registers the same defers, and runs them when it
                 # completes.
-                return SUSPEND_SENTINEL_STR
+                return SUSPENDED
 
             # Deliberate, and load-bearing: this is the workflow error
             # boundary. Everything the user's workflow body can raise has to
@@ -402,7 +468,7 @@ def cleat_entry(name: str | None = None) -> Callable:
                 try:
                     run_deferred()
                 except SuspendSentinel:
-                    return SUSPEND_SENTINEL_STR
+                    return SUSPENDED
                 return json.dumps({"error": str(exc)})
 
         # Mark the wrapper for introspection tooling.

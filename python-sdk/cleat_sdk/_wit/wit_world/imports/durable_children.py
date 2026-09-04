@@ -3,32 +3,42 @@
 """
 Child workflow spawn and await operations.
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
 
 
 
 def durable_child_workflow(name: str, input: str) -> str:
     """
     Start a child workflow instance (async).
+    Returns the child run ID string.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError
 def durable_await_child(run_id: str) -> str:
     """
     Wait for a single child workflow to complete.
+    Returns the child result JSON string.
     """
     raise NotImplementedError
 def durable_await_all_children(run_ids_json: str) -> str:
     """
     Wait for multiple child workflows to complete (batch).
+    Returns the combined results JSON string.
     """
     raise NotImplementedError
-def durable_child_workflow_with_options(
-    name: str,
-    input: str,
-    version: int,
-    priority: int,
-    parent_close_policy: str,
-) -> str:
+def durable_child_workflow_with_options(name: str, input: str, version: int, priority: int, parent_close_policy: str) -> str:
     """
     Start a child workflow with version, priority, and parent-close-policy options.
+    Returns the child run ID string.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError

@@ -72,7 +72,7 @@ def register_defer(defer_id: str, fn: Callable[[], None]) -> None:
     _DEFERS.append((defer_id, fn))
 
 
-def run_deferred() -> int:
+def run_deferred(*, propagate_suspend: bool = True) -> int:
     """Run registered defer bodies in LIFO order; return how many ran.
 
     The table is drained BEFORE the first body runs, which makes this
@@ -84,10 +84,28 @@ def run_deferred() -> int:
     so running them in registration order unwinds the workflow inside-out.
 
     An exception in one body does not stop the others and does not disturb the
-    workflow's result, which is already decided by the time this runs. The one
-    exception is ``SuspendSentinel``, which is not an error: it propagates so
-    the entry wrapper sees it and the segment suspends. Swallowing it would
-    complete a workflow the host has already recorded as suspended.
+    workflow's result, which is already decided by the time this runs.
+
+    ``SuspendSentinel`` is the one that depends on WHO is draining, which is
+    what *propagate_suspend* selects:
+
+    * The **guest** drains at the end of a workflow that finished
+      (``@cleat_entry`` step (e)). A body that suspends there has to win over
+      the result: the host has recorded a suspension, and completing anyway
+      reports a workflow that is still running as done. So it propagates --
+      the default.
+    * The **host** drains a workflow that has already suspended, through the
+      ``run-deferred`` export. There is no result left to lose, and the
+      remaining bodies have already been taken off the table -- propagating
+      would consume them without running them, which is the destroyed cleanup
+      IMPROVEMENT-PLAN 3.81 measured and 3.106 found again in the
+      AssemblyScript SDK. So the drain carries on, and the caller passes
+      ``propagate_suspend=False``.
+
+    Rust's ``run_deferred`` makes the second choice unconditionally and has no
+    flag, because its host calls return the stop as an ``Err`` a defer body
+    can ignore. Python's arrives as an exception, so it has to be caught
+    somewhere, and this is the only place that knows which drain is running.
     """
     global _DEFERS, _IN_DEFER_PHASE
     taken = _DEFERS
@@ -104,7 +122,8 @@ def run_deferred() -> int:
             try:
                 fn()
             except SuspendSentinel:
-                raise
+                if propagate_suspend:
+                    raise
             except Exception:  # noqa: BLE001 - one bad cleanup must not stop the rest
                 pass
         return ran

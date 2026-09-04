@@ -804,6 +804,22 @@ Core class wrapping all 36 WASM host function imports. Each method handles the p
 - `RetryPolicy(max_attempts, initial_interval_ms, backoff_coefficient, max_interval_ms, non_retryable_errors)` — for `cleat_call_with_retry`
 - `SuspendSentinel` — exception raised to signal workflow suspension
 - `TerminalError` — exception raised from a saga step to trigger immediate compensation (non-retryable)
+- `CleatCallError` — raised when a durable call fails, with `CleatCallTimeoutError`,
+  `CleatCallTransientError` and `CleatCallPermanentError` selected by the host's error code
+
+#### A failed call raises; it does not come back as a response
+
+`call`, `call_with_retry`, `call_with_heartbeat`, `child_workflow`,
+`child_workflow_with_options`, `plugin_call` and `plugin_call_streaming` return
+`result<string, call-failure>` in `wit/cleat.wit`, which the generated bindings lift into
+"return the response, or raise". So a failure reaches you as a `CleatCallError`, and the
+engine stopping your workflow reaches you as `SuspendSentinel` — neither can arrive as a
+string, whatever the service on the other end returns.
+
+This changed in IMPROVEMENT-PLAN 3.110. Before it, these returned a bare `string`, and both
+cases arrived as ordinary successful responses: a failure as the error text, and a stop as
+`""`. **If your workflow inspected a response for an error marker, delete that check** — the
+`"__CLEAT_ERROR__:"` prefix the SDK looked for had no producer in the host and never appeared.
 
 ### Saga
 
