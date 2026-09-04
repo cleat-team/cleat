@@ -1,73 +1,116 @@
 #!/usr/bin/env bash
-# A workflow that runs on push must not cancel its own runs.
+# A workflow that runs on push must not discard its own runs -- by cancelling
+# them, or by queueing them where a later push will cancel them for it.
 #
 # WHY THIS IS A GUARD AND NOT A CONVENTION. `github.ref` is refs/heads/develop
-# for every merge, so a workflow with
+# for every merge, so a workflow whose concurrency group is keyed on it puts
+# consecutive merges into one group. There are then TWO ways the merge's own
+# verification is thrown away, and this script checks for both, because the
+# first version of it checked only the first and 11 runs were lost anyway.
+#
+#   1. cancel-in-progress: true -- a later merge kills a running one outright.
+#
+#   2. A shared group at all. GitHub allows one *pending* run per group, so
+#      when a third push arrives at an occupied group, the one waiting is
+#      cancelled before it starts. `cancel-in-progress: false` does not
+#      prevent this: it governs the running run, not the queued one.
+#
+# (2) is not theoretical and is not rare. Measured on develop between 14:20 and
+# 00:57 on 2026-09-03, after (1) had been fixed in #634, 11 of 36 `Tier 1 Gate`
+# push runs were cancelled -- each with zero jobs, killed within seconds of the
+# next merge:
+#
+#   gh run list --workflow="Tier 1 Gate" --branch develop --event push \
+#     --limit 60 --json conclusion,createdAt
+#   gh run view <cancelled-id> --json jobs --jq '.jobs | length'   # 0
+#   gh run view <success-id>   --json jobs --jq '.jobs | length'   # 1
+#
+# The fix for both is to give each push its own group and keep cancellation
+# scoped to pull requests, where it is genuinely wanted:
 #
 #     concurrency:
-#       group: ${{ github.workflow }}-${{ github.ref }}
-#       cancel-in-progress: true
+#       group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+#       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 #
-# puts consecutive merges in one group and lets each cancel the one before it.
-# The merge's own verification is discarded, and `cancelled` is not `success` --
-# nothing downstream reads it as a failure, so it disappears silently.
-#
-# That matters most for the checks whose entire subject is the merge. The plan
-# section-number guard exists to catch collisions that "exist only in the merge"
-# (see the comment on its step in ci.yml). It cannot see them from a pre-merge
-# base by construction, so the post-merge run is the only place it can -- and
-# that is exactly the run being cancelled. Measured 2026-09-03: three develop
-# runs cancelled and two failed unnoticed while duplicate section numbers sat on
-# develop for two hours.
-#
-# The fix is to scope the cancellation to pull requests, where it is genuinely
-# wanted (pushing twice to a branch should not run the suite twice):
-#
-#     cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-#
-# Re-derive what this checks:
-#   grep -l 'push:' .github/workflows/*.yml | xargs grep -l 'cancel-in-progress: true'
+# Re-derive what this reads:
+#   grep -l 'push:' .github/workflows/*.yml
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-bad=()
+bad_cancel=()
+bad_group=()
 scanned=0
+with_concurrency=0
+
 for f in .github/workflows/*.yml; do
     # Only workflows that run on push are affected; a pull_request-only
-    # workflow cancelling itself is correct.
+    # workflow sharing and cancelling its own group is correct.
     grep -qE '^\s*push:' "$f" || continue
     scanned=$((scanned + 1))
+
     if grep -qE '^\s*cancel-in-progress:\s*true\s*$' "$f"; then
-        bad+=("$f")
+        bad_cancel+=("$f")
     fi
+
+    # No concurrency block means no group, so no queue and nothing to discard.
+    grep -qE '^concurrency:' "$f" || continue
+    with_concurrency=$((with_concurrency + 1))
+
+    # The group must vary per commit on a push. github.sha and github.run_id
+    # both do; github.ref alone does not.
+    group=$(grep -E '^\s*group:' "$f" | head -1)
+    case "$group" in
+        *github.sha*|*github.run_id*) ;;
+        *) bad_group+=("$f") ;;
+    esac
 done
 
 # A scan that matched nothing would pass no matter what the workflows said --
 # the same vacuous-pass failure the rest of this repo's guards are shaped
-# against. There are push-triggered workflows; if this finds none, the glob or
-# the grep is broken rather than the tree being clean.
+# against. Both counts are negative controls: there are push-triggered
+# workflows, and they do declare concurrency. If either reads zero, this script
+# is looking at the wrong thing rather than the tree being clean.
 if [ "$scanned" -eq 0 ]; then
     echo "ERROR: no push-triggered workflows found in .github/workflows/." >&2
     echo "This guard is reading the wrong files and would pass whatever they said." >&2
     exit 1
 fi
+if [ "$with_concurrency" -eq 0 ]; then
+    echo "ERROR: no push-triggered workflow declares a concurrency block." >&2
+    echo "The group check below matched nothing and would pass whatever they said." >&2
+    exit 1
+fi
 
-if [ ${#bad[@]} -gt 0 ]; then
-    echo "ERROR: these workflows run on push and cancel their own runs:" >&2
-    printf '    %s\n' "${bad[@]}" >&2
+fail=0
+
+if [ ${#bad_cancel[@]} -gt 0 ]; then
+    echo "ERROR: these workflows run on push and cancel their own running runs:" >&2
+    printf '    %s\n' "${bad_cancel[@]}" >&2
+    fail=1
+fi
+
+if [ ${#bad_group[@]} -gt 0 ]; then
+    echo "ERROR: these workflows run on push and share one concurrency group across pushes:" >&2
+    printf '    %s\n' "${bad_group[@]}" >&2
+    echo >&2
+    echo "GitHub keeps at most one pending run per group, so the next merge cancels" >&2
+    echo "the queued one before it starts -- with zero jobs, and 'cancelled' is not" >&2
+    echo "'success'. cancel-in-progress: false does not prevent this." >&2
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
     cat >&2 <<'MSG'
 
-github.ref is refs/heads/develop for every merge, so consecutive merges share
-one concurrency group and each cancels the previous one. The merge's own
-verification is discarded, and `cancelled` is not `success`.
+Key the group on the commit for pushes, and keep cancellation for PRs:
 
-Scope it to pull requests instead:
-
+    group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
     cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 MSG
     exit 1
 fi
 
-echo "OK: $scanned push-triggered workflows, none cancels its own runs."
+echo "OK: $scanned push-triggered workflows ($with_concurrency with a concurrency group);"
+echo "    none cancels a running run, none shares a group across pushes."
