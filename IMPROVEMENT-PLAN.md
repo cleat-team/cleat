@@ -15945,7 +15945,7 @@ covered 8 calls and was read as covering all 53.
 
 ---
 
-### 3.300 The boundary inventory — 🔷 **C1 DELIVERED, C2 RANKED** (WS-3, 2026-09-04)
+### 3.400 The boundary inventory — 🔷 **C1 DELIVERED, C2 RANKED** (WS-3, 2026-09-04)
 
 WORKSTREAM.md's C1: *"enumerate the boundaries: host↔guest ABI (5 SDKs × ~60 calls),
 store↔dialect, doc↔code. A table with a row per boundary and a column for 'guarded by'."*
