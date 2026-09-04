@@ -105,6 +105,19 @@ func TestEverySDKCoversEveryHostStopSite(t *testing.T) {
 
 		exempt := map[string]string{}
 		for _, e := range sdkStopSiteExemptions[sdk.name] {
+			// Checked here rather than in a test of its own. A separate test
+			// would have nothing to assert when no exemptions are declared, and
+			// the natural way to write that is a t.Skip -- which is a pass
+			// wearing a skip's clothing, and which scripts/check-skips.sh
+			// rejects for exactly that reason. Reading them where they are
+			// consumed has no vacuous case: no exemptions, no iterations, and
+			// the coverage assertion below is what carries the meaning.
+			if len(e.why) < 40 {
+				t.Errorf("%s: the exemption for %q gives %d characters of reason.\n\n"+
+					"Every finding this family of guards has produced came from writing down "+
+					"why an exemption was safe; a reason too short to state the mechanism is "+
+					"the exemption going unexamined.", sdk.name, e.hostSite, len(e.why))
+			}
 			if !sites[e.hostSite] {
 				t.Errorf("%s: exemption names host site %q, which is no longer a stop site. "+
 					"A stale exemption excuses something that is not there.", sdk.name, e.hostSite)
@@ -135,28 +148,5 @@ func TestEverySDKCoversEveryHostStopSite(t *testing.T) {
 
 		t.Logf("%s: %d entries covering %d of %d host stop sites (%d exempt)",
 			sdk.name, len(sdk.calls), len(covered), len(sites), len(exempt))
-	}
-}
-
-// TestTheSDKExemptionsAreNamedAndReasoned keeps the exemption table from
-// becoming a place to put things. A reason that is empty, or that a reader
-// cannot act on, is the shape a comment takes when nobody is checking it.
-func TestTheSDKExemptionsAreNamedAndReasoned(t *testing.T) {
-	if len(sdkStopSiteExemptions) == 0 {
-		t.Skip("no exemptions declared")
-	}
-	for sdk, exs := range sdkStopSiteExemptions {
-		for _, e := range exs {
-			if e.hostSite == "" {
-				t.Errorf("%s: an exemption names no host site", sdk)
-			}
-			if len(e.why) < 40 {
-				t.Errorf("%s: the exemption for %q gives %d characters of reason.\n\n"+
-					"Every finding this family of guards has produced came from writing "+
-					"down why an exemption was safe; a reason too short to state the "+
-					"mechanism is the exemption going unexamined.",
-					sdk, e.hostSite, len(e.why))
-			}
-		}
 	}
 }

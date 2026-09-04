@@ -12689,6 +12689,14 @@ Plus five more: an entry naming a non-site, a stale exemption (covered *and* exe
 exemption naming a non-site, an entry with an empty host site, and a reason too short to state a
 mechanism.
 
+**The reason-quality check lives inside the coverage loop, and the first draft put it in a test of
+its own.** That test had nothing to assert when no exemptions are declared, and the natural way to
+write that is `t.Skip("no exemptions declared")` — which `scripts/check-skips.sh` rejected in CI,
+correctly: a skip is indistinguishable from a pass, and this one fired in exactly the vacuous case.
+Reading the exemptions where they are *consumed* has no vacuous branch at all — no exemptions
+means no iterations, and the coverage assertion is what carries the meaning either way. The guard
+caught a test-shape defect, not a naming problem.
+
 **Three of those seven do diagnosis work rather than detection work, and this was checked rather
 than assumed.** Deleting the "names a host site that is not one" assertion and re-running its
 mutation still fails — through the coverage assertion, with a worse message (`the host can refuse
