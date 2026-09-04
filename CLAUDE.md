@@ -239,6 +239,42 @@ a third", in the direction that flattered the finding — which is why it was no
 from a queue — can only produce runs with zero jobs, and six of the eleven had one job. A number
 that supports your conclusion is the one to re-derive, not the one to keep.
 
+**And `grep` in an interactive shell here is not the `grep` your script gets.** It is a shell
+function wrapping **ugrep 7.5.0**; a script with `#!/usr/bin/env bash` gets `/usr/bin/grep` (BSD),
+and CI gets GNU grep. Confirm with `type grep`, which reports the function, then `grep --version`.
+
+Two independent divergences, both measured 2026-09-04, same directory and same `LANG`:
+
+**1. `-c` combined with `-o` means different things.** ugrep counts *matches*, BSD grep counts
+*lines*. On `§[0-9]+\.[0-9]+` over `IMPROVEMENT-PLAN.md`:
+
+| | ugrep | BSD |
+|---|---|---|
+| `grep -oE ... \| wc -l` | 819 | 819 |
+| `grep -cE ...` | 731 | 731 |
+| `grep -coE ...` | **819** | **731** |
+
+The pattern is not the problem and neither tool is wrong; `-co` is simply underspecified. Write
+`-o \| wc -l` when you mean matches and `-c` when you mean lines, and never combine them. No
+tracked script or doc currently does (`grep -rn 'grep -[a-z]*c[a-z]*o\b' --include='*.sh'`).
+
+**2. A multibyte character inside a bracket expression parses differently.** On
+`IMPROVEMENT[- ]PLAN[^§0-9]{0,3}§?[0-9]+\.[0-9]+` over `--include='*.go'`: ugrep **399**,
+`/usr/bin/grep` **1379**, Python `re` **1379**. The interactive tool is the outlier, which is the
+wrong way round — every number derived by hand is measured with the one that disagrees.
+
+Plain-ASCII patterns were checked rather than assumed, and agree: `^### [0-9]+\.[0-9]+ `,
+`^\| [0-9]+\.[0-9]+ \|`, and a `✅|FIXED|DONE` alternation all return identical counts under both.
+
+So the rule above — write the command that re-derives the number — needs one more clause: **run it
+the way the reader will run it.** For any pattern with non-ASCII or `{n,m}`, check it under
+`bash -c '...'` before writing the number down, or compute it in Python, whose `re` is the same
+everywhere. A guard that greps for something exotic should not be a shell script at all.
+
+This surfaced as a script reporting 1627 citations where the identical pipeline pasted into the
+terminal reported 546 — and neither was right. A survey in Python found 2354, because the pattern
+missed four of the six forms a citation actually takes. Three tools, three answers, one command.
+
 **One PR, one thing.** Every PR that bundled a second concern was harder to review than the two
 would have been apart.
 
