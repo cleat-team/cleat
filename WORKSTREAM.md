@@ -153,7 +153,7 @@ that removes its own future friction.**
 |---|---|---|
 | A1 | `skip-budget.txt` total becomes derived from per-test declarations | ~~done (#696)~~ `skip-budget.txt` is deleted; budgets are summed from `scripts/skip-ledger.tsv`, one line per reason |
 | A2 | per-stream section blocks (R2), enforced | ~~done~~ `check-section-numbers.sh` rejects any 3.x number outside every block, with a `--self-test` negative control; `next-section-number.sh` hands each stream its next free number |
-| A3 | archive closed sections out of `IMPROVEMENT-PLAN.md` (R3) | plan holds open items; every `§N.M` cited from code or docs still resolves — verified by a reference check, not by eye |
+| A3 | archive closed sections out of `IMPROVEMENT-PLAN.md` (R3) | ~~done~~ 139 of 157 sections moved to `IMPROVEMENT-PLAN-CLOSED.md`; plan 16,236 → 3,179 lines. Every number keeps a stub, so all citations still resolve (checked in Python, 0 unresolvable). Re-run `scripts/archive-closed-sections.py` as items close. |
 | A4 | retire `PARALLEL-WORKSTREAMS.md`, `WS2-STATUS.md`, `WS3-STATUS.md` into this file (R5) | one coordination file |
 
 A1 and A2 first: they are what let A3 and the other streams proceed without conflicts.
