@@ -79,8 +79,29 @@ packages/*/node_modules/
 ports-round2/*/package-lock.json
 ports-round2/*/dist/
 
-# Generated WASM binaries in examples
-examples/*/dist/*.wasm
+# Build output in examples. `npm run build` regenerates all of dist/, so
+# tracking any of it makes the tree dirty after a build -- and the AS end-to-end
+# test in engine/as_workflow_e2e_test.go RUNS that build, so `go test ./engine/`
+# was enough to do it.
+#
+# This rule used to be `examples/*/dist/*.wasm`, which covered the artifact the
+# READMEs actually name (`cleat deploy as-workflow dist/workflow.stamped.wasm`)
+# and left AssemblyScript's generated glue tracked. Four files, workflow.js and
+# workflow.d.ts in two examples, none of them read by anything:
+#
+#   grep -rn "as-workflow/dist" --include="*.go" --include="*.md" .   # no hits
+#
+# They were also STALE -- the committed workflow.js disagreed with what the
+# pinned toolchain produces, and the build is deterministic (two runs
+# byte-identical), so the difference was age, not nondeterminism. A committed
+# artifact that nothing reads and that does not match its own lockfile's output
+# is worse than an absent one: a reader takes it for the real thing.
+#
+# The same lesson is recorded 100 lines below for the asworkflow test fixture,
+# where only dist/workflow.wasm is a fixture and the stamped copy is ignored
+# "because left untracked it makes the tree dirty after any asworkflow build".
+# This is that case again, one directory over.
+examples/*/dist/
 
 # Cloned source repos (not our work product)
 ports-round2/dbos-demo-apps/
