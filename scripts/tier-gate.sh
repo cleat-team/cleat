@@ -15,7 +15,7 @@
 # column is the reliable half and is reproducible to the test, while the wall clock that
 # used to be quoted here no longer separates the two cases (see CLAUDE.md, "Is this result
 # real?"). Nothing in a green result can tell those two runs apart, which is why tier 1
-# checks the DSNs up front rather than inferring anything from one.
+# asserts the connection up front rather than inferring anything from one.
 #
 # Usage:
 #   scripts/tier-gate.sh            enforce (exit non-zero on failure or skip)
@@ -74,6 +74,51 @@ for d in $DIALECTS; do
       note "  $d: $one is set"
     fi
   done
+done
+
+# --- 2a1. ...and every one of them must actually CONNECT ----------------------------
+# A DSN that is SET but wrong is indistinguishable from one that works, by every signal
+# this script had until now. Setting the variable is what stops a test skipping;
+# connecting is a separate question, and neither the skip count nor the wall clock asks
+# it -- those tests fail on connect instead of skipping.
+#
+# Measured 2026-09-03, reconstructing the three DSNs from memory instead of reading
+# WS3-STATUS.md: wrong database name, wrong passwords on MySQL and MSSQL. The run produced
+# a clean monotonic-looking result -- skips falling 876 -> 581 -> 4 across no-DSN /
+# postgres-only / all-three, with the final 4 matching the table above EXACTLY. It was 1086
+# connection failures. The matching 4 read as corroboration.
+#
+# The loop above would have passed all three. This is what it costs to find out otherwise:
+# without the probe the gate discovers it 4779 tests and ~18 minutes later, as a wall of
+# failures that mean "nobody could connect" and are indistinguishable from real ones in the
+# summary line -- the same shape as the CLEAT_CRASH_DB precondition below, and the specific
+# failure mode this whole script exists to prevent.
+#
+# TestTenantSelfAccess is the probe because it already does exactly this: forEachBackend
+# calls backend.Setup(t) for every registered dialect, and Setup pings and Fatals rather
+# than skipping. Measured: ~1s with all three reachable, and 0.9s to fail naming the
+# dialect when one password is wrong.
+#
+# Asserting a PASS PER DIALECT rather than the exit code is the point. forEachBackend SKIPS
+# a backend whose Enabled() is false, and a skipped subtest leaves `go test` printing ok --
+# so an exit-code check here would be a green that measured nothing, in the script whose
+# entire job is to refuse those.
+note "checking that each tier-1 dialect accepts a connection"
+PROBE=$(cd "$REPO_ROOT" && go test ./engine/ -run '^TestTenantSelfAccess$' -count=1 -v 2>&1)
+for d in $DIALECTS; do
+  if echo "$PROBE" | grep -q -- "--- PASS: TestTenantSelfAccess/$d"; then
+    note "  $d: connected"
+  else
+    fail "$d: no connection was made. TestTenantSelfAccess/$d did not pass, so this dialect
+       refused the connection, or was never registered, or skipped -- and a skip here leaves
+       \`go test\` exiting 0, which is why this asserts a PASS per dialect rather than an exit
+       code. If the DSN-is-set check above also failed for $d, that is the cause and this is
+       the echo. Otherwise the variable is set and WRONG, which looks exactly like one that
+       works to every other check in this script. Read the DSNs from WS3-STATUS.md (this
+       checkout) or PARALLEL-WORKSTREAMS.md (defaults) rather than reconstructing them.
+
+$(echo "$PROBE" | grep -E '^\s+.*(ping|unreachable|Access denied|login error|does not exist)' | head -3)"
+  fi
 done
 
 # --- 2a2. Packages that need a database the dialect DSNs do not name ----------------
