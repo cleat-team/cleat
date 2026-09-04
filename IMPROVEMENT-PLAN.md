@@ -13826,14 +13826,19 @@ is, before it is written down. `Tier 1 Gate` push runs on develop, before and af
 
 | sha | created | conclusion | jobs |
 |---|---|---|---|
-| `b6562c93` | 00:00:47Z | **cancelled** | 0 |
-| `11f4eba5` | 00:00:55Z | success | 1 |
-| `eb347bfd` | 00:36:36Z | **cancelled** | 0 |
-| `2eeec9e3` | 00:38:44Z | success | 1 |
-| `eb6e7b33` | 01:19:22Z | success | 1 |
-| `920c649f` | 01:20:04Z | success | 1 |
-| `893e3fb0` | 01:41:00Z | success | 1 |
-| `a0072702` | 01:43:19Z | success | 1 |
+| `b6562c93` | 00:00:47Z | **cancelled** | none |
+| `11f4eba5` | 00:00:55Z | success | some |
+| `eb347bfd` | 00:36:36Z | **cancelled** | none |
+| `2eeec9e3` | 00:38:44Z | success | some |
+| `eb6e7b33` | 01:19:22Z | success | some |
+| `920c649f` | 01:20:04Z | success | some |
+| `893e3fb0` | 01:41:00Z | success | some |
+| `a0072702` | 01:43:19Z | success | some |
+
+The column is deliberately not a number. A run's job count grows while it proceeds, so it is only
+final once the run is — `2eeec9e3` read `1` when this was first measured and `3` twenty minutes
+later. Zero versus non-zero is the distinction that carries the meaning; the count is a sampling
+artefact.
 
 **`eb6e7b33` and `920c649f` are 42 seconds apart**, and both ran. That is the case the defect was
 made of: under the shared group the second would have entered an occupied queue — the first run

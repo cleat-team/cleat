@@ -155,9 +155,26 @@ confirm the count is non-zero. A loop that cannot see the state it looks for doe
 it prints a confident green, which is the same failure this file's whole "Is this result real?"
 section is about.
 
-**A merge's own `develop` run can be cancelled by the next merge** landing seconds later, and
+**A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
 head*, which contains your commit — not your own SHA.
+
+That cancellation was fixed in two halves — #634 scoped `cancel-in-progress` to pull requests,
+#661 gave each push its own concurrency group — so it should no longer happen. The reading skill
+outlives the defect, and it is one line:
+
+    gh run view <run-id> --json jobs --jq '.jobs | length'
+
+**A `cancelled` run with zero jobs never started.** It was evicted from a concurrency queue
+before any runner picked it up; a run killed mid-flight has jobs, each with a `cancelled`
+conclusion. The two look identical in `gh run list` and have completely different causes, and
+telling them apart is what separated the two halves above: of 22 cancelled `Tier 1 Gate` runs on
+2026-09-03, the 17 before #634 had jobs (one exception) and all 5 after it had none. Measured
+2026-09-04; see IMPROVEMENT-PLAN §3.100.
+
+**Read it as zero versus non-zero, never as a count.** The number grows while a run proceeds, so
+it is only final once the run is. The same run sampled twenty minutes apart gave `1` and then `3`
+here, and the `1` went into a table before this sentence was written.
 
 **When a schema migration lands, recreate your test databases.** `CREATE TABLE IF NOT EXISTS`
 never adds a column, so a long-lived database keeps its old shape and dozens of tests fail on a
@@ -186,6 +203,26 @@ already been removed; three of them concluded that a working feature was broken.
 **Any number you write down carries a date and the command that re-derives it.** If you cannot
 write the command, do not write the number. Every count in this repo's docs was wrong when
 checked — linter totals, finding counts, skip counts, branch counts, all of them.
+
+**And the command has to answer the question you think it does.** A command that runs clean is
+not a command that is right. `git log --date=iso` prints a *local* time with an offset —
+`2026-09-03 14:20:48 -0400` — and pasting that clock reading into a UTC comparison moves the
+window four hours:
+
+    gh run list ... --jq '[.[] | select(.createdAt > "2026-09-03T14:20:48Z")]'   # wrong by 4h
+
+`gh` compares strings, so nothing errors; it silently answers about a different window. That one
+inflated a measured count from 5-of-24 to 11-of-36 and the conclusion from "a fifth" to "roughly
+a third", in the direction that flattered the finding — which is why it was not questioned. Use
+`%cI`, which carries the offset, and convert:
+
+    git log -1 --format=%cI <sha>                    # 2026-09-03T14:20:48-04:00
+    python3 -c "import datetime,sys; print(datetime.datetime.fromisoformat(sys.argv[1])
+      .astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$(git log -1 --format=%cI <sha>)"
+
+**What caught it was checking the story, not the number.** The mechanism being claimed — eviction
+from a queue — can only produce runs with zero jobs, and six of the eleven had one job. A number
+that supports your conclusion is the one to re-derive, not the one to keep.
 
 **One PR, one thing.** Every PR that bundled a second concern was harder to review than the two
 would have been apart.
