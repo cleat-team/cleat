@@ -465,6 +465,36 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 		go func(idx int, rid string) {
 			defer wg.Done()
 			if s.engine.childWfStore != nil {
+				// context.Background() rather than ctx, deliberately, and NOT
+				// for the usual reason.
+				//
+				// The usual reason is lifetime -- a goroutine that outlives its
+				// caller cannot borrow the caller's context. That is why
+				// adaptive_flush.go:474 and scheduledbackup/routes.go:534 use
+				// Background(), and it does NOT apply here: wg.Wait() below
+				// joins every one of these, so they cannot outlive this call.
+				// gosec's G118 flags this site for exactly that mismatch, and
+				// on lifetime grounds it would be right.
+				//
+				// The reason is durability. Whatever these goroutines produce
+				// is marshalled into the EventRecord recorded a few lines down,
+				// and replayAwaitAllChildren hands `rec.Response` back to the
+				// guest verbatim on every future replay. So cancelling these
+				// queries does not abandon work -- it writes
+				// "context canceled" into the workflow's permanent history and
+				// replays it forever. A transient shutdown would become a
+				// durable wrong answer, which is a strictly worse failure than
+				// the one cancellation avoids.
+				//
+				// The cost is real and is accepted: because wg.Wait() joins,
+				// an unreachable database makes this call block for as long as
+				// the driver takes to give up, and a cancelled ctx will not cut
+				// that short. A bounded context would cap the wait but bakes
+				// the same wrong history on timeout, just later -- it moves the
+				// defect rather than fixing it. Compare
+				// cmd/cleat-worker/memory_controller.go:189, which DOES wrap
+				// Background() in a timeout: nothing there is replayed, so
+				// giving up early loses only a stats row.
 				result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
 				if err != nil {
 					outcomes[idx] = childOutcome{RunID: rid, Error: err.Error()}
