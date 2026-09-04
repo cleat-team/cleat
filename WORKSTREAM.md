@@ -63,10 +63,38 @@ scheme (3.100 #634, 3.107 #647, 3.113 #684, 3.114 #687). Handing `3.1xx` to WS-1
 retroactively assigned three streams' work to one. The blocks start above the high-water mark
 instead; everything at or below 3.114 is grandfathered. See `scripts/section-blocks.sh`.
 
-**R3 — A closed item leaves the plan.** Its *lesson* graduates to the code it describes (a comment
-beside the guard) or to `CLAUDE.md`; the section is then deleted, not marked ✅. `IMPROVEMENT-PLAN.md`
-is 15,684 lines (`wc -l`, 2026-09-04 16:00Z — it moves hourly) and both stale-marker incidents this week were findability failures caused by size.
-Target: open items only.
+**R3 — A closed item leaves the plan, by being ARCHIVED, not deleted.** Its *lesson* graduates to
+the code it describes (a comment beside the guard) or to `CLAUDE.md`. The section itself moves to a
+companion file that keeps its anchor resolvable. `IMPROVEMENT-PLAN.md` is 15,885 lines
+(`wc -l IMPROVEMENT-PLAN.md`, 2026-09-04 17:20Z — it moves hourly) and both stale-marker incidents
+this week were findability failures caused by size. Target: the plan holds open items.
+
+**This rule said "deleted" until 2026-09-04, and following it literally would have broken about two
+thousand cross-references.** Measured before A3 started, which is the only reason it was caught:
+
+| | count | re-derive |
+|---|---|---|
+| sections in the plan | 153 | `grep -cE '^### [0-9]+\.[0-9]+ ' IMPROVEMENT-PLAN.md` |
+| …carrying a closed marker | **143** | same, piped to `grep -cE '✅\|FIXED\|DONE\|fixed in'` |
+| `§N.M` refs inside the plan | 800 | `grep -oE '§[0-9]+\.[0-9]+' IMPROVEMENT-PLAN.md \| wc -l` |
+| `§N.M` refs in other markdown | 1083 | same over `--include='*.md'`, excluding the plan |
+| `§N.M` refs in code | 191 | same over `*.go *.sh *.yml *.rs *.py *.java *.ts` |
+| distinct sections cited **from code** | 56 | those refs, `sort -u` |
+| …that are closed | **49** | `comm -12` against the closed list |
+
+So "delete the closed sections" means deleting 93% of the file and breaking 49 live code comments,
+each of which cites the plan as the authoritative description of what a test package is for.
+Archiving costs nothing extra and keeps every one of them resolvable.
+
+(That markdown row read 1080 on the first pass and 1083 on the second. Three of the references it
+counts are in the paragraph below, added between the two runs. R3a is not a style rule.)
+
+**A `§N.M` does not always name a `###` heading.** The Phase 2 table carries rows `2.1`–`2.9` in the
+same numeric shape, and three of the sections cited from code — `§2.4`, `§2.5`, `§2.7` — resolve to
+*rows*, not headings. Checking only headings reports them as dangling; that check was written and it
+did, and the finding was wrong. Anything that migrates or validates references must know both
+namespaces. The two join deliberately at `2.8`, where row 2.8 says "see below" and `### 2.8 results`
+is the write-up.
 
 **R3a — Every number in this file carries the command that re-derives it**, because they all move.
 The plan's line count changed between drafting this file and verifying it, which is the whole
@@ -125,7 +153,7 @@ that removes its own future friction.**
 |---|---|---|
 | A1 | `skip-budget.txt` total becomes derived from per-test declarations | ~~done (#696)~~ `skip-budget.txt` is deleted; budgets are summed from `scripts/skip-ledger.tsv`, one line per reason |
 | A2 | per-stream section blocks (R2), enforced | ~~done~~ `check-section-numbers.sh` rejects any 3.x number outside every block, with a `--self-test` negative control; `next-section-number.sh` hands each stream its next free number |
-| A3 | graduate closed sections out of `IMPROVEMENT-PLAN.md` (R3) | plan contains open items only |
+| A3 | archive closed sections out of `IMPROVEMENT-PLAN.md` (R3) | plan holds open items; every `§N.M` cited from code or docs still resolves — verified by a reference check, not by eye |
 | A4 | retire `PARALLEL-WORKSTREAMS.md`, `WS2-STATUS.md`, `WS3-STATUS.md` into this file (R5) | one coordination file |
 
 A1 and A2 first: they are what let A3 and the other streams proceed without conflicts.
