@@ -86,7 +86,7 @@ did not carry them when it declared that one superseded.
 | in `PARALLEL-WORKSTREAMS.md` | status |
 |---|---|
 | Checkout → stream map (`:17`) — `/localssd/rcownie/cleat-agent2` is **WS-3, "Execution boundaries: what stops a guest that will not stop"** | **live.** It is how a session in a sandbox learns which stream it is. |
-| Database ports (`:80`) — WS-3 is Postgres `5434`, MySQL `3308`, SQL Server `1435` | **live.** Used 2026-09-02 for a full three-dialect `go test ./engine/... -p 1` (133s wall; Postgres-only is ~21s, so all three connected). |
+| Database ports (`:80`) — WS-3 is Postgres `5434`, MySQL `3308`, SQL Server `1435` | **live**, and re-derived 2026-09-03 with a check that can actually see it: `go test ./engine/ -count=1 -json` with all three `CLEAT_TEST_*` set gives **`skip=4 FAIL=0`**. The `4` is the all-three-connected reading; the `FAIL=0` is what separates *connected* from *DSN set but wrong*, which produces the same collapse in the skip count. This cell used to argue it from wall clock — "133s, and Postgres-only is ~21s, so all three connected" — which is the inference CLAUDE.md retired: a no-DSN run now takes ~150s, so that reasoning clears its own threshold while testing no database at all. |
 | Migration ranges (`:108`) — WS-1 `010–019`, WS-2 `020–029`, WS-3 `030–039` | **live.** §3.35 phase 5 still cites `030–039` as reserved. |
 | `IMPROVEMENT-PLAN.md` section allocation (`:105`) — WS-1 `§3.10+`, WS-2 `§3.20+`, WS-3 `§3.30+` | **already breached, and not worth restoring.** See below. |
 | "Three concurrent streams", the coordination rituals, the per-stream boards | **retired.** That is what this file supersedes. |
