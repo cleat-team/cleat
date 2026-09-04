@@ -549,6 +549,19 @@ func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, input
 		s.exitReplay()
 	}
 
+	// A detached run is a child workflow by another name: the line below calls
+	// the SAME StartChildWorkflow that childWorkflowWithVersion calls, and
+	// leaves the same claimable workflow_instances row behind. That one is
+	// refused in a defer segment (3.84) and this one was not, so a terminated
+	// workflow's cleanup pass could still create live work -- through the same
+	// store method, two functions apart in this file. IMPROVEMENT-PLAN 3.111.
+	//
+	// After the replay return, because a refusal records no event and a replay
+	// that reached this would find nothing where an event should be.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	// Resolve child version using the same policy logic as childWorkflowWithVersion.
 	childVersion := s.resolveChildVersion(ctx, name, 0)
 

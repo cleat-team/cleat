@@ -57,6 +57,13 @@ const (
 	// never worked on a component at all and cannot express `suspended` until
 	// it is redesigned. Tracked in IMPROVEMENT-PLAN §3.110.
 	reasonWitIsStillCoreABI exemptReason = "open-finding-wit-is-core-abi"
+
+	// reasonNotInTheComponentWorld: the host function has no WIT declaration at
+	// all, so a component guest cannot call it and there is no signature to
+	// carry the refusal. Distinct from reasonWitIsStillCoreABI, which is about a
+	// function the world DOES declare and declares wrongly -- keeping them
+	// separate is the point of these being constants.
+	reasonNotInTheComponentWorld exemptReason = "not-in-the-component-world"
 )
 
 // stopSurface declares, for one host stop site, which Go adapters and which WIT
@@ -109,6 +116,16 @@ var stopSurfaces = map[string]stopSurface{
 		adapters:   nil,
 		adapterWhy: reasonNoGoAdapter,
 		wit:        []string{"fetch"},
+	},
+	"RunDetached": {
+		// No Go adapter and no WIT function: `cleat_run_detached` is imported by
+		// the Rust, Java and AssemblyScript SDKs only. Go's cleat.HostCalls has a
+		// RunDetached, but it is a different thing -- it runs a closure with a
+		// HostCalls that ignores cancellation, and never touches this import.
+		adapters:   nil,
+		adapterWhy: reasonNoGoAdapter,
+		wit:        nil,
+		witWhy:     reasonNotInTheComponentWorld,
 	},
 	"DurableAwaitSignals": {
 		adapters: []string{"DurableAwaitSignals"},

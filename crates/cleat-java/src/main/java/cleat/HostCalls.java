@@ -1709,6 +1709,13 @@ public class HostCalls {
 
         long result = cleatRunDetachedRaw(nameOff, nameLen, inOff, inLen);
 
+        // The host refuses new work in a defer segment and marks it with bit 31
+        // (IMPROVEMENT-PLAN 3.111). Before decoding: this is a simple-result
+        // layout in which bit 31 is not a field, so a stop decoded field-first
+        // is errCode 0 -- a SUCCESS, and the guest goes on to do the work the
+        // segment exists to prevent.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("runDetached failed with code " + errCode);

@@ -1114,6 +1114,14 @@ impl HostCalls {
                 input_json.as_ptr(), input_json.len() as u32,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal
+        // with bit 31 (IMPROVEMENT-PLAN 3.111). Ask BEFORE decoding: this call
+        // decodes as a simple result, in which bit 31 is not a field, so a stop
+        // read field-first is an err_code of 0 -- a SUCCESS.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
+
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("run_detached(name=\"{}\") failed: host error code {}. Check that the workflow name is correct.", name, err_code));
