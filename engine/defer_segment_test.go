@@ -588,3 +588,65 @@ func TestADeferSegmentDoesNotStartAChildWorkflow(t *testing.T) {
 			"reached the child-workflow call and then swallowed the cleanup too.", got)
 	}
 }
+
+// TestADeferSegmentDoesNotMakeAHeartbeatCall is IMPROVEMENT-PLAN 3.111: the
+// eighth fresh path, and the third time the inventory of them was built by hand
+// and came up short.
+//
+// It asserts the pair, and the pair is the test. Either half alone passes
+// against a broken build: an assertion that the call was refused passes against
+// a segment that refuses everything including its own cleanup -- which is the
+// defect 3.81 measured, where refusing the defer bodies' calls CONSUMES the
+// table rather than skipping it.
+func TestADeferSegmentDoesNotMakeAHeartbeatCall(t *testing.T) {
+	ctx := context.Background()
+	wasmBytes, _, _, _ := deferPhaseProbeEngine(t, "wf-heartbeat-frontier", false)
+
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+
+	caller := &mockCaller{}
+	eng := NewEngine(rt, caller,
+		WithBackends(WasmtimeLanguages, wt),
+		WithWorkflowID("wf-heartbeat-frontier"),
+		WithDeferPhase())
+
+	res, _, susp, _, _, err := eng.Execute(ctx, wasmBytes,
+		"defer_call_heartbeat", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if susp == nil {
+		t.Fatalf("the segment did not suspend; it returned %q, reporting a "+
+			"terminated workflow as having finished normally.", res)
+	}
+
+	got := operationsCalled(caller)
+	for _, op := range got {
+		if op == "charge" {
+			t.Fatalf("the segment made the heartbeat call: operations were %v.\n\n"+
+				"A terminated workflow's cleanup pass reached a service through "+
+				"cleat_call_heartbeat, which DurableCallWithHeartbeat did not "+
+				"guard with stopBeforeNewWork. Worse than a single side effect: "+
+				"freshCallWithHeartbeat's ticker appends an EventTypeHeartbeat "+
+				"per tick to a workflow that has already terminated. "+
+				"See IMPROVEMENT-PLAN 3.111.", got)
+		}
+	}
+
+	// The other half: stopping the body must not stop the cleanup.
+	if len(got) != 1 || got[0] != "after_heartbeat" {
+		t.Fatalf("defer calls were %v, want [after_heartbeat].\n\n"+
+			"Empty means the guest did not drain its defer table -- the stop "+
+			"reached the heartbeat call and then swallowed the cleanup too, "+
+			"which is 3.81's consumed-table defect one path over.", got)
+	}
+}

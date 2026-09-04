@@ -12442,6 +12442,101 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
+### 3.111 A defer segment could still call a service through `cleat_call_heartbeat` — 🟢 **FIXED 2026-09-04** (WS-1, 2026-09-04)
+
+The eighth fresh path, and the third time this inventory was built by hand and came up short.
+§3.83 guarded `cleat_call`. §3.84 added four more and its table listed `DurableCall` and
+`DurableCallWithRetry` — the durable-call family minus one. §3.104 added `Fetch` as a seventh,
+with the note that the inventory had been built "by reading the entry points a guest uses to
+reach a *service*". `DurableCallWithHeartbeat` reaches a service, is in the family, decodes the
+same layout as `cleat_call`, and was in none of the three lists.
+
+```go
+func (s *execSession) DurableCallWithHeartbeat(...) int64 {
+	if s.isReplay {
+		return s.replayCallWithHeartbeat(...)
+	}
+	return s.freshCallWithHeartbeat(...)   // no stopBeforeNewWork
+}
+```
+
+**Worse than an ordinary unguarded call rather than equal to it.** `freshCallWithHeartbeat`
+starts a goroutine and a `time.Ticker`, and every tick writes an `EventTypeHeartbeat` through
+`recordEvent`. So an unstopped heartbeat call in a defer segment does not perform its side effect
+once — it appends history to a workflow that has already terminated, for as long as the call runs.
+
+#### The host half alone would have been a regression, on the reference SDK
+
+Caught by WS-2 in review before it shipped, and it is the more useful half of this entry.
+`wasm/adapter_metadata.go` wraps a decoder in `withSuspendCheck` to make it test bit 31 before
+reading any field. Seven adapters used it; `DurableCallWithHeartbeat` started straight at
+`responseLen := uint32(uint64(result) >> 40)`. A Go guest reads the sentinel through that layout
+as `responseLen=0, callErrorCode=0, errCode=0` — an *empty successful response* — which is
+exactly §3.83's defect. `deferSegmentLanguages` does not save it: `go` is in the map, so the
+fence lets the segment run.
+
+Both halves land together here. Falsified separately, and the two reds differ:
+
+| mutation | result |
+|---|---|
+| host check removed, adapter check kept | `the segment made the heartbeat call: operations were [charge]` |
+| host check kept, adapter check removed | suspends, makes no call, and `defers_run=0` — `defer calls were [], want [after_heartbeat]` |
+
+**The second red is quieter than predicted and that is the point.** The expectation was that the
+guest would return `{"status":"ok"}` and fail to suspend, which is loud. What actually happens is
+that the segment looks correct from outside — it suspends, it makes no forbidden call — and runs
+**zero** defers, because the guest read the refusal as a successful empty response, ran to
+completion, and consumed its own defer table before the host's drain reached it. §3.81's
+destroyed-cleanup defect, reached from a new direction. A test asserting only "the call was
+refused" would have passed over it.
+
+#### The other four SDKs were already ready, and their guards had never fired
+
+Re-derived 2026-09-04. Each already tests the sentinel on this call and could not have been
+exercised, because nothing on the host has ever produced it here:
+
+| SDK | site |
+|---|---|
+| Rust | `crates/cleat-sdk/src/host_calls.rs:1582`, `stop_requested(result)` |
+| Java | `crates/cleat-java/src/main/java/cleat/HostCalls.java:2092`, `Memory.throwIfStopped` |
+| AssemblyScript | `packages/cleat-as/assembly/host-calls.ts:1186`, `stopRequested(result)` |
+| Python / component | `decodeCallOutcome` masks the sentinel ahead of any field decode, on all eight dispatchers |
+
+So this is one host-side condition plus one Go adapter, not a five-SDK change. It also means four
+guards fire for the first time on this merge, having never been proved able to fail.
+
+#### Not fixed here: the frontier is wider than eight, and the answer is a mechanism
+
+Measured 2026-09-04 — every `execSession` method carrying an `isReplay` check, which is the
+signature of a durable step:
+
+```
+execSession methods: 100    with an isReplay check: 41    consulting stopBeforeNewWork: 8
+```
+
+Most of the other 33 are internal state (`GetState`, `SetState`, `ListState`) and are not fresh
+*work* in the sense `stopBeforeNewWork` means. A real subset is: `SignalWorkflow`,
+`SendSignalAndWait`, `ReplyToSignal`, `RunDetached`, `ScheduleCron`, `DeleteCron`,
+`DurableScheduleInvoke`, `AcquireLock`, `ReleaseLock`, `CreatePromise`, `ResolvePromise`,
+`RejectPromise`, `ContinueAsNew`, `SideEffect`. Each starts something a terminated workflow's
+cleanup should not start; none is guarded.
+
+That list is deliberately **not** fixed here, because writing a fourth hand-built inventory is
+what the last three did. `withSuspendCheck`'s own comment already claims the property a mechanism
+would give — *"Every host call the host can refuse mid-segment goes through it, so the check
+cannot be forgotten by a decoder that is added later"* — and that claim was false when written:
+it is opt-in, and heartbeat is the counterexample. The shape that would close it is a guard
+asserting the correspondence in both directions: a host method consulting `stopBeforeNewWork` must
+have an adapter using `withSuspendCheck`, and every durable step must be either guarded or
+allowlisted with a written reason. That is its own change.
+
+Re-derive the current set:
+
+```
+grep -rn "stopBeforeNewWork()" --include="*.go" engine/ | grep -v _test.go
+grep -c "withSuspendCheck(" wasm/adapter_metadata.go        # 1 definition + N users
+```
+
 ### 3.108 The Tier 1 Gate ran on Go's 10-minute default and the engine suite outgrew it — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
 
 `scripts/tier-gate.sh` invoked `go test` with no `-timeout`, so Go's 10-minute per-package default

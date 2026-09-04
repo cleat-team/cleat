@@ -159,6 +159,36 @@ func DeferChildWorkflow(h cleat.HostCalls, input string) (string, error) {
 	return `{"status":"ok"}`, nil
 }
 
+// DeferCallHeartbeat registers cleanup and then makes a HEARTBEAT call.
+//
+// IMPROVEMENT-PLAN 3.111. The eighth fresh path, and the last one in the
+// durable-call family: 3.84 guarded DurableCall and DurableCallWithRetry and
+// its inventory did not list this one.
+//
+// Two things make it a sharper test than DeferChildWorkflow rather than a
+// duplicate of it. The heartbeat call reaches a service through cleat_call_
+// heartbeat, which decodes the SAME layout as cleat_call -- so unlike the
+// child-workflow path, nothing about the result shape excuses a missing check.
+// And freshCallWithHeartbeat starts a ticker whose every tick appends an
+// EventTypeHeartbeat to history, so an unstopped one does not perform its side
+// effect once; it keeps writing to a workflow that has already terminated.
+//
+// The interval is long relative to the call so the assertion is about the call
+// being refused, not about how many ticks a loaded machine fits into it.
+func DeferCallHeartbeat(h cleat.HostCalls, input string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		h.DurableCall("cleanup", "after_heartbeat", `{}`)
+	}); err != nil {
+		return "", err
+	}
+
+	if _, err := h.DurableCallWithHeartbeat(
+		"billing", "charge", `{}`, time.Hour, func(string) {}); err != nil {
+		return "", err
+	}
+	return `{"status":"ok"}`, nil
+}
+
 // DeferOnRetriesExhausted registers cleanup and then exhausts a retry policy.
 //
 // Two things are observable in one run, and IMPROVEMENT-PLAN 3.88 needs both:
