@@ -76,7 +76,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	rows, err := tx.QueryContext(ctx, `
 		WITH candidates AS (
 			SELECT id FROM workflow_instances
-			WHERE status = 'ready'
+			WHERE status IN ('ready', 'terminating')
 			  AND next_wake_at <= now()
 			  AND task_queue = ANY($2)
 			ORDER BY priority ASC, created_at
@@ -90,7 +90,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		    generation = generation + 1
 		FROM candidates c
 		WHERE w.id = c.id
-		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id
+		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id, COALESCE(w.pending_terminal_status, '') AS pending_terminal_status
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
@@ -618,9 +618,17 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 	}
 	defer tx.Rollback()
 
+	// Same CASE as ReapStaleInstances, for the same reason: a workflow whose
+	// terminal outcome is already recorded is not runnable work, and a release
+	// that called it 'ready' would undo the distinction D6 created the
+	// 'terminating' status to make. Either status is claimable, so the phase
+	// runs again either way -- this is about the status telling the truth
+	// while it waits.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, next_wake_at = $3
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, next_wake_at = $3
 		WHERE id = $1 AND assigned_to = $2 AND generation = $4
 	`, workflowID, workerID, nextWakeAt, generation)
 	if err != nil {
@@ -748,9 +756,18 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	}
 	defer tx.Rollback()
 
+	// A workflow reaped mid-defer-phase goes back to 'terminating', not to
+	// 'ready'. The marker on the row is what makes the next claim a defer
+	// segment either way -- the executor reads pending_terminal_status, not
+	// the status -- so this is not what keeps the phase correct. It is what
+	// keeps the status honest: a workflow whose terminal outcome is already
+	// decided is not runnable work, and reporting it as 'ready' would undo
+	// exactly the distinction D6 created the status to make.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < now() - $1::interval
 	`, fmt.Sprintf("%d seconds", int(timeout.Seconds())))
@@ -862,7 +879,7 @@ func scanClaimedWorkflows(rows *sql.Rows) ([]*WorkflowInstance, error) {
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp,
-			&wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
+			&wf.Generation, &wf.Priority, &wf.TraceID, &wf.PendingTerminalStatus); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -929,7 +946,8 @@ type CrossTenantClaimer interface {
 func (s *PostgresStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at,
-		       tenant_id, created_at, error_code, error_op, generation, priority, trace_id
+		       tenant_id, created_at, error_code, error_op, generation, priority, trace_id,
+		       pending_terminal_status
 		FROM admin.claim_workflows($1, $2, $3)
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
@@ -977,6 +995,21 @@ func crossTenantProvisioningGap(err error) string {
 	case "42501":
 		return "this connection may not EXECUTE admin.claim_workflows; grant it as " +
 			"migrations/postgres/023_cross_tenant_claim.sql documents"
+	case "42703":
+		// undefined_column. The function exists but is 023's 14-column
+		// version: this deployment applied 023 and not
+		// 040_claim_terminating_workflows.sql, so the SELECT above asks it
+		// for pending_terminal_status and it has none.
+		//
+		// Treated as a provisioning gap rather than a hard error for the
+		// same reason as the two above -- the fallback keeps this worker
+		// dispatching its own tenant's work while the operator is told what
+		// to apply. The cost of the gap is specific and worth naming: a
+		// cross-tenant dispatch loop on 023 alone never claims a defer
+		// phase, so every terminate on it waits out defer_phase_deadline and
+		// is finalized with its cleanup skipped.
+		return "admin.claim_workflows is 023's version and does not return " +
+			"pending_terminal_status; apply migrations/postgres/040_claim_terminating_workflows.sql"
 	}
 	return ""
 }

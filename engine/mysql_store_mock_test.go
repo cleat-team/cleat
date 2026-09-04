@@ -45,7 +45,7 @@ func TestMySQLStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 		// Step 3: SELECT after update — return full workflow row.
 		// Columns: id, def_name, def_version, status, input, assigned_to,
 		//          next_wake_at, tenant_id, created_at, error_code, error_op,
-		//          generation, priority, trace_id
+		//          generation, priority, trace_id, pending_terminal_status
 		{match: "COALESCE(priority", data: [][]driver.Value{{
 			"wf-1",                  // id
 			"test-wf",               // def_name
@@ -61,6 +61,7 @@ func TestMySQLStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 			int64(1),                // generation
 			int64(0),                // priority
 			"",                      // trace_id
+			"",                      // pending_terminal_status
 		}}},
 	}, []mockExecResult{
 		// Step 2: UPDATE

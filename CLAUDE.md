@@ -195,6 +195,21 @@ the one under test: a fence test passed with its SQL guard deleted because a Go-
 covered for it; a cross-tenant assertion passed against a wide-open security policy because the
 store's own SQL carried `tenant_id = ?`. Break the specific layer and watch.
 
+**The sharpest form is a test whose NAME asserts the mechanism.**
+`TestFinalizeDeferPhaseIsFencedOnTheClaimAndOnTheMarker` (§3.112) stayed green with the marker
+predicate deleted. What refused the repeated finalize it pointed at was the finalize clearing
+`assigned_to`, so the ordinary fence no longer matched — the predicate in the name had nothing to
+do with it. Three cases in one test, three different things doing the refusing, and the name
+attributed all three to one.
+
+**And when a falsification comes back green, the obvious repair is usually the wrong one.** "It
+did not go red, so the line is dead code" would have deleted a predicate that has a real case:
+a claimed workflow that owes no defer phase, where the fence *is* satisfied and only the marker
+stops a `status = NULL` write over a running workflow. Once that case was written, the same
+falsification failed — with a NOT NULL violation where `ErrFenceLost` was expected, which is a
+refusal by database constraint rather than by the code under test. **A falsification that stays
+green is telling you which case you did not write, not which line to remove.**
+
 **When you fix something, fix the prose that describes it — not just the status marker.** A ✅ on
 a heading over a stale body is worse than no marker at all, because it stops the next reader from
 checking. Four separate sessions were lost to one sentence describing a build tag that had

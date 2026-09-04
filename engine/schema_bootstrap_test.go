@@ -405,6 +405,37 @@ func TestShippedSchema_IsIdempotent(t *testing.T) {
 			"the VOID version (003) does not. A re-applied database has lost "+
 			"the fence.", returnType)
 	}
+
+	// The same pairing, one function later: 023 creates admin.claim_workflows
+	// and 040 replaces it with a version that accepts 'terminating' and returns
+	// pending_terminal_status. 023 carries the DROP that makes it re-appliable,
+	// which means a re-run briefly reinstates the 14-column version that cannot
+	// claim a defer phase. Safe only because 040 sorts after 023 and runs again.
+	//
+	// Asserted on the column count rather than on the predicate because the
+	// count is what the Go scan depends on: a re-applied database left at 023's
+	// shape fails every cross-tenant claim with "expected 15 destination
+	// arguments in Scan, not 14", which is a loud failure, while the missing
+	// 'terminating' alone would be a silent one -- defer phases never claimed,
+	// every terminate waiting out its deadline.
+	var claimCols int
+	err = db.QueryRow(`
+		SELECT COALESCE(array_length(p.proallargtypes, 1), 0)
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE p.proname = 'claim_workflows' AND n.nspname = 'admin'
+	`).Scan(&claimCols)
+	if err != nil {
+		t.Fatalf("look up admin.claim_workflows shape after re-apply: %v", err)
+	}
+	// proallargtypes counts IN plus OUT (the RETURNS TABLE columns): 3 in,
+	// 15 out.
+	if claimCols != 18 {
+		t.Errorf("after re-applying the migrations, admin.claim_workflows has %d "+
+			"arguments and result columns, want 18 (3 in + 15 out).\n"+
+			"A re-applied database has been left at 023's 14-column version, "+
+			"which cannot claim a defer phase.", claimCols)
+	}
 }
 
 // TestShippedSchema_CreatesObjectsInPublic asserts that the migrations build the

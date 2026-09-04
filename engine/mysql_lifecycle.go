@@ -49,7 +49,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	selArgs = append(selArgs, s.tenantID, limit)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id FROM workflow_instances
-		WHERE status = 'ready'
+		WHERE status IN ('ready', 'terminating')
 		  AND next_wake_at <= NOW(6)
 		  AND task_queue IN (%s)
 		  AND tenant_id = ?
@@ -102,7 +102,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, COALESCE(pending_terminal_status, '') AS pending_terminal_status
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -200,7 +200,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, COALESCE(pending_terminal_status, '') AS pending_terminal_status
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -287,7 +287,7 @@ func (s *MySQLStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID s
 	selArgs = append(selArgs, limit)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id FROM workflow_instances
-		WHERE status = 'ready'
+		WHERE status IN ('ready', 'terminating')
 		  AND next_wake_at <= NOW(6)
 		  AND task_queue IN (%s)
 		ORDER BY priority ASC, created_at
@@ -340,7 +340,7 @@ func (s *MySQLStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID s
 	// Step 3: Fetch the full rows. Column list and order match
 	// scanClaimedWorkflows's expectations exactly -- see the doc comment above.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, COALESCE(pending_terminal_status, '') AS pending_terminal_status
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -488,9 +488,17 @@ func (s *MySQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID s
 	}
 	defer tx.Rollback()
 
+	// Same CASE as ReapStaleInstances, for the same reason: a workflow whose
+	// terminal outcome is already recorded is not runnable work, and a release
+	// that called it 'ready' would undo the distinction D6 created the
+	// 'terminating' status to make. Either status is claimable, so the phase
+	// runs again either way -- this is about the status telling the truth
+	// while it waits.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, next_wake_at = ?
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, next_wake_at = ?
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
 	`, nextWakeAt, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
@@ -858,9 +866,15 @@ func (s *MySQLStore) RetryWorkflow(ctx context.Context, workflowID string) error
 // but whose heartbeat has not been updated within the given timeout.
 // Returns the number of instances reclaimed.
 func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+	// See PostgresStore.ReapStaleInstances: a workflow reaped mid-defer-phase
+	// goes back to 'terminating', because its terminal outcome is already
+	// decided and calling it 'ready' would undo the distinction D6 created the
+	// status to make.
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < NOW(6) - INTERVAL ? SECOND
 		  AND tenant_id = ?

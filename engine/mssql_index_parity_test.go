@@ -4,7 +4,17 @@ package engine
 // (idx_instances_ready, idx_defs_active, idx_instances_tenant_ready) exist on
 // PostgreSQL and MySQL and, before
 // migrations/mssql/035_ready_and_active_indexes.sql, did not exist on SQL
-// Server at all. See that migration's header for how the three dialects'
+// Server at all.
+//
+// Two of the three were renamed and rewidened by
+// migrations/mssql/043_claim_terminating_workflows.sql: the claim now accepts
+// 'terminating' as well as 'ready' (IMPROVEMENT-PLAN 3.112), and a FILTERED
+// index is only usable when the query's predicate implies its filter -- so a
+// filter of `status = 'ready'` would have taken every claim index out of play
+// on the hottest query in the system. idx_instances_ready became
+// idx_instances_claimable and idx_instances_tenant_ready became
+// idx_instances_tenant_claimable, with the filter covering both statuses.
+// idx_defs_active is untouched. See that migration's header for how the three dialects'
 // index sets were re-derived (grep, not the review's list taken on faith)
 // and for the SET SHOWPLAN_ALL ON evidence of which of the three the planner
 // actually chooses under the mandatory tenant security policy.
@@ -87,23 +97,55 @@ func TestMSSQLIndexes_ReadyAndActiveExist(t *testing.T) {
 	testutil.SetupMSSQLFullSchema(t, db)
 
 	cases := []struct {
-		table, name, wantCols, wantFilter string
+		table, name, wantCols string
+		// wantFilterHas is a set of substrings rather than the whole
+		// filter_definition. SQL Server rewrites what it stores -- an IN list
+		// comes back as an OR chain, with its own bracketing and spacing --
+		// so an exact string here would be asserting a normalisation rather
+		// than an index. The statuses are what the assertion is about.
+		wantFilterHas []string
 	}{
-		{"workflow_instances", "idx_instances_ready", "status,next_wake_at", "([status]='ready')"},
-		{"workflow_defs", "idx_defs_active", "name,version", ""},
-		{"workflow_instances", "idx_instances_tenant_ready", "tenant_id,status,next_wake_at", "([status]='ready')"},
+		{"workflow_instances", "idx_instances_claimable", "status,next_wake_at",
+			[]string{"'ready'", "'terminating'"}},
+		{"workflow_defs", "idx_defs_active", "name,version", nil},
+		{"workflow_instances", "idx_instances_tenant_claimable", "tenant_id,status,next_wake_at",
+			[]string{"'ready'", "'terminating'"}},
 	}
 	for _, tc := range cases {
 		def, ok := readMSSQLIndexDef(t, db, tc.table, tc.name)
 		if !ok {
 			t.Fatalf("%s: no such index on dbo.%s -- migrations/mssql/035_ready_and_active_indexes.sql "+
-				"did not create it, or something dropped it", tc.name, tc.table)
+				"and 043_claim_terminating_workflows.sql did not create it, or something dropped it",
+				tc.name, tc.table)
 		}
 		if def.cols != tc.wantCols {
 			t.Errorf("%s columns = %q, want %q", tc.name, def.cols, tc.wantCols)
 		}
-		if def.filter != tc.wantFilter {
-			t.Errorf("%s filter = %q, want %q", tc.name, def.filter, tc.wantFilter)
+		if len(tc.wantFilterHas) == 0 {
+			if def.filter != "" {
+				t.Errorf("%s filter = %q, want none", tc.name, def.filter)
+			}
+			continue
+		}
+		for _, want := range tc.wantFilterHas {
+			if !strings.Contains(def.filter, want) {
+				t.Errorf("%s filter = %q, want it to mention %s -- a filtered index is only "+
+					"usable when the query's predicate implies its filter, and the claim's "+
+					"predicate is status IN ('ready', 'terminating')", tc.name, def.filter, want)
+			}
+		}
+	}
+
+	// The old names must be gone, not merely superseded. Two filtered indexes
+	// over overlapping row sets is the shape that makes the planner choose a
+	// BitmapOr-equivalent and lose the claim's ordering -- see
+	// migrations/postgres/040 for why the predicate is widened rather than a
+	// second index added.
+	for _, name := range []string{"idx_instances_ready", "idx_instances_tenant_ready",
+		"idx_instances_tenant_queue_ready", "idx_workflow_instances_ready_claim"} {
+		if _, ok := readMSSQLIndexDef(t, db, "workflow_instances", name); ok {
+			t.Errorf("%s still exists; 043 was supposed to drop it once its widened "+
+				"replacement was in place", name)
 		}
 	}
 }
@@ -113,7 +155,8 @@ func TestMSSQLIndexes_ReadyAndActiveExist(t *testing.T) {
 // 035's header (measured, not asserted here -- see its comment) to be
 // bypassed by the optimizer once SQL Server's mandatory tenant security
 // policy is in play, for the two query shapes this schema's own code
-// actually runs. idx_instances_tenant_ready is the one of the three that
+// actually runs. idx_instances_tenant_claimable (idx_instances_tenant_ready
+// before 043 widened and renamed it) is the one of the three that
 // *is* chosen naturally, because it is the only one of the three whose
 // leading column is tenant_id -- which both the query's own predicate and
 // the RLS residual predicate need. This test is the regression for that: it
@@ -224,7 +267,7 @@ func TestMSSQLIndexes_TenantReadyUsedByPlanner(t *testing.T) {
 		if op != "" {
 			operators = append(operators, op)
 		}
-		if arg != "" && strings.Contains(arg, "idx_instances_tenant_ready") {
+		if arg != "" && strings.Contains(arg, "idx_instances_tenant_claimable") {
 			sawIndex = true
 		}
 	}
@@ -238,7 +281,7 @@ func TestMSSQLIndexes_TenantReadyUsedByPlanner(t *testing.T) {
 
 	if !sawIndex {
 		t.Fatalf("plan for the tenant-scoped ready-instance query does not reference "+
-			"idx_instances_tenant_ready (physical operators seen: %v) -- the index "+
+			"idx_instances_tenant_claimable (physical operators seen: %v) -- the index "+
 			"exists but the optimizer is not using it for the query this schema's own "+
 			"tenant-scoped reads issue", operators)
 	}

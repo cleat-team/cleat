@@ -329,7 +329,7 @@ func TestClaimWorkflowsAcrossTenants_UngrantedDeploymentFallsBack(t *testing.T) 
 	}
 }
 
-// TestCrossTenantProvisioningGap_MapsBothCodes pins the two SQLSTATEs to the
+// TestCrossTenantProvisioningGap_MapsBothCodes pins the three SQLSTATEs to the
 // meaning the fallback depends on, including the negative case.
 //
 // The negative case is the one that matters. crossTenantProvisioningGap
@@ -345,6 +345,10 @@ func TestCrossTenantProvisioningGap_MapsBothCodes(t *testing.T) {
 	}{
 		{"undefined_function: migration 023 never applied", &pq.Error{Code: "42883"}, true},
 		{"insufficient_privilege: EXECUTE never granted", &pq.Error{Code: "42501"}, true},
+		// 023 applied, 040 not: the function exists and returns 14 columns,
+		// so asking it for pending_terminal_status is undefined_column.
+		// IMPROVEMENT-PLAN 3.112.
+		{"undefined_column: migration 040 never applied", &pq.Error{Code: "42703"}, true},
 		{"deadlock: a real claim failure, must propagate", &pq.Error{Code: "40P01"}, false},
 		{"unique_violation: a real claim failure, must propagate", &pq.Error{Code: "23505"}, false},
 		{"not a pq error at all", errors.New("connection refused"), false},

@@ -1174,7 +1174,10 @@ func TestMSSQLStore_FailWorkflow_Success(t *testing.T) {
 func TestMSSQLStore_ReleaseWorkflow_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'ready'", affected: 1},
+		// The release writes 'terminating' rather than 'ready' for a workflow
+		// whose defer phase is still owed (IMPROVEMENT-PLAN 3.112), so the
+		// match is the CASE's tail rather than a literal status.
+		{match: "ELSE 'ready' END", affected: 1},
 	})
 	defer db.Close()
 
@@ -1188,7 +1191,7 @@ func TestMSSQLStore_ReleaseWorkflow_Success(t *testing.T) {
 func TestMSSQLStore_ReleaseWorkflow_NoRows(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'ready'", affected: 0},
+		{match: "ELSE 'ready' END", affected: 0},
 	})
 	defer db.Close()
 

@@ -1123,8 +1123,22 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 	return totalDeleted, nil
 }
 
-// TerminateWorkflow force-terminates a workflow, setting status to 'terminated'.
+// TerminateWorkflow force-terminates a workflow.
 // Unlike FailWorkflow, this does not require the worker to own the workflow.
+//
+// TERMINATE IS ASYNCHRONOUS WHEN THE WORKFLOW OWES CLEANUP (D6, and
+// IMPROVEMENT-PLAN 3.75 step 2). A workflow with registered defers does not go
+// to 'terminated' here: it goes to 'terminating' carrying the outcome in
+// pending_terminal_status, is claimed as a defer segment, runs its cleanup, and
+// is finalized by FinalizeDeferPhase. A caller that reads status straight after
+// this returns and expects 'terminated' has to poll. See engine/defer_phase.go
+// for the mechanism and docs/reference/workflow-lifecycle.md for the whole
+// state machine.
+//
+// A workflow with no defers -- which is every workflow in most deployments --
+// still terminates in one step, right here. The two-phase path costs a claim, a
+// replay and a WASM instantiation, and buys nothing when there is no body to
+// run.
 // A terminate that matched no row does NOT cascade, and returns
 // ErrWorkflowNotFound rather than nil (3.92).
 //
@@ -1151,13 +1165,73 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 	}
 	defer tx.Rollback()
 
+	// Does this workflow owe a defer phase? See deferPhaseOwed for why a
+	// compacted workflow answers yes on a weaker basis than an uncompacted
+	// one. FOR UPDATE holds the row for the UPDATE that follows, so the
+	// status this reads is the status that gets marked.
+	var curStatus string
+	var hasDefers, compacted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       EXISTS(SELECT 1 FROM event_history e
+		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
+		       w.compaction_state IS NOT NULL
+		FROM workflow_instances w
+		WHERE w.id = $1
+		FOR UPDATE
+	`, workflowID).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrWorkflowNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("terminate workflow: read: %w", err)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers, compacted) {
+		// Phase 1 of the two-phase transition: mark, do not finalize.
+		//
+		// next_wake_at is pulled to now() because the claim filters on it,
+		// and a workflow terminated while sleeping on a timer has one set
+		// well into the future -- so without this the defer phase would not
+		// be dispatched until the sleep it will never take was due.
+		//
+		// generation is still bumped, and assigned_to still cleared, for the
+		// same reason the one-phase transition did it: whatever worker held
+		// this workflow is fenced out, and its own finalize now loses.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = $3,
+			    pending_terminal_status = 'terminated',
+			    defer_phase_deadline = now() + ($4 * interval '1 second'),
+			    error_msg = $2,
+			    next_wake_at = now(),
+			    assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = $1
+		`, workflowID, reason, statusTerminating, int(deferPhaseTimeout.Seconds())); err != nil {
+			return fmt.Errorf("terminate workflow: mark defer phase: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("terminate workflow commit: %w", err)
+		}
+		// No releaseWorkflowResources and no enforceParentClosePolicy here.
+		// Both belong to the terminal transition, and this workflow is not
+		// terminal yet -- FinalizeDeferPhase (or ExpireDeferPhases) runs
+		// them once the outcome is actually applied. Releasing here is the
+		// defect this whole mechanism exists to fix: the host would drop the
+		// concurrency keys before the defer that releases them ever ran.
+		return nil
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'terminated',
 		    error_msg = $2,
 		    completed_at = now(),
 		    assigned_to = NULL,
-		    generation = generation + 1
+		    generation = generation + 1,
+		    pending_terminal_status = NULL,
+		    defer_phase_deadline = NULL
 		WHERE id = $1
 	`, workflowID, reason)
 	if err != nil {

@@ -1377,7 +1377,7 @@ func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
 		},
 	}, nil)
@@ -1402,7 +1402,7 @@ func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
 		},
 	}, nil)
@@ -1456,7 +1456,7 @@ func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
 		},
 	}, nil)

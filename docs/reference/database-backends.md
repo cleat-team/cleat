@@ -557,7 +557,10 @@ the target dialect's syntax.
 3. **No partial (filtered) indexes**: Indexes in migration 002 are full
    indexes instead of filtered indexes. The `idx_instances_tenant_ready` index
    covers all statuses, not just `ready`, making it larger than the equivalent
-   PostgreSQL or SQL Server index. Query plans still use it effectively.
+   PostgreSQL or SQL Server index (`idx_instances_tenant_claimable`, filtered
+   on `status IN ('ready', 'terminating')`). Query plans still use it
+   effectively — and MySQL needed no change when the claim widened, for exactly
+   this reason.
 
 4. **No native SHA-256**: Idempotency key hashing and event checksums are
    computed in Go using `crypto/sha256`. No measurable performance impact.
@@ -709,8 +712,10 @@ innodb_buffer_pool_instances = 4  # 1 instance per ~2 GB of pool
 **Skip locked contention:**
 
 Ensure `idx_instances_tenant_ready` exists on `workflow_instances(tenant_id,
-status, next_wake_at)`. Without this index, `SELECT ... FOR UPDATE SKIP LOCKED`
-performs a full table scan under lock, serializing all claim attempts.
+status, next_wake_at)` — named `idx_instances_tenant_claimable` on PostgreSQL
+and SQL Server, where it is filtered on `status IN ('ready', 'terminating')`.
+Without this index, `SELECT ... FOR UPDATE SKIP LOCKED` performs a full table
+scan under lock, serializing all claim attempts.
 
 **Connection timeouts:**
 

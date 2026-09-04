@@ -334,7 +334,9 @@ tier1:
     mysql: ">=8.0"       # tested against 8.4, tag-pinned (not digest) -- see below
     mssql: ">=2022"      # tested against the digest pinned in tier1-gate.yml
 
-  # D6, DECIDED 2026-09-02: terminate is ASYNCHRONOUS, and the window is named.
+  # D6, DECIDED 2026-09-02, IMPLEMENTED 2026-09-04 for TerminateWorkflow
+  # (IMPROVEMENT-PLAN 3.112; the other two transitions are still one-step):
+  # terminate is ASYNCHRONOUS, and the window is named.
   #
   # §3.35 phases 1-4 made a workflow's defer bodies run wherever a live instance exists.
   # Three transitions set a terminal status by direct UPDATE with no instance --
@@ -1216,8 +1218,24 @@ tier3:
 #       parked on the output of tests that could not fail; see the note in tier 3.
 #   D5  DECIDED 2026-08-06. The tier-1 gate filters lower-tier tests out; it does not
 #       provision their toolchains. Recorded inline above tier1.rules.
-#   D6  DECIDED 2026-09-02. Terminate is ASYNCHRONOUS, and the window is named.
+#   D6  DECIDED 2026-09-02, IMPLEMENTED 2026-09-04 for TerminateWorkflow.
+#       Terminate is ASYNCHRONOUS, and the window is named.
 #       Recorded inline in the tenancy block; see IMPROVEMENT-PLAN 3.76 and #576.
+#
+#       What shipped, and what did not. The decision names THREE transitions;
+#       IMPROVEMENT-PLAN 3.112 built the first. `TerminateWorkflow` marks
+#       'terminating', the dispatch loop claims it, the defer segment runs the
+#       cleanup, and only then is the recorded outcome applied and the workflow's
+#       resources released. The parent-close TERMINATE arm and adminForceResolve
+#       still terminate in one step and still skip their defers.
+#
+#       One qualification the decision did not carry and now does: terminate is
+#       asynchronous WHEN THE WORKFLOW OWES CLEANUP. A workflow with no registered
+#       defers -- which is every workflow in a deployment that does not use
+#       `defer` -- still terminates in one step, because a defer phase for it
+#       would be a claim, a replay and a WASM instantiation to run nothing. The
+#       visibility condition is unaffected: a caller that might terminate a
+#       workflow with defers must poll, and cannot know in advance which it has.
 #   D8  DECIDED 2026-09-02. CROSS-SCHEMA CHILD WORKFLOWS ARE REMOVED, not fixed.
 #       cleat_child_workflow_in_schema wrote a child row directly into another
 #       PostgreSQL schema, which makes that deployment's schema part of this one's API,

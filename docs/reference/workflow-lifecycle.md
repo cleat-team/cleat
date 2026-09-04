@@ -3,7 +3,8 @@
 Every state a workflow instance can be in, what moves it between them, and which of those states
 are terminal.
 
-Derived from the code on **2026-09-02**, not from intent. Every claim below names the file that
+Derived from the code on **2026-09-02**, and revised on **2026-09-04** when the defer phase
+gained its first writer (IMPROVEMENT-PLAN §3.112) — not from intent. Every claim below names the file that
 implements it, and the enumerations carry the command that re-derives them — because the natural
 mental model of this state machine is wrong in two places, and both are recorded here rather than
 left to be rediscovered.
@@ -13,9 +14,8 @@ left to be rediscovered.
 ## The statuses
 
 `workflow_instances.status` is a `TEXT` column with no `CHECK` constraint
-(`migrations/postgres/001_schema.sql:227`, default `'ready'`). Six values are ever written today,
-and a seventh — `terminating` — has its schema in place but no writer yet (see the defer phase
-below):
+(`migrations/postgres/001_schema.sql:227`, default `'ready'`). Seven values are written; the
+seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase below):
 
 | status | terminal? | meaning |
 |---|---|---|
@@ -25,7 +25,7 @@ below):
 | `failed` | **yes** | The workflow failed terminally, or its parent's close policy terminated it. |
 | `terminated` | **yes** | Force-terminated by an operator through the admin API. |
 | `dead_lettered` | **yes** | Retries exhausted. On the Go SDK this is reachable only through a retry policy short enough to have run on the host — see `IMPROVEMENT-PLAN.md` §3.88. |
-| `terminating` | no | **Not yet written by anything.** The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Schema landed in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
+| `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow` when the workflow has registered defers; cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
 
 Re-derive the written set with:
 
@@ -145,38 +145,45 @@ stalled-then-reaped worker unable to overwrite the new owner's result.
 Three transitions are **not** fenced, because no worker holds the workflow when they happen. They
 set a terminal status with a direct `UPDATE`:
 
-- `TerminateWorkflow`
+- `TerminateWorkflow` — **only when the workflow owes no cleanup.** Since 2026-09-04 a workflow
+  with registered defers takes the two-phase transition below instead, and its terminal status is
+  then written by `FinalizeDeferPhase`, which *is* fenced on the defer segment's own claim.
 - `enforceParentClosePolicy`'s TERMINATE arm
 - `adminForceResolve` (`engine/store_admin.go:154`)
 
 Re-derive with `grep -rn "SET status = '" --include='*.go' engine/ | grep -v _test` across all
 three dialects. These three are the reason the defer phase below needs a design at all: a
 workflow that reaches a terminal status this way never had a live instance, so **its registered
-defers never ran** (IMPROVEMENT-PLAN §3.75).
+defers never ran** (IMPROVEMENT-PLAN §3.75). Two of the three still work that way.
 
 ---
 
-## The planned defer phase, and the status window it introduces
+## The defer phase, and the status window it introduces
 
-**Status: durable record landed; nothing writes it yet (§3.75 step 1).** Documented here in
-advance because it changes what `terminate` means to a caller, and that change should be visible
-before it ships rather than discovered afterwards.
+**Status: live for `TerminateWorkflow` since 2026-09-04 (§3.75 step 2). The other two unfenced
+transitions — the parent-close `TERMINATE` arm and `adminForceResolve` — still terminate in one
+step and still skip their defers.** This section describes what terminate does now; the two
+remaining transitions are called out where they differ.
 
-What exists as of 2026-09-03 is the schema and the vocabulary:
+The durable record:
 
 | | |
 |---|---|
 | `workflow_instances.pending_terminal_status` | the outcome to finalize with once the defer phase completes. `NULL` on every row today, which is what "no defer phase is owed" means. |
-| `workflow_instances.defer_phase_deadline` | when the reaper may conclude the phase died and re-queue the workflow. Separate from heartbeat staleness on purpose: a phase whose worker vanished is already caught by the heartbeat sweep, so this bounds the *phase* — a workflow cannot sit in `terminating` forever because its defers trap on every attempt. |
+| `workflow_instances.defer_phase_deadline` | when the phase gives up. Separate from heartbeat staleness on purpose, and it is a different sweep: a phase whose worker *vanished* is caught by the heartbeat sweep and gets another attempt, so this one bounds the number of ATTEMPTS — a workflow cannot sit in `terminating` forever because its defers trap on every replay. Past it, `ExpireDeferPhases` applies the recorded outcome without the cleanup. |
 | `terminating` | the status for the window, per the visibility condition below. |
 
 `migrations/postgres/038_defer_phase_marker.sql`, `mysql/037`, `mssql/041`. Note the numbers do
 not align across dialects and are not meant to; take the next free number above each dialect's
-own high-water mark.
+own high-water mark. `migrations/postgres/040` widened the cross-tenant claim function to match
+the inline claims — a deployment on `--claim-across-tenants` that applied 038 without 040 would
+never dispatch a defer phase at all.
 
-**Nothing reads or writes these yet.** The consumer — the defer segment in the executor — and
-the producers — the three unfenced transitions — are the remaining work. Until then the columns
-are inert and the paragraph at the end of this section still describes current behaviour.
+**Which workflows take it.** A terminate enters the defer phase only when the workflow has
+registered defers — an `EventTypeDefer` row in its history, or a compaction state, which is the
+conservative answer because compaction prunes the rows it folds. A workflow with no defers has no
+cleanup to run and terminates in one step exactly as before, which is every workflow in most
+deployments. `engine/defer_phase.go`'s `deferPhaseOwed` is the whole of that decision.
 
 §3.35 phases 1–4 made a workflow's `defer` bodies run on every path where a live instance exists:
 success, error, and every kill the host performs. The three unfenced transitions above are the
@@ -208,11 +215,19 @@ follows from that:
   visible — a caller can tell "terminating, running its cleanup" from "running normally".
 - **The workflow is not re-executed.** The defer segment replays history to reconstruct the
   instance and runs only the registered defers; the workflow body does not run again.
-- **Bounded by a deadline.** `defer_phase_deadline`, swept by the existing `reaperLoop`, so a
-  worker that dies mid-defer-phase leaves a workflow the reaper re-queues.
+- **Bounded by a deadline.** Two different sweeps, and the distinction is the point.
+  A worker that *dies* mid-phase is caught by the ordinary heartbeat sweep, which returns the
+  workflow to `terminating` for another attempt. `defer_phase_deadline` bounds the number of
+  attempts: past it, `ExpireDeferPhases` applies the recorded outcome without the cleanup, so a
+  guest that traps on every replay cannot leave a workflow in `terminating` forever. Five minutes
+  (`engine/defer_phase.go`).
+- **A defer phase never fails the workflow.** Every failure inside it — a trap, a timeout,
+  unreadable history, WASM that will not load, a panic — applies the recorded outcome and reports
+  the cleanup as lost. Turning a terminate into a `failed` because its *cleanup* went wrong would
+  replace an outcome the database had already committed to.
 
-Until this ships, the three unfenced transitions remain terminal-and-immediate, and their defers
-do not run at all. That is the status quo, not a regression.
+The parent-close `TERMINATE` arm and `adminForceResolve` remain terminal-and-immediate, and their
+defers do not run at all. That is unchanged, not a regression.
 
 ---
 

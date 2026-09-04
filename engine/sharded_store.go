@@ -1534,3 +1534,53 @@ func (s *ShardedStore) ClaimDueSchedule(ctx context.Context, name string, expect
 	}
 	return claimed, nil
 }
+
+// ---- DeferPhaseStore ----
+//
+// IMPROVEMENT-PLAN 3.75 step 2. ShardedStore has to implement this pair or a
+// sharded deployment's terminate would mark a defer phase it could never
+// finalize: TerminateWorkflow routes to the shard and marks the row, and with
+// no FinalizeDeferPhase the worker's segment would have nowhere to apply the
+// recorded outcome. The pair travels with TerminateWorkflow, not with the
+// store type.
+
+// FinalizeDeferPhase routes by workflow ID, like every other per-workflow
+// write. The fence lives on the shard's own row, so nothing here needs to know
+// about it.
+func (s *ShardedStore) FinalizeDeferPhase(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord) error {
+	shard := s.getShard(runID)
+	if shard == nil {
+		return fmt.Errorf("finalize_defer_phase: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	dps, ok := shard.Store.(DeferPhaseStore)
+	if !ok {
+		return fmt.Errorf("finalize_defer_phase: shard %q's store cannot finalize a defer phase, "+
+			"so a terminate that marked one on it can never complete", shard.Config.Name)
+	}
+	return dps.FinalizeDeferPhase(ctx, runID, workerID, generation, newEvents)
+}
+
+// ExpireDeferPhases fans out, like ReapStaleInstances: a deadline is a property
+// of a row rather than of a workflow this call knows the id of.
+//
+// A shard whose store cannot expire is skipped rather than fatal, because the
+// same store could not have marked a phase either -- so it has nothing to
+// expire, and failing the whole sweep over it would stop the shards that do.
+func (s *ShardedStore) ExpireDeferPhases(ctx context.Context) (int, error) {
+	total := 0
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		dps, ok := shard.Store.(DeferPhaseStore)
+		if !ok {
+			continue
+		}
+		n, err := dps.ExpireDeferPhases(ctx)
+		if err != nil {
+			return total, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
+}

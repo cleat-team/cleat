@@ -1,3 +1,11 @@
+-- SUPERSEDED IN PART by 043_claim_terminating_workflows.sql (2026-09-04): the
+-- two workflow_instances indexes below are dropped there and replaced by
+-- idx_instances_claimable and idx_instances_tenant_claimable, whose filter
+-- covers 'terminating' as well as 'ready'. A filtered index is only usable
+-- when the query's predicate implies its filter, and the dispatch claim's
+-- predicate became status IN ('ready', 'terminating') -- see IMPROVEMENT-PLAN
+-- 3.112. idx_defs_active is unaffected. Everything below still explains WHY
+-- these indexes exist and how the three dialects' sets were compared.
 -- cleat migration 035 (mssql): add idx_instances_ready, idx_defs_active,
 -- idx_instances_tenant_ready for dialect parity with PostgreSQL/MySQL
 --

@@ -95,8 +95,24 @@ future session should not have to rediscover.
 > Three items, and **all three have a decision at the front rather than an implementation** —
 > which is why none of them was taken today.
 >
-> 1. **§3.75 step 2 — the two-phase terminal transition.** The flagship. Step 1 (#623) landed the
->    migration and *no Go code*: `grep -rn "pending_terminal_status|defer_phase_deadline"
+> 1. ~~**§3.75 step 2 — the two-phase terminal transition.**~~ **DONE for `TerminateWorkflow`,
+>    2026-09-04, §3.112.** Terminate now marks `terminating`, the dispatch loop claims it, the
+>    defer segment runs the cleanup, and `FinalizeDeferPhase` applies the recorded outcome and
+>    only then releases the resources. `WithDeferPhase` has a production caller.
+>
+>    **Both constraints recorded below were wrong, and one of them cost a day.** The "second
+>    engine" is not needed: `setup.go:1705` is `NewEngine` *inside* `executeWorkflow`, so the
+>    worker already builds one engine per workflow and the wiring is a single appended option.
+>    The note was written from the line number without reading the enclosing function. The
+>    language gate closed itself — `deferSegmentLanguages` reached all five on 2026-09-04.
+>
+>    **What remains is transitions 2 and 3**, and they reuse everything step 2 built: the
+>    parent-close `TERMINATE` arm, then `adminForceResolve`. §3.88 §1 confirmed all three sites
+>    are symmetric on all three dialects, so these are the mechanical half.
+>
+>    The original note follows, because its evidence is still how to check the claim.
+>
+>    Step 1 (#623) landed the migration and *no Go code*: `grep -rn "pending_terminal_status|defer_phase_deadline"
 >    --include=*.go` returns nothing, and so does `grep -rn '"terminating"'`. §3.81 built the
 >    execution mechanism, `WithDeferPhase`, and `grep -rn WithDeferPhase --include=*.go` finds
 >    **only its own tests** — no production caller. Step 2 is the whole connection.
