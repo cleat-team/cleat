@@ -102,6 +102,20 @@ func TestEveryShippedTenantPolicyExistsInTheBuiltDatabase(t *testing.T) {
 			"mssqlFilterPredicateRe rather than lowering this bound.", len(want))
 	}
 
+	// Guard on the DSN before touching testutil.MSSQLTestDB, which does NOT
+	// skip when SQL Server is absent: with CLEAT_TEST_MSSQL unset it falls back
+	// to a default localhost:1433 DSN and t.Fatalf's on the failed ping. The
+	// first version of this test omitted the guard and failed three CI jobs
+	// that have no SQL Server -- a test asserting a database property must skip
+	// where the database does not exist, and the neighbouring
+	// TestMSSQLTenantIsolation_UnderRealSecurityPolicies guards exactly this way.
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
+	if testing.Short() {
+		t.Skip("Skipping MSSQL integration test in short mode")
+	}
+
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 
