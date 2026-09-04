@@ -12425,15 +12425,35 @@ SQL Server while §3.86 was being written; the mock here does not simulate the p
 violation, so reverting the fix shows a 200. The test asserts the handler property, which holds
 whatever the store would have gone on to do.
 
-#### Not done here
+#### The three siblings, done 2026-09-03 — and only one of them was a hole
 
-The same shape applies to `handleWorkflowRetry`, `handleCancel` and `handleGetQueryState` — one
-line each. They are left alone because the scope asked for was terminate and signal; widening it
-silently is how a reviewable change becomes an unreviewable one.
+This entry originally said the same shape applied to `handleWorkflowRetry`, `handleCancel` and
+`handleGetQueryState`, *"one line each"*. **That was wrong, and checking each one is what showed
+it.** Only `handleCancel` needed anything:
 
-Also still open, and recorded in §3.92: `terminateWorkflowOnce` does not check `RowsAffected`
-before running the parent-close cascade. This entry stops the *caller* learning anything, and does
-not change what the store does when reached.
+| route | before | verdict |
+|---|---|---|
+| `handleCancel` | `200 {"status":"cancellation_requested"}` for a workflow it had not cancelled, and for one that did not exist | **a hole** — now routed through `callerOwnsTarget` |
+| `handleWorkflowRetry` | already reads the workflow back through a tenant-scoped `GetWorkflowByID` and `404`s when it is nil | safe |
+| `handleGetQueryState` | `GetQueryState` returns `("", nil)` for no rows on all three dialects | safe |
+
+The query-state one is worth stating carefully, because "it returns 200" sounds like the defect
+this entry is about and is not. A foreign id, an unknown id, and a real workflow whose key is
+simply unset all produce the same `200 {"key":k,"value":""}`. Indistinguishable is the property
+that matters; a 404 there would *add* an oracle rather than remove one.
+
+`handleWorkflowRetry` answers `404 "workflow not found"` where `callerOwnsTarget` answers
+`404 "not found"`. Different wording, same status, and — the part that counts — the same answer
+for an unknown id as for someone else's, so it is not an oracle either. Left as it is rather than
+churned for symmetry.
+
+**Estimating from a shape rather than reading the code is what produced the wrong count**, and it
+was an estimate offered as a plan. Two of the three were already correct by different mechanisms,
+which is the same "two mechanisms, same outcome" pattern §3.91 and §3.99 both record for the
+dialects.
+
+Also recorded here and now **done**: `terminateWorkflowOnce` not checking `RowsAffected` before the
+parent-close cascade — see §3.92's root-fix section.
 
 ### 3.99 The admin API answered 404 to its rightful owner on two of three dialects — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
 

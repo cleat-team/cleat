@@ -631,7 +631,20 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id string) {
-	st, ok := s.scopedStore(w, r)
+	// callerOwnsTarget, matching terminate and signal (3.101). Cancel was the
+	// third route taking an id from the URL path and not checking it: 3.86
+	// scoped RequestCancellation's UPDATE so nothing crossed, but the handler
+	// reported 200 "cancellation_requested" for a workflow it had not
+	// cancelled -- and for one that does not exist at all.
+	//
+	// Its two siblings turned out NOT to need this, which is why only one
+	// route changes here. handleWorkflowRetry already reads the workflow back
+	// through a tenant-scoped GetWorkflowByID and 404s when it is nil.
+	// handleGetQueryState needs nothing: GetQueryState returns ("", nil) for no
+	// rows on all three dialects, so a foreign id, an unknown id and a real
+	// workflow with that key unset are already the same 200 with an empty
+	// value -- indistinguishable, which is the property that matters.
+	st, ok := s.callerOwnsTarget(w, r, id)
 	if !ok {
 		return
 	}
