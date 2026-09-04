@@ -12470,6 +12470,97 @@ added after it was written. **A doc comment that explains why something is safe 
 and a new caller is the event that expires it.** Grep for callers when you change a function;
 grep for *premises* when you add one.
 
+### 3.113 The Python SDK discards the host's result on fire-and-forget calls, so a refusal is reported as success — 🔴 **OPEN** (WS-1, 2026-09-04)
+
+Found while costing §3.111's remaining candidates, and it **blocks** them. It is also a live
+defect on its own, independent of defer segments.
+
+`python-sdk/cleat_sdk/host_calls.py` calls several host imports and throws the return value away:
+
+```python
+_import_cleat_signal_workflow(target_run_id, signal_name, payload_str)
+_import_cleat_send(service, operation, req_str)
+```
+
+No assignment, no error check. The host does not return 0 unconditionally on these paths —
+`SignalWorkflow` (`engine/signaller.go`) returns `errSignalAuthRequiredInt` when
+`signalAuthCheck` refuses the send, and logs it at ERROR host-side. **A Python workflow whose
+signal is refused by the auth check is told nothing**: `signal_workflow` returns `None` on the
+refusal and `None` on success.
+
+Measured 2026-09-04 over the ten methods §3.111 costed. Nine of the ten do not bind the host
+result at all; none tests bit 31:
+
+```
+python method           binds result?  tests any bit?
+side_effect             NO             NO
+send                    NO             NO
+schedule_invoke         NO             NO
+send_signal_and_wait    NO             NO
+reply_to_signal         NO             NO
+signal_workflow         NO             NO
+schedule_cron           NO             NO
+acquire_lock            NO             NO
+release_lock            yes            NO
+```
+
+`run_detached` is in that scan and is **not** an instance: Python's `run_detached` takes a
+closure, like Go's, and reaches no import. Checked rather than assumed, because it is the one
+§3.111 had just guarded — `run-detached` is absent from `cleat.wit` and has no component
+dispatcher, so a component guest cannot call it and §3.111's
+`reasonNotInTheComponentWorld` exemption holds.
+
+#### Why this blocks §3.111's remaining seven
+
+The plan there was to guard the calls that *start* something — `SignalWorkflow`,
+`SendSignalAndWait`, `DurableSend`, `SideEffect`, `AcquireLock`, `ScheduleCron`,
+`DurableScheduleInvoke`. Every one is declared in `cleat.wit`, so a Python component guest can
+call it, and `python` is in `deferSegmentLanguages` since §3.110, so those segments run.
+
+Guarding them host-side today would set bit 31 on a result **the Python SDK does not read**. The
+guest would carry on and do the work the segment exists to prevent — §3.83's defect, reproduced
+seven times, on the one language whose SDK cannot see it. The prerequisite is this entry, not
+more host guards.
+
+#### A correction to a shape §3.111's guard assumes
+
+`TestTheThreeStopSurfacesAgree` requires every host stop site to have a WIT function returning
+`result<string, call-failure>`. That is right for all nine current sites, which return strings —
+and it is **not** the right rule for these seven, which return `u64`/`s64`. Bit 31 fits inside a
+`u64`, so the component guest can test it exactly as the core-module SDKs test their `i64`; the
+`result<...>` shape exists for *string*-returning calls where the sentinel had nowhere to live
+(§3.110). Applied to a `u64` call the guard would demand a signature change that is not the fix,
+while the actual gap — the Python SDK not testing the bit — went unchecked.
+
+Not changed yet, because no `u64` call is guarded and a rule loosened before it has a case is a
+rule nobody can falsify. Recorded so that whoever guards the first one changes the rule rather
+than the signature.
+
+#### The fix, specified
+
+Bind the result and test it, in the order the other four SDKs use — sentinel first, then the
+error code — for each import whose host function can return non-zero. `release_lock` already
+binds its result and is the model for the shape. The Python SDK has no bit-31 constant today:
+`memory.py`'s `SUSPEND_SENTINEL` is `1 << 62` and is a **different mechanism** (the value an
+*export* returns to suspend), so a new one is needed rather than reusing that.
+
+Re-derive the scan:
+
+```
+python3 - <<'EOF'
+import pathlib, re
+src = pathlib.Path('python-sdk/cleat_sdk/host_calls.py').read_text().split('\n')
+defs = [(i, re.match(r'    def (\w+)', l).group(1))
+        for i, l in enumerate(src) if re.match(r'    def \w+', l)]
+for idx, (i, name) in enumerate(defs):
+    end = defs[idx+1][0] if idx+1 < len(defs) else len(src)
+    body = '\n'.join(src[i:end])
+    if '_import_cleat_' in body:
+        binds = bool(re.search(r'\bresult\s*=|\bres\s*=|\brc\s*=', body))
+        print(f"{name:<28}{'binds' if binds else 'DISCARDS'}")
+EOF
+```
+
 ### 3.111 A defer segment could still call a service through `cleat_call_heartbeat` — 🟢 **FIXED 2026-09-04** (WS-1, 2026-09-04)
 
 The eighth fresh path, and the third time this inventory was built by hand and came up short.
