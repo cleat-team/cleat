@@ -56,9 +56,24 @@ git diff --cached --name-only --diff-filter=ACM -- "$PLAN" | grep -q . || exit 0
 # shellcheck source=scripts/section-blocks.sh
 . "$BLOCKS"
 
-# Added section headings only. -U0 keeps the context lines out, so an unchanged
-# heading near an edit is not read as a new one.
-added="$(git diff --cached -U0 -- "$PLAN" | grep -oE '^\+### [0-9]+\.[0-9]+ ' | sed 's/^+### //; s/ $//' | sort -u)"
+# Genuinely new section numbers, computed as a SET DIFFERENCE between the staged
+# file and HEAD's -- not from the diff's `+` lines.
+#
+# Reading `+` lines was the first implementation and it was wrong. `git diff`
+# pairs lines by similarity, so a commit that removes a lot of surrounding text
+# re-emits unchanged headings as additions even at -U0. The archive migration
+# (A3) moved 13,000 lines out of this file without adding a single section, and
+# the hook refused it while listing 98 grandfathered numbers as newly added.
+# A set difference cannot make that mistake: a number already in HEAD is not new,
+# however the diff chose to render it.
+heads_of() { grep -oE '^### [0-9]+\.[0-9]+ ' | sed 's/^### //; s/ $//' | sort -u; }
+
+staged="$(git show ":$PLAN" 2>/dev/null | heads_of)"
+current="$(git show "HEAD:$PLAN" 2>/dev/null | heads_of)"
+
+# A first commit of the file has no HEAD side; everything in it is new, which is
+# the correct reading.
+added="$(comm -23 <(printf '%s\n' "$staged") <(printf '%s\n' "$current"))"
 [ -n "$added" ] || exit 0
 
 stream="$(section_stream_for_checkout)"
