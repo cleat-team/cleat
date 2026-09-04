@@ -37,6 +37,21 @@ GRANDFATHER_MAX=114
 
 # stream:low-high. Disjoint by construction; check-section-numbers.sh --self-test
 # asserts the boundaries rather than trusting them.
+#
+# THREE SECTIONS SIT IN THE WRONG BLOCK AND ARE STAYING THERE, recorded so that
+# nobody later reads them as evidence of who owns what:
+#
+#   3.201, 3.202   WS-2 (Python SDK), inside WS-1's block   e4de0a4, 9353527
+#   3.300          WS-3 (boundary inventory), inside WS-2's #697
+#
+# Both authors had started before the block rule landed and never re-ran
+# next-section-number.sh, which answers correctly. Not renumbered: blocks exist
+# to prevent COLLISIONS, and next-section-number.sh reads every used number
+# regardless of block, so it never hands out a taken one. Renumbering would have
+# meant editing two other streams' sections plus 18 references
+# (`grep -roE '3\.(201|202|300)' ... | wc -l`, 2026-09-04) across streams, while
+# one of them had an open PR citing them. .githooks/pre-commit now catches this
+# at commit time, which is the only place the stream is known.
 SECTION_BLOCKS=(
   "WS-1:200-299"
   "WS-2:300-399"

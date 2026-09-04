@@ -77,6 +77,16 @@ git config core.hooksPath .githooks
 composes with `--signoff`, `--amend` and `git rebase --signoff` rather than
 signing anything twice.
 
+The same setting enables `.githooks/pre-commit`, which refuses a commit that
+adds an `IMPROVEMENT-PLAN.md` section outside your sandbox's allocated block.
+CI cannot check that — it asserts uniqueness and block membership, both of
+which a cross-stream misallocation satisfies — so the commit is the only point
+where the answer is knowable. Ask for your number rather than picking one:
+
+```
+scripts/next-section-number.sh
+```
+
 If a branch is already unsigned:
 
 ```
