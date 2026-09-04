@@ -12,6 +12,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **Terminating a workflow that has registered `defer` bodies is now asynchronous,
+  and runs those bodies before the workflow becomes terminal.** Migrations
+  `postgres/040`, `mssql/043` (MySQL needs none).
+
+  Previously `TerminateWorkflow` wrote `status = 'terminated'` and then released
+  the workflow's sticky assignment and concurrency keys. The registered defers
+  never ran — and the resources a defer body would have released were dropped
+  anyway, by the host, in the wrong order, with nothing recording that anything
+  was owed.
+
+  Now such a workflow goes to a new non-terminal status, **`terminating`**,
+  carrying the outcome it will be given. A worker claims it like any other
+  workflow, replays its history as a *defer segment* — the body does not run
+  again; it is refused any new work — runs the outstanding defer bodies, and only
+  then applies the recorded outcome and releases the resources.
+
+  **Consequences.**
+  - A caller that terminates and immediately reads `status` may see `terminating`
+    rather than `terminated`, and must poll. This is `tiers.yaml`'s decision D6.
+  - A workflow with **no** registered defers still terminates in one step, as
+    before. Most deployments will see no change at all.
+  - Terminating a workflow that is already in its defer phase terminates it
+    immediately, cutting the cleanup short.
+  - A defer phase never changes the outcome: if it traps, times out, or cannot
+    start, the recorded outcome is applied anyway and the lost cleanup is logged.
+    `defer_phase_deadline` (5 minutes) bounds it.
+  - **Apply the migrations.** `postgres/040` widens `admin.claim_workflows` and
+    the claim's partial indexes; `mssql/043` widens the filtered ones. A
+    deployment running this code against the older schema keeps working — the
+    cross-tenant claim falls back with a warning naming the migration — but its
+    defer phases are never claimed, so every terminate waits out its deadline and
+    skips the cleanup.
+
+  The parent-close `TERMINATE` policy and the admin force-resolve verbs are
+  unchanged: they still terminate in one step and still skip their defers.
+
+  See IMPROVEMENT-PLAN §3.75 and §3.112, and
+  `docs/reference/workflow-lifecycle.md` for the whole state machine.
+
 - **Workflow definition names are now per-tenant.** `workflow_defs`' primary key
   becomes `(tenant_id, name, version)`, and the three foreign keys that reference
   it — from `workflow_instances`, `workflow_tags` and `workflow_routing` — carry

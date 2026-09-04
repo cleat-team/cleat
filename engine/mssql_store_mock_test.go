@@ -69,6 +69,7 @@ func TestMSSQLStore_ClaimWorkflow_Success(t *testing.T) {
 					int64(1),   // generation
 					int64(0),   // priority
 					"",         // trace_id
+					"",         // pending_terminal_status
 				},
 			},
 		},

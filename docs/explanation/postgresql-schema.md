@@ -117,9 +117,13 @@ CREATE TABLE workflow_instances (
 
 **Indexes**:
 
-- `idx_instances_ready` on `(status, next_wake_at)` WHERE `status = 'ready'` --
-  accelerates the worker poll loop. This is the most critical index for worker
-  throughput.
+- `idx_instances_claimable` on `(status, next_wake_at)` WHERE
+  `status IN ('ready', 'terminating')` -- accelerates the worker poll loop.
+  This is the most critical index for worker throughput. It was
+  `idx_instances_ready`, filtered on `status = 'ready'` alone, until migration
+  040: the claim now also picks up workflows running their defer phase
+  (`docs/reference/workflow-lifecycle.md`), and a partial index is only usable
+  when the query's predicate implies its filter.
 - `idx_instances_heartbeat` on `(assigned_to, heartbeat_at)` WHERE
   `status = 'running'` -- enables monitoring and stale-assignment detection.
 - `idx_instances_stale` on `(status, heartbeat_at)` WHERE `status = 'running'` --
@@ -274,7 +278,7 @@ CREATE TABLE workflow_update_requests (
 
 | Index | Table | Purpose | Uniqueness |
 |-------|-------|---------|------------|
-| `idx_instances_ready` | `workflow_instances` | Worker poll loop: find runnable instances | Non-unique, partial |
+| `idx_instances_claimable` | `workflow_instances` | Worker poll loop: find runnable instances (`ready` and `terminating`) | Non-unique, partial |
 | `idx_instances_namespace_ready` | `workflow_instances` | Namespace-scoped poll loop | Non-unique, partial |
 | `idx_instances_heartbeat` | `workflow_instances` | Heartbeat monitoring | Non-unique, partial |
 | `idx_instances_stale` | `workflow_instances` | Reaper: stale heartbeat detection | Non-unique, partial |

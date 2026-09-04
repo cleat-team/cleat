@@ -35,6 +35,17 @@ type WorkflowInstance struct {
 	Generation int64           `json:"generation"`
 	Priority   int             `json:"priority"`
 	TraceID    string          `json:"trace_id,omitempty"`
+
+	// PendingTerminalStatus is the outcome a two-phase terminal transition
+	// has already decided and has not yet applied: "" for the overwhelming
+	// majority of rows, and the status to finalize with once this claim's
+	// defer phase completes. See engine/defer_phase.go.
+	//
+	// It is what tells the dispatch loop that the claim it just took is a
+	// defer segment rather than ordinary work, which is why it is carried on
+	// the claim rather than read back afterwards. Status cannot carry it:
+	// every claim sets status = 'running' and returns the new value.
+	PendingTerminalStatus string `json:"pending_terminal_status,omitempty"`
 }
 
 // Schedule is a row from workflow_schedules.

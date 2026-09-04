@@ -1315,13 +1315,34 @@ func TestMySQLStore_QueueDepth(t *testing.T) {
 	}
 }
 
+// TerminateWorkflow reads the row before it writes, because which UPDATE it
+// runs depends on whether the workflow owes a defer phase (IMPROVEMENT-PLAN
+// 3.112). Both arms are exercised: the mock cannot tell them apart -- they are
+// both "UPDATE workflow_instances" -- so what this covers is the read and the
+// branch reaching a write at all, not which write.
 func TestMySQLStore_TerminateWorkflow(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 1},
-	})
-	err := store.TerminateWorkflow(testCtx, "wf-1", "manual termination")
-	if err != nil {
-		t.Fatalf("TerminateWorkflow: %v", err)
+	for _, tc := range []struct {
+		name       string
+		status     string
+		hasDefers  bool
+		compaction bool
+	}{
+		{"no defers terminates in one step", "running", false, false},
+		{"registered defers enter the defer phase", "running", true, false},
+		{"compacted history is treated as owing defers", "running", false, true},
+		{"already terminal stays one-step", "done", true, false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMySQLStoreForTest(t, []mockRowsResult{
+				queryRowOk("SELECT w.status", tc.status, tc.hasDefers, tc.compaction),
+			}, []mockExecResult{
+				{match: "UPDATE workflow_instances", affected: 1},
+			})
+			if err := store.TerminateWorkflow(testCtx, "wf-1", "manual termination"); err != nil {
+				t.Fatalf("TerminateWorkflow: %v", err)
+			}
+		})
 	}
 }
 

@@ -11056,7 +11056,7 @@ Re-derive: generate a wrapper and read it, or run
 `CleatEntryProcessorTest.testGeneratedWrapperPropagatesSuspension`. Removing the processor's
 suspend branch fails exactly that test and no other (282 tests, 1 failure).
 
-### 3.75 The durable record for a resumable defer phase — 🔵 **DESIGN ANSWER, not yet built; one premise corrected and the execution half built in §3.81** (WS-2, 2026-09-02)
+### 3.75 The durable record for a resumable defer phase — 🟡 **DESIGN ANSWER; BUILT for `TerminateWorkflow` 2026-09-04 (§3.112), two transitions to go** (WS-2, 2026-09-02)
 
 > **2026-09-02, read §3.81 before building this.** The record-shape answer below stands. One
 > supporting claim does not: the inventory excludes `RequestCancellation` because "the guest
@@ -11219,10 +11219,26 @@ shows a reset chain segment.
   from the shipped migrations, so there is no second schema definition to keep in step.
   `docs/reference/workflow-lifecycle.md` carries the vocabulary, including `terminating` as a
   seventh status with schema but no writer.
-- Change the two host-driven terminal sites to mark rather than finalize, and move
-  `releaseWorkflowResources` behind the defer segment on those paths.
-- Add the defer segment to the executor: replay, run defers, finalize with the recorded outcome.
-- Extend `reaperLoop` with the marker's deadline predicate.
+- ~~Change the two host-driven terminal sites to mark rather than finalize, and move
+  `releaseWorkflowResources` behind the defer segment on those paths.~~ — ✅ **done for
+  `TerminateWorkflow` 2026-09-04 (§3.112), on all three dialects.** The parent-close `TERMINATE`
+  arm and `adminForceResolve` are the two that remain, and they reuse everything below rather
+  than adding to it.
+- ~~Add the defer segment to the executor: replay, run defers, finalize with the recorded
+  outcome.~~ — ✅ **done 2026-09-04.** The segment itself was §3.81's; what §3.112 added is the
+  claim that starts one (`status IN ('ready','terminating')` on five claim queries plus
+  `migrations/postgres/040` for the cross-tenant function), the marker on the claimed row, and
+  `FinalizeDeferPhase`.
+- ~~Extend `reaperLoop` with the marker's deadline predicate.~~ — ✅ **done 2026-09-04**,
+  `ExpireDeferPhases`. Note it is a *second* sweep rather than a change to the first: the
+  heartbeat sweep handles a worker that died, this one bounds the number of attempts. See §3.112.
+
+**One thing this section got wrong, worth keeping because the shape recurs.** It says a defer
+phase should run whenever a host-driven transition happens. It should not: a workflow with no
+registered defers has nothing to run in one, and paying a claim, a replay and a WASM
+instantiation for it would be a regression for every workflow in most deployments. §3.112's
+`deferPhaseOwed` is that gate, and it is also what kept the blast radius survivable — every
+existing test that terminates a fixture without defers is untouched.
 
 #### Open, and deliberately not decided here
 
@@ -15067,3 +15083,152 @@ componentize-py inside the component — so the staleness was invisible. Regener
   `abort()` now. The callback has no way to *report* an allocation failure — its error channel
   is a `wasmtime_error_t` it would also have to allocate — so the only real choice was where
   the failure becomes visible.
+
+### 3.112 Terminate ran no defers, and released the locks the defers were for — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+§3.75 step 2, and the first of its three transitions. §3.75 is the design; this is what shipped
+and what had to be corrected on the way.
+
+**The defect, restated as an ordering rather than an omission.** `TerminateWorkflow` set the
+terminal status and then called `releaseWorkflowResources` — `ClearStickyWorker` and
+`ReleaseWorkflowConcurrencyKeys` — a few lines later. So a terminated workflow's cleanup was not
+merely skipped: the host performed a *different* release, in the wrong order, with nothing
+recording that anything was owed. A defer whose body releases the lock its workflow took never
+ran, and the lock was dropped anyway by a code path that knew nothing about it.
+
+**What ships.** A workflow that owes cleanup no longer terminates in one step. It goes to
+`terminating` carrying `pending_terminal_status = 'terminated'` and a deadline, stays
+schedulable, is claimed by the ordinary dispatch loop, replays as a defer segment
+(`WithDeferPhase`), and is finalized by `FinalizeDeferPhase` — which applies the *recorded*
+outcome and only then releases the resources. All three dialects.
+
+    engine/defer_phase.go                  the shared vocabulary and deferPhaseOwed
+    engine/{store,mysql,mssql}_defer_phase.go  FinalizeDeferPhase + ExpireDeferPhases
+    migrations/postgres/040                admin.claim_workflows: 'terminating' + the marker
+    cmd/cleat-worker/setup.go              the claim -> segment -> finalize glue
+
+**`WithDeferPhase` now has a production caller.** It had none since §3.81 built it: the whole
+mechanism — five SDKs' worth of defer-segment support, §3.105 through §3.110 — was reachable only
+from its own tests. That is what step 2 was.
+
+#### Four things the design did not anticipate, each measured
+
+**1. The "second engine" constraint does not exist.** WS2-STATUS recorded, 2026-09-03, that
+"the worker needs a second engine" because `e.deferPhase` is set at construction while the worker
+"builds one shared engine (`cmd/cleat-worker/setup.go:1705`)". That line is `eng :=
+engine.NewEngine(nil, caller, engineOpts...)` **inside `executeWorkflow`** — one engine per
+workflow, not one per worker. So the wiring is a single appended option. The note was written
+from the line number without reading the enclosing function, and it parked the item for a day.
+
+**2. Not every terminate should take it.** Two phases cost a claim, a replay and a WASM
+instantiation. A workflow with no registered defers has nothing to run in them, so `deferPhaseOwed`
+gates on an `EXISTS` over `event_history` for an `EventTypeDefer` row. This is also what keeps the
+blast radius survivable: every existing test that terminates a fixture with no defers is
+unaffected, and so is every deployment that does not use `defer`.
+
+**3. The gate has to be conservative about compaction, and the exact-looking version is the
+wrong one.** Compaction PRUNES the rows it folds (`DELETE FROM event_history WHERE workflow_id =
+$1 AND step < $2`, `engine/db.go`) and carries the registrations forward in
+`CompactionState.PendingDefers`. So on a compacted workflow the `EXISTS` answers "no" about rows
+that no longer exist rather than about defers that were never registered. `deferPhaseOwed`
+therefore also returns true for any compacted workflow. Reading `PendingDefers` out of the JSON
+would be exact and would be three JSON dialects' worth of SQL; the cost of being coarse is one
+segment that runs nothing, and the cost of being exact-looking would be skipped cleanup on the
+long-running workflows most likely to hold a lock.
+
+**4. Every failure path had to be re-pointed, not just the executor's.** A defer segment that
+cannot run is still a terminate that has to complete. Five pre-segment failures — no store for the
+tenant, unreadable history, WASM that will not load, the version check, and the panic recovery —
+all reach a terminal write through `writeTerminalFailure`, which would have written `failed` over
+a workflow whose outcome the database had already recorded as `terminated`. The guard lives in
+that one function for exactly that reason, and it applies the recorded outcome rather than merely
+refusing, so the workflow terminates now instead of waiting out its deadline.
+
+#### The indexes were the half that would have been found in production
+
+Every PostgreSQL and SQL Server index for finding runnable work is **partial/filtered on
+`status = 'ready'`**, and `status IN ('ready','terminating')` does not imply that — so widening
+the claim's predicate takes the claim's own indexes out of play, on the hottest query in the
+system. Nothing in the test suite would have shown it.
+
+Measured on PostgreSQL 16, 2026-09-04, 20,000 `workflow_instances` rows of which 6,693 are
+claimable, `EXPLAIN (ANALYZE, BUFFERS)` of the claim's candidate SELECT:
+
+| | A: ready-only (before) | B: widened (ships) | C: ready-only + terminating-only |
+|---|---|---|---|
+| with an explicit tenant predicate | `idx_instances_tenant_status_created`, cost 883 | `idx_instances_claim_order`, cost 830 | same as A, cost 883 |
+| without one | **Seq Scan**, cost 1404 | `idx_instances_claim_order`, cost 1222 | **Seq Scan**, cost 1404 |
+
+Two things fall out. **C is the obvious fix and it does not work**: adding a second partial index
+for `terminating` alongside the existing one leaves the planner using neither — it produces
+exactly A's plan, seq scan and all. So the predicate has to be widened in place, which is what
+`migrations/postgres/040` and `mssql/043` do (new names first, old ones dropped after, so the
+claim is never without an index).
+
+**And the "without a tenant predicate" row is the real case, not a corner.**
+`PostgresStore.ClaimWorkflows`' candidate SELECT carries no tenant predicate at all — its
+isolation is RLS, which is not something the planner sees written down. That is the row where the
+old indexes lose the claim entirely.
+
+The seed and the EXPLAIN are written out in `migrations/postgres/040`'s header.
+
+#### The two sweeps are different sweeps
+
+`ReapStaleInstances` handles a worker that *died* mid-phase: the heartbeat goes stale and the
+workflow returns to `terminating` — not to `ready`, which is a one-line `CASE` on all three
+dialects and is what keeps D6's distinction ("terminating, running its cleanup" is not
+"runnable") true after a reap.
+
+`ExpireDeferPhases` bounds the number of ATTEMPTS. Without it, a guest that traps on every replay
+is re-queued by the heartbeat sweep forever and the workflow never leaves `terminating`. Past
+`defer_phase_deadline` (5 minutes) it applies the recorded outcome without the cleanup, bumping
+the generation — which is what makes it safe against a phase that is currently claimed, since the
+holder's `FinalizeDeferPhase` then loses its fence, and `ErrFenceLost` is already handled as
+"another owner has this now".
+
+#### A test that passed for the wrong reason, and what fixed it
+
+`TestFinalizeDeferPhaseIsFencedOnTheClaimAndOnTheMarker` originally asserted that the
+`pending_terminal_status IS NOT NULL` predicate is what refuses a **repeated** finalize. Deleting
+that predicate left the test green. What refuses a repeat is the finalize clearing `assigned_to`,
+so the ordinary fence no longer matches — the marker predicate had nothing to do with it.
+
+Its real case is a claimed workflow that owes **no** defer phase: the fence is satisfied, and only
+the marker stops `status = pending_terminal_status` writing NULL. With the predicate removed and
+that case tested, the falsification fails with
+
+    pq: null value in column "status" ... violates not-null constraint (23502)
+    Error 1048 (23000): Column 'status' cannot be null
+
+on postgres and mysql respectively — a refusal by NOT NULL constraint, which is a refusal with a
+message about a column instead of about a fence. Three cases, three different things doing the
+refusing, and only one of them is the predicate under test.
+
+#### Falsified, each against the line it names
+
+| removed | fails with |
+|---|---|
+| the two-phase branch in `TerminateWorkflow` | `status = "terminated", want "terminating"` |
+| `releaseWorkflowResources` moved back to mark time | `the key was released at mark time` — the §3.75 pre-emption, at the assertion that names it |
+| `'terminating'` from the claim predicate | `workflow ... was not claimed; got 0 workflow(s)` |
+| the `CASE` in `ReapStaleInstances` | `status = "ready" after reaping a defer phase` |
+| the marker predicate in `FinalizeDeferPhase` | a NOT NULL violation where `ErrFenceLost` was expected |
+| `WithDeferPhase()` from the segment engine | `the defer segment recorded [], want "after_sleep"` |
+| the `writeTerminalFailure` guard | `a defer segment failed the workflow; the outcome was already decided` |
+
+#### What is NOT in this PR
+
+The other two unfenced transitions. `enforceParentClosePolicy`'s `TERMINATE` arm and
+`adminForceResolve` still terminate in one step and still skip their defers — they are §3.75's
+transitions 2 and 3, and they reuse everything above rather than needing more of it. §3.88 §1
+confirmed all three sites are symmetric on all three dialects, so the remaining two are the
+mechanical half.
+
+One coverage gap, stated rather than papered over: nothing exercises `executeWorkflow`'s
+*post-segment* branch through a real guest. `engine/defer_phase_vertical_test.go` covers terminate
+→ claim → segment → finalize with a real WASM guest and a real database, and
+`cmd/cleat-worker/defer_phase_test.go` covers the worker's own handling with a mock store — but
+the ~10 lines where a claim carrying a marker is routed away from the ordinary suspended/`ready`
+finalize are only covered by the mock-store side. Deleting that branch turns every terminate with
+defers into a workflow that reschedules itself forever, and the test that would catch it does not
+exist.

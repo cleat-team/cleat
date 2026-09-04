@@ -108,6 +108,18 @@ $$;
 GRANT USAGE ON SCHEMA public TO cleat_dispatcher;
 GRANT SELECT, UPDATE ON workflow_instances TO cleat_dispatcher;
 
+-- Dropped before it is created, for the reason 003_procedures.sql documents at
+-- length: 040_claim_terminating_workflows.sql replaces this function with one
+-- that returns an extra column, and PostgreSQL rejects a return-type change
+-- through CREATE OR REPLACE with
+--   ERROR: cannot change return type of existing function (42P13)
+-- Re-applying the migration set to a database that already has 040's version
+-- would otherwise fail here, and re-applying is exactly what an operator
+-- upgrading an existing deployment does. TestShippedSchema_IsIdempotent
+-- enforces it, and also asserts the END state is 040's shape -- which holds
+-- because 040 sorts after 023 and is re-applied in the same pass.
+DROP FUNCTION IF EXISTS admin.claim_workflows(text, text[], integer);
+
 -- The claim itself. This is the same statement cmd/cleat-worker's dispatch loop
 -- has always run -- see engine/store_lifecycle.go ClaimWorkflows -- with no
 -- tenant predicate, because it never had one: isolation came entirely from RLS.

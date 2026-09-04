@@ -274,11 +274,20 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 }
 
 // scanWorkflowInstanceExtra is like scanWorkflowInstance but also scans
-// tenant_id (sql.NullString) and created_at (sql.NullTime).
+// tenant_id (sql.NullString), created_at (sql.NullTime) and
+// pending_terminal_status.
+//
+// The last one is only ever non-empty on a claim that took a defer phase
+// (IMPROVEMENT-PLAN 3.75 step 2), which today is the general claim and not the
+// sticky one -- a sticky claim filters on status = 'ready' and a workflow in
+// its defer phase is 'terminating'. Both queries select it anyway, because one
+// scanner reading two column lists is how a claim silently starts returning the
+// wrong field for the right name.
 func (d Dialect) scanWorkflowInstanceExtra(row scanner, wf *WorkflowInstance) error {
 	var nextWakeAt, createdAt sql.NullTime
 	var tenantID sql.NullString
 	var errorCode, errorOp sql.NullString
+	var pendingTerminal sql.NullString
 
 	if d == DialectMSSQL {
 		var inputStr string
@@ -286,6 +295,7 @@ func (d Dialect) scanWorkflowInstanceExtra(row scanner, wf *WorkflowInstance) er
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt,
 			&tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID,
+			&pendingTerminal,
 		); err != nil {
 			return err
 		}
@@ -295,10 +305,12 @@ func (d Dialect) scanWorkflowInstanceExtra(row scanner, wf *WorkflowInstance) er
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&wf.Input, &wf.AssignedTo, &nextWakeAt,
 			&tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID,
+			&pendingTerminal,
 		); err != nil {
 			return err
 		}
 	}
+	wf.PendingTerminalStatus = pendingTerminal.String
 
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time

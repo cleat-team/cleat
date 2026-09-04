@@ -1704,6 +1704,24 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// Throttle cancellation polls to at most once per 100ms wall-clock
 	// to avoid a full DB transaction on every durable step.
 	engineOpts = append(engineOpts, engine.WithCancellationCheckInterval(100*time.Millisecond))
+
+	// A claim that carries a pending terminal outcome is not ordinary work:
+	// it is the second phase of a terminal transition whose first phase
+	// already decided how this workflow ends (IMPROVEMENT-PLAN 3.75 step 2).
+	// The segment replays the history to rebuild a live instance, refuses the
+	// body any NEW work, and runs the outstanding defers in it.
+	//
+	// One option on a per-execution engine, which is all this needs: the
+	// worker builds an engine per workflow a few lines above, not one shared
+	// engine reused across dispatches. WS2-STATUS recorded the opposite as a
+	// constraint to decide before implementing ("the worker needs a second
+	// engine", 2026-09-03) -- it named setup.go:1705, which is this
+	// NewEngine call, and read it as construction-time state shared between
+	// executions. It is not, so there was nothing to decide.
+	deferPhase := wf.PendingTerminalStatus != ""
+	if deferPhase {
+		engineOpts = append(engineOpts, engine.WithDeferPhase())
+	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)
 	eng.Metrics = w.Metrics
 
@@ -1730,6 +1748,24 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 	}
 	if err != nil {
+		if deferPhase {
+			// A defer segment that could not run is still a terminate that
+			// has to complete. The outcome was decided and recorded before
+			// this segment was ever claimed, and there is no failure this
+			// replay can report that changes it -- so the workflow is
+			// finalized with the recorded outcome and the cleanup is
+			// reported as lost, rather than left in 'terminating' for the
+			// deadline to pick up five minutes later.
+			//
+			// Not left to writeTerminalFailure's guard, which covers the
+			// failure paths that run before the segment: this one has the
+			// segment's own events, and they still belong in the history
+			// even when the execution that produced them ended badly.
+			w.logger.ErrorContext(context.Background(), "defer phase failed; terminating without its cleanup",
+				"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+			w.finishDeferPhase(wf, execStore, history, resultHistory, workflowStartTime)
+			return
+		}
 		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		var ce *engine.CleatError
 		errorCode := engine.ErrUnknown.String()
@@ -1756,6 +1792,16 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			newEvents[i].Request = engine.Redact(newEvents[i].Request)
 			newEvents[i].Response = engine.Redact(newEvents[i].Response)
 		}
+	}
+
+	// A defer segment ends by applying the outcome its first phase recorded,
+	// whatever shape it came back in. It normally comes back SUSPENDED -- the
+	// body replays, asks for its first piece of new work, and is refused -- so
+	// the ordinary reading of that suspension (reschedule and run again later)
+	// is exactly the wrong one here, and this branch has to come before it.
+	if deferPhase {
+		w.finishDeferPhase(wf, execStore, history, resultHistory, workflowStartTime)
+		return
 	}
 
 	if suspended != nil && suspended.Reason == "continue_as_new" {
@@ -1929,9 +1975,49 @@ func (w *Worker) reaperLoop() {
 				w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
 				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
 			}
+			w.expireDeferPhases()
 			w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "ok")
 			w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
 		}
+	}
+}
+
+// expireDeferPhases bounds the number of ATTEMPTS a defer phase gets, which is
+// a different job from the sweep it rides along with.
+//
+// The stale-instance sweep above handles a worker that DIED mid-phase: the
+// heartbeat goes stale, the workflow returns to 'terminating' and another
+// worker replays it. That is the right answer once and the wrong answer
+// forever -- a guest that traps every time it replays would be re-queued on
+// every tick, and the workflow would never leave 'terminating'. Past
+// defer_phase_deadline this applies the outcome that was recorded when the
+// transition was marked, without the cleanup. A terminate that cannot run its
+// defers must still terminate.
+//
+// It shares the reaper's tick rather than having its own loop: both are "sweep
+// rows whose time is up", the deadline is minutes and the tick is seconds, and
+// a second goroutine would buy nothing but another thing to shut down.
+//
+// A store that cannot expire is silent, not an error. It is also a store that
+// cannot MARK a phase -- TerminateWorkflow and the DeferPhaseStore pair ship
+// together -- so it has nothing to sweep.
+func (w *Worker) expireDeferPhases() {
+	dps, ok := w.store.(engine.DeferPhaseStore)
+	if !ok {
+		return
+	}
+	n, err := dps.ExpireDeferPhases(w.ctx)
+	if err != nil {
+		if isConnectionError(err) {
+			w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: DB appears down", "worker_id", w.id)
+		} else {
+			w.logger.ErrorContext(w.ctx, "Defer-phase deadline sweep error", "worker_id", w.id, "error", err)
+		}
+		return
+	}
+	if n > 0 {
+		w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: terminated workflows whose cleanup did not finish in time",
+			"worker_id", w.id, "count", n)
 	}
 }
 
@@ -2545,6 +2631,30 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	st := w.storeFor(wf)
 	ctx := context.Background()
 
+	// A claim carrying a pending terminal outcome cannot be failed, because
+	// its outcome was decided before it was claimed: this execution is the
+	// defer phase of a terminate, and writing 'failed' over it would turn a
+	// terminate into a failure on the strength of the cleanup going wrong.
+	//
+	// The guard lives here rather than in executeWorkflow's error branch
+	// because it has to cover the failure paths that run BEFORE the segment
+	// does -- no store for the tenant, history that would not load, WASM that
+	// would not load, a version check, and the panic recovery. Every one of
+	// them reaches a terminal failure through this function, and every one of
+	// them is a defer phase that could not run rather than a workflow that
+	// failed.
+	//
+	// It applies the recorded outcome rather than merely refusing, so a
+	// workflow whose defer phase cannot start terminates now instead of
+	// sitting in 'terminating' until its deadline.
+	if wf.PendingTerminalStatus != "" {
+		w.logger.WarnContext(ctx, "a defer phase could not run; applying the recorded terminal outcome without its cleanup",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
+			"status", wf.PendingTerminalStatus, "error", errMsg)
+		w.finishDeferPhase(wf, st, nil, nil, time.Now())
+		return false, false
+	}
+
 	deadLettered = strings.Contains(errMsg, "retries exhausted")
 	var err error
 	if deadLettered {
@@ -2579,6 +2689,79 @@ func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt ti
 	if deadLettered {
 		w.Metrics.RecordWorkflowsDeadLettered(ctx)
 	}
+}
+
+// finishDeferPhase applies the terminal outcome that this workflow's first
+// phase recorded, after its defer segment has run. IMPROVEMENT-PLAN 3.75
+// step 2.
+//
+// It takes no status and no error. That is the property the whole two-phase
+// transition rests on: the outcome was written to the row before this segment
+// was claimed, and FinalizeDeferPhase reads it from there, so nothing that
+// happens in the defer phase -- a trap, a timeout, a body that suspends, a
+// worker that is fenced out -- can turn a terminate into a completion or a
+// failure into a different failure. The segment's job is to run the cleanup and
+// get out of the way.
+//
+// The events it appends are real, though, and they are the reason this is not
+// just an UPDATE: a defer body's host calls are durable calls, and their event
+// rows have to land in the same transaction as the terminal write.
+func (w *Worker) finishDeferPhase(wf *engine.WorkflowInstance, execStore engine.WorkflowStore, history, resultHistory []engine.EventRecord, startedAt time.Time) {
+	ctx := context.Background()
+
+	dps, ok := execStore.(engine.DeferPhaseStore)
+	if !ok {
+		// Unreachable through any store that could have marked the phase --
+		// TerminateWorkflow and the DeferPhaseStore pair are implemented
+		// together, and engine asserts that at compile time. Said out loud
+		// rather than ignored, because the failure it describes is a workflow
+		// stuck in 'terminating' with nothing able to move it.
+		w.logger.ErrorContext(ctx, "store cannot finalize a defer phase; this workflow stays in 'terminating' until its deadline",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return
+	}
+
+	var newEvents []engine.EventRecord
+	if len(resultHistory) > len(history) {
+		newEvents = resultHistory[len(history):]
+		for i := range newEvents {
+			newEvents[i].Request = engine.Redact(newEvents[i].Request)
+			newEvents[i].Response = engine.Redact(newEvents[i].Response)
+		}
+	}
+
+	err := dps.FinalizeDeferPhase(ctx, wf.ID, w.id, wf.Generation, newEvents)
+	if errors.Is(err, engine.ErrFenceLost) {
+		// Normal rather than exceptional here, and it has one more cause than
+		// elsewhere: as well as the ordinary "reaped and reclaimed", the
+		// reaper's ExpireDeferPhases takes a phase away from a worker still
+		// grinding on it by bumping the generation. Either way the outcome has
+		// been applied by whoever holds it now.
+		w.logger.DebugContext(ctx, "defer phase: fence lost, the terminal outcome was applied by another owner",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		return
+	}
+	if err != nil {
+		// No recordTerminalFailure: this workflow's outcome is already
+		// decided and writing a different one over it is the one thing this
+		// path must not do. Leaving it in 'terminating' is correct and
+		// bounded -- the deadline sweep applies the recorded outcome.
+		w.logger.ErrorContext(ctx, "finalizing a defer phase failed; it stays in 'terminating' until its deadline",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		return
+	}
+
+	// The parent wake happens inside the finalize, like every other terminal
+	// transition; this only prods the dispatch loop to look.
+	select {
+	case w.parentWakeCh <- struct{}{}:
+	default:
+	}
+
+	w.Metrics.RecordWorkflowDuration(ctx, time.Since(startedAt), wf.DefName, wf.PendingTerminalStatus, "")
+	w.logger.InfoContext(ctx, "defer phase complete; terminal outcome applied",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
+		"status", wf.PendingTerminalStatus, "defer_events", len(newEvents))
 }
 
 // releaseWorkflow returns wf to the ready pool, treating a lost fence as the

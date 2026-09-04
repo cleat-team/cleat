@@ -1190,14 +1190,72 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 // Note that an ALREADY-terminated workflow still matches: the UPDATE carries no
 // status filter, so terminate stays idempotent and only a genuinely absent (or
 // other-tenant) row returns not-found.
+//
+// TERMINATE IS ASYNCHRONOUS WHEN THE WORKFLOW OWES CLEANUP (D6, and
+// IMPROVEMENT-PLAN 3.75 step 2) -- see PostgresStore.TerminateWorkflow for the
+// whole story. A workflow with registered defers goes to 'terminating' here,
+// carrying its outcome in pending_terminal_status, and is finalized by
+// FinalizeDeferPhase once its cleanup has run.
 func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("terminate workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Does this workflow owe a defer phase? See deferPhaseOwed. FOR UPDATE
+	// holds the row for the UPDATE that follows, so the status this reads is
+	// the status that gets marked.
+	var curStatus string
+	var hasDefers, compacted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       EXISTS(SELECT 1 FROM event_history e
+		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
+		       w.compaction_state IS NOT NULL
+		FROM workflow_instances w
+		WHERE w.id = ? AND w.tenant_id = ?
+		FOR UPDATE
+	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrWorkflowNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("terminate workflow: read: %w", err)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers, compacted) {
+		// Phase 1 of the two-phase transition: mark, do not finalize. See
+		// PostgresStore.TerminateWorkflow for why next_wake_at moves and why
+		// nothing is released here.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = ?,
+			    pending_terminal_status = 'terminated',
+			    defer_phase_deadline = NOW(6) + INTERVAL ? SECOND,
+			    error_msg = ?,
+			    next_wake_at = NOW(6),
+			    assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = ? AND tenant_id = ?
+		`, statusTerminating, int(deferPhaseTimeout.Seconds()), reason, workflowID, s.tenantID); err != nil {
+			return fmt.Errorf("terminate workflow: mark defer phase: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("terminate workflow commit: %w", err)
+		}
+		return nil
+	}
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'terminated',
 		    error_msg = ?,
 		    completed_at = NOW(),
 		    assigned_to = NULL,
-		    generation = generation + 1
+		    generation = generation + 1,
+		    pending_terminal_status = NULL,
+		    defer_phase_deadline = NULL
 		WHERE id = ? AND tenant_id = ?
 	`, reason, workflowID, s.tenantID)
 	if err != nil {
@@ -1209,6 +1267,9 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 	}
 	if n == 0 {
 		return ErrWorkflowNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("terminate workflow commit: %w", err)
 	}
 	// The other two dialects have always done this and MySQL never did.
 	//

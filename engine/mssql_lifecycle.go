@@ -101,11 +101,12 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		       INSERTED.created_at,
 		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,
-		       INSERTED.trace_id
+		       INSERTED.trace_id,
+		       COALESCE(INSERTED.pending_terminal_status, '') AS pending_terminal_status
 		WHERE id IN (
 			SELECT id
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
-			WHERE status = 'ready'
+			WHERE status IN ('ready', 'terminating')
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
 			  AND tenant_id = @p4
@@ -127,9 +128,11 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		var inputStr string
 		var errorCode, errorOp sql.NullString
 		var traceID sql.NullString
+		var pendingTerminal sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID,
+			&pendingTerminal); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 		wf.TraceID = traceID.String
@@ -146,6 +149,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		}
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
+		wf.PendingTerminalStatus = pendingTerminal.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -221,7 +225,8 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 		       INSERTED.created_at,
 		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,
-		       INSERTED.trace_id
+		       INSERTED.trace_id,
+		       COALESCE(INSERTED.pending_terminal_status, '') AS pending_terminal_status
 		WHERE id IN (
 			SELECT id
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
@@ -248,9 +253,11 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 		var inputStr string
 		var errorCode, errorOp sql.NullString
 		var traceID sql.NullString
+		var pendingTerminal sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID,
+			&pendingTerminal); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 		wf.TraceID = traceID.String
@@ -267,6 +274,7 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 		}
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
+		wf.PendingTerminalStatus = pendingTerminal.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -409,11 +417,12 @@ func (s *MSSQLStore) claimWorkflowsAcrossTenantsOnce(ctx context.Context, worker
 		       INSERTED.next_wake_at, CONVERT(NVARCHAR(36), INSERTED.tenant_id) AS tenant_id,
 		       INSERTED.created_at, INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,
-		       INSERTED.trace_id
+		       INSERTED.trace_id,
+		       COALESCE(INSERTED.pending_terminal_status, '') AS pending_terminal_status
 		WHERE id IN (
 			SELECT id
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
-			WHERE status = 'ready'
+			WHERE status IN ('ready', 'terminating')
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
 			ORDER BY priority ASC, created_at
@@ -434,9 +443,11 @@ func (s *MSSQLStore) claimWorkflowsAcrossTenantsOnce(ctx context.Context, worker
 		var inputStr string
 		var errorCode, errorOp sql.NullString
 		var traceID sql.NullString
+		var pendingTerminal sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID,
+			&pendingTerminal); err != nil {
 			return nil, fmt.Errorf("claim workflows across tenants scan: %w", err)
 		}
 		wf.TraceID = traceID.String
@@ -453,6 +464,7 @@ func (s *MSSQLStore) claimWorkflowsAcrossTenantsOnce(ctx context.Context, worker
 		}
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
+		wf.PendingTerminalStatus = pendingTerminal.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -753,9 +765,17 @@ func (s *MSSQLStore) releaseWorkflowOnce(ctx context.Context, workflowID, worker
 	}
 	defer tx.Rollback()
 
+	// Same CASE as ReapStaleInstances, for the same reason: a workflow whose
+	// terminal outcome is already recorded is not runnable work, and a release
+	// that called it 'ready' would undo the distinction D6 created the
+	// 'terminating' status to make. Either status is claimable, so the phase
+	// runs again either way -- this is about the status telling the truth
+	// while it waits.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, next_wake_at = @p3
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, next_wake_at = @p3
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p4
 	`, workflowID, workerID, nextWakeAt, generation)
 	if err != nil {

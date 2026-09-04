@@ -30,9 +30,15 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 	}
 	defer tx.Rollback()
 
+	// See PostgresStore.ReapStaleInstances: a workflow reaped mid-defer-phase
+	// goes back to 'terminating', because its terminal outcome is already
+	// decided and calling it 'ready' would undo the distinction D6 created the
+	// status to make.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
 		WHERE status = 'running'
 		  AND heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME())
 		  AND tenant_id = @p2
@@ -204,6 +210,12 @@ func (s *MSSQLStore) releaseWorkflowConcurrencyKeysOnce(ctx context.Context, wor
 //
 // Since 3.92 a terminate that matches no row returns ErrWorkflowNotFound and
 // does not run the parent-close cascade. See terminateWorkflowOnce.
+//
+// TERMINATE IS ASYNCHRONOUS WHEN THE WORKFLOW OWES CLEANUP (D6, and
+// IMPROVEMENT-PLAN 3.75 step 2) -- see PostgresStore.TerminateWorkflow for the
+// whole story. A workflow with registered defers goes to 'terminating' here,
+// carrying its outcome in pending_terminal_status, and is finalized by
+// FinalizeDeferPhase once its cleanup has run.
 func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return withRollbackGuaranteedRetry(ctx, "terminate workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		return s.terminateWorkflowOnce(ctx, workflowID, reason)
@@ -217,13 +229,63 @@ func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reas
 	}
 	defer tx.Rollback()
 
+	// Does this workflow owe a defer phase? See deferPhaseOwed. UPDLOCK holds
+	// the row for the UPDATE that follows, so the status this reads is the
+	// status that gets marked.
+	var curStatus string
+	var hasDefers, compacted int
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       CASE WHEN EXISTS(SELECT 1 FROM event_history e
+		                        WHERE e.workflow_id = w.id AND e.event_type = 'defer')
+		            THEN 1 ELSE 0 END,
+		       CASE WHEN w.compaction_state IS NOT NULL THEN 1 ELSE 0 END
+		FROM workflow_instances w WITH (UPDLOCK, ROWLOCK)
+		WHERE w.id = @p1 AND w.tenant_id = @p2
+	`, sql.Named("p1", workflowID), sql.Named("p2", s.tenantID)).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Not wrapped, for the same reason the RowsAffected == 0 arm below is
+		// not: withRollbackGuaranteedRetry must see it plainly rather than
+		// retry a lookup that will keep answering the same thing.
+		return ErrWorkflowNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("terminate workflow: read: %w", err)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers == 1, compacted == 1) {
+		// Phase 1 of the two-phase transition: mark, do not finalize. See
+		// PostgresStore.TerminateWorkflow for why next_wake_at moves and why
+		// nothing is released here.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = @p4,
+			    pending_terminal_status = 'terminated',
+			    defer_phase_deadline = DATEADD(SECOND, @p5, SYSUTCDATETIME()),
+			    error_msg = @p2,
+			    next_wake_at = SYSUTCDATETIME(),
+			    assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = @p1 AND tenant_id = @p3
+		`, sql.Named("p1", workflowID), sql.Named("p2", reason), sql.Named("p3", s.tenantID),
+			sql.Named("p4", statusTerminating), sql.Named("p5", int(deferPhaseTimeout.Seconds()))); err != nil {
+			return fmt.Errorf("terminate workflow: mark defer phase: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("terminate workflow commit: %w", err)
+		}
+		return nil
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'terminated',
 		    error_msg = @p2,
 		    completed_at = GETDATE(),
 		    assigned_to = NULL,
-		    generation = generation + 1
+		    generation = generation + 1,
+		    pending_terminal_status = NULL,
+		    defer_phase_deadline = NULL
 		WHERE id = @p1 AND tenant_id = @p3
 	`, sql.Named("p1", workflowID), sql.Named("p2", reason), sql.Named("p3", s.tenantID))
 	if err != nil {
