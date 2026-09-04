@@ -12312,9 +12312,36 @@ caused it, and it could not: the engine suite does not import that package.
 
 Both run the same packages. The gate sets **all three DSNs**; `ci.yml`'s `Test Go (engine)` matrix
 entry configures PostgreSQL only, and CLAUDE.md's own table records what that is worth — 2544
-tests in 16s against no DSN, 3846 in 60s against three. The gate is simply the invocation running
-the suite that got long. `ci.yml`'s entry carries `flags: -p 1` and no timeout either, so it has
-the same latent defect and now carries an explicit 30m as insurance rather than as a fix.
+tests in 16s against no DSN, 3846 in 60s against three. The gate is simply the invocation this
+entry was written from. `ci.yml`'s entry carried `flags: -p 1` and no timeout either, and also
+now carries an explicit 30m.
+
+**That second change was described here, and in #654, as "insurance rather than a fix". It was a
+fix, and the defect had already fired.** Corrected 2026-09-04. `Test Go (engine) on 1.26` had
+gone red on develop at 22:26 on 2026-09-03, roughly forty minutes before the sentence claiming it
+"finishes well inside 10m today" was written:
+
+```
+$ gh run view 33813039339 --json jobs \
+    --jq '.jobs[] | select(.conclusion=="failure") | [.name,.startedAt,.completedAt] | @tsv'
+Test Go (engine) on 1.26   2026-09-03T22:27:24Z   2026-09-03T22:39:50Z
+
+$ gh run view 33813039339 --log-failed | grep -E 'panic: test timed out|budget='
+... "Output":"panic: test timed out after 10m0s\n"
+job=test-go/engine skipped=96 budget=592 (passed=1972 failed=0)
+```
+
+`failed=0`, and the job went red — the same "a red that is not a failure" this section opens
+with, on a second job, in the same hour. It landed on `b26f379c`, a **documentation-only** commit
+touching `WORKSTREAM.md`, which is how it was misread: WS-3 reported that the merge had made
+develop red, and the change could not have done so.
+
+**How the wrong claim got written.** The PR-level evidence was real — `Test Go (engine)` was
+passing on the branches being looked at — and no one looked at develop's runs, where the job with
+the smaller test count and the same missing timeout had already crossed the wall. This is the
+same verification gap §3.100 records for its own first fix: **a claim about CI's behaviour is
+settled by CI's history, not by the configuration or by the PR at hand.** One `gh run list
+--branch develop` answers it.
 
 #### 30m, and why not 45m
 
@@ -12386,11 +12413,12 @@ anything.
 
 #### Related
 
-This is the third timeout of the same family in two days. #629 raised the cluster job's 300s after
-the engine suite outgrew it; this session hit Go's 10-minute default repeatedly on local
-three-dialect runs (380s, 442s, 473s, 503s, 987s, 1533s — the spread is machine load, not the
-suite). The suite is growing and the defaults were set when it was smaller; expect the next one
-rather than being surprised by it.
+This is the third timeout of the same family in two days, and it fired in **two** jobs, not one —
+the gate on a PR and `Test Go (engine)` on develop, within an hour of each other. #629 raised the
+cluster job's 300s after the engine suite outgrew it; this session hit Go's 10-minute default
+repeatedly on local three-dialect runs (380s, 442s, 473s, 503s, 987s, 1533s — the spread is
+machine load, not the suite). The suite is growing and the defaults were set when it was smaller;
+expect the next one rather than being surprised by it.
 
 ### 3.101 Terminate and signal told the caller which workflow ids are real — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
 
