@@ -416,6 +416,24 @@ _CALL_ERROR_NAMES: dict[int, str] = {
 }
 
 
+def _raise_if_stopped(result: int) -> None:
+    """Unwind if the host refused this call because the workflow is stopping.
+
+    Must be called before any field of ``result`` is decoded. Bit 31 is free in
+    every layout the host can pack -- "free" meaning the host cannot produce it
+    as an ordinary value, NOT that a field decode would ignore it. In the
+    await-signals layout it sits inside the timed-out field, so a decoder that
+    reads its fields first turns a stop into a timeout and carries on.
+
+    This is the Python half of ``callSuspendSentinel`` (``engine/memory.go``).
+    The Go SDK's half is ``suspendSentinelStmts`` in ``wasm/adapter_metadata.go``,
+    which is prefixed onto every guarded decoder by ``withSuspendCheck`` for the
+    same reason this is a function rather than a line copied to each site.
+    """
+    if result & CALL_SUSPEND_SENTINEL:
+        raise SuspendSentinel()
+
+
 def _check_host_result(result: int, what: str) -> int:
     """Decode a packed host result word, raising on a stop or an error.
 
@@ -451,8 +469,7 @@ def _check_host_result(result: int, what: str) -> int:
         If the host reported a non-zero error code.
     """
     r = result & 0xFFFFFFFFFFFFFFFF
-    if r & CALL_SUSPEND_SENTINEL:
-        raise SuspendSentinel()
+    _raise_if_stopped(r)
     err_code = r & 0xFF
     if err_code != 0:
         raise RuntimeError(f"{what} failed: {_error_code_name(err_code)} (code {err_code})")
@@ -1906,8 +1923,20 @@ class HostCalls:
             payload_max,
         )
 
-        # Host returns SUSPEND_SENTINEL when no signal is available and a
-        # non-zero timeout was specified.
+        # The stop sentinel, tested FIRST and by mask, before any field of the
+        # word below is read. This is not the same value as SUSPEND_SENTINEL
+        # and the difference is the entire defect this guards:
+        # DurableAwaitSignals is a stop site -- `stopBeforeNewWork` returns
+        # `callSuspendSentinel` (engine/signaller.go) because a fresh await
+        # inside a defer segment would leave a terminated workflow waiting for
+        # a signal instead of finishing its cleanup. callSuspendSentinel is bit
+        # 31, and bit 31 lands inside this layout's timed-out field: decoding
+        # first gives timed_out=True with err_code=0, an ORDINARY RESULT, and
+        # the workflow runs on past a stop it was told to obey.
+        _raise_if_stopped(result)
+
+        # SUSPEND_SENTINEL (1 << 62) is the older, unrelated case: no signal
+        # available with a non-zero timeout. Whole-word, not a mask.
         if result == SUSPEND_SENTINEL:
             raise SuspendSentinel()
 

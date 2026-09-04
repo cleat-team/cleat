@@ -15883,3 +15883,62 @@ before touching the rule. Across the whole WIT surface, 8 of 53 functions return
 **Still open, and tracked at §3.202:** `await_signals` binds its result but decodes it wrongly —
 the stop sentinel reads as an ordinary timeout. That is a live hole in the defer-segment stop
 guarantee and is a separate defect from this one.
+
+---
+
+### 3.202 A stop read as a timeout on `await_signals`, so a Python defer segment ran on — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+Found while closing §3.201. A live hole in the defer-segment stop guarantee, on a language
+`deferSegmentLanguages` lists as *verified to unwind on the sentinel*.
+
+**The mechanism.** `DurableAwaitSignals` is one of the host's nine stop sites: a fresh await
+inside a defer segment would leave a terminated workflow waiting for a signal instead of
+finishing its cleanup, so `stopBeforeNewWork` returns `callSuspendSentinel`
+(`engine/signaller.go:82`). Unlike the `result<...>` calls, `durable-await-signals` returns a
+plain `u64` and `dispatchAwaitSignals` passes the word through with a raw `setResultU64` — it
+does not go through `decodeCallOutcome`, whose own comment names this exact layout as the case a
+field-first decoder misses.
+
+`callSuspendSentinel` is `1 << 31`. `decode_await_signals_result` reads
+`timed_out = ((r >> 16) & 0xFFFF) != 0`, and `(1 << 31) >> 16 = 32768`. So the stop decoded as
+`sig_name_len=0, payload_len=0, timed_out=True, err_code=0` and `await_signals_ms` returned
+
+    SignalResult(name='', payload='', timed_out=True)
+
+— an ordinary "nothing arrived in time". The workflow carried on and did the work the segment
+exists to prevent. §3.83's defect, silently, with no error anywhere.
+
+The SDK tested `result == SUSPEND_SENTINEL` — `1 << 62`, whole-word, a **different mechanism**
+(what an export returns *to* the host). There was no bit-31 constant anywhere in the Python SDK
+before §3.201:
+
+    grep -rn "1 << 31\|1<<31\|2147483648\|0x80000000" python-sdk/cleat_sdk/
+
+**Python was the only SDK missing it.** Go prefixes `suspendSentinelStmts` onto
+`DurableAwaitSignals`'s decoder via `withSuspendCheck` (`wasm/adapter_metadata.go:98`), whose
+comment states the same requirement in the same terms. That is the parity this closes.
+
+**The fix** is `_raise_if_stopped(result)` before the decode, sharing one implementation with
+§3.201's `_check_host_result` so the two sites cannot drift.
+
+Falsified twice. Removing the call: `DID NOT RAISE SuspendSentinel`, and the returned value is
+the `SignalResult(timed_out=True)` above — the defect reproduced rather than merely a red test.
+Moving the call *after* the decode instead of removing it: exactly one test red, the source-order
+one. **Ordering needed a source-level assertion**, which is worth stating plainly: both orders
+raise for a bare sentinel, and only a word carrying the sentinel *and* a field distinguishes them
+at runtime — a value the host does not currently produce for this layout. Asserting on source
+order is honest about that; inventing a host value to prove it with would have tested a fiction.
+
+#### The claim that hid it
+
+`deferSegmentLanguages`' comment justified Python's membership on the grounds that its host calls
+return `result<string, call-failure>`, "so a stop is a case of the return type rather than a bit
+in a packed word. There is no sentinel to decode and no ordinary reading to fall into."
+
+That holds for **8 of the 53 functions** in `python-sdk/wit/cleat.wit` — exactly the ones §3.110
+changed. The other 45 return plain scalars or strings, and one of them is a stop site. The
+comment is corrected in this change.
+
+The general form is the part worth keeping: **"this guest cannot misread a stop" is a claim
+about a call's return shape, not about a language.** Ask it per call. A language-level answer
+covered 8 calls and was read as covering all 53.
