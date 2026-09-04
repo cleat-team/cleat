@@ -49,9 +49,19 @@ Each rule exists because something measured above went wrong. They are short on 
 wrong. Derive it. `skip-budget.txt`'s total becomes a sum over per-test declarations that live
 next to the tests; nobody edits a total, so there is nothing to conflict on.
 
-**R2 — Section numbers are per-stream.** WS-1 takes `3.1xx`, WS-2 `3.2xx`, WS-3 `3.3xx`. Sequential
-integers across three streams made collisions that `check-section-numbers.sh` structurally cannot
-see, because they exist only across open PRs. Ranges make them impossible instead of detected.
+**R2 — Section numbers are per-stream blocks.** WS-1 `3.200–299`, WS-2 `3.300–399`, WS-3
+`3.400–499`. Sequential integers across three streams made collisions that
+`check-section-numbers.sh` structurally cannot see, because they exist only across open PRs.
+Disjoint blocks make them impossible instead of detected.
+
+**Do not pick a number by hand: `scripts/next-section-number.sh` prints yours.** It reads
+`origin/develop`, not your branch, because the gap between those two is the original defect.
+
+This rule first said `3.1xx`/`3.2xx`/`3.3xx`, and that was unimplementable on the day it was
+written — 3.100 through 3.114 already existed, allocated by all three streams before any block
+scheme (3.100 #634, 3.107 #647, 3.113 #684, 3.114 #687). Handing `3.1xx` to WS-1 would have
+retroactively assigned three streams' work to one. The blocks start above the high-water mark
+instead; everything at or below 3.114 is grandfathered. See `scripts/section-blocks.sh`.
 
 **R3 — A closed item leaves the plan.** Its *lesson* graduates to the code it describes (a comment
 beside the guard) or to `CLAUDE.md`; the section is then deleted, not marked ✅. `IMPROVEMENT-PLAN.md`
@@ -113,8 +123,8 @@ that removes its own future friction.**
 
 | | task | done when |
 |---|---|---|
-| A1 | `skip-budget.txt` total becomes derived from per-test declarations | no stream edits a number; `check-skip-budget.sh` computes it |
-| A2 | per-stream section ranges (R2), enforced | `check-section-numbers.sh` also rejects a number outside the author's range |
+| A1 | `skip-budget.txt` total becomes derived from per-test declarations | ~~done (#696)~~ `skip-budget.txt` is deleted; budgets are summed from `scripts/skip-ledger.tsv`, one line per reason |
+| A2 | per-stream section blocks (R2), enforced | ~~done~~ `check-section-numbers.sh` rejects any 3.x number outside every block, with a `--self-test` negative control; `next-section-number.sh` hands each stream its next free number |
 | A3 | graduate closed sections out of `IMPROVEMENT-PLAN.md` (R3) | plan contains open items only |
 | A4 | retire `PARALLEL-WORKSTREAMS.md`, `WS2-STATUS.md`, `WS3-STATUS.md` into this file (R5) | one coordination file |
 
