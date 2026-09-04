@@ -13768,3 +13768,81 @@ Three calls, all returning `string`: `durable-send-signal-and-wait`, `side-effec
 `result<string, call-failure>` signature — an ABI change, not a rule change, and a different
 shape of work from §3.301 and this entry.
 
+
+---
+
+### 3.300 A defer segment could still reach the three string-returning calls — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+B2's last tranche, and the one §3.113 said would need a signature change rather than a rule change:
+`SendSignalAndWait`, `SideEffect`, `ScheduleCron`. Their WIT spelled the return as a bare `string`,
+which has nowhere to put the sentinel.
+
+**Narrower than "an ABI change" sounds.** All three host methods already return `int64` with
+out-pointers (`engine/lifecycle.go:244`, `engine/signaller.go:156`, `engine/schedules.go:62`), so
+on the **core** ABI the sentinel always fitted and the four core-module SDKs needed only the same
+one-line check as §3.301. What was actually broken is the component path: `dispatchSideEffect`,
+`dispatchScheduleCron` and `dispatchSendSignalAndWait` all called `setResultString`, which lifts
+the payload and **discards the packed word's error and sentinel bits**. The WIT had to say
+`string` because that is all the dispatcher passed through. The fix is the shape
+`dispatchChildWorkflow` already used.
+
+**Reach, in the order that matters.** `ScheduleCron` is the worst: it registers a *recurring*
+trigger, so a terminated workflow would keep starting new runs indefinitely. `SendSignalAndWait`
+is new work twice over — it signals another workflow and then blocks on a reply that can never
+come. `SideEffect` records a non-deterministic value into a terminated workflow's history, which
+any later replay would take as authoritative.
+
+**Reachability is not uniform, and two exemptions came out of it.** Neither Rust nor Java declares
+a cron import at all (`grep -c schedule_cron crates/cleat-sdk/src/host_calls.rs` → 0), so a guest
+in those languages cannot register a trigger and there is no decoder to guard; both are
+`sdkCoverageExemption`s. AssemblyScript does have one and is covered by its list. `SendSignalAndWait`
+is absent from `wasm/usage.go`, so it is `reasonNoGoAdapter` like §3.302's three.
+
+#### The fourth surface, found by falsification
+
+`TestTheThreeStopSurfacesAgree` checks the WIT **declaration**. It does not check the dispatcher
+that implements it, and those are different claims. Measured: reverting `dispatchSideEffect` to
+`setResultString` while leaving the WIT as `result<string, call-failure>` **failed nothing** in the
+engine suite. The signature promised a refusal the host could not deliver, and the mismatch would
+surface only when a real component guest made that call.
+
+`TestEveryResultReturningWitFunctionCanActuallyCarryTheStop` closes it, walking two hops that were
+already written down — the interface tables map a WIT name to a `cbType`, the switch in
+`component_cgo.go` maps a `cbType` to its dispatcher — and requiring `setResultCallOutcome` rather
+than `setResultString`. It fires on exactly that mutation.
+
+#### Three test defects the change exposed
+
+**The parity tests hardcoded the variable name.** All three matched `stopRequested(result)`
+literally. AssemblyScript's `sideEffect` takes a *parameter* named `result`, so its local is
+`hostResult` — and a correctly guarded method read as unguarded. The silent direction is worse: a
+method guarding one word while decoding another would have **passed**. All three now capture the
+identifier and require the guard and the decoder to name the same one.
+
+**Two dispatch tests mocked the wrong layout.** `TestDispatchSideEffect` and
+`TestDispatchSendSignalAndWait` built their mock with `packStrLen` (bits 40-63) while the real host
+returns `packSimpleResult` (bits 32-63). Invisible while the assertion was only
+`cgotestHasResultString`; the moment `wantCallOutcome` checked a length it read 2048 bytes instead
+of 8 — exactly 256×, one byte of shift. The file's own comment at `packSimpleStrLen` documents the
+split.
+
+**A vacuity canary that named a symbol that does not exist.** The new guard's own check used
+`cbTypeDurableCall`; the real constant is `cbTypeDurableCallString`. It failed loudly rather than
+passing over 51 correctly-parsed entries, which is the whole point of checking a named member as
+well as a count.
+
+#### On the run that looked like a hang
+
+Two full-suite runs hit the 10-minute harness budget and were mistaken for a stall introduced here.
+They were not: the suite completes in 248s. **A timeout imposed by the tool running a command is
+not evidence about the command.**
+
+Verified: `go test ./engine/ -p 1` with `postgres:postgres@5432` + MySQL — **4232 passed, 324
+skipped, 0 failed**, against 4231/0 on develop before this change (the extra test is the new
+guard).
+
+**A separate finding for the DSN table.** The same suite on WS-2's *documented* Postgres
+(`cleat:cleat@localhost:5433`) fails 8 tests — the cross-tenant claim and schedule ones — while
+every one of them passes when run alone, and all pass in a full run on 5432 and 5434. Verified not
+to be a vacuous skip: 12 run, 12 report, 9 PASS. Not caused by this change, and it fits CLAUDE.md's
+"recreate your test databases".

@@ -318,9 +318,12 @@ func (b *wasmtimeBackend) dispatchSendSignalAndWait(
 	buf := make([]byte, 65536)
 	packed := b.handler.SendSignalAndWait(ctxWithMem(context.Background(), buf), nil,
 		target, sigName, payload, timeoutMs, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
+	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
+	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
+	// the component guest as the `suspended` case rather than as a response the
+	// service could also have produced. setResultString discarded those bits.
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
 	return nil
 }
 
@@ -899,9 +902,12 @@ func (b *wasmtimeBackend) dispatchSideEffect(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.SideEffect(ctxWithMem(context.Background(), buf), nil, result, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
+	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
+	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
+	// the component guest as the `suspended` case rather than as a response the
+	// service could also have produced. setResultString discarded those bits.
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
 	return nil
 }
 
@@ -975,9 +981,12 @@ func (b *wasmtimeBackend) dispatchScheduleCron(
 	buf := make([]byte, 65536)
 	packed := b.handler.ScheduleCron(ctxWithMem(context.Background(), buf), nil,
 		workflowName, cronExpr, timezone, input, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
+	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
+	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
+	// the component guest as the `suspended` case rather than as a response the
+	// service could also have produced. setResultString discarded those bits.
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
 	return nil
 }
 

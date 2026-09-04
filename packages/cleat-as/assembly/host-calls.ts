@@ -2286,6 +2286,17 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.300). Ask BEFORE decoding: decodeSimpleResult
+    // reads errCode from the low byte, where a stop is 0, and `extra` as a
+    // length, which for a stop is 0 -- an EMPTY SUCCESSFUL response.
+    if (stopRequested(result)) {
+      return new DurableResult<string>(
+        "",
+        "cleat: host refused this call -- the workflow is running its defer phase",
+      );
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
       return new DurableResult<string>(
@@ -2487,6 +2498,15 @@ export class HostCalls {
       OUTPUT_OFFSET as i32,
       OUT_BUF_SIZE,
     );
+
+    // Bit 31 first. This method spells failure as `null`, and a stop decodes to
+    // errCode=0 with extra=0 -- which reaches the same `return null` and would
+    // be indistinguishable from an ordinary empty side effect. stopRequested
+    // also sets the suspend flag, which is what actually ends the segment here
+    // (AssemblyScript has no exceptions; see engine.go deferSegmentLanguages).
+    if (stopRequested(hostResult)) {
+      return null;
+    }
 
     let decoded = decodeSimpleResult(hostResult);
     if (decoded.errCode !== 0 || decoded.extra === 0) {
@@ -3204,6 +3224,17 @@ export class HostCalls {
       OUTPUT_OFFSET as i32,
       OUT_BUF_SIZE,
     );
+
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.300). Ask BEFORE decoding: decodeSimpleResult
+    // reads errCode from the low byte, where a stop is 0, and `extra` as a
+    // length, which for a stop is 0 -- an EMPTY SUCCESSFUL response.
+    if (stopRequested(result)) {
+      return new DurableResult<string>(
+        "",
+        "cleat: host refused this call -- the workflow is running its defer phase",
+      );
+    }
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {

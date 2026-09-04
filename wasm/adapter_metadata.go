@@ -584,14 +584,14 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"fn", "func() (string, error)"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"cachedResultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`    return "", fmt.Errorf("cleat_side_effect: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
 			"}",
 			"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), nil",
-		},
+		),
 	},
 	"ScheduleCron": {
 		FieldName:  "ScheduleCron",
@@ -602,7 +602,7 @@ var adapterDefs = map[string]adapterDef{
 			{"timezone", "string"},
 			{"inputJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"scheduleIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
@@ -613,7 +613,7 @@ var adapterDefs = map[string]adapterDef{
 			`	return "", fmt.Errorf("cleat_schedule_cron: %s", hostErrMessage(scheduleIDBuf[:], scheduleIDLen))`,
 			"}",
 			"return unsafe.String(&scheduleIDBuf[0], int(scheduleIDLen)), nil",
-		},
+		),
 	},
 	"DeleteCron": {
 		FieldName:  "DeleteCron",

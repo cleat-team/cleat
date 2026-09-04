@@ -245,6 +245,12 @@ func (s *execSession) SideEffect(ctx context.Context, m api.Module, computedResu
 	if s.isReplay {
 		return s.replaySideEffect(ctx, m, computedResult, respPtr, respMaxLen)
 	}
+	// A fresh side_effect is new work: it records a non-deterministic value into
+	// the history of a workflow that has already terminated, and any later
+	// replay would take that value as authoritative.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 	return s.freshSideEffect(ctx, m, computedResult, respPtr, respMaxLen)
 }
 

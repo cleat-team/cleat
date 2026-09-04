@@ -79,6 +79,9 @@ var asCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"signalWorkflow", "SignalWorkflow"},
 	{"cleatSend", "DurableSend"},
 	{"scheduleInvokeMs", "DurableScheduleInvoke"},
+	{"sendSignalAndWaitMs", "SendSignalAndWait"},
+	{"sideEffect", "SideEffect"},
+	{"scheduleCron", "ScheduleCron"},
 	{"cleatFetch", "Fetch"},
 	{"runDetached", "RunDetached"},
 }
@@ -113,24 +116,38 @@ func asMethodBody(t *testing.T, src, method string) string {
 func TestEveryASCallTheHostCanRefuseChecksTheStopBit(t *testing.T) {
 	src := readASSDK(t, asHostCallsSrc)
 
-	guard := regexp.MustCompile(`stopRequested\(result\)`)
-	decode := regexp.MustCompile(`decode\w+\(result\)`)
+	// The identifier is CAPTURED, not assumed to be named `result`.
+	// AssemblyScript's sideEffect takes a parameter called `result`, so its
+	// local is `hostResult`; a fixed name reported that guarded method as
+	// unguarded. The worse direction is the silent one: a method that guarded
+	// one word while decoding another would have PASSED. Requiring the same
+	// identifier in both closes it.
+	guard := regexp.MustCompile(`stopRequested\((\w+)\)`)
+	decode := regexp.MustCompile(`decode\w+\((\w+)\)`)
 
 	for _, c := range asCallsTheHostCanRefuse {
 		method := c.sdk
 		body := asMethodBody(t, src, method)
-		gi := guard.FindStringIndex(body)
+		gi := guard.FindStringSubmatchIndex(body)
 		if gi == nil {
 			t.Errorf("%s never calls stopRequested, so the host can refuse this call and the "+
 				"guest will decode the refusal as an ordinary result", method)
 			continue
 		}
-		if di := decode.FindStringIndex(body); di != nil && di[0] < gi[0] {
-			t.Errorf("%s decodes a field before calling stopRequested. Order is the contract: "+
-				"in the await-signals layout bit 31 lands inside the timed-out field, so "+
-				"decoding first turns a stop into an ordinary timeout and the workflow runs "+
-				"on -- doing the new work the defer segment exists to prevent, with nothing "+
-				"to see.", method)
+		guarded := body[gi[2]:gi[3]]
+		di := decode.FindStringSubmatchIndex(body)
+		if di != nil {
+			decoded := body[di[2]:di[3]]
+			if decoded != guarded {
+				t.Errorf("%s guards %q but decodes %q. The guard has to test the WORD THE\nDECODER READS; testing a different local passes this check and lets the refusal\nthrough untouched.", method, guarded, decoded)
+			}
+			if di[0] < gi[0] {
+				t.Errorf("%s decodes a field before calling stopRequested. Order is the contract: "+
+					"in the await-signals layout bit 31 lands inside the timed-out field, so "+
+					"decoding first turns a stop into an ordinary timeout and the workflow runs "+
+					"on -- doing the new work the defer segment exists to prevent, with nothing "+
+					"to see.", method)
+			}
 		}
 	}
 }

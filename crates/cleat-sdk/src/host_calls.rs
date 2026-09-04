@@ -836,6 +836,14 @@ impl HostCalls {
         if result == memory::SUSPEND_SENTINEL {
             return Err(suspend());
         }
+        // Bit 31 before any field. IMPROVEMENT-PLAN 3.300: a stop decodes here as
+        // response_len=0, err_code=0 -- an empty SUCCESSFUL reply, so the guest
+        // would return "" and carry on as though the target had answered.
+        if stop_requested(result) {
+            return Err(CallError::Failed(
+                "cleat: host refused this call -- the workflow is running its defer phase".to_string(),
+            ));
+        }
         let (response_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
@@ -1654,6 +1662,10 @@ impl HostCalls {
                 out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // Bit 31 before any field. IMPROVEMENT-PLAN 3.300.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (out_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("side_effect(...) failed: host error code {}. Check that the input is valid.", err_code));

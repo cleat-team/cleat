@@ -869,16 +869,17 @@ func TestDispatchUUID(t *testing.T) {
 }
 
 func TestDispatchSideEffect(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(8)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(8)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("result")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(14, strPtr, 1, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	// result<string, call-failure> since IMPROVEMENT-PLAN 3.300, not a bare
+	// string: side-effect is a stop site, and setResultString had nowhere to put
+	// the refusal.
+	wantCallOutcome(t, resultPtr, "ok", 8, 0)
 }
 
 func TestDispatchFetch(t *testing.T) {
@@ -941,16 +942,15 @@ func TestDispatchChildWorkflowWithOptions(t *testing.T) {
 }
 
 func TestDispatchSendSignalAndWait(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(10)}}
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("target", "signal", "payload", uint64(5000))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(21, argsPtr, 4, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	// result<string, call-failure> since IMPROVEMENT-PLAN 3.300.
+	wantCallOutcome(t, resultPtr, "ok", 10, 0)
 }
 
 func TestDispatchAwaitPromise(t *testing.T) {
