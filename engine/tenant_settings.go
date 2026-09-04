@@ -151,6 +151,49 @@ func (e *Engine) tenantSettings(ctx context.Context) TenantSettings {
 			return
 		}
 		e.tenantSettingsValue = s
+		e.warnIfTenantLimitsConflict(ctx, s)
 	})
 	return e.tenantSettingsValue
+}
+
+// warnIfTenantLimitsConflict is the per-tenant half of §3.90's startup warning,
+// and it is 3.94 step 6.
+//
+// The hazard is the same one §3.90 found in the flags, now reachable by a
+// tenant on its own: a wall-clock ceiling BELOW the instance timeout means the
+// invocation's context deadline expires before the epoch fence can, so the
+// guest's execution bound silently becomes the ceiling and the instance
+// timeout stops being the number that decides. Nothing fails; the wrong number
+// just wins, which is why this is worth saying out loud.
+//
+// Called from inside tenantSettingsOnce, so it logs once per engine rather than
+// once per execution. A per-execution warning for a durable workflow is a log
+// line per replay segment, which is how a real signal becomes noise nobody
+// reads.
+//
+// # What this can and cannot see
+//
+// It compares the tenant's OWN two overrides. It deliberately does not try to
+// judge a tenant's wall-clock ceiling against the operator's instance timeout,
+// because the engine cannot see that number -- it lives on the backend, set
+// from --wasm-instance-timeout when the worker builds it (see
+// WasmBackend.PerExecution). Warning on a comparison against a value this code
+// does not have would mean guessing, and a confident wrong warning is worse
+// than none: the next reader tunes against it.
+//
+// So this does NOT replace the startup warning in cmd/cleat-worker, which
+// checks the operator's own two flags against each other. The two cover
+// different misconfigurations and both are kept.
+func (e *Engine) warnIfTenantLimitsConflict(ctx context.Context, s TenantSettings) {
+	if s.WasmWallClockCeiling <= 0 || s.WasmInstanceTimeout <= 0 {
+		return
+	}
+	if s.WasmWallClockCeiling >= s.WasmInstanceTimeout {
+		return
+	}
+	e.log().WarnContext(ctx,
+		"this tenant's wall-clock ceiling is below its instance timeout, so its guest execution bound is effectively the ceiling",
+		"tenant_id", e.tenantID,
+		"wall_clock_ceiling", s.WasmWallClockCeiling,
+		"instance_timeout", s.WasmInstanceTimeout)
 }
