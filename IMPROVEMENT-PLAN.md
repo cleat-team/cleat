@@ -14064,7 +14064,7 @@ string (matching the existing `"__CLEAT_ERROR__:"` convention, but re-opening ex
 collision §3.83 exists to record) or changing the WIT so a stop is unrepresentable as a response.
 The second is the right one and is a public-API change.
 
-### 3.106 The AssemblyScript SDK could not run a defer segment either, and its stop cannot unwind — 🔶 **SDK HALF DONE; the end-to-end proof and `deferSegmentLanguages` remain** (WS-2, 2026-09-03)
+### 3.106 The AssemblyScript SDK could not run a defer segment either, and its stop cannot unwind — ✅ **FIXED, both halves; a defect found in the second one** (WS-2, 2026-09-03)
 
 The AssemblyScript half of §3.105's problem: the host marks a refused call in a defer segment
 with bit 31 (§3.84), and this SDK never tested it. Same nine methods, same ordering contract,
@@ -14102,16 +14102,71 @@ The as-pect tests deliberately do not drive `HostCalls` methods: that harness st
 existing `defer.spec.ts` says the same thing about `deferFunc`. The structural guarantee is held
 from the Go side instead.
 
-**Not done here, exactly as in §3.105:** `assemblyscript` is not added to
-`deferSegmentLanguages`. The end-to-end proof — a fixture with a defer, run as a segment — is the
-next piece, and until it lands the fence stays closed and AssemblyScript behaves as it does today.
+#### The end-to-end half, and the defect it found
+
+`examples/as-workflow` already had the fixture — a `defer_order` entry point with two defers and
+one body call, written for §3.73 — so the end-to-end piece is one Go test,
+`engine/as_defer_segment_e2e_test.go`, plus the fence entry. **It failed, and not in the way this
+section predicted.**
+
+    defers_run=1     operations: [second]        want [second first]
+
+One cleanup ran. The other was taken off the table and dropped, with no error anywhere. A
+workflow with two defers released one lock and kept the other, and the segment reported success.
+
+The cause is the difference this section is about, one layer further on than where it was
+expected. `_workflowSuspended` is a **flag**, and a flag does not unwind. The body's refused call
+set it; the generated wrapper correctly returned `SUSPEND_SENTINEL` without draining; the host
+then called `__cleat_run_deferred` — **which did not reset it**. `runDeferred` checks the flag
+after each body, to stop the drain when a defer body itself suspends. It read the flag still set
+from the *body's* call, concluded the first cleanup had suspended, and stopped.
+
+The workflow wrappers had always reset the flag (their "Step 3"). The defer runner never did, and
+it is the one entry point that is *only ever* called after something else has already set it — so
+it is both the easiest to forget and the only one where forgetting is certain to bite.
+
+**The rule this is an instance of: every host entry point clears the flag on the way in**, because
+"the thing currently running asked to suspend" is a statement about one call into the module, and
+the host makes several. `packages/cleat-as/transform/index.js` now emits
+`resetWorkflowSuspended()` at the top of `__cleat_run_deferred`, and
+`TestEveryGeneratedASHostEntryPointResetsTheSuspendFlag` (`cmd/cleat/`) reads the generator and
+pins it — including the **order**, because resetting after the drain restores the bug in a form
+that still contains the word. Both falsifications measured, both giving `defers_run=1`: no reset
+at all, and reset moved below `runDeferred`.
+
+That guard runs without Node, so it runs in every job; the behavioural proof needs the toolchain
+and runs only in `e2e-cross-language`. The pair is deliberate.
+
+#### This was reachable before defer segments existed
+
+`runGuestDefersAfterKill` calls the same export. A workflow that took a suspending host call,
+ignored the flag — which this SDK permits, since ignoring it is just not writing an `if` — and
+then ran long enough to be killed would have reached the drain with the flag set and lost every
+defer but the last. **Stated as reasoning, not measured:** the kill-path fixture
+(`spin_forever`) registers a single defer, so it could not have shown this, and
+`TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow` passed throughout. It is the same code
+path and the same stale flag; a second defer in that fixture would settle it, and is worth doing.
+
+#### What membership means for this language
+
+`assemblyscript` is now in `deferSegmentLanguages` and
+`TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified` pins `{go, assemblyscript}`. The
+guarantee is genuinely weaker than the other three and the entry in `engine.go` says so: the body
+is not stopped, it runs on past the refused call to its own return. What makes that acceptable is
+that it can do nothing durable while it does — `stopBeforeNewWork` refuses every further call
+host-side, for the whole segment — and that the wrapper's suspension check, which exists for
+§3.73's reason rather than this one, keeps the defer table intact for the host. Membership still
+means the same thing it means for Go and Java: measured, end to end, that the segment runs only
+the defers.
 
 Remaining: **Rust**, unblocked by §3.87 (#643) and different in shape again —
 `Err(CallError::Suspended)` returned before any field is decoded, rather than a flag or an
-unwind. **Python** is still blocked on an ABI decision and not on effort: it is a Component Model
-guest whose WIT declares `durable-call: func(...) -> string`, so there is no result word to carry
-bit 31, and `extractStringFromPacked` turns the sentinel into `""` — an empty *successful*
-response. Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`.
+unwind; its SDK half is §3.107 and its end-to-end half is next. **Python** is still blocked on an
+ABI decision and not on effort: it is a Component Model guest whose WIT declares
+`durable-call: func(...) -> string`, so there is no result word to carry bit 31, and
+`extractStringFromPacked` turns the sentinel into `""` — an empty *successful* response.
+Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`.
+
 ### 3.107 The Rust SDK decodes the defer-segment stop sentinel — 🔶 **SDK HALF DONE; the end-to-end proof and `deferSegmentLanguages` remain** (WS-2, 2026-09-03)
 
 The third of the four SDK halves (§3.105 Java, §3.106 AssemblyScript). Same eight-or-nine
