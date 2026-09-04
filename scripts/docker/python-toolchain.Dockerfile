@@ -36,6 +36,52 @@
 # which is not what they are there to check. With it the run reports
 #
 #   wasmtime registered for [go assemblyscript java rust python]
+#
+# ---------------------------------------------------------------------------
+# If this machine has NO desktop-linux context -- colima only
+# ---------------------------------------------------------------------------
+#
+# The invocation above then cannot work at all, and the advice "use
+# desktop-linux" has nowhere to go. Verified 2026-09-04 on the WS-3 checkout,
+# where `docker context ls` offers only colima profiles. All six Python
+# component tests pass this way; the recipe is three changes, none obvious:
+#
+#   1. STAGE THE TREE UNDER $HOME. colima mounts $HOME and does not mount
+#      /Users/Shared/... or /tmp/colima. This is the empty-mount trap above,
+#      so confirm the mount before trusting a result:
+#
+#        git archive <ref> | tar -x -C ~/cleat-run
+#        docker --context colima run --rm -v ~/cleat-run:/src alpine ls /src
+#
+#      Mount ~/go/pkg/mod as /go/pkg/mod too, or the module download dominates.
+#
+#   2. --network host FOR THE DB-BACKED TESTS. TestPythonCronEndToEnd needs
+#      Postgres, and the databases run INSIDE the colima VM -- so
+#      host.docker.internal:5434 is NOT reachable while localhost:5434 is,
+#      once the container shares the VM's network. Pass the DSN BY NAME so it
+#      is inherited rather than written into argv:
+#
+#        docker --context colima run --rm --network host \
+#          -v ~/cleat-run:/src -v ~/go/pkg/mod:/go/pkg/mod -w /src \
+#          -e CGO_ENABLED=1 -e CLEAT_TEST_POSTGRES \
+#          <tag> go test ./engine/ -run 'Python|Component' -count=1
+#
+#   3. REBUILD BEFORE TRUSTING AN EXISTING IMAGE, and this is the one that
+#      costs a whole session. A `cleat-py-toolchain` built before the
+#      wasm-tools layer above has componentize-py but no wasm-tools, and
+#      toolsAvailable() gates on BOTH -- so every Python component test SKIPS
+#      and the suite prints `ok`. A green run over code nothing executed is
+#      exactly what CLAUDE.md's "Is this result real?" section is about.
+#      Measured 2026-09-04: a stale image gave 6 skips, a rebuilt one gave
+#      23 pass / 0 skip / 0 fail. There is no COPY or ADD in this file, so the
+#      build context is unused and an empty directory builds it:
+#
+#        docker --context colima build -f scripts/docker/python-toolchain.Dockerfile \
+#          -t cleat-py-toolchain $(mktemp -d)
+#
+# Why this is worth the lines: these are the only tests that exercise
+# componentCallRun and the Component Model callback path (engine/component_cgo.go).
+# Editing that file with them skipping means editing code nothing local covers.
 FROM golang:1.26-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
