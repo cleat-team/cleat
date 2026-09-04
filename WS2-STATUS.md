@@ -90,82 +90,81 @@ future session should not have to rediscover.
 > invisible until someone noticed the behaviour it broke. **When one carrier has a mechanism and
 > its sibling does not, the sibling is where the bugs are.**
 >
-> ### Open, as of 2026-09-03
+> ### Open, re-derived 2026-09-04 against `develop` at `d3015a8`
 >
-> Three items, and **all three have a decision at the front rather than an implementation** —
-> which is why none of them was taken today.
+> **One item and one gap, where the 2026-09-03 list had three — and the three left by three
+> different routes.** One was built, one was *deleted by this same stream forty minutes after
+> the list was written*, and one is still the decision it always was.
 >
-> 1. ~~**§3.75 step 2 — the two-phase terminal transition.**~~ **DONE for `TerminateWorkflow`,
->    2026-09-04, §3.112.** Terminate now marks `terminating`, the dispatch loop claims it, the
->    defer segment runs the cleanup, and `FinalizeDeferPhase` applies the recorded outcome and
->    only then releases the resources. `WithDeferPhase` has a production caller.
+> 1. **§2.35's `ServiceCaller` half — a decision, not an implementation.** The plugin half
+>    landed in #633. What remains is one line, `engine/errors.go:81`:
 >
->    **Both constraints recorded below were wrong, and one of them cost a day.** The "second
->    engine" is not needed: `setup.go:1705` is `NewEngine` *inside* `executeWorkflow`, so the
->    worker already builds one engine per workflow and the wiring is a single appended option.
->    The note was written from the line number without reading the enclosing function. The
->    language gate closed itself — `deferSegmentLanguages` reached all five on 2026-09-04.
+>        func (e *CleatError) Retryable() bool { return e.Code == ErrTransient }
 >
->    **Transition 2 landed the same day** — the parent-close `TERMINATE` arm, §3.114. It is the
->    same shape with one property worse: a bulk operation, so one closing parent pre-empted the
->    cleanup of every child at once. It also forced the predicate into SQL, because the arm
->    closes many children in one statement and cannot ask Go about each row — two carriers of one
->    rule, with `TestTheSQLPredicateAgreesWithTheGoOne` as the thing that keeps them honest.
+>    Seven `ErrorCode` values collapse into one bit, and `ErrUnknown` is the `iota` zero value
+>    (`engine/errors.go:24`) — so a `CleatError` built without an explicit `Code` is silently
+>    **non-retryable** rather than obviously unclassified. Changing it changes retry behaviour
+>    for workflows already in flight, which is why it wants a direction before a diff. Related
+>    and also undecided: whether the four stream-failure causes should get *truthful* codes
+>    (`NotFound`, `PermissionDenied`). That has to be answered for **both** call paths at once
+>    or it re-opens the asymmetry #633 closed, pointing the other way.
 >
->    **Transition 3 was DECLINED, not built** — `tiers.yaml` D10, 2026-09-04.
->    `adminForceResolve` keeps its one-phase transition, because it is the operator's escape
->    hatch for a workflow that is stuck and a defer phase needs the guest to replay. Recording
->    it as a decision rather than leaving it on this list is the point: "not yet done" and
->    "deliberately not done" read identically to the next person.
+>    §2.35 also carries a **retracted** claim that `ErrTimeout` is misclassified. It is not, and
+>    there is nothing to fix there — read the retraction before acting on the section.
 >
->    **§3.75 is therefore closed** — two transitions built, one declined, inventory complete.
+> 2. **The coverage gap §3.112 stated rather than papered over.** Nothing exercises
+>    `executeWorkflow`'s *post-segment* branch through a real guest: the ~10 lines that route a
+>    claim carrying `PendingTerminalStatus` away from the ordinary suspended/`ready` finalize.
+>    `engine/defer_phase_vertical_test.go` covers terminate → claim → segment → finalize with a
+>    real WASM guest and a real database, and `cmd/cleat-worker/defer_phase_test.go` covers the
+>    worker's handling with a mock store — the branch itself is covered only by the mock side.
+>    Delete it and every terminate-with-defers becomes a workflow that reschedules itself
+>    forever, with no test to notice.
 >
->    The original note follows, because its evidence is still how to check the claim.
+> **Closed since the 2026-09-03 list. Each is a line rather than a deletion, because how it
+> closed is the part worth keeping.**
 >
->    Step 1 (#623) landed the migration and *no Go code*: `grep -rn "pending_terminal_status|defer_phase_deadline"
->    --include=*.go` returns nothing, and so does `grep -rn '"terminating"'`. §3.81 built the
->    execution mechanism, `WithDeferPhase`, and `grep -rn WithDeferPhase --include=*.go` finds
->    **only its own tests** — no production caller. Step 2 is the whole connection.
+> - **§3.75 step 2 is done: two transitions built, the third declined.** `TerminateWorkflow`
+>   (§3.112) and the parent-close `TERMINATE` arm (§3.114) now mark `terminating`, let the
+>   dispatch loop claim the row, run the cleanup as a defer segment, and only then release the
+>   resources — `FinalizeDeferPhase` applies the recorded outcome first. `adminForceResolve` was
+>   **declined** and recorded as `tiers.yaml` D10: it is the operator's escape hatch for a stuck
+>   workflow, and a defer phase needs the guest to replay. "Not yet done" and "deliberately not
+>   done" read identically on a list, which is why it left this one for the manifest.
 >
->    Two constraints measured 2026-09-03 that the design did not anticipate:
+>   **Both constraints the old note recorded as blockers were wrong, and one cost a day.** The
+>   "second engine" was never needed: `cmd/cleat-worker/setup.go` calls `NewEngine` *inside*
+>   `executeWorkflow`, so the worker already builds one engine per workflow and the wiring is a
+>   single appended option. That note was written from a line number without reading the
+>   enclosing function. The language gate closed itself — `deferSegmentLanguages` reached all
+>   five on 2026-09-04.
 >
->    - **It is language-gated, and the gate is being opened one language at a time.**
->      `deferSegmentLanguages` was `{"go": true}` when this was written; it is
->      `{"go": true, "java": true}` as of §3.105 (2026-09-03). Re-derive rather than trusting
->      either: `grep -n 'var deferSegmentLanguages' engine/engine.go`. It is checked against
->      `WasmtimeLanguages = [go, assemblyscript, java, rust, python]` and `engine/executor.go`
->      fails the execution **closed** for anything else, so terminate would still mean something
->      different depending on the workflow's language. Rust (§3.107) and AssemblyScript (§3.106)
->      have their SDK halves and need an end-to-end fixture each; Python needs an ABI decision
->      first (§3.105's "what remains"). Until all five are in, this is a `tiers.yaml` change and
->      a product call, not a detail — D6 decided terminate is asynchronous, not that it is
->      asynchronous *for some languages*.
->    - **The worker needs a second engine.** `e.deferPhase` is read per-execution inside
->      `Execute` but set as an `EngineOption` at construction, and the worker builds one shared
->      engine (`cmd/cleat-worker/setup.go:1705`). A second instance sharing the registered
->      backends is the clean answer; worth deciding before implementing rather than during.
+>   **The old note's evidence is not preserved here, because it has flipped.** It told the
+>   reader to confirm the item with `grep -rn WithDeferPhase --include=*.go` finding only its
+>   own tests. That grep now finds production callers, so running it today argues the item is
+>   *done*. Harmless in this direction and dangerous in the other, which is the §2.35 row's
+>   lesson from 2026-09-02 seen from the far side: **an evidence command outlives the sentence
+>   it supports, and keeps answering after the answer has changed.**
 >
->    Suggested split, by transition rather than by layer — splitting by layer means landing a
->    mechanism with no caller, which is what §2.35 refused to do and what §1.4 cost the project
->    350 lines of never-run code: (1) `TerminateWorkflow` on all three dialects, carrying the
->    status, claim, segment, finalize and reaper the others reuse; (2) the parent-close
->    `TERMINATE` arm; (3) `adminForceResolve`.
+> - **`DBEventStream` was gone before the list carrying it was a day old.** #640 deleted
+>   `engine/event_stream.go` (§3.103). Re-derive: `ls engine/event_stream.go` fails, and
+>   `grep -rn DBEventStream --include="*.go" .` returns exactly one hit — a comment in
+>   `engine/read_path_parity_test.go` recording that a fourth `EventRecord` reader used to
+>   exist. (Quote the `--include` glob; unquoted, zsh tries to expand it and the grep never
+>   runs.)
 >
-> 2. **§2.35's `ServiceCaller` half.** The plugin half is done. What remains is the seven
->    `ErrorCode` values collapsing into one `Retryable()` bit. It changes retry behaviour for
->    workflows in flight, so it wants a decision on direction first. Related and also undecided:
->    whether the four stream-failure causes should get *truthful* codes (`NotFound`,
->    `PermissionDenied`) — recorded in §2.35, and it has to be answered for **both** call paths
->    at once or it re-opens the asymmetry #633 just closed, pointing the other way.
+>   **Its shelf life on this list was forty minutes.** The list landed in `546788a` at
+>   2026-09-03T15:43 and #640 merged at 2026-09-03T16:23 — both WS-2, the same afternoon. It
+>   then sat here for a day, describing a public-API decision about a file that no longer
+>   existed.
 >
-> 3. **`DBEventStream` (`engine/event_stream.go`) — a decision, not a task.** A fourth
->    `EventRecord` reader. It selects no `payload` column, so every payload-carried field comes
->    back empty, and its `WHERE` clause is `workflow_id = $1` with **no `tenant_id` predicate**.
->    `grep -rn NewDBEventStream --include=*.go .` finds only its own tests. The trap: its
->    constructor takes a bare `*sql.DB` with no tenant context, so **the missing predicate cannot
->    be fixed without changing an exported signature**. Fix, delete, or leave — all three are
->    public-API calls. Recorded in §3.102. The cross-tenant `WHERE` is the same class WS-1 closed
->    in §3.86, §3.91, §3.92.
+>   The 2026-09-02 table above already records that three of its four rows went stale because
+>   they were checks against *this stream's own upcoming work*. This is the same failure
+>   compressed from weeks into forty minutes, so the interval between re-derivations is not the
+>   defect:
+>   **nothing re-reads the open list when a PR closes an item on it.** The habit that would have
+>   caught it costs one command — when a PR closes something, grep this file for the thing's
+>   name *before* opening the PR, not at the next status pass.
 >
 > ### One process measurement, because it cost more than any single fix
 >

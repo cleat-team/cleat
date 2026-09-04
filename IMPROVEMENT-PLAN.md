@@ -11598,12 +11598,20 @@ something.
    what made it wrong: `cleat_await_child` packs a 32-bit length at bits 32-63, this layout packs
    a 24-bit one at bits 40-63, and the same bit means 1 GiB in the first and 4 MiB in the
    second.
-2. **§3.75's two-phase terminal transition** — migration `038` across all three dialects
-   (postgres, mysql and mssql high-water marks are 034/033/037 and are **not** aligned), the
-   marker and deadline, the three `UPDATE`-driven sites, `reaperLoop`'s predicate, and the
-   caller-visible `terminating` status that D6 in `tiers.yaml` settled. This is the largest
-   piece and the most obviously shaped like progress; it is now unblocked, because the defer
-   segment it dispatches into exists and is measured.
+2. ~~**§3.75's two-phase terminal transition**~~ — **DONE 2026-09-04, §3.112 and §3.114.**
+   The marker and deadline shipped as `postgres/038`, `mysql/037` and `mssql/041`
+   (`grep -rln pending_terminal_status migrations/`), which is why this bullet's single `038`
+   is not how it landed: the high-water marks were not aligned and each dialect took its own
+   next free number. Widening the claim predicate to `IN ('ready', 'terminating')` then needed
+   a second migration on the two dialects with partial or filtered claim indexes —
+   `postgres/040` and `mssql/043` — because a `status = 'ready'` index predicate takes the
+   index out of play for the new status rather than merely missing rows.
+
+   Of the three `UPDATE`-driven sites this bullet counts, two became two-phase and the third,
+   `adminForceResolve`, was **declined** and recorded as `tiers.yaml` D10. `reaperLoop` gained
+   a second sweep rather than a widened predicate: `ExpireDeferPhases` bounds the phase by
+   *deadline*, where `ReapStaleInstances` bounds a claim by *heartbeat*, and the two answer
+   different questions about the same row.
 3. **The wazero path has no defer segment.** `WithDeferPhase` fails closed on a backend that
    cannot honour it rather than silently skipping the drain, so `cleatctl replay` and the other
    tooling paths report the refusal instead of reporting a cleanup that did not happen.
@@ -12237,7 +12245,7 @@ point that raises the SDK's own suspend signal with no host call in the way, so 
 `session.suspendErr` and mask the result. Neither is installed here — `componentize-py`,
 `wasm-tools` and a gradle binary are all absent — so neither was run.
 
-### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — ✅ **steps 1 and 2 DONE; step 3 (§3.75) not started** (WS-3, 2026-09-03)
+### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — ✅ **steps 1 and 2 DONE; step 3 (§3.75) DONE 2026-09-04 — §3.112 and §3.114 built two of the three transitions this section's inventory named, and D10 declined the third** (WS-3, 2026-09-03)
 
 §3.75 tells whoever builds it to re-derive two things first. Both were done 2026-09-03. One comes
 out clean and one does not come out the way the section expects, so this is recorded before the
