@@ -15942,3 +15942,133 @@ comment is corrected in this change.
 The general form is the part worth keeping: **"this guest cannot misread a stop" is a claim
 about a call's return shape, not about a language.** Ask it per call. A language-level answer
 covered 8 calls and was read as covering all 53.
+
+---
+
+### 3.300 The boundary inventory — 🔷 **C1 DELIVERED, C2 RANKED** (WS-3, 2026-09-04)
+
+WORKSTREAM.md's C1: *"enumerate the boundaries: host↔guest ABI (5 SDKs × ~60 calls),
+store↔dialect, doc↔code. A table with a row per boundary and a column for 'guarded by'."*
+Its argument for doing this at all: every guard built this week found a defect on its first run,
+so the expected value of the next one is high — but where to look is currently chosen by
+stumbling.
+
+A boundary here is **two artifacts that must agree, maintained separately**. That is the shape
+every defect this week had. It is not "a component", and the inventory is deliberately not a
+list of packages.
+
+#### Re-derive the whole table
+
+    # guards that exist (the "guarded by" column)
+    ls engine/*parity*_test.go engine/*coverage*_test.go engine/*correspondence*_test.go \
+       engine/*completeness*_test.go
+    ls scripts/check-*.sh
+
+#### A. host ↔ guest ABI
+
+| # | the two artifacts | guarded by | gap |
+|---|---|---|---|
+| A1 | wazero host imports ≡ wasmtime host funcs, by name | `hostabi_runtime_parity_test.go` — `TestWasmtimeSatisfiesEveryWazeroHostImport`, `TestNeitherRuntimeHasHostFunctionsTheOtherLacks` | — |
+| A2 | …and by **arity**, which is what a guest actually links against | `TestCreatePromiseGuestLinksOnTheWorkerBackend` — **one** host function, by name | **1 of 55.** The name-level check above passed while `cleat_create_promise` was unlinkable (§3.55) |
+| A3 | every wasmtime host func registered via `b.hostFunc` (epoch budget) | `scripts/check-hostfunc-budget.sh` | — |
+| A4 | host stop site ≡ Go adapter `withSuspendCheck` ≡ WIT `result<string, call-failure>` | `stop_correspondence_guard_test.go` — `TestTheThreeStopSurfacesAgree` | component arm carries an open exemption, `reasonWitIsStillCoreABI` (§3.110) |
+| A5 | each SDK's refusable-call list covers every host stop site | `sdk_stop_site_coverage_test.go` | **java, rust, assemblyscript only.** Go and Python are not rows in it |
+| A6 | each SDK agrees on the stop bit's **value** (bit 31) | `{as,java,rust}_sdk_stop_bit_parity_test.go` | **3 of 5** |
+| A7 | component dispatcher's pack shift ≡ its extractor's shift | `component_pack_extract_parity_test.go` (§3.33 mechanism) | 23 of 25 pairings; 2 hand-rolled exceptions named in the test |
+| A8 | packed result's **errCode** ≡ what the guest observes | **nothing** | open: `extractStringFromPacked` drops it, so a refusal reaches Python as a success (WS-2, §3.113) |
+| A9 | `ABI.md` ≡ the code it specifies | `scripts/check-doc-consistency.sh` — ABI version, `DefaultOutBufSize` | **2 numbers** against a document describing ~60 calls |
+
+A5/A6 read worse than they are: Go is covered by A4's adapter arm, and Python by A4's WIT arm.
+The uncovered thing is narrower — no SDK-level list for either — and A4 is the reason it has not
+bitten.
+
+#### B. store ↔ dialect
+
+| # | the two artifacts | guarded by | gap |
+|---|---|---|---|
+| B1 | tenant filter predicates the migrations ship ≡ predicates in the built DB | `mssql_policy_coverage_test.go` (§2.71, #691) | mssql only |
+| B2 | Postgres JSONB columns ≡ mssql JSON check constraints | `mssql_json_parity_test.go` | **postgres ↔ mysql: nothing** |
+| B3 | required indexes exist, and the planner uses them | `mssql_index_parity_test.go` | mssql only |
+| B4 | every read path returns the same row, and the time that was written | `read_path_parity_test.go` | — |
+| B5 | migrations that define a routine ≡ migrations the test helper applies | **nothing** | see below — **8 vs 2** on Postgres |
+| B6 | the migration *set* across dialects | **nothing** | 21 pg / 16 mysql / 23 mssql |
+| B7 | event record fields ≡ what the stored payload carries | `payload_carrier_completeness_test.go` | — |
+| B8 | statement-level tenant predicates in the Go SQL | §3.86's allowlist-with-reasons (WS-1) | — |
+
+#### C. doc ↔ code
+
+| # | the two artifacts | guarded by | gap |
+|---|---|---|---|
+| C1 | `tiers.yaml` support claims ≡ what CI runs | `tier-gate.sh`, `tier2-gate.sh` | its `open_items` prose is the part CI does not check (WORKSTREAM R4) |
+| C2 | section numbers unique across the plan | `check-section-numbers.sh` | structurally cannot see collisions that exist only across open PRs (R2) |
+| C3 | exported API ≡ something using it | `check-dead-exports.sh` | — |
+| C4 | `CLAUDE.md`'s claims ≡ the code | **nothing** | four sessions were lost to one sentence describing a removed build tag |
+
+#### B5, measured
+
+`engine/store_backends_procedures_test.go` declares, per dialect, which migration files define
+the stored routines, and applies exactly those against the shared test database:
+
+    var postgresProcedureMigrations = []string{"003_procedures.sql",
+        "004_fix_finalize_workflow_status_fence.sql"}
+
+Three hardcoded lists of two. What is actually on disk, 2026-09-04:
+
+    for d in postgres mysql mssql; do
+      grep -lniE 'create (or replace )?(function|procedure)|create or alter procedure' \
+        migrations/$d/*.sql | sed 's|.*/||' | sort | tr '\n' ' '; echo
+    done
+
+| dialect | migrations defining a routine | the helper applies |
+|---|---|---|
+| postgres | **8** — 001, 003, 004, 023, 024, 032, 034, 040 | 2 |
+| mysql | **3** — 003, 004, 034 | 2 |
+| mssql | 2 — 003, 004 | 2 |
+
+`040_claim_terminating_workflows.sql` is the one that matters: it `DROP`s and re-`CREATE`s
+`admin.claim_workflows` with an extra return column, superseding `023`. This is §1.1's trap
+exactly — *for anything defined by `CREATE OR REPLACE`, find the highest-numbered migration that
+defines it* — with the list frozen two migrations after the schema stopped agreeing with it.
+
+**And it is currently clean, which is the finding.** Probed against this checkout's Postgres:
+
+    docker exec cleat-postgres-manual2 psql -U postgres -d cleat -t -A -c \
+      "SELECT pg_get_function_result(p.oid) LIKE '%pending_terminal_status%'
+       FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+       WHERE n.nspname='admin' AND p.proname='claim_workflows';"    # -> t
+
+The database has 040's version. It has it because the database was built by an external
+migration run over the whole directory, not because anything checked. The helper's list is
+right about nothing and wrong about nothing — it is simply not the thing that determined the
+answer. On a database that was **not** rebuilt, the same list produces the old routine and every
+test that exercises it silently measures the superseded definition. That is the failure
+`CLAUDE.md` already warns about ("when a schema migration lands, recreate your test databases")
+with no guard attached to it.
+
+The mysql entry is **not** a gap, checked rather than assumed: `034` defines
+`cleat_drop_defs_fks()` and drops it again in the same file, and
+`information_schema.ROUTINES` for the test database lists only `finalize_workflow_status`.
+
+#### The ranking for C2
+
+**B5 first.** It is the same shape as #691 — parse both sides, declare nothing — so the mechanism
+is known to work and known to find things. Its failure is silent, machine-dependent, and
+invisible to every existing check. It spans all three dialects, so one guard closes three rows.
+
+**Then A2.** 55 host functions, one of which has a link-level check, and the name-level check
+above it passed while a guest could not link. That is a measured false green, not a hypothetical.
+
+Not B6: 21/16/23 is not evidence of anything on its own — dialects legitimately need different
+migrations, and a row that cannot distinguish "different" from "missing" is a backlog generator,
+not a guard. It stays in the table as an unguarded boundary with no claim attached.
+
+#### What I got wrong building this
+
+The first pattern for the B5 table was
+`'CREATE OR REPLACE (FUNCTION|PROCEDURE)|CREATE PROCEDURE|CREATE OR ALTER PROCEDURE'`. It missed
+`040` entirely, because `040` uses bare `DROP FUNCTION` + `CREATE FUNCTION` — no `OR REPLACE`.
+So the first version of the postgres row read **7 vs 2** and did not contain the single migration
+the whole finding turns on. What surfaced it was `store_lifecycle.go:1045` naming `040` in a
+remediation string, which contradicted a list built by grep. **The narrower pattern was the one
+that flattered the story** — it still showed a gap, just not the interesting one — which is why
+it was not questioned until something outside the grep disagreed with it.
