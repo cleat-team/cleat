@@ -14931,6 +14931,71 @@ componentize-py inside the component — so the staleness was invisible. Regener
   `C.CString` since long before this file. What changed is how many paths carry it. Nothing
   bounds it today, and settling it needs a measurement rather than a reading of the header.
 
+* **Measured 2026-09-04 (WS-3): wasmtime DOES free the callback result's response body.** The
+  worst case this section names — "a worker leaks the full response body of every durable call
+  a component guest makes" — does not happen. What was measured, and what was not:
+
+  | | |
+  |---|---|
+  | fixture | a Python workflow that calls once and returns a **constant** |
+  | phases | warmup 60, then small (1 KiB), big (4 MiB), small **again**, 80 iterations each |
+  | instrument | RSS from `/proc/self/statm` minus `runtime.MemStats.Sys`, least-squares slope in bytes per iteration |
+  | order control | the two small phases: **−980,500** and **−979,599** B/iter, differing by **901** |
+  | result | `slope_big` = **−166,502 B/iter** |
+
+  Retention of a 4 MiB response would be **+4,193,280 B/iter**. The observed slope is
+  *negative*: RSS **falls** through a phase carrying 335 MB of response bodies. The order
+  control is 0.02% of the effect sought, so the instrument resolves it.
+
+  **The fixture returning a constant is what makes this about callbacks at all.** The obvious
+  fixture, `durable_call_workflow`, returns the response, so growing the response also grows
+  the `run` export's own `run-outcome` — two allocations on two paths, moving together, with no
+  way to attribute the result. Returning a fixed short string leaves response size moving the
+  callback path alone.
+
+  **Three earlier attempts were wrong, and how they were wrong is the reusable part.** The
+  first used a before/after RSS delta: the opening phase absorbed ~358 MiB of one-time growth
+  (wasmtime's code cache for a 19 MB component) with a 1 KiB payload, RSS then plateaued, and
+  the second phase could not grow whatever its payload — so the difference measured which phase
+  ran **first** and printed a confident `NOT LEAKING`. The second switched to slopes but at a
+  128 KiB payload, where the order control (937 KiB/iter) was **seven times** the effect sought
+  (130 KiB/iter); it printed `LEAKING` off noise. The third subtracted `HeapAlloc`, which counts
+  *live* Go objects, so Go garbage awaiting return to the OS was charged to C. Only raising the
+  payload to 4 MiB — until the signal dwarfed a noise band that could not be reduced — made the
+  question answerable. **A verdict must be gated on its own control**, which is why the probe
+  refuses to answer when the control is large, and why "no signal" and "no leak" must not print
+  the same word.
+
+  **NOT measured: the fixed-size allocations.** Discriminant names, record entries and the
+  `val_new` pointers are tens of bytes per call, far below this instrument's resolution. At
+  ~50 bytes/call a worker would need ~20M calls to accumulate 1 GB. That is a real question and
+  a much smaller one, and it needs an allocator-level counter rather than RSS.
+
+  Reproduce: the probe is not in the tree — it is a 15-minute test whose signal needs a 4 MiB
+  payload and 300 executions, which does not belong in a suite. Rebuild it from the table
+  above; the container is `scripts/docker/python-toolchain.Dockerfile`.
+
+* **The header answers a narrower question than the one above, and it is worth not conflating
+  them.** `wasmtime_component_val_new` returns a pointer that must be released with
+  `wasmtime_component_val_free`, and explicitly **not** `val_delete`, which "will deallocate
+  the contents of the value but not the value pointer itself". So even under the reading where
+  wasmtime cleans up after a callback, *which of the two it uses* on `of.result.val` decides
+  whether the inner struct survives. The measurement above cannot see a difference that small.
+  That is the precise question to put upstream — not the general one.
+
+* **The value the guest returns was leaking, and that one had a documented answer all along —
+  fixed 2026-09-04 (WS-3).** Distinct from the open question above, which is about *callback*
+  results. `componentCallRun` declares `result` as embedder stack storage and never released
+  it; `val_delete`'s own doc says it "should only be used when the embedder owns the pointer
+  `value` itself", which is exactly this. `componentCall` had the same omission and predates
+  this section, but the value grew: a `run-outcome` VARIANT owns a discriminant buffer, a
+  payload buffer and a `val_new` pointer, where the bare string it replaced owned one. All
+  three call sites now `defer C.wasmtime_component_val_delete(&result)`. Safe on the error
+  path because Go zeroes the struct at declaration — zero `kind` is `WASMTIME_COMPONENT_BOOL`,
+  a scalar owning nothing. Verified against use-after-free by asserting the result is identical
+  across 300+ executions: a mis-ordered `GoStringN` shows up as a result that *changes* between
+  identical runs, not as a crash.
+
 * **Two `malloc` returns were unchecked, and one failure mode was worse than a crash.** Also
   from WS-1's review. `cleat_dup` returning NULL reached wasmtime as
   `discriminant.data = NULL` alongside `discriminant.size = 9` — a nine-byte read from address
