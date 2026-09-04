@@ -89,19 +89,12 @@ interface durable-call {
 
     /// Make a durable call with periodic heartbeat/progress updates.
     ///
-    /// This one cannot return ``suspended`` AT THE TIME OF WRITING (2026-09-04):
-    /// unlike the two above, the host's DurableCallWithHeartbeat does not
-    /// consult ``stopBeforeNewWork``, so a defer segment does not stop it.
-    /// That is a host-side gap on every SDK rather than anything about this
-    /// type -- the eighth such path -- and IMPROVEMENT-PLAN 3.111 (#672) is
-    /// closing it. **Delete this paragraph when that lands**; the type below
-    /// does not change, only this sentence does.
-    ///
     /// The type is the same shape as its two siblings because the failure half
-    /// applies to it identically, because a third convention for one function
-    /// would be worse, and because it means the host half is the only thing
-    /// missing: the component dispatch already masks the sentinel before any
-    /// field decode, so this signature is a producer away from working.
+    /// applies to it identically, and because a third convention for one
+    /// function would be worse. The host half arrived in IMPROVEMENT-PLAN 3.111
+    /// (#672): DurableCallWithHeartbeat consults stopBeforeNewWork, so a defer
+    /// segment stops it, and the component dispatch masks the sentinel ahead of
+    /// any field decode -- both ends of `suspended` are real on this call.
     durable-call-heartbeat: func(
         service: string,
         operation: string,

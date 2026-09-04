@@ -14881,18 +14881,20 @@ componentize-py inside the component — so the staleness was invisible. Regener
 
 #### What this does not do
 
-* **`durable-call-heartbeat` is typed with the others but cannot return `suspended`**, because
-  the host's `DurableCallWithHeartbeat` (engine/heartbeats.go) does not consult
-  `stopBeforeNewWork` at all. That is a **host-side gap on every SDK**, not a component one:
-  a defer segment can start a fresh heartbeat call on a Go guest today too. WS-1 has it as
-  §3.111 (#672), and that PR must also correct this bullet's tense on its rebase, because
-  everything above is present tense and stops being true when it lands.
+* **`durable-call-heartbeat` was typed with the others and could not return `suspended`.**
+  ~~The host's `DurableCallWithHeartbeat` does not consult `stopBeforeNewWork` at all.~~
+  **Closed by §3.111 (#672) on 2026-09-04**, which is the tense correction this bullet asked
+  for on rebase. It was a **host-side gap on every SDK**, not a component one — a defer
+  segment could start a fresh heartbeat call on a Go guest too — and #672 supplied both ends:
+  the host condition, and the `withSuspendCheck` wrapper the Go adapter was missing. The
+  second half mattered: the host condition alone would have made a Go guest read the sentinel
+  as an empty *successful* response, which is §3.83's defect on the reference SDK.
 
-  **It is the EIGHTH such path, and this bullet said "sixth" until WS-1 re-derived it.**
-  Seven methods consult `stopBeforeNewWork` today: `childWorkflowWithVersion`, `DurableCall`,
-  `DurableCallWithRetry`, `Fetch`, `PluginCall`, `PluginCallStreaming` and
-  `DurableAwaitSignals`. "Sixth" came from §3.84's table, which has six rows — and the rows
-  are not the methods.
+  **It was the EIGHTH such path, and this bullet said "sixth" until WS-1 re-derived it.**
+  Seven methods consulted `stopBeforeNewWork` before that fix: `childWorkflowWithVersion`,
+  `DurableCall`, `DurableCallWithRetry`, `Fetch`, `PluginCall`, `PluginCallStreaming` and
+  `DurableAwaitSignals`; it is now eight. "Sixth" came from §3.84's table, which has six rows
+  — and the rows are not the methods.
 
   **Three counts differ here and any sentence about this has to say which one it means.**
   §3.84's table has 6 rows; there are 7 methods, because it merges `ChildWorkflow` and
