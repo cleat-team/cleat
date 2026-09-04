@@ -289,11 +289,11 @@ func TestWasmDiskCache_Eviction(t *testing.T) {
 	//
 	// It failed on a SQL Server CI run as exactly that -- "wf v2 should have
 	// been evicted" together with "wf v3 should have survived" -- which is the
-	// pair swapping places. PARALLEL-WORKSTREAMS.md names this shape directly:
+	// pair swapping places. CLAUDE.md's rule covers it exactly -- "if an
+	// assertion depends on wall-clock time, remove the timing rather than
+	// widening it" -- and the case that produced the rule was this same shape:
 	// a 2 ms sleep in the zombie-writer scenario survived four CI runs and lost
-	// the fifth, and "if an assertion depends on wall-clock time, remove the
-	// timing rather than widening it". Widening the sleep would have hidden it
-	// again for a while.
+	// the fifth. Widening the sleep would have hidden it again for a while.
 	//
 	// os.Chtimes removes the dependency instead: the ordering under test is now
 	// stated, not raced for. The timestamps are in the past so that each

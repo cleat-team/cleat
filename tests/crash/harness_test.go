@@ -68,7 +68,7 @@ const (
 
 // ownerDSN is the migration/owner connection. Deliberately not defaulted to
 // port 5432: that instance belongs to another workstream's checkout, and
-// PARALLEL-WORKSTREAMS.md assigns this one 5433.
+// WORKSTREAM.md's DSN table assigns this one 5433.
 func ownerDSN() string {
 	if dsn := os.Getenv("CLEAT_CRASH_DB"); dsn != "" {
 		return dsn

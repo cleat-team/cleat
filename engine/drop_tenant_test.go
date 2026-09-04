@@ -10,7 +10,7 @@ package engine
 // engine/rls_gap_concurrency_and_update_requests_test.go uses for 031:
 // engine/testutil's postgresSchemaFiles() is an explicit list (not a
 // directory glob) owned by another stream this round per
-// PARALLEL-WORKSTREAMS.md, so a migration added here is applied locally
+// WORKSTREAM.md's shared-files table, so a migration added here is applied locally
 // rather than by editing that list.
 //
 // CLAUDE.md's standing requirement: prove the regression test can fail, and

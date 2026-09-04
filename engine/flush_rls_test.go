@@ -216,8 +216,9 @@ func TestEventFlushSucceedsAsOwner(t *testing.T) {
 // already built its schema and whose neighbours in the same file pass, because
 // only the connection this ran on carries the change. That is a long way from
 // the cause and reads like a broken migration; it cost a full diagnosis on
-// #638. WS3-STATUS.md records the role/schema collision as an environment
-// hazard, and this is the code path that turns it into a test failure.
+// #638. WORKSTREAM.md records the role/schema collision as an environment
+// hazard -- the container's POSTGRES_USER=cleat collides with the cleat
+// schema -- and this is the code path that turns it into a test failure.
 //
 // db.Conn pins one physical connection for the life of the returned handle, so
 // RESET ALL is guaranteed to undo the SET on the same session it was set on,

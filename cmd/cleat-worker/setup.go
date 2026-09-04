@@ -143,7 +143,7 @@ func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJ
 // phase B.
 //
 // NOTE (WS-2 -> WS-3): cmd/cleat-worker/ is WS-3's under
-// PARALLEL-WORKSTREAMS.md. Added here because the engine-side mechanism is inert
+// WORKSTREAM.md's shared-files table. Added here because the engine-side mechanism is inert
 // without a caller that implements it, and shipping a mechanism nothing calls is
 // the exact shape of the §1.4 defect this phase exists to avoid. Additive: the
 // existing Call is unchanged in behaviour and delegates to the same helper.
@@ -1713,7 +1713,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	//
 	// One option on a per-execution engine, which is all this needs: the
 	// worker builds an engine per workflow a few lines above, not one shared
-	// engine reused across dispatches. WS2-STATUS recorded the opposite as a
+	// engine reused across dispatches. WS2-STATUS.md (retired 2026-09-04;
+	// see git history) recorded the opposite as a
 	// constraint to decide before implementing ("the worker needs a second
 	// engine", 2026-09-03) -- it named setup.go:1705, which is this
 	// NewEngine call, and read it as construction-time state shared between

@@ -149,8 +149,8 @@ jobs:
 
       # The crash suite's own instance. Not a second database on the first
       # server: this suite crashes and restarts workers against it and applies
-      # migrations as an owner role, and PARALLEL-WORKSTREAMS.md gives it its
-      # own port for that reason. The DSN shape below matches the default in
+      # migrations as an owner role, and WORKSTREAM.md's DSN table gives it
+      # its own port for that reason. The DSN shape below matches the default in
       # tests/crash/harness_test.go's ownerDSN.
       postgres-crash:
         image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b

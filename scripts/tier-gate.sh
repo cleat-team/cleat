@@ -83,7 +83,7 @@ done
 # it -- those tests fail on connect instead of skipping.
 #
 # Measured 2026-09-03, reconstructing the three DSNs from memory instead of reading
-# WS3-STATUS.md: wrong database name, wrong passwords on MySQL and MSSQL. The run produced
+# the ones written down: wrong database name, wrong passwords on MySQL and MSSQL. The run produced
 # a clean monotonic-looking result -- skips falling 876 -> 581 -> 4 across no-DSN /
 # postgres-only / all-three, with the final 4 matching the table above EXACTLY. It was 1086
 # connection failures. The matching 4 read as corroboration.
@@ -114,8 +114,10 @@ for d in $DIALECTS; do
        \`go test\` exiting 0, which is why this asserts a PASS per dialect rather than an exit
        code. If the DSN-is-set check above also failed for $d, that is the cause and this is
        the echo. Otherwise the variable is set and WRONG, which looks exactly like one that
-       works to every other check in this script. Read the DSNs from WS3-STATUS.md (this
-       checkout) or PARALLEL-WORKSTREAMS.md (defaults) rather than reconstructing them.
+       works to every other check in this script. Read the DSNs from WORKSTREAM.md, under
+       'Sandboxes, databases, and shared files', rather than reconstructing them. Note
+       that the credentials differ per port -- a probe that varies only the port is not
+       a test of the credentials.
 
 $(echo "$PROBE" | grep -E '^\s+.*(ping|unreachable|Access denied|login error|does not exist)' | head -3)"
   fi
@@ -124,7 +126,7 @@ done
 # --- 2a2. Packages that need a database the dialect DSNs do not name ----------------
 # tests/crash is in tier1.packages and does not use any CLEAT_TEST_* DSN. It reads
 # CLEAT_CRASH_DB and, when that is unset, defaults to port 5433 -- deliberately not
-# 5432, because PARALLEL-WORKSTREAMS.md assigns this suite its own instance so its
+# 5432, because WORKSTREAM.md assigns this suite its own instance so its
 # crash-and-recover cycles cannot disturb another workstream's fixtures.
 #
 # Its five tests then Fatal rather than skip when that instance is unreachable, which
@@ -149,7 +151,7 @@ if awk '/^tier1:/{t=1} t&&/^  packages:/{p=1;next} p&&/^    - /{print;next} p{ex
      | grep -q '\./tests/crash/'; then
   if [ -z "${CLEAT_CRASH_DB:-}" ]; then
     fail "CLEAT_CRASH_DB is unset -- ./tests/crash/... is a tier-1 package and does not use
-       the CLEAT_TEST_* DSNs. It defaults to port 5433 (PARALLEL-WORKSTREAMS.md gives this
+       the CLEAT_TEST_* DSNs. It defaults to port 5433 (WORKSTREAM.md gives this
        suite its own instance) and its tests Fatal, not skip, when that is unreachable --
        so leaving it unset produces five failures that mean 'nobody asked' and are
        indistinguishable from real ones in this script's summary."
