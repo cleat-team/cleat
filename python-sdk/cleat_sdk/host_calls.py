@@ -3430,6 +3430,12 @@ class HostCalls:
         key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
         result = _import_cleat_acquire_lock(SCRATCH_BASE, key_len, ttl_ms)
 
+        # Before decoding: this layout puts `acquired` at bit 8 and errCode in
+        # the low byte, so a stop would decode as errCode=0, acquired=False --
+        # an ordinary "someone else holds it" -- and the workflow would take its
+        # did-not-get-the-lock branch and run on. IMPROVEMENT-PLAN 3.301.
+        _raise_if_stopped(result)
+
         err_code = result & 0xFF
         acquired = bool((result >> 8) & 0x1)
 

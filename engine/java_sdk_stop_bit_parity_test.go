@@ -87,6 +87,7 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pluginCallOutcome", "PluginCall"},
 	{"pluginCallStreaming", "PluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
+	{"acquireLockMs", "AcquireLock"},
 	{"cleatFetch", "Fetch"},
 	{"runDetached", "RunDetached"},
 }
@@ -208,7 +209,13 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// needed nothing. The gap was entirely host-side, which is why only the
 	// number moved -- and this test is the reason that was verified instead of
 	// assumed from the Java list being long enough.
-	const stopSitesOn20260904 = 9
+	//
+	// Moved 9 -> 10 on 2026-09-04 for IMPROVEMENT-PLAN 3.301 (AcquireLock), and
+	// this time Java DID need something: `acquireLockMs` decoded straight to
+	// `result & 0xFFL`, so a stop would have read as errCode=0 with `acquired`
+	// false at bit 8 -- an ordinary "someone else holds the lock". Both halves
+	// were added here, not just the number.
+	const stopSitesOn20260904 = 10
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

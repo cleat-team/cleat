@@ -76,9 +76,31 @@ type stopSurface struct {
 	wit        []string
 	adapterWhy exemptReason // set when adapters is deliberately empty
 	witWhy     exemptReason // set when wit is deliberately empty
+
+	// py names the Python SDK methods that decode this call, and is REQUIRED
+	// when the WIT function returns a scalar rather than result<...>.
+	//
+	// For a result<...> call the component guest cannot misread a stop: the
+	// refusal is a case of the return type and there is no other way to read
+	// it. A scalar return gives that up -- bit 31 arrives inside an ordinary
+	// word -- so something has to assert the SDK tests it, and this is that
+	// something. Dropping the WIT requirement without adding this would have
+	// removed a structural guarantee and replaced it with nothing.
+	py []string
 }
 
 var stopSurfaces = map[string]stopSurface{
+	"AcquireLock": {
+		// The first stop site whose WIT function returns a SCALAR rather than
+		// result<string, call-failure>, which is why witCallOutcomeFuncs now
+		// reports a third category. §3.113 recorded the rule as wrong for
+		// numeric calls and deliberately did not change it, on the grounds
+		// that a rule loosened before it has a case is a rule nobody can
+		// falsify. This is the case.
+		adapters: []string{"AcquireLock", "AcquireLockMs"},
+		wit:      []string{"durable-acquire-lock"},
+		py:       []string{"acquire_lock_ms"},
+	},
 	"DurableCall": {
 		adapters: []string{"DurableCall"},
 		wit:      []string{"durable-call"},
@@ -216,19 +238,62 @@ func adaptersWithSuspendCheck(t *testing.T) (wrapped, all map[string]bool) {
 
 // witCallOutcomeFuncs returns the WIT interface functions returning
 // result<string, call-failure>, and the full set of function names.
-func witCallOutcomeFuncs(t *testing.T) (outcome, all map[string]bool) {
+// witCallOutcomeFuncs splits cleat.wit's functions three ways, not two.
+//
+// `outcome` returns result<string, call-failure>: a stop is a case of the type
+// and a component guest cannot read it as anything else.
+//
+// `scalar` returns u64 or s64, wide enough to carry bit 31 with the sentinel's
+// other 63 bits zero. A stop is expressible, but NOT structurally unmissable --
+// the guest has to test for it, which is why a stopSurface naming a scalar WIT
+// function must also name the Python methods that do (see the `py` field).
+//
+// s64 is included and u32 is not. Bit 31 is the sign bit of a 32-bit word, so
+// on a u32 the sentinel is either unrepresentable or aliases a negative value
+// depending on how the binding lifts it; on s64 it is an ordinary positive
+// 2147483648. No stop site returns u32 today and this is what stops one being
+// added quietly.
+func witCallOutcomeFuncs(t *testing.T) (outcome, scalar, all map[string]bool) {
 	t.Helper()
 	src := repoFile(t, "python-sdk/wit/cleat.wit")
 	fn := regexp.MustCompile(`(?s)\n\s*([a-z0-9-]+): func\(.*?\)\s*->\s*([^;]+);`)
-	outcome, all = map[string]bool{}, map[string]bool{}
+	outcome, scalar, all = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, m := range fn.FindAllStringSubmatch(src, -1) {
 		name, ret := m[1], strings.TrimSpace(m[2])
 		all[name] = true
-		if strings.Contains(ret, "call-failure") {
+		switch {
+		case strings.Contains(ret, "call-failure"):
 			outcome[name] = true
+		case ret == "u64", ret == "s64":
+			scalar[name] = true
 		}
 	}
-	return outcome, all
+	return outcome, scalar, all
+}
+
+// pySDKStopChecks reports which Python HostCalls methods test the stop sentinel
+// before decoding, by parsing the SDK rather than trusting a list.
+//
+// "Tests it" means reaching _raise_if_stopped, directly or through
+// _check_host_result, which calls it first. Both are in host_calls.py.
+func pySDKStopChecks(t *testing.T) map[string]bool {
+	t.Helper()
+	src := repoFile(t, "python-sdk/cleat_sdk/host_calls.py")
+	out := map[string]bool{}
+	def := regexp.MustCompile(`(?m)^    def (\w+)\(`)
+	locs := def.FindAllStringSubmatchIndex(src, -1)
+	for i, loc := range locs {
+		end := len(src)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		body := src[loc[0]:end]
+		name := src[loc[2]:loc[3]]
+		if strings.Contains(body, "_raise_if_stopped(") || strings.Contains(body, "_check_host_result(") {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 func sortedStopKeys(m map[string]bool) []string {
@@ -245,7 +310,8 @@ func sortedStopKeys(m map[string]bool) []string {
 func TestTheThreeStopSurfacesAgree(t *testing.T) {
 	sites := hostStopSites(t)
 	wrappedAdapters, allAdapters := adaptersWithSuspendCheck(t)
-	outcomeWit, allWit := witCallOutcomeFuncs(t)
+	outcomeWit, scalarWit, allWit := witCallOutcomeFuncs(t)
+	pyChecks := pySDKStopChecks(t)
 
 	// -- vacuity, per thing rather than per total ---------------------------
 	//
@@ -264,6 +330,12 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 		{"adapters with withSuspendCheck", wrappedAdapters, 6, "DurableCall"},
 		{"all adapterDefs keys", allAdapters, 30, "DurableSleep"},
 		{"WIT call-outcome functions", outcomeWit, 6, "durable-call"},
+		{"WIT scalar-returning functions", scalarWit, 15, "durable-acquire-lock"},
+		// The canary is deliberately NOT acquire_lock_ms, the method this file
+		// actually requires. Using the method under test makes the vacuity check
+		// fire first when it is removed, so the per-site check below can never
+		// be reached and cannot be falsified. Measured: it did exactly that.
+		{"Python methods testing the stop sentinel", pyChecks, 8, "signal_workflow"},
 		{"all WIT functions", allWit, 30, "durable-sleep"},
 	} {
 		if len(c.got) < c.min {
@@ -333,6 +405,21 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 			}
 		}
 
+		if len(s.py) > 0 {
+			allScalar := len(s.wit) > 0
+			for _, w := range s.wit {
+				if !scalarWit[w] {
+					allScalar = false
+				}
+			}
+			if !allScalar {
+				t.Errorf("stopSurfaces[%q] names Python methods %v, but its WIT functions do "+
+					"not all return scalars.\n\n`py` is the substitute for the result<...> "+
+					"guarantee and means nothing where that guarantee holds. An entry carrying "+
+					"both was probably copied from one that needed it.", site, s.py)
+			}
+		}
+
 		if len(s.wit) == 0 {
 			if s.witWhy == "" {
 				t.Errorf("stopSurfaces[%q] names no WIT function and gives no reason.", site)
@@ -348,12 +435,38 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 				t.Errorf("stopSurfaces[%q] names WIT function %q, which is not in cleat.wit.", site, w)
 				continue
 			}
-			if !outcomeWit[w] {
-				t.Errorf("the host can refuse %s, but WIT function %q does not return "+
-					"result<string, call-failure>.\n\nA component guest has no case in which "+
-					"to receive the refusal, so it arrives as a value the service could also "+
-					"have produced -- which is the forgeable-sentinel problem §3.83 and §3.110 "+
-					"both exist to remove.", site, w)
+			switch {
+			case outcomeWit[w]:
+				// A stop is a case of the return type. Nothing further to check:
+				// the guest cannot receive it as anything else.
+			case scalarWit[w]:
+				// Expressible but missable, so the Python surface is required.
+				// This is the branch §3.113 argued for and left unwritten.
+				if len(s.py) == 0 {
+					t.Errorf("the host can refuse %s, and WIT function %q returns a scalar "+
+						"rather than result<string, call-failure>.\n\nThat is allowed -- bit 31 "+
+						"fits -- but it gives up the guarantee the result type provided, so the "+
+						"entry must name the Python SDK methods that test the sentinel. Add `py`.",
+						site, w)
+					continue
+				}
+				for _, meth := range s.py {
+					if !pyChecks[meth] {
+						t.Errorf("the host can refuse %s through the scalar-returning WIT "+
+							"function %q, but the Python method %q does not reach "+
+							"_raise_if_stopped.\n\nA component guest decodes the word's fields "+
+							"and bit 31 reads as an ordinary value -- for the lock layout that is "+
+							"errCode=0, acquired=false, an unremarkable \"someone else holds it\". "+
+							"The workflow takes that branch and runs on. §3.202 is the same defect "+
+							"on await_signals.", site, w, meth)
+					}
+				}
+			default:
+				t.Errorf("the host can refuse %s, but WIT function %q returns neither "+
+					"result<string, call-failure> nor a 64-bit scalar.\n\nA component guest has "+
+					"no case in which to receive the refusal and no free bit to carry it, so it "+
+					"arrives as a value the service could also have produced -- the "+
+					"forgeable-sentinel problem §3.83 and §3.110 both exist to remove.", site, w)
 			}
 		}
 	}
