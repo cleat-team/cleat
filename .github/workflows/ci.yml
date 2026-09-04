@@ -340,7 +340,10 @@ jobs:
       # dependency fails loudly, which is the good case; the bad case is the
       # one this file is otherwise about.
       - name: ShellCheck
-        run: shellcheck scripts/*.sh benchmarks/*.sh
+        # .githooks/* included since 2026-09-04: the pre-commit hook shipped in
+        # #706 with a defect and nothing linted it. It sources
+        # scripts/section-blocks.sh, which is an input here, so SC1091 resolves.
+        run: shellcheck scripts/*.sh benchmarks/*.sh .githooks/*
 
       # CGO on. With CGO_ENABLED=0 this step analysed a build that is not the
       # one we ship: `//go:build cgo` takes eight files out of ./engine/,
