@@ -539,14 +539,14 @@ var adapterDefs = map[string]adapterDef{
 			{"key", "string"},
 			{"ttlMs", "int64"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result & 0xFF)",
 			"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
 			"if errCode != 0 {",
 			`    return false, fmt.Errorf("cleat_acquire_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
 			"}",
 			"return acquired, nil",
-		},
+		),
 	},
 	"AcquireLockMs": {
 		FieldName:  "AcquireLockMs",
@@ -555,14 +555,14 @@ var adapterDefs = map[string]adapterDef{
 			{"key", "string"},
 			{"ttlMs", "int64"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result & 0xFF)",
 			"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
 			"if errCode != 0 {",
 			`    return false, fmt.Errorf("cleat_acquire_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
 			"}",
 			"return acquired, nil",
-		},
+		),
 	},
 	"ReleaseLock": {
 		FieldName:  "ReleaseLock",

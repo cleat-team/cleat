@@ -16072,3 +16072,88 @@ the whole finding turns on. What surfaced it was `store_lifecycle.go:1045` namin
 remediation string, which contradicted a list built by grep. **The narrower pattern was the one
 that flattered the story** — it still showed a gap, just not the interesting one — which is why
 it was not questioned until something outside the grep disagreed with it.
+### 3.301 A defer segment could still take a distributed lock — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+B2's first call, and the one that forced §3.113's deferred rule change.
+
+**The defect.** `AcquireLock` did not consult `stopBeforeNewWork`. A defer segment could take a
+distributed lock with a TTL on behalf of a workflow that has already terminated and will never
+reach the release, leaving the key held until the TTL expired — the resource-leak shape §3.112
+fixed from the other direction.
+
+**All five SDKs would have misread the refusal, which is why this is not a one-line change.**
+Every one decoded the low byte first:
+
+| SDK | before |
+|---|---|
+| Go | `AcquireLock`/`AcquireLockMs` adapters started at `errCode := uint32(result & 0xFF)` |
+| Rust | `let err_code = (result as u64 & 0xFF) as u8` |
+| Java | `int errCode = (int) (result & 0xFFL)` |
+| AssemblyScript | `let errCode: i64 = result & 0xFF` |
+| Python | `err_code = result & 0xFF` |
+
+The lock layout puts `acquired` at bit 8 and `errCode` in the low byte, so `1 << 31` decodes as
+**`errCode=0, acquired=false`** — an unremarkable "someone else holds it". Every guest would have
+taken its did-not-get-the-lock branch and run on. That is §3.83's defect again, and it is quieter
+here than in the durable-call layout: "I did not get the lock" is a case workflows are written to
+handle, so the segment would look like it was behaving correctly.
+
+#### The rule §3.113 deferred, now that it has a case
+
+`TestTheThreeStopSurfacesAgree` required every stop site's WIT function to return
+`result<string, call-failure>`. `durable-acquire-lock` returns `s64`. §3.113 recorded the rule as
+wrong for numeric calls and deliberately left it alone, "because a rule loosened before it has a
+case is a rule nobody can falsify".
+
+`witCallOutcomeFuncs` now splits three ways rather than two: `result<...>`, 64-bit scalar, and
+everything else. **`s64` and `u64` are accepted; `u32` is not** — bit 31 is the sign bit of a
+32-bit word, so on a `u32` the sentinel is either unrepresentable or aliases a negative value
+depending on how the binding lifts it. No stop site returns `u32`, and the third branch is what
+stops one being added quietly.
+
+**Loosening the WIT requirement removes a guarantee, so something has to replace it.** For a
+`result<...>` call a component guest cannot misread a stop: the refusal is a case of the return
+type. A scalar gives that up. So `stopSurface` gains a `py` field, **required** when the WIT
+function is scalar, naming the Python methods that must reach `_raise_if_stopped` — verified by
+parsing the SDK, not by a list. An entry carrying `py` alongside a `result<...>` function also
+fails, because that combination means someone copied an entry that needed it.
+
+**Falsified five ways, each a different message:**
+
+| mutation | fails with |
+|---|---|
+| host guard removed | `stopSurfaces names "AcquireLock", which no longer consults stopBeforeNewWork` |
+| scalar WIT kept, `py` dropped | `returns a scalar … the entry must name the Python SDK methods` |
+| Python check removed | `the Python method "acquire_lock_ms" does not reach _raise_if_stopped` |
+| Go adapters unwrapped | `the Go adapter "AcquireLock" does not use withSuspendCheck` |
+| `py` added to a `result<>` entry | `names Python methods [call], but its WIT functions do not all return scalars` |
+
+**The third one is the finding.** It first failed at the *vacuity canary* rather than the check it
+was aimed at, because the canary named `acquire_lock_ms` — the very method under test — so
+removing that method's guard tripped the canary and the per-site check was never reached. A
+vacuity canary must name something other than the thing the file exists to require, or the
+requirement cannot be falsified. Canary changed to `signal_workflow`; the falsification then
+produced the message above.
+
+#### What B2 has left, re-measured
+
+§3.111's remaining seven are **not** the uniform set the plan describes:
+
+| call | WIT returns | Go adapter |
+|---|---|---|
+| `durable-acquire-lock` | `s64` | yes — **done here** |
+| `durable-signal-workflow` | `u64` | **none** — not in `wasm/usage.go` |
+| `durable-send` | `u64` | **none** |
+| `durable-schedule-invoke` | `u64` | **none** |
+| `durable-send-signal-and-wait` | `string` | none |
+| `side-effect` | `string` | yes |
+| `durable-schedule-cron` | `string` | yes |
+
+    grep -oE '\{"[a-z_]+", "\w+"\}' wasm/usage.go | sort -u
+
+Three have no Go guest half to write at all — a Go WASM guest cannot reach them, because
+`HostCallsOptions` fields are emitted only for `usage.Funcs` entries that have an `adapterDefs`
+entry, so `h.signalWorkflow` is nil and the SDK method returns its not-in-a-workflow error. Those
+are `reasonNoGoAdapter` cases like `Fetch`. Three others return `string` and need the §3.110
+signature change, not this rule. Only `side-effect` and `durable-schedule-cron` are string-typed
+*and* Go-reachable, which makes them the next pair and a different kind of change from this one.

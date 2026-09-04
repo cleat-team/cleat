@@ -1519,6 +1519,15 @@ impl HostCalls {
                 ttl_ms,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.301). Ask BEFORE decoding: this layout puts
+        // `acquired` at bit 8 and errCode in the low byte, so a stop decodes as
+        // errCode=0, acquired=false -- an ordinary "someone else holds it", and
+        // the workflow takes its did-not-get-the-lock branch and runs on.
+        if stop_requested(result) {
+            return (false, Some("cleat: host refused this call -- the workflow is running its defer phase".to_string()));
+        }
+
         let err_code = (result as u64 & 0xFF) as u8;
         let acquired = ((result as u64 >> 8) & 0x1) != 0;
         if err_code != 0 {

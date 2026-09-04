@@ -2369,6 +2369,13 @@ public class HostCalls {
 
         long result = cleatAcquireLockRaw(keyOff, keyLen, ttlMs);
 
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.301). Ask BEFORE decoding: this layout puts
+        // `acquired` at bit 8 and errCode in the low byte, so a stop decodes as
+        // errCode=0, acquired=false -- an ordinary "someone else holds it", and
+        // the workflow takes its did-not-get-the-lock branch and runs on.
+        Memory.throwIfStopped(result);
+
         int errCode = (int) (result & 0xFFL);
         if (errCode != 0) {
             return CleatResult.err("acquireLock(key=\"" + key + "\", ttlMs=" + ttlMs + ") failed: host returned error code " + errCode + ". Check that the lock key is valid.");

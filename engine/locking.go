@@ -12,6 +12,14 @@ func (s *execSession) AcquireLock(ctx context.Context, m api.Module, key string,
 	if s.isReplay {
 		return s.replayAcquireLock(ctx, m, key, ttlMs)
 	}
+	// A fresh acquire is new work: it takes a distributed lock with a TTL, on
+	// behalf of a workflow that has already terminated and will never reach the
+	// release. A defer segment that got past here would leave the key held
+	// until the TTL expired, which is the resource-leak shape 3.112 fixed from
+	// the other direction (terminate released the locks its defers were for).
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 	return s.freshAcquireLock(ctx, m, key, ttlMs)
 }
 
