@@ -13043,17 +13043,17 @@ longer consumes the guest's execution budget, and the wall-clock ceiling that do
 defaults to 5m rather than 30s. The remaining work there is the missing
 `HostCallsImpl.DurableCallWithRetry` method.
 
-### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🟡 **IN PROGRESS: steps 1–5 done, 6 open** (WS-3, 2026-09-03)
+### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🟢 **FIXED 2026-09-03: all six steps shipped** (WS-3, 2026-09-03)
 
 **Requirement, 2026-09-03:** each tenant must be able to override the default time thresholds
 without affecting other tenants, so that several microservices — or several organisations —
 sharing one cleat deployment can manage their own settings.
 
-The design and the plan are below. Steps 1–5 have shipped — the settings table on three
-dialects, and per-tenant resolution of all three limits: the wall-clock ceiling (5a), the
-host-side retry threshold (4), and the epoch fence (5b). Step 6 is open. The
-`What exists today` table below describes the state BEFORE this work and is kept as the
-problem statement; read the step markers for status.
+All six steps have shipped: the settings table on three dialects, per-tenant resolution of
+all three limits — the wall-clock ceiling (5a), the host-side retry threshold (4) and the
+epoch fence (5b) — and per-tenant validation (6). The `What exists today` table below
+describes the state BEFORE this work and is kept as the problem statement, not as current
+fact; read the step markers for status.
 
 #### What exists today
 
@@ -13364,7 +13364,24 @@ consistent and costs nothing.
      both shipped underneath it while it stayed green. `TestTheThreeSettingsBoundDifferentThings`
      keeps the invariant that was actually worth having — the three limits bound three
      different things and must not leak into each other's bound, which is §3.90's finding.
-6. **Per-tenant validation** replacing §3.90's startup warning.
+6. ~~**Per-tenant validation**~~ — ✅ **done 2026-09-03.** `Engine.warnIfTenantLimitsConflict`,
+   called from inside `tenantSettingsOnce` so it logs once per engine rather than once per
+   replay segment — a per-execution warning on a durable workflow is how a real signal becomes
+   noise nobody reads.
+
+   **It ADDS to §3.90's startup warning rather than replacing it, which is a deliberate
+   departure from the line this step used to be.** The two cover different
+   misconfigurations: the startup check compares the operator's own two flags, this compares a
+   tenant's own two overrides. Dropping the first would lose a check that still catches a real
+   mistake.
+
+   **It also does not compare across the two sources, and that is the honest limit.** Judging a
+   tenant's wall-clock ceiling against the *operator's* instance timeout is impossible here —
+   that number lives on the backend, set from `--wasm-instance-timeout` when the worker builds
+   it, and the engine never sees it (the same asymmetry step 5b works around). Warning on a
+   comparison against a value this code does not have would be a guess, and a confident wrong
+   warning is worse than none because the next reader tunes against it. So the validator stays
+   quiet when only one override is set, and its control test asserts that quiet explicitly.
 
 #### What to be suspicious of when building this
 
