@@ -88,6 +88,7 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pluginCallStreaming", "PluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
 	{"cleatFetch", "Fetch"},
+	{"runDetached", "RunDetached"},
 }
 
 // javaCallsThatMustNotCheck are the methods where the guard would be a defect
@@ -207,7 +208,7 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// needed nothing. The gap was entirely host-side, which is why only the
 	// number moved -- and this test is the reason that was verified instead of
 	// assumed from the Java list being long enough.
-	const stopSitesOn20260904 = 8
+	const stopSitesOn20260904 = 9
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

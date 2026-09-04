@@ -82,6 +82,7 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"plugin_call_streaming", "PluginCallStreaming"},
 	{"await_signals_ms", "DurableAwaitSignals"},
 	{"cleat_fetch", "Fetch"},
+	{"run_detached", "RunDetached"},
 }
 
 var rustCallsThatMustNotCheck = map[string]string{

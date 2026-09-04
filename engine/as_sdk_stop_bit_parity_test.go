@@ -76,6 +76,7 @@ var asCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pluginCallStreaming", "PluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
 	{"cleatFetch", "Fetch"},
+	{"runDetached", "RunDetached"},
 }
 
 var asCallsThatMustNotCheck = map[string]string{

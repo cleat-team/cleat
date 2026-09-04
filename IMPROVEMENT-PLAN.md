@@ -12910,6 +12910,63 @@ DurableCall and this SDK's list does not cover it`, which does not say a binding
 the detection all comes from coverage; the binding checks buy the diagnosis. That is worth stating
 because a reader would otherwise count seven independent guarantees where there are four.
 
+#### `RunDetached` closed, and the rest costed (2026-09-04)
+
+**`RunDetached` was a defect by inspection rather than by judgement**, which is why it went first.
+It calls the *same* `StartChildWorkflow` that `childWorkflowWithVersion` calls and leaves the same
+claimable `workflow_instances` row — and that one has been refused in a defer segment since §3.84.
+Two functions apart in `engine/children.go`, one guarded and one not, through the identical store
+method. A terminated workflow's cleanup could still create live work by asking for it under the
+other name.
+
+Guarded host-side, plus the guest half in all three SDKs that can reach it (`stop_requested` in
+Rust, `Memory.throwIfStopped` in Java, `stopRequested` in AssemblyScript). Each decodes this call
+as a **simple result**, in which bit 31 is not a field — so a stop decoded field-first is
+`errCode 0`, an ordinary success, and the guest runs on.
+
+`TestADeferSegmentDoesNotStartADetachedWorkflow` is a direct session test, not a WASM fixture,
+because **Go guests cannot reach `cleat_run_detached` at all**: it is imported by Rust, Java and
+AssemblyScript only, and `cleat.HostCalls.RunDetached` is a different thing that runs a closure
+without touching the import. It asserts three arms — the control (it starts one outside a
+segment), the refusal, and that a defer body's own call still goes through, because a segment that
+refuses everything passes the middle assertion while destroying the cleanup (§3.81).
+
+#### What the remaining candidates cost, measured before deciding
+
+Every one is reachable from three or four SDKs, so each is a host line **plus** a guest guard per
+language plus the declarations three guards now demand. Measured 2026-09-04:
+
+| host method | import | reachable from |
+|---|---|---|
+| `SignalWorkflow` | `cleat_signal_workflow` | rust, java, as |
+| `SendSignalAndWait` | `cleat_send_signal_and_wait` | rust, java, as |
+| `DurableSend` | `cleat_send` | rust, java, as |
+| `SideEffect` | `cleat_side_effect` | rust, java, as, go |
+| `AcquireLock` | `cleat_acquire_lock` | rust, java, as, go |
+| `ScheduleCron` | `cleat_schedule_cron` | as, go |
+| `DurableScheduleInvoke` | `cleat_schedule_invoke` | as |
+| `ReplyToSignal` | `cleat_reply_to_signal` | rust, java, as |
+| `ResolvePromise` / `RejectPromise` | `cleat_{resolve,reject}_promise` | rust, java, as |
+| `ReleaseLock` | `cleat_release_lock` | rust, java, as, go |
+| `DeleteCron` | `cleat_delete_cron` | as, go |
+
+**That is roughly forty guest-side edits across four languages, not a sweep to be done in one
+change.** Writing it down is the point: the mechanism (§3.111's guards) now prices this honestly
+instead of letting it look like fourteen one-line additions.
+
+**And the list splits, which is why it is not simply "guard them all".** The first group —
+`SignalWorkflow`, `SendSignalAndWait`, `DurableSend`, `SideEffect`, `AcquireLock`, `ScheduleCron`,
+`DurableScheduleInvoke` — start something: an external effect, a lock a terminated workflow will
+never release until its TTL, or durable work that outlives the segment. The same argument as
+`RunDetached`.
+
+The second group — `ReplyToSignal`, `ResolvePromise`, `RejectPromise`, `ReleaseLock`, `DeleteCron`
+— *release* rather than acquire. Refusing them is not obviously right, and could strand a waiter
+on a promise the terminated workflow was about to resolve. `stopBeforeNewWork` is false during the
+defer drain, so a defer body doing this cleanup is unaffected either way; the open question is the
+workflow **body** past the frontier, and it wants a decision rather than a reflex. Recorded, not
+taken.
+
 #### Not fixed here: the frontier is wider than eight, and the answer is a mechanism
 
 Measured 2026-09-04 — every `execSession` method carrying an `isReplay` check, which is the

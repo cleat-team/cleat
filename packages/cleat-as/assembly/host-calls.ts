@@ -2685,6 +2685,14 @@ export class HostCalls {
       inputLen,
     );
 
+    // The host refuses new work in a defer segment and marks it with bit 31
+    // (IMPROVEMENT-PLAN 3.111). Before decoding: this is a simple-result layout
+    // in which bit 31 is not a field, so a stop decoded field-first is errCode 0
+    // -- a SUCCESS, and the guest runs on.
+    if (stopRequested(result)) {
+      return "cleat: host refused this call -- the workflow is running its defer phase";
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
       return "runDetached(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
