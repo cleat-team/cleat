@@ -12651,6 +12651,51 @@ per-method coverage with **no host-side pin at all**, so a ninth site passes bot
 silently. This test is about the correspondence; those are about each SDK's own decoders. Both
 are wanted.
 
+#### The Rust and AssemblyScript half of that, closed (2026-09-04)
+
+`TestEverySDKCoversEveryHostStopSite` (`engine/sdk_stop_site_coverage_test.go`). It asserts the
+stronger property rather than adding two more count pins: **every host stop site is reachable by
+name in each SDK's list**, or exempt with a written reason. A count pin cannot tell "grew by one"
+from "grew by one and the wrong method was added to compensate".
+
+**The enabling change was moving one string out of a comment.** All three lists annotated the host
+method beside each entry:
+
+```go
+"cleat_call_heartbeat",        // DurableCallWithHeartbeat
+```
+
+That is data in a place nothing can check — the comment can name a renamed method, or the wrong
+one, and every test over the list still passes. It is now a field (`sdkRefusableCall{sdk,
+hostSite}`), which is what lets the coverage question be asked at all. Same rule the exemption
+constants follow, one level down.
+
+Coverage today: java 10 entries / 8 of 8 sites; rust 8 entries / 7 of 8 with one exemption
+(no `call_with_retry` — a Rust guest reaches the retry path through `cleat_call`); assemblyscript
+9 entries / 8 of 8.
+
+**Falsified as two narrow mutations, not one that breaks both sides** — the distinction §3.111
+records above:
+
+| mutation | result |
+|---|---|
+| a new host stop site, SDKs untouched | **all three** SDKs report `the host can refuse SignalWorkflow and this SDK's list does not cover it` |
+| one Rust entry removed, host untouched | **rust only** reports `the host can refuse Fetch and this SDK's list does not cover it` |
+
+Neither fires the other's assertion, which is what makes them evidence about each side separately.
+The first is precisely the case Rust and AssemblyScript were blind to.
+
+Plus five more: an entry naming a non-site, a stale exemption (covered *and* exempted), an
+exemption naming a non-site, an entry with an empty host site, and a reason too short to state a
+mechanism.
+
+**Three of those seven do diagnosis work rather than detection work, and this was checked rather
+than assumed.** Deleting the "names a host site that is not one" assertion and re-running its
+mutation still fails — through the coverage assertion, with a worse message (`the host can refuse
+DurableCall and this SDK's list does not cover it`, which does not say a binding was typo'd). So
+the detection all comes from coverage; the binding checks buy the diagnosis. That is worth stating
+because a reader would otherwise count seven independent guarantees where there are four.
+
 #### Not fixed here: the frontier is wider than eight, and the answer is a mechanism
 
 Measured 2026-09-04 — every `execSession` method carrying an `isReplay` check, which is the
