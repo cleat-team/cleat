@@ -684,35 +684,60 @@ tier2:
     - id: admin-dashboard
       decision: DECIDED 2026-08-06    # D3 -- the dashboard must authenticate
       why: |
-        Wired to a real API and reasonably tested at the lib layer, but `web/src/lib/api.ts`
-        never sends an Authorization header -- it sets Content-Type and nothing else, at
-        every one of its call sites. cleat-worker defaults --require-auth=true.
+        D3 is decided: the dashboard must authenticate. The credential question it left
+        open -- operator-pasted API key, or a login flow -- was answered as the PASTED
+        KEY, and that is built. Corrected 2026-09-04: every word of this entry below the
+        decision used to describe the gap in the present tense, and all three open items
+        were false. It was cited as a release blocker on the strength of this text.
 
-        D3 is decided: the dashboard must authenticate. cleat runs on cloud instances and
-        the dashboard connects from somewhere else, so "local dev only, never exposed" was
-        never the shipping story -- which settles it. Two consequences follow, and the
-        second is the one that costs something:
+        What exists, end to end:
 
-          * The "run it against --require-auth=false" configuration is not a supported
-            deployment. It is an ungated admin surface reachable from wherever the worker
-            is reachable, and no doc or manifest may present it as a way to use the
-            dashboard.
-          * Authentication is a feature that does not exist yet, not a header to add. The
-            open question is where the credential comes from -- an operator-pasted API
-            key held in the browser, or a real login flow -- and they are different
-            amounts of work. Until one is built and the dashboard sends it, this is a
-            component that cannot function against a correctly-configured worker.
+          * issuance -- `cleat-worker --generate-api-key-for <tenant-uuid>` prints a key
+            and the header to use it in (cmd/cleat-worker/main.go).
+          * storage -- admin.tenant_api_keys, hashed, with revoked_at
+            (migrations/postgres/001_schema.sql).
+          * validation -- auth/middleware.go accepts `Authorization: Bearer cleat_sk_...`
+            or `X-Cleat-API-Key`, and with requireAuth=true refuses anything else with
+            401 before the handler runs.
+          * the browser -- web/src/lib/auth.ts holds the key in localStorage;
+            web/src/components/ApiKeyGate.svelte is the paste modal, mounted in
+            App.svelte and opened on 401 via onUnauthorized; web/src/lib/api.ts attaches
+            the header in fetchJSON, which every call in the file routes through.
+          * the security property -- cmd/cleat-worker/tenant_isolation_db_test.go's
+            "unauthenticated request is refused, not defaulted" asserts 401 for
+            GET /api/workflows under requireAuth: true.
 
-        Tier 2 with a named gap rather than tier 3, because the gap is now a tracked
-        feature with a decided direction rather than an open question about intent. It
-        does not move to tier 1 until it authenticates against a worker running the
-        default --require-auth=true.
+        CORS was not answered; it dissolved. This entry assumed "cross-origin is the
+        normal case". It is not how the thing shipped: cmd/cleat-worker embeds web/dist
+        with go:embed and serves it itself, and api.ts uses `const BASE = ''` -- relative,
+        same origin. That is why there is no Access-Control-Allow-* anywhere in
+        cmd/cleat-worker, and why none is needed for the supported topology.
+
+        The "run it against --require-auth=false" configuration is still not a supported
+        deployment: it is an ungated admin surface reachable from wherever the worker is,
+        and no doc or manifest may present it as a way to use the dashboard.
+
+        STILL TIER 2, for the one thing that is genuinely missing rather than for the
+        three that were not. The two halves are each tested against a mock of the other:
+        the browser tests stub `fetch` and assert the header, and the Go tests drive the
+        middleware with a hand-built request. Nothing exercises the actual dashboard
+        against an actual worker, so "it authenticates against a worker running the
+        default --require-auth=true" -- this entry's own promotion criterion -- is
+        assembled from two halves rather than observed. That is a smaller gap than the
+        one recorded here for a month, and it is a different kind: a missing proof, not
+        a missing feature.
       open_items:
-        - "web/src/lib/api.ts sends no Authorization header at any call site"
-        - "no credential acquisition path exists — decide operator-pasted API key vs
-           login flow before building it; cross-origin is the normal case, so CORS on
-           the worker's API and token storage in the browser both need answering"
-        - "docs and deployment manifests still imply the dashboard works as shipped"
+        - "no end-to-end test drives the built dashboard against a running worker with
+           --require-auth=true; the browser half mocks fetch and the Go half mocks the
+           request, so the loop is inferred rather than observed. This is the only thing
+           between this entry and tier 1"
+        - "cmd/cleat-worker/auth_test.go's comment says it mirrors --require-auth=true and
+           the code passes requireAuth=false; its no_auth_header_passes_through subtest
+           then justifies the pass-through as being 'so healthz and metrics work', which
+           is wrong twice -- those are exempted by path at auth/middleware.go:66, before
+           the requireAuth branch, and the path under test is /api/workflows/my-wf/start.
+           The property is covered elsewhere, so this is a misleading comment rather than
+           a hole -- but it is the file a reader checks first"
 
     - id: workflow-callable-cron
       status: SUPPORTED in go, assemblyscript and python
