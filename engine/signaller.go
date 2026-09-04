@@ -252,6 +252,13 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 		s.exitReplay()
 	}
 
+	// A fresh signal_workflow is new work: it delivers a signal to another
+	// workflow, which can wake it and start a run. A defer segment exists to run
+	// a terminated workflow's cleanup, not to start something on its behalf.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	// Check signal authorization before delivering.
 	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
 		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {

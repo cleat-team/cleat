@@ -101,6 +101,35 @@ var stopSurfaces = map[string]stopSurface{
 		wit:      []string{"durable-acquire-lock"},
 		py:       []string{"acquire_lock_ms"},
 	},
+	// The three fire-and-forget calls (§3.302). All scalar-returning, so each
+	// needs `py`; and none has a Go adapter, for a reason worth stating because
+	// it is not the same as Fetch's. Fetch has no adapter because Go reaches it
+	// through DurableCall. These have none because they are ABSENT FROM
+	// wasm/usage.go, so the scanner never records them as used, no adapterDefs
+	// entry is consulted, and no HostCallsOptions field is emitted -- leaving
+	// HostCallsImpl.signalWorkflow nil and the SDK method returning its
+	// "can only be called from within a workflow function" error. A Go WASM
+	// guest cannot reach these host functions at all.
+	//
+	//	grep -oE '\{"[a-z_]+", "\w+"\}' wasm/usage.go | sort -u
+	"SignalWorkflow": {
+		adapters:   nil,
+		adapterWhy: reasonNoGoAdapter,
+		wit:        []string{"durable-signal-workflow"},
+		py:         []string{"signal_workflow"},
+	},
+	"DurableSend": {
+		adapters:   nil,
+		adapterWhy: reasonNoGoAdapter,
+		wit:        []string{"durable-send"},
+		py:         []string{"send"},
+	},
+	"DurableScheduleInvoke": {
+		adapters:   nil,
+		adapterWhy: reasonNoGoAdapter,
+		wit:        []string{"durable-schedule-invoke"},
+		py:         []string{"schedule_invoke"},
+	},
 	"DurableCall": {
 		adapters: []string{"DurableCall"},
 		wit:      []string{"durable-call"},

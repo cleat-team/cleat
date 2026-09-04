@@ -921,6 +921,13 @@ impl HostCalls {
                 payload.as_ptr(), payload.len() as u32,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decode_simple_result
+        // reads errCode from the low byte, where a stop is 0 -- an ordinary success
+        // for a fire-and-forget call, so the guest would report the send as done.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("signal_workflow(target_run_id=\"{}\", signal_name=\"{}\") failed: host error code {}. Check that the target run ID and signal name are valid.", target_run_id, signal_name, err_code));
@@ -1077,6 +1084,13 @@ impl HostCalls {
                 request_json.as_ptr(), request_json.len() as u32,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decode_simple_result
+        // reads errCode from the low byte, where a stop is 0 -- an ordinary success
+        // for a fire-and-forget call, so the guest would report the send as done.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("cleat_send(service=\"{}\", operation=\"{}\") failed: host error code {}. Check that the service and operation names are valid.", service, operation, err_code));
@@ -1099,6 +1113,13 @@ impl HostCalls {
                 delay_ms,
             )
         };
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decode_simple_result
+        // reads errCode from the low byte, where a stop is 0 -- an ordinary success
+        // for a fire-and-forget call, so the guest would report the send as done.
+        if stop_requested(result) {
+            return Err("cleat: host refused this call -- the workflow is running its defer phase".to_string());
+        }
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("schedule_invoke(service=\"{}\", operation=\"{}\") failed: host error code {}. Check that the service and operation are valid.", service, operation, err_code));
