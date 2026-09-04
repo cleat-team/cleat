@@ -15138,6 +15138,40 @@ componentize-py inside the component — so the staleness was invisible. Regener
   `OUTPUT_OFFSET` — this call has never worked on a component and does not now. It needs the
   same treatment (a `record` result, not out-params), which is a change to signal handling
   rather than to this boundary.
+* **ANSWERED 2026-09-04 (WS-3): wasmtime frees the callback's result, recursively, and the
+  premise below is wrong in the tenant's favour.** Read
+  `crates/c-api/src/component/linker.rs` at `v44.0.0`, the version wasmtime-go v44 links:
+
+      let res = callback(..., c_rets.as_mut_ptr(), c_rets.len());
+      if let Some(res) = res { return Err((*res).into()); }
+      for (rust_val, c_val) in std::iter::zip(rets, c_rets) {
+          *rust_val = Val::from(&c_val);
+      }
+
+  wasmtime converts **by reference** and then `c_rets: Vec<wasmtime_component_val_t>` drops at
+  end of scope. `wasmtime_component_val_t` is a `#[repr(C, u8)]` enum whose `String` arm is a
+  `wasm_name_t` and whose `Result`/`Variant` arms hold **`Option<Box<Self>>`** — a Rust `Box`,
+  not a raw pointer — so that drop is recursive through `of.result.val`, the discriminant, and
+  the record entries. And `wasmtime_component_val_delete` is literally
+  `ManuallyDrop::drop(value)`: the same drop, reachable by hand.
+
+  **So the choice below is not a preference for the leak over the crash. malloc'd storage is
+  REQUIRED**, because static storage would be freed by Rust and would crash — and there is no
+  leak to prefer. Two claims in this section were wrong and are corrected rather than deleted,
+  because the reasoning that produced them is the reusable part:
+
+  * "a deliberate preference for the leak over the crash" — there is no leak.
+  * "`setResultString` has had the same `C.CString` since long before this file", implying it
+    has leaked since it was written — it has not; wasmtime frees it.
+
+  The `val_free`-vs-`val_delete` question this section posed is also moot: **neither** is called
+  on a callback's results. The distinction the header draws matters only for a `val_new` pointer
+  an embedder owns and releases itself, which is not this path.
+
+  What follows is the original bullet, kept because it is how the question was framed before it
+  was answered, and because "settling it needs a measurement rather than a reading of the
+  header" is the right instinct even though the reading turned out to be decisive.
+
 * **Ownership of a callback's result values is still an open question, and the first draft of
   this bullet got the consequence wrong.** It said the new constructors' use of the C allocator
   was "correct under either reading". It is not, and WS-1's review caught it: under the reading
@@ -15188,10 +15222,21 @@ componentize-py inside the component — so the staleness was invisible. Regener
   refuses to answer when the control is large, and why "no signal" and "no leak" must not print
   the same word.
 
-  **NOT measured: the fixed-size allocations.** Discriminant names, record entries and the
-  `val_new` pointers are tens of bytes per call, far below this instrument's resolution. At
-  ~50 bytes/call a worker would need ~20M calls to accumulate 1 GB. That is a real question and
-  a much smaller one, and it needs an allocator-level counter rather than RSS.
+  **The fixed-size allocations are covered by the same result, and that is an argument rather
+  than an assumption.** Discriminant names, record entries and the `val_new` pointers are tens
+  of bytes per call, far below RSS resolution — but they are freed by the *same recursive drop,
+  in the same call, at the same instant* as the payload string that was measured. There is no
+  mechanism by which `wasm_name_t`'s buffer is released and the `Option<Box<Self>>` beside it is
+  not.
+
+  A direct allocator-level attempt (glibc `mallinfo2().uordblks`, 2026-09-04) was **inconclusive
+  and is recorded as such**: holding executions constant at 150 and varying calls-per-execution
+  between a 1-call and a 10-call fixture, the ten-call phase made **1,350 more callbacks and
+  retained 647 KB LESS** (196,208 B vs 843,168 B). The direction rules a per-callback leak out —
+  a leak pushes that number up — but per-execution allocation is not stable enough between
+  phases (5,621 vs 1,308 bytes/exec, still converging) to pin the value near zero. The probe
+  carried its own positive control: a deliberate 32-byte-per-iteration leak read back as 47.9
+  bytes/call, so the counter could see leaks of the size in question.
 
   Reproduce: the probe is not in the tree — it is a 15-minute test whose signal needs a 4 MiB
   payload and 300 executions, which does not belong in a suite. Rebuild it from the table

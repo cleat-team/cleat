@@ -98,26 +98,32 @@ package engine
 // // is the whole point: no response a service can return produces one.
 // //
 // // Every name and every payload is heap-allocated with the C allocator, and
-// // deliberately so even though the discriminants are two fixed strings.
-// // Static storage would be smaller and faster, and it is the wrong choice --
-// // but not because malloc is safe under both readings of the ownership
-// // question, which is what this comment used to claim and is not true.
+// // it is REQUIRED, not a preference. wasmtime FREES these -- so static
+// // storage would be a free() of a string literal, which is a crash rather
+// // than a saving.
 // //
-// // The header does not state who owns a callback's results, and
-// // wasmtime_component_val_delete "will look at value->kind and deallocate
-// // any memory if necessary" (val.h). Nothing in engine/ ever calls it, so:
+// // The header does not say so; wasmtime's source does. In
+// // crates/c-api/src/component/linker.rs (v44.0.0, the version wasmtime-go v44
+// // links) the callback's results are a Vec<wasmtime_component_val_t> that
+// // wasmtime converts BY REFERENCE and then drops at end of scope:
 // //
-// //   * if wasmtime DOES run it over these, static storage would be a free()
-// //     of a string literal and malloc'd storage is correct;
-// //   * if it does NOT, malloc'd storage LEAKS -- every duplicated name and,
-// //     far more importantly, the C.CString payload in setResultCallOutcome,
-// //     once per host call, in a process that runs for weeks.
+// //     for (rust_val, c_val) in std::iter::zip(rets, c_rets) {
+// //         *rust_val = Val::from(&c_val);
+// //     }
 // //
-// // So this is a deliberate choice of the leak over the crash, not a choice
-// // that is right either way. The exposure is inherited rather than
-// // introduced -- setResultString has had the same C.CString since long
-// // before this file -- but these paths make it apply to more calls.
-// // IMPROVEMENT-PLAN 3.110 has the question open and nothing bounds it today.
+// // wasmtime_component_val_t is a #[repr(C, u8)] enum whose String arm is a
+// // wasm_name_t and whose Result/Variant arms hold Option<Box<Self>> -- a Rust
+// // Box, not a raw pointer -- so that drop is RECURSIVE through of.result.val,
+// // the discriminant and the record entries. wasmtime_component_val_delete is
+// // literally ManuallyDrop::drop of the same value, which is why nothing in
+// // engine/ needing to call it is not a leak.
+// //
+// // This comment previously said the opposite -- "a deliberate choice of the
+// // leak over the crash" -- and that setResultString had leaked a C.CString
+// // per call since it was written. Both were wrong. Measured from the outside
+// // as well: a 4 MiB response body is not retained across 80 executions
+// // (IMPROVEMENT-PLAN 3.110), and the fixed-size allocations are freed by the
+// // same recursive drop in the same instant.
 // // Aborts rather than returning NULL, and that is the point of it existing.
 // // A NULL return reaches wasmtime as discriminant.data = NULL alongside
 // // discriminant.size = 9, which is a nine-byte read from address zero inside
