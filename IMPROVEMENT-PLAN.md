@@ -12596,6 +12596,50 @@ The reverse directions are not decoration. **Bit 31 is *reachable* in one layout
 `packSleepResult`, measured by `TestStopSentinelBitsAcrossEveryLayout` — so a stray guard there
 would read an ordinary sleep result as a stop. The forward direction cannot see that.
 
+**Nine was not enough, and the reason generalises (2026-09-04).** Each of those nine broke its
+target hard enough that *two* assertions fired together, and a pair recorded as one result does
+not tell you which member was load-bearing. The clearest case was the vacuity check: breaking the
+WIT scanner outright fired the size floor **and** the named-member check at once, so the member
+check's own message — *"a size floor alone would not have caught this"* — asserted a property
+nobody had demonstrated.
+
+Breaking it narrowly instead settles it. A scanner that loses only `durable-call` leaves seven of
+eight, satisfies the floor, and fires the member check alone:
+
+```
+WIT call-outcome functions: "durable-call" is missing, so the scan is reading the wrong thing.
+A size floor alone would not have caught this: the other entries are present.
+```
+
+Auditing the rest the same way found **four assertions that had never been made to fire at all** —
+the ones catching a malformed declaration rather than a real divergence: a stale *adapter*
+exemption, an adapter name absent from `adapterDefs`, an empty `wit` list with no reason, and a
+WIT name absent from `cleat.wit`. All four now falsified individually. **Fourteen assertions, each
+shown to fire for its own reason.**
+
+Three of the four fire *alongside* the reverse orphan check, which is worth stating rather than
+glossing: a typo'd declaration leaves the real surface undeclared, so the orphan check fires too.
+That is reinforcing rather than masking — one error names the typo, the other names what went
+unguarded — but distinguishing the two was the point of checking.
+
+The general rule, and it is not only about this test: **a falsification that fires two assertions
+proves neither.** Break the narrowest thing that isolates the one you mean to test.
+
+Credit to WS-2, whose own instance is sharper, and whose correction to how it is stated here
+matters more than the instance. `TestFinalizeDeferPhaseIsFencedOnTheClaimAndOnTheMarker` passed
+with its marker predicate deleted — but **the predicate is not redundant**. It has a real case: a
+claimed workflow with no defer phase, where the fence is satisfied and only the predicate stops a
+`NULL` status write. What was wrong was that the test named the *repeat-finalize* case as the
+predicate's evidence, when that case is refused by an unrelated column being cleared. Three cases,
+three mechanisms, one name.
+
+**The distinction is load-bearing for what you do next.** "The predicate did nothing" invites
+deleting it, and deleting it on the strength of that falsification would have removed a live guard
+for a case the test never exercised. The lesson is not that a mechanism was absent; it is that
+three mechanisms were attributed to one, which a green result cannot distinguish from one
+mechanism doing all three. That is CLAUDE.md's "watch which layer is holding the test up" with the
+layer inside the test rather than under it.
+
 Vacuity is checked **per thing, not per total**: each scan must find a plausible size *and* a
 named member it cannot legitimately lose. A floor alone is satisfied by the wrong things being
 present, which is how an earlier guard in this repo passed while nine AssemblyScript cases were
