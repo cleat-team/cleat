@@ -77,7 +77,7 @@ func clusterDB(t *testing.T) *sql.DB {
 			// that runs this suite: ci.yml's "Cluster Integration Tests" sets
 			// CLEAT_TEST_DB explicitly for this step, so `configured` is
 			// always true there and this branch can never fire -- which is
-			// why scripts/skip-budget.txt gives "cluster/exhaustion" a
+			// why scripts/skip-ledger.tsv gives "cluster/exhaustion" a
 			// budget of 0.
 			t.Skipf("no cluster database configured (CLEAT_TEST_POSTGRES / CLEAT_TEST_DB "+
 				"not set); default DSN %s is unreachable: %v -- this suite needs "+

@@ -1,0 +1,63 @@
+# skip-ledger.tsv — what may skip, one line per reason.
+#
+# REPLACES the single-number-per-job budget. That file took 37 commits in three
+# days and held one line of 120,780 characters, because three streams edited the
+# SAME NUMBER and resolved additively; ten of those resolutions were on one line
+# in two days, and three had EQUAL NUMBERS ON BOTH SIDES -- 596 vs 596, which
+# were not the same 596. Equal numbers on both sides of a conflict do not look
+# like a conflict, which is why that shape had to go rather than be managed.
+#
+# FORMAT, tab-separated:
+#
+#   <job key>	<count>	<test-name regex>	<why it may skip>
+#
+# A job's budget is the SUM of its lines. Adding a skipping test means adding a
+# NEW LINE, which is why two streams doing it at once no longer conflict: git
+# merges distinct lines. Nobody edits a total, because there is no total.
+#
+# EACH LINE IS CHECKED INDIVIDUALLY. The regex must match exactly <count> skips
+# in the run. A line matching fewer is stale -- the test stopped skipping, or was
+# renamed -- and fails. A line matching more means something new is skipping
+# under a reason written for something else.
+#
+# THE __UNATTRIBUTED__ LINE IS A RATCHET. It carries the skips inherited from the
+# old single-number budget, which were never attributed to reasons. It may only
+# SHRINK. A new skip that matches no pattern lands here, pushes the count over,
+# and fails -- so a new skip must be attributed by name. That is the forcing
+# function: the legacy remainder cannot grow, only be worked down.
+#
+# WHAT A SKIP COSTS, which has been got wrong four times:
+#   * a test running against registeredBackends costs TWO skips (its mysql and
+#     mssql arms) in every PostgreSQL-only job -- test-go/engine AND cluster,
+#     which move together;
+#   * a test gated on CLEAT_TEST_MYSQL / CLEAT_TEST_MSSQL costs ONE in whichever
+#     job runs its package without that dialect;
+#   * a toolchain-gated test costs ONE in every job that does not install it.
+# Attribute by NAME, never by delta: run the new test with
+#   go test ./<pkg>/ -run <Name> -json | grep '"Action":"skip"'
+# and count what it actually reports.
+#
+# A skip is indistinguishable from a pass. Where a job PROVISIONS a resource the
+# right number is 0: a skip there means something it set up did not arrive.
+
+test-go/core	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/engine	616	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/engine	1	TestEveryShippedTenantPolicyExistsInTheBuiltDatabase	dialect-gated: guards on CLEAT_TEST_MSSQL being unset and skips ONCE, unlike a registeredBackends test which costs two here. Landed as #691's +1 on the single number; it is a line now, and #691 would not have touched a shared total at all.
+test-go/wasm	1	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/internal	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/plugins	1	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/support	12	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/commands	6	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/manifests	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/integrity	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/upgrade	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/scale	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/crash	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+fuzz	1	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+cluster	616	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+cluster	1	TestEveryShippedTenantPolicyExistsInTheBuiltDatabase	dialect-gated: guards on CLEAT_TEST_MSSQL being unset and skips ONCE, unlike a registeredBackends test which costs two here. Landed as #691's +1 on the single number; it is a line now, and #691 would not have touched a shared total at all.
+cluster/exhaustion	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+plugin-harness/multi-db	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+plugin-harness/wasm	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+e2e-cross-language	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+soak	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink

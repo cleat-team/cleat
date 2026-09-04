@@ -15,13 +15,19 @@
 # A static scan cannot see either. Both show up here as "this job skipped far
 # more tests than it is supposed to".
 #
-# Budgets live in scripts/skip-budget.txt as
+# Budgets are DERIVED, not stored. scripts/skip-ledger.tsv holds one line per
+# reason a test may skip,
 #
-#     <job key><TAB><max skipped tests><TAB># why
+#     <job key><TAB><count><TAB><test-name regex><TAB><why>
+#
+# and a job's budget is the SUM of its lines. There is no total to edit, which
+# is the point: two streams each adding a skipping test add two distinct lines
+# and git merges them. Each line is also checked on its own, so a line that
+# matches nothing is a grant covering something that is not there.
 #
 # A budget is a ceiling on a job that is expected to skip *nothing* once its
-# services are up. Seed it from an observed green run, then tighten. Zero is
-# the goal for any job that provisions everything its tests ask for.
+# services are up. Zero is the goal for any job that provisions everything its
+# tests ask for.
 #
 # Usage:
 #   scripts/check-skip-budget.sh <job-key> <test-report.json>
@@ -32,7 +38,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUDGETS="$REPO_ROOT/scripts/skip-budget.txt"
+LEDGER="$REPO_ROOT/scripts/skip-ledger.tsv"
 
 if [ "$#" -ne 2 ]; then
   echo "usage: $0 <job-key> <test-report.json>" >&2
@@ -42,8 +48,8 @@ fi
 JOB="$1"
 REPORT="$2"
 
-if [ ! -f "$BUDGETS" ]; then
-  echo "ERROR: $BUDGETS is missing." >&2
+if [ ! -f "$LEDGER" ]; then
+  echo "ERROR: $LEDGER is missing." >&2
   exit 1
 fi
 
@@ -80,11 +86,63 @@ if [ "$passed" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$skipped" -eq 0 ]; then
   exit 1
 fi
 
-budget="$(grep -E "^${JOB}	" "$BUDGETS" | head -1 | cut -f2)"
-if [ -z "$budget" ]; then
-  echo "ERROR: no skip budget recorded for job '$JOB' in $BUDGETS." >&2
-  echo "Add a line '<job key><TAB><max><TAB># why'. An unbudgeted job is one" >&2
-  echo "whose skips can grow without anyone seeing it." >&2
+# The budget is the SUM of this job's ledger lines, not a number anyone edits.
+# See the header of scripts/skip-ledger.tsv for why the single number had to go.
+lines="$(awk -F'\t' -v job="$JOB" '!/^#/ && NF>=3 && $1==job' "$LEDGER")"
+if [ -z "$lines" ]; then
+  echo "ERROR: no skip ledger lines for job '$JOB' in $LEDGER." >&2
+  echo "Add '<job key><TAB><count><TAB><test regex><TAB><why>'. A job with no" >&2
+  echo "ledger is one whose skips can grow without anyone seeing it." >&2
+  exit 1
+fi
+budget="$(echo "$lines" | awk -F'\t' '{n+=$2} END{print n+0}')"
+
+# The skipped test NAMES, which is what lets each line be checked on its own
+# rather than only in aggregate.
+names="$(grep '"Action":"skip"' "$REPORT" | grep -o '"Test":"[^"]*"' | sed 's/"Test":"//; s/"$//' | LC_ALL=C sort)"
+
+fail=0
+attributed=0
+while IFS=$'\t' read -r _job count pattern why; do
+  [ -z "$pattern" ] && continue
+  [ "$pattern" = "__UNATTRIBUTED__" ] && continue
+  got="$(printf '%s\n' "$names" | grep -cE "$pattern" || true)"
+  attributed=$((attributed + got))
+  if [ "$got" -ne "$count" ]; then
+    echo "ERROR: ledger line for '$JOB' expects $count skip(s) matching /$pattern/, got $got." >&2
+    if [ "$got" -lt "$count" ]; then
+      echo "  Fewer than declared: the test stopped skipping, or was renamed. A line" >&2
+      echo "  that matches nothing is a grant covering something that is not there." >&2
+    else
+      echo "  More than declared: something new is skipping under a reason written" >&2
+      echo "  for something else. Give it its own line." >&2
+    fi
+    echo "  reason on file: $why" >&2
+    fail=1
+  fi
+done <<EOF
+$lines
+EOF
+
+# Whatever matched no pattern lands against the inherited remainder, which may
+# only shrink. A new skip that nobody attributed pushes this over and fails --
+# that is the forcing function, not a side effect.
+legacy="$(echo "$lines" | awk -F'\t' '$3=="__UNATTRIBUTED__" {print $2+0; exit}')"
+legacy="${legacy:-0}"
+unattributed=$((skipped - attributed))
+if [ "$unattributed" -gt "$legacy" ]; then
+  echo "ERROR: '$JOB' has $unattributed skip(s) matching no ledger line; the" >&2
+  echo "inherited allowance is $legacy and may only shrink." >&2
+  echo >&2
+  echo "Add a line naming the new skip and why, rather than raising a total:" >&2
+  echo "    $JOB<TAB><count><TAB><test regex><TAB><why>" >&2
+  echo >&2
+  echo "Attribute by NAME, not by delta -- a registeredBackends test costs two" >&2
+  echo "skips in a PostgreSQL-only job and a dialect-gated one costs one:" >&2
+  echo "    go test ./<pkg>/ -run <Name> -json | grep '\"Action\":\"skip\"'" >&2
+  fail=1
+fi
+if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
@@ -92,9 +150,9 @@ echo "job=$JOB skipped=$skipped budget=$budget (passed=$passed failed=$failed)"
 
 # A skip count read off a failing run is not a measurement of anything: a test
 # that dies early never reaches the subtests that would have skipped, so the
-# number is low by an unknown amount. Whoever writes it into skip-budget.txt
-# then records a ceiling nobody can reach, and this file's own history says
-# that is how the guard stops being able to fail.
+# number is low by an unknown amount. Whoever writes it into the ledger then
+# records a ceiling nobody can reach, and this file's own history says that is
+# how the guard stops being able to fail.
 #
 # Not fatal -- the test step that produced this report has already failed the
 # job -- but loud, because the number printed above is about to be copied into
@@ -103,7 +161,7 @@ if [ "$failed" -gt 0 ]; then
   echo >&2
   echo "WARNING: this report contains $failed failing test(s), so the skip count" >&2
   echo "above is not a usable measurement -- do not write it into" >&2
-  echo "scripts/skip-budget.txt. Fix the failures and re-measure." >&2
+  echo "scripts/skip-ledger.tsv. Fix the failures and re-measure." >&2
   echo >&2
   # NAME them. Every workflow step that produces one of these reports redirects
   # the test output into it -- `go test -json ... > test-report.json 2>&1` --
@@ -130,7 +188,7 @@ if [ "$failed" -gt 0 ]; then
   echo >&2
   echo "If you are running locally: './engine/...' matches two database-backed" >&2
   echo "packages, and without '-p 1' they run concurrently against one database" >&2
-  echo "and delete each other's fixtures. See the header of skip-budget.txt." >&2
+  echo "and delete each other's fixtures. See the header of skip-ledger.tsv." >&2
   echo >&2
 fi
 
@@ -157,7 +215,9 @@ if [ "$skipped" -gt "$budget" ]; then
 fi
 
 if [ "$skipped" -lt "$budget" ]; then
-  echo "NOTE: under budget by $((budget - skipped)). Lower '$JOB' in $BUDGETS to lock it in."
+  echo "NOTE: under budget by $((budget - skipped)). Lower the __UNATTRIBUTED__ line"
+  echo "      for '$JOB' in $LEDGER to lock it in -- that line is a ratchet and this"
+  echo "      is the direction it is allowed to move."
 fi
 
 echo "OK: '$JOB' skips are within budget."
