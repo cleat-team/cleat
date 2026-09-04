@@ -7059,7 +7059,7 @@ both are now decisions about *what a defer may do* rather than prerequisites for
 module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
 the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
 
-### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 PART-BUILT — the defer segment runs, the terminal transition does not use it yet (§3.81)** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02)
+### 3.35 What `defer` is supposed to be — 🔶 **PHASES 1–4 DONE; 5 PART-BUILT — the defer segment now runs on `TerminateWorkflow` (§3.112), and on neither of the other two terminal transitions** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02; phase 5's first transition 2026-09-04)
 
 > **2026-09-02.** Phase 5's record shape is answered (§3.75), and the *execution* half is now
 > built and measured: `WithDeferPhase` replays a workflow purely to run its outstanding defers,
@@ -11448,13 +11448,25 @@ children and flags its `REQUEST_CANCEL` children, where before it did neither. T
 design says should happen, and it removes the orphan the policy exists to prevent — but a
 deployment relying on terminate being narrow will see children close that did not close before.
 
-### 3.81 The defer segment — 🔶 **MECHANISM BUILT AND MEASURED; the two-phase transition remains** (WS-3, 2026-09-02)
+### 3.81 The defer segment — 🔶 **MECHANISM BUILT AND MEASURED; one of three terminal transitions now uses it (§3.112, 2026-09-04)** (WS-3, 2026-09-02)
 
 §3.75 answered the record-shape question phase 5 was parked behind, and its answer stands: no
 new durable record is needed, the terminal transition becomes two-phase, and the only new
 durable state is a workflow-level marker on the existing reaper. Implementation started against
 that design on 2026-09-02 and stopped at the first measurement, which found a hole in the step
 *before* the record shape.
+
+> **`WithDeferPhase` has a production caller as of 2026-09-04 — §3.112 (#679, WS-2).** This
+> section and §3.35 both said the transition "remains" for a day after the first third of it
+> shipped, which is the §1.1/§1.2 cost recorded in CLAUDE.md: a board scan reads a stale heading
+> as *not started* and re-derives what the body already knows. Corrected here rather than in a
+> summary table, because the heading is the source of truth.
+>
+> What shipped: `TerminateWorkflow` now marks the workflow terminating, runs a defer segment,
+> and only then finalizes and releases resources — on all three dialects. What did **not**:
+> §3.75 names three sites that set a terminal status by direct `UPDATE`, and the **parent-close
+> TERMINATE arm** and **`adminForceResolve`** are still the other two. The mechanism below is
+> unchanged and is what all three reuse; only its caller count moved, from zero to one.
 
 **§3.75 records one mechanism as already working, and it is not.** Its inventory excludes
 `RequestCancellation` on the grounds that *"it sets `cancellation_requested`, the guest observes
