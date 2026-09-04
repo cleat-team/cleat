@@ -8703,6 +8703,38 @@ session on its own and should not be folded into a lint sweep — but "229 integ
 the WASM boundary layer, unreviewed" is a more useful thing to carry forward than "283 gosec
 findings".
 
+**One slice of G115 now has a mechanism instead of a sweep, 2026-09-04 (WS-3).** CLAUDE.md's
+ruling on this backlog is that the defects here have never been overflows — "in every case the
+value meant the wrong thing on one side of the boundary, which a property test over that
+boundary would find faster than reading the remaining sites". The component bridge is the
+boundary where that is cheapest to check and worst to get wrong.
+
+A host call's result word carries the response length, and the two layouts disagree about where:
+`packDurableCallResult` at bits 40-63, `packSimpleResult` at 32-63. `component_callbacks.go` has
+one extractor per layout and **25 dispatchers each pick one by hand**. Pick wrong and nothing
+errors — a bit-32 length read at bit 40 is zero for any response under 256 bytes, so the guest
+receives an empty *successful* response. That shipped once, for one of the 25;
+`TestComponentShortStringResultsAreNotTruncated` is its regression test.
+
+`engine/component_pack_extract_parity_test.go` covers the other 24 and every one added later. It
+resolves 23 of the 25 pairings by following delegation through the AST, and **found no mismatch**
+— its value is the next one, not a live bug.
+
+**Both sides are measured rather than declared**, which is the part worth copying. A table saying
+"`packSimpleResult` means 32" would be a third copy of the thing under test and would agree with
+a shift that had changed underneath it — the §1.1 trap. Instead the test packs a distinctive
+length and finds where it landed, and hands each extractor words built at each candidate shift to
+see which it honours. Nothing in the test states a shift.
+
+It fails rather than passing quietly when it stops measuring: fewer than 20 dispatchers parsed,
+fewer than 15 pairings compared, both extractors reading the same bit, or any handler it cannot
+resolve. `PollCancellation` and `PollSignal` build their word inline instead of calling a packer
+and are listed as named exceptions with the reason, because an unresolvable site is exactly where
+the next mispairing would hide.
+
+Proven able to fail: mispairing `dispatchDurableDefer` reports "extracts the length from bit [40],
+but its handler DurableDefer writes it at bit 32".
+
 ### 3.20 `AdminForceComplete` / `AdminForceFail` were stubs — ✅ **FIXED** (WS-2, 2026-08-05, #297)
 
 > Recovered heading, added 2026-08-06. This section's body had been appended into §3.33's
