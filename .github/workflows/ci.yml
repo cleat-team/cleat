@@ -116,8 +116,16 @@ jobs:
       # The collision exists only in the merge, and a duplicate heading renders
       # perfectly. Four of them landed on 2026-09-02 alone (1.3, 2.70, 3.77,
       # 3.78); the damage is the cross-references that rot around them.
+      #
+      # Since 2026-09-04 the numbers are allocated in per-stream blocks
+      # (scripts/section-blocks.sh), which makes the collision impossible rather
+      # than merely detected. The self-test runs first and is not optional: the
+      # block check is a classifier, and a classifier that returned "fine" for
+      # every input would pass the real check silently forever.
       - name: Plan section-number guard
-        run: scripts/check-section-numbers.sh
+        run: |
+          scripts/check-section-numbers.sh --self-test
+          scripts/check-section-numbers.sh
 
       # The guard above can only ever run against a pre-merge base, so the
       # post-merge run on develop is the only place a merge-created collision

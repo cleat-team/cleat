@@ -194,7 +194,7 @@ which has `rosetta: false`, and `sqlservr` aborts there under QEMU. The `cleat-w
 
 | file | protocol |
 |---|---|
-| `IMPROVEMENT-PLAN.md` | Edit only your own `§` sections. ~~New sections: WS-1 takes §3.10+, WS-2 §3.20+, WS-3 §3.30+.~~ **That allocation is breached and retired (#563, 2026-09-02)** — WS-1 holds §3.34, §3.37 and §3.38 inside WS-3's block and §3.35 was allocated twice. **Take the next free number above the highest in the file.** |
+| `IMPROVEMENT-PLAN.md` | Edit only your own `§` sections. **Do not pick a number by hand — run `scripts/next-section-number.sh`.** Sections are allocated in per-stream blocks (WS-1 `3.200–299`, WS-2 `3.300–399`, WS-3 `3.400–499`), enforced by `scripts/check-section-numbers.sh`. The earlier §3.10/3.20/3.30 allocation was breached and retired (#563, 2026-09-02), and its replacement — "take the next free number above the highest in the file" — is the move that collided; it is what the blocks exist to stop. |
 | `scripts/skip-baseline.txt` | Never hand-edit. Regenerate with `scripts/check-skips.sh --update` **after** rebasing. A count going *down* is the point; **a count going up needs a sentence.** `test-go/engine` and `cluster` move together — the cluster job also runs `./engine/...`. Currently 187 skip sites, 731 skipped tests. |
 | `scripts/deadcode-baseline.txt` | Same; regenerate with `scripts/check-test-only-code.sh --update`. A shrinking baseline is the honest evidence that wiring landed — 12 entries left it when §2.26 was wired. Currently 59. |
 | `migrations/{postgres,mysql,mssql}/` | Numbered per dialect. **The 010/020/030 blocks are nearly full — take the next free number above the dialect's high-water mark, not the next one in a block.** See the note below. |
