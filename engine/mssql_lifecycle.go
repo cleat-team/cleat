@@ -1157,19 +1157,66 @@ func (s *MSSQLStore) startNewRunOnce(ctx context.Context, runID, defName string,
 // a predicate on the cascade is its symptom-level twin. Closing it properly
 // changes what the HTTP layer returns for an unknown id -- today a 200 -- so
 // it wants its own change and its own argument. 3.92.
+// mssqlParentCloseDeferPhase is the TERMINATE arm for children that owe
+// cleanup, assembled once rather than concatenated at its use site.
+//
+// The shape is not stylistic. TestMSSQLTenantScopedTablesAreQueriedWithATenant-
+// Predicate reads SQL out of SOURCE STRING LITERALS, and a statement assembled
+// by concatenating a Go constant into the middle of one is invisible to it past
+// the first fragment. Written inline, the guard saw only the text up to the
+// opening quote of the status value -- no WHERE clause at all -- and reported
+// this statement as having no tenant predicate. It has one. The guard could not
+// see it.
+//
+// Do not quote SQL in backticks in a comment near here. The guard's extraction
+// is a regex over backtick-delimited text and does not know a Go comment from
+// code, so a comment quoting the offending fragment becomes an offending
+// fragment. That is how the first version of THIS comment failed the guard it
+// exists to explain.
+//
+// The available fix was an allowlist entry, which the guard invites and which
+// would have been the wrong trade: it exempts the whole FUNCTION, so every
+// future edit to enforceParentClosePolicy would go unchecked on the dialect
+// where an explicit predicate is the entire isolation mechanism
+// (dbo.fn_tenant_filter is off for any dbo.cleat_admin connection). One
+// Sprintf keeps the statement, and the predicate, statically readable.
+//
+// The two interpolations are a compile-time constant expression and a
+// package-level SQL fragment, neither reachable from a caller.
+var mssqlParentCloseDeferPhase = fmt.Sprintf(`
+		UPDATE workflow_instances
+		SET status = 'terminating',
+		    pending_terminal_status = 'failed',
+		    defer_phase_deadline = %s,
+		    error_msg = 'parent workflow terminated',
+		    next_wake_at = SYSUTCDATETIME(),
+		    assigned_to = NULL,
+		    generation = generation + 1
+		WHERE parent_workflow_id = @p1
+		  AND parent_close_policy = 'TERMINATE'
+		  AND status NOT IN ('done', 'failed')
+		  AND tenant_id = @p2
+		  AND %s
+	`, deferPhaseDeadlineMSSQL, deferPhaseOwedSQL)
+
 func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
 	steps := []struct {
 		policy string
 		query  string
 	}{
+		// Two TERMINATE arms, split by whether the child owes cleanup. See
+		// PostgresStore's enforceParentClosePolicy. IMPROVEMENT-PLAN 3.114.
 		{"TERMINATE", `
 		UPDATE workflow_instances
-		SET status = 'failed', error_msg = 'parent workflow terminated'
+		SET status = 'failed', error_msg = 'parent workflow terminated',
+		    pending_terminal_status = NULL, defer_phase_deadline = NULL
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
 		  AND tenant_id = @p2
+		  AND NOT ` + deferPhaseOwedSQL + `
 	`},
+		{"TERMINATE (defer phase)", mssqlParentCloseDeferPhase},
 		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
 		SET cancellation_requested = 1
@@ -1223,6 +1270,7 @@ func (s *MSSQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkfl
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
 		  AND tenant_id = @p2
+		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID, s.tenantID)
 	if err != nil {
 		return nil, err

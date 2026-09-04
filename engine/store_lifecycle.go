@@ -462,12 +462,37 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 		policy string
 		query  string
 	}{
+		// Two TERMINATE arms, and the predicate is what splits them:
+		// a child that owes cleanup goes to 'terminating' with the outcome
+		// recorded, and is failed later by FinalizeDeferPhase once its
+		// defers have run. IMPROVEMENT-PLAN 3.114.
+		//
+		// `AND NOT` here rather than a status filter, so the two arms
+		// partition the children exactly. deferPhaseOwedSQL is never NULL --
+		// it is an IN over a NOT NULL column ANDed with an IS NOT NULL and an
+		// EXISTS -- so NOT is total and no child falls between them.
 		{"TERMINATE", `
 		UPDATE workflow_instances
-		SET status = 'failed', error_msg = 'parent workflow terminated'
+		SET status = 'failed', error_msg = 'parent workflow terminated',
+		    pending_terminal_status = NULL, defer_phase_deadline = NULL
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
+		  AND NOT ` + deferPhaseOwedSQL + `
+	`},
+		{"TERMINATE (defer phase)", `
+		UPDATE workflow_instances
+		SET status = '` + statusTerminating + `',
+		    pending_terminal_status = 'failed',
+		    defer_phase_deadline = ` + deferPhaseDeadlinePostgres + `,
+		    error_msg = 'parent workflow terminated',
+		    next_wake_at = now(),
+		    assigned_to = NULL,
+		    generation = generation + 1
+		WHERE parent_workflow_id = $1
+		  AND parent_close_policy = 'TERMINATE'
+		  AND status NOT IN ('done', 'failed')
+		  AND ` + deferPhaseOwedSQL + `
 	`},
 		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
@@ -503,6 +528,13 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 // fail, so their resources can be released after it commits. Its WHERE must
 // stay identical to that UPDATE's, or the two disagree about which children
 // were closed.
+//
+// Which is why it carries `AND NOT deferPhaseOwedSQL` too, and why that matters
+// more than the symmetry: a child entering a defer phase is NOT terminal yet,
+// and releasing its concurrency keys here would be the exact pre-emption
+// IMPROVEMENT-PLAN 3.112 removed from TerminateWorkflow -- the host dropping
+// the resource before the defer that releases it has run. Those children are
+// released by FinalizeDeferPhase instead.
 func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWorkflowID string) ([]string, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -514,6 +546,7 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
+		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID)
 	if err != nil {
 		return nil, err

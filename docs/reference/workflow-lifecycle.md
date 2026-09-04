@@ -148,22 +148,24 @@ set a terminal status with a direct `UPDATE`:
 - `TerminateWorkflow` — **only when the workflow owes no cleanup.** Since 2026-09-04 a workflow
   with registered defers takes the two-phase transition below instead, and its terminal status is
   then written by `FinalizeDeferPhase`, which *is* fenced on the defer segment's own claim.
-- `enforceParentClosePolicy`'s TERMINATE arm
+- `enforceParentClosePolicy`'s TERMINATE arm — **same qualification, same date.** A child that
+  owes cleanup goes to `terminating` carrying `pending_terminal_status = 'failed'`; a child that
+  owes none is failed here as before.
 - `adminForceResolve` (`engine/store_admin.go:154`)
 
 Re-derive with `grep -rn "SET status = '" --include='*.go' engine/ | grep -v _test` across all
 three dialects. These three are the reason the defer phase below needs a design at all: a
 workflow that reaches a terminal status this way never had a live instance, so **its registered
-defers never ran** (IMPROVEMENT-PLAN §3.75). Two of the three still work that way.
+defers never ran** (IMPROVEMENT-PLAN §3.75). One of the three still works that way.
 
 ---
 
 ## The defer phase, and the status window it introduces
 
-**Status: live for `TerminateWorkflow` since 2026-09-04 (§3.75 step 2). The other two unfenced
-transitions — the parent-close `TERMINATE` arm and `adminForceResolve` — still terminate in one
-step and still skip their defers.** This section describes what terminate does now; the two
-remaining transitions are called out where they differ.
+**Status: live for `TerminateWorkflow` (§3.112) and for the parent-close `TERMINATE` arm
+(§3.114) since 2026-09-04. `adminForceResolve` is the one unfenced transition that still
+terminates in one step and still skips its defers.** This section describes what those two do
+now.
 
 The durable record:
 
@@ -226,8 +228,13 @@ follows from that:
   the cleanup as lost. Turning a terminate into a `failed` because its *cleanup* went wrong would
   replace an outcome the database had already committed to.
 
-The parent-close `TERMINATE` arm and `adminForceResolve` remain terminal-and-immediate, and their
-defers do not run at all. That is unchanged, not a regression.
+**Which outcome is applied depends on which transition marked the phase**, and the marker is
+where that is recorded rather than something the finalize is told: `TerminateWorkflow` records
+`terminated`, the parent-close arm records `failed`. One finalize, two outcomes, and nothing
+between the phases can substitute a third.
+
+`adminForceResolve` remains terminal-and-immediate, and its defers do not run at all. That is
+unchanged, not a regression.
 
 ---
 
