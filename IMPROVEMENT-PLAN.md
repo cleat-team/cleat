@@ -12445,6 +12445,16 @@ grep for *premises* when you add one.
 ### 3.111 A defer segment could still call a service through `cleat_call_heartbeat` — 🟢 **FIXED 2026-09-04** (WS-1, 2026-09-04)
 
 The eighth fresh path, and the third time this inventory was built by hand and came up short.
+
+**"Eighth" is a method count, and three different counts are in circulation.** Methods consulting
+`stopBeforeNewWork` on develop before this change: `childWorkflowWithVersion`, `DurableCall`,
+`DurableCallWithRetry`, `Fetch`, `PluginCall`, `PluginCallStreaming`, `DurableAwaitSignals` —
+**seven**, so heartbeat is the eighth. That is *eight* entry points, because
+`childWorkflowWithVersion` serves both `ChildWorkflow` and `ChildWorkflowWithOptions`; and §3.84's
+table shows *six rows* for those seven entry points, because it merged the child pair. Any of the
+three is defensible and they are not interchangeable — §3.110 calls this "§3.84's sixth path",
+which is none of them. Re-derive the method count with the loop below, and note that a naive one
+returns eight: `stopBeforeNewWork`'s own definition contains its name and is not a caller.
 §3.83 guarded `cleat_call`. §3.84 added four more and its table listed `DurableCall` and
 `DurableCallWithRetry` — the durable-call family minus one. §3.104 added `Fetch` as a seventh,
 with the note that the inventory had been built "by reading the entry points a guest uses to
