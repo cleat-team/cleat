@@ -15584,14 +15584,34 @@ transitions 2 and 3, and they reuse everything above rather than needing more of
 confirmed all three sites are symmetric on all three dialects, so the remaining two are the
 mechanical half.
 
-One coverage gap, stated rather than papered over: nothing exercises `executeWorkflow`'s
-*post-segment* branch through a real guest. `engine/defer_phase_vertical_test.go` covers terminate
-→ claim → segment → finalize with a real WASM guest and a real database, and
-`cmd/cleat-worker/defer_phase_test.go` covers the worker's own handling with a mock store — but
-the ~10 lines where a claim carrying a marker is routed away from the ordinary suspended/`ready`
-finalize are only covered by the mock-store side. Deleting that branch turns every terminate with
-defers into a workflow that reschedules itself forever, and the test that would catch it does not
-exist.
+~~One coverage gap, stated rather than papered over:~~ **CLOSED 2026-09-04 by
+`cmd/cleat-worker/defer_phase_execute_test.go`.** Nothing exercised `executeWorkflow`'s
+*post-segment* branch through a real guest: `engine/defer_phase_vertical_test.go` covered
+terminate → claim → segment → finalize with a real WASM guest and a real database, and
+`cmd/cleat-worker/defer_phase_test.go` covered the worker's own handling with a mock store — but
+the lines where a claim carrying a marker is routed away from the ordinary suspended/`ready`
+finalize were only covered by the mock-store side, and that test calls `finishDeferPhase`
+directly, so the branch that DECIDES to call it was what neither had.
+
+`TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt` drives `w.executeWorkflow` twice against
+one workflow on a real PostgreSQL, a real wasmtime guest and the worker's own `dbServiceCaller`
+pointed at an `httptest` server: segment 1 registers a defer and sleeps, `TerminateWorkflow`
+marks it, and segment 2 is the defer phase.
+
+**The falsification found the assertion that mattered, and it was not the obvious one.** Deleting
+the branch left the drain intact — `ran a defer segment's defers defers_run=1`, and the service
+still received `cleanup/after_sleep` — because `WithDeferPhase` is set before `Replay` and the
+branch runs after it. So the cleanup call, the assertion the test was designed around, does **not**
+catch a missing branch. What caught it was the finalize never happening: the run logged
+`workflow suspended` a second time and the row went back to `terminating`, which is this
+paragraph's original "reschedules itself forever" prediction observed rather than reasoned. Both
+assertions stay — the cleanup call is the only thing separating this branch from the failure arm
+above it, which reaches a terminal row too and logs `defer phase failed; terminating without its
+cleanup`.
+
+**One thing the test had to be corrected about:** the worker records a sleeping workflow as
+`ready` with `next_wake_at` set, not as `suspended` — the finalized-`ready` shape §3.83 is about.
+The first draft asserted `suspended` and failed on a run where everything worked.
 
 ### 3.114 A closing parent pre-empted every child's cleanup at once — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
