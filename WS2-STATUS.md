@@ -112,14 +112,22 @@ future session should not have to rediscover.
 >    §2.35 also carries a **retracted** claim that `ErrTimeout` is misclassified. It is not, and
 >    there is nothing to fix there — read the retraction before acting on the section.
 >
-> 2. **The coverage gap §3.112 stated rather than papered over.** Nothing exercises
->    `executeWorkflow`'s *post-segment* branch through a real guest: the ~10 lines that route a
+> 2. ~~**The coverage gap §3.112 stated rather than papered over.**~~ **CLOSED the same day this
+>    list was written**, by `cmd/cleat-worker/defer_phase_execute_test.go`. Nothing exercised
+>    `executeWorkflow`'s *post-segment* branch through a real guest — the lines that route a
 >    claim carrying `PendingTerminalStatus` away from the ordinary suspended/`ready` finalize.
->    `engine/defer_phase_vertical_test.go` covers terminate → claim → segment → finalize with a
->    real WASM guest and a real database, and `cmd/cleat-worker/defer_phase_test.go` covers the
->    worker's handling with a mock store — the branch itself is covered only by the mock side.
->    Delete it and every terminate-with-defers becomes a workflow that reschedules itself
->    forever, with no test to notice.
+>    The new test drives `w.executeWorkflow` twice against one workflow on a real PostgreSQL and
+>    a real wasmtime guest: segment 1 registers a defer and sleeps, `TerminateWorkflow` marks it,
+>    segment 2 is the defer phase.
+>
+>    **Its falsification is why this entry stays rather than being deleted.** Removing the branch
+>    left the drain intact — the cleanup still ran and still reached the service — because
+>    `WithDeferPhase` is set before `Replay` and the branch runs after it. The assertion the test
+>    was designed around does **not** catch the deletion; what does is the finalize never
+>    happening, which shows up as a second `workflow suspended` and a row back in `terminating`.
+>    That is the prediction in this bullet's original text, observed rather than reasoned — and
+>    one more instance of CLAUDE.md's "Watch which layer is holding the test up": **the layer
+>    holding an assertion up is usually not the one its author had in mind.**
 >
 > **Closed since the 2026-09-03 list. Each is a line rather than a deletion, because how it
 > closed is the part worth keeping.**

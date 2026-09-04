@@ -15,6 +15,7 @@ cmd/cleat-worker	TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
+cmd/cleat-worker	TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt	1
 cmd/cleat-worker	newSignalAuthStore	1
 engine	RegisterBackend	2
 engine	TestADeferBodyCannotContinueAsNew	1
