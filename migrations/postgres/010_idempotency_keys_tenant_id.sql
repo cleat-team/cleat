@@ -25,8 +25,11 @@
 -- rows take the default tenant, which is the tenant a single-tenant
 -- deployment already writes under, so deduplication survives the upgrade.
 --
--- Note on the version number: this file is 010 because IMPROVEMENT-PLAN /
--- PARALLEL-WORKSTREAMS reserve 010-019 for tenancy work. Migration versions
+-- Note on the version number: this file is 010 because the per-stream
+-- migration ranges then in force reserved 010-019 for tenancy work. Those
+-- ranges are retired (see WORKSTREAM.md): new migrations take the next free
+-- number above the dialect's high-water mark. This comment records why this
+-- file is 010; it is not a rule still in force. Migration versions
 -- 006-015 were used by the pre-consolidation numbering that eb6b082 folded
 -- into 001, so a develop-tracking database migrated before that commit may
 -- already have version 10 recorded and would skip this file. That failure is

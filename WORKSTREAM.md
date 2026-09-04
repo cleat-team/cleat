@@ -34,7 +34,8 @@ Two more numbers that follow from it:
   "additive". Three of those conflicts had *both sides reading the same number*.
 - 27% of commits in that window are `docs:`, and the week produced at least four stale-marker
   incidents (§3.36 read as open work for four days; §3.83's heading two days; `tiers.yaml`'s
-  admin-dashboard entry a month; `WS3-STATUS.md` five days without a touch while WS-3 merged daily).
+  admin-dashboard entry a month; `WS3-STATUS.md` five days without a touch while WS-3 merged daily;
+  both retired 2026-09-04).
 
 Throughput is not the problem: 192 of 200 PRs opened since 09-01 merged, 4 closed unmerged. The
 process works. It is expensive.
@@ -107,7 +108,10 @@ were false for a month.
 
 **R5 — Status is `gh pr list`.** No per-stream status files. `WS2-STATUS.md`, `WS3-STATUS.md`,
 `PARALLEL-WORKSTREAMS.md` and this file were 1,803 lines between them with one five days stale.
-Retire them into this one.
+Retire them into this one. **Done 2026-09-04 (A4)**: all three are deleted and their durable
+reference content is in "Sandboxes, databases, and shared files" at the end of this file. What was
+retired is the *status* half — boards, per-stream item lists, merged-PR counts — because that is
+the half that goes stale between the writing and the reading.
 
 **R6 — Never hold two open PRs that touch the same declaration file.** Land the first, rebase the
 second. WS-1's own #680 and #682 collided on the three SDK parity lists because both were open at
@@ -154,7 +158,7 @@ that removes its own future friction.**
 | A1 | `skip-budget.txt` total becomes derived from per-test declarations | ~~done (#696)~~ `skip-budget.txt` is deleted; budgets are summed from `scripts/skip-ledger.tsv`, one line per reason |
 | A2 | per-stream section blocks (R2), enforced | ~~done~~ `check-section-numbers.sh` rejects any 3.x number outside every block, with a `--self-test` negative control; `next-section-number.sh` hands each stream its next free number |
 | A3 | archive closed sections out of `IMPROVEMENT-PLAN.md` (R3) | ~~done~~ 139 of 157 sections moved to `IMPROVEMENT-PLAN-CLOSED.md`; plan 16,236 → 3,179 lines. Every number keeps a stub, so all citations still resolve (checked in Python, 0 unresolvable). Re-run `scripts/archive-closed-sections.py` as items close. |
-| A4 | retire `PARALLEL-WORKSTREAMS.md`, `WS2-STATUS.md`, `WS3-STATUS.md` into this file (R5) | one coordination file |
+| A4 | retire `PARALLEL-WORKSTREAMS.md`, `WS2-STATUS.md`, `WS3-STATUS.md` into this file (R5) | ~~done~~ all three deleted; the reference half is the last section of this file, and the 19 live citations to them across `CLAUDE.md`, `scripts/`, `.github/workflows/`, `engine/`, `cmd/` and `IMPROVEMENT-PLAN.md` were repointed in the same PR. Both other streams agreed unreserved. |
 
 A1 and A2 first: they are what let A3 and the other streams proceed without conflicts.
 
@@ -203,3 +207,190 @@ rate was at its peak. Closing items fast and finding them fast is not convergenc
 
 Read it once a day. The first day it falls while the fix rate holds is the first evidence that the
 work is finishing rather than continuing.
+
+---
+
+## Sandboxes, databases, and shared files
+
+Absorbed from `PARALLEL-WORKSTREAMS.md`, `WS2-STATUS.md` and `WS3-STATUS.md` when those three
+were retired on 2026-09-04 (A4, R5). Both other streams agreed to it unreserved. Only content a
+stream re-verified that day came across; the status halves went to `gh pr list`, which cannot go
+stale, and two bullets were **dropped rather than ported** because their owner retracted them —
+see "What did not come across" at the end.
+
+**CLAUDE.md points here for the DSNs.** They are written down precisely so that nobody rebuilds
+one from memory: the section around that pointer records a run where doing so produced a tidy
+876 → 581 → 4 skip progression that was 1,086 connection failures wearing the right costume.
+
+### Which sandbox is which stream
+
+| | sandbox | docker context |
+|---|---|---|
+| **WS-1** | `/localssd/rcownie/cleat` | `colima` (default) |
+| **WS-2** | `/localssd/rcownie/cleat-agent1` | `colima` (default) |
+| **WS-3** | `/localssd/rcownie/cleat-agent2` | `colima-cleat-ws3` |
+
+The same tree is reachable as `/localssd/…` and as `/Users/Shared/localssd/…`, so identify a
+checkout by its git *common* directory rather than `$PWD` — which is what
+`scripts/section-blocks.sh` does, and it is also how the 14 `cleat-wt-*` worktrees resolve back to
+the stream that owns them.
+
+### DSNs
+
+Each row was connected to on 2026-09-04 by the stream that owns it.
+
+| | PostgreSQL | MySQL | SQL Server |
+|---|---|---|---|
+| **WS-1** | `postgres:postgres@localhost:5432` | `root:cleat@tcp(127.0.0.1:3306)` | `1433` — **broken**, below |
+| **WS-2** | `cleat:cleat@localhost:5433` | `root:cleat@tcp(127.0.0.1:3307)` | `1434` — connects, migrations fail |
+| **WS-3** | `postgres:postgres@localhost:5434` | `root:cleat@tcp(127.0.0.1:3308)` | `1435` — the only working one |
+
+    CLEAT_TEST_POSTGRES='postgres://postgres:postgres@localhost:5434/cleat?sslmode=disable'
+    CLEAT_TEST_MYSQL='root:cleat@tcp(127.0.0.1:3308)/cleat?tls=false&parseTime=true&multiStatements=true'
+    CLEAT_TEST_MSSQL='sqlserver://sa:CleatTest123!@127.0.0.1:1435?database=cleat'
+
+**Credentials are port-specific, so a probe that varies only the port answers the wrong
+question.** Measured across the full matrix on 2026-09-04:
+
+| | `postgres:postgres` | `cleat:cleat` |
+|---|---|---|
+| 5432 | ✅ | ❌ `28P01` |
+| 5433 | ❌ `28P01` | ✅ |
+| 5434 | ✅ | ✅ |
+
+MySQL has the same shape: `root:cleat` works on 3306, `cleat:cleat` is refused with `1045`. Both
+streams that reported on this got a detail wrong, in opposite directions — one called 5433
+"set-but-broken" after probing it with 5432's credentials, the other reported `postgres:postgres`
+as failing on 5434, where it works. Re-derive with a credential × port matrix, never a port sweep:
+
+    for p in 5432 5433 5434; do for c in postgres:postgres cleat:cleat; do
+      psql "postgres://$c@localhost:$p/cleat?sslmode=disable" -c 'SELECT 1' >/dev/null 2>&1 \
+        && echo "$p $c OK" || echo "$p $c FAIL"
+    done; done
+
+**And on 5434 the pair that also works is the wrong one to use.** That container was built with
+`POSTGRES_USER=cleat`, and `cleat` is also a *schema* name here, so `search_path="$user",public`
+resolves to a per-user schema and the test tables end up split across two of them. A `postgres`
+superuser role was created for exactly this reason, which is why the row above says
+`postgres:postgres` and an older draft said otherwise. **Connect as `cleat` and you see half a
+schema** — not an error, half a schema, which is the failure mode this whole section is about.
+That is also the hazard behind `engine/flush_rls_test.go`'s connection-pinning comment: the
+symptom is `relation "<table>" does not exist` from a test whose neighbours pass.
+
+### SQL Server: only one stream can run it locally
+
+Every part of this has cost a session at least once.
+
+| port | server | version | state |
+|---|---|---|---|
+| 1433 | `colima-cleat-ws1/cleat-ws1-mssql` | SQL Server 2022 image | **no TDS handshake** |
+| 1434 | `colima/cleat-ws2-mssql` | Azure SQL Edge 15.0 | connects; migrations fail |
+| 1435 | `colima-cleat-ws3/cleat-ws3-mssql` | SQL Server 2022 16.0 | works |
+
+**1433 reports `Up 4 weeks` and is not serving.** The port listens, so a connection is accepted
+and then dropped — four different encryption settings all return `EOF` — while `docker logs`
+shows `Error: 17300 … Failed to start system task` repeating in real time. A container's `Up` is not a
+statement about the database inside it.
+
+**1434 cannot run this repo's migrations.** `migrations/mssql/011_json_scalar_payloads.sql` uses
+the two-argument `ISJSON`, introduced in SQL Server 2022; Azure SQL Edge is 15.0, so all 540
+failures come from that one file. CI covers MSSQL, so this bounds local work only — but it means a
+"passes on three dialects" claim made from that sandbox is not one.
+
+**SQL Server needs its own VM**: it cannot start under QEMU (`Invalid mapping of address …`), and
+only the `cleat-ws3` colima profile has Rosetta. Manage it with an explicit
+`docker --context colima-cleat-ws3`, and note that **`colima start` rewrites the global docker
+context** — set it back with `docker context use colima` or every other stream's bare `docker`
+silently retargets.
+
+**A container name is not unique across docker contexts, and `docker ps` in one context will lie
+to you about a port another context owns.** Two containers named `cleat-ws1-mssql` exist in
+different colima VMs, and *two different containers both publish host port 1435* — the default
+context's `cleat-ws1-mssql` and `colima-cleat-ws3`'s `cleat-ws3-mssql`. Only one can hold it, bind
+order decides, and nothing records which won. Today it is WS-3's.
+
+That ambiguity is not cosmetic. `engine/testutil`'s `CleanupMSSQLTestData`
+(`engine/testutil/mssql_schema.go:118`) is an unqualified `DELETE FROM` across **15 tables**. If
+the default VM restarts and takes 1435, WS-3's suite silently starts wiping WS-1's server — and
+`-p 1` cannot help, because it serialises packages inside one `go test`, not streams across VMs.
+
+**So probe the port; do not read the table.** `docker ps` answers a different question:
+
+    docker context ls                       # there are five; a bare `docker ps` sees one
+    docker --context colima-cleat-ws3 ps -a
+    # then ask the server which server it is:
+    SELECT @@SERVERNAME, SERVERPROPERTY('ProductVersion')
+
+`@@SERVERNAME` is the container ID, so it distinguishes two instances that share a name and a port.
+That is what settled the 1435 question: it returned `1a4890c33e6e`, WS-3's container.
+
+### Shared files, and the protocol for each
+
+| file | protocol |
+|---|---|
+| `IMPROVEMENT-PLAN.md` | Edit only your own `§` sections. **Do not pick a number — run `scripts/next-section-number.sh`.** Blocks are per stream (WS-1 `3.200–299`, WS-2 `3.300–399`, WS-3 `3.400–499`; `scripts/section-blocks.sh`), and `.githooks/pre-commit` refuses a commit that adds one outside yours. Closed sections are archived by `scripts/archive-closed-sections.py`, never deleted. |
+| `scripts/skip-ledger.tsv` | **Add a line; never edit a number.** A job's budget is the sum of its lines, so two streams adding skips do not contend for one total. Attribute a new skip by test name, never by delta. `test-go/engine` and `cluster` move together — the cluster job also runs `./engine/...`. |
+| `scripts/skip-baseline.txt` | Never hand-edit. Regenerate with `scripts/check-skips.sh --update` **after** rebasing. A count going down is the point; a count going up needs a sentence. |
+| `scripts/deadcode-baseline.txt` | Same; `scripts/check-test-only-code.sh --update`. A shrinking baseline is the honest evidence that wiring landed. |
+| `migrations/{postgres,mysql,mssql}/` | Numbered per dialect. **Take the next free number above the dialect's high-water mark** — see below; the reserved blocks are gone. |
+| `.golangci.yml` | One linter per PR, repo-wide, and say in the PR which one you are taking. |
+| `tiers.yaml` | The support manifest. Do not claim in prose what it does not grant. |
+| `engine/testutil/` | WS-1's this round. Ask before adding test-schema columns. |
+| `engine/store_lifecycle.go` | Shared: WS-1 owns the idempotency block, WS-2 the event and flush paths. Expect textual conflicts, not semantic ones; rebase often. |
+| `.github/workflows/`, `cmd/cleat-worker/` | WS-3's. Another stream may add there when leaving the mechanism unwired would be worse — say so in the comment, as `ci.yml` and `setup.go` both do. |
+
+**The per-stream migration ranges are retired, and this is the second time that has been
+written.** `010–019`/`020–029`/`030–039` were "sparse and above the high-water mark so no
+stream renumbers another"; four weeks of merges consumed them. Re-derived 2026-09-04 with
+`for d in postgres mysql mssql; do ls migrations/$d/*.sql | sed 's#.*/##;s/_.*//' | tr '\n' ' '; echo; done`:
+
+| dialect | numbers in use | high-water | free in the `030` block |
+|---|---|---|---|
+| postgres | 001–005, 010, 020–024, 031–040 | `040` | `030` |
+| mysql | 001–004, 010, 020–022, 030, 033–039 | `039` | `031`, `032` |
+| mssql | 001–004, 010–013, 020–022, 031, 033–043 | `043` | `030`, `032` |
+
+Note what that shows, beyond the block being full: the numbers are **not** aligned across dialects
+— `033` is a different migration in each — and the `030` block was used by whoever needed the next
+number, not by WS-3. A block is a collision-avoidance device between concurrent writers, not a
+per-stream namespace, so **a migration numbered in another stream's block is not a defect to go
+fix.** `migrations/postgres/010_idempotency_keys_tenant_id.sql` carries a comment naming the old
+reservation; it is a record of why that file is `010`, not a rule still in force.
+
+**Do not re-reserve fresh blocks.** An earlier draft did exactly that (`040/050/060`) before #563
+landed. #563's rule is better for the reason it gives about section numbers: a reservation needs
+every writer to remember it every time, and the table above is the evidence that they do not.
+
+**On the linter backlog, read `.golangci.yml` and not a count written anywhere else** — including
+here. Restating a number in two files is how the two come to disagree, and the count that used to
+live in the retired file was four measurements stale when it was retired. One caveat worth keeping
+because it produces a *tidy table of zeroes* rather than an error: on this machine the pinned
+`golangci-lint` v1.64.7 cannot read the installed Go 1.27 toolchain's export data
+(`export data version 4 is greater than maximum supported version 2`), so it emits typecheck
+errors instead of findings and every type-aware linter reads `0`. CI is unaffected — `lint-go`
+pins Go 1.25. Locally, pin it too, and confirm a non-zero count for a linter you know has findings
+before believing a zero for one you hope does not:
+
+    GOTOOLCHAIN=go1.25.11 golangci-lint run --timeout=20m -c <one-linter.yml> ./... | grep -c '(<linter>)'
+
+### What did not come across, and where the old citations point
+
+Two bullets from `WS3-STATUS.md` were **retracted by WS-3 rather than ported**: one said
+`CGO_ENABLED=0` "runs everything on wazero", which stopped being true when the wazero *backend*
+was deleted in #459 — CLAUDE.md carries the correct version, which is that there is no backend
+left at all — and one said `componentize-py` cannot run on this machine, which was a WS-3-machine
+fact stated as a general one. The `CREATE TABLE IF NOT EXISTS` warning is not repeated here
+because CLAUDE.md already carries it.
+
+`IMPROVEMENT-PLAN-CLOSED.md` and `REMEDIATION-PLAN-2026-08-09.md` still name the three retired
+files. Those citations were **deliberately left alone**: both documents are historical records —
+one an archive of closed items, the other explicitly superseded — and repointing a dated quotation
+at a file that did not exist when it was written would falsify it. Read them as history and use
+`git log --follow` for the text. Every *live* pointer was repointed here or to CLAUDE.md in the
+same PR, so nothing a reader is told to go and read is missing.
+
+One of those citations was already stale before any of this: `REMEDIATION-PLAN-2026-08-09.md:19`
+cites `PARALLEL-WORKSTREAMS.md:108` for the migration ranges, and line 108 had drifted onto an
+unrelated paragraph about `errcheck`. **A line-number citation into a living document is a dead
+citation with a delay**, which is its own argument for putting the reference material somewhere it
+can be cited by section name.

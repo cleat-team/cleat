@@ -7,10 +7,11 @@ package engine
 // longer owned -- interleaved with whatever its successor was writing.
 //
 // This drives the generation bump explicitly, the way
-// fence_lost_integration_test.go's buildZombieWriterScenario does and
-// PARALLEL-WORKSTREAMS.md warns against not doing: claim, capture the
-// generation, call ReapStaleInstances with a timeout guaranteed to reclaim
-// everything (no sleep, no race), then act as the stale worker. See that
+// fence_lost_integration_test.go's buildZombieWriterScenario does, and the
+// way CLAUDE.md's rule against wall-clock-dependent assertions requires:
+// claim, capture the generation, call ReapStaleInstances with a timeout
+// guaranteed to reclaim everything (no sleep, no race), then act as the
+// stale worker. See that
 // file's comment on why the timeout is negative rather than the flow being
 // timed.
 

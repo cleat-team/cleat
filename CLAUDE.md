@@ -71,8 +71,10 @@ measured a tidy 876 → 581 → 4 progression whose final `4` matched the old ta
 
     go test ./engine/ -run TestTenantIsolationAcrossDialects -count=1
 
-The DSNs are written down: `WS3-STATUS.md` for this checkout's ports, `PARALLEL-WORKSTREAMS.md`
-for the defaults. Read them rather than rebuilding them from memory.
+The DSNs are written down in `WORKSTREAM.md`, under "Sandboxes, databases, and shared files" —
+every port, with the credential matrix, because the credentials are port-specific and a probe that
+varies only the port answers the wrong question. Read them rather than rebuilding them from memory.
+(They were in `WS3-STATUS.md` and `PARALLEL-WORKSTREAMS.md`; both were retired 2026-09-04.)
 
 **Build and test with CGO on — the default.** `CGO_ENABLED=0` does not skip a check. It swaps
 `NewWasmtimeBackend` for the `//go:build !cgo` stub in `engine/backend_wasmtime_stub.go`, which

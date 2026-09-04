@@ -730,7 +730,7 @@ jobs:
           # disable RLS, which is the class of defect it exists to catch.
           #
           # NOTE (WS-2 -> WS-3): .github/workflows/ is WS-3's under
-          # PARALLEL-WORKSTREAMS.md. Added here rather than left unwired,
+          # WORKSTREAM.md's shared-files table. Added here rather than left unwired,
           # because check-ci-package-coverage.sh correctly refuses a suite no
           # job runs and UNWIRED_SUITES is how the last set of dead suites
           # accumulated. Move or restructure it freely.

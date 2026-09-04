@@ -18,9 +18,11 @@ Effort is given in solo+AI sessions (a session ≈ half a day of your attention)
 
 ## Handover, 2026-08-04
 
-Work is now split across three concurrent sessions — see **`PARALLEL-WORKSTREAMS.md`** for
-who owns which paths, the reserved migration ranges, the per-sandbox database, and the three
-cross-stream couplings. Read that before this file; then read only your own items below.
+Work is now split across three concurrent sessions — see **`WORKSTREAM.md`** for who owns which
+paths, the per-sandbox database, and the cross-stream couplings. Read that before this file; then
+read only your own items below. (It absorbed `PARALLEL-WORKSTREAMS.md`, which this line used to
+name, on 2026-09-04. The *reserved migration ranges* it also used to name are retired: take the
+next free number above the dialect's high-water mark.)
 
 Four things worth knowing before you start, none of which are derivable from the code:
 
@@ -360,7 +362,8 @@ the code.
    The residual worth keeping is a *different* pair: `engine/testutil/mssql_schema.go`
    hand-writes its tables independently of `migrations/mssql/001_schema.sql` and defines none
    of the seven security policies, so no MSSQL test has a tenant backstop. That is recorded in
-   PARALLEL-WORKSTREAMS.md's third cross-stream coupling and belongs to WS-2.
+   PARALLEL-WORKSTREAMS.md's third cross-stream coupling (that file was retired
+   2026-09-04; the couplings are in WORKSTREAM.md) and belongs to WS-2.
 
 **Process note for future sessions.** Two commits had to be rewound because `git add -A` was
 run while subagents were mid-edit; one nearly shipped a call site an agent had *deliberately*
@@ -1935,7 +1938,8 @@ Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED
 
 ### 3.36 errcheck's 283 findings, triaged — 🟢 **THE DEFECT WAS FIXED in §3.43 (2026-08-31); errcheck itself is still not enabled** (WS-3, 2026-08-05)
 
-The companion to §3.33. `PARALLEL-WORKSTREAMS.md` singles errcheck out as **"the class that
+The companion to §3.33. `PARALLEL-WORKSTREAMS.md` — retired 2026-09-04, so this is a quotation
+from history rather than a pointer — singles errcheck out as **"the class that
 produced §1.2 and §2.50"** — both real defects, both literally a discarded error return — so
 the question is not whether 283 is a lot but which of them are that class again.
 
@@ -2206,8 +2210,8 @@ protection, not a style preference.
 
 ### 3.33 gosec's 283 findings, triaged — 🔶 **2 fixed, 281 classified** (WS-3, 2026-08-05)
 
-`PARALLEL-WORKSTREAMS.md` calls gosec "unreviewed security findings in a codebase whose last
-two days have been tenancy defects" and says an unreviewed 283 is worse than a reviewed 283
+`PARALLEL-WORKSTREAMS.md` — retired 2026-09-04, quoted here from history — calls gosec
+"unreviewed security findings in a codebase whose last two days have been tenancy defects" and says an unreviewed 283 is worse than a reviewed 283
 with 280 suppressions. This is the review. It does **not** enable the linter — G115 alone
 would block that — but it replaces a number with a distribution, which is what the decision
 needs.
