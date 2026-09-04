@@ -13903,10 +13903,10 @@ recorded, and `TestAnOrdinarySegmentStillFetches` is the other direction — a g
 *every* fetch would satisfy the first test just as well. The fetcher is a recording double, so
 "did the request go out" is measured rather than inferred from a return value.
 
-### 3.105 The Java SDK could not run a defer segment, because it never decoded the stop sentinel — 🔶 **SDK HALF DONE; the end-to-end proof and `deferSegmentLanguages` remain** (WS-2, 2026-09-03)
+### 3.105 The Java SDK could not run a defer segment, because it never decoded the stop sentinel — ✅ **FIXED, both halves; `java` is in `deferSegmentLanguages`** (WS-2, 2026-09-03)
 
-`deferSegmentLanguages` is `{"go": true}` and five languages are supported. The reason is not that
-the other four are unfinished in general — it is one specific thing: when the host refuses a call
+`deferSegmentLanguages` was `{"go": true}` when this item opened, and five languages are
+supported. The reason was not that the other four were unfinished in general — it is one specific thing: when the host refuses a call
 in a defer segment it sets bit 31 of the result word (§3.84), and only the Go SDK tests that bit.
 Everything else reads the word through whichever layout the call it made returns, and **every one
 of those readings is a plausible ordinary result**.
@@ -13952,21 +13952,72 @@ the other side rather than just move the number.
 - §3.104 — `Fetch` was a seventh unguarded fresh path on the **host** side, found the same way.
   Fixed there, and it is why `cleatFetch` is on the list above.
 
-#### What is deliberately NOT done here
+#### The end-to-end half, which is what actually opened the fence
 
-**`java` is not added to `deferSegmentLanguages`.** Membership there means *verified to unwind on
-the sentinel*, end to end, and `engine/defer_segment_test.go` refuses a language without it:
-"a host that emits and a guest that never decodes are two green half-tests and no working
-feature". What exists so far is the guest half plus structural guards. The end-to-end proof needs
-a Java fixture with a defer, built through `buildJavaWasm`, run as a segment — that is the next
-piece, and until it lands the fence stays closed and Java behaves exactly as it does today.
+`examples/saga-java-port` gained a `defer_order` entry point — two defers, then one call of the
+workflow's own — and `engine/java_defer_segment_e2e_test.go` builds the real TeaVM module and
+runs it as a defer segment. Green: the segment suspends and records `[second first]`, the
+cleanups in LIFO order, and not the body's call. `java` is now in `deferSegmentLanguages`, and
+`TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified` pins the list at `{go, java}`.
 
-AssemblyScript is the same shape (core module, `decodeCallResult(result: i64)`) and is next.
-Python is **not**: it is a Component Model guest whose WIT declares `durable-call: func(...) ->
-string`, so there is no result word to carry bit 31 — and `extractStringFromPacked`
-(`engine/component_cgo.go`) currently turns the sentinel into `""`, an empty successful response.
-Measured 2026-09-03: `extractStringFromPacked(0x80000000, buf) == ""`. That needs an ABI decision
-before any code.
+The whole toolchain rather than a synthetic module, because the sentinel crosses three layers a
+hand-built module does not have: TeaVM compiles `throw` into its own unwinding scheme, the
+generated wrapper catches `SuspendSignal` in a `catch` TeaVM also compiles, and the host then
+calls a second export into a runtime that has just thrown. None of those is exercised by reading
+Java source with a regex, which is all the §3.105 SDK half could do.
+
+#### Three falsifications, three different reds, and one of them changed a test
+
+Deleting `Memory.throwIfStopped` from `cleatCall` and rebuilding produced:
+
+    suspended: nil   result: {"status":"ok"}   operations: []
+
+— the segment reported the terminated workflow as having **completed normally** and performed
+**none** of its cleanup. The wrapper drained on its ordinary success path and every defer body's
+call was refused in turn: §3.81's consumption, reached from the other direction.
+
+**That falsification also showed one of the three assertions cannot fail on a guest-side
+regression.** `body` was still absent from the caller, because `stopBeforeNewWork` refuses the
+call *host*-side before the `ServiceCaller` is reached — the sentinel tells the guest, it is not
+what does the refusing. The check is kept, because it still catches a host-side regression, but
+the comment now says which half it guards instead of implying it covers both. A test whose stated
+purpose and actual coverage differ is the §1.1 trap in miniature.
+
+The other two falsifications went at the generated wrapper. Draining with `Defer.runDeferred()`
+inside `catch (SuspendSignal)` **traps** — the first cleanup's call is refused, throws again, and
+escapes the catch; draining with `runDeferredForHost()`, which swallows, gives `defers_run=0` and
+the empty list. So the processor's choice between the two drains on each exit path is load-bearing
+in both directions, not a stylistic one.
+
+#### The test names are load-bearing, and the first version of them was dead
+
+Written first as `TestAJavaDeferSegment...` and `TestAnOrdinaryJava...`. `e2e-cross-language.yml`
+is the only job that installs Java and selects with
+`-run "TestRust|TestPython|TestAssemblyScript|TestJava"` — which **neither name matches**, since
+`TestAJava` does not contain `TestJava`. They would have skipped in every job that ran them and
+never run in the one job that could, while the suite printed `ok`: a green result that measured
+nothing, produced by a test written to stop exactly that. Renamed to `TestJavaDeferSegment...` and
+`TestJavaOrdinarySegment...`. **Any cross-language test whose name lacks the language prefix is
+dead code with a skip in front of it**, and nothing in CI says so.
+
+Skip budget: +2 on `test-go/engine` and `cluster`, the toolchain-gated one-skip shape, counted by
+name from a run with `gradle` and `java` off `PATH`.
+
+#### What remains
+
+Rust (§3.107) and AssemblyScript (§3.106) have their SDK halves and still need this same
+end-to-end piece before they join the list. AssemblyScript's will be the interesting one: it has
+no exceptions, so a stop is a flag rather than an unwind, and a body that ignores it keeps
+running — its `runDeferred` would then consume the table exactly as the falsification above did.
+
+Python is a different problem, and still blocked on a decision rather than on effort: it is a
+Component Model guest whose WIT declares `durable-call: func(...) -> string`, so there is no
+result word to carry bit 31 — and `extractStringFromPacked` (`engine/component_cgo.go`) turns the
+sentinel into `""`, an empty successful response. Measured 2026-09-03:
+`extractStringFromPacked(0x80000000, buf) == ""`. The two options are a sentinel prefix in the
+string (matching the existing `"__CLEAT_ERROR__:"` convention, but re-opening exactly the
+collision §3.83 exists to record) or changing the WIT so a stop is unrepresentable as a response.
+The second is the right one and is a public-API change.
 
 ### 3.106 The AssemblyScript SDK could not run a defer segment either, and its stop cannot unwind — 🔶 **SDK HALF DONE; the end-to-end proof and `deferSegmentLanguages` remain** (WS-2, 2026-09-03)
 

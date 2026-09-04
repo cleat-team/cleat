@@ -558,7 +558,13 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //
 // Add a language here in the same change that lands its decode, with a test
 // that exercises it end to end.
-var deferSegmentLanguages = map[string]bool{"go": true}
+//
+//   - go: testdata/deferfunc + engine/defer_segment_test.go.
+//   - java: examples/saga-java-port's defer_order entry point +
+//     engine/java_defer_segment_e2e_test.go, which builds the real TeaVM module
+//     and measures that a defer segment records the two cleanup calls and not
+//     the body's (3.105).
+var deferSegmentLanguages = map[string]bool{"go": true, "java": true}
 
 // RunsOnWasmtime reports whether a detected guest language is served by the
 // wasmtime backend.

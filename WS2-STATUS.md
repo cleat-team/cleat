@@ -103,12 +103,17 @@ future session should not have to rediscover.
 >
 >    Two constraints measured 2026-09-03 that the design did not anticipate:
 >
->    - **It is language-gated.** `deferSegmentLanguages = {"go": true}` (`engine/engine.go:486`)
->      against `WasmtimeLanguages = [go, assemblyscript, java, rust, python]` (`:464`), and
->      `engine/executor.go:213` fails the execution **closed** for anything else. So the defer
->      phase can only run for Go guests, and terminate would mean something different depending
->      on the workflow's language. That is a `tiers.yaml` change and a product call, not a
->      detail — D6 decided terminate is asynchronous, not that it is asynchronous *for Go*.
+>    - **It is language-gated, and the gate is being opened one language at a time.**
+>      `deferSegmentLanguages` was `{"go": true}` when this was written; it is
+>      `{"go": true, "java": true}` as of §3.105 (2026-09-03). Re-derive rather than trusting
+>      either: `grep -n 'var deferSegmentLanguages' engine/engine.go`. It is checked against
+>      `WasmtimeLanguages = [go, assemblyscript, java, rust, python]` and `engine/executor.go`
+>      fails the execution **closed** for anything else, so terminate would still mean something
+>      different depending on the workflow's language. Rust (§3.107) and AssemblyScript (§3.106)
+>      have their SDK halves and need an end-to-end fixture each; Python needs an ABI decision
+>      first (§3.105's "what remains"). Until all five are in, this is a `tiers.yaml` change and
+>      a product call, not a detail — D6 decided terminate is asynchronous, not that it is
+>      asynchronous *for some languages*.
 >    - **The worker needs a second engine.** `e.deferPhase` is read per-execution inside
 >      `Execute` but set as an `EngineOption` at construction, and the worker builds one shared
 >      engine (`cmd/cleat-worker/setup.go:1705`). A second instance sharing the registered

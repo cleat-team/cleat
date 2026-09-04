@@ -363,7 +363,7 @@ func TestADeferSegmentPastTheFrontierRunsOnlyTheDefers(t *testing.T) {
 // So the list is asserted exactly. Growing it is a deliberate act that fails
 // here first, and the failure says what has to accompany it.
 func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
-	want := map[string]bool{"go": true}
+	want := map[string]bool{"go": true, "java": true}
 	if len(deferSegmentLanguages) != len(want) {
 		t.Fatalf("deferSegmentLanguages = %v, want %v.\n\n"+
 			"Adding a language here means its SDK decodes callSuspendSentinel "+
@@ -395,7 +395,7 @@ func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 // satisfied by any of the several other ways Execute can fail on a synthetic
 // module -- which is the trap this file's other tests keep hitting.
 func TestADeferSegmentRefusesAGuestThatCannotHearTheStop(t *testing.T) {
-	for _, lang := range []string{"rust", "python", "java", "assemblyscript"} {
+	for _, lang := range []string{"rust", "python", "assemblyscript"} {
 		t.Run(lang, func(t *testing.T) {
 			ctx := context.Background()
 			rt, err := NewRuntime(ctx, 0, 0)
