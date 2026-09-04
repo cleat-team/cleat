@@ -2448,6 +2448,14 @@ export class HostCalls {
       payloadLen,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleResult
+    // reads errCode from the low byte, where a stop is 0 -- an ordinary success
+    // for a fire-and-forget call, so the guest would report the send as done.
+    if (stopRequested(result)) {
+      return "cleat: host refused this call -- the workflow is running its defer phase";
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
       return "signalWorkflow(targetRunId='" + targetRunId + "', signalName='" + signalName + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
@@ -2585,6 +2593,14 @@ export class HostCalls {
       reqLen,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleResult
+    // reads errCode from the low byte, where a stop is 0 -- an ordinary success
+    // for a fire-and-forget call, so the guest would report the send as done.
+    if (stopRequested(result)) {
+      return "cleat: host refused this call -- the workflow is running its defer phase";
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
       return "cleatSend(service='" + service + "', operation='" + operation + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
@@ -2642,6 +2658,14 @@ export class HostCalls {
       reqLen,
       delayMs,
     );
+
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleResult
+    // reads errCode from the low byte, where a stop is 0 -- an ordinary success
+    // for a fire-and-forget call, so the guest would report the send as done.
+    if (stopRequested(result)) {
+      return "cleat: host refused this call -- the workflow is running its defer phase";
+    }
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {

@@ -88,6 +88,9 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pluginCallStreaming", "PluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
 	{"acquireLockMs", "AcquireLock"},
+	{"signalWorkflow", "SignalWorkflow"},
+	{"cleatSend", "DurableSend"},
+	{"scheduleInvokeMs", "DurableScheduleInvoke"},
 	{"cleatFetch", "Fetch"},
 	{"runDetached", "RunDetached"},
 }
@@ -215,7 +218,13 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// `result & 0xFFL`, so a stop would have read as errCode=0 with `acquired`
 	// false at bit 8 -- an ordinary "someone else holds the lock". Both halves
 	// were added here, not just the number.
-	const stopSitesOn20260904 = 10
+	// Moved 10 -> 13 on 2026-09-04 for IMPROVEMENT-PLAN 3.302 (the three
+	// fire-and-forget calls). Java needed all three: signalWorkflow, cleatSend
+	// and scheduleInvokeMs each went straight to Memory.decodeSimpleErrCode,
+	// which reads the low byte -- and a stop is 0 there, which for a
+	// fire-and-forget call is an ordinary SUCCESS. The guest would have reported
+	// the send as done.
+	const stopSitesOn20260904 = 13
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

@@ -648,6 +648,13 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 		return 0
 	}
 
+	// A fresh send is new work: it dispatches a request to an external service
+	// through s.engine.caller, in a goroutine that outlives this call. A
+	// terminated workflow would cause a side effect after its own end.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	rec := EventRecord{
 		Step:      s.stepCount,
 		EventType: EventTypeDurableSend,
@@ -687,6 +694,13 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 			}
 		}
 		return 0
+	}
+
+	// A fresh schedule_invoke is new work, and it outlives the segment by
+	// design: the host records a delayed invocation that fires after the delay,
+	// so a terminated workflow would keep causing side effects on a timer.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
 	}
 
 	rec := EventRecord{

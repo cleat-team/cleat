@@ -16157,3 +16157,76 @@ entry, so `h.signalWorkflow` is nil and the SDK method returns its not-in-a-work
 are `reasonNoGoAdapter` cases like `Fetch`. Three others return `string` and need the §3.110
 signature change, not this rule. Only `side-effect` and `durable-schedule-cron` are string-typed
 *and* Go-reachable, which makes them the next pair and a different kind of change from this one.
+
+---
+
+### 3.302 A defer segment could still fire three fire-and-forget calls — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+B2's second tranche: `SignalWorkflow`, `DurableSend`, `DurableScheduleInvoke`. All three now
+consult `stopBeforeNewWork`.
+
+**Each starts something that outlives the segment**, which is what makes them worth guarding
+rather than merely refusing:
+
+- `SignalWorkflow` delivers a signal to another workflow, which can wake it and start a run.
+- `DurableSend` dispatches to an external service **in a goroutine that outlives the call**.
+- `DurableScheduleInvoke` records a delayed invocation that fires *after* the delay — a
+  terminated workflow left causing side effects on a timer.
+
+**The misread is worse here than at any previous stop site.** These decode through
+`packSimpleResult`, where the guest reads `errCode` from the low byte. `1 << 31` has a low byte of
+zero, and for a fire-and-forget call **zero is success** — there is no length or payload to look
+wrong. So the guest would not merely continue; it would report the send as *done*. The lock case
+(§3.301) at least produced a "did not acquire" the workflow might branch on.
+
+**Go needs nothing, for a different reason than `Fetch`.** All three are `reasonNoGoAdapter`, but
+not because Go reaches them another way: they are **absent from `wasm/usage.go`**, so the scanner
+never records them as used, no `adapterDefs` entry is consulted, and no `HostCallsOptions` field
+is emitted — leaving `HostCallsImpl.signalWorkflow` nil and the SDK method returning its
+"can only be called from within a workflow function" error. A Go WASM guest cannot reach these
+host functions at all.
+
+    grep -oE '\{"[a-z_]+", "\w+"\}' wasm/usage.go | sort -u
+
+Guest halves added to Rust, Java and AssemblyScript. **Python needed none** — §3.201 routed all
+three through `_check_host_result`, which tests the sentinel first. That is the prerequisite
+§3.113 described, paying off exactly as predicted: the guard could be added because the guest
+already read it.
+
+#### Two harness errors, both of which reported the wrong thing
+
+Recorded because each produced a confident wrong answer, and neither was caught by the result
+looking implausible.
+
+**A `-run` pattern that matched the filename, not the test name.** Falsifying the Rust guard
+appeared to fail nothing at all — which reads as "no test covers this". The selector was
+`-run 'Stop|Refuse|Coverage|Parity'`, chosen against `rust_sdk_stop_bit_parity_test.go`; the test
+inside it is `TestEveryRustCallTheHostCanRefuseChecksTheStopBit`, which contains no "Parity". The
+guard was working and the falsification could not see it. **A falsification that fires nothing is
+a claim about the selector until the selector is checked** — so run the pattern once and count
+what it selects before believing a silence:
+
+    go test ./engine/ -run '<pattern>' -count=1 -v | grep -cE '^=== RUN   Test'
+
+**A list entry naming a method that never reaches the import.** `rustCallsTheHostCanRefuse` was
+given `schedule_invoke`, which only delegates to `schedule_invoke_ms`; the guard went into the
+latter, correctly, and the list demanded it in the former. Caught by
+`TestEveryRustCallTheHostCanRefuseChecksTheStopBit` on its own — the error came from reading a
+`sed` range that spanned two functions and attributing the second's body to the first.
+
+#### Falsified three ways
+
+| mutation | fails with |
+|---|---|
+| host guard dropped from `DurableSend` | `java: entry "cleatSend" names host site "DurableSend", which does not consult stopBeforeNewWork` |
+| Rust guard dropped from `signal_workflow` | `signal_workflow never calls stop_requested, so the host can refuse this call and the guest will decode the refusal as an ordinary result` |
+| Python guard dropped from `send` | `the host can refuse DurableSend through the scalar-returning WIT function "durable-send", but the Python method "send" does not reach _raise_if_stopped` |
+
+The Java parity pin moved 10 → 13, and unlike §3.111's move all three needed a Java change.
+
+#### B2's remainder
+
+Three calls, all returning `string`: `durable-send-signal-and-wait`, `side-effect`,
+`durable-schedule-cron`. A string has nowhere to carry the sentinel, so these need §3.110's
+`result<string, call-failure>` signature — an ABI change, not a rule change, and a different
+shape of work from §3.301 and this entry.

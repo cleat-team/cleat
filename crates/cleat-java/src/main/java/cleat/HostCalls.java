@@ -1544,6 +1544,12 @@ public class HostCalls {
             sigOff, sigLen,
             payOff, payLen);
 
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleErrCode
+        // reads the low byte, where a stop is 0 -- an ordinary success for a
+        // fire-and-forget call, so the guest would report the send as done.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("signalWorkflow(targetRunId=\"" + targetRunId + "\", signalName=\"" + signalName + "\") failed: host returned error code " + errCode + ". Check that the target run ID and signal name are valid.");
@@ -1622,6 +1628,12 @@ public class HostCalls {
 
         long result = cleatSendRaw(svcOff, svcLen, opOff, opLen, reqOff, reqLen);
 
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleErrCode
+        // reads the low byte, where a stop is 0 -- an ordinary success for a
+        // fire-and-forget call, so the guest would report the send as done.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("cleatSend(service=\"" + service + "\", operation=\"" + operation + "\") failed: host returned error code " + errCode + ". Check that the service and operation names are valid.");
@@ -1651,6 +1663,12 @@ public class HostCalls {
         int svcLen = p[3], opLen = p[4], reqLen = p[5];
 
         long result = scheduleInvokeRaw(svcOff, svcLen, opOff, opLen, reqOff, reqLen, delayMs);
+
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleErrCode
+        // reads the low byte, where a stop is 0 -- an ordinary success for a
+        // fire-and-forget call, so the guest would report the send as done.
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
