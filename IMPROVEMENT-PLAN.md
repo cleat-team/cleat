@@ -13504,7 +13504,7 @@ grep -n "created_at" engine/store_events.go engine/mysql_events.go engine/mssql_
 `docs/reference/database-backends.md` already require it, and `engine/mysql_ops.go` already scans
 `sql.NullTime` in several places.
 
-### 3.100 A merge's own verification is cancelled by the next merge — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
+### 3.100 A merge's own verification is cancelled by the next merge — 🟢 **FIXED 2026-09-04; the 2026-09-03 fix was half of one** (WS-1, 2026-09-03)
 
 Six workflows carried
 
@@ -13561,6 +13561,106 @@ the post-merge run existing at all.
 the section-number guard it protects. Falsified both ways: restoring `cancel-in-progress: true` in
 one workflow fails it by name, and pointing its glob at nothing makes it `exit 1` rather than
 report a clean scan of nothing.
+
+#### The first fix was half a fix, and the guard passed anyway (2026-09-04)
+
+Everything above is still true and still necessary. It was not sufficient, and the way it failed is
+worth more than the fix.
+
+`cancel-in-progress: false` governs the **running** run. It says nothing about the **queued** one,
+and GitHub keeps at most one pending run per concurrency group: when a third push arrives at an
+occupied group, the one waiting is cancelled before it ever starts. Consecutive merges still shared
+one group, so they still queued behind each other, so a merge landing during a long run still had
+its verification thrown away — with `cancelled` reported exactly as before.
+
+Measured on develop between 14:20 (when the first fix merged) and 00:57, 2026-09-03:
+
+| workflow | push runs | cancelled |
+|---|---|---|
+| **Tier 1 Gate** | 36 | **11** |
+| CI/CD Pipeline | 36 | 3 |
+| Cross-Language E2E | 36 | 2 |
+| Multi-DB CI | 36 | 2 |
+| Plugin Harness Tests | 36 | 1 |
+| Tier 2 Gate | 36 | 1 |
+
+```
+for wf in "CI/CD Pipeline" "Cross-Language E2E" "Multi-DB CI" \
+          "Plugin Harness Tests" "Tier 1 Gate" "Tier 2 Gate"; do
+  json=$(gh run list --workflow="$wf" --branch develop --event push --limit 60 \
+           --json conclusion,createdAt)
+  n=$(echo "$json" | jq '[.[] | select(.createdAt > "2026-09-03T14:20:48Z")] | length')
+  c=$(echo "$json" | jq '[.[] | select(.createdAt > "2026-09-03T14:20:48Z")
+                             | select(.conclusion=="cancelled")] | length')
+  printf '%-22s push-runs=%-4s cancelled=%s\n' "$wf" "$n" "$c"
+done
+```
+
+**Roughly a third of merges never reached the gate at all** — not "ran and passed", not "ran and
+failed", but never started. The rate tracks duration: the gate takes 20-40 minutes and merges land
+minutes apart, so its queue is almost always occupied, while Tier 2 drains fast enough to be hit
+once.
+
+The distinguishing observation, and the one that turns this from a plausible story into a measured
+one, is that a cancelled run has **no jobs**:
+
+```
+gh run view 33822486816 --json jobs --jq '.jobs | length'   # 0   (cancelled, eb347bfd)
+gh run view 33820005763 --json jobs --jq '.jobs | length'   # 0   (cancelled, b6562c93)
+gh run view 33822626919 --json jobs --jq '.jobs | length'   # 1   (success,   2eeec9e3)
+```
+
+A run killed while *running* has jobs with a `cancelled` conclusion. Zero jobs means it never left
+the queue, which is what separates mechanism (2) from mechanism (1) rather than leaving them as two
+readings of the same evidence. The timestamps agree: each cancellation lands 1-3 seconds after the
+next merge's run is created, with a third run still in progress ahead of both.
+
+#### The second fix
+
+Give each push a group of its own, so there is no queue to be evicted from:
+
+```yaml
+group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+```
+
+On a pull request the group stays per-ref and cancellation keeps its real purpose. On a push the
+group is per-commit, so no two merges ever contend and `cancel-in-progress` never applies. The cost
+stated above gets larger, honestly: develop can now run several gates concurrently during a burst
+rather than serialising them. That is what "each merge is verified" costs.
+
+#### What this says about the guard
+
+`scripts/check-workflow-concurrency.sh` **passed the entire time.** It checked
+`cancel-in-progress: true` and nothing else, so it was blind to the mechanism that was actually
+discarding runs. Demonstrated directly — the old script against the exact configuration that lost
+11 runs:
+
+```
+$ git show 658116d9:scripts/check-workflow-concurrency.sh > scripts/_old.sh
+$ chmod +x scripts/_old.sh
+$ ./scripts/_old.sh                   # with the ref-keyed group restored in tier1-gate.yml
+OK: 9 push-triggered workflows, none cancels its own runs.
+rc=0
+```
+
+It has to be run from inside `scripts/`: the script does `cd "$(dirname "$0")/.."`, so a copy in
+`/tmp` walks to `/`, finds no workflows, and exits 1 on its own negative control. That red is not
+the answer to the question — it is the check failing to run, which is the distinction this
+document keeps making in the other direction.
+
+That is this repo's recurring failure — a green result that measured nothing — in a script written
+*to prevent* a green result that measured nothing, one day after writing it. The guard now checks
+both mechanisms and both arms are falsified by name, and it carries a second negative control:
+`with_concurrency == 0` fails, because a group check that finds no groups would pass whatever the
+workflows said.
+
+The narrower lesson is about how the first fix was verified. It was checked by reading the YAML and
+confirming the expression evaluated to `false` on a push — which was true, and was not the
+question. Nothing looked at whether develop's push runs actually completed afterwards. **A fix to
+CI's behaviour is verified by CI's subsequent behaviour, not by its configuration**, and the
+observation that would have caught this — the same `gh run list` in the table above — takes one
+command.
 
 #### Not fixed here
 
