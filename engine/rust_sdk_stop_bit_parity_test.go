@@ -73,15 +73,15 @@ func TestTheRustSDKAgreesOnTheStopBit(t *testing.T) {
 // so a guard on the sleep path would be a defect.
 //
 // Eight, not nine: this SDK has no call_with_retry.
-var rustCallsTheHostCanRefuse = []string{
-	"cleat_call",                  // DurableCall              engine/durablecalls.go
-	"cleat_call_heartbeat",        // DurableCallWithHeartbeat
-	"child_workflow",              // ChildWorkflow            engine/children.go
-	"child_workflow_with_options", // ChildWorkflowWithOptions
-	"plugin_call",                 // PluginCall               engine/plugins.go
-	"plugin_call_streaming",       // PluginCallStreaming
-	"await_signals_ms",            // DurableAwaitSignals      engine/signaller.go
-	"cleat_fetch",                 // Fetch                    engine/lifecycle.go (3.104)
+var rustCallsTheHostCanRefuse = []sdkRefusableCall{
+	{"cleat_call", "DurableCall"},
+	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
+	{"child_workflow", "childWorkflowWithVersion"},
+	{"child_workflow_with_options", "childWorkflowWithVersion"},
+	{"plugin_call", "PluginCall"},
+	{"plugin_call_streaming", "PluginCallStreaming"},
+	{"await_signals_ms", "DurableAwaitSignals"},
+	{"cleat_fetch", "Fetch"},
 }
 
 var rustCallsThatMustNotCheck = map[string]string{
@@ -117,7 +117,8 @@ func TestEveryRustCallTheHostCanRefuseChecksTheStopBit(t *testing.T) {
 	guard := regexp.MustCompile(`stop_requested\(result\)`)
 	decode := regexp.MustCompile(`memory::decode_\w+\(result\)`)
 
-	for _, fn := range rustCallsTheHostCanRefuse {
+	for _, c := range rustCallsTheHostCanRefuse {
+		fn := c.sdk
 		body := rustFnBody(t, src, fn)
 		gi := guard.FindStringIndex(body)
 		if gi == nil {

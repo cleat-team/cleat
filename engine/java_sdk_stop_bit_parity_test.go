@@ -76,17 +76,18 @@ func TestTheJavaSDKAgreesOnTheStopBit(t *testing.T) {
 // stated as a list rather than as "everywhere", and
 // TestTheRequiredJavaGuardsCoverEveryHostStopSite keeps it honest against the
 // engine.
-var javaCallsTheHostCanRefuse = []string{
-	"cleatCall",                // DurableCall            engine/durablecalls.go
-	"cleatCallWithRetry",       // DurableCallWithRetry   engine/durablecalls.go
-	"cleatCallHeartbeat",       // DurableCallWithHeartbeat
-	"childWorkflow",            // ChildWorkflow          engine/children.go
-	"childWorkflowWithOptions", // ChildWorkflowWithOptions
-	"pluginCall",               // PluginCall             engine/plugins.go
-	"pluginCallOutcome",        // PluginCall, second caller of the same import
-	"pluginCallStreaming",      // PluginCallStreaming    engine/plugins.go
-	"awaitSignalsMs",           // DurableAwaitSignals    engine/signaller.go
-	"cleatFetch",               // Fetch                  engine/lifecycle.go (3.104)
+var javaCallsTheHostCanRefuse = []sdkRefusableCall{
+	{"cleatCall", "DurableCall"},
+	{"cleatCallWithRetry", "DurableCallWithRetry"},
+	{"cleatCallHeartbeat", "DurableCallWithHeartbeat"},
+	{"childWorkflow", "childWorkflowWithVersion"},
+	{"childWorkflowWithOptions", "childWorkflowWithVersion"},
+	{"pluginCall", "PluginCall"},
+	// A second caller of the same import, so two entries share one host site.
+	{"pluginCallOutcome", "PluginCall"},
+	{"pluginCallStreaming", "PluginCallStreaming"},
+	{"awaitSignalsMs", "DurableAwaitSignals"},
+	{"cleatFetch", "Fetch"},
 }
 
 // javaCallsThatMustNotCheck are the methods where the guard would be a defect
@@ -126,7 +127,8 @@ func TestEveryJavaCallTheHostCanRefuseChecksTheStopBit(t *testing.T) {
 	guard := regexp.MustCompile(`Memory\.throwIfStopped\(result\)`)
 	decode := regexp.MustCompile(`Memory\.decode\w+\(result\)`)
 
-	for _, method := range javaCallsTheHostCanRefuse {
+	for _, c := range javaCallsTheHostCanRefuse {
+		method := c.sdk
 		body := javaMethodBody(t, src, method)
 		if rawCall.FindStringIndex(body) == nil {
 			t.Errorf("%s makes no `long result = ...(` host call, so this entry is stale",

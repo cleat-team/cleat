@@ -66,16 +66,16 @@ func TestTheAssemblyScriptSDKAgreesOnTheStopBit(t *testing.T) {
 // Same rule as the Java list, and the same reason it is a list rather than
 // "every host call": bit 31 is REACHABLE in packSleepResult, so a guard on the
 // sleep path would be a defect. See asCallsThatMustNotCheck.
-var asCallsTheHostCanRefuse = []string{
-	"cleatCallMs",              // DurableCall              engine/durablecalls.go
-	"cleatCallRetry",           // DurableCallWithRetry
-	"cleatCallHeartbeat",       // DurableCallWithHeartbeat
-	"childWorkflow",            // ChildWorkflow            engine/children.go
-	"childWorkflowWithOptions", // ChildWorkflowWithOptions
-	"pluginCall",               // PluginCall               engine/plugins.go
-	"pluginCallStreaming",      // PluginCallStreaming
-	"awaitSignalsMs",           // DurableAwaitSignals      engine/signaller.go
-	"cleatFetch",               // Fetch                    engine/lifecycle.go (3.104)
+var asCallsTheHostCanRefuse = []sdkRefusableCall{
+	{"cleatCallMs", "DurableCall"},
+	{"cleatCallRetry", "DurableCallWithRetry"},
+	{"cleatCallHeartbeat", "DurableCallWithHeartbeat"},
+	{"childWorkflow", "childWorkflowWithVersion"},
+	{"childWorkflowWithOptions", "childWorkflowWithVersion"},
+	{"pluginCall", "PluginCall"},
+	{"pluginCallStreaming", "PluginCallStreaming"},
+	{"awaitSignalsMs", "DurableAwaitSignals"},
+	{"cleatFetch", "Fetch"},
 }
 
 var asCallsThatMustNotCheck = map[string]string{
@@ -111,7 +111,8 @@ func TestEveryASCallTheHostCanRefuseChecksTheStopBit(t *testing.T) {
 	guard := regexp.MustCompile(`stopRequested\(result\)`)
 	decode := regexp.MustCompile(`decode\w+\(result\)`)
 
-	for _, method := range asCallsTheHostCanRefuse {
+	for _, c := range asCallsTheHostCanRefuse {
+		method := c.sdk
 		body := asMethodBody(t, src, method)
 		gi := guard.FindStringIndex(body)
 		if gi == nil {
