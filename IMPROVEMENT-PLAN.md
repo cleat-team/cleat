@@ -14415,3 +14415,126 @@ result word to carry bit 31, and `extractStringFromPacked` turns the sentinel in
 two options are a sentinel prefix in the string (matching the existing `"__CLEAT_ERROR__:"`
 convention, but re-opening exactly the collision §3.83 exists to record) or changing the WIT so a
 stop is unrepresentable as a response. The second is the right one and is a public-API change.
+
+### 3.109 Three tests ran in no job at all, and the tier-1 gate was building tier-2 toolchains — ✅ **FIXED** (WS-2, 2026-09-03)
+
+**§3.108 (WS-1) already fixed the red this started from**, and correctly: `scripts/tier-gate.sh`
+ran `go test` with no `-timeout`, so Go's 10-minute per-package default applied inside a job that
+allowed 45, and the engine package started tripping it with `fail=0`. `GO_TEST_TIMEOUT=30m` is
+the right fix and this item does not touch it.
+
+What that leaves is two things the timeout was hiding, both found while diagnosing the same red
+from the other end.
+
+> **The guard has already been used in anger, three times, before this landed** (2026-09-04).
+> Rebasing onto §3.105 (Java) and §3.106 (AssemblyScript) as they merged, it named
+> `TestJavaDeferSegmentRunsOnlyTheDefers`, `TestJavaOrdinarySegmentRunsTheBody` and
+> `TestAssemblyScriptDeferSegmentRunsOnlyTheDefers` as toolchain-building tests with no
+> `tiers.yaml` exclusion — all three written after this branch opened, by someone who had read
+> §3.105's own note about the naming trap. **Adding an engine test that builds a guest toolchain
+> and not tiering it is the default mistake, not an unusual one**, which is the case for a guard
+> rather than a checklist item. The three exclusions are in this change.
+>
+> §3.107's Rust equivalent was caught differently and worth contrasting: it does not merely
+> waste the gate's budget, it *skips* there — the runner image has node, a JDK and Gradle but
+> not `wasm32-wasip1` — so the Tier 1 Gate failed it outright with "tier 1 skipped 1 test(s)".
+> That exclusion landed on #659. Same defect, two different symptoms, and only one of them is
+> loud.
+
+#### Three tests were running in no job at all
+
+`TestARustGuestSuspendsCleanly`, `TestARustGuestReachesTheHostRetryLoop` and
+`TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker`:
+
+- excluded from the tier-1 gate by `tiers.yaml`, correctly, as tier 2;
+- skipped in `test-go/engine`, because `ci.yml` gates its Setup Rust step to the `internal`
+  package — which is exactly why they each cost a skip in `scripts/skip-budget.txt`;
+- **not selected by `e2e-cross-language.yml`**, the only job that installs the Rust
+  `wasm32-wasip1` toolchain, because its `-run` is
+  `"TestRust|TestPython|TestAssemblyScript|TestJava"` and **`"TestARust"` does not contain
+  `"TestRust"`**.
+
+Every job reported green. One of the three is §3.87's suspend probe, written the day before —
+the measurement that unblocked §3.107 — and it had never run in CI.
+
+This is the one-character trap §3.105 recorded hitting on `TestAJavaDeferSegment...` and catching
+by reading the workflow. It was already in the tree, twice over, and nothing anywhere said so:
+`go test -skip` removes a test with no `--- SKIP` line, and a `-run` that does not select one
+leaves nothing at all.
+
+Five more were in the same shape by a different route —
+`TestTheHostRunsDefersOfAKilledJavaWorkflow`,
+`TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow`,
+`TestAMissingDeferExportIsNotReportedAsAFailure`, `TestTheBackendLogsToTheConfiguredLogger`,
+`TestTheWazeroPathRunsDefersOfATrappedWorkflow`. They build a toolchain, are named for what they
+do rather than for their language, and so were caught by neither the exclusions nor the selector.
+The tier-1 gate was the only place they ran, which is the second problem below and is why fixing
+that one alone would have retired them.
+
+#### The tier-1 gate was building tier-2 toolchains
+
+`tier1-gate.yml` says of itself:
+
+> What this job deliberately does NOT provide: Rust, Node, a JDK or Gradle.
+
+True of its own setup steps, and false of the machine. The GitHub runner image preinstalls
+`node`, `npm`, `java` and `gradle`, so `buildAssemblyScriptWasm`'s `exec.LookPath("npm")`
+succeeds and the test builds rather than skipping. **A statement about what a job installs is not
+a statement about what is on the runner**, and every "this environment does not have X" comment
+in CI config is worth re-reading that way.
+
+`exclude_tests` caught some of it, and the shape of what it caught is the tell: `^TestRustWorkflow`
+is a prefix, so it took all five Rust tests, while Java and AssemblyScript got one exact-anchored
+name each. Eleven more built a JDK or ran `npm ci` here. Measured before §3.108 raised the
+timeout, one test per run:
+
+| run | slowest test | its time | engine package |
+|---|---|---|---|
+| #644's merge | `TestAssemblyScriptWorkflowDefersRun` | 7.55s | 375.850s ok |
+| a later merge | `TestAssemblyScriptWorkflowDefersRun` | 137.27s | 501.455s ok |
+| #647 | `TestAssemblyScriptWorkflowDefersRun` | 263.22s | 600.053s timeout |
+| #651 | `TestAssemblyScriptWorkflowDefersRun` | **426.84s** | 600.053s timeout |
+| #652 | `TestAssemblyScriptDeferSegmentRunsOnlyTheDefers` | 272.87s | 600.050s timeout |
+
+**Read the last row before drawing anything from the third column.** The cost is `npm ci`, paid
+once per package run by whichever AssemblyScript test happens to go first — so it MOVES as tests
+are added, and on #652 it landed on a test that PR had just written. "The slowest test is the test
+that got slow" was tempting and wrong every time.
+
+With a 30m budget this no longer fails anything. It is still four hundred seconds of a tier-2
+language inside the gate that decides whether tier 1 is releasable, and `tiers.yaml` declares
+tier 1's languages as `[go, python]`.
+
+#### The mechanism
+
+`engine/tier2_toolchain_tests_placement_test.go` walks the engine test sources with `go/parser`
+for every function that REACHES `buildJavaWasm`, `buildAssemblyScriptWasm` or `buildRustWasm`,
+and requires each to be **both** excluded from the tier-1 gate **and** matched by the
+cross-language job's `-run`. Either alone is a defect, and the two failure modes are the two
+halves above: selected-only burns the tier-1 budget, excluded-only runs nowhere.
+
+Transitive reachability rather than a direct-call grep, and that step earned itself immediately —
+`TestADeferBodyCannotContinueAsNew` and `TestADeferBodyCannotRegisterAnotherDefer` reach the
+builder through a helper, and a grep for `buildAssemblyScriptWasm(t)` inside test bodies called
+them toolchain-free. §3.105's two Java tests reach `buildJavaWasm` through `javaDeferSegment` the
+same way.
+
+It needs no toolchain and no database, so it runs in every job, including the gate it is about.
+
+#### Falsifying the guard is what fixed the guard
+
+Five falsifications. Dropping an exclusion, and narrowing the selector, each go red naming the
+test and which half is missing. The other three went at the vacuity check, and one found a real
+defect **in this test**: it first asserted `len(tests) >= 8`, and renaming
+`buildAssemblyScriptWasm` in its own map — which makes all nine AssemblyScript tests invisible to
+the scan — left eight Java and Rust tests behind, so it printed `ok`. **A floor a whole language
+can vanish underneath.** Per-language minimums now, falsified for all three builders.
+
+Same slack as §3.105's `>=` count gate, found the same way, one day later. Writing a guard and
+then trying to defeat it is not optional here.
+
+#### Not fixed
+
+The engine package is still the biggest thing in every job, and §3.108's 30m plus this item's
+~300s of headroom bought time rather than solving it. It was at 364s two days ago;
+`TestReplayStressBasic` alone is ~150s. The next crossing wants the package or the job split.
