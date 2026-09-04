@@ -4699,7 +4699,7 @@ Two caveats stated rather than buried:
 
 ---
 
-### 2.71 MSSQL session context is cleared by connection pooling — 🔶 **PARTLY FIXED** (found by WS-3, fixed by WS-1, 2026-08-04)
+### 2.71 MSSQL session context is cleared by connection pooling — 🟢 **BOTH HALVES FIXED, and the per-table coverage residual is closed** (found by WS-3, connection half fixed by WS-1 2026-08-04, schema half 2026-08-31, residual 2026-09-04)
 
 `MSSQLStoreFactory` gives each tenant a pool whose wrapped connector runs
 `sp_set_session_context`. The doc comment at `engine/mssql_store.go:270-272` says this happens
@@ -4829,8 +4829,34 @@ Both tables and both filter predicates ship:
 `FILTER PREDICATE dbo.fn_tenant_filter(tenant_id)` on `dbo.workflow_tags` and
 `dbo.workflow_routing`.
 
-**One thing this does *not* establish, stated rather than glossed.** That the predicates are
-*created* is read off the migration files; nothing asserts per-table policy coverage.
+> **Closed 2026-09-04 (WS-3): `TestEveryShippedTenantPolicyExistsInTheBuiltDatabase`**
+> (`engine/mssql_policy_coverage_test.go`). The residual below described this exactly, and it
+> was real — measured before fixing, **eight of the nine shipped predicates could be dropped
+> and both existing guards stayed green**.
+>
+> Both sides are read, neither is listed: the intended set is parsed out of
+> `migrations/mssql/*.sql`, the actual set from `sys.security_predicates` in the database those
+> migrations just built. A literal list of the nine names here would be a third copy that goes
+> stale in the direction that hides the defect — a policy deleted from a migration *and* from
+> the list agrees with itself.
+>
+> Proven able to fail, against a real SQL Server rather than by reasoning: dropping
+> `dbo.TenantFilter_Tags` and re-running reported `workflow_tags` shipped-but-absent, and the
+> policy was restored immediately. `SetupMSSQLFullSchema` does not heal that — `migration.Runner`
+> treats an applied migration as done regardless of what has since happened to the objects it
+> created, which is the property this section already documents and the reason the mutation is
+> observable at all.
+>
+> **What it deliberately does not assert**, because the number invites a wrong conclusion:
+> measured the same day, **38 tables carry a `tenant_id` column and 9 have a filter predicate**.
+> That is not a finding and must not be read as one. §3.86 (🟢, WS-1) covers the layer that
+> matters — statement-level tenant predicates in the Go SQL — and records its remaining 27 as
+> "an allowlist with reasons, not a backlog". RLS is off entirely for an admin connection, which
+> is *why* §3.86 fixed statements rather than policies. This test pins the backstop that exists
+> against erosion; it does not relitigate its scope.
+
+~~**One thing this does *not* establish, stated rather than glossed.** That the predicates are
+*created* is read off the migration files; nothing asserts per-table policy coverage.~~
 `requireMSSQLPoliciesIntact` (`engine/testutil/mssql_schema.go`) counts
 `sys.security_policies > 0`, and `mssql_rls_enforcement_test.go` checks `is_enabled` for one
 policy by name. A migration that dropped the predicate on `workflow_tags` specifically would
