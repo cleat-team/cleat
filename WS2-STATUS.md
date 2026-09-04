@@ -112,8 +112,13 @@ future session should not have to rediscover.
 >    closes many children in one statement and cannot ask Go about each row — two carriers of one
 >    rule, with `TestTheSQLPredicateAgreesWithTheGoOne` as the thing that keeps them honest.
 >
->    **What remains is transition 3**: `adminForceResolve`. Same shape, all three dialects,
->    reuses everything 3.112 and 3.114 built.
+>    **Transition 3 was DECLINED, not built** — `tiers.yaml` D10, 2026-09-04.
+>    `adminForceResolve` keeps its one-phase transition, because it is the operator's escape
+>    hatch for a workflow that is stuck and a defer phase needs the guest to replay. Recording
+>    it as a decision rather than leaving it on this list is the point: "not yet done" and
+>    "deliberately not done" read identically to the next person.
+>
+>    **§3.75 is therefore closed** — two transitions built, one declined, inventory complete.
 >
 >    The original note follows, because its evidence is still how to check the claim.
 >

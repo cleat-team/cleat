@@ -11088,7 +11088,7 @@ Re-derive: generate a wrapper and read it, or run
 `CleatEntryProcessorTest.testGeneratedWrapperPropagatesSuspension`. Removing the processor's
 suspend branch fails exactly that test and no other (282 tests, 1 failure).
 
-### 3.75 The durable record for a resumable defer phase — 🟡 **DESIGN ANSWER; BUILT for `TerminateWorkflow` 2026-09-04 (§3.112), two transitions to go** (WS-2, 2026-09-02)
+### 3.75 The durable record for a resumable defer phase — 🟢 **DONE 2026-09-04: two transitions built (§3.112, §3.114), the third declined (D10)** (WS-2, 2026-09-02)
 
 > **2026-09-02, read §3.81 before building this.** The record-shape answer below stands. One
 > supporting claim does not: the inventory excludes `RequestCancellation` because "the guest
@@ -11252,10 +11252,9 @@ shows a reset chain segment.
   `docs/reference/workflow-lifecycle.md` carries the vocabulary, including `terminating` as a
   seventh status with schema but no writer.
 - ~~Change the two host-driven terminal sites to mark rather than finalize, and move
-  `releaseWorkflowResources` behind the defer segment on those paths.~~ — ✅ **done for
-  `TerminateWorkflow` 2026-09-04 (§3.112), on all three dialects.** The parent-close `TERMINATE`
-  arm and `adminForceResolve` are the two that remain, and they reuse everything below rather
-  than adding to it.
+  `releaseWorkflowResources` behind the defer segment on those paths.~~ — ✅ **done 2026-09-04,
+  on all three dialects.** `TerminateWorkflow` in §3.112, the parent-close `TERMINATE` arm in
+  §3.114. `adminForceResolve` is **deliberately not converted** — see the closing note below.
 - ~~Add the defer segment to the executor: replay, run defers, finalize with the recorded
   outcome.~~ — ✅ **done 2026-09-04.** The segment itself was §3.81's; what §3.112 added is the
   claim that starts one (`status IN ('ready','terminating')` on five claim queries plus
@@ -11271,6 +11270,33 @@ registered defers has nothing to run in one, and paying a claim, a replay and a 
 instantiation for it would be a regression for every workflow in most deployments. §3.112's
 `deferPhaseOwed` is that gate, and it is also what kept the blast radius survivable — every
 existing test that terminates a fixture without defers is untouched.
+
+#### The inventory is closed, and one of the three is closed by declining it
+
+**`adminForceResolve` keeps its one-phase transition. `tiers.yaml` D10, decided 2026-09-04.**
+
+This section's inventory has three rows and this is the third. It is recorded as a decision rather
+than as remaining work, because "not yet done" and "deliberately not done" are indistinguishable
+to the next reader and the difference is the whole point — the same failure this document records
+for a heading with no status marker.
+
+The reason is what the verb is for. §3.20 describes force-complete and force-fail as the escape
+hatch for *"an operator trying to unstick a workflow"*, and they are fenced on generation but
+**not** on `assigned_to` precisely because the workflow being force-resolved usually has no live
+owner. A defer phase needs the guest to replay successfully. Making the escape hatch depend on
+that makes it depend on the thing that is already failing: an operator whose workflow is wedged
+would wait out `defer_phase_deadline` before the override took effect.
+
+It also has to agree with §3.114, which made every direct terminal `UPDATE` clear
+`pending_terminal_status`. That makes force-resolve **authoritative** over a defer phase already
+running — an operator can stop a cleanup that is itself stuck. Force-resolve both starting a phase
+and overriding one would have been two answers to one question.
+
+**What it costs**, stated rather than left implicit: guest-side cleanup never runs on this path.
+A defer body that would have released an external lock or closed a remote session does not run
+when an operator force-resolves. Host-side resources are unaffected — `releaseWorkflowResources`
+runs here as it always has — so what is skipped is external effects, and the operator's remedy is
+to terminate rather than force-resolve when the workflow is healthy enough to run its own cleanup.
 
 #### Open, and deliberately not decided here
 

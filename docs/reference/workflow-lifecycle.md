@@ -151,21 +151,25 @@ set a terminal status with a direct `UPDATE`:
 - `enforceParentClosePolicy`'s TERMINATE arm — **same qualification, same date.** A child that
   owes cleanup goes to `terminating` carrying `pending_terminal_status = 'failed'`; a child that
   owes none is failed here as before.
-- `adminForceResolve` (`engine/store_admin.go:154`)
+- `adminForceResolve` (`engine/store_admin.go:154`) — **and it stays that way, deliberately.**
+  `tiers.yaml` D10: force-complete and force-fail are the operator's escape hatch for a workflow
+  that is stuck, and a defer phase needs the guest to replay successfully. See the closing note
+  in the defer-phase section below.
 
 Re-derive with `grep -rn "SET status = '" --include='*.go' engine/ | grep -v _test` across all
 three dialects. These three are the reason the defer phase below needs a design at all: a
 workflow that reaches a terminal status this way never had a live instance, so **its registered
-defers never ran** (IMPROVEMENT-PLAN §3.75). One of the three still works that way.
+defers never ran** (IMPROVEMENT-PLAN §3.75). Two of the three now run them; the third does not,
+by decision rather than by omission.
 
 ---
 
 ## The defer phase, and the status window it introduces
 
 **Status: live for `TerminateWorkflow` (§3.112) and for the parent-close `TERMINATE` arm
-(§3.114) since 2026-09-04. `adminForceResolve` is the one unfenced transition that still
-terminates in one step and still skips its defers.** This section describes what those two do
-now.
+(§3.114) since 2026-09-04. `adminForceResolve` deliberately keeps its one-step transition —
+`tiers.yaml` D10.** This section describes what the first two do now, and ends with why the third
+is different.
 
 The durable record:
 
@@ -233,8 +237,26 @@ where that is recorded rather than something the finalize is told: `TerminateWor
 `terminated`, the parent-close arm records `failed`. One finalize, two outcomes, and nothing
 between the phases can substitute a third.
 
-`adminForceResolve` remains terminal-and-immediate, and its defers do not run at all. That is
-unchanged, not a regression.
+### Why `adminForceResolve` is not one of them
+
+Force-complete and force-fail remain terminal-and-immediate, and their defers do not run.
+**That is a decision (`tiers.yaml` D10), not the transition nobody got to.**
+
+They are the operator's escape hatch for a workflow that is stuck — fenced on generation but not
+on `assigned_to`, because a workflow being force-resolved usually has no live owner. A defer phase
+requires the guest to replay successfully, so routing the escape hatch through one would make it
+depend on the thing that is already failing: an operator whose workflow is wedged would wait out
+`defer_phase_deadline` before the override took effect.
+
+It is also what makes force-resolve **authoritative** over a defer phase that is already running.
+Every direct terminal `UPDATE` clears `pending_terminal_status`, so an operator can stop a cleanup
+that is itself stuck — and a workflow cannot be left terminal with a marker the deadline sweep
+would later act on.
+
+**What it costs:** guest-side cleanup does not run on this path. A defer body that would have
+released an external lock or closed a remote session is skipped. Host-side resources are
+unaffected — concurrency keys and the sticky assignment are still released. If the workflow is
+healthy enough to run its own cleanup, terminate it rather than force-resolving it.
 
 ---
 
