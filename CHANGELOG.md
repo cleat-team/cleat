@@ -45,10 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     defer phases are never claimed, so every terminate waits out its deadline and
     skips the cleanup.
 
-  The parent-close `TERMINATE` policy and the admin force-resolve verbs are
-  unchanged: they still terminate in one step and still skip their defers.
+  **A closing parent's `TERMINATE` children work the same way**, and the change
+  matters more there because it is a bulk operation: one closing parent used to
+  drop every child's concurrency keys and sticky assignment at once, before any
+  of their defers had run. A child that owes cleanup now goes to `terminating`
+  carrying `pending_terminal_status = 'failed'` — the close policy's own
+  outcome, not `terminated` — and is failed once its defers have run. A child
+  that owes none is failed immediately, as before.
 
-  See IMPROVEMENT-PLAN §3.75 and §3.112, and
+  The admin force-resolve verbs are unchanged: they still terminate in one step
+  and still skip their defers.
+
+  See IMPROVEMENT-PLAN §3.75, §3.112 and §3.114, and
   `docs/reference/workflow-lifecycle.md` for the whole state machine.
 
 - **Workflow definition names are now per-tenant.** `workflow_defs`' primary key

@@ -917,15 +917,39 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 	}
 	defer tx.Rollback()
 
-	// Terminate children with TERMINATE policy.
+	// Terminate children with TERMINATE policy -- in two arms, split by
+	// whether the child owes cleanup. See PostgresStore's for the reasoning;
+	// both arms are in this one transaction, so the partition cannot apply
+	// by halves. IMPROVEMENT-PLAN 3.114.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'failed', error_msg = 'parent workflow terminated'
+		SET status = 'failed', error_msg = 'parent workflow terminated',
+		    pending_terminal_status = NULL, defer_phase_deadline = NULL
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
+		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID); err != nil {
 		s.log().WarnContext(ctx, "enforceParentClosePolicy: TERMINATE children not failed",
+			"parent_workflow_id", parentWorkflowID, "error", err)
+		return
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = '`+statusTerminating+`',
+		    pending_terminal_status = 'failed',
+		    defer_phase_deadline = `+deferPhaseDeadlineMySQL+`,
+		    error_msg = 'parent workflow terminated',
+		    next_wake_at = NOW(6),
+		    assigned_to = NULL,
+		    generation = generation + 1
+		WHERE parent_workflow_id = ?
+		  AND parent_close_policy = 'TERMINATE'
+		  AND status NOT IN ('done', 'failed')
+		  AND `+deferPhaseOwedSQL+`
+	`, parentWorkflowID); err != nil {
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: TERMINATE children with defers not moved to their defer phase",
 			"parent_workflow_id", parentWorkflowID, "error", err)
 		return
 	}
@@ -962,6 +986,7 @@ func (s *MySQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkfl
 		WHERE parent_workflow_id = ?
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
+		  AND NOT `+deferPhaseOwedSQL+`
 	`, parentWorkflowID)
 	if err != nil {
 		return nil, err

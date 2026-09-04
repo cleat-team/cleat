@@ -1222,12 +1222,15 @@ tier3:
 #       Terminate is ASYNCHRONOUS, and the window is named.
 #       Recorded inline in the tenancy block; see IMPROVEMENT-PLAN 3.76 and #576.
 #
-#       What shipped, and what did not. The decision names THREE transitions;
-#       IMPROVEMENT-PLAN 3.112 built the first. `TerminateWorkflow` marks
-#       'terminating', the dispatch loop claims it, the defer segment runs the
+#       What shipped, and what did not. The decision names THREE transitions.
+#       IMPROVEMENT-PLAN 3.112 built the first and 3.114 the second, both on
+#       2026-09-04: `TerminateWorkflow` and the parent-close TERMINATE arm mark
+#       'terminating', the dispatch loop claims them, the defer segment runs the
 #       cleanup, and only then is the recorded outcome applied and the workflow's
-#       resources released. The parent-close TERMINATE arm and adminForceResolve
-#       still terminate in one step and still skip their defers.
+#       resources released. The two record DIFFERENT outcomes -- 'terminated' and
+#       'failed' -- which is why the finalize reads the outcome from the row
+#       rather than taking one from its caller. adminForceResolve is the third
+#       and still terminates in one step, skipping its defers.
 #
 #       One qualification the decision did not carry and now does: terminate is
 #       asynchronous WHEN THE WORKFLOW OWES CLEANUP. A workflow with no registered

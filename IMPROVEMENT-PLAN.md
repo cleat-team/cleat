@@ -15348,3 +15348,101 @@ the ~10 lines where a claim carrying a marker is routed away from the ordinary s
 finalize are only covered by the mock-store side. Deleting that branch turns every terminate with
 defers into a workflow that reschedules itself forever, and the test that would catch it does not
 exist.
+
+### 3.114 A closing parent pre-empted every child's cleanup at once — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+§3.75 step 2, transition **2 of 3**. §3.112 did `TerminateWorkflow`; this does the parent-close
+`TERMINATE` arm. `adminForceResolve` is the one that remains.
+
+**Same defect, one property worse.** `enforceParentClosePolicy`'s TERMINATE arm commits
+`SET status = 'failed', error_msg = 'parent workflow terminated'` for every child of a closing
+parent, and then `releaseTerminatedChildren` drops each child's concurrency keys and sticky
+assignment. The children's registered defers never ran, and the resources those defers would have
+released were dropped anyway. It is a **bulk** operation, so one closing parent pre-empts the
+cleanup of every child at once rather than one workflow's.
+
+**What ships.** The arm splits in two, partitioned by whether the child owes cleanup. A child
+with registered defers goes to `terminating` carrying `pending_terminal_status = 'failed'`; a
+child without is failed immediately, exactly as before. `childrenClosedByTerminate` — the list
+whose resources get released — is narrowed by the same predicate, which is the half that actually
+fixes the ordering: a child entering its defer phase must not be released here.
+
+The outcome carried is `'failed'`, not `'terminated'`. That is the close policy's own outcome,
+and it is why `FinalizeDeferPhase` reads the status from the row rather than taking one from its
+caller (§3.112): two transitions record two different outcomes through one finalize.
+
+#### The predicate exists twice, and nothing structural keeps the copies honest
+
+The single-row paths ask Go (`deferPhaseOwed`). The parent-close arms close many children in one
+statement and cannot, so they ask SQL (`deferPhaseOwedSQL`). Two carriers of one rule.
+
+**That is the §3.98 shape**: compaction had a completeness property test and the database payload
+carrier had none, and every payload defect was invisible until someone noticed the behaviour it
+broke. So `TestTheSQLPredicateAgreesWithTheGoOne` seeds a real row for each of 13
+(status × has-defers × compacted) combinations, evaluates the SQL predicate against it, and
+compares with the Go function's answer for the same inputs. It carries its own vacuity guard:
+agreement is worthless if every case answered the same way, so it also asserts that the answers
+are mixed.
+
+One fragment for all three dialects, with no table alias — PostgreSQL and MySQL take
+`UPDATE workflow_instances w`, SQL Server takes `UPDATE w ... FROM workflow_instances w`, and
+three spellings of one rule is the thing this section is about. Referencing the target table by
+name inside the correlated subquery is legal on all three: MySQL's "cannot select from the table
+you are updating" restriction is about the subquery's `FROM`, and this one reads `event_history`.
+
+#### Falsified
+
+| removed | fails with |
+|---|---|
+| the defer-phase arm | `the child with defers is "ready", want "terminating"` — and *"ready"* rather than *"failed"*, because the plain arm's `AND NOT` leaves that child untouched, which is the partition working |
+| `AND NOT` from `childrenClosedByTerminate` | `the closing parent released its child's concurrency slot before the child's defers had run` |
+| the compaction clause from `deferPhaseOwedSQL` | `status="running" defers=false compacted=true: SQL says false, Go says true` |
+
+**A fourth falsification did not apply and printed `ok`.** The patch script's pattern missed
+because `gofmt` had closed the spaces around `+ deferPhaseOwedSQL +`, and the run reported a clean
+pass for a mechanism that was still present. Caught by the assertion in the patch script rather
+than by reading the green — which is the argument for making a falsification *assert* that it
+changed something, not merely attempt it. It is the same failure this file's "Is this result
+real?" section is about, arriving through the tool built to prevent it.
+
+#### Two things an existing guard found, one of them about the guard
+
+`TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate` failed twice on this change, and both
+failures are worth keeping.
+
+**The first was legitimate.** The new SQL Server arm assembled its statement by concatenating a Go
+constant into the middle of a raw string, and the guard reads SQL out of source string literals —
+so it saw only the fragment up to the opening quote of the status value, with no `WHERE` clause at
+all, and reported the statement as having no tenant predicate. The statement has one. The guard
+was still right to fail: a statement built that way is not statically checkable, and the allowlist
+entry the failure message invites would have exempted the whole **function**, leaving every future
+edit to `enforceParentClosePolicy` unchecked on the dialect where an explicit predicate is the
+entire isolation mechanism (`dbo.fn_tenant_filter` is off for any `dbo.cleat_admin` connection).
+Restructured into one `fmt.Sprintf` over a single literal instead, so the predicate is visible to
+a reader and to the guard.
+
+**The second is a blind spot in the guard.** The comment written to explain the first failure
+quoted the offending fragment in backticks — and `sqlLiteralRe` is a regex over backtick-delimited
+spans that does not know a Go comment from code, so the comment became an offending literal. The
+guard failed on the explanation of why it had failed.
+
+Two consequences, and the second is the one that matters:
+
+- attribution is wrong for anything outside a function body. The reported name was
+  `startNewRunOnce`, eleven lines below the comment and unrelated to it.
+- **the remedy the message offers would be actively harmful.** It says to allowlist
+  `mssql_lifecycle.go:startNewRunOnce` with a true reason — which, followed on a false positive,
+  silently exempts a real function that writes `workflow_instances` and had nothing to do with the
+  failure. A guard whose failure message can talk you into exempting the wrong function is worse
+  than one that simply fails.
+
+Not fixed here, and reported to the guard's owner: skipping Go comment spans before the regex runs
+is the fix, and the falsification writes itself — a comment containing a backticked unscoped
+statement must not fail, and the same text in code must. This section carries a
+"do not quote SQL in backticks near here" line at the call site, which is a workaround.
+
+#### What remains
+
+`adminForceResolve` (§3.20's force-complete and force-fail), transition 3 of 3. It is the same
+shape as this one — a direct terminal `UPDATE` on an unclaimed workflow, on all three dialects —
+and reuses everything §3.112 and this section built.

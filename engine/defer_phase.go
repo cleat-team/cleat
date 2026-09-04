@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -61,6 +62,44 @@ const statusTerminating = "terminating"
 // defer bodies, on a claimed instance, and a cleanup that has not finished in
 // five minutes is not going to be finished by waiting.
 const deferPhaseTimeout = 5 * time.Minute
+
+// deferPhaseOwedSQL is deferPhaseOwed as a predicate, for the set-based paths
+// that close many workflows in one statement and so cannot ask Go about each
+// row. IMPROVEMENT-PLAN 3.114.
+//
+// It has to say the same thing as the Go function, and nothing structural makes
+// it: they are two carriers of one rule, which is the shape this repo has been
+// bitten by before (compaction had a completeness property test and the
+// database payload had none, and every payload defect was invisible until the
+// behaviour it broke was noticed). TestTheSQLPredicateAgreesWithTheGoOne
+// evaluates this against real rows in every status and compares the answers.
+//
+// No table alias. PostgreSQL and MySQL take `UPDATE workflow_instances w`,
+// SQL Server takes `UPDATE w ... FROM workflow_instances w`, and one fragment
+// that works in all three is worth more than a shorter one that needs three
+// spellings. Referencing the target table by name inside the correlated
+// subquery is legal on all three -- MySQL's "cannot select from the table you
+// are updating" restriction is about the subquery's FROM, and this one reads
+// event_history.
+const deferPhaseOwedSQL = `(workflow_instances.status IN ('ready', 'running', 'suspended')
+		   AND (workflow_instances.compaction_state IS NOT NULL
+		        OR EXISTS (SELECT 1 FROM event_history e
+		                   WHERE e.workflow_id = workflow_instances.id
+		                     AND e.event_type = 'defer')))`
+
+// The deadline expression, per dialect, with the timeout embedded as a literal
+// rather than bound as a parameter.
+//
+// Embedded because these go into statements whose parameter lists already
+// differ between dialects -- SQL Server's parent-close steps carry a tenant
+// parameter the other two do not -- and threading one more argument through
+// three different runners to pass a compile-time constant would be three
+// changes to buy nothing. It is not user input: it is int(deferPhaseTimeout).
+var (
+	deferPhaseDeadlinePostgres = fmt.Sprintf("now() + interval '%d seconds'", int(deferPhaseTimeout.Seconds()))
+	deferPhaseDeadlineMySQL    = fmt.Sprintf("NOW(6) + INTERVAL %d SECOND", int(deferPhaseTimeout.Seconds()))
+	deferPhaseDeadlineMSSQL    = fmt.Sprintf("DATEADD(SECOND, %d, SYSUTCDATETIME())", int(deferPhaseTimeout.Seconds()))
+)
 
 // DeferPhaseStore is implemented by stores that can complete a two-phase
 // terminal transition.

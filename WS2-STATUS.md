@@ -106,9 +106,14 @@ future session should not have to rediscover.
 >    The note was written from the line number without reading the enclosing function. The
 >    language gate closed itself — `deferSegmentLanguages` reached all five on 2026-09-04.
 >
->    **What remains is transitions 2 and 3**, and they reuse everything step 2 built: the
->    parent-close `TERMINATE` arm, then `adminForceResolve`. §3.88 §1 confirmed all three sites
->    are symmetric on all three dialects, so these are the mechanical half.
+>    **Transition 2 landed the same day** — the parent-close `TERMINATE` arm, §3.114. It is the
+>    same shape with one property worse: a bulk operation, so one closing parent pre-empted the
+>    cleanup of every child at once. It also forced the predicate into SQL, because the arm
+>    closes many children in one statement and cannot ask Go about each row — two carriers of one
+>    rule, with `TestTheSQLPredicateAgreesWithTheGoOne` as the thing that keeps them honest.
+>
+>    **What remains is transition 3**: `adminForceResolve`. Same shape, all three dialects,
+>    reuses everything 3.112 and 3.114 built.
 >
 >    The original note follows, because its evidence is still how to check the claim.
 >
