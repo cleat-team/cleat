@@ -7440,7 +7440,7 @@ when this paragraph was written.** The doubled defer body (finding 3) is likewis
 fixed in §3.64: running a destructor twice is wrong under every set of semantics in the decision
 table above.
 
-### 3.36 errcheck's 283 findings, triaged — 🔶 **1 real defect found, handed to WS-1** (WS-3, 2026-08-05)
+### 3.36 errcheck's 283 findings, triaged — 🟢 **THE DEFECT WAS FIXED in §3.43 (2026-08-31); errcheck itself is still not enabled** (WS-3, 2026-08-05)
 
 The companion to §3.33. `PARALLEL-WORKSTREAMS.md` singles errcheck out as **"the class that
 produced §1.2 and §2.50"** — both real defects, both literally a discarded error return — so
@@ -7487,6 +7487,39 @@ handling.
 **Handed to WS-1** rather than patched here: `engine/mysql_*.go` and `engine/mssql_*.go` are
 theirs and had three commits land in them today. Same treatment as §3.34, which they picked up
 within the hour.
+
+**The handoff was completed, and this heading did not say so for four days.** Recorded
+2026-09-04. §3.43 fixed it on 2026-08-31 (#500), in the shape suggested above: one unexported
+helper, `releaseWorkflowResources` in `engine/workflow_cleanup.go`, taking a two-method
+interface so one copy serves all three stores, warning on each of the two errors. The
+parent-close half followed in §3.80 (#583), where a closing parent had been stranding a
+concurrency slot per child.
+
+Verified 2026-09-04 rather than taken from §3.43:
+
+```
+$ go test -count=1 -run TestBestEffortCleanupGoesThroughTheHelper ./engine/
+--- PASS: TestBestEffortCleanupGoesThroughTheHelper (0.03s)
+
+$ grep -rn "releaseWorkflowResources(s.log()" --include="*.go" engine/ | grep -v _test.go | grep -c .
+21
+```
+
+The guard fails if a new call site reintroduces either dropped-error form, so the three dialects
+cannot drift apart again silently. (21 sites, not the 20 §3.43 measured — the count grew with the
+codebase, which is what a dated number does.)
+
+**Why this correction is worth its own paragraph.** A 🔶 saying *"handed to WS-1"* is
+indistinguishable from open work assigned to a named stream, and it stayed that way for four days
+over a body describing a fix that had shipped. This is the failure CLAUDE.md records for §1.1 and
+§1.2 — a status marker read as "not started" while the fix sat on develop — with the additional
+cost that this one names an owner, so it reads as *someone else's* outstanding task. It was found
+by scanning for WS-1's open items and picking this one up to work on.
+
+**What remains open here is the linter, not a defect.** The other groups in the table above were
+classified, not fixed, and the classification stands: `tx.Rollback` (152) is the idiom,
+`fs.Parse` (13) is noise after `flag.ExitOnError`, and the write-and-lock tail is the part worth
+a pass. Nothing in it is a known defect.
 
 **Why errcheck still should not be enabled yet.** 152 `tx.Rollback` findings would have to be
 suppressed first, and blanket-suppressing the single most common shape in the codebase to turn
