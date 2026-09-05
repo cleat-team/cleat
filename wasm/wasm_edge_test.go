@@ -1017,17 +1017,27 @@ func TestGenerateHostAdapterWithAwaitAllChildren(t *testing.T) {
 }
 
 func TestGenerateHostAdapterWithSideEffect(t *testing.T) {
-	// SideEffect has func() (string, error) param.
+	// This asserted `fn func() (string, error)` until 2026-09-05, matching
+	// cleat.HostCalls.SideEffect -- the method a workflow calls. The generated
+	// closure is assigned to cleat.HostCallsOptions.SideEffect, which is
+	// func(computedResult string) (string, error): HostCallsImpl.SideEffect
+	// invokes the closure itself and passes the computed string down. So the
+	// old expectation pinned a closure the struct literal would not accept, and
+	// no workflow calling SideEffect could be built.
+	//
+	// syntaxCheck below is why that survived -- it parses the generated code,
+	// and a type error is not a parse error. See IMPROVEMENT-PLAN 3.204.
 	usage := &UsageInfo{
 		Used:  map[string]bool{"cleat_side_effect": true},
 		Funcs: []HostFunction{{ImportName: "cleat_side_effect", FieldName: "SideEffect"}},
 	}
 	code := string(GenerateHostAdapter("mypkg", usage, "go"))
-	if !strings.Contains(code, "fn func() (string, error)") {
-		t.Errorf("expected func() param pattern")
+	if !strings.Contains(code, "SideEffect: func(computedResult string) (string, error)") {
+		t.Errorf("expected the closure to take the computed string, matching " +
+			"cleat.HostCallsOptions.SideEffect")
 	}
-	if !strings.Contains(code, "_computedResult, _sideEffectErr := fn()") {
-		t.Errorf("expected sideEffect call pattern")
+	if !strings.Contains(code, "computedResultPtr, computedResultLen := stringPtr(computedResult)") {
+		t.Errorf("expected the computed string to be passed to the import")
 	}
 	syntaxCheck(t, "GenerateHostAdapter(sideeffect)", code)
 }
@@ -1224,9 +1234,16 @@ func TestOutBufNamesEdgeCases(t *testing.T) {
 		{"cleat_call_retry", 1, "responseBuf"},
 		{"cleat_await_signals", 2, "signalNameBuf"},
 		{"cleat_poll_cancellation", 1, "reasonBuf"},
-		// Note: outBufNames uses the raw param name from importDefs (snake_case).
-		{"cleat_create_promise", 1, "promise_id_outBuf"},
-		{"cleat_await_promise", 1, "result_outBuf"},
+		// These two read "promise_id_outBuf" and "result_outBuf" until 2026-09-05,
+		// under a note explaining that outBufNames uses the raw importDefs param
+		// name. The note was accurate and the expectation was a defect: the
+		// adapters reference promiseIDOutBuf and resultOutBuf, so the buffer this
+		// function named was one no compiling code could use, and promises could
+		// not be built at all. The importDefs params are camelCase now, and the
+		// test that would have caught it is
+		// TestGeneratedAdapterCompilesForEveryHostCall. See IMPROVEMENT-PLAN 3.204.
+		{"cleat_create_promise", 1, "promiseIDOutBuf"},
+		{"cleat_await_promise", 1, "resultOutBuf"},
 		{"cleat_side_effect", 1, "cachedResultBuf"},
 		{"plugin_call_streaming", 1, "responseBuf"},
 	}

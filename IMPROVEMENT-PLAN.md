@@ -3389,6 +3389,104 @@ memory and named a database `cleat_test` that does not exist — the exact failu
 `WORKSTREAM.md`; read them. The probe used afterwards has a negative control: the good DSN passes
 `TestPluginMigrations_AllDialects` and a wrong password fails it.
 
+### 3.204 Locks, promises and side effects could not be compiled from any Go WASM workflow — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Four host calls generated Go that does not compile. **Not a subtle failure mode — `cleat build`
+exits 1** on any workflow that touches them:
+
+```
+h.AcquireLock("k", time.Second)
+  gen_host_adapter.go: undefined: ttl_ms
+  gen_host_adapter.go: unknown field AcquireLockMs in struct literal of type cleat.HostCallsOptions
+
+h.AwaitPromise(id, 5*time.Second)
+  undefined: promise_idPtr, promise_idLen, timeout_ms, resultOutBuf
+
+h.SideEffect(func() (string, error) { ... })
+  cannot use func(fn func() (string, error)) (string, error) as
+  func(computedResult string) (string, error) value in struct literal
+```
+
+Distributed locks, durable promises and side effects are three of the primitives a durable
+workflow engine exists to provide. All three were unusable from Go, the tier-1 guest language.
+
+**Found while writing the test §3.200 said was missing**, which is the whole reason to write the
+test a report admits it did not do rather than filing the gap and moving on.
+
+## Three independent causes
+
+**1. `adapterDefs` had an entry for a field that does not exist.** `AnalyzeUsage` keys `info.Used`
+by *ImportName*, so once `cleat_acquire_lock` is used, **every** `hostFunctions` row sharing that
+import contributes a struct field — and `AcquireLockMs` is not a field on `cleat.HostCallsOptions`.
+`HostCallsImpl.AcquireLockMs` reaches the host through `opts.AcquireLock`, so the entry was never
+needed. Removed. The other two multi-row imports, `cleat_defer` and `cleat_sleep`, are both real
+fields and are fine:
+
+    grep -c '"AcquireLockMs": {' wasm/adapter_metadata.go   # 0
+
+**2. The import spec and the adapter spec had to agree on parameter names, and nothing made them.**
+For a scalar the generator emits the *import's* name as the call argument, and for a string it
+emits `<importName>Ptr`/`<importName>Len`. The import specs were snake_case and the adapters
+camelCase, so five names never resolved: `ttl_ms`, `promise_id`, `timeout_ms`, `result_out`,
+`promise_id_out`. Renamed to match the adapters, which is the convention the working calls already
+used (`timeoutMs` in `cleat_send_signal_and_wait`).
+
+**3. Two adapters declared a closure the options struct will not accept.**
+`HostCallsOptions.AwaitPromise` is `func(promiseID string, timeout time.Duration)` and the adapter
+declared `timeoutMs int64`. `HostCallsOptions.SideEffect` is `func(computedResult string)` — the
+SDK's `HostCallsImpl.SideEffect` calls the closure itself and passes the computed string on — and
+the adapter declared `fn func() (string, error)`.
+
+## Why every existing test passed
+
+**Nothing compiled generated code.** Every test in `./wasm/` inspects the generated source *as a
+string*, so an identifier that does not exist and a closure of the wrong type both pass.
+
+And the gap was known. `TestRunBuild_GoTargetBuildDir` in `cmd/cleat` runs the whole pipeline —
+analyze, `BuildOutputs`, `PrepareBuildDir` — and stops one step short, saying so in its own
+comment: *"Verify the build directory setup for the go target without requiring actual go build to
+compile."* It then asserts the generated files **exist**. Four broken host calls sat behind that
+sentence.
+
+§3.200 recorded the same gap from the other side and, having recorded it, did not close it: "a
+wrong buffer name would pass every test in that package… a test that builds a workflow exercising
+every host call would be strictly better and does not exist." Its substitute check — is each
+identifier used elsewhere in the same adapter — reported **15 of 15 clean**, because
+`AwaitPromise` used `resultOutBuf` consistently in both branches of an adapter that had never
+compiled. **A consistency check cannot see a name that is consistently wrong.**
+
+## The test
+
+`TestGeneratedAdapterCompilesForEveryHostCall` runs the real pipeline over
+`testdata/allhostcalls`, a workflow calling every `HostCalls` method, then invokes the Go
+compiler for `wasip1/wasm` on the result. All 37 `adapterDefs` fields are exercised — asserted,
+not assumed, by the companion test below — and 53 host functions reach the adapter.
+
+`TestEveryHostCallIsExercisedByTheCompileFixture` keeps it honest — a call the fixture never makes
+is a call nobody compiles. It caught three on its first run (`DurableCallWithHeartbeat`,
+`DurableDeferFunc`, `RegisterUpdateHandler`), which were then added.
+
+**Falsified:** restoring `ttl_ms` alone fails the compile test with
+`gen_host_adapter.go:388:53: undefined: ttl_ms` — the generator's own output, not a proxy for it.
+
+**CI caught two things this section's own reasoning had missed.**
+
+`engine/stop_correspondence_guard_test.go`'s `stopSurfaces` table named `"AcquireLockMs"` as a Go
+adapter, so removing the entry made that guard fail with *`stopSurfaces["AcquireLock"] names Go
+adapter "AcquireLockMs", which is not in adapterDefs`*. The table is right to notice — it
+cross-references three surfaces — and the entry is now `{"AcquireLock"}` with the reason recorded
+beside it.
+
+And the test shipped with a `-short` skip, one paragraph below a comment saying it must never
+learn to skip. `scripts/check-skips.sh` rejected it, and its taxonomy names the error exactly:
+this is case (c), *"the precondition is always satisfiable in this repo"*. There is no
+environmental question to ask, so a skip here is a decision not to run the test. Removed rather
+than baselined.
+
+The test must not learn to skip. `wasip1` ships with the standard toolchain, so there is no
+environmental precondition to detect; a skip here restores exactly the blind spot the test removes.
+It is guarded only by `-short`.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
