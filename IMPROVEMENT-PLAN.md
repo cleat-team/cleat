@@ -3159,6 +3159,20 @@ rule and the assertion names one call**, so it stayed green while two other adap
 layout carried the same defect. This is CLAUDE.md's "a test whose NAME asserts the mechanism"
 in its other form: here the *comment* asserted the mechanism and the test checked an instance.
 
+**Follow-up, same day — the fix prefixed what `callErrorMessage` already names.** Wrapping its
+result in `fmt.Errorf("plugin_call: %s", ...)` doubles the call name on the fallback path
+(`plugin_call: plugin_call: error 2 (...)`) and, on the success path, prepends a name the other
+guests do not print. The second half is the one that matters: this section exists to make a Go
+guest report what Rust, AS and Java report, and `plugin_call: blobstore: no tenant context`
+against their `blobstore: no tenant context` is still a divergence — a smaller one than
+`error 1`, but the same kind. Measured by WS-2 on the harness: `llm.chat_stream` read
+`plugin_call_streaming: plugin_call_streaming: no plugin stream registry configured`. Fixed by
+returning `callErrorMessage`'s result verbatim; the fallback keeps the call name because
+`callErrorMessage` puts it there itself, which is exactly why the wrapper must not. Pinned by
+`TestPluginAdaptersDoNotPrefixWhatCallErrorMessageAlreadyNames`. **This decides the question for
+the remaining 13 too** — whatever `hostErrMessage` does about prefixing will do it for all of
+them at once, so settling it here is cheaper than unpicking it later.
+
 CLAUDE.md records that all four prior defects at this boundary were "the value meant the wrong
 thing on one side of the boundary", and none was an overflow. This is a fifth, and it is that
 exactly — twice over: a length that was read and dropped, and a code read from the wrong field.

@@ -124,3 +124,45 @@ func adapterCallName(field string) string {
 	}
 	return field
 }
+
+// TestPluginAdaptersDoNotPrefixWhatCallErrorMessageAlreadyNames pins that the
+// adapter returns callErrorMessage's result verbatim rather than prefixing it
+// with the call name a second time.
+//
+// callErrorMessage returns one of two things. When the host wrote a message it
+// returns that text unchanged; when it did not, it returns its own
+// "<callName>: error N (<legend>)". So a caller that wraps the result in
+// "<callName>: %s" doubles the name on the fallback path --
+//
+//	plugin_call: plugin_call: error 2 (0=unknown 1=timeout ...)
+//
+// -- and on the success path prepends a name the other guests do not print.
+// That second half is the one that matters: 3.200 exists to make a Go guest
+// report what Rust, AssemblyScript and Java report for the same failure, and
+// "plugin_call: blobstore: no tenant context" against their "blobstore: no
+// tenant context" is still a divergence, just a smaller one than "error 1".
+//
+// Measured by WS-2 on the plugin harness after 3.200 landed: llm.chat_stream
+// read "plugin_call_streaming: plugin_call_streaming: no plugin stream
+// registry configured", the host message in that one case already beginning
+// with the call name.
+//
+// The fallback keeps the call name because callErrorMessage puts it there
+// itself -- which is the whole reason the wrapper must not.
+func TestPluginAdaptersDoNotPrefixWhatCallErrorMessageAlreadyNames(t *testing.T) {
+	for _, name := range []string{"PluginCall", "PluginCallStreaming"} {
+		stmts := strings.Join(adapterDefs[name].ResultStmts, "\n")
+		call := adapterCallName(name)
+
+		if strings.Contains(stmts, `fmt.Errorf("`+call+`: %s"`) {
+			t.Errorf("%s: prefixes callErrorMessage's result with %q, which doubles "+
+				"the call name on the fallback path and diverges from the other "+
+				"guests on the host-message path", name, call+": ")
+		}
+		// The property above is only meaningful while the message still comes
+		// from callErrorMessage; without this a deleted call would pass.
+		if !strings.Contains(stmts, "callErrorMessage(") {
+			t.Errorf("%s: no longer calls callErrorMessage", name)
+		}
+	}
+}
