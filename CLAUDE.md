@@ -69,7 +69,37 @@ measured a tidy 876 → 581 → 4 progression whose final `4` matched the old ta
 1086 connection failures wearing the right costume, and the matching `4` read as corroboration.
 **So count failures too**, or probe first:
 
-    go test ./engine/ -run TestTenantIsolationAcrossDialects -count=1
+    go test ./engine/ -run TestPluginMigrations_AllDialects -count=1
+
+**The command this file gave here until 2026-09-04 was `-run TestTenantIsolationAcrossDialects`,
+and no such test exists.** It was named only here, never in the tree
+(`grep -rn TestTenantIsolationAcrossDialects --include='*.go' .` → nothing). A `-run` pattern that
+matches nothing is not an error: `go test` prints `ok … [no tests to run]` and **exits 0**. So the
+probe returned a green with a wrong password, against a nonexistent database, and with no DSN set
+at all — all three measured. The command this file offered as the cure for "a green result that
+measured nothing" was itself one, for as long as anyone ran it.
+
+That generalises past this one name. **Before trusting any `-run` probe, check that it selects
+something:**
+
+    go test ./engine/ -run <name> -count=1 -v 2>&1 | grep -c '^=== RUN'
+    # 0 means the pattern matched nothing. TestTenantIsolationAcrossDialects: 0.
+    # TestPluginMigrations_AllDialects: 4 (the parent and its three dialect subtests).
+
+`TestPluginMigrations_AllDialects` replaces it because it has the property a probe needs and the
+old name only implied: `BootstrapScratchDB` distinguishes configured-but-unreachable (`Fatal`)
+from nothing-configured (`Skip`), so a DSN that is **set and does not connect fails** rather than
+skipping. Negative control, measured 2026-09-04, under a second per run:
+
+| DSN varied | result |
+|---|---|
+| all three good | `ok` |
+| postgres password wrong | `FAIL … password authentication failed for user "cleat" (28P01)` |
+| mysql password wrong | `FAIL` |
+| mssql password wrong | `FAIL` |
+
+A probe with no negative control is a claim, not a check — the same rule this file states for
+`gh pr checks` watchers, which is where it was learned the first time.
 
 The DSNs are written down in `WORKSTREAM.md`, under "Sandboxes, databases, and shared files" —
 every port, with the credential matrix, because the credentials are port-specific and a probe that
