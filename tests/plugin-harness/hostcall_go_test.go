@@ -140,8 +140,17 @@ func buildGoHostCallWasm(t *testing.T) []byte {
 	t.Helper()
 
 	workflowDir := hostCallFixtureDir(t, "hostcallsgo")
+	// Fatal, not Skip. check-skips.sh case (c): the precondition is always
+	// satisfiable here, because `go test` is what is running this line -- a
+	// machine with no Go toolchain never reaches it. A skip would be a
+	// decision not to run the test, dressed as an environmental fact.
+	//
+	// The -short skip that was here is gone for the same reason, and it is the
+	// second time this week I have shipped one: §3.204's test had it for about
+	// an hour. -short is a mode someone opts into, not a precondition, and a
+	// harness that measures what runs must not learn to stop running.
 	if _, err := exec.LookPath("go"); err != nil {
-		t.Skipf("Go toolchain not available")
+		t.Fatalf("no go toolchain on PATH, yet `go test` is executing this: %v", err)
 	}
 
 	tmpDir := t.TempDir()
@@ -177,10 +186,6 @@ func buildGoHostCallWasm(t *testing.T) []byte {
 // §3.200 was one guest mis-decoding one call, and a harness that fails as a
 // unit would have said only "Go is broken".
 func TestHostCallsGo(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping WASM compilation test in short mode")
-	}
-
 	env := NewTestPluginEnvInMemory(t)
 	defer env.Close()
 
