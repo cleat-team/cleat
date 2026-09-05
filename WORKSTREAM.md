@@ -165,8 +165,8 @@ measurement is §3.210; the short version is two tables.
 
 | SDK | executed | surface | compiled |
 |---|---|---|---|
-| go | 11 | 38 | 38 (on #735) |
-| python | 10 | 73 | 73 (on #736) |
+| go | 11 | 37 | 37 ✅ |
+| python | 10 | 73 | 73 (on #741) |
 | java | 8 | 68 | 68 ✅ |
 | rust | 7 | 61 | 61 ✅ |
 | assemblyscript | 7 | 66 | 66 ✅ |
@@ -204,6 +204,33 @@ from 17 plugin calls to N host calls; nothing else in the tree does.**
 
 `tests/cross-language/` is not it — 594 lines, Go and Rust only, one hand-written test per case.
 
+**Two constraints on the Python fixture, both from #742, both design inputs to A1 rather than
+things B2 discovers the hard way:**
+
+*A Python component cannot be pinned.* componentize-py's output is not reproducible — five
+consecutive builds of unchanged source gave five distinct digests with sizes moving in both
+directions (20482296 / 20443810 / 20421353 / 20448164 / 20398088). So "commit the fixture and diff
+it" is not available for Python, and neither is #726's remedy of moving the artifact out of the
+build's reach and refreshing it. The harness must build Python fixtures into a temp directory and
+compare *outcomes*, never bytes.
+
+*And it must pass an absolute `--output`.* `python-sdk/scripts/build_wasm.py` resolves a relative
+one against the **entry file's directory** — not the CWD and not `-o` — which is how
+`TestPluginCalls_Wasm_Python` came to rewrite two tracked 19 MB fixtures on every run. B2 would have
+met this as an unexplained dirty tree with a 20 MB binary diff.
+
+**Python fixtures are verified in the container, not on the host.** `componentize-py` dies on
+Darwin with `EXC_GUARD / GUARD_TYPE_MACH_PORT`; `scripts/docker/python-toolchain.Dockerfile` exists
+for exactly this and has since 2026-08-06. On a Mac running colima, `--context desktop-linux` is
+not optional — colima bind-mounts the repo as an *empty* directory and the failure reads as a
+broken checkout:
+
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+      cleat-py-toolchain go test ./engine/ -run TestPythonAllHostCallsWorkflowCompiles -count=1
+
+Environmental is not the same as unavoidable — that distinction cost this stream a day, and cost
+WS-2 one too, because I fed them my wrong diagnosis as agreement.
+
 **Wave 1 is the 23 result-carrying calls, not all 50.** Those are the adapters that decode
 something the guest must interpret — an out buffer, a packed length, a host message — and every
 one of the six defects above lived in one:
@@ -214,9 +241,16 @@ one of the six defects above lived in one:
     ListCrons PluginCall PluginCallStreaming PollCancellation PollChild
     PollSignal RunID ScheduleCron SideEffect WorkflowID
 
-The 15 scalar-only calls — `AcquireLock`, `Now`, `Random`, `DurableSleep` and the rest — carry no
-buffer to mis-decode and are wave 2. Re-derive both lists from `wasm/adapter_metadata.go`; the
-split is "does the error path read a buffer".
+The **14** scalar-only calls — `AcquireLock`, `Now`, `Random`, `DurableSleep` and the rest — carry
+no buffer to mis-decode and are wave 2. The split is "does the error path read a buffer".
+Re-derive both lists against `wasm.AdapterFieldNames()` rather than by grepping the file, because
+the struct literal's shape defeats the obvious regex:
+
+    23 + 14 = 37, and every wave-1 name resolves — checked 2026-09-05 by diffing
+    the list above against AdapterFieldNames(), which returns 37.
+
+This said 15 until 2026-09-05, from before #735 removed `AcquireLockMs`. A wave-2 list is exactly
+where a removed adapter goes unnoticed: nothing reads it until the wave starts.
 
 ### The dependency, stated rather than wished away
 
@@ -247,6 +281,9 @@ language, it will not localise the next one either.
 B1 is the part that cannot be rushed and does not need the harness. §3.303's lesson is that the
 table is the test: "a key is present" passed over 16 failures, and "a reason that matches, with a
 why" did not.
+
+**B2's Python half runs in the toolchain container** and its fixture cannot be byte-pinned — see
+the two #742 constraints above before starting it, not after.
 
 ### WS-3 — Rust and AssemblyScript, and the CI shape
 

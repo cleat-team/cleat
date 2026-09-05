@@ -3515,7 +3515,7 @@ excluded, because they exist to be compiled and are never executed:
 
 | SDK | executed | surface | compiled |
 |---|---|---|---|
-| go | 11 | 38 | 38 |
+| go | 11 | 37 | 37 |
 | python | 10 | 73 | 73 |
 | java | 8 | 68 | 68 |
 | rust | 7 | 61 | 61 |
@@ -3528,8 +3528,12 @@ the work "do the other four". Go is 29%. It is five roughly equal gaps, not one 
 **One caveat on the Go row, since it reads worse than it is.** It counts *guest-side* execution:
 host calls made by a Go workflow that a test compiles and runs. Go host handlers are also driven
 directly by unit tests with no guest at all, which is why the host-side table above shows full
-coverage while this row shows 11 of 38. Both numbers are correct and they answer different
+coverage while this row shows 11 of 37. Both numbers are correct and they answer different
 questions.
+
+**The Go surface is 37 and not 38** because #735 removed the `AcquireLockMs` adapter entry, which
+had no host call behind it. A surface that shrinks is the one direction worth noticing: it moves
+the denominator without anything being covered.
 
 ## Why the difference between the two tables is the risk
 
