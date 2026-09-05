@@ -433,7 +433,20 @@ jobs:
         # .githooks/* included since 2026-09-04: the pre-commit hook shipped in
         # #706 with a defect and nothing linted it. It sources
         # scripts/section-blocks.sh, which is an input here, so SC1091 resolves.
-        run: shellcheck scripts/*.sh benchmarks/*.sh .githooks/*
+        #
+        # benchmarks/*.sh was dropped here when benchmarks/compare.sh -- the only
+        # shell script that directory ever had -- moved to cleat-bench. Left in
+        # place it does not degrade to "lints nothing": with no match the literal
+        # `benchmarks/*.sh` reaches shellcheck, which exits 2 and fails this job.
+        # That is the loud failure and it is the good case. The quiet one is that
+        # this list is hand-maintained and four tracked .sh files have never been
+        # in it -- deploy/postgres/*.sh, examples/python-langchain/crash_demo.sh,
+        # crates/cleat-java/scripts/inject-metadata.sh. The first three pass
+        # today; the fourth has two SC2086 findings on a deliberately unquoted
+        # `$OUTPUT_FLAG` that must word-split, so widening the set to
+        # `git ls-files '*.sh'` needs that script fixed first. Tracked separately;
+        # not folded in here, where it would ride along with a file deletion.
+        run: shellcheck scripts/*.sh .githooks/*
 
       # CGO on. With CGO_ENABLED=0 this step analysed a build that is not the
       # one we ship: `//go:build cgo` takes eight files out of ./engine/,
