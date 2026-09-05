@@ -22,6 +22,13 @@ it, and fails on:
      tier1/tier2.packages, so the classification cannot be asserted by hand -- which
      is how the block would rot back into the state it was written to fix.
   4. A duplicate context name, or a `total:` that disagrees with the number declared.
+  5. Disagreement with `.github/required-checks.txt`, in either direction. That file
+     predates this block and `scripts/check-workflow-guards.py` reads it, so the two
+     are copies of one list. `.golangci.yml` records what happens to two copies of one
+     fact -- "two mechanisms with two baselines, which is the shape that let the
+     routing tables in 2.72 drift apart" -- and this block was shipped in #729 without
+     noticing the file already existed. They were identical when the check was added;
+     the check is what keeps them so.
 
 Check 3 only reaches `Test Go (...)` contexts, because the test-go matrix is the only
 place a context's packages are written down mechanically. `covers:` on the other 21 --
@@ -62,6 +69,7 @@ import yaml
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKFLOW_DIR = os.path.join(REPO_ROOT, ".github", "workflows")
+REQUIRED_CHECKS_FILE = os.path.join(REPO_ROOT, ".github", "required-checks.txt")
 NEEDS_REASON = ("tier2", "undeclared")
 
 findings = []
@@ -74,6 +82,26 @@ def fail(msg):
 def load(path=None):
     with open(path or os.path.join(REPO_ROOT, "tiers.yaml")) as f:
         return yaml.safe_load(f)
+
+
+def read_required_checks_file():
+    """The context list in .github/required-checks.txt, or None if absent.
+
+    That file predates this block and scripts/check-workflow-guards.py reads it.
+    Two hand-maintained copies of one fact is the shape .golangci.yml warns about
+    ("one class of finding two mechanisms with two baselines, which is the shape
+    that let the routing tables in 2.72 drift apart"), so check 5 below asserts
+    they are equal rather than letting them drift.
+    """
+    if not os.path.isfile(REQUIRED_CHECKS_FILE):
+        return None
+    out = []
+    with open(REQUIRED_CHECKS_FILE) as handle:
+        for line in handle:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                out.append(line)
+    return out
 
 
 def workflow_jobs(filename):
@@ -136,6 +164,22 @@ def check(tiers, *, verbose=False):
         fail(f"required_contexts.total is {block['total']} but {len(contexts)} "
              f"contexts are declared")
 
+    # 5. this block and .github/required-checks.txt are two copies of one list
+    from_file = read_required_checks_file()
+    if from_file is None:
+        fail(f"{REQUIRED_CHECKS_FILE} is missing; scripts/check-workflow-guards.py "
+             f"reads it and this block is supposed to agree with it")
+    else:
+        here, there = set(names), set(from_file)
+        for c in sorted(there - here):
+            fail(f"{c!r} is in .github/required-checks.txt but not declared here. "
+                 f"Two hand-maintained copies of one list drift; add it with a "
+                 f"`covers:` and, if it is not tier 1, a `why_required:`.")
+        for c in sorted(here - there):
+            fail(f"{c!r} is declared here but not in .github/required-checks.txt. "
+                 f"check-workflow-guards.py reads that file, so a context only in "
+                 f"this block is not checked against the workflow jobs at all.")
+
     tiers_of = matrix_tiers(tiers)
 
     for entry in contexts:
@@ -170,6 +214,16 @@ def check(tiers, *, verbose=False):
             if covers == "tier2" and "tier2" not in actual:
                 fail(f"{name!r}: declared covers: tier2, but no path resolves to tier 2 "
                      f"(resolves to {sorted(actual)})")
+            # A stale `undeclared` is the one that rots QUIETLY, because it rots by
+            # being FIXED: someone assigns the missing package a tier and this label
+            # goes on claiming a gap that is closed. Shipped without this check in
+            # #729, and it passed silently the first time a tier was assigned --
+            # which is exactly the "guard that cannot see the state it looks for"
+            # this script's own docstring is about.
+            if covers == "undeclared" and "undeclared" not in actual:
+                fail(f"{name!r}: declared covers: undeclared, but every path now has a "
+                     f"tier ({sorted(actual)}). Reclassify it -- the `why_required` "
+                     f"below it is describing a gap that no longer exists.")
             if verbose:
                 print(f"  {name:32s} covers={covers:10s} matrix={sorted(actual)}")
 
@@ -253,6 +307,19 @@ def self_test():
          lambda d: first_of(d, "tier2").pop("why_required", None))
     case("a tier-2 context relabelled covers: tier1",
          lambda d: first_of(d, "tier2", go_matrix=True).update(covers="tier1"))
+    case("a context still marked undeclared after its packages got a tier",
+         lambda d: first_of(d, "tier2", go_matrix=True).update(covers="undeclared"))
+    def drop_one(d):
+        """Remove a context AND fix `total`, so ONLY check 5 fires.
+
+        WORKSTREAM.md's verification protocol: "A falsification that fires two
+        assertions proves neither." Dropping a context without adjusting `total`
+        would trip check 4 as well and prove nothing about check 5.
+        """
+        d["required_contexts"]["contexts"].pop()
+        d["required_contexts"]["total"] -= 1
+
+    case("a context dropped here but still in .github/required-checks.txt", drop_one)
     case("a duplicated context",
          lambda d: d["required_contexts"]["contexts"].append(
              copy.deepcopy(d["required_contexts"]["contexts"][0])))
