@@ -94,7 +94,33 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 
 	// Determine output name from the function name.
 	name := strings.ReplaceAll(funcName, "-", "_")
-	wasmOutput := name + ".wasm"
+
+	// Build into a temporary directory, via an ABSOLUTE path.
+	//
+	// This was the bare relative name `name + ".wasm"`, and build_wasm.py
+	// resolves a relative --output against the *entry file's* directory --
+	// not the process CWD, and not -o (python-sdk/scripts/build_wasm.py,
+	// "Resolve output path to absolute"). So every Python build dropped two
+	// artifacts beside the user's source, the component and the
+	// `<name>.wasm.component.wasm` backup it copies alongside, and -o only
+	// ever received a copy of the first one. The lookup below used to carry a
+	// fallback that searched the entry directory when "." came up empty,
+	// which is the shape of a symptom worked around rather than fixed.
+	//
+	// It is not only untidy. In this repo the entry directory is tracked, so
+	// TestPluginCalls_Wasm_Python rewrote two committed fixtures on every
+	// run, and componentize-py's output is not reproducible -- five
+	// consecutive builds of an unchanged source gave five distinct SHA-256s
+	// and sizes from 20398088 to 20482296 bytes -- so the rewrite could never
+	// settle. See IMPROVEMENT-PLAN 3.308 for why those particular bytes were
+	// worth protecting rather than regenerating.
+	buildDir, err := os.MkdirTemp("", "cleat-build-python-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not create a temporary build directory: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(buildDir)
+	wasmOutput := filepath.Join(buildDir, name+".wasm")
 
 	entry := pyFile + ":" + funcName
 
@@ -113,13 +139,11 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 		os.Exit(1)
 	}
 
-	// Locate and copy the output .wasm file.
-	srcWasm := filepath.Join(".", wasmOutput)
-	if _, err := os.Stat(srcWasm); os.IsNotExist(err) {
-		// The build script may have written it relative to the entry file's directory.
-		entryDir := filepath.Dir(pyFile)
-		srcWasm = filepath.Join(entryDir, wasmOutput)
-	}
+	// Copy the output .wasm to the requested directory. wasmOutput is
+	// absolute, so the build script wrote exactly there and there is nowhere
+	// else to look -- the two-place search this replaced existed only because
+	// a relative output path could land in either.
+	srcWasm := wasmOutput
 
 	input, err := os.ReadFile(srcWasm)
 	if err != nil {

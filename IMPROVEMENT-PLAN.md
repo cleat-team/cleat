@@ -4179,3 +4179,69 @@ no Go-specific entry rather than an entry nothing matches.
 Also removed a duplicated `"llm.chat_stream"` from three of the five key lists (Go, Rust,
 Python) — 18 entries, 17 distinct, so one key was checked twice and the count in the log
 line never matched the list.
+
+### 3.308 `cleat build --target python` wrote its output into the user's source directory — 🟢 **FIXED 2026-09-05** (WS-2, 2026-09-05)
+
+`cmd/cleat/build_python.go` passed `--output <name>.wasm` — a bare **relative** name, with
+`outDir` playing no part in it. `python-sdk/scripts/build_wasm.py` resolves a relative
+`--output` against the **entry file's directory** (its "Resolve output path to absolute"
+block, because componentize-py runs with that directory as CWD), so the component landed
+beside the user's `.py` file along with the `<name>.wasm.component.wasm` backup copied next
+to it. `-o` was honoured only as the destination of a later copy, and the code that made
+that copy searched two places — `.` first, then the entry directory — which is the shape of
+a symptom worked around rather than a path anyone believed in.
+
+**Why it mattered here.** `tests/plugin-harness/testdata/pythonworkflow/` is *tracked*, so
+`TestPluginCalls_Wasm_Python` overwrote two committed 19 MB fixtures every time it ran —
+including on every run of `plugin-harness-ci.yml`, which installs componentize-py. It was
+invisible in CI because a runner's checkout is discarded, and invisible locally because the
+build could not run on a Mac at all (see the container recipe below).
+
+**Do not fix this by committing the new bytes.** componentize-py's output is not
+reproducible. Five consecutive builds of an unchanged source, `__pycache__` cleared between
+the fourth and fifth to rule out a warming cache:
+
+| run | size | sha256 (first 16) |
+|---|---|---|
+| 1 | 20482296 | — |
+| 2 | 20443810 | `e2ba0fb2a785a1d1` |
+| 3 | 20421353 | `01d2dd3bd94d4933` |
+| 4 | 20448164 | `3e082ea08494310d` |
+| 5 | 20398088 | `e05fa134b0f8c59a` |
+
+Five distinct digests, sizes moving in both directions. A committed copy cannot be kept
+current even in principle, which is what rules out the fix §3.305 used for the
+AssemblyScript fixture — move it out of the build's reach and refresh it. Re-derive with
+
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+      cleat-py-toolchain go test ./tests/plugin-harness/ -run TestPluginCalls_Wasm_Python -count=1
+    shasum -a 256 tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm
+
+**And those particular bytes were worth protecting rather than regenerating**, which is the
+part that inverted the fix. `engine/imports.go:108` cites this fixture as the reason
+`RegisterQueryHandler` survives as a no-op host import: removing the import would break
+guests already compiled against it, and that file *is* the witness. Every SDK's public
+wrapper around the call was removed 2026-08-09, so the committed artifact carries **9**
+occurrences of `register_query_handler` and a fresh build carries **1**. The test was
+quietly replacing the evidence for an ABI decision with a guest that no longer witnesses it.
+Deleting the fixtures as unreferenced build output — no test loads them, only prose and that
+comment refer to them — was the first plan, and it was wrong for exactly this reason.
+
+    strings -a tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm \
+      | grep -c register_query_handler        # committed: 9, freshly built: 1
+
+**Fix.** Build into `os.MkdirTemp` via an absolute path, so the build script has nothing to
+re-root and `-o` receives the only copy. The two-place search is gone with it.
+
+**Not a sweep.** All four language targets build beside the source and copy to `-o`, but
+Rust writes into `target/`, Java into `build/` and AssemblyScript into `dist/` — all
+conventionally ignored. Python was the only one whose "beside the source" *is* the source
+directory.
+
+**Guard.** `plugin-harness-ci.yml` gains a `git diff --exit-code` over
+`tests/plugin-harness/testdata` after the WASM integration tests, scoped to the whole
+directory rather than to `pythonworkflow/` because the same defect in another language is
+the thing most worth catching — §3.305 already found one in the AssemblyScript fixture.
+Falsified both ways: with the fix reverted the guard exits 1 naming both files, with it
+applied the guard exits 0. **The test itself reports `ok` in both runs** — it never read
+those bytes, so nothing but the guard can see the difference.
