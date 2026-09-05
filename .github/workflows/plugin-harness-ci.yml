@@ -207,6 +207,33 @@ jobs:
           # gcc. Pinned, that case fails loudly.
           CGO_ENABLED: "1"
 
+      # The tests must not rewrite their own tracked fixtures. This is the
+      # regression guard for IMPROVEMENT-PLAN 3.308: `cleat build --target
+      # python` resolved a relative --output against the *entry file's*
+      # directory, so TestPluginCalls_Wasm_Python overwrote the two committed
+      # call_all_plugins artifacts on every run -- including every run of this
+      # job, invisibly, because a runner's checkout is thrown away.
+      #
+      # git diff rather than git status --porcelain: the invariant is about
+      # *tracked* fixtures. Untracked build leftovers (__pycache__ and the
+      # like) are a tidiness matter and would only make this flap.
+      #
+      # Scoped to testdata rather than to pythonworkflow alone, deliberately.
+      # The same defect in another language is the thing most worth catching,
+      # and #726 already found and fixed one in the AssemblyScript fixture.
+      - name: Tests did not rewrite their own fixtures
+        if: always()
+        run: |
+          if ! git diff --exit-code --stat -- tests/plugin-harness/testdata; then
+            echo
+            echo "The files above are tracked fixtures that a test rewrote as it ran."
+            echo "A build wrote into the source tree instead of its output directory."
+            echo "See IMPROVEMENT-PLAN 3.308 -- do not fix this by committing the"
+            echo "new bytes: componentize-py's output is not reproducible, so they"
+            echo "will differ again on the next run."
+            exit 1
+          fi
+
       - name: Skip budget
         if: always()
         run: scripts/check-skip-budget.sh plugin-harness/wasm wasm-integration-report.json
