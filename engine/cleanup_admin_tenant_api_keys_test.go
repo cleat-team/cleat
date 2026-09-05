@@ -43,10 +43,25 @@ func TestCleanupPostgresTestDataClearsAdminTenantAPIKeys(t *testing.T) {
 		tenantID, "cleanup-api-key-fixture"); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
-	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM admin.tenant_api_keys WHERE tenant_id = $1`, tenantID)
-		_, _ = db.Exec(`DELETE FROM admin.tenants WHERE tenant_id = $1`, tenantID)
-	})
+	// defer, not t.Cleanup: t.Cleanup runs after the test function returns, by
+	// which point `defer db.Close()` above has already closed the handle, so the
+	// deletes fail. Written that way first, with the errors discarded, it leaked
+	// a tenant row on every run and looked exactly like a cleanup that worked --
+	// which is the failure this whole file is about. Defers are LIFO, so this
+	// one runs before the Close.
+	//
+	// admin.tenants is not in postgresCleanupTables (nothing clears it), so a
+	// leak here is permanent rather than tidied up by the next test.
+	defer func() {
+		if _, err := db.Exec(
+			`DELETE FROM admin.tenant_api_keys WHERE tenant_id = $1`, tenantID); err != nil {
+			t.Errorf("fixture cleanup: delete api keys: %v", err)
+		}
+		if _, err := db.Exec(
+			`DELETE FROM admin.tenants WHERE tenant_id = $1`, tenantID); err != nil {
+			t.Errorf("fixture cleanup: delete tenant: %v", err)
+		}
+	}()
 
 	if _, err := db.Exec(
 		`INSERT INTO admin.tenant_api_keys (tenant_id, key_hash, description)
