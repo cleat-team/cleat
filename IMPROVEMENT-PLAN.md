@@ -4006,9 +4006,16 @@ excludes exactly what is missing.** A guard whose surface is derived from the th
 cannot report an absence in that thing. The other four SDKs' surfaces are their own `HostCalls`
 classes and have the same property.
 
-That is the argument for measuring against the **host ABI** rather than per-SDK surfaces: 55
-exports, `grep -oE '\.Export\("cleat_[a-z0-9_]+"\)' engine/imports.go | sort -u | wc -l`. Against
+That is the argument for measuring against the **host ABI** rather than per-SDK surfaces. Against
 that denominator the gap is visible; against `adapterDefs` it is invisible by construction.
+
+**This paragraph said "55 exports" and gave a command that could not have returned anything else.**
+The pattern was `\.Export\("cleat_[a-z0-9_]+"\)`, which matches only `cleat_`-prefixed names, and
+three exports are not prefixed — `plugin_call`, `plugin_call_streaming`, `set_query_state`. The
+count is 58, and 55 of those are workflow-facing after three exclusions with three different
+reasons. See §3.213, and use:
+
+    grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u | grep -c .
 
 ## Not fixed here
 
@@ -4017,7 +4024,7 @@ intended at all — a promise created by one workflow may be meant for an extern
 it is not, four SDKs bind something Go deliberately omits and `tiers.yaml` says nothing either way.
 The nil-guard message is worth fixing regardless: it is wrong in both worlds.
 
-### 3.213 The release rule, and the denominator that makes it checkable — 🔵 **PLAN 2026-09-05** (WS-1, 2026-09-05)
+### 3.213 The release rule, and the denominator that makes it checkable — 🔵 **PLAN 2026-09-05**; the denominator is 58-minus-3, corrected from 55 by WS-2 before publishing (WS-1, 2026-09-05)
 
 The bar for release, as stated by the project owner on 2026-09-05:
 
@@ -4042,55 +4049,79 @@ wrong in any way a reader can see.
 **The host ABI is the only denominator shared by all five.** It is what the engine exports and
 what every guest, in every language, has to go through:
 
-    grep -oE '\.Export\("cleat_[a-z0-9_]+"\)' engine/imports.go | sort -u | grep -c .   # 55
+    grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u | grep -c .
+    # 58
 
-## The classification: 53 workflow-facing, 2 runtime protocol
+**It is 58, and this section said 55 until WS-2 re-derived it.** The command here previously read
+`grep -oE '\.Export\("cleat_[a-z0-9_]+"\)'`, which cannot return anything but `cleat_`-prefixed
+names — **the pattern encoded the conclusion it was supposed to test.** Three exports are not
+prefixed, and none of them is incidental: `plugin_call` and `plugin_call_streaming` are the calls
+§3.306, #730, #732 and #754 have all been about, and `set_query_state` is the one the
+`RegisterQueryHandler` comment directs users to. An SDK binding every `cleat_` export and none of
+these three cannot call a plugin.
 
-Two of the 55 are not workflow functionality and no SDK but Go should bind them:
+Confirmed against an independent source: **`ABI.md` documents 58 declared imports and the two sets
+are identical**, `comm` empty in both directions. That check needed one repair of its own — a first
+pass grepping the names *anywhere* in `ABI.md` returned 61, the three extras being
+`cleat_child_workflow_in_schema`, which appears only in changelog rows recording its **removal** on
+2026-09-02, and `cleat_plugin_call`/`cleat_plugin_call_streaming`, which appear only in an alias
+table. Matching a retraction again. Extract the `(import "env" "...")` declarations, not the names.
 
-| export | why it is not workflow-facing |
+## The classification: 55 workflow-facing, and NOT the 55 above
+
+Three of the 58 should not be in a parity target, for **three different reasons**:
+
+| export | why it is excluded |
 |---|---|
-| `cleat_poll_work` | supplies entry point and input to **Go wasip1** modules via `_start`/`main`. A Go WASM build calls it from `main()` to receive work before dispatching. |
-| `cleat_complete` | called by the **Go WASM export wrapper** before returning, so the worker can capture the result. |
+| `cleat_poll_work` | **Go module handshake.** Supplies entry point and input to Go wasip1 modules via `_start`/`main`. |
+| `cleat_complete` | **Go module handshake.** Called by the Go WASM export wrapper before returning, so the worker can capture the result. |
+| `cleat_register_query_handler` | **Deliberately unbindable.** `engine/imports.go:102-115` records it as a no-op kept only so already-compiled guests still instantiate; it does not make a workflow queryable, every SDK's public wrapper was removed 2026-08-09, and the comment says "do not add a new one". |
 
-Both are the Go module handshake, not API a workflow author calls. The other four SDKs reach the
-guest through the Component Model or their own entry convention and have no use for either.
+The first two are protocol. The third is workflow-*shaped* — it carries an ordinary signature
+comment and reads like API — and it is the one a target must exclude most carefully, because
+including it asks five SDKs to restore a wrapper the repo forbids.
 
-The classification has a mechanical tell that is worth stating, because it means the boundary was
-already legible in the tree and nobody had read it: **these two are the only exports in
-`engine/imports.go` whose registration carries a prose comment.** The other 53 carry an ABI
-signature and nothing else (`// cleat_set_state: (ptr,len x2) -> i64`). Re-derive by extracting the
-comment block above each `.Export(...)` and partitioning on whether it matches `<name>: <sig>`.
+    58 - 2 handshake - 1 deliberately unbindable = 55
 
-**The partition is exact, and checking that is not the same as counting the prose.** Measured
-2026-09-05: **0 uncommented, 53 signature, 2 prose.** The first number is the one that matters and
-it was not measured in the first pass — a scan that looks for a comment and classifies "did not
-find one" as "not prose" reports the same 2 whether the remaining 53 are documented or bare, so
-the original check could not distinguish a strong tell from a lucky one. WS-2 asked for the
-converse before citing the claim, which is what prompted measuring it. Every export is commented,
-so the split really is 53/2 and not 53-minus-however-many-are-silent.
+**This 55 is not the 55 this section started with, and the coincidence is the dangerous part.**
+The first was "the `cleat_`-prefixed subset"; this one is "58 minus three exclusions". They agree
+on the digits and **disagree on four members** — the first excludes `plugin_call`,
+`plugin_call_streaming` and `set_query_state` and includes `cleat_register_query_handler`; the
+second is the reverse on all four. Had either derivation stopped at 55, the match would have read
+as corroboration between two independent routes. That is the 876/581/4 costume from CLAUDE.md's
+opening section, reproduced exactly: a number that agrees for the wrong reason is more convincing
+than one that does not agree at all.
 
-Note what the tell is and is not. It is a property of the **comments**, not of the calls, so it
-could select the right two for the wrong reason. The independent check is semantic and is the one
-that decides: `cleat_poll_work` feeds `_start`/`main` the entry point and input, and
-`cleat_complete` is called by the export wrapper so the worker can capture a result. Both are the
-Go module handshake. The comment shape agrees with that reading; it does not establish it.
+**So the artifact of record is the LIST WITH A REASON PER EXCLUSION, not the count.** Three
+exclusions, three distinct reasons, each independently checkable. A bare "55" carries none of
+that and cannot be audited by the next reader.
 
-So **the denominator for the release rule is 53**, and `cleat_poll_work` / `cleat_complete` are
-the first two entries on the documented-gap list, with the reason above.
+The handshake pair also has a mechanical tell, which is worth stating but is **not** what decides
+the classification: they are the only two of the 58 whose registration carries a prose comment
+rather than an ABI signature. Measured 2026-09-05, partitioning all three ways: **0 uncommented,
+53 signature-only, 2 prose** — and the first number is the load-bearing one, because a scan that
+classifies "found no comment" as "not prose" reports the same 2 whether the rest are documented or
+bare. WS-2's first attempt at this parse returned **10**, by walking back from `.Export(...)` to
+the nearest comment and landing *inside* a long function body rather than above the builder.
 
-## Measured against 53: two instruments, two answers, no number published
+Note the tell's limit, which `cleat_register_query_handler` demonstrates: it is a property of the
+**comments**, so it separates the two handshake calls and is blind to the third exclusion entirely.
+The semantic reading is what decides; the comment shape agrees with it for two of three.
 
-Two independent scans were run over the same tree on 2026-09-05. They agree on Rust (49/53) and
-Java (48/53) and disagree on the other three:
+## Measured: two instruments, two answers, no number published
+
+Two independent scans were run over the same tree on 2026-09-05, **against the superseded 53-call
+set**, so the figures below are wrong twice over — wrong denominator, and disputed numerator. They
+are kept only because their disagreement is the finding. They agree on Rust and Java and disagree
+on the other three:
 
 | SDK | scan A | scan B |
 |---|---|---|
-| assemblyscript | 53/53 | **52/53** |
-| rust | 49/53 | 49/53 |
-| java | 48/53 | 48/53 |
-| python | 42/53 | **41/53** |
-| go | 34/53 | **32/53** |
+| assemblyscript | 53 | **52** |
+| rust | 49 | 49 |
+| java | 48 | 48 |
+| python | 42 | **41** |
+| go | 34 | **32** |
 
 **No per-SDK binding figure is recorded here, because one of these is wrong in every disagreeing
 row and the failure is understood in only one of them.** That one is worth writing down, because
@@ -4102,7 +4133,7 @@ both scans get it wrong in a way this file already has a name for.
 
 Scan A searched for the export name as a substring, matched it **inside a comment stating the
 binding was removed**, and recorded AssemblyScript as binding it. That is the §1.1 trap — a grep
-that a *retraction* satisfies — and it is the reason scan A reports 53/53.
+that a *retraction* satisfies — and it is the reason scan A scored AssemblyScript as binding everything.
 
 Scan B gets that row right and **not for a reason that generalises**. Its pattern is
 `\bcleat_register_query_handler\b`; the text is `import_cleat_register_query_handler`; `_` is a
@@ -4110,7 +4141,7 @@ word character, so there is no word boundary before `cleat` and the match fails.
 accidental mechanism. A retraction comment written without the `import_` prefix would fool scan B
 exactly as it fooled scan A, and neither scan distinguishes a binding from a sentence about one.
 
-So the honest state is: **the classification below is measured and the binding counts are not.**
+So the honest state is: **the classification above is measured and the binding counts are not.**
 What can be said without either scan is the shape, which both agree on — Rust and Java are short
 by a handful, and Go is short by the most, which is not in tension with Go's reported 37/37 but is
 what 37/37 hides. The Go adapter list is 37 entries and every one is wired; the list is simply
@@ -4140,7 +4171,7 @@ Go, Rust and AssemblyScript today. Nothing produces it for the other 29 exports 
 
 ## Work items, in order
 
-1. **Make the 53 x 5 matrix a guarded script, and do not scan for names in text.** Both scans
+1. **Make the 55 x 5 matrix a guarded script, and do not scan for names in text.** Both scans
    above are textual, and a textual scan cannot tell a binding from a comment about a binding.
    The instrument has to resolve the actual declaration: the `extern`/`@external`/`native` block
    per language, and for Go the generated adapter set, which is not textual at all. Nothing here
@@ -4152,16 +4183,19 @@ Go, Rust and AssemblyScript today. Nothing produces it for the other 29 exports 
    history. It needs a known-positive: one export known bound and one known unbound, per SDK.
 3. **Raise the three-state matrix.** State 2 is invisible in every report the project currently
    produces.
-4. **Fill, or document with a reason.** The `*_state` family is 6 of Go's 19 and 5 of Python's 11;
-   one abstraction, not eleven fixes. The cron family is 3 of Rust's 4 and 3 of Java's 5. That is
-   two mechanisms covering 17 of the 39 unbound pairs — ask whether the answer is a sweep or a
-   mechanism before opening 39 items.
+4. **Fill, or document with a reason.** Do not open an item per unbound pair before re-measuring
+   against the corrected set: on the superseded numbers the `*_state` family and the cron family
+   alone accounted for roughly half the gap, which is two mechanisms rather than dozens of fixes.
+   Ask whether the answer is a sweep or a mechanism first.
 5. **Record every accepted gap in `tiers.yaml`**, which is where support claims are checked, rather
-   than in prose here. Two entries are already known: `cleat_poll_work` and `cleat_complete`.
+   than in prose here. Three entries are already known, and they are not one kind: `cleat_poll_work`
+   and `cleat_complete` are protocol, `cleat_register_query_handler` is a call the repo forbids
+   binding. A gap list that does not carry the reason cannot be audited, and these three prove it —
+   the same exclusion for three different causes.
 
 ## Not settled here
 
-Whether all 53 *should* be bound by all five SDKs is a product question this section does not
+Whether all 55 *should* be bound by all five SDKs is a product question this section does not
 answer — §3.212 raises a live instance, where four SDKs bind `resolve`/`reject` from inside a guest
 and Go deliberately omits it, and `tiers.yaml` says nothing either way. The classification above
 separates "workflow-facing" from "runtime protocol"; it does not assert that every workflow-facing
