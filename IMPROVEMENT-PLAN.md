@@ -4981,3 +4981,72 @@ the code.
 what an existing test asserts, and the question of whether any caller wants partial outcomes
 is not mine to answer alone. Filed with the evidence so the decision is made on it rather
 than rediscovered.
+
+### 3.310 One harness test ran nowhere and one harness job has never run a test — 🟡 **PARTLY FIXED 2026-09-05** (WS-2, 2026-09-05)
+
+WS-1's §3.211 found a new guard that was committed, passing, and selected by no job, and
+drew the generalisation this section is an application of: **a test that is not selected is a
+third state beside pass and skip, and nothing in the tree counts it.** The skip budget is
+blind to it by construction — a test that never runs never skips. Run as a census over
+`tests/plugin-harness` (10 test functions, four `-run` patterns) it found two more, one in
+each direction.
+
+**1. `TestPluginCallStreaming_Cleattest` was in no job's pattern.** It runs and passes in
+0.00s, and it covers the streaming plugin path — which #730 and #732 both modified this week
+with nothing here executing it. Re-derive:
+
+    cd tests/plugin-harness
+    for p in $(grep -rhoE "\-run '[^']+'" ../../.github/workflows/*.yml | sed "s/-run '//;s/'$//"); do
+      go test ./... -list "$p" 2>/dev/null | grep -q '^TestPluginCallStreaming_Cleattest$' && echo "$p"
+    done                                    # printed nothing
+
+Fixed here by adding it to Layer 1's alternation, verified by selection count rather than by
+the file's presence — 3 tests before, 4 after. **It is not covered by the
+`TestPluginCalls_Cleattest` term already there**: `-run` is an unanchored regex and
+`TestPluginCallStreaming_Cleattest` does not contain that substring (`PluginCalls_` versus
+`PluginCallStreaming_`). A name that looks like it is already matched is how this stayed
+invisible.
+
+**2. Layer 4 — "Blobstore S3" — has never run a test. 🔴 OPEN.** Its pattern names a test
+that does not exist anywhere in the repository:
+
+    grep -rn "TestBlobstore_S3" --include='*.go' .   # nothing
+    cd tests/plugin-harness && go test ./... -run 'TestBlobstore_S3'
+    # ok  github.com/cleat-team/cleat/tests/plugin-harness  0.441s [no tests to run]   exit 0
+
+That is CLAUDE.md's `-run`-matches-nothing trap, live in CI. The job is vestigial in three
+independent ways, any one of which settles it: the pattern selects nothing; `grep -rn
+CLEAT_TEST_S3 --include='*.go' .` returns nothing, so no Go code reads the five environment
+variables it sets; and the real S3 tests
+(`plugins/blobstore/blobstore_s3_backend_test.go`) drive a mock transport
+(`s3MockTransport`) and live in the **root** module, so they neither need the MinIO service
+container this job provisions nor are reachable from its `working-directory`.
+
+**Deliberately not resolved here.** The honest options are to write the missing test or to
+delete the job; repointing the pattern at the existing mock-based tests would restore a
+green that still measures nothing, which is this section's whole subject. Whether
+S3-against-real-MinIO coverage is wanted is not a question a `grep` answers.
+
+**Note the symmetry, because it is why neither was caught.** §3.211 and item 1 are a test
+that exists and is not selected; item 2 is a selector naming a test that does not exist.
+**From the job's exit code they are indistinguishable — both are green**, and `go vet`,
+`go test .` and the skip budget are blind to all three.
+
+**The mechanism-level answer is a guard that every `-run` pattern in the workflows selects at
+least one test**, which would have caught §3.211, item 2, and the
+`TestTenantIsolationAcrossDialects` case CLAUDE.md already carries. Not added here: it goes
+red on item 2 the moment it lands, which is correct behaviour and makes it a change to
+sequence after that decision rather than bolt onto this one.
+
+**Separately, a claim repeated four times in that workflow is false.** Lines 89, 189, 319 and
+418 state that `go test ./tests/plugin-harness/...` from the repo root "fails with
+`directory prefix tests/plugin-harness does not contain main module`". `go.work` landed
+2026-08-10 (`d23529e`) and it works:
+
+    go test -count=1 -run TestMockServers ./tests/plugin-harness/...
+    # ok  github.com/cleat-team/cleat/tests/plugin-harness  0.494s   exit 0
+
+Left as-is rather than rewritten: the statement is measurably false, but the
+`working-directory` form those comments justify may still be wanted for reasons the comments
+do not give, and guessing a replacement rationale is how stale prose gets replaced with
+confident prose that is also wrong.

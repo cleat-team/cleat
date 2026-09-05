@@ -89,7 +89,17 @@ jobs:
       # fails with "directory prefix tests/plugin-harness does not contain main
       # module or its selected dependencies" -- so the pattern is ./... from
       # inside the module instead. See tests/plugin-harness/go.mod.
-      - run: go test -count=1 -timeout=120s ./... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+      # TestPluginCallStreaming_Cleattest is in this alternation because it was
+      # in NO job's -run pattern -- it existed, passed in 0.00s, and ran nowhere.
+      # It covers the streaming plugin path, which #730 and #732 both changed
+      # while nothing here executed it. See IMPROVEMENT-PLAN 3.310.
+      #
+      # Note it is not covered by the "TestPluginCalls_Cleattest" term: -run is
+      # an unanchored regex, and TestPluginCallStreaming_Cleattest does not
+      # contain that substring (PluginCalls_ vs PluginCallStreaming_). A name
+      # that looks like it is already matched is exactly how this stayed
+      # invisible.
+      - run: go test -count=1 -timeout=120s ./... -run 'TestPluginCalls_Cleattest|TestPluginCallStreaming_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"
