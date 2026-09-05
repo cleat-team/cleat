@@ -4128,7 +4128,23 @@ since §2.10. Measured on develop after #730:
     grep -c '0=unknown 1=timeout' wasm/adapter_metadata.go   # 18, was 20
     grep -c 'callErrorMessage' wasm/adapter_metadata.go      # 5, was 3
 
-**18 adapters still print that legend, and they are a *different* defect** — deliberately
+**Both of those follow-ups are now closed by #734 (2026-09-05), and the counts above are
+frozen at #730 — re-derive before quoting them.** On develop at `fa6dd10` the first command
+returns **0**: the legend is gone from `wasm/adapter_metadata.go` entirely, and survives in
+exactly two places in non-test Go, both correct — `wasm/generator.go:427`, the
+`callErrorMessage` helper used by the five adapters whose result word really does carry a
+CallErrorCode, and an explanatory comment at `engine/memory.go:310`.
+
+    grep -rn '0=unknown' --include='*.go' . | grep -v _test.go | grep -c .   # 2, both intended
+    grep -c 'hostErrMessage' wasm/adapter_metadata.go                        # 15
+
+A zero from that first command deserves suspicion rather than belief: this file's struct
+literals defeat the obvious regex, so a grep over it can return zero for a pattern that was
+never going to match and "confirm" whatever was being claimed. What makes this zero real is
+that #734 exists and says so, not the zero itself. Cross-check against
+`wasm.AdapterFieldNames()`, which is exported for this.
+
+**What the 18 were, and why they were a *different* defect** — deliberately
 not taken in #730. `packDurableCallResult` is the only packer with a `CallErrorCode` field
 and it reaches exactly the five above. The other 18 sit over `packSimpleResult`,
 `packAwaitChildResult`, `packAwaitPromiseResult`, `packAwaitSignalsResult` and
@@ -4137,7 +4153,17 @@ and it reaches exactly the five above. The other 18 sit over `packSimpleResult`,
 `ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`, `ReleaseLock`) have no buffer
 and want the legend **removed** rather than replaced. `hostErrMessage` already exists in
 `wasm/generator.go` for exactly this, and its doc comment warns the legend "would describe
-a rejected cron expression as a timeout" — describing the live defect in 13 other calls.
+a rejected cron expression as a timeout" — describing what was then the live defect in 13
+other calls.
+
+#734 took both halves, and corrected two things this section had inferred rather than
+checked. The useful split was not "does the legend apply" but "did the host write something
+to read" — AwaitChild, SideEffect and AwaitPromise all write the reason into the buffer on
+the replay path and the guest returned before reading it, which is this section's own defect
+on a different packer. And branches that looked dead were not: `engine/imports.go` returns
+`errBadParam = 0xFFFFFFFF_00000001` from 64 sites before a handler runs, and its low byte is
+1, so every one of those failures printed "error 1" — read by the legend as a timeout rather
+than a bad parameter.
 
 **§2.10 is why this survived: comment general, test specific.**
 `TestHostAdapterReportsCallErrorCodeNotErrCode` pins this exact property and its doc
