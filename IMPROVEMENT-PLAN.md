@@ -3317,3 +3317,42 @@ That listing reached back **2.5 hours** (`gh run list --limit 200 --json created
 2026-08-10 whatever the truth was. Querying the workflow directly showed one run, and it
 succeeded. A limit-bounded listing answers "not in the last N", never "never" — take the
 window's own lower bound before writing "never" down.
+### 3.305 A checked-in test fixture was rewritten by its own test, and was stale under the rewrite — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm` is read by
+`wasm/import_section_test.go` and `cmd/cleat-worker/backend_routing_test.go`, neither of
+which can build it (a Go-only CI job has no `npx`). But `TestPluginCalls_Wasm_AS` compiles
+the same workflow on every run, and `asc` writes `dist/workflow.wasm` — so a test run
+overwrote the fixture and left `git status` dirty. Moved to `prebuilt/`, out of the
+build's reach, exactly as `javaworkflow/prebuilt/` already was for the same reason;
+`dist/` is now gitignored whole.
+
+`.gitignore` had reasoned about this case and got one step wrong. Its rule named only
+`dist/workflow.stamped.wasm`, on the grounds that "only dist/workflow.wasm is a fixture"
+— a true statement about **which file has readers** used to answer a question about
+**which files the build writes**.
+
+**The interesting part is what the overwrite was hiding.** Measured 2026-09-04:
+
+| | bytes | sha256 (16) |
+|---|---|---|
+| committed | 13369 | `36c46f1395c1092a` |
+| after one `TestPluginCalls_Wasm_AS` | 13672 | `17cb617f1563a736` |
+| after a second run | 13672 | `17cb617f1563a736` |
+
+The AS build is reproducible — unlike TeaVM, where `javaworkflow/prebuilt/README.md`
+records successive builds of unchanged source differing in hash. So the 303-byte gap was
+**age, not nondeterminism**: the committed fixture predated its own source or toolchain
+(`asc` inside the `^0.28.19` pin resolves to 0.28.20). Nothing had noticed, because every
+AS test run silently refreshed it in place.
+
+**That makes "move it" and "refresh it" one change rather than two.** Moving the stale
+bytes to `prebuilt/` would have frozen the staleness permanently, with the mechanism that
+had been concealing it now removed — strictly worse than leaving it. Both reader tests
+pass against either version, so the refresh changed no assertion; falsified by hiding the
+fixture, which fails exactly the `assemblyscript` subtest in each and nothing else.
+
+`workflow.js` and `workflow.d.ts` are generated glue with no reader
+(`grep -rn 'dist/workflow\.\(js\|d\.ts\)' --include='*.go' --include='*.md'
+--exclude-dir=node_modules .` finds none), so they are untracked rather than moved — the
+same call `.gitignore` already made for `examples/*/dist/`.
