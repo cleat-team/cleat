@@ -162,16 +162,17 @@ six findings below are that same shape, which is why they are worth a round.
 
 | # | finding | evidence, re-derivable |
 |---|---|---|
-| 1 | SQL Server is a **tier-1 dialect**, and its transient-error retry path has no production caller | `grep -rln mssqlRetry --include='*.go' .` → `engine/mssql_retry.go` plus three `_test.go`, nothing else |
+| 1 | §2.26's remainder — 2 of the MSSQL store's files still have unretried transaction boundaries, and its stated blocker cleared a month ago | `grep -c 'withRollbackGuaranteedRetry(' engine/mssql_events.go engine/mssql_signals_promises.go` → 0 and 0; every other MSSQL file uses it (28 production call sites) |
 | 2 | `Test Go (scale)` is a **required check** on a **tier-2** package, whose contract permits failure | required contexts include it; `tiers.yaml` `tier2.packages` includes `./tests/scale/...` |
 | 3 | The convergence metric double-counts, and inflates when a status marker is corrected | 2026-09-03: 48 `+###` lines, **27** distinct sections, §3.94 counted 5× |
 | 4 | Assertion-shaped skips are grandfathered into the skip baseline | `tests/plugin-harness/wasm_plugin_test.go:757,760` skip on a JSON decode failure |
 | 5 | `gosec` is disabled, so §3.33's 281 classified findings are unenforced | `.golangci.yml` `disable:` lists `gosec`, `errcheck`, `unused`, `gocyclo` |
 | 6 | Five SDKs carry three versions, against two repo tags | python `0.2.0`; rust, java, AS `0.1.0`; `git tag` → `v0.1.0`, `v0.2.0` |
 
-Findings 1 and 2 are the release blockers — each is a published claim that no check defends.
-Finding 3 is why nobody can currently say whether the project is close to done. Each stream takes
-one substantive item, one guard, and the falsification of its own guard.
+Finding 2 is the release blocker: a published claim that no check defends. Finding 1 is a month-old
+task whose blocker cleared and whose marker never moved. Finding 3 is why nobody can currently say
+whether the project is close to done. Each stream takes one substantive item, one guard, and the
+falsification of its own guard.
 
 **Take section numbers from `scripts/next-section-number.sh --stream WS-N`, not from this table.**
 As of writing it hands out WS-1 `3.200`, WS-2 `3.303`, WS-3 `3.401`, and those move as siblings land.
@@ -180,17 +181,33 @@ As of writing it hands out WS-1 `3.200`, WS-2 `3.303`, WS-3 `3.401`, and those m
 
 | | task | done when |
 |---|---|---|
-| A1 | §2.26's open half: wire `mssqlRetry` / `isMSSQLRetryable`, or demote the SQL Server claim in `tiers.yaml` | a production (non-`_test.go`) caller exists and a test proves a transient 1205/258 is retried and a permanent 2627 is not — **or** `tiers.yaml` no longer lists mssql as tier 1 |
+| A1 | §2.26's remainder: wrap the transaction boundaries in `engine/mssql_events.go` and `engine/mssql_signals_promises.go` in `withRollbackGuaranteedRetry` | both files use the wrapper, a test proves a 1205 deadlock victim is replayed on those paths, and §2.26's "Still to do" paragraph is retired |
 | A2 | replace the convergence metric with a first-appearance count | `scripts/convergence.py` prints one row per day, carries a `--self-test` that fails on the double-counting input below, and the table in this file is regenerated from it |
-| A3 | falsify A1 | remove the wiring, watch the A1 test go red, and **check the message names the classifier** — not a connection error or a constraint violation standing in for it |
+| A3 | falsify A1 | unwrap one boundary, watch the A1 test go red, and **check the message names the deadlock** — not a connection error or a constraint violation standing in for it |
 
-A1 is the sharpest finding in the review and the reason WS-1 gets it: `tiers.yaml` puts mssql in
-`tier1.dialects`, whose contract is "must pass on every backend and dialect named below", while the
-code that decides whether a SQL Server error is worth retrying is reachable only from tests. §2.26
-is the single `OPEN` marker left in `IMPROVEMENT-PLAN.md`, and it has been right about this since
-it was filed — its own text says "wiring still OPEN". **Note the trap it also documents**: the
-classifier was wrong in *both* directions before it was fixed, so wiring it as it stood would have
-been worse than leaving it dead. Read §2.26 before writing the caller.
+A1 is the single `OPEN` marker left in `IMPROVEMENT-PLAN.md`, and it is narrower than that marker
+makes it sound. **The first draft of this plan got it wrong in a way worth recording**, because the
+same mistake is available to whoever picks it up. Grepping for `mssqlRetry` finds it called from
+nothing but tests, which reads as "SQL Server has no retry path" — a tier-1 dialect claim with
+nothing behind it. That is not the situation. The live wrapper has a different name,
+`withRollbackGuaranteedRetry`, and it has **28 production call sites across 7 files**.
+
+`mssqlRetry` is uncalled *by design*, and wiring it would be a defect. Its own doc comment says so:
+it gates on `isMSSQLRetryable`, which includes timeouts (258) and dropped connections — errors that
+leave the outcome **unknown**, where the commit may have succeeded and only the acknowledgement was
+lost. Replaying a non-idempotent transaction after one of those double-applies it, which for a
+workflow engine is a duplicated side effect. `withRollbackGuaranteedRetry` gates on the narrower
+set — deadlock victim (1205), snapshot conflicts (3960, 41301–41325) — where the server has
+definitively undone the work. **Do not wire `mssqlRetry`.**
+
+What is actually left is §2.26's own last paragraph: `mssql_events.go` and
+`mssql_signals_promises.go` were deferred because §2.60 was changing them, and told to wait. §2.60
+landed as #283 on 2026-08-04. **The task has been unblocked for a month and the marker never
+moved** — the same stale-marker shape as §3.113, which cost a session last week.
+
+One number to re-derive rather than inherit: §2.26 says 9 boundaries, and `grep -c BeginTx` over
+the two files gives 3. That section has already corrected its own count once — it says so, "there
+are ~20 transaction boundaries in the MSSQL store, not 8." Count them before wrapping them.
 
 A2 matters because it is the instrument the project steers by. Measured 2026-09-04, the published
 command counts `+### ` diff lines, so a section is counted once per commit that rewrites its
