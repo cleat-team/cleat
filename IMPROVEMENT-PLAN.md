@@ -4310,6 +4310,128 @@ and Go deliberately omits it, and `tiers.yaml` says nothing either way. The clas
 separates "workflow-facing" from "runtime protocol"; it does not assert that every workflow-facing
 export belongs in every language. That decision is an input to item 4, not an output of it.
 
+### 3.214 Go's state reads never reach the host, and the docs promise they do — 🔴 **OPEN 2026-09-05**; a defect against a written contract, not an undocumented choice (WS-1, 2026-09-05)
+
+`HostCallsImpl` in `cleat/runtime_workflow.go` offers `SetState`, `GetState`, `HasState`,
+`IncrState`, `ListState` and `DeleteState`. **None of them is a host binding.**
+
+- `SetState` writes `h.stateMap`, a `map[string]interface{}` **inside the guest**, and then
+  one-way-persists through `set_query_state`.
+- `GetState` reads that map and nothing else. So do `HasState`, `IncrState` and `DeleteState`.
+- Every write to `stateMap` is the guest's own, and the map is only ever created empty. **No path
+  anywhere populates it from the host.**
+
+The host side is not missing. `cleat_get_state`, `cleat_has_state`, `cleat_incr_state`,
+`cleat_list_state` and `cleat_delete_state` are all exported by `engine/imports.go`, implemented,
+and tested — `engine/lifecycle_test.go:686` exercises the host's `GetState` directly. **Rust and
+AssemblyScript bind all six**, as real declarations rather than wrappers:
+
+| | rust `pub fn`, `host_calls.rs` | AS `@external`, `host-calls.ts` |
+|---|---|---|
+| `cleat_set_state` | 244 | 412 |
+| `cleat_get_state` | 247 | 424 |
+| `cleat_delete_state` | 250 | 436 |
+| `cleat_incr_state` | 253 | 446 |
+| `cleat_has_state` | 256 | 457 |
+| `cleat_list_state` | 259 | 467 |
+
+**Only Go cannot read them.**
+
+Those Rust line numbers were first written as `194,243,247,253`, and two of the four pointed at
+**comments** — `// cleat_set_scope` and `// cleat_set_state` — rather than at declarations. Cited
+before being opened. It is the same failure as counting a name in prose as a binding, in a section
+about exactly that, so the numbers above were taken from
+`grep -nE '^\s+pub fn cleat_(set|get|has|incr|list|delete)_state\('` rather than from a search for
+the name.
+
+    grep -n 'stateMap' cleat/runtime_workflow.go       # every write guest-side; no host read
+    grep -n 'setQueryState' cleat/runtime_workflow.go  # the family's only host call, write-only
+
+## What that means at runtime
+
+Within one execution of one instance, set-then-get works, because the map is still there. Across a
+`continue_as_new`, or in any second instance, `GetState` returns `durable: state not found for
+key: <k>` for a key **the host is holding**. `IncrState` is a read-modify-write over a map that
+starts empty, so it restarts from zero rather than continuing.
+
+**This is worse than a missing method, which is why it is filed separately from §3.213's count.**
+An absent method fails at compile time, at the desk of the person writing the workflow. This one
+compiles, passes its tests, works in development against a single instance, and returns the wrong
+answer later on a different instance. §3.213's matrix records Go at 35 of 55 and a reader will take
+that as "Go supports fewer features"; for this family the truth is that Go has the method and it
+means something else.
+
+## The existing test cannot fail on this
+
+`TestHostCallsImpl_StateOperations` (`cleat/runtime_behavioral_test.go:1765`) does
+`SetState` then `GetState` on **one** `HostCallsImpl` and asserts the value comes back. A
+`map[string]interface{}` satisfies that. So does a correct host binding. The test cannot
+distinguish them, and it is green today for the same reason it would be green if the feature were
+deleted and replaced with a local cache — which is what it is.
+
+That is this repo's most familiar shape: an assertion held up by a layer other than the one under
+test. The falsification is cheap and has not been written: set state, cross an instance boundary,
+read it back.
+
+## The documented contract is durable, stated three times, with no caveat
+
+This section first left intent open, on the strength of `docs/determinism.md:173` presenting
+`SetQueryState` as "the mechanism that actually fits how cleat runs". **That passage is about query
+state, which is a different API**, and reading it as though it covered `SetState`/`GetState` was a
+conflation, not a finding. The docs on the state family are not ambiguous:
+
+| where | what it says |
+|---|---|
+| `docs/reference/sdk-api.md:31` | `StateManager` — **durable key-value state** |
+| `docs/reference/sdk-api.md`, StateManager | "Full key-value state management scoped to the current workflow." |
+| `docs/migration/from-restate.md:23` | maps Restate's `ctx.get`/`ctx.set`/`ctx.clear` to `get_state()`/`set_state()`/`delete_state()`, "Similar key-value state" |
+| `docs/migration/from-temporal.md:22` | Memo / Search Attributes → "Use Cleat's state API" |
+
+No caveat exists anywhere. Searched:
+
+    git grep -n -i "state.*not durable\|in-memory state\|state.*per-execution\|state is local" -- 'docs/**' '*.md'
+
+The Restate row is the sharpest of the four, because **Restate's virtual-object state is durable
+across invocations — that is the entire point of it** — and the migration guide tells a Restate
+user their `ctx.get` ports to `get_state()`. In Go it ports to a map lookup that returns not-found
+on the second invocation.
+
+**And the design doc draws exactly the distinction Go's implementation collapses.**
+`docs/contributor/design/cleat-execution-design.md:1152`:
+
+> `SetQueryState` merges the key-value pair into a JSON object (`query_state`) … **`SetQueryState`
+> is NOT recorded in the event history — it is derived state, not durable state.**
+
+So the architecture separates derived, queryable state from durable state on purpose. Go's
+`SetState` is implemented **on top of `set_query_state`** — the mechanism that doc classifies as
+not durable — while `GetState` reads a guest-local map. Go's durable state API is therefore not
+durable in either direction: the read never consults the host, and the write goes to the store the
+design explicitly says is derived.
+
+## So this is a defect against a written contract, not an undocumented design choice
+
+That resolves what this section originally declined to guess at, and it resolves it the less
+comfortable way. The remaining question is only which repair:
+
+1. **Bind the five host calls Go cannot reach**, making the docs true. `cleat_get_state`,
+   `cleat_has_state`, `cleat_incr_state`, `cleat_list_state` and `cleat_delete_state` are exported,
+   implemented, tested, and bound by Rust and AssemblyScript already.
+2. **Change the docs and rename the methods**, making the code true — and accept that
+   `from-restate.md` is inviting a migration that silently loses state.
+
+Option 2 is a product decision to ship a weaker feature than the reference SDKs offer and than the
+docs promise; it is not a smaller version of option 1. **Either way `tiers.yaml` has to say which**,
+because right now the manifest grants support that the Go implementation does not provide.
+
+What is not open: whether the current state is acceptable. An undocumented divergence from a
+written contract, whose only test cannot detect it, is not a documented gap in the sense the
+release rule means.
+
+Found by WS-3 while re-deriving §3.213's Go figure of 35, and confirmed here independently. It is
+the mirror of §3.207: there a strict extractor missed generics and **inflated** Rust's coverage;
+here a loose scan of Go method names finds nine methods that exist and would **credit bindings that
+do not**. Anchoring on the import table rather than on method names is what makes 35 correct.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
