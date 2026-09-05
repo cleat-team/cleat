@@ -3847,6 +3847,57 @@ the plan rather than inferred.
 **The executed table is a hand-run measurement, not yet a guard.** Turning it into one is A2 of the
 2026-09-05 plan. Until then it is a dated number like any other and will rot.
 
+### 3.211 A guard can be in the tree, green, and selected by no CI pattern at all — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+The host-call execution harness (§3.210's remedy, plan item A1) was committed to
+`tests/plugin-harness/`, passed locally, and **ran nowhere in CI.** The Layer 2 step in
+`plugin-harness-ci.yml` selects its tests by name:
+
+    go test ... ./... -run 'TestPluginCalls_Wasm'
+
+and `TestHostCallsGo` does not match that. So the guard existed, was green, and was not run — in the
+PR whose entire subject is the difference between a call that compiles and a call that runs.
+
+**This is the mirror of the trap CLAUDE.md already carries, and the harder direction of it.** That
+one is `TestTenantIsolationAcrossDialects`: a `-run` pattern naming a test that does not exist,
+where `go test` prints `ok … [no tests to run]` and exits 0. Here the test *does* exist, the file
+*is* committed, and the selector silently excludes it. **A reader checking "is it in the tree" gets
+yes**, and every question that gets asked about a new guard — is it written, does it pass, can it
+fail — returns the right answer. The one that does not get asked is whether anything runs it.
+
+Measured both ways rather than assumed, which is the whole of the fix:
+
+    cd tests/plugin-harness
+    go test ./... -run 'TestPluginCalls_Wasm'               -v | grep -c '^=== RUN   TestHostCallsGo/'   # 0
+    go test ./... -run 'TestPluginCalls_Wasm|TestHostCalls' -v | grep -c '^=== RUN   TestHostCallsGo/'   # 24
+
+**The general rule, which is not the same as the `-run`-matches-nothing rule:** where a job selects
+tests by name, adding a test file is not adding a test. Count the subtests the job's own pattern
+selects, before and after. `grep` for the test's name in the workflow is not enough either — an
+alternation that names it can still be wrong, and the count is what settles it.
+
+Two things this did *not* fail on, both of which read as verification and are not:
+
+  * `go vet ./...` and `go test .` both passed — they compile and run the package directly, which is
+    a different question from what a job's `-run` selects.
+  * The skip budget is unaffected. A test that never runs does not skip, so `check-skip-budget.sh`
+    is blind to it by construction. This file's whole "is this result real?" discipline is about
+    skips; **a test that is not selected is a third state next to pass and skip**, and nothing in
+    the tree currently counts it.
+
+**Where it runs, and why that is not settled.** Layer 2 rather than `Cross-Language WASM E2E`.
+WS-3's C1 recommended E2E because it installs every guest toolchain and the alternatives install
+none — but Layer 2 already installs Rust, Python with `componentize-py`, Java and Gradle, and
+already runs this module, which is its own Go module and so is not reached by a pattern from the
+repo root. With only the Go reference in place, the job that already runs the module is the smaller
+change. When B2 and C2 add the other four languages this should be re-decided on measurement, and
+per WS-2 the deciding term will not be toolchain install: **a Python invocation is ~0.93s and does
+not amortise**, so cost scales with invocation count rather than fixture count and the two jobs
+diverge as fixtures land.
+
+`.github/workflows/` is WS-3's file; adding there follows WORKSTREAM.md's protocol — another stream
+may when leaving the mechanism unwired would be worse — and the comment says so at the change.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

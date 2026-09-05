@@ -197,8 +197,29 @@ jobs:
           # ../../: the report has to land at the repo root, because the
           # Skip budget step below runs scripts/check-skip-budget.sh from
           # there. Written from inside the module (see working-directory).
+          # This file is WS-3's; WS-1 is adding here under the protocol in
+          # WORKSTREAM.md -- another stream may, when leaving the mechanism
+          # unwired would be worse, and it would be: the harness was in the
+          # tree and selected by NO CI pattern, which is the "coverage nobody
+          # has" case the harness itself exists to find.
+          #
+          # TestHostCalls is the host-call execution harness (IMPROVEMENT-PLAN
+          # §3.210, plan item A1). It is named here explicitly because this
+          # step selects by -run: a test that matches no pattern is not run,
+          # and an unwired guard reads as coverage nobody has. Confirm it is
+          # selected rather than assuming:
+          # HostCallTableCovers is a SEPARATE alternative on purpose, and its
+          # absence is how the first version of this line was wrong:
+          # 'TestHostCalls' selects TestHostCallsGo and does NOT select
+          # TestHostCallTableCoversEveryWave1Call -- the names diverge at
+          # "TestHostCall|s" vs "TestHostCall|Table". So the drift guard added
+          # to catch unselected tests was itself unselected. Found by WS-3.
+          # Confirm with -list, which answers the question -run silently does
+          # not:
+          #   go test ./... -list 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers'
+          #     -> the harness, its table guard, and the five plugin tests
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
