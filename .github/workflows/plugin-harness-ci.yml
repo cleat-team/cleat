@@ -208,10 +208,18 @@ jobs:
           # step selects by -run: a test that matches no pattern is not run,
           # and an unwired guard reads as coverage nobody has. Confirm it is
           # selected rather than assuming:
-          #   go test ./... -run 'TestPluginCalls_Wasm|TestHostCalls' -v \
-          #     | grep -c '^=== RUN   TestHostCallsGo/'      # 24, one per wave-1 call
+          # HostCallTableCovers is a SEPARATE alternative on purpose, and its
+          # absence is how the first version of this line was wrong:
+          # 'TestHostCalls' selects TestHostCallsGo and does NOT select
+          # TestHostCallTableCoversEveryWave1Call -- the names diverge at
+          # "TestHostCall|s" vs "TestHostCall|Table". So the drift guard added
+          # to catch unselected tests was itself unselected. Found by WS-3.
+          # Confirm with -list, which answers the question -run silently does
+          # not:
+          #   go test ./... -list 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers'
+          #     -> the harness, its table guard, and the five plugin tests
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
