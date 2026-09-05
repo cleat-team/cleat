@@ -148,78 +148,134 @@ different question than the one asked.
 
 ## The next 24 hours
 
-Three streams, no shared files between them by construction. **Each stream's first task is the one
-that removes its own future friction.**
+Written 2026-09-04, after a review of the tree, both gates, and the two plan files. **The previous
+round is done**: A1–A4, B1–B2 and C1 all closed, C2 ranked. C3 is the only task that did not move,
+and it returns below as WS-3's C3.
 
-### WS-1 — remove the shared state
+The review's conclusion is that the *engineering discipline* here is in better shape than the
+*release claims*. The tree is clean by every count that was checked — 6 `TODO`s in all of Go, 20
+dead exports, no 🔴 heading left in the plan (`grep -cE '^### .*🔴' IMPROVEMENT-PLAN.md` → 0; a
+bare `grep -c '🔴'` returns 3, all of them prose inside §3.113's note about the last one), and
+4642 pass / 0 fail / 6 skip locally across all three dialects.
+What is not clean is the set of places where a **claim** and a **check** have drifted apart. All
+six findings below are that same shape, which is why they are worth a round.
+
+| # | finding | evidence, re-derivable |
+|---|---|---|
+| 1 | SQL Server is a **tier-1 dialect**, and its transient-error retry path has no production caller | `grep -rln mssqlRetry --include='*.go' .` → `engine/mssql_retry.go` plus three `_test.go`, nothing else |
+| 2 | `Test Go (scale)` is a **required check** on a **tier-2** package, whose contract permits failure | required contexts include it; `tiers.yaml` `tier2.packages` includes `./tests/scale/...` |
+| 3 | The convergence metric double-counts, and inflates when a status marker is corrected | 2026-09-03: 48 `+###` lines, **27** distinct sections, §3.94 counted 5× |
+| 4 | Assertion-shaped skips are grandfathered into the skip baseline | `tests/plugin-harness/wasm_plugin_test.go:757,760` skip on a JSON decode failure |
+| 5 | `gosec` is disabled, so §3.33's 281 classified findings are unenforced | `.golangci.yml` `disable:` lists `gosec`, `errcheck`, `unused`, `gocyclo` |
+| 6 | Five SDKs carry three versions, against two repo tags | python `0.2.0`; rust, java, AS `0.1.0`; `git tag` → `v0.1.0`, `v0.2.0` |
+
+Findings 1 and 2 are the release blockers — each is a published claim that no check defends.
+Finding 3 is why nobody can currently say whether the project is close to done. Each stream takes
+one substantive item, one guard, and the falsification of its own guard.
+
+**Take section numbers from `scripts/next-section-number.sh --stream WS-N`, not from this table.**
+As of writing it hands out WS-1 `3.200`, WS-2 `3.303`, WS-3 `3.401`, and those move as siblings land.
+
+### WS-1 — a tier-1 dialect whose retry path is dead code
 
 | | task | done when |
 |---|---|---|
-| A1 | `skip-budget.txt` total becomes derived from per-test declarations | ~~done (#696)~~ `skip-budget.txt` is deleted; budgets are summed from `scripts/skip-ledger.tsv`, one line per reason |
-| A2 | per-stream section blocks (R2), enforced | ~~done~~ `check-section-numbers.sh` rejects any 3.x number outside every block, with a `--self-test` negative control; `next-section-number.sh` hands each stream its next free number |
-| A3 | archive closed sections out of `IMPROVEMENT-PLAN.md` (R3) | ~~done~~ 139 of 157 sections moved to `IMPROVEMENT-PLAN-CLOSED.md`; plan 16,236 → 3,179 lines. Every number keeps a stub, so all citations still resolve (checked in Python, 0 unresolvable). Re-run `scripts/archive-closed-sections.py` as items close. |
-| A4 | retire `PARALLEL-WORKSTREAMS.md`, `WS2-STATUS.md`, `WS3-STATUS.md` into this file (R5) | ~~done~~ all three deleted; the reference half is the last section of this file, and the 19 live citations to them across `CLAUDE.md`, `scripts/`, `.github/workflows/`, `engine/`, `cmd/` and `IMPROVEMENT-PLAN.md` were repointed in the same PR. Both other streams agreed unreserved. |
+| A1 | §2.26's open half: wire `mssqlRetry` / `isMSSQLRetryable`, or demote the SQL Server claim in `tiers.yaml` | a production (non-`_test.go`) caller exists and a test proves a transient 1205/258 is retried and a permanent 2627 is not — **or** `tiers.yaml` no longer lists mssql as tier 1 |
+| A2 | replace the convergence metric with a first-appearance count | `scripts/convergence.py` prints one row per day, carries a `--self-test` that fails on the double-counting input below, and the table in this file is regenerated from it |
+| A3 | falsify A1 | remove the wiring, watch the A1 test go red, and **check the message names the classifier** — not a connection error or a constraint violation standing in for it |
 
-A1 and A2 first: they are what let A3 and the other streams proceed without conflicts.
+A1 is the sharpest finding in the review and the reason WS-1 gets it: `tiers.yaml` puts mssql in
+`tier1.dialects`, whose contract is "must pass on every backend and dialect named below", while the
+code that decides whether a SQL Server error is worth retrying is reachable only from tests. §2.26
+is the single `OPEN` marker left in `IMPROVEMENT-PLAN.md`, and it has been right about this since
+it was filed — its own text says "wiring still OPEN". **Note the trap it also documents**: the
+classifier was wrong in *both* directions before it was fixed, so wiring it as it stood would have
+been worse than leaving it dead. Read §2.26 before writing the caller.
 
-### WS-2 — close the Python gap, then the frontier it blocks
+A2 matters because it is the instrument the project steers by. Measured 2026-09-04, the published
+command counts `+### ` diff lines, so a section is counted once per commit that rewrites its
+heading — and rewriting a heading is exactly what correcting a status marker does. **The metric
+punishes the discipline CLAUDE.md most insists on.**
 
-| | task | done when |
-|---|---|---|
-| B1 | §3.113 — Python SDK binds and checks host results | ~~done~~ shipped as §3.201 (`e4de0a4`), wider than §3.113 measured: `SetState`/`DeleteState` were discarding a non-determinism report too. A refused `signal_workflow` raises. §3.113's marker was left 🔴 until #714 closed it. |
-| B2 | the seven "start something" calls of §3.111, now unblocked by B1 | each guarded host-side with its guest half in all five SDKs |
+    git log --since="2026-09-03 00:00" --until="2026-09-03 23:59" -p --format="" \
+      -- IMPROVEMENT-PLAN.md | grep -cE '^\+### [0-9]+\.[0-9]+ '     # 48
+    # distinct section numbers among those 48: 27. Thirteen counted 2-5 times; 3.94 five times.
 
-B1 was a live defect, not only a prerequisite: a Python workflow whose signal was refused by the
-auth check was told nothing. **B1 is done** (§3.201, §3.202). **B2 is four of seven** — the scalar
-calls are guarded (§3.302 and earlier), the three string-returning ones are not, and cannot be
-without a WIT change. Measured 2026-09-04 on `develop`:
-
-    for f in SignalWorkflow SendSignalAndWait DurableSend SideEffect AcquireLock \
-             ScheduleCron DurableScheduleInvoke; do
-      echo -n "$f "; sed -n "/func (s \*execSession) $f(/,/^}/p" engine/*.go \
-        | grep -c callSuspendSentinel
-    done
-    # 19:55 -- 1 0 1 0 1 0 1, the zeros being SendSignalAndWait, SideEffect, ScheduleCron
-    # 20:30 -- 1 1 1 1 1 1 1, after §3.300 (1d70483) closed exactly those three
-
-A `string` return has nowhere to put the sentinel, so those three needed
-`result<string, call-failure>` in `python-sdk/wit/cleat.wit` first — §3.110's situation. **WS-2
-did it as §3.300 at 20:14 on 2026-09-04, so B2 is now seven of seven and both rows are done.** The
-19:55 reading above is kept because it was accurate when taken; see §3.113's closing note on why a
-dated remainder rots where a dated measurement does not.
-
-### WS-3 — make discovery systematic
+### WS-2 — the Java result path, and the skip that hid it
 
 | | task | done when |
 |---|---|---|
-| C1 | enumerate the boundaries: host↔guest ABI (5 SDKs × ~60 calls), store↔dialect, doc↔code | a table with a row per boundary and a column for "guarded by" |
-| C2 | guard the highest-yield unguarded boundary from C1 | one new guard, falsified per the protocol above |
-| C3 | §3.33 — gosec's 281 classified findings: fix or justify the top 20 by severity | none of the 20 is unexplained |
+| B1 | convert the four assertion-shaped skips in `tests/plugin-harness/wasm_plugin_test.go` (757, 760, 311, 350) to failures | a Java/TeaVM module returning an unparseable result **fails** the harness |
+| B2 | falsify B1 against a real defect | revert #455 in a scratch tree, run the harness, confirm B1's assertion is what goes red |
+| B3 | one release-version story for the five SDKs | `CONTRIBUTING.md` states the policy, and python/rust/java/AS either agree with it or carry a recorded reason not to |
 
-C1 is the point. Every guard built this week found a defect **on its first run**, so the expected
-value of the next one is high and known — but the choice of where to look is currently made by
-stumbling. C1 converts a random walk into a sweep with a finish line.
+B1 is not hygiene. Lines 757 and 760 read `t.Skipf("failed to decode outer wrapper: %v")` and
+`t.Skipf("failed to parse result JSON: %v")` — so a Java plugin workflow that returns garbage is
+reported as a skip, which CI reads as a pass. The two most recent fixes on `develop` are #455,
+"a Java workflow's result is now a JSON object, not JSON in a string", and #456. **That is the
+exact failure these two lines were swallowing**, which is what makes B2 a falsification with a
+known answer rather than a hopeful one: if reverting #455 does not turn B1 red, B1 is not done.
+
+`scripts/check-skips.sh` will not catch these on its own — it is a set-membership guard, so it
+blocks a *new* silent skip but grandfathers the 214 already in the baseline. Converting a skip
+lowers a count, which the guard reports and never fails on. **Regenerate the baseline after,** per
+this file's protocol for that file.
+
+### WS-3 — two CI contracts that contradict the manifest
+
+| | task | done when |
+|---|---|---|
+| C1 | reconcile the required-check list with `tiers.yaml` | a script asserts that every required context maps to a tier-1 package, or that its tier-2 package is named with a reason; `tests/scale` lands on one side or the other |
+| C2 | remove the wall-clock thresholds from `tests/scale/latency_test.go` | no assertion in the scale suite compares a measured duration to a constant |
+| C3 | §3.33 — re-enable `gosec` behind a baseline file | `gosec` is out of `.golangci.yml`'s `disable:` list, its findings are a ceiling that can only shrink, and CI fails on 282 |
+
+C1 and C2 are one incident seen from two sides. `Test Go (scale) on 1.26` is one of the required
+contexts on `develop`, and `./tests/scale/...` is in `tier2.packages` — tier 2's contract is "must
+*run*; may fail against a tracked list", and `tier2.known_failures` is `[]`. So a package the
+manifest permits to fail is blocking merges, and the list that was supposed to make that visible is
+empty. It failed on `491a0f71` (#720, already merged) and passed on the 13 other recent runs.
+
+C2 is the reason it failed, and CLAUDE.md is explicit: *"If an assertion depends on wall-clock
+time, remove the timing rather than widening it."* **Do not widen the threshold.** The distribution
+says something more interesting anyway — 200 samples, P50 2.676ms, and two samples at 623.876ms and
+625.203ms:
+
+    latency_test.go:144: P99 latency 623.876463ms exceeds threshold 500ms
+
+That is bimodal, not runner noise: a P50 of 2.7ms with a pair of near-identical ~624ms outliers
+looks like a fixed stall — a lock wait, a retry backoff, a connection-pool timeout — not a slow
+machine. **Find what the 624ms is before deleting the assertion**, and if it is a real stall, that
+is a finding worth its own section rather than a threshold to remove.
+
+C3 fits `.golangci.yml`'s one-linter-per-PR protocol; say in the PR that you are taking `gosec`.
+Note that §3.33's own count is recorded as not re-derivable — `golangci-lint` was not installed when
+it was checked — so **re-measure before writing the baseline**, and let the new number be the one
+that carries the date.
 
 ---
 
 ## The convergence metric
 
-New `IMPROVEMENT-PLAN.md` sections created per day:
+New `IMPROVEMENT-PLAN.md` sections per day, counted by **first appearance** of each section number
+anywhere in the tree. Corrected 2026-09-04; the previous table on this line counted `+###` diff
+lines and roughly doubled every figure. WS-1's A2 turns this into a script.
 
 | 08-31 | 09-01 | 09-02 | 09-03 | 09-04 |
 |---|---|---|---|---|
-| 8 | 37 | 37 | **48** | 9* |
+| 4 | 27 | 16 | 23 | 11* |
 
-\* partial day at time of writing.
+\* to 21:30 local. The superseded row read 8 / 37 / 37 / 48 / 9.
 
-Re-derive:
+Re-derive by walking every commit that touched either plan file, oldest first, and recording the
+first day each `### N.M` is present in the tree — **not** by counting `+###` lines, which counts a
+section again every time its heading is rewritten, and a heading is rewritten precisely when a
+status marker is corrected. On 2026-09-03 that difference is 48 versus 27.
 
-    git log --since="<day> 00:00" --until="<day> 23:59" -p --format="" -- IMPROVEMENT-PLAN.md \
-      | grep -cE '^\+### [0-9]+\.[0-9]+ '
-
-**This is the number that says whether the project is converging, and it has not bent yet.** The
-open-item count does not say it: 129 of 151 sections were marked fixed on 09-04 while the discovery
-rate was at its peak. Closing items fast and finding them fast is not convergence.
+**It has still not bent.** 27 → 16 → 23 → 11 is noise around roughly twenty a day, and 09-04's 11
+is a nearly-complete day, so it is the first plausible dip — one point, not a trend. The corrected
+numbers change the magnitude and not the conclusion: **the project is still finding work faster
+than a converging project would.** The open-item count says the opposite (0 🔴, 157 of 158 closed)
+and it is the less honest of the two, because closing fast and finding fast look identical in it.
 
 Read it once a day. The first day it falls while the fix rate holds is the first evidence that the
 work is finishing rather than continuing.
