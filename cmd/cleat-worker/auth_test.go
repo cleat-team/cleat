@@ -10,6 +10,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // TestAuthMiddlewareRejectsInvalidKey verifies that when auth middleware is
@@ -80,13 +81,20 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 	// this decoy instead of the real table for as long as both existed. Running
 	// this one test was enough to recreate the decoy minutes after it was
 	// dropped by hand.
+	// Build the schema the way every other database-backed test in this package
+	// does -- SetupFullSchema applies the real migrations, which is where
+	// admin.tenant_api_keys is defined. tenant_isolation_db_test.go in this same
+	// package already did this; this test hand-rolled a table instead and got
+	// the schema wrong.
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+
 	if err := db.QueryRow(
 		`SELECT to_regclass('admin.tenant_api_keys') IS NOT NULL`).Scan(&haveTable); err != nil {
 		fatalf("cannot check for admin.tenant_api_keys: %v", err)
 		return
 	}
 	if !haveTable {
-		fatalf("admin.tenant_api_keys does not exist in %s -- run the migrations. "+
+		fatalf("admin.tenant_api_keys does not exist in %s even after SetupFullSchema. "+
 			"Without it the middleware refuses every request because the lookup "+
 			"errors, and this test passes without exercising the key check at all.", dsn)
 		return
