@@ -66,21 +66,15 @@ var knownPluginFailures = []struct {
 	{"not registered. Check that the plugin is deployed", "pgvector is not among the 10 plugins the harness registers"},
 	{"no plugin stream registry configured", "llm.chat_stream needs a stream registry the in-memory env does not wire"},
 
-	// The Go guest reports a CODE where the other four report the host's
-	// message: every one of its 16 failures reads "plugin_call: error 1",
-	// which the legend beside it calls a timeout, for causes the other
-	// languages name exactly ("blobstore: no tenant context"). Same host,
-	// same plugins, same calls.
-	//
-	// The host DOES write the message and the adapter DOES decode its
-	// length -- and then discards both on the error branch, printing an
-	// errCode the host hardcodes to 1 against a legend belonging to a
-	// different field. So "error 1" is a constant, not a timeout. 20 of the
-	// 23 adapters share the defect. See IMPROVEMENT-PLAN 3.306; these two
-	// entries exist to keep the divergence visible rather than bless it,
-	// and both should go once 3.306 lands.
-	{"plugin_call: error ", "the Go adapter discards the host's message (3.306)"},
-	{"plugin_call_streaming: error ", "the Go streaming adapter, same defect (3.306)"},
+	// There is deliberately no entry here for Go's old "plugin_call: error 1"
+	// legend. Until #730 (3.200, and 3.306 for the finding) the Go adapter
+	// discarded the host's message and printed a constant errCode against
+	// another field's legend, so Go needed two entries of its own. It now
+	// carries the host's text and matches the three reasons above like every
+	// other guest -- re-measured 2026-09-04 after #730, all 16 of its
+	// failures. Those two entries were removed rather than left harmless:
+	// a dead reason in a list whose whole purpose is to shrink is the rot
+	// this list exists to prevent.
 }
 
 // pluginResultError reports the error text a plugin result carries, if any.
