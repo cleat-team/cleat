@@ -193,12 +193,23 @@ cmd/cleat-worker/cleat-worker
 /ast_transform_demo.go
 /ast_transform_demo_v2.go
 
-# `npm run build` in the AS test fixture stamps a second artifact next to the
-# tracked one. Only dist/workflow.wasm is a fixture (wasm/import_section_test.go
-# and cmd/cleat-worker/backend_routing_test.go read it); the stamped copy is
-# build output with no reader, and left untracked it makes the tree dirty after
-# any asworkflow build.
-tests/plugin-harness/testdata/asworkflow/dist/workflow.stamped.wasm
+# The whole of the AS test fixture's dist/ is build output now, and none of it
+# is tracked. This rule used to name only dist/workflow.stamped.wasm, on the
+# reasoning that "only dist/workflow.wasm is a fixture" -- true about which file
+# has readers, wrong about which files the build writes. `cleat build --target
+# assemblyscript` regenerates dist/workflow.wasm itself, so
+# TestPluginCalls_Wasm_AS rewrote the tracked fixture on every run and left the
+# tree dirty. Measured 2026-09-04: 13369 bytes committed, 13672 after one run,
+# and byte-identical across two runs -- so the difference was age, not
+# nondeterminism, the same distinction drawn 100 lines above for examples/.
+#
+# The fixture the two tests read now lives in ../prebuilt/, out of the build's
+# reach, exactly as javaworkflow/prebuilt/ already did for the same reason.
+# workflow.js and workflow.d.ts are AssemblyScript's generated glue with no
+# reader (`grep -rn 'dist/workflow\.\(js\|d\.ts\)' --include='*.go'
+# --include='*.md' --exclude-dir=node_modules .` finds none) and are untracked
+# rather than moved.
+tests/plugin-harness/testdata/asworkflow/dist/
 
 # goreleaser output. Produced by `goreleaser build --snapshot`, which the
 # Release Dry Run CI job runs and which is the documented way to reproduce a
