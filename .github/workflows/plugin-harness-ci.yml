@@ -197,8 +197,21 @@ jobs:
           # ../../: the report has to land at the repo root, because the
           # Skip budget step below runs scripts/check-skip-budget.sh from
           # there. Written from inside the module (see working-directory).
+          # This file is WS-3's; WS-1 is adding here under the protocol in
+          # WORKSTREAM.md -- another stream may, when leaving the mechanism
+          # unwired would be worse, and it would be: the harness was in the
+          # tree and selected by NO CI pattern, which is the "coverage nobody
+          # has" case the harness itself exists to find.
+          #
+          # TestHostCalls is the host-call execution harness (IMPROVEMENT-PLAN
+          # §3.210, plan item A1). It is named here explicitly because this
+          # step selects by -run: a test that matches no pattern is not run,
+          # and an unwired guard reads as coverage nobody has. Confirm it is
+          # selected rather than assuming:
+          #   go test ./... -run 'TestPluginCalls_Wasm|TestHostCalls' -v \
+          #     | grep -c '^=== RUN   TestHostCallsGo/'      # 24, one per wave-1 call
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
