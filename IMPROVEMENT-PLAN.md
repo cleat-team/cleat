@@ -4060,12 +4060,27 @@ prefixed, and none of them is incidental: `plugin_call` and `plugin_call_streami
 `RegisterQueryHandler` comment directs users to. An SDK binding every `cleat_` export and none of
 these three cannot call a plugin.
 
-Confirmed against an independent source: **`ABI.md` documents 58 declared imports and the two sets
-are identical**, `comm` empty in both directions. That check needed one repair of its own — a first
-pass grepping the names *anywhere* in `ABI.md` returned 61, the three extras being
-`cleat_child_workflow_in_schema`, which appears only in changelog rows recording its **removal** on
-2026-09-02, and `cleat_plugin_call`/`cleat_plugin_call_streaming`, which appear only in an alias
-table. Matching a retraction again. Extract the `(import "env" "...")` declarations, not the names.
+Corroborated **three ways over two files, one set**. All three return 58 and `diff` reports every
+pair identical:
+
+| | route | over |
+|---|---|---|
+| A | `^#### <n>.<n> \`name\`` section headings | `ABI.md` |
+| B | `(import "env" "...")` declaration forms | `ABI.md` |
+| C | `.Export("...")` registrations | `engine/imports.go` |
+
+**A fourth attempt failed, and what separates it from A and B is the useful part.** Grepping the
+export names *anywhere* in `ABI.md` returns **61**: `cleat_child_workflow_in_schema` appears only
+in changelog rows recording its **removal** on 2026-09-02, and
+`cleat_plugin_call`/`cleat_plugin_call_streaming` appear only in an alias table at `ABI.md:169`.
+A retraction and a cross-reference, counted as declarations.
+
+The obvious lesson — "extract declarations, not name mentions" — is true and is not what saved
+route A. Section headings are not declarations either. What saved it is the `^` anchor: **a
+changelog row and an alias table cannot appear at the start of a heading line.** So the rule that
+covers all of these is *anchor to where the artifact lives, not to what it is called* — which also
+covers `packages/cleat-as/assembly/host-calls.ts:391`, where a retraction is prose in a body and
+could never sit at a declaration site.
 
 ## The classification: 55 workflow-facing, and NOT the 55 above
 
