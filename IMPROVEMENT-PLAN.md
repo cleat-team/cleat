@@ -3652,14 +3652,25 @@ zero methods in an SDK with dozens would otherwise read as perfect coverage of n
 unwired follows that file's stated protocol, and the reason is in the workflow comment: an unwired
 guard reads as coverage nobody has.
 
-### 3.207 The Rust host-call surface: 7 of 61 compiled, now all 61 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+### 3.207 The Rust host-call surface: 7 of 71 compiled, now 63 — 🟡 **PARTLY FIXED 2026-09-05**; the surface was 71 all along (WS-1, 2026-09-05)
 
 The first tier-2 row of §3.206. `examples/rust-workflow` and the plugin-harness fixture between
 them called **7 of 61** `cleat_sdk::HostCalls` methods, so passing the Rust tests meant "a Rust
 workflow builds", not "the Rust host-call surface builds".
 
 `examples/rust-all-host-calls` calls all 61 and is built for `wasm32-wasip1` by
-`TestRustAllHostCallsCompiles`. Coverage is now 61/61.
+`TestRustAllHostCallsCompiles`. Coverage is now **63/71, not 61/61**.
+
+**The 61 was wrong when this section was written**, and the error was in the measuring script
+rather than the fixture: `rust_surface()` required a `(` immediately after the method name, so
+every generic method — `pub fn name<T: ...>(` — was excluded. Ten of them, found by WS-3
+2026-09-05 and fixed in #753. Two are the ONLY Rust binding for a wave-1 call:
+`cleat_call_with_retry` is the whole of `DurableCallWithRetry` and `defer_func` the whole of
+`DurableDeferFunc`.
+
+So this section claimed a completed row that was never complete. **Rust has never been at 100%**;
+eight generic methods are bound and called by no fixture. The direction is the point: the surface
+is the denominator, so under-counting it inflates the percentage rather than failing loudly.
 
 **It compiled on the first try, and that is the result.** The equivalent Go exercise found four
 host calls that could not be built at all (§3.204) — locks, promises, side effects. Rust has no
@@ -3694,7 +3705,7 @@ in a job that cannot build Rust.
 `let _ = h.x()` throughout because it exists to be compiled, not run. §3.206 predicted exactly this
 and is why that column is reported and not baselined.
 
-### 3.208 The Java host-call surface: 8 of 68 compiled, now all 68 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+### 3.208 The Java host-call surface: 8 of 70 compiled, now all 70 — 🟢 **FIXED 2026-09-05**; surface corrected 68→70 by #753 (WS-1, 2026-09-05)
 
 Second tier-2 row of §3.206. `examples/java-workflow` and the plugin-harness fixture between them
 called **8 of 68** `cleat.HostCalls` methods.
@@ -3731,7 +3742,8 @@ report:
     build/test-results/test/TEST-cleat.AllHostCallsCompileTest.xml
     tests="1" skipped="0" failures="0" errors="0"
 
-Coverage after §3.207 and this: rust 61/61, java 68/68. AssemblyScript (11/66) is the remaining
+Coverage after §3.207 and this: **rust 63/71, java 70/70** (both corrected 2026-09-05 by #753 —
+the surface scans under-counted). AssemblyScript (11/66) is the remaining
 tier-2 row; go and python reach 37/37 and 73/73 when §3.204 and §3.205 land.
 
 ### 3.209 The AssemblyScript host-call surface: 11 of 66 compiled, now all 66 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
@@ -3770,7 +3782,9 @@ would have reported 65 as complete.
 `ERROR TS2339: Property 'noSuchHostCall' does not exist on type 'assembly/host-calls/HostCalls'`,
 and `asc` exits 1 where the clean fixture exits 0.
 
-Coverage after §3.207–§3.209: **rust 61/61, java 68/68, assemblyscript 66/66.** Go and Python
+Coverage after §3.207–§3.209: **rust 63/71, java 70/70, assemblyscript 66/66** (rust and java
+corrected by #753; the earlier 61/61 and 68/68 came from surface scans that under-counted, so
+"all five SDKs at 100%" was never true). Go and Python
 reach 37/37 and 73/73 when §3.204 and §3.205 land, which completes compile coverage for all five
 SDKs. **What remains unmeasured is execution** — see §3.210.
 
