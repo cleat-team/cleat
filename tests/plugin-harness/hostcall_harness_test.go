@@ -130,8 +130,24 @@ func executeOneCall(t *testing.T, eng *engine.Engine, wasmBytes []byte, call str
 		return hostCallOutcome{Call: call, Status: statusSuspended, Detail: suspended.Reason}
 	}
 
+	// Java/TeaVM returns the entry's value as a JSON-ENCODED STRING -- a JSON
+	// string whose contents are the JSON object -- where Go, Rust and
+	// AssemblyScript return the object itself. That is the Java SDK's ABI
+	// contract, not a fixture bug: TestPluginCalls_Wasm_Java unwraps the same
+	// way, and #724 turned the two skips that hid it into failures.
+	//
+	// Unwrapped exactly once, and only when the payload really is a JSON
+	// string, so a malformed object still fails here rather than being
+	// massaged into one. A tolerant decoder is how a harness stops being able
+	// to tell a wrong answer from a differently-shaped right one.
+	payload := result
+	var wrapped string
+	if err := json.Unmarshal([]byte(result), &wrapped); err == nil {
+		payload = wrapped
+	}
+
 	var got hostCallOutcome
-	if err := json.Unmarshal([]byte(result), &got); err != nil {
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
 		t.Fatalf("%s: fixture returned undecodable result: %v\nraw: %.500s", call, err, result)
 	}
 	// The fixture is asked for one call and must answer about that call. A
