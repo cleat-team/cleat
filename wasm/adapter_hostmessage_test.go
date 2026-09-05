@@ -1,0 +1,126 @@
+package wasm
+
+import (
+	"strings"
+	"testing"
+)
+
+// packDurableCallResultAdapters are the adapters whose host side returns
+// engine.packDurableCallResult, and they are the only ones for which the
+// CallErrorCode legend means anything.
+//
+// That packer is `responseLen<<40 | callErrorCode<<8 | errCode`, so it is the
+// only one carrying a cleat.CallErrorCode at all. Re-derive the set with:
+//
+//	grep -rn 'packDurableCallResult(' --include='*.go' engine/ | grep -v _test.go
+//
+// which reaches durablecalls.go (freshCall, replayCall, DurableCallWithRetry,
+// freshCallWithRetry), heartbeats.go (freshCallWithHeartbeat,
+// replayCallWithHeartbeat) and plugins.go (replayPluginCall,
+// freshPluginCallInternal, streamFailure, freshPluginCallStreaming,
+// replayPluginCallStreaming) -- the five adapters below and nothing else.
+//
+// Every other packer -- packSimpleResult, packAwaitChildResult,
+// packAwaitPromiseResult, packAwaitSignalsResult, packAcquireLockResult -- has
+// an errCode and no callErrorCode field, so an adapter on one of those must not
+// print the legend either. That is a separate defect from this one and is not
+// asserted here; see IMPROVEMENT-PLAN.md 3.200.
+var packDurableCallResultAdapters = []string{
+	"DurableCall",
+	"DurableCallWithRetry",
+	"DurableCallWithHeartbeat",
+	"PluginCall",
+	"PluginCallStreaming",
+}
+
+// TestDurableCallAdaptersReportTheHostsMessageNotJustACode asserts that an
+// adapter on the durable-call layout hands the host's own error text to
+// callErrorMessage, rather than printing a bare number against the legend.
+//
+// The host writes the reason into the response buffer and packs its length:
+// engine/plugins.go's failure path is
+//
+//	written, _ := s.writeResult(ctx, m, responsePtr, errStr, responseMaxLen)
+//	return packDurableCallResult(int(written), callFailureCode, 1)
+//
+// PluginCall and PluginCallStreaming decoded that length into responseLen, then
+// returned on the error branch without ever reading responseBuf -- so a Go
+// guest was told "plugin_call: error 1 (...1=timeout...)" while Rust, AS and
+// Java were told "plugin function pgvector/upsert not registered". Same host,
+// same bytes, three languages reading them and one not.
+//
+// Two further things were wrong with that number, which is why this test checks
+// the message rather than the code. `result & 0xFF` is the errCode field, and
+// the host hardcodes it to literal 1 on every failure path -- so the value was
+// a constant, not a classification. And the legend beside it enumerates
+// CallErrorCode, which lives at bits 8-39 and was never decoded: the real
+// classification (callFailureCode = callErrorUnavailable = 2) was discarded
+// with the message.
+//
+// TestHostAdapterReportsCallErrorCodeNotErrCode already pinned this for
+// cleat_call. Its doc comment describes the general defect and its assertion
+// names one call, so it stayed green while two other adapters on the same
+// layout had the same bug. This is the general form.
+func TestDurableCallAdaptersReportTheHostsMessageNotJustACode(t *testing.T) {
+	const legend = "0=unknown 1=timeout"
+
+	for _, name := range packDurableCallResultAdapters {
+		def, ok := adapterDefs[name]
+		if !ok {
+			t.Fatalf("adapterDefs has no %q -- this list is stale, re-derive it "+
+				"with the grep in packDurableCallResultAdapters' doc comment", name)
+		}
+		stmts := strings.Join(def.ResultStmts, "\n")
+
+		if !strings.Contains(stmts, "callErrorMessage(") {
+			t.Errorf("%s: error path never calls callErrorMessage, so the host's "+
+				"message is discarded and the guest sees only a code", name)
+		}
+		if strings.Contains(stmts, legend) {
+			t.Errorf("%s: prints the CallErrorCode legend instead of the host's "+
+				"message; the host wrote a reason into the response buffer and "+
+				"packed its length", name)
+		}
+		// The legend is only wrong because there is a real message to print
+		// instead. An adapter with no response buffer could not do better, so
+		// pin that this one has one.
+		if !strings.Contains(stmts, "responseBuf") {
+			t.Errorf("%s: no responseBuf in the error path; if this call really "+
+				"has no output buffer it does not belong in "+
+				"packDurableCallResultAdapters", name)
+		}
+	}
+}
+
+// TestPluginCallDecodesCallErrorCodeFromTheRightBits pins the shift, because
+// the message and the code come from different fields of one packed word and
+// only one of them is checked above.
+//
+// callErrorCode is bits 8-39. Decoding it as `result & 0xFF` yields errCode,
+// which is 1 for every failure -- the constant that made every plugin failure
+// read as a timeout.
+func TestPluginCallDecodesCallErrorCodeFromTheRightBits(t *testing.T) {
+	for _, name := range []string{"PluginCall", "PluginCallStreaming"} {
+		stmts := strings.Join(adapterDefs[name].ResultStmts, "\n")
+		want := "callErrorCode := uint32((uint64(result) >> 8) & 0xFFFFFFFF)"
+		if !strings.Contains(stmts, want) {
+			t.Errorf("%s: does not decode callErrorCode from bits 8-39.\nwant: %s", name, want)
+		}
+		if strings.Contains(stmts, "callErrorMessage(\""+adapterCallName(name)+"\", responseBuf, responseLen, errCode)") {
+			t.Errorf("%s: passes errCode where callErrorCode belongs; errCode is 1 "+
+				"for every failure and the legend describes CallErrorCode", name)
+		}
+	}
+}
+
+// adapterCallName maps an adapter field name to the host import name it reports
+// in its error text.
+func adapterCallName(field string) string {
+	switch field {
+	case "PluginCall":
+		return "plugin_call"
+	case "PluginCallStreaming":
+		return "plugin_call_streaming"
+	}
+	return field
+}

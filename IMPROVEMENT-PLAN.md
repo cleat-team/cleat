@@ -3068,6 +3068,101 @@ Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
+### 3.200 A Go guest was told "error 1 (timeout)" for every plugin failure, and the host's real message was in the buffer beside it — 🟢 **FIXED 2026-09-04** (WS-1, 2026-09-04); the other 13 adapters are 🔴 **OPEN**
+
+Found by WS-2 while dumping every plugin key in every language for §3.306, and handed over as
+ABI-adjacent. Same host, same 10 plugins, same 17 calls:
+
+| guest | what it reported |
+|---|---|
+| Rust / AS / Java | `plugin function pgvector/upsert not registered. Check that...` |
+| Go | `plugin_call: error 1 (0=unknown 1=timeout 2=transient ...)` |
+
+WS-2 posed two candidates — the host wrote no response bytes, or the length failed
+`callErrorMessage`'s bounds check — and deliberately did not guess between them. **It was
+neither.** The host writes the text and the guest decodes the length correctly. The Go adapter
+then discards it:
+
+```go
+responseLen := uint32(uint64(result) >> 40)
+errCode := uint32(result & 0xFF)
+if errCode != 0 {
+	return "", fmt.Errorf("plugin_call: error %d (0=unknown 1=timeout ...)", errCode)
+}
+return unsafe.String(&responseBuf[0], int(responseLen)), nil
+```
+
+`responseLen` is computed and then unused on the error branch; `responseBuf` is never read there.
+The host side is `engine/plugins.go`:
+
+```go
+written, _ := s.writeResult(ctx, m, responsePtr, errStr, responseMaxLen)
+return packDurableCallResult(int(written), callFailureCode, 1)
+```
+
+**Three things were wrong at once, which is why the symptom looked like a length bug.**
+
+1. *The message is discarded.* Nothing reads `responseBuf` on the failure path.
+2. *The printed number comes from a different field than the legend describes.*
+   `packDurableCallResult` is `responseLen<<40 | callErrorCode<<8 | errCode`, so `result & 0xFF`
+   is `errCode` — which the host hardcodes to literal `1` on **every** failure path. Simulating
+   the packer with `callErrorCode` varied over 0/2/3/5 prints `1` every time. The legend beside
+   it enumerates `CallErrorCode`, which lives at bits 8–39.
+3. *The real classification is discarded too.* `callFailureCode = callErrorUnavailable = 2`,
+   never decoded.
+
+So "why is it 1 for a not-registered plugin" has a flat answer: **it is 1 for everything.** Not a
+timeout, not a classification — a constant.
+
+**This is a mechanism, not a bug, and the scope is the finding.** 20 of the 23 adapters in
+`wasm/adapter_metadata.go` print that legend; three call `callErrorMessage`. Those three —
+`DurableCall`, `DurableCallWithRetry`, `DurableCallWithHeartbeat` — are exactly the calls named in
+§2.10. **The fix was applied to the report's examples and never generalised.**
+
+The set that legend can *ever* be right for is decidable, because only one packer carries a
+`CallErrorCode`:
+
+    grep -rn 'packDurableCallResult(' --include='*.go' engine/ | grep -v _test.go
+
+reaches `durablecalls.go`, `heartbeats.go` and `plugins.go` — five adapters. The three above, plus
+`PluginCall` and `PluginCallStreaming`. **Those two are this fix.** Both now decode
+`callErrorCode` from bits 8–39 and pass the buffer to `callErrorMessage`, which is what the other
+three have done since §2.10.
+
+**Still open: the other 13.** `packSimpleResult`, `packAwaitChildResult`, `packAwaitPromiseResult`,
+`packAwaitSignalsResult` and `packAcquireLockResult` each carry an `errCode` and **no
+`callErrorCode` field at all** — so `DurableAwaitSignals`, `DurableDefer`, `DurableDeferFunc`,
+`PollSignal`, `ChildWorkflow`, `ChildWorkflowWithOptions`, `AwaitChild`, `AwaitAllChildren`,
+`PollChild`, `AwaitAnyChild`, `CreatePromise`, `AwaitPromise` and `SideEffect` print a legend for
+a field that does not exist. That is a different defect with a different fix — `hostErrMessage`,
+or no legend — and it is not taken here. `wasm/generator.go` already says so in
+`hostErrMessage`'s doc comment, which warns that printing the `CallErrorCode` legend beside a
+simple-result code "would describe a rejected cron expression as a timeout". **That comment
+describes the live defect in thirteen other calls.** Five more adapters —
+`ContinueAsNew`, `ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`, `ReleaseLock` — print
+the legend with no output buffer at all, so they have nothing better to print and need the legend
+removed rather than replaced.
+
+**Falsification.** Reverting `adapter_metadata.go` and keeping the test reddens
+`TestDurableCallAdaptersReportTheHostsMessageNotJustACode` on `PluginCall` and
+`PluginCallStreaming` — both assertions, both adapters, naming the discarded message — and
+`TestPluginCallDecodesCallErrorCodeFromTheRightBits` on the shift. **`DurableCall`,
+`DurableCallWithRetry` and `DurableCallWithHeartbeat` stay green in the same run**, which is the
+negative control: the test discriminates the two broken adapters from the three correct ones
+rather than merely firing.
+
+**Why the existing guard did not catch it.** `TestHostAdapterReportsCallErrorCodeNotErrCode`
+(§2.10) pins exactly this property — its doc comment describes a call that "reported Code 4
+(invalid request) and then said 'error 1', which the legend reads as a *timeout*". Its assertion
+is a substring match on `callErrorMessage("cleat_call", ...)`. **The comment states the general
+rule and the assertion names one call**, so it stayed green while two other adapters on the same
+layout carried the same defect. This is CLAUDE.md's "a test whose NAME asserts the mechanism"
+in its other form: here the *comment* asserted the mechanism and the test checked an instance.
+
+CLAUDE.md records that all four prior defects at this boundary were "the value meant the wrong
+thing on one side of the boundary", and none was an overflow. This is a fifth, and it is that
+exactly — twice over: a length that was read and dropped, and a code read from the wrong field.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
