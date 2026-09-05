@@ -228,7 +228,7 @@ func (fi *FaultInjector) applyLatencySleep() {
 	if min > 0 && max > 0 {
 		dur := min
 		if max > min {
-			dur += time.Duration(rand.Int63n(int64(max - min)))
+			dur += time.Duration(rand.Int63n(int64(max - min))) //nolint:gosec // G404: picks which fault to inject and how long to stall. Cryptographic randomness would be a category error.
 		}
 		time.Sleep(dur)
 	}

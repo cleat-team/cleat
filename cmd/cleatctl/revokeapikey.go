@@ -66,6 +66,8 @@ import (
 // paragraph above, which exists because passing a live key in argv leaks it to
 // any co-resident user. The scanner flags the documentation of the mitigation
 // and has nothing to say about the mitigation itself.
+//
+//nolint:gosec // G101: usage text, not a credential -- see the paragraph above.
 const revokeAPIKeyUsage = `Usage: cleatctl revoke-api-key [flags]
 
 Revokes a cleat API key so it can no longer authenticate. Exactly one of

@@ -935,6 +935,7 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 		return
 	}
 
+	//nolint:gosec // G202: the concatenated fragments are compile-time constants -- statusTerminating and deferPhaseOwedSQL are consts in defer_phase.go, deferPhaseDeadlineMySQL is a Sprintf over a duration const. No caller-controlled string reaches this.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = '`+statusTerminating+`',

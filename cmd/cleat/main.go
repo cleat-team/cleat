@@ -909,7 +909,7 @@ func runVetAS(dir string) int {
 	// --noEmit runs parse and the transform, including the E001-E005
 	// determinism diagnostics, without producing a .wasm. Everything else
 	// matches the build invocation so vet and build agree about what compiles.
-	cmd := exec.Command("npx",
+	cmd := exec.Command("npx", //nolint:gosec // G204: fixed binary, arguments passed as an array, no shell. The variable part is a project path the developer just typed.
 		"asc", filepath.Join("assembly", "index.ts"),
 		"--runtime", "stub",
 		"--transform", "@cleat/transform",

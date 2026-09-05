@@ -73,7 +73,7 @@ func (p *VaultCredentialProvider) GetConnectionString(ctx context.Context) (stri
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "vault", "kv", "get", "-field=connection_string", p.credentialPath)
+	cmd := exec.CommandContext(ctx, "vault", "kv", "get", "-field=connection_string", p.credentialPath) //nolint:gosec // G204: fixed binary ("vault"), arguments as an array, no shell. credentialPath is an operator-supplied --db-credential-path.
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -107,7 +107,7 @@ func (p *AWSSecretsManagerProvider) GetConnectionString(ctx context.Context) (st
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "aws", "secretsmanager", "get-secret-value",
+	cmd := exec.CommandContext(ctx, "aws", "secretsmanager", "get-secret-value", //nolint:gosec // G204: fixed binary ("aws"), arguments as an array, no shell. Same shape as the vault provider above.
 		"--secret-id", p.credentialPath,
 		"--query", "SecretString",
 		"--output", "text")

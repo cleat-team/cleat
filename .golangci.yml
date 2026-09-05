@@ -13,11 +13,13 @@ linters:
     - staticcheck
     # Enabled 2026-08-05 (WS-3). 32 findings, all fixed with `unconvert -apply`.
     - unconvert
+    # Enabled 2026-09-04 (WS-3). See "gosec, 2026-09-04" below: 671 raw, and 0
+    # after two scoped exclusions that the notes below argue for individually.
+    - gosec
   disable:
     - errcheck
     - unused
     - gocyclo
-    - gosec
   # The disables above are a backlog, not a policy. This note used to read
   # "errcheck and other noisy linters are temporarily disabled. The engine
   # refactoring introduced hundreds of pre-existing issues." That was true when
@@ -202,6 +204,117 @@ linters:
   # every count comes back 0. Loop with `while IFS= read -r m`, and check
   # stderr for `level=error` rather than trusting the count.
 issues:
+  # gosec, 2026-09-04 (WS-3). ENABLED, with two exclusions and no baseline file.
+  #
+  # Measured on golangci-lint v1.64.7 under GOTOOLCHAIN=go1.25.11 (the toolchain
+  # matters: v1.64.7 cannot read export data from Go 1.27 and exits 3 having
+  # found nothing, which is the "tidy table of zeroes" this file already warns
+  # about one section up -- and `go.work` here requires >= 1.25.11, so go1.25.0
+  # fails the same way. Check for `level=error` on stderr, not just the count):
+  #
+  #     671 total
+  #     -> 418 in _test.go, 253 production
+  #     -> 40 production once G115 is excluded
+  #     -> 17 production once G306 is excluded too
+  #     -> 0, with those 17 //nolint'd at the site with their reasoning
+  #
+  # The middle two lines are worth keeping because the first draft of this note
+  # asserted "0 with the two exclusions below" without running it. It was 67.
+  # Every number in this block was measured after the config it describes.
+  #
+  # Re-derive with a gosec-only config, per the recipe in the section above:
+  #
+  #     GOTOOLCHAIN=go1.25.11 golangci-lint run --timeout=15m -c gosec-only.yml ./... \
+  #       > out.txt 2> err.txt; grep -c 'level=error' err.txt   # must be 0
+  #     grep -c '(gosec)' out.txt
+  #     grep -v '_test\.go' out.txt | grep -oE 'G[0-9]{3}' | sort | uniq -c | sort -rn
+  #
+  # WHY NO BASELINE FILE, which is how this was first proposed. A baseline makes
+  # sense when the backlog is real work someone will grind down. This one is not:
+  # every single one of the 40 production findings was read, and all 40 are false
+  # positives or deliberate. A baseline of 180 benign entries would be a file
+  # nobody could ever shrink, and "can only shrink" would quietly become "never
+  # moves". The two exclusions below say the same thing in a tenth the space and
+  # carry the reason with them.
+  #
+  # What was actually read, so the next person does not have to re-read it:
+  #
+  #   G202 SQL string concatenation (5)  -- every concatenated fragment is a
+  #     compile-time constant: `statusTerminating` and `deferPhaseOwedSQL` are
+  #     consts (engine/defer_phase.go:50,84), `deferPhaseDeadlineMySQL` is a
+  #     Sprintf over a duration const, and `sqlPlaceholders` emits only "?" or
+  #     "@pN". No caller-controlled string reaches any of them.
+  #   G204 subprocess (6)  -- fixed binary ("vault", "aws", "npx"), arguments
+  #     passed as an array, no shell. gosec flags any non-literal argument.
+  #   G101 hardcoded credentials (3)  -- a usage string, a test-only Postgres
+  #     role password that only ever exists in ephemeral test databases, and a
+  #     localhost default DSN. cmd/cleatctl/revokeapikey.go already carried a
+  #     comment saying gosec "flags the documentation of the mitigation and has
+  #     nothing to say about the mitigation itself".
+  #   G108 pprof (1)  -- the blank net/http/pprof import registers on
+  #     DefaultServeMux, and cmd/cleat-worker never serves it: the API uses its
+  #     own http.NewServeMux, and pprof gets a separate opt-in listener behind
+  #     --pprof-addr, empty by default (main.go:1126-1147). gosec flags the
+  #     import, not the wiring.
+  #   G602 slice bounds (1)  -- wasm/component_rewrite.go:363 indexes
+  #     wasmBytes[0:8] under a `len(wasmBytes) < 8` early return at the top of
+  #     the same function (line 122).
+  #   G404 weak random (1)  -- engine/fault_injector.go picks which fault to
+  #     inject. Cryptographic randomness would be a category error.
+  #   G306 file permissions (23)  -- 0644 on files a developer is meant to read
+  #     and edit: `cleat init` scaffolding, generated code, build outputs, a
+  #     lock file, the compiled-module disk cache. 0600 would be wrong, not
+  #     safer. This one is an exclusion rather than 23 //nolints; see below.
+  exclude-rules:
+    # G115, integer overflow conversion. 213 of the 253 production findings.
+    #
+    # This is a DECISION, not a deferral, and it predates enabling gosec --
+    # see the 2026-08-31 note above. CLAUDE.md: "Four real defects have come
+    # out of the ABI layer's integer-conversion sites and none of them was an
+    # overflow -- in every case the value meant the wrong thing on one side of
+    # the boundary, which a property test over that boundary would find faster
+    # than reading the remaining sites." Those property tests landed in #485.
+    # Reading 213 conversion sites for overflows is precisely the sweep that
+    # guidance exists to prevent.
+    - linters: [gosec]
+      text: "G115"
+
+    # G306, WriteFile permissions. Excluded repo-wide for gosec ONLY.
+    #
+    # Scoped to the linter rather than added back to a global `exclude-files`,
+    # which is the move the note below this block explicitly asks for: "If you
+    # are tempted to re-add the exclusion to make a new linter tractable, scope
+    # it to that linter instead of blinding all of them."
+    #
+    # THE COST, stated because an exclusion that hides a future real finding is
+    # how a linter becomes decoration: cleat has no code path that writes a
+    # secret to disk today, so there is nothing here for 0600 to protect. If one
+    # is added -- a credential cache, a token file -- this exclusion will not
+    # flag it, and the reviewer of that PR is the last line. G306 is the one
+    # rule here excluded on breadth rather than on having read every site.
+    - linters: [gosec]
+      text: "G306"
+
+    # Test files, for gosec ONLY -- 418 of the 671, and 140 of them survive the
+    # two exclusions above.
+    #
+    # This is the scoped form the note below asks for, not a return to the
+    # global `exclude-files` that note is about. The argument for removing THAT
+    # was "a linter that cannot see test files cannot see a test that does not
+    # test", and it was earned: staticcheck found an unreachable t.Fatal and an
+    # `if !reapCalled {}` with an empty body. gosec cannot find that class of
+    # defect. What it finds in _test.go here is test DSNs with the password in
+    # them (G101), harnesses shelling out to docker/cargo/npx (G204), and
+    # fixtures written 0644 (G306) -- all of them properties of being a test.
+    #
+    # THE COST: a real credential committed in a test file would not be flagged
+    # by this linter. scripts/ and CI have no secret-scanner either, so nothing
+    # else catches it. That is a gap worth closing separately; it is not a
+    # reason to keep 140 findings that are all the test suite being a test
+    # suite.
+    - path: '_test\.go'
+      linters: [gosec]
+
   # THERE IS NO `exclude-files` HERE ANY MORE, AND THAT IS THE POINT.
   #
   # This file carried `exclude-files: [".*_test\.go$"]` from the beginning, so
