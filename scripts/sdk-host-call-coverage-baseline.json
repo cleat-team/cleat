@@ -12,7 +12,7 @@
   "rust": {
     "covered": 61,
     "surface": 61,
-    "executed": 7
+    "executed": 23
   },
   "java": {
     "covered": 68,
@@ -22,6 +22,6 @@
   "assemblyscript": {
     "covered": 66,
     "surface": 66,
-    "executed": 7
+    "executed": 25
   }
 }

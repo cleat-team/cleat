@@ -5177,3 +5177,33 @@ store ignores `Version`.
 
 All three languages, 72 host-call executions, **5.3s** locally. Rust builds in 2.7s and executes
 in 0.17s; AssemblyScript is 3.65s end to end. Build-once-invoke-N held.
+
+#### What it did to the executed-coverage guard, and two calls that guard cannot see
+
+`scripts/sdk-host-call-coverage.py --check-executed` (§3.207) moved **rust 7 → 23** and
+**assemblyscript 7 → 25**, and *failed* on the rise until the baseline was recorded — the
+bidirectional ratchet landed in #749 hours before this, on the reasoning that a guard which only
+forbids shrinking cannot tell a stale baseline from an accurate one.
+
+**Two wave-1 calls this fixture exercises are invisible to both coverage metrics, and the reason
+is one character of regex.** `rust_surface()` matches `^\s{4}pub fn ([a-z_][a-z0-9_]*)\s*\(` —
+the name must be followed by `(`. A Rust generic method is `pub fn name<T: …>(`, so every generic
+method on `HostCalls` is excluded:
+
+    counted (surface) = 61
+    all `pub fn`      = 71
+    excluded (10): await_child_typed, child_workflow_typed, cleat_call_heartbeat_typed,
+                   cleat_call_typed, cleat_call_with_host_retry, cleat_call_with_retry,
+                   defer_func, plugin_call_streaming_typed, plugin_call_typed, side_effect_typed
+
+Two of those ten are the **only** Rust bindings for a wave-1 call: `cleat_call_with_retry` is the
+whole of `DurableCallWithRetry` (there is no string-in/string-out form) and `defer_func` is the
+whole of `DurableDeferFunc`. So this fixture calls them, the table asserts their outcomes, and
+both coverage numbers are computed as though neither existed. **The Rust surface of 61 understates
+by 10, and the direction is the dangerous one** — a smaller denominator makes coverage look
+*higher*, and an uncountable call reads as a call nobody needs to write.
+
+Not fixed here; the fix changes every Rust number at once and belongs with its own baseline
+update. The same shape may affect Java — 77 `public` members against a counted surface of 68 —
+but that is flagged rather than claimed, because the Java regex admits `<>` inside the return
+type and the four-member remainder was not investigated.
