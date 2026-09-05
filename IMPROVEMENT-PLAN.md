@@ -4668,3 +4668,201 @@ the thing most worth catching — §3.305 already found one in the AssemblyScrip
 Falsified both ways: with the fix reverted the guard exits 1 naming both files, with it
 applied the guard exits 0. **The test itself reports `ok` in both runs** — it never read
 those bytes, so nothing but the guard can see the difference.
+
+---
+
+### 3.404 The guest-execution harness's cost is set by fixture shape, not by call count — 🟢 **ANSWERED 2026-09-05** (WS-3, 2026-09-05)
+
+**Question (WS-1's C1).** Does executing wave 1 — the host calls whose result a guest must
+decode — fit the existing tier-2 jobs, or does it need its own? Answer wanted with measured job
+times, before A1 finalised the harness, because a bad answer would force sampling into the design
+as a retrofit.
+
+**Answer.** It fits `Cross-Language WASM E2E`. No new job, no sampling, at wave 1 and at
+wave 1 + wave 2 together — **provided the harness builds each guest once and invokes it N times.**
+One fixture per host call costs 3× as much and makes the job co-critical-path with `Tier 1 Gate`.
+That conditional is the whole finding: the cost driver is fixture shape, and the call count barely
+matters.
+
+#### The waves, re-derived
+
+24 wave 1 / 13 wave 2 / 37 total. (23/14 when first derived; `AcquireLock` was promoted after —
+see below.)
+
+`wasm.AdapterFieldNames()` returns names only, and the split needs `ReturnType` and `ResultStmts`,
+which are unexported. So the table was dumped from **inside** the package — a temporary
+`wasm/*_test.go` marshalling `adapterDefs` to JSON, removed after — rather than pattern-matched.
+That was not fastidiousness: the obvious regex over `wasm/adapter_metadata.go` returns **zero**
+entries, because the struct literal defeats it, and zero would have silently confirmed whatever
+was claimed.
+
+The discriminator has no middle. Every wave-1 entry shifts a length out of the packed result,
+reads an out buffer, or decodes a host message — most do all three. Every wave-2 entry does none
+of the three.
+
+#### The rule got better by being wrong about one row
+
+The first rule was *"does the error path read a buffer"*, and under it `AcquireLock` was wave 2.
+Recorded at the time as **the one placement I would defend least**, because it decodes
+`acquired := (result>>8)&0x1` — a bit the host computed — even though no length or buffer is
+involved.
+
+WS-1 promoted it and rewrote the rule to **"does the guest have to decode something the host
+computed"**, which is better generally. The case that separates the two rules is exactly this
+one: a guest that returns a constant `true` for `acquired` compiles, passes every
+compile-coverage check, and is silently wrong about holding a lock — the §3.200 class.
+
+**Its harness row is honest but weak, and #744's table says so.** Exercising `AcquireLock` twice
+in one invocation returns `first=true second=true`: the in-memory lock is re-entrant for the same
+holder, so the row cannot distinguish a decoded bit from a hardcoded one. Doing that needs a
+second holder, which one workflow invocation cannot provide. The same ceiling applies to any
+row whose value depends on another party's state.
+
+#### Measured job times
+
+Run `33973787289` (`Cross-Language E2E`, sha `fa6dd10a`, all green). Re-derive with
+
+    gh run list --workflow "<name>" --branch develop --status success --limit 5 \
+      --json databaseId,createdAt,updatedAt,headSha
+    gh api repos/:owner/:repo/actions/runs/<id>/jobs \
+      --jq '.jobs[] | .steps[] | "\(.name)\t\((.completed_at|fromdateiso8601)-(.started_at|fromdateiso8601))s"'
+
+| job | wall |
+|---|---|
+| Tier 1 Gate | **848s** — the critical path |
+| CI/CD Pipeline | 612s |
+| Cross-Language WASM E2E | **364s** — 20-minute timeout |
+| Tier 2 Gate | 269s — installs no guest toolchain |
+| Ecosystem CI | 82s — 4 jobs, 13–50s, SDK unit tests only, no host |
+
+#### The number that decided it, and it is not a build time
+
+Per-test durations in that run show each language's caching, and the caching is the underlying
+build tool's rather than the harness's — there is no `sync.Once` in `buildRustWasm`,
+`buildAssemblyScriptWasm` or `buildJavaWasm`, each shells out on every call. Rust looks free only
+because every test builds the *same* crate.
+
+Local measurements (this Mac, aarch64) separate build from execute, which the CI log cannot do —
+Go buffers `-v` output per test, so every line inside a test carries the same timestamp:
+
+| measurement | value |
+|---|---|
+| Rust, no-op rebuild | 0.03s |
+| Rust, rebuild after a one-line source edit | 1.21s |
+| AssemblyScript, `npm run build` (×2) | 1.05s, 0.86s — no caching |
+| Python, `componentize-py` build in `cleat-py-toolchain` (×2) | 1.82s, 1.54s |
+| **Python, execute a prebuilt 19.87 MB component, 5 consecutive in one process** | **995, 937, 934, 891, 935 ms** |
+
+**Python's per-invocation cost is flat and does not amortise.** One engine, one wasmtime backend,
+one already-built component, five executions — no downward trend. The build costs 1.8s once;
+every invocation after costs another 0.93s and no cache in the path touches it. This is the term
+that survives every shape change, and at wave 1 it is roughly half the added cost.
+
+Reproduce with a scratch test in `./engine/` that reads a prebuilt component, constructs
+`NewEngine(rt, caller, WithBackends(WasmtimeLanguages, wt))` once, and calls `engine.Execute(ctx,
+wasmBytes, "run", input)` in a loop, logging each duration.
+
+#### Costed, added to the 364s job
+
+| | shape B: one fixture per call | shape C: build once, invoke N |
+|---|---|---|
+| Python | 205s | 75s |
+| Java | 176s | 47s |
+| AssemblyScript | 51s | 14s |
+| Rust | 30s | 10s |
+| **added** | **~460s → 825s** | **~145s → ~510s** |
+
+Shape B is under the 1200s timeout but is 2.3× the job and lands within ~25s of `Tier 1 Gate`, so
+`Cross-Language E2E` becomes co-critical-path and wave 2 has nowhere to go. Shape C is 8.5
+minutes, stays 340s below the critical path, and leaves room for wave 2.
+
+**Shape C was not a new capability.** `examples/as-workflow` already exports 8 entrypoints from
+one module, `examples/rust-workflow` carries ~8 `#[cleat_entry]`, and the Java tree generates a
+`CleatEntryIndex`. Python differs in mechanism only: `componentize-py` takes one
+`--entry file.py:func`, and the component *"always exports `run` as the sole entry point, which
+dispatches to `@cleat_entry` functions"* (`engine/python_wasm_e2e_test.go:121`), so Python reaches
+shape C by dispatching on input inside one entry rather than by exporting 24 symbols. The cost
+profile is identical either way, because Python's cost is per-invocation and not per-export.
+A1 landed Go the same way — `buildGoHostCallWasm` called once outside the loop, dispatch inside a
+single `exercise_host_call` entry, **24 invocations plus the build in 3.6s** — so the harness is
+uniform across all five rather than Python being the exception.
+
+#### Why this job and not `Tier 2 Gate`
+
+`Cross-Language WASM E2E` already installs Go, Rust (both wasm targets), Python +
+componentize-py + wasm-tools, Node, Java 17 and Gradle; already sets `CLEAT_REQUIRE_TOOLCHAINS`
+so a missing toolchain is a `Fatal` rather than a skip; already runs `check-skip-budget.sh` at a
+budget of 0; and is triggered unconditionally on every PR — **no path filter**, so it cannot
+repeat the Ecosystem CI defect where each SDK job was triggered by every change but its own.
+`tiers.yaml` already declares it `covers: tier2` under `tier2.gated_by`, which is exactly the
+claim the harness makes.
+
+`Tier 2 Gate` installs no guest toolchain. Putting the harness there costs 27s + 137s of setup to
+duplicate what E2E already pays, more than doubling a 269s job to buy nothing.
+
+#### On sampling, which is the part that was designed out rather than designed in
+
+§3.401's lesson was not that sampling is hard. It was that **a metric which silently loses samples
+reports itself as better** — an unrecorded latency stayed zero, zeros sort to the front, and a run
+that measured less looked faster. So the requirement handed to A1 was not "sample carefully" but
+"assert the count of calls actually invoked, and fail short."
+
+A1 implemented it as a guard that fails `invoked 23 of 24`, negative-controlled by making one
+subtest skip. **Worth recording what it does not catch**, because WS-1 checked rather than
+assumed: dropping a call from the list shrinks `invoked` and `len(wave1Calls)` together, so the
+count guard is blind to that, and a separate table-drift guard covers it — negative-controlled by
+dropping `AcquireLock`. Two guards, two different failures, neither covering the other.
+
+#### A committed Python fixture is off the table for good
+
+Two `componentize-py` builds of identical source produced **19,928,335** and **19,872,748**
+bytes. WS-2 had measured five builds with five distinct digests on their machine; this reproduces
+it on a different machine and a different architecture, which moves it from "an environment" to
+"the tool". Any harness that wants to compare Python must compare **outcomes**, never bytes.
+
+#### Two numbers here are soft, and are labelled soft
+
+* **Java's build/execute split is not measured.** CI totals are 6.6–8.3s per test; what fraction
+  is Gradle is unknown, so shape C's ~1s/invocation for Java is the weakest figure above. It does
+  not change the verdict — Java could be 3× that and shape C still fits — but it must not be
+  quoted as measured.
+* **The Python CI split (5.9s build / 3.0s execute) is a model**, not a measurement: the Mac's
+  1.8 : 0.93 ratio applied to the measured 8.9s CI total. It is the only modelled number in the
+  section.
+
+---
+
+### 3.405 Thirty-eight per cent of the Cross-Language E2E job is one uncached install step — 🔷 **FOUND 2026-09-05, NOT FIXED** (WS-3, 2026-09-05)
+
+Found while costing §3.404, and recorded separately because it is not the harness's problem —
+which is exactly why it would otherwise stay an aside in a message and never be fixed.
+
+`Cross-Language WASM E2E` takes 364s. Of that, **166s is setup and 137s of the setup is a single
+step**:
+
+    gh api repos/:owner/:repo/actions/runs/33973787289/jobs \
+      --jq '.jobs[] | .steps[] | "\(.name)\t\((.completed_at|fromdateiso8601)-(.started_at|fromdateiso8601))s"'
+
+| step | s |
+|---|---|
+| toolchain setup (Go / Rust / Python / Node / Java / Gradle) | 27 |
+| **Install Python WASM toolchain** — `pip install componentize-py` + `cargo install wasm-tools` | **137** |
+| Install Python SDK | 2 |
+| Run cross-language E2E tests | 169 |
+| Run the cross-language suite | 24 |
+
+`cargo install wasm-tools` builds from source on every run. Both pins are static, so this is
+cacheable — by `actions/cache` on `~/.cargo/bin`, or by `taiki-e/install-action`, or by moving
+both into the `cleat-py-toolchain` image the repo already ships and already uses for Python work
+that cannot run on a Mac host.
+
+**Why it is worth doing and worth doing separately.** 137s is very nearly what §3.404's entire
+wave-1 harness costs (~145s for all five languages), and unlike the harness it buys nothing. It is also
+the reason this job's cost has never been questioned: the number is large, it has been large
+since the job was written, and nothing attributes it to a step.
+
+**Not started.** Any fix must be verified by extracting the step's `run:` block from the parsed
+workflow YAML and running *that* — a cached binary that lands somewhere off `PATH` fails with exit
+127 *after* a green install, which is how the gitleaks step in §3.403 failed on its first CI run
+having been verified locally by absolute path. The local and CI invocations must be the same
+command, not an approximation retyped into a shell.
