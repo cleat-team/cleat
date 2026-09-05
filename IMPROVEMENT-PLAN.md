@@ -5357,3 +5357,51 @@ Not fixed here; the fix changes every Rust number at once and belongs with its o
 update. The same shape may affect Java — 77 `public` members against a counted surface of 68 —
 but that is flagged rather than claimed, because the Java regex admits `<>` inside the return
 type and the four-member remainder was not investigated.
+
+### 3.311 `TestBlobstore_S3` now exists, so Layer 4 runs a test for the first time — 🟢 **FIXED 2026-09-05** (WS-2, 2026-09-05)
+
+§3.310 found that `plugin-harness-ci.yml`'s Layer 4 ran `-run 'TestBlobstore_S3'` against a
+test that existed nowhere, so it printed `ok … [no tests to run]` and exited 0 while
+provisioning a MinIO service container and five `CLEAT_TEST_S3_*` variables that no Go code
+read. It was filed rather than resolved because the honest options were to write the test or
+delete the job, and which one is right is a product question. **The owner chose to write it.**
+
+    cd tests/plugin-harness && go test ./... -list 'TestBlobstore_S3' | grep -c '^Test'
+    # 1, was 0
+
+**What it covers that the existing S3 tests cannot.**
+`plugins/blobstore/blobstore_s3_backend_test.go` constructs the unexported `s3Backend` with a
+mock `RoundTripper`, so it asserts the plugin's own call sequence and can never observe how a
+real server answers it; it also lives in the **root** module, which Layer 4's
+`working-directory` cannot reach. This test drives the plugin's *registered host functions* —
+the surface a workflow reaches through `cleat_plugin_call` — with a genuine endpoint and a
+real SQL index underneath.
+
+**The load-bearing assertion is the one that reads the bucket directly.** `Config.Backend`
+defaults to `"memory"`, so a plugin that ignored or failed to parse the S3 config would still
+`put` and `get` successfully, out of a map, with nothing in object storage. Falsified by
+setting `"backend": "memory"` and re-running against real MinIO:
+
+| perturbation | result |
+|---|---|
+| `backend: "s3"` (as shipped) | PASS |
+| `backend: "memory"` | **put and get both still succeed**; fails only at `the blob is not in the bucket at cleat-test-harness/2849…: The specified key does not exist` |
+
+So a round-trip test would have been green with nothing reaching S3, which is what makes the
+`StatObject` check the test rather than an extra.
+
+**Two skips, both `check-skips.sh` case (a).** `CLEAT_TEST_S3_ENDPOINT` unset, and
+`CLEAT_TEST_POSTGRES` unset — blobstore stores its index in SQL, so the S3 backend cannot be
+exercised through the plugin without a database. Layer 4 provides both. Baseline updated:
+`tests/plugin-harness  TestBlobstore_S3  2`.
+
+**Two things it does not do, deliberately.** It does not call `RunCoreMigrations`: the
+engine's workflow tables are irrelevant here, and `033_completed_workflow_retention_indexes.sql`
+needs the `pg_trgm` extension, which would fail this test on a database lacking it for a
+reason having nothing to do with S3. `RunPluginMigrations` creates its own tracking table, so
+it stands alone. And the payload is random rather than fixed, so a repeat run against a
+shared bucket cannot pass by reading an object an earlier run left behind — the assertions
+are round-trip equality, so the outcome does not vary.
+
+Measured against MinIO on `localhost:9000` and WS-2's PostgreSQL 5433: PASS in 0.07s, and
+SKIP with an accurate message when the endpoint is unset.

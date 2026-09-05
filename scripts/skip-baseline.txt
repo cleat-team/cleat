@@ -149,6 +149,7 @@ tests/integrity	TestReplayStressRandomCrashPoints	1
 tests/integrity	TestWalCorruption_PgSwitchWAL	1
 tests/integrity	buildStressWasm	2
 tests/integrity	newStressEngine	1
+tests/plugin-harness	TestBlobstore_S3	2
 tests/plugin-harness	TestHostCallsAS	1
 tests/plugin-harness	TestHostCallsGo	1
 tests/plugin-harness	TestHostCallsRust	1
