@@ -175,6 +175,14 @@ tier1:
     # adding an engine test that builds a guest toolchain and not tiering it is the default
     # mistake, not an unusual one.
     - "^TestRustDeferSegmentRunsOnlyTheDefers$"
+    # tier 2 -- rust. engine/rust_all_host_calls_test.go (3.207); needs cargo + wasm32-wasip1.
+    #
+    # Builds examples/rust-all-host-calls, which calls all 61 cleat_sdk::HostCalls methods so
+    # the Rust host-call surface is compiled rather than assumed. Listed on the first push
+    # because the entry above says the gate catches this and calls it the default mistake --
+    # which is exactly what made me check. The coverage half of this needs no toolchain and
+    # is not excluded: scripts/sdk-host-call-coverage.py runs in Lint.
+    - "^TestRustAllHostCallsCompiles$"
     # tier 2 -- java. engine/java_workflow_e2e_test.go; needs a JDK and Gradle.
     - "^TestJavaWorkflowExecute$"
     # tier 2 -- java. engine/java_defer_segment_e2e_test.go (3.105); needs a JDK and Gradle.

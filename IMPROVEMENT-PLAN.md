@@ -3485,7 +3485,9 @@ than baselined.
 
 The test must not learn to skip. `wasip1` ships with the standard toolchain, so there is no
 environmental precondition to detect; a skip here restores exactly the blind spot the test removes.
-It is guarded only by `-short`.
+**It has no skip at all** — the `-short` guard this sentence used to claim lived for about an hour
+before CI rejected it, and the paragraph above records why. Confirm with
+`grep -n 'testing.Short' cmd/cleat/generated_adapter_compiles_test.go` → nothing.
 ### 3.205 The Python end-to-end test's coverage was one host call wide — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
 
 The Python half of §3.204. `TestPythonWasmEndToEnd` compiles
@@ -3566,6 +3568,211 @@ That control is the only reason they are not recorded here as a finding.
 The calls sit in `_exercise_every_host_call`, which the entry point reaches only when its request
 says so. `continue_as_new`, `extend_timeout` and `release_lock` would change a running workflow's
 fate, and this file is on the compile path, not the behaviour path.
+
+### 3.206 A host call no fixture calls is one nothing compiles and nothing runs — 🟡 **MEASURED AND GUARDED 2026-09-05**; the fixtures themselves are open (WS-1, 2026-09-05)
+
+§3.204 and §3.205 were the same defect in two languages: the tests existed, the toolchains were
+provisioned, and the *fixtures* covered almost none of the surface. Four Go host calls shipped
+uncompilable and the Python end-to-end test's coverage was one method wide. Neither was found by a
+test; both were found by someone going looking.
+
+This makes the thing they have in common a number.
+
+`scripts/sdk-host-call-coverage.py` extracts each SDK's public host-call surface and the methods
+any workflow fixture actually calls, and `--check` fails when coverage falls below a baseline that
+can only shrink — the pattern `skip-baseline.txt` and `deadcode-baseline.txt` already use. Wired
+into the `Lint` job.
+
+**Measured 2026-09-05 on `develop`**, before §3.204's and §3.205's fixtures land:
+
+| SDK | covered | surface | |
+|---|---|---|---|
+| python | 13 | 73 | 17.8% |
+| go | 11 | 38 | 28.9% |
+| assemblyscript | 11 | 66 | 16.7% |
+| java | 8 | 68 | 11.8% |
+| rust | 7 | 61 | 11.5% |
+
+§3.205's fixture takes python to 73/73 and §3.204's takes go to 37/37. **The three tier-2 SDKs are
+untouched and are the open half of this item** — roughly 195 host calls across Rust, Java and
+AssemblyScript, each of which has to compile under its own toolchain. One language at a time.
+
+**Read the percentages as a floor, not a measure of risk.** The extractor counts a method as
+covered when a fixture *calls* it; whether the fixture then *asserts* anything about the result is
+a different question, and one WS-2 answered badly for plugins in §3.303 — 16 of 17 plugin calls
+were failing while all five language tests passed, because `expectedKeys` checked that a key was
+present rather than that the call worked. **Coverage is necessary and nowhere near sufficient.**
+
+## A metric that improves as the thing degrades
+
+WS-3's framing, and it is worth stating as a class because **three separate instances of it were
+found on 2026-09-05 alone**, in three different subsystems:
+
+| where | the metric | what it did as things got worse |
+|---|---|---|
+| §3.401 | scale-suite percentiles | a goroutine that failed its `INSERT` left a zero in the slice, and zeros sort to the **front** — so a run that lost measurements reported itself as **faster** |
+| §3.303 | plugin `expectedKeys` | checked a key was **present**, not that the call worked, so a failing call still populated its key |
+| §3.206 | this coverage number | counts a call, not an assertion — a fixture that calls everything and asserts nothing scores **100%** |
+
+This is nastier than an optimistic metric, and the difference is the gradient. An optimistic metric
+is wrong by a constant and you can learn to discount it. **These get better as the system gets
+worse**, so the reading that should alarm you is the one that reassures you. Every guard this repo
+adds should be asked which way its gradient points.
+
+**One cheap notch against it here, and it is not a solution.** The report now also counts, per SDK,
+how many covered methods have their result **bound** rather than discarded — `v, err := h.X()`
+versus a bare `h.X()`. Syntactic, on the same walk; it cannot tell a bound result that is checked
+from one ignored two lines later. It separates exactly one thing: *the fixture compiles this call*
+from *the fixture does something with what came back*.
+
+    assemblyscript  called  11/66   16.7%   result bound   8
+    go              called  11/38   28.9%   result bound   7
+    java            called   8/68   11.8%   result bound   5
+    python          called  13/73   17.8%   result bound   9
+    rust            called   7/61   11.5%   result bound   5
+
+**It is deliberately not baselined**, because the §3.204 and §3.205 fixtures will make it look
+worse and should. Both exist to be *compiled*, not run — §3.204's is full of `_, _ = h.X()` and
+§3.205's calls into a function the entry point does not reach — so both will raise `called` sharply
+and `bound` barely. **That is the honest shape of a compile fixture**, and a ratchet on `bound`
+would punish exactly the work this item asks for.
+
+Written in Python, not shell, deliberately: the surface extraction needs multi-line patterns and
+bracket expressions, and CLAUDE.md records that ugrep, BSD grep and GNU grep disagree on exactly
+those — three tools, three answers, one command. `re` behaves the same everywhere.
+
+The extractor fails rather than reports when a surface comes back empty, because a scan that finds
+zero methods in an SDK with dozens would otherwise read as perfect coverage of nothing.
+
+**Falsified:** rewriting the Go plugin-harness fixture's `h.PluginCall(` calls to
+`h.PluginCallStreaming(` — a name already covered, so the surface loses exactly one — fails
+`--check` with `FAIL go: coverage fell 11 -> 10 of 38`.
+
+`.github/workflows/ci.yml` is WS-3's file. Adding the step there rather than leaving the guard
+unwired follows that file's stated protocol, and the reason is in the workflow comment: an unwired
+guard reads as coverage nobody has.
+
+### 3.207 The Rust host-call surface: 7 of 61 compiled, now all 61 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+The first tier-2 row of §3.206. `examples/rust-workflow` and the plugin-harness fixture between
+them called **7 of 61** `cleat_sdk::HostCalls` methods, so passing the Rust tests meant "a Rust
+workflow builds", not "the Rust host-call surface builds".
+
+`examples/rust-all-host-calls` calls all 61 and is built for `wasm32-wasip1` by
+`TestRustAllHostCallsCompiles`. Coverage is now 61/61.
+
+**It compiled on the first try, and that is the result.** The equivalent Go exercise found four
+host calls that could not be built at all (§3.204) — locks, promises, side effects. Rust has no
+such defect, and the reason is structural rather than lucky: **the Go SDK's host adapter is
+generated** from three tables that had to agree and did not, while the Rust SDK is hand-written,
+so `rustc` had already checked every signature the moment it was written. The hole was never in
+the Rust code; it was in what the tests compiled.
+
+So the honest summary of this section is a negative result — **nothing was broken** — and the
+value is that the surface is now checked rather than presumed, and stays checked.
+
+Two mechanical points worth keeping:
+
+**`#[cleat_entry]` expands to code referencing `serde_json`**, so the crate needs `serde` and
+`serde_json` as dependencies even though the fixture's own source names neither. The failure is
+`cannot find module or crate serde_json` pointing at the attribute, not at any line you wrote.
+
+**The test is excluded from tier 1 on its first push**, and the entry above it in `tiers.yaml` is
+why: it records that `TestRustDeferSegmentRunsOnlyTheDefers` was *not* excluded on its first push,
+that the gate caught it, and that "adding an engine test that builds a guest toolchain and not
+tiering it is the default mistake, not an unusual one." Reading that is what prompted the check.
+**A note that names its own failure mode saved the round trip it describes.**
+
+The coverage half needs no toolchain and is deliberately not excluded:
+`scripts/sdk-host-call-coverage.py` runs in `Lint`, so a call deleted from the fixture fails even
+in a job that cannot build Rust.
+
+**Falsified:** adding `h.no_such_host_call("x")` fails with
+`error[E0599]: no method named 'no_such_host_call' found for reference '&HostCalls'`.
+
+`result bound` stays at 5 of 61, and that is correct rather than a gap: the fixture is
+`let _ = h.x()` throughout because it exists to be compiled, not run. §3.206 predicted exactly this
+and is why that column is reported and not baselined.
+
+### 3.208 The Java host-call surface: 8 of 68 compiled, now all 68 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Second tier-2 row of §3.206. `examples/java-workflow` and the plugin-harness fixture between them
+called **8 of 68** `cleat.HostCalls` methods.
+
+`crates/cleat-java/src/test/java/cleat/AllHostCallsCompileTest.java` calls all 68. Like Rust, it
+**compiled with one fixable error** and no SDK defect — `RetryPolicy` is a nested
+`HostCalls.RetryPolicy` and needs qualifying, which is a fixture mistake, not an SDK one.
+
+**It lives in the SDK's own test source set rather than in a new example crate, and that choice is
+the useful part.** `gradle test` in `crates/cleat-java` is already the **required** `Java Tests`
+check, so the surface is compiled by a job that exists, on a toolchain CI already provisions, with
+no TeaVM step, no new workflow wiring and no `tiers.yaml` exclusion. The Rust equivalent (§3.207)
+needed all four because it had to build a `cdylib` for `wasm32-wasip1`.
+
+`exerciseEveryHostCall` is never invoked — each call would trap without a host, and
+`continueAsNew` and `releaseLock` would change a running workflow's fate. `javac` accepting the
+calls is the assertion; the `@Test` makes the JVM load and verify the bytecode, and fails visibly
+if the method is deleted rather than silently dropping the coverage.
+
+**This is a compile check and not a behaviour check, and the distinction is load-bearing for
+Java specifically.** It says every method exists with the signature a workflow can call. It says
+nothing about the TeaVM WASM codegen — which is exactly where the Java-specific defects have been:
+§3.303 found 16 of 17 plugin calls failing while all five language tests passed, and #455 fixed a
+Java workflow returning JSON-in-a-string. The plugin-harness tests cover that path; this covers the
+one nothing covered.
+
+**Falsified:** adding `h.noSuchHostCall("x")` fails `compileTestJava` with
+`error: cannot find symbol … method noSuchHostCall(String)`.
+
+**Verified the test actually ran, rather than trusting `BUILD SUCCESSFUL`.** The first run printed
+that and nothing else, which is what an up-to-date task also prints. `--rerun-tasks` plus the XML
+report:
+
+    build/test-results/test/TEST-cleat.AllHostCallsCompileTest.xml
+    tests="1" skipped="0" failures="0" errors="0"
+
+Coverage after §3.207 and this: rust 61/61, java 68/68. AssemblyScript (11/66) is the remaining
+tier-2 row; go and python reach 37/37 and 73/73 when §3.204 and §3.205 land.
+
+### 3.209 The AssemblyScript host-call surface: 11 of 66 compiled, now all 66 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Last tier-2 row of §3.206. `examples/as-workflow`, `examples/widget-store-as` and the
+plugin-harness fixture between them called **11 of 66** `HostCalls` methods.
+
+`packages/cleat-as/assembly/__compile__/all-host-calls.ts` calls all 66, type-checked by
+`asc --noEmit`. As with Rust (§3.207) and Java (§3.208), **no SDK defect** — three for three on
+the hand-written SDKs, against four uncompilable host calls in the one SDK whose adapter is
+generated (§3.204). The pattern is now well enough evidenced to state: **the Go breakage was a
+property of code generation, not of breadth.**
+
+**It began as an as-pect spec and that was wrong, for a reason worth keeping.** as-pect
+*instantiates* the module it compiles, and the host imports are not callable in that runner —
+`LinkError: Import "env" "cleat_call": function import requires a callable`. The package's other
+specs say so in their own header: they test "pure functions and constants that do not require
+`@external` host function imports". So the fixture lives in `assembly/__compile__/`, outside the
+spec directory, and is type-checked rather than run. **The compile was already the assertion; the
+harness was adding an instantiation nobody wanted.**
+
+Wired through `package.json` rather than through a workflow: `test` now runs
+`check:host-calls && asp`. The **required** `AssemblyScript Tests` job already does `npm ci &&
+npm test`, so the surface is compiled by a job that exists with **no change to
+`.github/workflows/`** — the same move as §3.208's, which used `gradle test` in the required
+`Java Tests` job. Only §3.207 needed workflow-adjacent wiring, because only Rust had to build a
+`cdylib` for `wasm32-wasip1`.
+
+**The coverage script found the one method a hand-written fixture missed.** After the first pass it
+read 65/66, uncovered: `childWorkflowWithOptions` — declared across a single long line with a
+defaulted `options` parameter, which the signature extraction I was reading from had skipped while
+the surface extraction caught it. **Two extractors disagreeing is what surfaced it**; one alone
+would have reported 65 as complete.
+
+**Falsified:** adding `h.noSuchHostCall("x")` fails with
+`ERROR TS2339: Property 'noSuchHostCall' does not exist on type 'assembly/host-calls/HostCalls'`,
+and `asc` exits 1 where the clean fixture exits 0.
+
+Coverage after §3.207–§3.209: **rust 61/61, java 68/68, assemblyscript 66/66.** Go and Python
+reach 37/37 and 73/73 when §3.204 and §3.205 land, which completes compile coverage for all five
+SDKs. **What remains unmeasured is execution** — see §3.210.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
