@@ -267,8 +267,38 @@ nobody re-derives a figure that looks good. That is the same asymmetry as the UT
 *Ground rules for changes* below, which inflated a count "in the direction that flattered the
 finding — which is why it was not questioned."
 
+**The fifth instance is the sharpest, and it is one line of source.** A scan for binding names
+scored the AssemblyScript SDK as *having* `cleat_register_query_handler` — by matching this, at
+`packages/cleat-as/assembly/host-calls.ts:391`:
+
+    // There is no import_cleat_register_query_handler here (removed 2026-08-09).
+
+An explicit denial, read as a confirmation. A second scan got the right answer only because `\b`
+cannot match after the `_` in `import_cleat_` — not a mechanism anyone chose, and not one that
+survives a rename. The two agreeing would have proved nothing; their *disagreeing* is the only
+reason anybody looked, and it is why #757 publishes no binding counts until they reconcile. This
+is the "grep a retraction satisfies" trap under *Build*, one level up, and worse: that line is the
+**only** occurrence of `register_query_handler` in the file
+(`grep -c register_query_handler packages/cleat-as/assembly/host-calls.ts` → 1). The sole evidence
+the scan had was a sentence denying the thing it recorded.
+
 So when a check and the thing it checks agree, ask what a differently-wrong reading would say
 before recording the agreement as a result.
+
+**The mechanism under all of them: a tool applied to a format it does not model.** Four separate
+failures on 2026-09-05, plus one already recorded above from 2026-08-31 — one shape —
+
+| the read | the format it did not model | what models it |
+|---|---|---|
+| `cmd \| tail; echo $?` | a pipeline's exit status is the *last* command's | redirect, or `${PIPESTATUS[0]}` |
+| `grep -oE '"Output":"[^"]*"'` | a JSON string can contain `"` | a JSON decoder |
+| `grep -cE '^\S+\s+pending'` | a tab-delimited table whose fields contain spaces | `awk -F'\t'` |
+| `pub fn <name>(` | a declaration can carry generics | a parse that admits them |
+| a name scan over `.ts` | source contains prose *about* names | a declaration scan, not a text scan |
+
+"Check your regex" is the weak form of this. The strong form is that **a text search cannot tell a
+thing from a sentence about the thing**, and neither can a line-oriented read of a structured
+format. When the answer matters, read it with something that knows the shape.
 
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
