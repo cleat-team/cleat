@@ -158,6 +158,6 @@ tests/plugin-harness	TestPluginCalls_Wasm_Rust	1
 tests/plugin-harness	buildASWorkflowWasm	1
 tests/plugin-harness	buildGoWorkflowWasm	2
 tests/plugin-harness	buildJavaWorkflowWasm	1
-tests/plugin-harness	buildPythonWorkflowWasm	2
+tests/plugin-harness	buildPythonWorkflowWasm	3
 tests/plugin-harness	buildRustWorkflowWasm	2
 tests/soak	TestSoakWorkflowMix	1

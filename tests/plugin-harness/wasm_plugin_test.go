@@ -385,6 +385,32 @@ func buildPythonWorkflowWasm(t *testing.T) []byte {
 	if err := checkCmd.Run(); err != nil {
 		t.Skip("componentize-py or cleat_sdk not installed — run: pip install componentize-py && cd python-sdk && pip install -e .")
 	}
+	// The importable module and the console script come apart, and it is the
+	// script that matters here: `cleat build --target python` shells out to
+	// `componentize-py` after its own exec.LookPath (cmd/cleat/build_python.go:88),
+	// so importing the module says nothing about whether the build can run.
+	// Measured on a dev Mac 2026-09-05 — `import componentize_py` resolves to
+	// ~/Library/Python/3.9/site-packages while `command -v componentize-py`
+	// finds nothing, because a pip --user install puts the script in a bin
+	// directory that is not on PATH.
+	//
+	// Without this the gate passed, the build failed, and the Fatal below
+	// asserted "componentize-py and cleat_sdk both import, so this is a real
+	// build failure rather than a missing toolchain" — directly contradicted by
+	// the build's own "Error: componentize-py not found." two lines under it. A
+	// confidently wrong diagnostic is worse than a missing one: it stops the
+	// reader looking rather than sending them to check.
+	//
+	// This narrows the gate, it does not widen the skip. Everything past this
+	// point is still Fatal, which is the property the comment below is there to
+	// protect — that Skipf once hid a real break (wasm.FindRepoRoot resolving to
+	// the module directory after tests/plugin-harness became its own module).
+	// The distinction is check-skips.sh's: (a) toolchain genuinely absent skips,
+	// (b) toolchain present and the build broke fails. CI installs the script,
+	// so CI still runs this test and plugin-harness/wasm stays at budget 0.
+	if _, err := exec.LookPath("componentize-py"); err != nil {
+		t.Skip("componentize-py is importable as a module but its console script is not on PATH — `cleat build --target python` needs the script. Add pip's bin directory to PATH, or run the Linux toolchain container (scripts/docker/python-toolchain.Dockerfile).")
+	}
 
 	tmpDir := t.TempDir()
 	cmd := commandAt(filepath.Dir(pyFile), cleatBinary(t),
@@ -406,9 +432,9 @@ func buildPythonWorkflowWasm(t *testing.T) []byte {
 		// this directory and the build could not find python-sdk/scripts/
 		// build_wasm.py. The suite reported SKIP and the only thing that
 		// noticed was this job's skip budget of 0.
-		t.Fatalf("cleat build (python) failed although componentize-py and cleat_sdk "+
-			"both import, so this is a real build failure rather than a missing "+
-			"toolchain:\n%s", string(out))
+		t.Fatalf("cleat build (python) failed although cleat_sdk imports and the "+
+			"componentize-py console script is on PATH, so this is a real build "+
+			"failure rather than a missing toolchain:\n%s", string(out))
 	}
 
 	entries, err := os.ReadDir(tmpDir)
