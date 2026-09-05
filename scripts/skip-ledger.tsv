@@ -65,3 +65,5 @@ plugin-harness/multi-db	0	__UNATTRIBUTED__	inherited from the single-number budg
 plugin-harness/wasm	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
 e2e-cross-language	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
 soak	0	__UNATTRIBUTED__	inherited from the single-number budget on 2026-09-04; may only shrink
+test-go/engine	1	^TestRustAllHostCallsCompiles$	cargo + wasm32-wasip1 absent: builds examples/rust-all-host-calls so the Rust host-call surface is compiled rather than assumed (3.207). Skips ONCE -- a single LookPath gate, not a per-dialect or registeredBackends test. Only e2e-cross-language.yml provisions Rust; a job declaring "rust" in CLEAT_REQUIRE_TOOLCHAINS Fatals instead. Measured by name with cargo off PATH: go test ./engine/ -run TestRustAllHostCallsCompiles -count=1 -json | grep -c '"Action":"skip"' -- 1.
+cluster	1	^TestRustAllHostCallsCompiles$	same test, same reason as the test-go/engine line above: the cluster job also runs ./engine/..., so these two move together (WORKSTREAM.md says so for this file). cargo absent -> 1 skip.
