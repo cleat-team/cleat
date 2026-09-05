@@ -286,6 +286,24 @@ func ExerciseHostCall(h cleat.HostCalls, input string) (string, error) {
 		cancelled, reason := h.PollCancellation()
 		return ok(req.Call, fmt.Sprintf("cancelled=%v %s", cancelled, reason))
 
+	// Exercises the whole durable-state family in one invocation. Not a wave-1
+	// call -- reached by TestGoStateOpsReachTheHost, which checks the EVENT
+	// HISTORY rather than the returned values, because the values round-trip
+	// through a guest-local map just as convincingly (IMPROVEMENT-PLAN 3.214).
+	case "StateRoundTrip":
+		h.SetState("k", "v1")
+		var got string
+		if e := h.GetState("k", &got); e != nil {
+			return ok(req.Call, "GET FAILED: "+fmt.Sprintf("%v", e))
+		}
+		has := h.HasState("k")
+		n := h.IncrState("counter", 5)
+		n2 := h.IncrState("counter", 3)
+		keys := h.ListState("")
+		h.DeleteState("k")
+		gone := !h.HasState("k")
+		return ok(req.Call, fmt.Sprintf("got=%s has=%v incr=%d,%d keys=%d deleted=%v", got, has, n, n2, len(keys), gone))
+
 	case "SideEffect":
 		r, err := h.SideEffect(func() (string, error) { return "side-effect-value", nil })
 		if err != nil {

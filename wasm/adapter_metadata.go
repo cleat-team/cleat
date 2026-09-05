@@ -203,6 +203,105 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&payloadBuf[0], int(payloadLen)), found, nil",
 		},
 	},
+	// The state family (IMPROVEMENT-PLAN 3.214). Return packings are ABI.md
+	// 2.28-2.33; every one puts errCode in bits 0-31.
+	//
+	// These carry the suspend check because a state call runs mid-segment and
+	// the host can refuse it like any other.
+	"SetState": {
+		FieldName:  "SetState",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"key", "string"},
+			{"value", "string"},
+		},
+		ResultStmts: withSuspendCheck(
+			"if errCode := uint32(result); errCode != 0 {",
+			`	return fmt.Errorf("cleat_set_state: error %d", errCode)`,
+			"}",
+			"return nil",
+		),
+	},
+	"GetState": {
+		FieldName:  "GetState",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"key", "string"},
+		},
+		ResultStmts: withSuspendCheck(
+			"valueLen := uint32(uint64(result) >> 32)",
+			"if errCode := uint32(result); errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_get_state: error %d", errCode)`,
+			"}",
+			// The host returns errCode 0 with valueLen 0 for a key it does not
+			// hold (engine/lifecycle.go:381), so absence and empty-string are
+			// the same value at this boundary. Reported as the empty string;
+			// HasState is the discriminator, exactly as it is for every other
+			// SDK. Inventing a not-found error here would make Go's binding
+			// disagree with Rust's and AssemblyScript's over the same call.
+			"if valueLen == 0 {",
+			`	return "", nil`,
+			"}",
+			"return unsafe.String(&valueBuf[0], int(valueLen)), nil",
+		),
+	},
+	"DeleteState": {
+		FieldName:  "DeleteState",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"key", "string"},
+		},
+		ResultStmts: withSuspendCheck(
+			"if errCode := uint32(result); errCode != 0 {",
+			`	return fmt.Errorf("cleat_delete_state: error %d", errCode)`,
+			"}",
+			"return nil",
+		),
+	},
+	"IncrState": {
+		FieldName:  "IncrState",
+		ReturnType: "(int64, error)",
+		Params: []adapterParam{
+			{"key", "string"},
+			{"delta", "int64"},
+		},
+		ResultStmts: withSuspendCheck(
+			"if errCode := uint32(result); errCode != 0 {",
+			`	return 0, fmt.Errorf("cleat_incr_state: error %d", errCode)`,
+			"}",
+			"return int64(uint64(result) >> 32), nil",
+		),
+	},
+	"HasState": {
+		FieldName:  "HasState",
+		ReturnType: "(bool, error)",
+		Params: []adapterParam{
+			{"key", "string"},
+		},
+		ResultStmts: withSuspendCheck(
+			"if errCode := uint32(result); errCode != 0 {",
+			`	return false, fmt.Errorf("cleat_has_state: error %d", errCode)`,
+			"}",
+			"return uint32(uint64(result)>>32) != 0, nil",
+		),
+	},
+	"ListState": {
+		FieldName:  "ListState",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"prefix", "string"},
+		},
+		ResultStmts: withSuspendCheck(
+			"keysLen := uint32(uint64(result) >> 32)",
+			"if errCode := uint32(result); errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_list_state: error %d", errCode)`,
+			"}",
+			"if keysLen == 0 {",
+			`	return "[]", nil`,
+			"}",
+			"return unsafe.String(&keysBuf[0], int(keysLen)), nil",
+		),
+	},
 	"ContinueAsNew": {
 		FieldName:  "ContinueAsNew",
 		ReturnType: "error",

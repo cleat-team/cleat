@@ -89,10 +89,25 @@ var hostFunctions = []HostFunction{
 	{"cleat_min_version", "MinVersion"},
 	// State
 	{"set_query_state", "SetQueryState"},
-	// State mutation methods (all map to set_query_state import)
-	{"set_query_state", "SetState"},
-	{"set_query_state", "DeleteState"},
-	{"set_query_state", "IncrState"},
+
+	// The durable state family (IMPROVEMENT-PLAN 3.214). Distinct from
+	// set_query_state above, which the execution design calls "derived state,
+	// not durable state" -- these six are the durable ones, and Go reached
+	// none of them until 2026-09-05.
+	{"cleat_set_state", "SetState"},
+	{"cleat_get_state", "GetState"},
+	{"cleat_delete_state", "DeleteState"},
+	{"cleat_incr_state", "IncrState"},
+	{"cleat_has_state", "HasState"},
+	{"cleat_list_state", "ListState"},
+	// SetState/DeleteState/IncrState USED to map here too, so that calling one
+	// pulled in set_query_state and the value was published for external query.
+	// Removed 2026-09-05 (IMPROVEMENT-PLAN 3.214): they now bind the real
+	// durable calls above, and a duplicate FieldName here is not harmless --
+	// the generator pairs adapterDefs["SetState"] (params key,value) with
+	// whichever importDef it finds, and set_query_state's params are key,val,
+	// so the generated adapter referenced an undefined valPtr and no Go guest
+	// would compile.
 	// Promises
 	{"cleat_create_promise", "CreatePromise"},
 	{"cleat_await_promise", "AwaitPromise"},

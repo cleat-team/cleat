@@ -54,6 +54,50 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
+	// The state family. Go reached none of these until 2026-09-05: the SDK's
+	// SetState/GetState/... operated on a guest-local map, so Go state never
+	// entered the event history and never got the replay validation at
+	// engine/lifecycle.go:389 that every other SDK gets. IMPROVEMENT-PLAN 3.214.
+	"cleat_set_state": {
+		ImportName: "cleat_set_state",
+		Params: []paramSpec{
+			{"key", kindInString},
+			{"value", kindInString},
+		},
+	},
+	"cleat_get_state": {
+		ImportName: "cleat_get_state",
+		Params: []paramSpec{
+			{"key", kindInString},
+			{"value", kindOutString},
+		},
+	},
+	"cleat_delete_state": {
+		ImportName: "cleat_delete_state",
+		Params: []paramSpec{
+			{"key", kindInString},
+		},
+	},
+	"cleat_incr_state": {
+		ImportName: "cleat_incr_state",
+		Params: []paramSpec{
+			{"key", kindInString},
+			{"delta", kindInt64},
+		},
+	},
+	"cleat_has_state": {
+		ImportName: "cleat_has_state",
+		Params: []paramSpec{
+			{"key", kindInString},
+		},
+	},
+	"cleat_list_state": {
+		ImportName: "cleat_list_state",
+		Params: []paramSpec{
+			{"prefix", kindInString},
+			{"keys", kindOutString},
+		},
+	},
 	"cleat_sleep": {
 		ImportName: "cleat_sleep",
 		Params: []paramSpec{

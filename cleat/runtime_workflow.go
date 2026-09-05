@@ -252,6 +252,29 @@ func (h *HostCallsImpl) NewUUIDv7() string {
 
 func (h *HostCallsImpl) SetState(key string, value interface{}) {
 	sk := h.scopedKey(key)
+
+	// The host is the store (IMPROVEMENT-PLAN 3.214). Before 2026-09-05 this
+	// wrote only h.stateMap, so Go state never entered the event history and
+	// never got the replay validation at engine/lifecycle.go:389 that Rust and
+	// AssemblyScript have always had.
+	//
+	// stateMap is kept as a fallback for a guest built without the imports --
+	// every Go binary compiled before this change -- so an old module keeps
+	// working instead of nil-panicking.
+	if h.setStateHost != nil {
+		data, err := json.Marshal(value)
+		if err != nil {
+			data = []byte(fmt.Sprintf("%q", fmt.Sprint(value)))
+		}
+		// An error here is a host refusal, not a caller mistake. The signature
+		// returns nothing -- changing it is an API break -- so it is recorded
+		// where a workflow author will see it rather than dropped.
+		if serr := h.setStateHost(sk, string(data)); serr != nil && h.durableLog != nil {
+			h.durableLog("cleat: SetState(" + sk + ") failed: " + serr.Error())
+		}
+		return
+	}
+
 	if h.stateMap == nil {
 		h.stateMap = make(map[string]interface{})
 	}
@@ -273,6 +296,22 @@ func (h *HostCallsImpl) SetState(key string, value interface{}) {
 
 func (h *HostCallsImpl) GetState(key string, result interface{}) error {
 	sk := h.scopedKey(key)
+
+	if h.getStateHost != nil {
+		raw, err := h.getStateHost(sk)
+		if err != nil {
+			return err
+		}
+		// The host cannot distinguish a missing key from an empty value: it
+		// returns errCode 0 with length 0 for both (engine/lifecycle.go:381).
+		// Reported as not-found, which preserves this method's existing
+		// contract; HasState is the discriminator.
+		if raw == "" {
+			return errors.New("durable: state not found for key: " + sk)
+		}
+		return json.Unmarshal([]byte(raw), result)
+	}
+
 	if h.stateMap == nil {
 		return errors.New("durable: state not found for key: " + sk)
 	}
@@ -294,6 +333,12 @@ func (h *HostCallsImpl) GetState(key string, result interface{}) error {
 
 func (h *HostCallsImpl) DeleteState(key string) {
 	sk := h.scopedKey(key)
+	if h.deleteStateHost != nil {
+		if derr := h.deleteStateHost(sk); derr != nil && h.durableLog != nil {
+			h.durableLog("cleat: DeleteState(" + sk + ") failed: " + derr.Error())
+		}
+		return
+	}
 	if h.stateMap != nil {
 		delete(h.stateMap, sk)
 	}
@@ -303,6 +348,13 @@ func (h *HostCallsImpl) DeleteState(key string) {
 }
 
 func (h *HostCallsImpl) HasState(key string) bool {
+	if h.hasStateHost != nil {
+		exists, err := h.hasStateHost(h.scopedKey(key))
+		if err != nil {
+			return false
+		}
+		return exists
+	}
 	if h.stateMap == nil {
 		return false
 	}
@@ -312,6 +364,20 @@ func (h *HostCallsImpl) HasState(key string) bool {
 
 func (h *HostCallsImpl) IncrState(key string, delta int64) int64 {
 	sk := h.scopedKey(key)
+
+	// The host's increment is atomic against its own store; the map version
+	// below is a read-modify-write in the guest and is not.
+	if h.incrStateHost != nil {
+		v, err := h.incrStateHost(sk, delta)
+		if err != nil {
+			if h.durableLog != nil {
+				h.durableLog("cleat: IncrState(" + sk + ") failed: " + err.Error())
+			}
+			return 0
+		}
+		return v
+	}
+
 	if h.stateMap == nil {
 		h.stateMap = make(map[string]interface{})
 	}
@@ -341,10 +407,33 @@ func (h *HostCallsImpl) IncrState(key string, delta int64) int64 {
 }
 
 func (h *HostCallsImpl) ListState(prefix string) []string {
+	sk := h.scopedKey(prefix)
+
+	if h.listStateHost != nil {
+		raw, err := h.listStateHost(sk)
+		if err != nil {
+			return nil
+		}
+		var keys []string
+		if uerr := json.Unmarshal([]byte(raw), &keys); uerr != nil {
+			return nil
+		}
+		// Strip the scope prefix, matching the fallback below: a caller that
+		// set "count" inside a scope gets "count" back, not the internal
+		// "vo:<type>:<key>:count".
+		if h.scopeSet && h.scopePrefix != "" {
+			for i, k := range keys {
+				if strings.HasPrefix(k, h.scopePrefix) {
+					keys[i] = k[len(h.scopePrefix):]
+				}
+			}
+		}
+		return keys
+	}
+
 	if h.stateMap == nil {
 		return nil
 	}
-	sk := h.scopedKey(prefix)
 	var keys []string
 	for k := range h.stateMap {
 		if sk == "" || strings.HasPrefix(k, sk) {

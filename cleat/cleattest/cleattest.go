@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -276,6 +277,7 @@ type TestEnv struct {
 	versionVal     int
 	minVersionVal  int
 	queryState     map[string]string
+	durableState   map[string]string // IMPROVEMENT-PLAN 3.214: the state family, distinct from queryState
 	callHistory    []CallRecord
 	callStubs      []*callStub
 	pendingSignals []scheduledSignal
@@ -356,6 +358,7 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		versionVal:               1,
 		minVersionVal:            1,
 		queryState:               make(map[string]string),
+		durableState:             make(map[string]string),
 		promises:                 make(map[string]promiseState),
 		crons:                    make(map[string]cleat.CronSchedule),
 		childWorkflowStubs:       make(map[string]*childWorkflowStub),
@@ -408,6 +411,12 @@ func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
 		Version:                       e.versionImpl,
 		MinVersion:                    e.minVersionImpl,
 		SetQueryState:                 e.setQueryStateImpl,
+		SetState:                      e.setStateImpl,
+		GetState:                      e.getStateImpl,
+		DeleteState:                   e.deleteStateImpl,
+		IncrState:                     e.incrStateImpl,
+		HasState:                      e.hasStateImpl,
+		ListState:                     e.listStateImpl,
 		Now:                           e.nowImpl,
 		Random:                        e.randomImpl,
 		CreatePromise:                 e.createPromiseImpl,
@@ -653,6 +662,7 @@ func (e *TestEnv) Reset() {
 	e.versionVal = 1
 	e.minVersionVal = 1
 	e.queryState = make(map[string]string)
+	e.durableState = make(map[string]string)
 	e.callHistory = nil
 	e.callStubs = nil
 	e.pendingSignals = nil
@@ -1302,6 +1312,70 @@ func (e *TestEnv) setQueryStateImpl(key, value string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.queryState[key] = value
+}
+
+// The durable-state family (IMPROVEMENT-PLAN 3.214). Backed by its own map
+// rather than by queryState: the execution design calls query state "derived
+// state, not durable state", and collapsing the two here would let a test pass
+// against semantics the engine does not have.
+//
+// GetState returns the empty string for an absent key, matching the host, which
+// cannot distinguish absent from empty (engine/lifecycle.go:381). HasState is
+// the discriminator, in cleattest exactly as in a real run.
+func (e *TestEnv) setStateImpl(key, value string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.durableState[key] = value
+	return nil
+}
+
+func (e *TestEnv) getStateImpl(key string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.durableState[key], nil
+}
+
+func (e *TestEnv) deleteStateImpl(key string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.durableState, key)
+	return nil
+}
+
+func (e *TestEnv) incrStateImpl(key string, delta int64) (int64, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var cur int64
+	if v, ok := e.durableState[key]; ok {
+		cur, _ = strconv.ParseInt(v, 10, 64)
+	}
+	cur += delta
+	e.durableState[key] = strconv.FormatInt(cur, 10)
+	return cur, nil
+}
+
+func (e *TestEnv) hasStateImpl(key string) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.durableState[key]
+	return ok, nil
+}
+
+func (e *TestEnv) listStateImpl(prefix string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	keys := []string{}
+	for k := range e.durableState {
+		if prefix == "" || strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys) // deterministic: map order is not
+	b, err := json.Marshal(keys)
+	if err != nil {
+		return "[]", err
+	}
+	return string(b), nil
 }
 
 func (e *TestEnv) nowImpl() (ms int64) {

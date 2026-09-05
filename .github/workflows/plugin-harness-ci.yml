@@ -254,7 +254,7 @@ jobs:
           # does, and the pattern should say what CI runs. Confirm with
           #   go test -list 'EverySDKImportIsAHostExport' ./...    -> 1
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDKImportIsAHostExport' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDKImportIsAHostExport|GoStateOpsReachTheHost' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only

@@ -793,7 +793,18 @@ type HostCallsImpl struct {
 
 	sideEffect func(computedResult string) (string, error)
 
-	// State map for typed K/V operations.
+	// The durable state family (IMPROVEMENT-PLAN 3.214). Nil when the guest
+	// was built without these imports, which is every Go guest before
+	// 2026-09-05; the methods fall back to stateMap in that case so an old
+	// binary keeps working rather than panicking.
+	setStateHost    func(key, value string) error
+	getStateHost    func(key string) (string, error)
+	deleteStateHost func(key string) error
+	incrStateHost   func(key string, delta int64) (int64, error)
+	hasStateHost    func(key string) (bool, error)
+	listStateHost   func(prefix string) (string, error)
+
+	// State map for typed K/V operations. Now a FALLBACK only -- see above.
 	stateMap       map[string]interface{}
 	updateHandlers map[string]updateHandlerEntry
 
@@ -842,6 +853,12 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		version:                       opts.Version,
 		minVersion:                    opts.MinVersion,
 		setQueryState:                 opts.SetQueryState,
+		setStateHost:                  opts.SetState,
+		getStateHost:                  opts.GetState,
+		deleteStateHost:               opts.DeleteState,
+		incrStateHost:                 opts.IncrState,
+		hasStateHost:                  opts.HasState,
+		listStateHost:                 opts.ListState,
 		registerUpdateHandler:         opts.RegisterUpdateHandler,
 		handleUpdate:                  opts.HandleUpdate,
 		runDetached:                   opts.RunDetached,
@@ -927,23 +944,30 @@ type HostCallsOptions struct {
 	Version                       func() int
 	MinVersion                    func() int
 	SetQueryState                 func(key, value string)
-	RegisterUpdateHandler         func(name string)
-	HandleUpdate                  func(name, payload string) (string, error)
-	RunDetached                   func(fn func(h HostCalls) error) error
-	Now                           func() int64
-	Random                        func() int64
-	NewUUID                       func() string
-	PluginCall                    func(pluginName, functionName, inputJSON string) (string, error)
-	PluginCallStreaming           func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
-	DurableSend                   func(service, operation, requestJSON string) error
-	ScheduleInvoke                func(service, operation, requestJSON string, delayMs int64) error
-	SendSignalAndWait             func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
-	ReplyToSignal                 func(correlationID, response string) error
-	AwaitSignalsWithQuorum        func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
-	SignalWorkflow                func(targetRunID, signalName, payload string) error
-	ScheduleCron                  func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
-	DeleteCron                    func(scheduleID string) error
-	ListCrons                     func() (string, error)
+	// The durable state family (IMPROVEMENT-PLAN 3.214).
+	SetState               func(key, value string) error
+	GetState               func(key string) (string, error)
+	DeleteState            func(key string) error
+	IncrState              func(key string, delta int64) (int64, error)
+	HasState               func(key string) (bool, error)
+	ListState              func(prefix string) (string, error)
+	RegisterUpdateHandler  func(name string)
+	HandleUpdate           func(name, payload string) (string, error)
+	RunDetached            func(fn func(h HostCalls) error) error
+	Now                    func() int64
+	Random                 func() int64
+	NewUUID                func() string
+	PluginCall             func(pluginName, functionName, inputJSON string) (string, error)
+	PluginCallStreaming    func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
+	DurableSend            func(service, operation, requestJSON string) error
+	ScheduleInvoke         func(service, operation, requestJSON string, delayMs int64) error
+	SendSignalAndWait      func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
+	ReplyToSignal          func(correlationID, response string) error
+	AwaitSignalsWithQuorum func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
+	SignalWorkflow         func(targetRunID, signalName, payload string) error
+	ScheduleCron           func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
+	DeleteCron             func(scheduleID string) error
+	ListCrons              func() (string, error)
 
 	AcquireLock func(key string, ttlMs int64) (acquired bool, err error)
 	ReleaseLock func(key string) error
