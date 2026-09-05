@@ -133,7 +133,7 @@ func CleanupPostgresTestData(t *testing.T, db *sql.DB) {
 	present := existingTables(t, db, DialectPostgres, postgresCleanupTables)
 
 	for _, table := range present {
-		if _, err := db.Exec("DELETE FROM " + table); err != nil {
+		if _, err := db.Exec("DELETE FROM " + table); err != nil { //nolint:gosec // G202: `table` comes from postgresCleanupTables, a package-level literal list, filtered through existingTables. Not caller input.
 			t.Fatalf("cleanup: delete from %s: %v\n\n"+
 				"This used to be a t.Logf, so a cleanup that did nothing was "+
 				"indistinguishable from one that worked, and the fixtures it "+
@@ -407,7 +407,7 @@ func CleanupTestData(t *testing.T, db *sql.DB, dialect Dialect, runID string) {
 		// outright was indistinguishable from one that worked -- the same
 		// defect IMPROVEMENT-PLAN 2.60d records for the blanket cleanups,
 		// which this helper did not get when they were fixed.
-		if _, err := db.Exec("DELETE FROM "+d.table+" WHERE "+d.where, runID); err != nil {
+		if _, err := db.Exec("DELETE FROM "+d.table+" WHERE "+d.where, runID); err != nil { //nolint:gosec // G202: d.table and d.where come from the `deletes` literal declared in this function; runID is bound as an argument.
 			t.Fatalf("cleanup: delete from %s where %s: %v", d.table, d.where, err)
 		}
 	}
@@ -543,7 +543,7 @@ const PostgresRLSTestRole = "cleat_rls_test_role"
 // PostgresRLSTestRole. This role only ever exists inside ephemeral test
 // databases (CLEAT_TEST_DB/CLEAT_TEST_POSTGRES), never a real deployment,
 // so a hardcoded password is fine.
-const postgresRLSTestPassword = "cleat-rls-test-role-password"
+const postgresRLSTestPassword = "cleat-rls-test-role-password" //nolint:gosec // G101: a fixed login password for a role that only ever exists inside ephemeral test databases, never a real deployment. The comment above explains why that is fine.
 
 // SetupPostgresRLSRole ensures PostgresRLSTestRole exists and can perform
 // ordinary DML (SELECT/INSERT/UPDATE/DELETE) against every table in the

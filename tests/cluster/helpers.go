@@ -36,7 +36,7 @@ func SetupCluster(t *testing.T) {
 	dir := composeDir()
 
 	// Bring up postgres first, then workers.
-	cmd := exec.Command("docker", "compose",
+	cmd := exec.Command("docker", "compose", //nolint:gosec // G204: fixed binary ("docker"), arguments as an array, no shell.
 		"-f", filepath.Join(dir, "docker-compose.cluster.yml"),
 		"up", "-d", "postgres",
 	)
@@ -50,7 +50,7 @@ func SetupCluster(t *testing.T) {
 	waitForPostgres(t, 60*time.Second)
 
 	// Bring up workers and dashboard.
-	cmd = exec.Command("docker", "compose",
+	cmd = exec.Command("docker", "compose", //nolint:gosec // G204: fixed binary ("docker"), arguments as an array, no shell.
 		"-f", filepath.Join(dir, "docker-compose.cluster.yml"),
 		"up", "-d", "worker-1", "worker-2", "worker-3", "dashboard",
 	)
@@ -69,7 +69,7 @@ func TeardownCluster(t *testing.T) {
 	t.Helper()
 	dir := composeDir()
 
-	cmd := exec.Command("docker", "compose",
+	cmd := exec.Command("docker", "compose", //nolint:gosec // G204: fixed binary ("docker"), arguments as an array, no shell.
 		"-f", filepath.Join(dir, "docker-compose.cluster.yml"),
 		"down", "-v", "--remove-orphans",
 	)
@@ -166,7 +166,7 @@ func GetDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("CLEAT_TEST_DB")
 	if dsn == "" {
-		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
+		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" //nolint:gosec // G101: a localhost default DSN for the local compose stack, used only when CLEAT_TEST_DB is unset.
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

@@ -684,6 +684,11 @@ func main() {
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: server.Router(),
+		// Without this a client can hold a connection open by dribbling out
+		// header bytes (Slowloris). Set here rather than //nolint'd because
+		// examples get copied into real services, and the copy is where the
+		// missing timeout stops being theoretical.
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {

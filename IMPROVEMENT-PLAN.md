@@ -2208,7 +2208,7 @@ decision in it, and it stays §2.60d's rather than being restated here.
 Until then `-p 1` is load-bearing for `./engine/`, and CLAUDE.md's rule about it is the
 protection, not a style preference.
 
-### 3.33 gosec's 283 findings, triaged — 🔶 **2 fixed, 281 classified** (WS-3, 2026-08-05)
+### 3.33 gosec's 283 findings, triaged — 🟢 **ENABLED 2026-09-04; 3 fixed, G115 + G306 excluded, 17 //nolint'd** (WS-3, 2026-08-05)
 
 `PARALLEL-WORKSTREAMS.md` — retired 2026-09-04, quoted here from history — calls gosec
 "unreviewed security findings in a codebase whose last two days have been tenancy defects" and says an unreviewed 283 is worse than a reviewed 283
@@ -2280,6 +2280,75 @@ the next mispairing would hide.
 
 Proven able to fail: mispairing `dispatchDurableDefer` reports "extracts the length from bit [40],
 but its handler DurableDefer writes it at bit 32".
+
+
+#### ENABLED, 2026-09-04 (WS-3)
+
+The triage above ends "it does **not** enable the linter". It does now. `gosec` moved from
+`disable` to `enable` in `.golangci.yml`, and the tree is green across all seven first-party
+modules with **zero** findings.
+
+**Re-measured first, because the 2026-08-05 table was not re-derivable** — golangci-lint was
+not installed when it was written. On v1.64.7, the version `lint-go` pins:
+
+| | 2026-08-05 | 2026-08-31 | **2026-09-04** |
+|---|---|---|---|
+| total | 283 | 693 | **671** |
+| production (non-`_test.go`) | — | 272 | **253** |
+| production excluding G115 | — | 39 | **40** |
+
+    GOTOOLCHAIN=go1.25.11 golangci-lint run --timeout=15m -c gosec-only.yml ./... \
+      > out.txt 2> err.txt
+    grep -c 'level=error' err.txt      # MUST be 0 -- see the toolchain trap below
+    grep -c '(gosec)' out.txt
+
+**The toolchain is part of the command.** golangci-lint v1.64.7 cannot read export data from
+Go 1.27 and exits 3 having found **nothing**: `internal error in importing "internal/goarch"
+… export data version 4 is greater than maximum supported version 2`. That is a tidy zero
+that looks exactly like a clean tree. `GOTOOLCHAIN=go1.25.0` fails differently and just as
+quietly (`go.work requires go >= 1.25.11`). Both were hit writing this. Check stderr for
+`level=error`, never the count alone — the same rule `.golangci.yml` already records for the
+`--disable-all` trap that produced "a tidy table of four zeroes".
+
+**What it took to reach zero**, and the reasoning lives in `.golangci.yml` beside each:
+
+* **G115 excluded** (213 of the 253). Not a deferral — a decision that predates this work.
+  CLAUDE.md rules that these have never been overflows, and #485 landed the property tests
+  that cover the boundary properly. Reading 213 conversion sites is the sweep that ruling
+  exists to prevent.
+* **G306 excluded** (23), scoped to gosec rather than re-adding a global test exclusion,
+  which is the move `.golangci.yml` explicitly asks for. 0644 on `cleat init` scaffolding,
+  generated code and build outputs is intended; 0600 would be wrong, not safer. **This is the
+  one exclusion taken on breadth rather than on having read every site**, and its cost is
+  recorded there: a future credential written to disk would not be flagged.
+* **Test files excluded, for gosec only** (418 of 671, 140 of them surviving the two rules
+  above). What gosec finds in `_test.go` here is test DSNs, harnesses shelling out to
+  docker/cargo/npx, and 0644 fixtures — all properties of being a test. The cost, also
+  recorded: a real credential committed in a test file has nothing else catching it.
+* **17 `//nolint:gosec` at the site with the reason**, matching how ineffassign, gosimple and
+  staticcheck were handled. All 17 were read, not pattern-matched: G202 concatenates only
+  compile-time constants (`statusTerminating`, `deferPhaseOwedSQL`, `sqlPlaceholders`, and two
+  in-package literal table lists in `testutil/schema.go`); G204 uses a fixed binary with array
+  args and no shell; G602 is guarded by a `len < 8` early return in the same function; G108 is
+  the pprof separation this section already documents.
+
+**One new finding, and it was real** — `examples/widget-store-as/host/main.go` built an
+`http.Server` with no `ReadHeaderTimeout` (G112). Fixed rather than suppressed. Note what that
+says about the 2026-08-05 table calling G112/G114 "the only two actionable findings … Fixed":
+that pass measured the root module, and this one was in `examples/`, a separate module that
+`lint-go` also covers. **A count is scoped to what was walked**, and the earlier row did not
+say what it had walked.
+
+**Negative control, because a green from a linter is the easiest false green in this repo.**
+A file with a deliberate `rand.Intn` was dropped into `engine/` and the run went red on it:
+
+    engine/zz_gosec_probe.go:9:42: G404: Use of weak random number generator … (gosec)
+
+so the zero above is gosec running and finding nothing, not gosec not running. Removed after.
+
+**Still open:** G115 is not fixed, it is ruled out of scope, and this section's earlier
+paragraph on it stands — "229 integer conversions in the WASM boundary layer, unreviewed" is
+still the honest description of what excluding it means, at 213.
 
 ### 3.20 `AdminForceComplete` / `AdminForceFail` were stubs — ✅ **FIXED** (WS-2, 2026-08-05, #297)
 

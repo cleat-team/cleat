@@ -100,6 +100,7 @@ func (s *MySQLStore) AdminReReplay(ctx context.Context, workflowID string, gener
 
 	// IN (?,?,?) expanded from the shared list rather than written out, so the
 	// three dialects cannot drift on which statuses are re-replayable.
+	//nolint:gosec // G202: the only concatenated fragment is sqlPlaceholders(), which emits "?" or "@pN" and nothing else. The statuses themselves are bound as arguments.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
@@ -150,6 +151,7 @@ func (s *MSSQLStore) adminReReplayOnce(ctx context.Context, workflowID string, g
 	}
 	defer tx.Rollback()
 
+	//nolint:gosec // G202: as above -- sqlPlaceholders() only, statuses bound as arguments.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,

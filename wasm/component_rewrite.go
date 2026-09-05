@@ -360,6 +360,7 @@ func RewriteWitImports(wasmBytes []byte) ([]byte, error) {
 	}
 
 	newRaw := make([]byte, 0, totalSize)
+	//nolint:gosec // G602: wasmBytes[0:8] is guarded by a `len(wasmBytes) < 8` early return at the top of this function.
 	newRaw = append(newRaw, wasmBytes[0:8]...) // magic + version
 	for _, s := range sections {
 		newRaw = append(newRaw, s.id)
