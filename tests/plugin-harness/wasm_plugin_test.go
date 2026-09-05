@@ -70,10 +70,17 @@ var knownPluginFailures = []struct {
 	// message: every one of its 16 failures reads "plugin_call: error 1",
 	// which the legend beside it calls a timeout, for causes the other
 	// languages name exactly ("blobstore: no tenant context"). Same host,
-	// same plugins, same calls. See IMPROVEMENT-PLAN 3.306 -- this entry
-	// exists to keep that divergence visible rather than to bless it.
-	{"plugin_call: error ", "the Go guest's generated wrapper falls back to a code legend (3.306)"},
-	{"plugin_call_streaming: error ", "the Go guest's streaming wrapper, same cause (3.306)"},
+	// same plugins, same calls.
+	//
+	// The host DOES write the message and the adapter DOES decode its
+	// length -- and then discards both on the error branch, printing an
+	// errCode the host hardcodes to 1 against a legend belonging to a
+	// different field. So "error 1" is a constant, not a timeout. 20 of the
+	// 23 adapters share the defect. See IMPROVEMENT-PLAN 3.306; these two
+	// entries exist to keep the divergence visible rather than bless it,
+	// and both should go once 3.306 lands.
+	{"plugin_call: error ", "the Go adapter discards the host's message (3.306)"},
+	{"plugin_call_streaming: error ", "the Go streaming adapter, same defect (3.306)"},
 }
 
 // pluginResultError reports the error text a plugin result carries, if any.

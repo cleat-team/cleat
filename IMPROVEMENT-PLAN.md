@@ -3452,39 +3452,91 @@ fixture, which fails exactly the `assemblyscript` subtest in each and nothing el
 --exclude-dir=node_modules .` finds none), so they are untracked rather than moved — the
 same call `.gitignore` already made for `examples/*/dist/`.
 
-### 3.306 The Go guest reports an error code where the other four report the host's message — 🔴 **OPEN** (WS-2, 2026-09-04)
+### 3.306 The Go adapter decodes the host's error message and then throws it away — 🔴 **OPEN** (WS-2 found, WS-1 diagnosed and holds the fix, 2026-09-04)
 
 Same host, same 10 registered plugins, same 17 calls, four guest languages. Measured
 2026-09-04 by dumping every key of `TestPluginCalls_Wasm_*`'s result:
 
-| guest | what a failed `blobstore.put` says | what a failed `pgvector.upsert` says |
+| guest | failed `blobstore.put` | failed `pgvector.upsert` |
 |---|---|---|
-| Rust, AssemblyScript, Java | `blobstore: no tenant context` | `plugin function pgvector/upsert not registered. Check that the plugin is deployed…` |
+| Rust, AssemblyScript, Java | `blobstore: no tenant context` | `plugin function pgvector/upsert not registered. Check that…` |
 | **Go** | `plugin_call: error 1 (0=unknown 1=timeout …)` | `plugin_call: error 1 (0=unknown 1=timeout …)` |
 
-All 16 of Go's failures read `error 1`, for at least three genuinely different causes,
-and the legend printed beside it calls 1 a **timeout** — which none of them is. The other
-three guests distinguish the three causes exactly. (Python could not be measured here:
-`componentize-py` is killed with signal 9 building this workflow in this sandbox.)
+(Python could not be measured here: `componentize-py` is killed with signal 9 building this
+workflow in this sandbox.)
 
-**What is established and what is not.** `wasm/generator.go`'s `callErrorMessage` returns
-the host's response text when `responseLen > 0 && int(responseLen) <= len(responseBuf)`,
-and otherwise falls back to the code legend. Go printed the fallback for all 16, so on
-that path either the host wrote no response bytes or the length failed that bounds check.
-**Which of the two has not been determined**, and the answer decides whether this is a
-host defect, a guest buffer-sizing defect, or a length-encoding mismatch at the boundary.
-Do not assume; the four real defects this repo has found at that boundary were all
-"the value meant the wrong thing on one side", not overflow.
+**The mechanism, determined.** The host writes the text and the guest decodes its length
+correctly; the Go adapter then discards both. `wasm/adapter_metadata.go`, `PluginCall`'s
+`ResultStmts`:
 
-Note the code is already the *corrected* one — §2.10 fixed this same helper for printing
-`errCode` against a `CallErrorCode` legend, and its doc comment explains the distinction
-at length. So `error 1` here is a `callErrorCode` of 1, not the old confusion resurfacing.
-That makes "why is it 1 for a not-registered plugin" a live question rather than a known
-one.
+    responseLen := uint32(uint64(result) >> 40)
+    errCode := uint32(result & 0xFF)
+    if errCode != 0 {
+        return "", fmt.Errorf("plugin_call: error %d (0=unknown 1=timeout …)", errCode)
+    }
+    return unsafe.String(&responseBuf[0], int(responseLen)), nil
 
-Pinned meanwhile by `knownPluginFailures` in `tests/plugin-harness/wasm_plugin_test.go`
-(3.307), which carries the two `plugin_call*: error ` entries explicitly so the
-divergence stays visible rather than silently accepted.
+`responseLen` is computed and then unused on the error branch; `responseBuf` is never read
+there. Three faults on one line:
+
+1. **The message is discarded.** `engine/plugins.go:361` writes it —
+   `s.writeResult(ctx, m, responsePtr, errStr, responseMaxLen)` — then packs the length.
+   Rust/AS/Java read it. Only Go does not.
+2. **The number printed comes from a different field than the legend describes.**
+   `packDurableCallResult(responseLen, callErrorCode, errCode)` is
+   `responseLen<<40 | callErrorCode<<8 | errCode` (`engine/memory.go:243`). `result & 0xFF`
+   is `errCode`, which that same call site hardcodes to a literal `1` on every failure.
+   The legend is the **CallErrorCode** legend, and CallErrorCode lives at bits 8-39. So
+   `error 1` is a constant from one field printed against another field's legend — not a
+   timeout, and not a classification.
+3. **The real classification is discarded too**: `callFailureCode` sits in bits 8-39 and is
+   never read.
+
+So "why is it 1 for a not-registered plugin" has a flat answer: **it is 1 for everything.**
+
+**This is a mechanism, not a bug.** Of the 23 adapters, **20 print that legend and 3 call
+`callErrorMessage`** — and those 3 (`cleat_call`, `cleat_call_retry`,
+`cleat_call_heartbeat`) are exactly the ones §2.10 fixed. The fix was applied to the calls
+named in that report and never generalised. Re-derive:
+
+    grep -c '0=unknown 1=timeout' wasm/adapter_metadata.go     # 20
+    grep -n 'callErrorMessage' wasm/adapter_metadata.go        # 3
+
+15 of the 20 have an out buffer and already decode its length before discarding it;
+5 (`ContinueAsNew`, `ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`,
+`ReleaseLock`) have no out buffer, so the legend is all there is — but whether the number
+matches the legend still needs per-packer checking there. `wasm/generator.go`'s
+`hostErrMessage` already exists for precisely this case, and its doc comment warns that
+printing the CallErrorCode legend beside a `packSimpleResult` return "would describe a
+rejected cron expression as a timeout". **That comment describes the live defect in 15
+other calls.** The abstraction was written, documented, and applied to three sites.
+
+Held by WS-1; it needs per-call classification of which packer each host function uses, so
+it is not a find-and-replace. Pinned meanwhile by `knownPluginFailures` in
+`tests/plugin-harness/wasm_plugin_test.go` (§3.307), which carries the two `plugin_call*:
+error ` entries explicitly so the divergence stays visible rather than absorbed.
+
+**How this was first mis-diagnosed, because the mistake is reusable.** WS-2 reported the
+symptom with two candidate mechanisms — "the host wrote no response bytes" or "the length
+failed its bounds check" — and **both were wrong**, because both assumed `PluginCall` went
+through `callErrorMessage`. It does not; it has its own literal copy of the format string.
+The assumption came from
+
+    grep -rn '0=unknown 1=timeout' --include='*.go' . | grep -v wasm_plugin_test | head
+
+whose **first** hit is `wasm/generator.go:427` inside `callErrorMessage`, and whose
+10th line is not its last. That string occurs **22 times in non-test Go across 3 files** (23 counting the one in a
+test) — **20 of them in `wasm/adapter_metadata.go`**, including the `PluginCall` entry at
+line 530 that `head` cut off. Re-derive the shape with
+
+    grep -rn '0=unknown 1=timeout' --include='*.go' . | awk -F: '{print $1}' | sort | uniq -c
+
+The first hit was a plausible decoy: `callErrorMessage`'s `%s: error %d` with
+`callName="plugin_call"` renders byte-identically to the literal that actually produced it.
+**A `| head` on a search for "who produces this string" answers a different question — who
+produces it first in path order — and the two coincide only by luck.** Refusing to name a
+mechanism was what kept the wrong one out of the record; the guess would have been written
+down as fact.
 
 ### 3.307 Five plugin tests checked that a key was present, not that the call worked — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
