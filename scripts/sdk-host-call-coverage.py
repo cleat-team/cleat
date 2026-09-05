@@ -96,6 +96,20 @@ def as_surface() -> set[str]:
     return names - {"constructor", "if", "for", "while", "return", "switch", "catch"}
 
 
+# The call pattern below ends `\s*\(`, so it does not match a call that carries
+# an explicit type-argument list between the method name and the paren --
+# `h.cleat_call_with_retry::<Value, Value>(..)` in Rust, `h.method<T>(..)` in
+# AssemblyScript. Measured 2026-09-05 against a loosened pattern over every
+# glob in EXECUTED: zero calls are missed today, so this costs no number. It is
+# recorded because the zero is an accident. The one turbofish call site in the
+# tree is credited anyway, by examples/rust-workflow calling the same method in
+# a form the pattern does match; delete or rewrite that example and rust's
+# executed count drops by one, reading as a regression in a fixture rather than
+# a blind spot in this scanner.
+#
+# A known-positive, since "zero missed" is otherwise indistinguishable from a
+# loosened pattern that matches nothing: over the hostcallsrust globs ALONE,
+# strict finds 0 matches for cleat_call_with_retry and loose finds 1.
 SDKS = {
     # name: (surface fn, fixture globs, call pattern builder)
     "go": (
@@ -457,18 +471,24 @@ EXECUTED = {
         # wave-1 calls, one workflow invocation each, outcomes checked against
         # a recorded table.
         #
-        # It credits 22 and not 24, which is correct and worth stating so the
-        # gap is not read as a scan failure: the fixture's ScheduleCron and
-        # ListCrons arms make no host call at all. They return `unsupported`,
-        # because crates/cleat-sdk/src/host_calls.rs declares neither
-        # cleat_schedule_cron nor cleat_list_crons -- the string "cron" appears
-        # in it zero times. Crediting them here would be this mode's own
+        # Two arms make no host call at all: ScheduleCron and ListCrons return
+        # `unsupported`, because crates/cleat-sdk/src/host_calls.rs declares
+        # neither cleat_schedule_cron nor cleat_list_crons -- the string "cron"
+        # appears in it zero times. Crediting them would be this mode's own
         # failure case in miniature: a call counted as executed by a fixture
         # that cannot make it.
+        #
+        # That leaves 22 arms making calls, and this entry credits 21, not 22.
+        # ARMS AND SURFACE METHODS ARE DIFFERENT DENOMINATORS and the gap is in
+        # the scanner, not the fixture: the DurableCallWithRetry arm calls
+        # `h.cleat_call_with_retry::<Value, Value>(...)`, and the call pattern
+        # in SDKS ends `\s*\(`, which a turbofish sits in the middle of. See
+        # the note on SDKS. Measured 2026-09-05, this entry's globs alone:
+        # 20 credited under the pre-#753 surface, 21 after it.
         {
             "globs": ["tests/plugin-harness/testdata/hostcallsrust/src/*.rs"],
             "test": "TestHostCallsRust",
-            "why": "the host-call execution harness (C2); 22 of the 24 wave-1 calls, one invocation each -- the two cron calls have no Rust binding to execute",
+            "why": "the host-call execution harness (C2); 22 of the 24 wave-1 arms make a call, of which 21 credit a surface method -- the two cron arms have no Rust binding, and the retry arm's turbofish defeats the call pattern",
         },
     ],
     "java": [

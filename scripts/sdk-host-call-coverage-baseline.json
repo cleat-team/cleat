@@ -12,7 +12,7 @@
   "rust": {
     "covered": 63,
     "surface": 71,
-    "executed": 9
+    "executed": 25
   },
   "java": {
     "covered": 70,
