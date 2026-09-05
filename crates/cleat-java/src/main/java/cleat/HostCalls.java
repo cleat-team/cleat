@@ -106,11 +106,27 @@ public class HostCalls {
         int inPtr, int inLen,
         int outPtr, int maxLen);
 
+    // priority is the second i64 and it was MISSING here until 2026-09-05.
+    //
+    // The host takes ten parameters -- engine/imports.go, "cleat_child_workflow
+    // _with_options: (ptr,len x3, i64, i64, ptr,len, ptr,maxLen)" -- and this
+    // declared nine. A WASM import whose arity disagrees with the host does not
+    // fail at that call: the MODULE FAILS TO INSTANTIATE, so a Java workflow
+    // that so much as referenced childWorkflowWithOptions could not run at all.
+    //
+    // It went unnoticed because TeaVM tree-shakes unreferenced imports, and no
+    // Java test called this. Compile-time coverage cannot see it -- the Java
+    // side compiled perfectly well against a signature the host does not have.
+    // Found by the first run of tests/plugin-harness's Java host-call fixture,
+    // which is the whole argument for executing a binding rather than checking
+    // that it exists. Same defect class as IMPROVEMENT-PLAN §3.55, where
+    // cleat_create_promise was registered with a parameter no guest passed.
     @Import(module = "env", name = "cleat_child_workflow_with_options")
     private static native long cleatChildWorkflowWithOptionsRaw(
         int namePtr, int nameLen,
         int inPtr, int inLen,
         long version,
+        long priority,
         int policyPtr, int policyLen,
         int outPtr, int maxLen);
 
@@ -816,6 +832,13 @@ public class HostCalls {
             nameOff, nameLen,
             inOff, inLen,
             version,
+            // priority 0, which the Go SDK documents as the default and the
+            // highest ("0 = highest priority", cleat/runtime_children.go).
+            // Java's public API does not expose priority yet; adding an
+            // overload that does is an additive change and deliberately not
+            // bundled with fixing the arity, which is what stops the module
+            // linking at all.
+            0L,
             policyOff, policyLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 

@@ -152,6 +152,7 @@ tests/integrity	newStressEngine	1
 tests/plugin-harness	TestBlobstore_S3	2
 tests/plugin-harness	TestHostCallsAS	1
 tests/plugin-harness	TestHostCallsGo	1
+tests/plugin-harness	TestHostCallsJava	1
 tests/plugin-harness	TestHostCallsRust	1
 tests/plugin-harness	TestPluginCalls_MultiDB	1
 tests/plugin-harness	TestPluginCalls_Wasm_AS	1
@@ -163,6 +164,7 @@ tests/plugin-harness	buildASHostCallWasm	1
 tests/plugin-harness	buildASWorkflowWasm	1
 tests/plugin-harness	buildGoHostCallWasm	1
 tests/plugin-harness	buildGoWorkflowWasm	2
+tests/plugin-harness	buildJavaHostCallWasm	1
 tests/plugin-harness	buildJavaWorkflowWasm	1
 tests/plugin-harness	buildPythonWorkflowWasm	3
 tests/plugin-harness	buildRustHostCallWasm	2
