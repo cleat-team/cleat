@@ -793,6 +793,18 @@ func TestAwaitAllChildren_AllCompleted(t *testing.T) {
 	}
 }
 
+// TestAwaitAllChildren_SomeRunning asserts that a still-running child SUSPENDS
+// the workflow rather than being reported as an outcome.
+//
+// This test previously asserted the opposite -- errCode 0 with
+// Error: "child not completed" for run-b -- which is the behaviour
+// IMPROVEMENT-PLAN 3.309 identified as a durable wrong answer. The outcomes are
+// marshalled into the recorded EventRecord and replayAwaitAllChildren serves
+// rec.Response verbatim forever, so "had not finished when I looked" became
+// run-b's permanent result even after run-b completed.
+//
+// It asserted the code as written and justified neither half, which is why it
+// held the defect in place rather than catching it.
 func TestAwaitAllChildren_SomeRunning(t *testing.T) {
 	mock := &mockChildStore{
 		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
@@ -811,29 +823,77 @@ func TestAwaitAllChildren_SomeRunning(t *testing.T) {
 	ctx := contextWithRawMemBuf(context.Background(), buf)
 	result := s.AwaitAllChildren(ctx, nil, `["run-a","run-b"]`, 0, uint32(len(buf)))
 
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("a still-running child must suspend: got %#x, want %#x",
+			result, packAwaitChildResultSuspend())
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_all_children(run-b)") {
+		t.Errorf("expected 'await_all_children(run-b)' in reason, got %q", s.suspendErr.Reason)
 	}
 
-	// Verify the response contains both outcomes including "child not completed" for run-b.
+	// The recorded event must carry NO response. That is what makes the replay
+	// half fall through to fresh and re-check; a response here would be replayed
+	// verbatim forever.
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].Response != "" {
+		t.Errorf("suspend record must have an empty response, got %q", s.history[0].Response)
+	}
+}
+
+// TestAwaitAllChildren_ReplayOfSuspendRecordFallsThroughToFresh is the other
+// half of the 3.309 fix, and without it half one is worse than the defect: the
+// fresh path would suspend, and replay would then serve the suspend record's
+// empty response as the answer -- a durable EMPTY result, which reads as
+// success.
+func TestAwaitAllChildren_ReplayOfSuspendRecordFallsThroughToFresh(t *testing.T) {
+	// The child has completed by the time we replay.
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
+			return `{"result":"done"}`, true, nil
+		},
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitAllChildren,
+		Request:   `["run-a"]`,
+		// No Response: this is the suspend marker.
+	}}
+
+	buf := make([]byte, 512)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+	result := s.AwaitAllChildren(ctx, nil, `["run-a"]`, 0, uint32(len(buf)))
+
+	if result == packAwaitChildResultSuspend() {
+		t.Fatal("replay suspended again although the child has since completed")
+	}
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Fatalf("expected errCode 0, got %d", errCode)
+	}
+
+	written := uint32(result >> 32)
+	if written == 0 {
+		t.Fatal("replay returned an EMPTY result -- the suspend record was served verbatim, " +
+			"which is the failure this test exists to catch")
+	}
 	var outcomes []struct {
 		RunID  string `json:"run_id"`
 		Result string `json:"result,omitempty"`
 		Error  string `json:"error,omitempty"`
 	}
-	written := uint32(result >> 32)
 	if err := json.Unmarshal(buf[:written], &outcomes); err != nil {
 		t.Fatalf("unmarshal outcomes: %v", err)
 	}
-	if len(outcomes) != 2 {
-		t.Fatalf("expected 2 outcomes, got %d", len(outcomes))
-	}
-	// Find the outcome for run-b.
-	for _, o := range outcomes {
-		if o.RunID == "run-b" && o.Error != "child not completed" {
-			t.Errorf("expected 'child not completed' for run-b, got %q", o.Error)
-		}
+	if len(outcomes) != 1 || outcomes[0].Result != `{"result":"done"}` {
+		t.Errorf("expected the child's real result after fall-through, got %+v", outcomes)
 	}
 }
 
@@ -922,6 +982,14 @@ func TestFreshAwaitAllChildren_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestFreshAwaitAllChildren_NoStore asserts the consistency that started
+// IMPROVEMENT-PLAN 3.309: AwaitChild suspends when no child workflow store is
+// configured, and this returned success with "no child workflow store" as the
+// child's outcome. That divergence is what made the two calls disagree about an
+// identical run ID, and it was reported as a harness artifact before the
+// ordinary-path version of it was found.
+//
+// It asserted errCode 0 and that error string until 2026-09-05.
 func TestFreshAwaitAllChildren_NoStore(t *testing.T) {
 	s := newTestExecSession()
 	// childWfStore is nil
@@ -930,24 +998,12 @@ func TestFreshAwaitAllChildren_NoStore(t *testing.T) {
 	ctx := contextWithRawMemBuf(context.Background(), buf)
 	result := s.freshAwaitAllChildren(ctx, nil, `["run-a"]`, 0, uint32(len(buf)))
 
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("with no child store configured AwaitAllChildren must suspend, as AwaitChild does: "+
+			"got %#x, want %#x", result, packAwaitChildResultSuspend())
 	}
-
-	var outcomes []struct {
-		RunID string `json:"run_id"`
-		Error string `json:"error,omitempty"`
-	}
-	written := uint32(result >> 32)
-	if err := json.Unmarshal(buf[:written], &outcomes); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(outcomes) != 1 {
-		t.Fatalf("expected 1 outcome, got %d", len(outcomes))
-	}
-	if outcomes[0].Error != "no child workflow store" {
-		t.Errorf("expected 'no child workflow store' error, got %q", outcomes[0].Error)
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
 	}
 }
 

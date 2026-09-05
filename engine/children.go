@@ -458,6 +458,10 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 	}
 
 	outcomes := make([]childOutcome, len(runIDs))
+	// pending is tracked beside outcomes rather than as a field on childOutcome
+	// because childOutcome is marshalled into the result the guest reads: adding
+	// a field there would change the wire format for every caller.
+	pending := make([]bool, len(runIDs))
 	var wg sync.WaitGroup
 
 	for i, runID := range runIDs {
@@ -501,14 +505,54 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 				} else if completed {
 					outcomes[idx] = childOutcome{RunID: rid, Result: result}
 				} else {
+					// Still running. Not an outcome -- see the suspend below.
 					outcomes[idx] = childOutcome{RunID: rid, Error: "child not completed"}
+					pending[idx] = true
 				}
 			} else {
+				// No store configured. AwaitChild reaches its suspend on this
+				// same condition, so this does too; the two calls disagreeing
+				// about it was how IMPROVEMENT-PLAN 3.309 was found.
 				outcomes[idx] = childOutcome{RunID: rid, Error: "no child workflow store"}
+				pending[idx] = true
 			}
 		}(i, runID)
 	}
 	wg.Wait()
+
+	// Any child still running means this call has not been answered yet, so
+	// suspend rather than reporting "not completed" as that child's result.
+	//
+	// Recording an outcome here would be durable, not transient: the outcomes
+	// are marshalled into the EventRecord below and replayAwaitAllChildren
+	// hands rec.Response back verbatim on every future replay. So "had not
+	// finished when I looked" would become the child's permanent answer, and no
+	// later replay would ever say otherwise -- exactly the failure the comment
+	// above argues against for context cancellation, which is what made this
+	// unintentional rather than a design choice. IMPROVEMENT-PLAN 3.309.
+	//
+	// AwaitChild (children.go, "Child not completed") and AwaitAnyChild both
+	// suspend on this condition; the event is recorded WITHOUT a response so the
+	// replay path falls through to fresh and re-checks. ChildResult has no way
+	// to express "pending" either -- it is {RunID, Result, Error} -- so a caller
+	// could not tell a still-running child from a failed one except by matching
+	// the error string.
+	for i, isPending := range pending {
+		if !isPending {
+			continue
+		}
+		rec := EventRecord{
+			Step:      s.stepCount,
+			EventType: EventTypeAwaitAllChildren,
+			Request:   runIDsJSON,
+		}
+		s.recordEvent(rec)
+
+		s.suspendErr = &SuspendError{
+			Reason: fmt.Sprintf("await_all_children(%s)", runIDs[i]),
+		}
+		return packAwaitChildResultSuspend()
+	}
 
 	// Record event.
 	outcomesJSON, _ := json.Marshal(outcomes)
@@ -528,6 +572,28 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
+
+		// A record with no response is the suspend marker written by the fresh
+		// path when a child was still running. Fall through to fresh to
+		// re-check, exactly as AwaitChild does ("no cached result, exitReplay to
+		// fresh"). Without this half, suspending in the fresh path would replay
+		// as an EMPTY result -- a durable wrong answer traded for a durable
+		// empty one, which is worse because empty reads as success.
+		//
+		// Checked BEFORE advanceReplayStep and without advancing stepCount: the
+		// fresh execution records the real result at this same step, overwriting
+		// the empty event. Everything past this point keeps its existing order.
+		//
+		// An empty response cannot arise any other way -- the completed path
+		// records json.Marshal of a slice, which is "[]" at its shortest, never
+		// "" -- so this does not reinterpret any pre-existing history.
+		if rec.EventType == EventTypeAwaitAllChildren && rec.Response == "" {
+			s.engine.log().InfoContext(ctx, "await_all_children: no cached result, exitReplay to fresh",
+				"workflow_id", s.workflowID, "runIDs", runIDsJSON, "step", rec.Step)
+			s.exitReplay()
+			return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
+		}
+
 		if !s.advanceReplayStep(ctx, &rec) {
 			return 0
 		}

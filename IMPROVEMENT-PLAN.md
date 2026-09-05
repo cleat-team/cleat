@@ -4929,7 +4929,7 @@ workflow YAML and running *that* — a cached binary that lands somewhere off `P
 127 *after* a green install, which is how the gitleaks step in §3.403 failed on its first CI run
 having been verified locally by absolute path. The local and CI invocations must be the same
 command, not an approximation retyped into a shell.
-### 3.309 `AwaitAllChildren` does not await — it records "child not completed" as the child's permanent outcome — 🔴 **OPEN** (WS-2, 2026-09-05)
+### 3.309 `AwaitAllChildren` does not await — it records "child not completed" as the child's permanent outcome — 🟢 **FIXED 2026-09-05** (WS-2, 2026-09-05)
 
 Found while settling a question WS-1 raised for #744's B1: "AwaitAllChildren returns ok on a
 run ID that AwaitChild SUSPENDS on — either a real inconsistency or a design difference
@@ -4989,10 +4989,43 @@ the code.
    would replay as an empty result. Half 1 without half 2 converts a durable wrong answer
    into a durable empty one.
 
-**Not started, deliberately.** This changes what a shipped host function does at runtime and
-what an existing test asserts, and the question of whether any caller wants partial outcomes
-is not mine to answer alone. Filed with the evidence so the decision is made on it rather
-than rediscovered.
+**Fixed 2026-09-05, both halves, on the owner's decision.**
+
+Half 1, `freshAwaitAllChildren`: any child still running records the event **without a
+response** and suspends, with `pending` tracked in a slice beside `outcomes` rather than as a
+field on `childOutcome` — that struct is marshalled into the result the guest reads, so a new
+field would change the wire format for every caller. The no-store branch suspends too, which
+is the specific divergence that started this section: `AwaitChild` reaches its suspend on
+that same condition.
+
+Half 2, `replayAwaitAllChildren`: a record with an empty response falls through to fresh and
+re-checks, mirroring `AwaitChild`'s "no cached result, exitReplay to fresh". Checked **before**
+`advanceReplayStep` and without advancing `stepCount`, so the fresh execution overwrites the
+empty event at the same step; everything past that point keeps its existing order, and the
+four pre-existing replay tests (`Match`, `MismatchType`, `IDsMismatch`, `PastEnd`) still pass.
+An empty response cannot arise any other way — the completed path records `json.Marshal` of a
+slice, `"[]"` at its shortest — so no pre-existing history is reinterpreted.
+
+**Falsified one half at a time, which is what demonstrates "both halves or neither":**
+
+| perturbation | result |
+|---|---|
+| half 1 reverted (fresh does not suspend) | `TestAwaitAllChildren_SomeRunning` and `TestFreshAwaitAllChildren_NoStore` fail: `a still-running child must suspend: got 0x6300000000, want 0x4000000000000000` |
+| half 2 reverted (replay does not fall through) | **only** the replay test fails: `replay returned an EMPTY result -- the suspend record was served verbatim` |
+
+The second row is the argument for shipping them together: half 1 alone trades a durable
+wrong answer for a durable **empty** one, which is worse because empty reads as success.
+
+**Two tests asserted the old behaviour and were converted, not deleted.**
+`TestAwaitAllChildren_SomeRunning` asserted `errCode 0` with `"child not completed"` for the
+running child; `TestFreshAwaitAllChildren_NoStore` asserted `errCode 0` with
+`"no child workflow store"`. Both now assert the suspend, and each carries a comment saying
+what it asserted until 2026-09-05 and why that held the defect in place. A third test,
+`TestAwaitAllChildren_ReplayOfSuspendRecordFallsThroughToFresh`, is new and covers half 2.
+
+Measured: `go test ./engine/` 0 failures; child/replay/suspend tests against a real
+PostgreSQL (`-p 1`, WS-2's 5433) 400 pass, 0 fail, with the DSN confirmed to connect by
+`TestPluginMigrations_AllDialects` rather than assumed.
 
 ### 3.310 One harness test ran nowhere and one harness job has never run a test — 🟡 **PARTLY FIXED 2026-09-05** (WS-2, 2026-09-05)
 
