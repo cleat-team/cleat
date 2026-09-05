@@ -4060,7 +4060,21 @@ The classification has a mechanical tell that is worth stating, because it means
 already legible in the tree and nobody had read it: **these two are the only exports in
 `engine/imports.go` whose registration carries a prose comment.** The other 53 carry an ABI
 signature and nothing else (`// cleat_set_state: (ptr,len x2) -> i64`). Re-derive by extracting the
-comment block above each `.Export(...)` and asking which are not of the form `<name>: <signature>`.
+comment block above each `.Export(...)` and partitioning on whether it matches `<name>: <sig>`.
+
+**The partition is exact, and checking that is not the same as counting the prose.** Measured
+2026-09-05: **0 uncommented, 53 signature, 2 prose.** The first number is the one that matters and
+it was not measured in the first pass — a scan that looks for a comment and classifies "did not
+find one" as "not prose" reports the same 2 whether the remaining 53 are documented or bare, so
+the original check could not distinguish a strong tell from a lucky one. WS-2 asked for the
+converse before citing the claim, which is what prompted measuring it. Every export is commented,
+so the split really is 53/2 and not 53-minus-however-many-are-silent.
+
+Note what the tell is and is not. It is a property of the **comments**, not of the calls, so it
+could select the right two for the wrong reason. The independent check is semantic and is the one
+that decides: `cleat_poll_work` feeds `_start`/`main` the entry point and input, and
+`cleat_complete` is called by the export wrapper so the worker can capture a result. Both are the
+Go module handshake. The comment shape agrees with that reading; it does not establish it.
 
 So **the denominator for the release rule is 53**, and `cleat_poll_work` / `cleat_complete` are
 the first two entries on the documented-gap list, with the reason above.
