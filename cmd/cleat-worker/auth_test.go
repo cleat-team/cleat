@@ -10,6 +10,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // TestAuthMiddlewareRejectsInvalidKey verifies that when auth middleware is
@@ -47,6 +48,7 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 	if configured {
 		fatalf = t.Fatalf
 	}
+	var haveTable bool
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -60,16 +62,43 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 		return
 	}
 
-	// Ensure the tenant_api_keys table exists so that the query does not fail
-	// with a "relation does not exist" error before reaching the row check.
-	db.Exec(`CREATE TABLE IF NOT EXISTS tenant_api_keys (
-		key_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		tenant_id UUID NOT NULL,
-		key_hash BYTEA NOT NULL UNIQUE,
-		description TEXT NOT NULL DEFAULT '',
-		revoked_at TIMESTAMPTZ,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-	)`)
+	// The table this test needs is admin.tenant_api_keys -- that is what
+	// PostgresStore.ResolveTenantFromAPIKey queries (engine/store_deployment.go).
+	// REQUIRE it rather than creating it, for two reasons.
+	//
+	// First, the 401 has to be attributable. If the relation is missing the
+	// query errors, the middleware refuses the request, and all three subtests
+	// pass against a database carrying none of the schema they claim to
+	// exercise. Measured 2026-09-04 against an empty database: three of three
+	// PASS. A test that cannot fail for its own reason is not a test.
+	//
+	// Second, this used to do `CREATE TABLE IF NOT EXISTS tenant_api_keys`,
+	// UNQUALIFIED -- so it never satisfied the query it was added for (wrong
+	// schema) and it manufactured a decoy. Unqualified names resolve through
+	// search_path ("$user", public), so the new table then shadowed
+	// admin.tenant_api_keys for every other unqualified reference in that
+	// database. engine/testutil's cleanup list carried one, and its DELETE hit
+	// this decoy instead of the real table for as long as both existed. Running
+	// this one test was enough to recreate the decoy minutes after it was
+	// dropped by hand.
+	// Build the schema the way every other database-backed test in this package
+	// does -- SetupFullSchema applies the real migrations, which is where
+	// admin.tenant_api_keys is defined. tenant_isolation_db_test.go in this same
+	// package already did this; this test hand-rolled a table instead and got
+	// the schema wrong.
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+
+	if err := db.QueryRow(
+		`SELECT to_regclass('admin.tenant_api_keys') IS NOT NULL`).Scan(&haveTable); err != nil {
+		fatalf("cannot check for admin.tenant_api_keys: %v", err)
+		return
+	}
+	if !haveTable {
+		fatalf("admin.tenant_api_keys does not exist in %s even after SetupFullSchema. "+
+			"Without it the middleware refuses every request because the lookup "+
+			"errors, and this test passes without exercising the key check at all.", dsn)
+		return
+	}
 
 	// requireAuth=FALSE, deliberately, and this comment used to say the opposite.
 	// It claimed to mirror "what main() does when --require-auth=true" while
