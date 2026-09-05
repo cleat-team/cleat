@@ -5384,10 +5384,29 @@ both coverage numbers are computed as though neither existed. **The Rust surface
 by 10, and the direction is the dangerous one** — a smaller denominator makes coverage look
 *higher*, and an uncountable call reads as a call nobody needs to write.
 
-Not fixed here; the fix changes every Rust number at once and belongs with its own baseline
-update. The same shape may affect Java — 77 `public` members against a counted surface of 68 —
-but that is flagged rather than claimed, because the Java regex admits `<>` inside the return
-type and the four-member remainder was not investigated.
+**Fixed in #753 (`26e6333e`), and the corrected numbers are worse than the section predicted.**
+Rust's surface is **71**, and compile coverage is **63/71 = 88.7%** — it was never 100%, and that
+100% had been quoted into four places and to the user before anyone read the file a second way.
+Executed coverage moved 23 → 25. Java's surface went 68 → **70**: the two members were
+`awaitSignalsWithQuorum` and `awaitSignalsWithQuorumMs`, whose return type
+`CleatResult<java.util.List<AwaitSignalsResult>>` fell outside a character class missing `.`. The
+77-versus-68 gap flagged above was therefore **2, not 9** — the other seven `public` lines are
+fields and constructors. Flagging it rather than asserting it was right; asserting it would have
+been wrong by seven.
+
+**One caveat this harness's Rust numbers still carry, and it is the same defect on the other
+side.** #753 fixed the *declaration* side. The *call* side still ends `\s*\(`, and
+`DurableCallWithRetry` calls `h.cleat_call_with_retry::<Value, Value>(..)` — a turbofish sits
+exactly where the pattern expects a paren. Measured over this fixture's globs alone: it credits
+**21** of the 24 arms, and `cleat_call_with_retry` is **not** among them. Two of the other three
+are the `unsupported` cron arms, which make no call at all.
+
+The total is nevertheless right today, and only by accident: `examples/rust-workflow` calls the
+same method in a matchable form, so the one turbofish site is credited by a neighbour. **Delete or
+rewrite that example and Rust's executed count drops by one, reading as a fixture regression
+rather than a scanner one.** Recorded next to `SDKS` with its known-positive — over this fixture's
+globs alone the strict pattern finds 0 for `cleat_call_with_retry` and a loosened one finds 1 —
+because "zero missed" is otherwise indistinguishable from a loose pattern that matches nothing.
 
 ### 3.311 `TestBlobstore_S3` now exists, so Layer 4 runs a test for the first time — 🟢 **FIXED 2026-09-05** (WS-2, 2026-09-05)
 
