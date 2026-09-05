@@ -60,13 +60,27 @@ def python_surface() -> set[str]:
 def rust_surface() -> set[str]:
     src = _read(ROOT / "crates" / "cleat-sdk" / "src" / "host_calls.rs")
     # Methods on the HostCalls impl, not free functions or the raw externs.
-    return set(re.findall(r"^\s{4}pub fn ([a-z_][a-z0-9_]*)\s*\(", src, re.M))
+    # host_calls.rs has exactly one `impl` block, so the four-space indent is
+    # the whole of the qualification.
+    #
+    # NO `\(` ANCHOR after the name. A generic method is `pub fn name<T: ...>(`,
+    # and requiring the paren excluded all ten of them -- including
+    # cleat_call_with_retry and defer_func, which are the ONLY Rust bindings for
+    # DurableCallWithRetry and DurableDeferFunc. Found by WS-3 2026-09-05, and
+    # the direction is what made it worth fixing rather than noting: a smaller
+    # denominator makes coverage look HIGHER, and a call that cannot be counted
+    # reads as a call nobody needs to write. 61 -> 71.
+    return set(re.findall(r"^\s{4}pub fn ([a-z_][a-z0-9_]*)", src, re.M))
 
 
 def java_surface() -> set[str]:
     src = _read(ROOT / "crates" / "cleat-java" / "src" / "main" / "java" / "cleat" / "HostCalls.java")
+    # The `.` in the return-type class is load-bearing: a method returning
+    # CleatResult<java.util.List<AwaitSignalsResult>> was excluded without it,
+    # taking awaitSignalsWithQuorum and awaitSignalsWithQuorumMs with it. 68 -> 70.
+    # Same class as the Rust generics bug, found while checking whether it was.
     return set(
-        re.findall(r"^    public (?:static )?[\w<>,\[\]\s]+? ([a-zA-Z][A-Za-z0-9]*)\s*\(", src, re.M)
+        re.findall(r"^    public (?:static )?[\w<>,\[\]\.\s]+? ([a-zA-Z][A-Za-z0-9]*)\s*\(", src, re.M)
     )
 
 
@@ -82,6 +96,20 @@ def as_surface() -> set[str]:
     return names - {"constructor", "if", "for", "while", "return", "switch", "catch"}
 
 
+# The call pattern below ends `\s*\(`, so it does not match a call that carries
+# an explicit type-argument list between the method name and the paren --
+# `h.cleat_call_with_retry::<Value, Value>(..)` in Rust, `h.method<T>(..)` in
+# AssemblyScript. Measured 2026-09-05 against a loosened pattern over every
+# glob in EXECUTED: zero calls are missed today, so this costs no number. It is
+# recorded because the zero is an accident. The one turbofish call site in the
+# tree is credited anyway, by examples/rust-workflow calling the same method in
+# a form the pattern does match; delete or rewrite that example and rust's
+# executed count drops by one, reading as a regression in a fixture rather than
+# a blind spot in this scanner.
+#
+# A known-positive, since "zero missed" is otherwise indistinguishable from a
+# loosened pattern that matches nothing: over the hostcallsrust globs ALONE,
+# strict finds 0 matches for cleat_call_with_retry and loose finds 1.
 SDKS = {
     # name: (surface fn, fixture globs, call pattern builder)
     "go": (
@@ -199,7 +227,11 @@ def main() -> int:
     # coverage is at 100% on all five SDKs and executed coverage is not close,
     # and a single number would let the first stand in for the second.
     if mode in ("--executed", "--check-executed"):
-        problems = check_executed_wiring() + check_run_patterns_select_something()
+        problems = (
+            check_executed_wiring()
+            + check_run_patterns_select_something()
+            + check_surface_extraction()
+        )
         for p in problems:
             print(f"FAIL {p}", file=sys.stderr)
         ex = measure_executed()
@@ -439,18 +471,24 @@ EXECUTED = {
         # wave-1 calls, one workflow invocation each, outcomes checked against
         # a recorded table.
         #
-        # It credits 22 and not 24, which is correct and worth stating so the
-        # gap is not read as a scan failure: the fixture's ScheduleCron and
-        # ListCrons arms make no host call at all. They return `unsupported`,
-        # because crates/cleat-sdk/src/host_calls.rs declares neither
-        # cleat_schedule_cron nor cleat_list_crons -- the string "cron" appears
-        # in it zero times. Crediting them here would be this mode's own
+        # Two arms make no host call at all: ScheduleCron and ListCrons return
+        # `unsupported`, because crates/cleat-sdk/src/host_calls.rs declares
+        # neither cleat_schedule_cron nor cleat_list_crons -- the string "cron"
+        # appears in it zero times. Crediting them would be this mode's own
         # failure case in miniature: a call counted as executed by a fixture
         # that cannot make it.
+        #
+        # That leaves 22 arms making calls, and this entry credits 21, not 22.
+        # ARMS AND SURFACE METHODS ARE DIFFERENT DENOMINATORS and the gap is in
+        # the scanner, not the fixture: the DurableCallWithRetry arm calls
+        # `h.cleat_call_with_retry::<Value, Value>(...)`, and the call pattern
+        # in SDKS ends `\s*\(`, which a turbofish sits in the middle of. See
+        # the note on SDKS. Measured 2026-09-05, this entry's globs alone:
+        # 20 credited under the pre-#753 surface, 21 after it.
         {
             "globs": ["tests/plugin-harness/testdata/hostcallsrust/src/*.rs"],
             "test": "TestHostCallsRust",
-            "why": "the host-call execution harness (C2); 22 of the 24 wave-1 calls, one invocation each -- the two cron calls have no Rust binding to execute",
+            "why": "the host-call execution harness (C2); 22 of the 24 wave-1 arms make a call, of which 21 credit a surface method -- the two cron arms have no Rust binding, and the retry arm's turbofish defeats the call pattern",
         },
     ],
     "java": [
@@ -646,6 +684,59 @@ def check_run_patterns_select_something() -> list[str]:
             f"nothing and exits 0 -- `go test` prints 'ok ... [no tests to run]'. "
             f"Either the test was renamed or it was never written."
         )
+    return problems
+
+
+# A surface extractor that silently under-counts is the worst failure this
+# script has, and it has happened twice.
+#
+# Both were regexes that required something optional right after the method
+# name -- Rust wanted `(` and missed every `pub fn name<T>(`, Java's return-type
+# class lacked `.` and missed `java.util.List<...>` returns. Neither errored.
+# Both made coverage look HIGHER, because the surface is the denominator, and a
+# method that cannot be counted reads as one nobody needs to write.
+#
+# So each extractor is checked against a deliberately LOOSER parse of the same
+# file. The loose parse is not more correct -- it over-matches on purpose. It
+# exists to answer "is the strict one missing anything", which is the question
+# a passing scan cannot answer about itself.
+LOOSE = {
+    "rust": (
+        "crates/cleat-sdk/src/host_calls.rs",
+        r"^\s{4}pub fn ([a-z_][a-z0-9_]*)",
+    ),
+    "java": (
+        "crates/cleat-java/src/main/java/cleat/HostCalls.java",
+        r"^    public\s+(?:static\s+)?[\w<>,\[\]\.\s]+?\s+([a-zA-Z][A-Za-z0-9]*)\s*\(",
+    ),
+    "assemblyscript": (
+        "packages/cleat-as/assembly/host-calls.ts",
+        r"^  ([a-zA-Z][A-Za-z0-9]*)\s*(?:<[^)]*>)?\s*\(",
+    ),
+}
+_AS_KEYWORDS = {"constructor", "if", "for", "while", "return", "switch", "catch"}
+
+
+def check_surface_extraction() -> list[str]:
+    """Each strict extractor must see everything a looser parse of the same file sees."""
+    problems = []
+    for sdk, (path, pattern) in LOOSE.items():
+        f = ROOT / path
+        if not f.exists():
+            problems.append(f"{sdk}: {path} is missing; the surface scan has nothing to read")
+            continue
+        loose = set(re.findall(pattern, _read(f), re.M)) - _AS_KEYWORDS
+        strict = SDKS[sdk][0]()
+        missed = loose - strict
+        if missed:
+            problems.append(
+                f"{sdk}: the surface scan misses {len(missed)} method(s) a looser parse finds: "
+                f"{', '.join(sorted(missed))}. A smaller surface is a smaller DENOMINATOR, so this "
+                f"inflates coverage rather than failing loudly. Fix the extractor, do not widen "
+                f"the baseline."
+            )
+        if not strict:
+            problems.append(f"{sdk}: surface extraction found 0 methods -- the scan is broken")
     return problems
 
 

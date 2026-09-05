@@ -10,13 +10,13 @@
     "executed": 10
   },
   "rust": {
-    "covered": 61,
-    "surface": 61,
-    "executed": 23
+    "covered": 63,
+    "surface": 71,
+    "executed": 25
   },
   "java": {
-    "covered": 68,
-    "surface": 68,
+    "covered": 70,
+    "surface": 70,
     "executed": 8
   },
   "assemblyscript": {
