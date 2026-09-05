@@ -294,11 +294,17 @@ failures on 2026-09-05, plus one already recorded above from 2026-08-31 — one 
 | `grep -oE '"Output":"[^"]*"'` | a JSON string can contain `"` | a JSON decoder |
 | `grep -cE '^\S+\s+pending'` | a tab-delimited table whose fields contain spaces | `awk -F'\t'` |
 | `pub fn <name>(` | a declaration can carry generics | a parse that admits them |
-| a name scan over `.ts` | source contains prose *about* names | a declaration scan, not a text scan |
+| a name scan over `.ts` | source contains prose *about* names | anchor to where the artifact lives |
 
 "Check your regex" is the weak form of this. The strong form is that **a text search cannot tell a
 thing from a sentence about the thing**, and neither can a line-oriented read of a structured
 format. When the answer matters, read it with something that knows the shape.
+
+**And the portable version of that, which needs no parser: anchor to where the artifact lives, not
+to what it is called.** "Extract the declarations" requires a tool per language. `^` does not. A
+retraction is prose in a body and can never sit at a declaration site; a changelog row recording a
+removal cannot start a heading line. That one move covers every row above — and it is applicable
+to a file you have never seen, which "write a real parser" is not.
 
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
@@ -531,7 +537,35 @@ ABI is written twice — `engine/imports.go` for wazero, `engine/wasmtime_hostfu
 wasmtime. `engine/hostabi_runtime_parity_test.go` does. It found a real defect on its first run:
 `cleat_create_promise` was registered on wasmtime with a parameter no guest passed, so durable
 promises could not link on the worker at all (§3.55). **Note what a name-only comparison would
-have said** — both sides register the same 56 names, and did then too.
+have said** — both sides register the same names, and did then too.
+
+That number was **56** here until 2026-09-05 and carried no date, so it is corrected rather than
+preserved — this file's header says *"If you find one without a date that turns out to be wrong,
+fix it in the same PR."* It is **58**, and the count is the whole export list, not the
+`cleat_`-prefixed part of it:
+
+    grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u | grep -c .
+
+**Do not put `cleat_` inside that pattern.** Three exports are unprefixed — `plugin_call`,
+`plugin_call_streaming`, `set_query_state` — and all three are workflow API, so a scan that
+matches only `cleat_` returns 55 and silently drops the plugin calls. A pattern that can only
+return names of the shape it assumes cannot test the assumption; it encodes the conclusion. That
+error produced a **55** on 2026-09-05 whose digits matched a differently-derived 55 — the
+workflow-facing target, 58 less two handshake calls and one deliberately unbindable one — with
+**six** members different, three in each direction. Two derivations agreeing on a number while
+disagreeing on more than a tenth of its membership is the 876/581/4 costume from this file's
+opening section (IMPROVEMENT-PLAN §3.213). Re-derive the difference rather than the totals — this
+runs, and prints six lines, three in each column:
+
+    E=$(grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u)
+    comm -3 <(grep '^cleat_' <<<"$E") \
+            <(grep -v -e '^cleat_poll_work$' -e '^cleat_complete$' \
+                      -e '^cleat_register_query_handler$' <<<"$E")
+
+The six are `cleat_poll_work`, `cleat_complete` and `cleat_register_query_handler` on one side,
+`plugin_call`, `plugin_call_streaming` and `set_query_state` on the other. **Compare the sets, not
+the counts** — that is the same instruction as "diff the SET rather than comparing counts" under
+the `-list` rule, and this is what it looks like when nobody does.
 
 **"Which backend runs this" and "which code path inside that backend runs this" are different
 questions.** The wasmtime backend has **two** execution paths — core module and native
