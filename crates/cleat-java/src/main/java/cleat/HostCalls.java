@@ -1379,6 +1379,11 @@ public class HostCalls {
             timeoutMs,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        // Bit 31 before any field. IMPROVEMENT-PLAN 3.300: a stop decodes here as
+        // errCode=0 with extra=0 -- an empty SUCCESSFUL response, so the guest
+        // would return "" and carry on.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         int responseLen = Memory.decodeSimpleExtra(result);
 
@@ -1810,6 +1815,11 @@ public class HostCalls {
         long result = cleatSideEffectRaw(
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Bit 31 before any field. IMPROVEMENT-PLAN 3.300: a stop decodes here as
+        // errCode=0 with extra=0 -- an empty SUCCESSFUL response, so the guest
+        // would return "" and carry on.
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         int outLen = Memory.decodeSimpleExtra(result);

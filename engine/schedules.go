@@ -90,6 +90,13 @@ func (s *execSession) ScheduleCron(ctx context.Context, m api.Module, workflowNa
 		s.exitReplay()
 	}
 
+	// A fresh schedule_cron is new work with the longest reach of any call in
+	// this family: it registers a RECURRING trigger, so a terminated workflow
+	// would keep starting new runs on a cron schedule indefinitely.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	scheduleID, err := s.createCronSchedule(ctx, workflowName, cronExpr, timezone, inputJSON)
 
 	rec := EventRecord{

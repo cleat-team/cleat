@@ -169,6 +169,13 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 		s.exitReplay()
 	}
 
+	// A fresh send_signal_and_wait is new work twice over: it delivers a signal
+	// to another workflow and then blocks this one waiting for a reply that a
+	// terminated workflow can never receive.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
+
 	// Check signal authorization before delivering.
 	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
 		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {

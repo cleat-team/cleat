@@ -130,6 +130,28 @@ var stopSurfaces = map[string]stopSurface{
 		wit:        []string{"durable-schedule-invoke"},
 		py:         []string{"schedule_invoke"},
 	},
+	// The three string-returning calls (§3.300). Before that change their WIT
+	// spelled the return as a bare `string`, which has nowhere to put the
+	// sentinel -- so these are the calls §3.113 identified as needing the
+	// signature change rather than the scalar rule §3.301 introduced. No `py`
+	// field: once the return is result<...>, the component guest cannot misread
+	// a stop, which is the guarantee `py` exists to substitute for.
+	"SideEffect": {
+		adapters: []string{"SideEffect"},
+		wit:      []string{"side-effect"},
+	},
+	"ScheduleCron": {
+		adapters: []string{"ScheduleCron"},
+		wit:      []string{"durable-schedule-cron"},
+	},
+	"SendSignalAndWait": {
+		// Absent from wasm/usage.go, like the three fire-and-forget calls of
+		// §3.302: no adapterDef is consulted, no HostCallsOptions field is
+		// emitted, and a Go WASM guest cannot reach this host function.
+		adapters:   nil,
+		adapterWhy: reasonNoGoAdapter,
+		wit:        []string{"durable-send-signal-and-wait"},
+	},
 	"DurableCall": {
 		adapters: []string{"DurableCall"},
 		wit:      []string{"durable-call"},
@@ -532,4 +554,92 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 
 	t.Logf("stop surfaces in agreement: %d host sites, %d guarded Go adapters, %d WIT "+
 		"call-outcome functions", len(sites), len(wrappedAdapters), len(outcomeWit))
+}
+
+// TestEveryResultReturningWitFunctionCanActuallyCarryTheStop closes a gap the
+// three-way guard above cannot see.
+//
+// TestTheThreeStopSurfacesAgree checks the WIT *declaration*. It does not check
+// the dispatcher that implements it, and those are different things: a function
+// can be declared `result<string, call-failure>` while its dispatcher calls
+// setResultString, which lifts the payload and throws the packed word's error
+// and sentinel bits away. The declaration then promises a refusal the host
+// cannot deliver.
+//
+// Measured 2026-09-04 while adding §3.300: reverting dispatchSideEffect to
+// setResultString with the WIT left as result<...> failed NOTHING in the engine
+// suite. The mismatch surfaces only when a real component guest makes that call,
+// which no unit test does.
+//
+// Two hops, both parsed rather than declared, because both are already written
+// down: the interface tables in component_callbacks.go map a WIT name to a
+// cbType, and the switch in component_cgo.go maps a cbType to its dispatcher.
+func TestEveryResultReturningWitFunctionCanActuallyCarryTheStop(t *testing.T) {
+	outcomeWit, _, _ := witCallOutcomeFuncs(t)
+	callbacks := repoFile(t, "engine/component_callbacks.go")
+	cgo := repoFile(t, "engine/component_cgo.go")
+
+	witToCb := map[string]string{}
+	for _, m := range regexp.MustCompile(`"([a-z0-9-]+)":\s*(cbType\w+),`).FindAllStringSubmatch(callbacks, -1) {
+		witToCb[m[1]] = m[2]
+	}
+	cbToDispatch := map[string]string{}
+	for _, m := range regexp.MustCompile(`case (cbType\w+):\s*\n\s*return entry\.backend\.(dispatch\w+)\(`).FindAllStringSubmatch(cgo, -1) {
+		cbToDispatch[m[1]] = m[2]
+	}
+
+	// Vacuity, per thing: a scan that matched nothing would pass every case.
+	if len(witToCb) < 30 || witToCb["durable-call"] == "" {
+		t.Fatalf("wit->cbType scan found %d entries, durable-call=%q; it is reading the "+
+			"wrong thing", len(witToCb), witToCb["durable-call"])
+	}
+	if len(cbToDispatch) < 30 || cbToDispatch["cbTypeDurableCallString"] == "" {
+		t.Fatalf("cbType->dispatch scan found %d entries, cbTypeDurableCallString=%q; it is "+
+			"reading the wrong thing", len(cbToDispatch), cbToDispatch["cbTypeDurableCallString"])
+	}
+
+	for _, w := range sortedStopKeys(outcomeWit) {
+		cb, ok := witToCb[w]
+		if !ok {
+			t.Errorf("WIT function %q returns result<string, call-failure> but no interface "+
+				"table in component_callbacks.go maps it to a cbType, so no dispatcher serves "+
+				"it and a component guest calling it reaches nothing.", w)
+			continue
+		}
+		fn, ok := cbToDispatch[cb]
+		if !ok {
+			t.Errorf("WIT function %q maps to %s, which the switch in component_cgo.go does "+
+				"not dispatch.", w, cb)
+			continue
+		}
+		body := funcBody(t, cgo+callbacks, fn)
+		if strings.Contains(body, "setResultString(") {
+			t.Errorf("%s serves %q, which is declared result<string, call-failure>, but it "+
+				"calls setResultString.\n\nThat lifts the payload and discards the packed "+
+				"word's error and sentinel bits, so the refusal the signature promises can "+
+				"never arrive. Use setResultCallOutcome(decodeCallOutcome(...)), which tests "+
+				"the sentinel by mask before reading any field.", fn, w)
+		}
+		if !strings.Contains(body, "setResultCallOutcome(") {
+			t.Errorf("%s serves %q, declared result<string, call-failure>, but never calls "+
+				"setResultCallOutcome, so it cannot produce the err case at all.", fn, w)
+		}
+	}
+}
+
+// funcBody returns the source of a Go function from its declaration to the
+// closing brace at column 0. Fails rather than returning "" when absent: a
+// lookup that finds nothing would make every assertion above pass vacuously.
+func funcBody(t *testing.T, src, name string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^func \([a-z]+ \*wasmtimeBackend\) ` + regexp.QuoteMeta(name) + `\(`)
+	loc := re.FindStringIndex(src)
+	if loc == nil {
+		t.Fatalf("no func %s in the component sources", name)
+	}
+	rest := src[loc[0]:]
+	if end := regexp.MustCompile(`(?m)^\}`).FindStringIndex(rest); end != nil {
+		return rest[:end[1]]
+	}
+	return rest
 }

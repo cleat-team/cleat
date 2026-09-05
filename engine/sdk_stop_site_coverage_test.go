@@ -35,6 +35,22 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 				"retry path through cleat_call, which is covered above. There is no " +
 				"import to guard, so this is an absence rather than a gap.",
 		},
+		{
+			hostSite: "ScheduleCron",
+			why: "the Rust SDK declares no cleat_schedule_cron import and has no " +
+				"schedule_cron method: `grep -c schedule_cron crates/cleat-sdk/src/host_calls.rs` " +
+				"is 0 on 2026-09-04. A Rust guest cannot register a cron trigger at all, " +
+				"so there is no decoder to guard. An absence, not a gap.",
+		},
+	},
+	"java": {
+		{
+			hostSite: "ScheduleCron",
+			why: "the Java SDK declares no scheduleCron method and no raw import for it, " +
+				"so a Java guest cannot register a cron trigger and there is no decoder " +
+				"to guard. Same absence as the Rust entry above; AssemblyScript DOES " +
+				"have one and is covered by its list rather than exempted here.",
+		},
 	},
 }
 

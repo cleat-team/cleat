@@ -2871,15 +2871,8 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        resp = _import_side_effect(result)
-        if isinstance(resp, str):
-            return resp
-        out_len, err_code = decode_simple_result(resp)
-        if err_code != 0:
-            raise RuntimeError(
-                f"side_effect failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-        return read_string(OUTPUT_OFFSET, out_len)
+        # result<string, call-failure> since IMPROVEMENT-PLAN 3.300.
+        return _call_or_raise("lifecycle", "side_effect", _import_side_effect, result)
 
     # --------------------------------------------------------------------
     # 28. run_detached — execute detached from cancellation
@@ -3158,19 +3151,14 @@ class HostCalls:
             If the host reports an error or the timeout expires.
         """
         payload_str = self._marshal(payload)
-        result = _import_cleat_send_signal_and_wait(target_run_id, signal_name, payload_str, timeout_ms)
-
-        if isinstance(result, str):
-            return result
-
-        response_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
-            raise RuntimeError(
-                f"send_signal_and_wait(target_run_id='{target_run_id}', signal_name='{signal_name}') failed: {err_msg}"
-            )
-
-        return read_string(OUTPUT_OFFSET, response_len)
+        # result<string, call-failure> since IMPROVEMENT-PLAN 3.300, so a stop
+        # arrives as the `suspended` case and _call_or_raise unwinds on it. It
+        # used to be a bare `string`, which had nowhere to carry the refusal.
+        return _call_or_raise(
+            "signal", "send_signal_and_wait",
+            _import_cleat_send_signal_and_wait,
+            target_run_id, signal_name, payload_str, timeout_ms,
+        )
 
     # --------------------------------------------------------------------
     # 33. reply_to_signal — respond to a signal from within a handler
@@ -3343,7 +3331,11 @@ class HostCalls:
         # Strings, not scratch-memory offsets: the component ABI lifts and
         # lowers them itself. The host raises on failure, which surfaces here as
         # an exception rather than an error code to decode.
-        return _import_cleat_schedule_cron(workflow_name, cron_expr, timezone, input_json)
+        # result<string, call-failure> since IMPROVEMENT-PLAN 3.300.
+        return _call_or_raise(
+            "cron", "schedule_cron", _import_cleat_schedule_cron,
+            workflow_name, cron_expr, timezone, input_json,
+        )
 
     # --------------------------------------------------------------------
     # 36c. delete_cron — remove a cron-triggered workflow schedule

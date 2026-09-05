@@ -143,6 +143,8 @@ interface durable-lifecycle {
 
 /// Signal send, receive, and correlation operations.
 interface durable-signals {
+    use outcomes.{call-failure};
+
     /// Wait for one or more external signals, with a timeout.
     /// Output buffers kept for multi-return (name + payload).
     durable-await-signals: func(
@@ -165,7 +167,7 @@ interface durable-signals {
         signal-name: string,
         payload: string,
         timeout-ms: u64,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Reply to a correlated signal from within a handler.
     durable-reply-to-signal: func(
@@ -349,6 +351,8 @@ interface durable-stream-state {
 
 /// Extended lifecycle (ABI 2.15)
 interface durable-extended-lifecycle {
+    use outcomes.{call-failure};
+
     /// Continue as new with an explicit version.
     continue-as-new-versioned: func(
         input: string,
@@ -357,7 +361,7 @@ interface durable-extended-lifecycle {
 
     /// Record non-deterministic computation result in event history.
     /// Returns the previously recorded result on replay.
-    side-effect: func(value: string) -> string;
+    side-effect: func(value: string) -> result<string, call-failure>;
 }
 
 /// HTTP fetch (ABI 2.45)
@@ -384,6 +388,8 @@ interface durable-fetch {
 /// Delivery is at-least-once: a firing may be delivered more than once and
 /// will not be silently skipped. See tiers.yaml, workflow-callable-cron.
 interface durable-cron {
+    use outcomes.{call-failure};
+
     /// Register a recurring trigger for another workflow.
     ///
     /// ``timezone`` is an IANA name ("Europe/Berlin"); empty means UTC. The
@@ -394,7 +400,7 @@ interface durable-cron {
         cron-expr: string,
         timezone: string,
         input: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Remove a recurring trigger by schedule ID.
     durable-delete-cron: func(schedule-id: string);

@@ -91,6 +91,8 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"signalWorkflow", "SignalWorkflow"},
 	{"cleatSend", "DurableSend"},
 	{"scheduleInvokeMs", "DurableScheduleInvoke"},
+	{"sendSignalAndWaitMs", "SendSignalAndWait"},
+	{"sideEffect", "SideEffect"},
 	{"cleatFetch", "Fetch"},
 	{"runDetached", "RunDetached"},
 }
@@ -129,8 +131,14 @@ func TestEveryJavaCallTheHostCanRefuseChecksTheStopBit(t *testing.T) {
 	src := readJavaSDK(t, javaHostCallsSrc)
 
 	rawCall := regexp.MustCompile(`(?m)^\s*long result = \w+\(`)
-	guard := regexp.MustCompile(`Memory\.throwIfStopped\(result\)`)
-	decode := regexp.MustCompile(`Memory\.decode\w+\(result\)`)
+	// The identifier is CAPTURED, not assumed to be named `result`.
+	// AssemblyScript's sideEffect takes a parameter called `result`, so its
+	// local is `hostResult`; a fixed name reported that guarded method as
+	// unguarded. The worse direction is the silent one: a method that guarded
+	// one word while decoding another would have PASSED. Requiring the same
+	// identifier in both closes it.
+	guard := regexp.MustCompile(`Memory\.throwIfStopped\((\w+)\)`)
+	decode := regexp.MustCompile(`Memory\.decode\w+\((\w+)\)`)
 
 	for _, c := range javaCallsTheHostCanRefuse {
 		method := c.sdk
@@ -140,18 +148,26 @@ func TestEveryJavaCallTheHostCanRefuseChecksTheStopBit(t *testing.T) {
 				method)
 			continue
 		}
-		gi := guard.FindStringIndex(body)
+		gi := guard.FindStringSubmatchIndex(body)
 		if gi == nil {
 			t.Errorf("%s never calls Memory.throwIfStopped, so the host can refuse this call "+
 				"and the guest will decode the refusal as an ordinary result", method)
 			continue
 		}
-		if di := decode.FindStringIndex(body); di != nil && di[0] < gi[0] {
-			t.Errorf("%s decodes a field before calling Memory.throwIfStopped. Order is the "+
-				"contract: in the await-signals layout bit 31 lands inside the timed-out "+
-				"field, so decoding first turns a stop into an ordinary timeout and the "+
-				"workflow runs on -- doing the new work the defer segment exists to prevent, "+
-				"with nothing to see.", method)
+		guarded := body[gi[2]:gi[3]]
+		di := decode.FindStringSubmatchIndex(body)
+		if di != nil {
+			decoded := body[di[2]:di[3]]
+			if decoded != guarded {
+				t.Errorf("%s guards %q but decodes %q. The guard has to test the WORD THE\nDECODER READS; testing a different local passes this check and lets the refusal\nthrough untouched.", method, guarded, decoded)
+			}
+			if di[0] < gi[0] {
+				t.Errorf("%s decodes a field before calling Memory.throwIfStopped. Order is the "+
+					"contract: in the await-signals layout bit 31 lands inside the timed-out "+
+					"field, so decoding first turns a stop into an ordinary timeout and the "+
+					"workflow runs on -- doing the new work the defer segment exists to prevent, "+
+					"with nothing to see.", method)
+			}
 		}
 	}
 }
@@ -224,7 +240,13 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// which reads the low byte -- and a stop is 0 there, which for a
 	// fire-and-forget call is an ordinary SUCCESS. The guest would have reported
 	// the send as done.
-	const stopSitesOn20260904 = 13
+	// Moved 13 -> 16 on 2026-09-04 for IMPROVEMENT-PLAN 3.300 (the three
+	// string-returning calls). Java needed two of the three: sendSignalAndWaitMs
+	// and sideEffect both went straight to Memory.decodeSimpleErrCode, where a
+	// stop reads as errCode=0 with extra=0 -- an empty SUCCESSFUL response. The
+	// third, ScheduleCron, is exempt: the Java SDK has no scheduleCron method at
+	// all, so there is nothing to guard. See sdkStopSiteExemptions.
+	const stopSitesOn20260904 = 16
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+
