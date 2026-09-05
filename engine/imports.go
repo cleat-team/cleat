@@ -734,12 +734,6 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(h.RunDetached(ctx, m, name, inputJSON))
 	}).Export("cleat_run_detached")
 
-
-
-
-
-
-
 	// cleat_fetch: (ptr,len x4, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		methodPtr, methodLen, urlPtr, urlLen, headersPtr, headersLen, bodyPtr, bodyLen uint32,

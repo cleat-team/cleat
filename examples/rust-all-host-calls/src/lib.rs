@@ -94,13 +94,10 @@ fn exercise_every_host_call(h: &HostCalls) {
     let _ = h.reject_promise("prom-1", "e");
 
     // ---- state ----
+    // set_query_state is the whole of it. The durable-state family
+    // (set/get/delete/incr/has/list_state) was removed 2026-09-05 --
+    // see IMPROVEMENT-PLAN 3.216 and ABI.md's changelog.
     h.set_query_state("k", "v");
-    let _ = h.set_state("k", "v");
-    let _ = h.get_state("k");
-    let _ = h.delete_state("k");
-    let _ = h.incr_state("k", 1);
-    let _ = h.has_state("k");
-    let _ = h.list_state("pre");
 
     // ---- locks ----
     let _ = h.acquire_lock("k", d);

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"testing"
 )
 
@@ -43,41 +42,6 @@ func TestABISetScopeEmptyPairClearsScope(t *testing.T) {
 	if s.scopeSet || s.scopePrefix != "" || s.scopeObjType != "" || s.scopeInstKey != "" {
 		t.Errorf("scope not cleared: set=%v prefix=%q objType=%q instKey=%q",
 			s.scopeSet, s.scopePrefix, s.scopeObjType, s.scopeInstKey)
-	}
-}
-
-func TestABIListStateEmptyPrefixListsEverything(t *testing.T) {
-	s := newTestExecSession()
-	s.stateStore = map[string]string{"a:1": "x", "b:2": "y", "c:3": "z"}
-
-	// cleat_list_state: (prefixPtr,prefixLen, keysPtr,keysMaxLen)
-	h := newTestHostFuncHarness(t, "cleat_list_state",
-		[]byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, s)
-
-	const keysPtr, keysMaxLen = 2048, 4096
-	got, err := h.call(0, 0, keysPtr, keysMaxLen)
-	if err != nil {
-		t.Fatalf("call cleat_list_state: %v", err)
-	}
-	if got == errBadParam {
-		t.Fatal("cleat_list_state refused an empty prefix; HasPrefix(k, \"\") is " +
-			"true for every k, so an empty prefix means 'list everything'")
-	}
-
-	errCode, written := decodeExportResult(got)
-	if errCode != 0 {
-		t.Fatalf("errCode = %d, want 0", errCode)
-	}
-	raw, ok := h.mem.Read(keysPtr, written)
-	if !ok {
-		t.Fatal("could not read the keys buffer back")
-	}
-	var keys []string
-	if err := json.Unmarshal(raw, &keys); err != nil {
-		t.Fatalf("keys buffer is not JSON (%q): %v", raw, err)
-	}
-	if len(keys) != 3 {
-		t.Errorf("empty prefix listed %d keys (%v), want all 3", len(keys), keys)
 	}
 }
 

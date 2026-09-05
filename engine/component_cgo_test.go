@@ -105,8 +105,6 @@ func TestCbTypeConstants(t *testing.T) {
 		cbTypeDurableSend, cbTypeScheduleInvoke, cbTypeWorkflowID, cbTypeRunID,
 		cbTypePluginCall, cbTypePluginCallStreaming, cbTypeAcquireLock, cbTypeReleaseLock,
 		cbTypeSetScope, cbTypeGetScope, cbTypeUUID,
-		cbTypeSetState, cbTypeGetState, cbTypeDeleteState,
-		cbTypeIncrState, cbTypeHasState, cbTypeListState,
 		cbTypeContinueAsNewVersioned, cbTypeSideEffect, cbTypeFetch,
 	}
 	for _, typ := range allTypes {
@@ -197,8 +195,6 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"CreatePromise", true, 5, strPtr, 1},
 		{"PluginCall", true, 6, strPtr, 3},
 		{"SetScope", true, 7, strPtr, 2},
-		{"GetState", true, 8, strPtr, 1},
-		{"ListState", true, 9, strPtr, 1},
 		{"PollCancellation", true, 10, nil, 0},
 		{"WorkflowID", true, 11, nil, 0},
 		{"RunID", true, 12, nil, 0},
@@ -223,10 +219,6 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"RejectPromise", false, 8, strPtr, 2},
 		{"SetQueryState", false, 9, strPtr, 2},
 		{"DurableSend", false, 10, strPtr, 3},
-		{"SetState", false, 11, strPtr, 2},
-		{"IncrState", false, 12, strPtr, 2},
-		{"HasState", false, 13, strPtr, 1},
-		{"DeleteState", false, 14, strPtr, 1},
 		{"AcquireLock", false, 15, strPtr, 2},
 		{"ReleaseLock", false, 16, strPtr, 1},
 		{"SignalWorkflow", false, 17, strPtr, 3},
@@ -276,8 +268,6 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"CreatePromise(0<1)", true, 5},
 		{"PluginCall(0<3)", true, 6},
 		{"SetScope(0<2)", true, 7},
-		{"GetState(0<1)", true, 8},
-		{"ListState(0<1)", true, 9},
 		{"AwaitChild(0<1)", true, 17},
 		{"AwaitAllChildren(0<1)", true, 18},
 		{"PluginCallStreaming(0<3)", true, 19},
@@ -295,10 +285,6 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"RejectPromise(0<2)", false, 8},
 		{"SetQueryState(0<2)", false, 9},
 		{"DurableSend(0<3)", false, 10},
-		{"SetState(0<2)", false, 11},
-		{"IncrState(0<2)", false, 12},
-		{"HasState(0<1)", false, 13},
-		{"DeleteState(0<1)", false, 14},
 		{"AcquireLock(0<2)", false, 15},
 		{"ReleaseLock(0<1)", false, 16},
 		{"SignalWorkflow(0<3)", false, 17},
@@ -457,58 +443,6 @@ func TestDispatchDurableSend(t *testing.T) {
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchU64(10, strPtr, 3, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 1 {
-		t.Errorf("result = %d, want 1", got)
-	}
-}
-
-func TestDispatchSetState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("key", "value")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(11, strPtr, 2, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 1 {
-		t.Errorf("result = %d, want 1", got)
-	}
-}
-
-func TestDispatchIncrState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 5}}
-	argsPtr, _, freeArgs := cgotestMakeMixedArgs("counter-key", uint64(10))
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(12, argsPtr, 2, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 5 {
-		t.Errorf("result = %d, want 5", got)
-	}
-}
-
-func TestDispatchHasState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("key")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(13, strPtr, 1, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 1 {
-		t.Errorf("result = %d, want 1", got)
-	}
-}
-
-func TestDispatchDeleteState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("key")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(14, strPtr, 1, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got := cgotestReadResultU64(resultPtr); got != 1 {
@@ -789,32 +723,6 @@ func TestDispatchSetScope(t *testing.T) {
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(7, strPtr, 2, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
-}
-
-func TestDispatchGetState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("key")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(8, strPtr, 1, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
-}
-
-func TestDispatchListState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("prefix")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(9, strPtr, 1, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !cgotestHasResultString(resultPtr) {

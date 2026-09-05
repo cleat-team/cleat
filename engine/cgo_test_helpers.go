@@ -244,6 +244,13 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 		22: b.dispatchAwaitPromise,
 		23: b.dispatchPollSignal,
 	}[method]
+	// A missing key yields a nil func value, and calling it segfaults rather
+	// than failing a test. The map has had gaps since the durable-state family
+	// was removed (IMPROVEMENT-PLAN 3.216) and it will have more whenever a
+	// dispatcher goes; an unknown method must be an error, not a crash.
+	if dispatch == nil {
+		return fmt.Errorf("cgotestDispatchStr: no dispatcher for method %d", method)
+	}
 	err := dispatch((*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultPtr), 1)
 	if err != nil {
 		var msg C.wasm_byte_vec_t

@@ -36,37 +36,12 @@ import (
 type sessionState struct {
 	Deferrals     map[string]string
 	QueryState    map[string]string
-	StateStore    map[string]string
 	QueryHandlers []string
 	HeldScopes    []string
 	ScopeSet      bool
 	ScopePrefix   string
 	ScopeObjType  string
 	ScopeInstKey  string
-}
-
-func snapshotSession(s *execSession) sessionState {
-	cp := func(m map[string]string) map[string]string {
-		if m == nil {
-			return nil
-		}
-		out := make(map[string]string, len(m))
-		for k, v := range m {
-			out[k] = v
-		}
-		return out
-	}
-	return sessionState{
-		Deferrals:     cp(s.deferrals),
-		QueryState:    cp(s.queryState),
-		StateStore:    cp(s.stateStore),
-		QueryHandlers: append([]string(nil), s.queryHandlers...),
-		HeldScopes:    append([]string(nil), s.heldScopes...),
-		ScopeSet:      s.scopeSet,
-		ScopePrefix:   s.scopePrefix,
-		ScopeObjType:  s.scopeObjType,
-		ScopeInstKey:  s.scopeInstKey,
-	}
 }
 
 func newParitySession(t *testing.T) *execSession {
@@ -101,24 +76,32 @@ var parityCases = []struct {
 		s.SetScope(ctx, nil, "cart", "c1", 0, 0)
 		s.SetScope(ctx, nil, "order", "o9", 0, 0)
 	}},
-	{"SetState", func(ctx context.Context, s *execSession) {
-		s.SetState(ctx, nil, "status", "shipped")
-	}},
-	{"SetState then DeleteState", func(ctx context.Context, s *execSession) {
-		s.SetState(ctx, nil, "status", "shipped")
-		s.DeleteState(ctx, nil, "status")
-	}},
-	{"IncrState", func(ctx context.Context, s *execSession) {
-		s.IncrState(ctx, nil, "attempts", 3)
-	}},
-	{"IncrState twice", func(ctx context.Context, s *execSession) {
-		s.IncrState(ctx, nil, "attempts", 3)
-		s.IncrState(ctx, nil, "attempts", 4)
-	}},
 }
 
 // TestReplayReproducesFreshSessionState is the property.
-//
+func snapshotSession(s *execSession) sessionState {
+	cp := func(m map[string]string) map[string]string {
+		if m == nil {
+			return nil
+		}
+		out := make(map[string]string, len(m))
+		for k, v := range m {
+			out[k] = v
+		}
+		return out
+	}
+	return sessionState{
+		Deferrals:     cp(s.deferrals),
+		QueryState:    cp(s.queryState),
+		QueryHandlers: append([]string(nil), s.queryHandlers...),
+		HeldScopes:    append([]string(nil), s.heldScopes...),
+		ScopeSet:      s.scopeSet,
+		ScopePrefix:   s.scopePrefix,
+		ScopeObjType:  s.scopeObjType,
+		ScopeInstKey:  s.scopeInstKey,
+	}
+}
+
 // The vacuous-pass guard is the important part of the harness. If the replayed
 // session diverges -- exits replay and re-runs the fresh path -- the two
 // states match trivially and the case proves nothing. So each case must
@@ -171,9 +154,9 @@ func TestReplayReproducesFreshSessionState(t *testing.T) {
 }
 
 func describeState(s sessionState) string {
-	return fmt.Sprintf("deferrals=%v queryState=%v stateStore=%v queryHandlers=%v "+
+	return fmt.Sprintf("deferrals=%v queryState=%v queryHandlers=%v "+
 		"heldScopes=%v scopeSet=%v scopePrefix=%q",
-		s.Deferrals, s.QueryState, s.StateStore, s.QueryHandlers,
+		s.Deferrals, s.QueryState, s.QueryHandlers,
 		s.HeldScopes, s.ScopeSet, s.ScopePrefix)
 }
 
