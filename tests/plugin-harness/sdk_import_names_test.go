@@ -53,6 +53,24 @@ func TestEverySDKImportIsAHostExport(t *testing.T) {
 		{"rust", 45, rustDeclaredImports},
 		{"java", 45, javaDeclaredImports},
 		{"assemblyscript", 45, asDeclaredImports},
+
+		// Go and Python declare nothing themselves, and are covered here by
+		// the tables that decide their import names instead.
+		//
+		// A Go guest gets its imports from a generated adapter -- there is no
+		// //go:wasmimport anywhere in the tree, only in docs -- and the name
+		// comes from hostFunctions in wasm/usage.go. Python reaches the host
+		// through the Component Model, so its names come from WitToEnvImport
+		// in wasm/component_rewrite.go, which maps WIT (module, function)
+		// pairs to flat "env" names.
+		//
+		// Both tables are host-side, so a mismatch is far less likely than in
+		// an SDK that spells the name itself -- which is a real reason these
+		// two are different in kind, not an excuse for skipping them. A typo
+		// in either table is the same fatal-and-silent instantiation failure,
+		// and neither had a check.
+		{"go (wasm/usage.go hostFunctions)", 30, goAdapterImportNames},
+		{"python (wasm/component_rewrite.go WitToEnvImport)", 45, witEnvImportNames},
 	} {
 		t.Run(sdk.name, func(t *testing.T) {
 			declared := sdk.fn(t, root)
@@ -162,4 +180,72 @@ func readFileOrFatal(t *testing.T, path string) string {
 		t.Fatalf("reading %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// goAdapterImportNames reads the import names the generated Go adapter is
+// built from. There is no //go:wasmimport in the tree; hostFunctions is where
+// a Go guest's import name is decided.
+func goAdapterImportNames(t *testing.T, root string) map[string]string {
+	t.Helper()
+	src := readFileOrFatal(t, filepath.Join(root, "wasm", "usage.go"))
+	out := map[string]string{}
+	// Positional struct literals: {"cleat_call", "DurableCall"}. Named fields
+	// would not match, which is why the floor above is not decoration.
+	//
+	// The import name is optional in this pattern because one row is
+	// {"", "RunDetached"} -- an EMPTY import name, meaning the Go adapter for
+	// that method binds no host function at all. It is a real sentinel, not a
+	// typo: it is why a Go workflow cannot call cleat_run_detached. Matched
+	// deliberately and skipped below, so that the row is accounted for rather
+	// than invisible to the row-count agreement check.
+	re := regexp.MustCompile(`\{"([a-z_][a-z0-9_]*)?",\s*"[A-Za-z0-9_]+"\}`)
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
+		if m[1] == "" {
+			continue
+		}
+		out[m[1]] = "wasm/usage.go"
+	}
+
+	// A FLOOR IS NOT ENOUGH HERE, and this is the second time today that
+	// lesson has had to be learned: a floor answers "did the scan find
+	// enough", never "did it find everything". Rewriting ONE row to named
+	// fields makes the strict pattern miss it, and 34 of 35 clears any floor
+	// worth setting -- so the guard silently stops requiring that name.
+	//
+	// So count the rows a LOOSER reading finds and require agreement. The
+	// loose pattern would make a bad extractor: it takes anything that opens
+	// a struct literal with a string. Its only job is to disagree.
+	block := regexp.MustCompile(`(?s)var hostFunctions = \[\]HostFunction\{.*?\n\}`).FindString(src)
+	if block == "" {
+		t.Fatalf("could not find the hostFunctions slice literal in wasm/usage.go.\n\n" +
+			"Teach this extractor the new shape rather than letting it check a subset.")
+	}
+	// Compare ROWS to ROWS. The table is deliberately many-to-one -- several
+	// Go methods share one import -- so the count of distinct names is
+	// legitimately smaller and comparing it here would fail on a healthy tree.
+	// (It did, first try.)
+	strictRows := len(re.FindAllString(block, -1))
+	looseRows := len(regexp.MustCompile(`(?m)^\s*\{`).FindAllString(block, -1))
+	if strictRows != looseRows {
+		t.Errorf("the strict scan of hostFunctions matched %d rows and a looser "+
+			"reading of the same block found %d.\n\n"+
+			"Some row is spelled in a way the strict pattern does not match -- named "+
+			"fields instead of positional, or a line break inside the literal. Every "+
+			"row it cannot see is an import name this test cannot require. Teach the "+
+			"pattern the new spelling; do not lower the floor.", strictRows, looseRows)
+	}
+	return out
+}
+
+// witEnvImportNames reads the flat "env" names the Component Model path
+// rewrites WIT imports to -- the Python SDK's route to the host.
+func witEnvImportNames(t *testing.T, root string) map[string]string {
+	t.Helper()
+	src := readFileOrFatal(t, filepath.Join(root, "wasm", "component_rewrite.go"))
+	out := map[string]string{}
+	re := regexp.MustCompile(`"[a-z0-9\-/:.]+"\s*:\s*"([a-z_][a-z0-9_]*)"`)
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
+		out[m[1]] = "wasm/component_rewrite.go"
+	}
+	return out
 }
