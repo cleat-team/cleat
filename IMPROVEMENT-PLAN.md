@@ -3724,6 +3724,23 @@ Both caught; removed; re-scan clean. A third probe, `AKIAIOSFODNN7EXAMPLE`, was 
 correct, and is recorded here so the next person does not use it as a probe and conclude the
 scanner is broken.
 
+#### The first version of the CI step failed, and local verification could not have caught it
+
+`go install` then bare `gitleaks` -> **`gitleaks: command not found`, exit 127**, *after* the
+install succeeded. `go install` writes to `$(go env GOPATH)/bin`, which is not on `PATH` in the
+`lint` job. What made it look safe is that `lint-go` two jobs down does exactly this with
+`golangci-lint` and works; both jobs run `actions/setup-go@v7`, so the difference is not the
+obvious one and was not worth chasing.
+
+**Locally it could not fail**, because every local run invoked the binary by absolute path out of
+`$(go env GOPATH)/bin` — so the local command and the CI command were different commands, and
+only the one that was never run locally was wrong. Now `"$(go env GOPATH)/bin/gitleaks"` in CI
+too, which does not depend on whatever the PATH difference is and makes the two identical.
+
+Verified by extracting the step's `run:` block straight out of the parsed YAML and executing
+*that*, rather than a hand-retyped approximation of it: `bash -n` clean, then `no leaks found`,
+exit 0.
+
 #### What it does not cover
 
 History, deliberately, per the above. And the scan is ~10s over 320 MB, so it is cheap enough
