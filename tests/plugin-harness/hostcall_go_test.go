@@ -53,8 +53,10 @@ var goHostCallOutcomes = map[string]expectedOutcome{
 
 	// ---- calls that succeed with no backend ----
 	"AwaitAllChildren": {
-		status: statusOK, detailContains: "1 child result(s)",
+		status: statusOK, detailContains: `[{"run_id":"00000000-0000-0000-0000-000000000001","error":"child not completed"}]`,
 		why: "returns immediately with a result per run ID rather than suspending, UNLIKE AwaitChild and AwaitAnyChild on the same run ID. " +
+			"The detail is the RAW result and not a count, on WS-3's finding that the AssemblyScript row exposed what a count hides: the single result IS the error. " +
+			"This row asserted \"1 child result(s)\" until 2026-09-05 and went green through the very defect it was flagging -- a summary statistic over a result is where a wrong answer hides. " +
 			"NOT a no-backend artifact, which is how this row was first worded: WS-2 traced it to the ordinary path (§3.309, #746). " +
 			"An incomplete child is recorded as childOutcome{Error: \"child not completed\"} at children.go:504 with errCode 0, that outcome is marshalled into the EventRecord, " +
 			"and replayAwaitAllChildren serves rec.Response back verbatim -- its only exitReplay is the out-of-history case, so unlike AwaitChild there is no \"no cached result, re-check\" path. " +

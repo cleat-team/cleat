@@ -95,11 +95,23 @@ func ExerciseHostCall(h cleat.HostCalls, input string) (string, error) {
 		return ok(req.Call, r)
 
 	case "AwaitAllChildren":
+		// Reports the results RAW, not a count.
+		//
+		// It reported "%d child result(s)" until WS-3 pointed out that the
+		// AssemblyScript row, which reports raw, shows the single result is
+		// [{"run_id":"...","error":"child not completed"}] -- the §3.309
+		// durable-wrong-answer branch. A count is 1 either way, so this row
+		// went green THROUGH the defect it was flagging. A summary statistic
+		// over a result is exactly where a wrong answer hides.
 		rs, err := h.AwaitAllChildren([]string{"00000000-0000-0000-0000-000000000001"})
 		if err != nil {
 			return bad(req.Call, err)
 		}
-		return ok(req.Call, fmt.Sprintf("%d child result(s)", len(rs)))
+		raw, mErr := json.Marshal(rs)
+		if mErr != nil {
+			return bad(req.Call, mErr)
+		}
+		return ok(req.Call, string(raw))
 
 	case "AwaitAnyChild":
 		runID, r, err := h.AwaitAnyChild([]string{"00000000-0000-0000-0000-000000000001"})
