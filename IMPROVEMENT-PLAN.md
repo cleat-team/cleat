@@ -3694,6 +3694,46 @@ in a job that cannot build Rust.
 `let _ = h.x()` throughout because it exists to be compiled, not run. §3.206 predicted exactly this
 and is why that column is reported and not baselined.
 
+### 3.208 The Java host-call surface: 8 of 68 compiled, now all 68 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Second tier-2 row of §3.206. `examples/java-workflow` and the plugin-harness fixture between them
+called **8 of 68** `cleat.HostCalls` methods.
+
+`crates/cleat-java/src/test/java/cleat/AllHostCallsCompileTest.java` calls all 68. Like Rust, it
+**compiled with one fixable error** and no SDK defect — `RetryPolicy` is a nested
+`HostCalls.RetryPolicy` and needs qualifying, which is a fixture mistake, not an SDK one.
+
+**It lives in the SDK's own test source set rather than in a new example crate, and that choice is
+the useful part.** `gradle test` in `crates/cleat-java` is already the **required** `Java Tests`
+check, so the surface is compiled by a job that exists, on a toolchain CI already provisions, with
+no TeaVM step, no new workflow wiring and no `tiers.yaml` exclusion. The Rust equivalent (§3.207)
+needed all four because it had to build a `cdylib` for `wasm32-wasip1`.
+
+`exerciseEveryHostCall` is never invoked — each call would trap without a host, and
+`continueAsNew` and `releaseLock` would change a running workflow's fate. `javac` accepting the
+calls is the assertion; the `@Test` makes the JVM load and verify the bytecode, and fails visibly
+if the method is deleted rather than silently dropping the coverage.
+
+**This is a compile check and not a behaviour check, and the distinction is load-bearing for
+Java specifically.** It says every method exists with the signature a workflow can call. It says
+nothing about the TeaVM WASM codegen — which is exactly where the Java-specific defects have been:
+§3.303 found 16 of 17 plugin calls failing while all five language tests passed, and #455 fixed a
+Java workflow returning JSON-in-a-string. The plugin-harness tests cover that path; this covers the
+one nothing covered.
+
+**Falsified:** adding `h.noSuchHostCall("x")` fails `compileTestJava` with
+`error: cannot find symbol … method noSuchHostCall(String)`.
+
+**Verified the test actually ran, rather than trusting `BUILD SUCCESSFUL`.** The first run printed
+that and nothing else, which is what an up-to-date task also prints. `--rerun-tasks` plus the XML
+report:
+
+    build/test-results/test/TEST-cleat.AllHostCallsCompileTest.xml
+    tests="1" skipped="0" failures="0" errors="0"
+
+Coverage after §3.207 and this: rust 61/61, java 68/68. AssemblyScript (11/66) is the remaining
+tier-2 row; go and python reach 37/37 and 73/73 when §3.204 and §3.205 land.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

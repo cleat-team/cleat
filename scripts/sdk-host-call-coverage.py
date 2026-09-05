@@ -100,7 +100,7 @@ SDKS = {
     ),
     "java": (
         java_surface,
-        ["examples/java-workflow/**/*.java", "examples/saga-java-port/**/*.java", "tests/plugin-harness/testdata/javaworkflow/**/*.java"],
+        ["examples/java-workflow/**/*.java", "examples/saga-java-port/**/*.java", "tests/plugin-harness/testdata/javaworkflow/**/*.java", "crates/cleat-java/src/test/java/cleat/AllHostCallsCompileTest.java"],
         lambda n: rf"\b(?:h|host|hc)\.{n}\s*\(",
     ),
     "assemblyscript": (
