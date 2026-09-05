@@ -181,7 +181,22 @@ jobs:
       # Same file-ownership note as above: this is WS-3's file, and the guard
       # is unwired without the step.
       - name: SDK host-call EXECUTED coverage guard
-        run: scripts/sdk-host-call-coverage.py --check-executed
+        # The negative control runs in CI, every time, deliberately.
+        #
+        # This step names a mode in a YAML file nobody re-reads. Until
+        # 2026-09-05 an unrecognised mode fell through to the report path and
+        # exited 0, so one transposed character here would have turned the
+        # guard into a report with the job still green (WS-3). The script now
+        # rejects an unknown mode, and this asserts that it does -- because a
+        # guard whose own invocation cannot be shown to fail is the thing this
+        # step exists to prevent.
+        run: |
+          if scripts/sdk-host-call-coverage.py --a-mode-that-does-not-exist >/dev/null 2>&1; then
+            echo "argument validation is broken: an unknown mode exited 0," >&2
+            echo "so a typo in the line below would pass silently." >&2
+            exit 1
+          fi
+          scripts/sdk-host-call-coverage.py --check-executed
 
       - name: ABI doc/code consistency guard
         run: scripts/check-doc-consistency.sh

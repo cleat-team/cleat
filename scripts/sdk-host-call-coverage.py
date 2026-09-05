@@ -160,8 +160,38 @@ def measure() -> dict[str, dict]:
     return out
 
 
+# Every mode this script accepts. An argument outside this set is an ERROR,
+# not a fall-through.
+#
+# It used to fall through: `mode` was compared against the known names and
+# anything else reached the report path and returned 0, so --chekc,
+# --check-executd and --this-is-nonsense all printed a plausible table and
+# exited successfully. Found by WS-3 2026-09-05, and the reason it matters is
+# not the typo at a shell prompt -- it is that CI invokes this script BY NAME
+# in a YAML file nobody re-reads. One transposed character there turns a guard
+# into a report and the job stays green.
+#
+# That is this repo's central failure mode living in the argument parser of a
+# script whose whole job is to be a guard, and it is the same shape as a -run
+# pattern that matches nothing: a wrong invocation indistinguishable from a
+# right one.
+MODES = {
+    "--report",
+    "--check",
+    "--update",
+    "--executed",
+    "--check-executed",
+    "--update-executed",
+}
+
+
 def main() -> int:
     mode = sys.argv[1] if len(sys.argv) > 1 else "--report"
+
+    if mode not in MODES:
+        print(f"unknown mode {mode!r}", file=sys.stderr)
+        print(f"usage: {sys.argv[0]} [{' | '.join(sorted(MODES))}]", file=sys.stderr)
+        return 2
 
     # --executed and --check-executed are the A2 modes. They share the ratchet
     # shape of the compile modes above and a SEPARATE baseline key, because the
