@@ -4100,12 +4100,28 @@ including it asks five SDKs to restore a wrapper the repo forbids.
 
 **This 55 is not the 55 this section started with, and the coincidence is the dangerous part.**
 The first was "the `cleat_`-prefixed subset"; this one is "58 minus three exclusions". They agree
-on the digits and **disagree on four members** — the first excludes `plugin_call`,
-`plugin_call_streaming` and `set_query_state` and includes `cleat_register_query_handler`; the
-second is the reverse on all four. Had either derivation stopped at 55, the match would have read
-as corroboration between two independent routes. That is the 876/581/4 costume from CLAUDE.md's
-opening section, reproduced exactly: a number that agrees for the wrong reason is more convincing
-than one that does not agree at all.
+on the digits and **disagree on six members, three in each direction**:
+
+    E=$(grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u)
+    comm -3 <(grep '^cleat_' <<<"$E") \
+            <(grep -v -e '^cleat_poll_work$' -e '^cleat_complete$' \
+                      -e '^cleat_register_query_handler$' <<<"$E")
+    # cleat_complete, cleat_poll_work, cleat_register_query_handler
+    #     | plugin_call, plugin_call_streaming, set_query_state
+
+Had either derivation stopped at 55, the match would have read as corroboration between two
+independent routes. That is the 876/581/4 costume from CLAUDE.md's opening section, reproduced
+exactly: a number that agrees for the wrong reason is more convincing than one that does not agree
+at all. **Six of 55 is more than a tenth of the membership**, and the totals still match to the
+digit — which is the argument for comparing the sets rather than the counts, in the same form
+`-list` makes it against `-run`.
+
+**This section said "four" until WS-3 ran the `comm`.** Four was the count of members I could name
+from memory — the three I had missed, plus the one WS-2 added. It omitted `cleat_poll_work` and
+`cleat_complete`, which the prefix-anchored set keeps (they are prefixed) and the workflow-facing
+set drops (they are protocol). I described the difference by recalling the edits that produced it
+instead of computing it, one paragraph after writing that a number carried across a correction has
+to be re-measured rather than re-read.
 
 **So the artifact of record is the LIST WITH A REASON PER EXCLUSION, not the count.** Three
 exclusions, three distinct reasons, each independently checkable. A bare "55" carries none of
