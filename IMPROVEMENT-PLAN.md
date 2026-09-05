@@ -4049,7 +4049,7 @@ list of packages.
 | # | the two artifacts | guarded by | gap |
 |---|---|---|---|
 | A1 | wazero host imports ≡ wasmtime host funcs, by name | `hostabi_runtime_parity_test.go` — `TestWasmtimeSatisfiesEveryWazeroHostImport`, `TestNeitherRuntimeHasHostFunctionsTheOtherLacks` | — |
-| A2 | …and by **arity**, which is what a guest actually links against | `TestCreatePromiseGuestLinksOnTheWorkerBackend` — **one** host function, by name | **1 of 55.** The name-level check above passed while `cleat_create_promise` was unlinkable (§3.55) |
+| A2 | …and by **arity**, which is what a guest actually links against | `TestCreatePromiseGuestLinksOnTheWorkerBackend` — **one** host function, by name | **1 of 58.** The name-level check above passed while `cleat_create_promise` was unlinkable (§3.55) |
 | A3 | every wasmtime host func registered via `b.hostFunc` (epoch budget) | `scripts/check-hostfunc-budget.sh` | — |
 | A4 | host stop site ≡ Go adapter `withSuspendCheck` ≡ WIT `result<string, call-failure>` | `stop_correspondence_guard_test.go` — `TestTheThreeStopSurfacesAgree` | component arm carries an open exemption, `reasonWitIsStillCoreABI` (§3.110) |
 | A5 | each SDK's refusable-call list covers every host stop site | `sdk_stop_site_coverage_test.go` | **java, rust, assemblyscript only.** Go and Python are not rows in it |
@@ -4135,8 +4135,24 @@ The mysql entry is **not** a gap, checked rather than assumed: `034` defines
 is known to work and known to find things. Its failure is silent, machine-dependent, and
 invisible to every existing check. It spans all three dialects, so one guard closes three rows.
 
-**Then A2.** 55 host functions, one of which has a link-level check, and the name-level check
+**Then A2.** 58 host functions, one of which has a link-level check, and the name-level check
 above it passed while a guest could not link. That is a measured false green, not a hypothetical.
+
+> **Both numbers above read 55 until 2026-09-05.** They came from
+> `grep -oE '\.Export\("cleat_[a-z0-9_]+"\)'`, a pattern that cannot return anything but
+> `cleat_`-prefixed names and so cannot test the assumption it encodes. Three exports are
+> unprefixed — `plugin_call`, `plugin_call_streaming`, `set_query_state` — and all three are
+> workflow API a guest links against, so they belong in this denominator. Re-derive with
+>
+>     grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u | grep -c .
+>
+> **Note the direction, because CLAUDE.md's neighbouring correction went the other way.** There,
+> "both sides register the same 56 names" became **55**, because the parity test filters both
+> sides on the prefix and genuinely compares 55 of 58. Here the denominator is "host functions a
+> guest can link against", which is all 58 — and none of the three unprefixed ones has an arity
+> check either, so the corrected number makes the gap *larger*. Same two figures, opposite
+> corrections, because they answer different questions. Fixing both to agree would have been
+> wrong in one of them.
 
 Not B6: 21/16/23 is not evidence of anything on its own — dialects legitimately need different
 migrations, and a row that cannot distinguish "different" from "missing" is a backlog generator,
@@ -4848,7 +4864,7 @@ decode — fit the existing tier-2 jobs, or does it need its own? Answer wanted 
 times, before A1 finalised the harness, because a bad answer would force sampling into the design
 as a retrofit.
 
-**Answer.** It fits `Cross-Language WASM E2E`. No new job, no sampling, at wave 1 and at
+**Answer.** It fits an existing job. No new job, no sampling, at wave 1 and at
 wave 1 + wave 2 together — **provided the harness builds each guest once and invokes it N times.**
 One fixture per host call costs 3× as much and makes the job co-critical-path with `Tier 1 Gate`.
 That conditional is the whole finding: the cost driver is fixture shape, and the call count barely
@@ -4957,18 +4973,33 @@ A1 landed Go the same way — `buildGoHostCallWasm` called once outside the loop
 single `exercise_host_call` entry, **24 invocations plus the build in 3.6s** — so the harness is
 uniform across all five rather than Python being the exception.
 
-#### Why this job and not `Tier 2 Gate`
+#### Which job — corrected 2026-09-05, after it landed somewhere else
 
-`Cross-Language WASM E2E` already installs Go, Rust (both wasm targets), Python +
-componentize-py + wasm-tools, Node, Java 17 and Gradle; already sets `CLEAT_REQUIRE_TOOLCHAINS`
-so a missing toolchain is a `Fatal` rather than a skip; already runs `check-skip-budget.sh` at a
-budget of 0; and is triggered unconditionally on every PR — **no path filter**, so it cannot
-repeat the Ecosystem CI defect where each SDK job was triggered by every change but its own.
-`tiers.yaml` already declares it `covers: tier2` under `tier2.gated_by`, which is exactly the
-claim the harness makes.
+**This section named `Cross-Language WASM E2E` and the harness went to `Layer 2 — WASM
+Integration` (#744, #751).** The criteria were right and the job was wrong, so the criteria are
+kept and the name is corrected rather than the paragraph deleted.
 
-`Tier 2 Gate` installs no guest toolchain. Putting the harness there costs 27s + 137s of setup to
-duplicate what E2E already pays, more than doubling a 269s job to buy nothing.
+What the criteria asked for, and Layer 2 satisfies every one: it already installs Go, Rust with
+`wasm32-unknown-unknown`, Python + componentize-py, Java 17 and Gradle; it already runs
+`check-skip-budget.sh` at a budget of **0** (`scripts/skip-ledger.tsv`, key `plugin-harness/wasm`);
+its `Layer 2 — WASM Integration` context is already required; and `tiers.yaml` already declares it
+`covers: tier2` under `tier2.gated_by`. It gained `Setup Node` in #751, because
+`buildASHostCallWasm` skips rather than fails on a missing `npx` and the runner image shipping Node
+is not a promise the job was making.
+
+**The reason it had to be Layer 2 is stronger than the reason it could be, and this section did
+not have it.** The harness needs `NewTestPluginEnvInMemory`, which lives in the
+`tests/plugin-harness` module. `Cross-Language WASM E2E` runs `./engine/...` and
+`tests/cross-language`; it does not run that module at all. So the harness could not have gone
+where this section pointed without moving the environment it depends on.
+
+`Tier 2 Gate` remains ruled out for the reason given: it installs no guest toolchain, so putting
+the harness there costs 27s + 137s of setup to duplicate what another job already pays, more than
+doubling a 269s job to buy nothing.
+
+**What this cost.** Nothing, because A1 chose correctly without the section. But
+"host it in X" read as settled for four hours while X was not where it went, and a later reader
+reconciling the plan against CI would have found a job that runs none of it.
 
 #### On sampling, which is the part that was designed out rather than designed in
 
