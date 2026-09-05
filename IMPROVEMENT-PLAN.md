@@ -4560,6 +4560,114 @@ Cross-instance shared state, of the kind Restate's virtual objects provide, **st
 in cleat for any language** — it never did. This removes an API that implied otherwise; it does not
 add the capability. If that capability is ever wanted it is engine work — persisting state keyed by
 scope and seeding `stateStore` at session start — and a much larger change than these six calls.
+### 3.215 A signal is stored as a row keyed by name, so a second one overwrites the first — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
+
+Three defects with one root. `workflow_signals` is keyed
+
+    PRIMARY KEY (workflow_id, signal_name)          migrations/postgres/001_schema.sql:309
+
+so the schema can hold **one signal per name per workflow**. A signal is modelled as a
+*row*, not as a *delivery*, and everything below follows from that.
+
+Found while answering a verification question from the conformance-port session, which asked
+whether a signal made durable during completion can be lost (`signal/prevent_close` in
+`temporalio/features`). The answer is below, and the adjacent finding is worse than the question.
+
+## (a) A signal delivered during completion is persisted and never delivered
+
+`DeliverSignal` (`engine/store_signals.go:151`) inserts unconditionally and never reads the
+workflow's status. The status check is on the **wake**, not on the insert:
+
+    INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (workflow_id, signal_name) DO UPDATE SET payload = $3, delivered_at = now()
+
+    UPDATE workflow_instances SET next_wake_at = now()
+    WHERE id = $1 AND status IN ('ready', 'suspended')
+
+So a signal arriving as a workflow completes is written, is never consumed, and sits in the table
+until the instance is deleted and the foreign key cascades it away. Nothing blocks completion on a
+pending signal, nothing reports the orphan, and no transaction spans the signal insert and the
+finalize.
+
+**State the failure precisely, because the obvious phrasing is wrong**: the signal is not lost
+before it is durable. It is durable, and then orphaned. That distinction decides the fix — this is
+a missing feature (completion must consider pending signals), not a torn write.
+
+## (b) Two signals of the same name: the first payload is gone
+
+Every dialect resolves the primary-key conflict by overwriting:
+
+| dialect | clause | file |
+|---|---|---|
+| postgres | `ON CONFLICT (workflow_id, signal_name) DO UPDATE SET payload = $3` | `engine/store_signals.go:153` |
+| mysql | `ON DUPLICATE KEY UPDATE payload = VALUES(payload)` | `engine/mysql_store.go:433` |
+| mssql | `WHEN MATCHED THEN UPDATE SET payload = source.payload` | `engine/mssql_signals_promises.go:50` |
+
+Send `"approve"` twice before the workflow consumes it and the first payload is discarded with no
+error. Any workflow that accumulates — a counter, one approval per reviewer, a batch of items —
+silently receives only the last. **This is data loss on the ordinary path, not a race.**
+
+## (c) `cleattest` queues signals, so the test double cannot see (b)
+
+`cleat/cleattest/cleattest.go:281`:
+
+    pendingSignals []scheduledSignal
+
+A slice. Appended at 467 and 484, consumed one element at a time at 875, 1001 and 1700. **cleattest
+genuinely queues: send `"approve"` twice and a workflow receives two deliveries.** Postgres gives
+it one.
+
+So a workflow that is correct under `cleattest` can lose a signal in production, and no test can
+see the difference — the double and the real store disagree about the semantics, and only the
+double matches what a user would expect.
+
+**The test double is the one that got it right.** The fix direction is therefore production moving
+to `cleattest`'s semantics, not the reverse. When (b) is fixed `cleattest` needs no behavioural
+change — but it does need a test asserting the two agree, because nothing currently forces that
+and this divergence is exactly what its absence permits.
+
+## Why coverage did not catch it, which is the transferable part
+
+`DeliverSignal` appears in **25 test files** — more than `TerminateWorkflow` (24) or
+`RequestCancellation` (15) — including a dedicated `signal_payload_test.go` and a
+`host_signal_test.go` with 26 occurrences. The defect survived all of it, because **no test sends
+the same signal name twice before consumption**.
+
+    for f in DeliverSignal TerminateWorkflow RequestCancellation; do
+      echo "$f: $(git grep -l "$f" -- '*_test.go' | grep -c .)"; done
+
+Coverage count was never the problem. Test *shape* was. A count answers "how many tests touch
+this", never "does any test try the thing that breaks it" — the same distinction as §3.213's
+`-list` versus `-run`, and as a count over a result set that cannot fail on the contents of what it
+counted (§3.212, and the `AwaitAllChildren` row in #758).
+
+## Not settled here
+
+**Idempotency.** Today's overwrite provides accidental idempotency: re-delivering a signal is
+harmless because it lands on the same row. Queue semantics remove that, so a retried delivery
+genuinely duplicates, and fixing (b) naively trades a silent-loss bug for a silent-duplicate one.
+
+The conformance session proposed honouring "the existing Idempotency-Key mechanism" as part of the
+fix. **That mechanism does not currently reach signals.** `Idempotency-Key` is read in exactly one
+place — `cmd/cleat-worker/server.go:501`, the workflow-start route — and is threaded into
+`StartNewRun`. No signal path reads the header and `store_signals.go` contains no idempotency
+handling. So this is extending a mechanism to a second route with its own storage question, not
+wiring up one that is already there. Re-derive with
+`git grep -n "Idempotency-Key" -- 'cmd/cleat-worker/*.go'` — one non-test hit outside `setup.go`.
+
+**Every line number and count in this section was re-derived against `develop` before it was
+written down.** The first draft carried the conformance session's figures — 15/13/10 test files,
+`cleattest.go:283` — and all of them were wrong here: the real counts are 25/24/15, and 283 was a
+line number I had read on a branch where I had myself edited that file. Two peers agreeing on a
+number neither has re-measured is still one measurement.
+
+**Queue depth.** An unbounded per-name queue is a denial-of-service surface: a caller signalling
+faster than the workflow consumes grows the table without limit. A cap needs a policy at the limit,
+and rejecting the delivery is the only option consistent with (a)'s no-silent-loss principle.
+
+Found jointly with the conformance-port session, which supplied the scenario that prompted the
+question and independently confirmed all three before acting on them.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
