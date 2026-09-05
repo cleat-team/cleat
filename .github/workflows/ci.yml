@@ -99,6 +99,20 @@ jobs:
       - name: CI package-coverage guard
         run: scripts/check-ci-package-coverage.sh
 
+      # Required-context guard. Distinct from the package-coverage guard above,
+      # which checks the test-go matrix against the FILESYSTEM: this one checks
+      # the required-status-context list against tiers.yaml, so it catches a
+      # tier-2 package that has quietly become a merge blocker. Five had.
+      #
+      # --self-test first, and it is load-bearing rather than decorative: it
+      # already caught a gap in its own third check, which can only see
+      # `Test Go (...)` contexts. A guard that cannot see the state it looks
+      # for prints a confident green.
+      - name: Required-context guard
+        run: |
+          scripts/check-required-contexts.py --self-test
+          scripts/check-required-contexts.py
+
       # A t.Skip is reported by `go test` as neither a pass nor a failure, and
       # so is read as a pass. That mechanism hid four separate defects found in
       # one session: a Postgres service with no published port (twice), a

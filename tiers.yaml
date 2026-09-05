@@ -479,6 +479,20 @@ tier2:
     without a written justification in the PR. Anything here is honestly describable as
     "works, with known gaps, and here is the plan"; nothing here may be described as
     production-ready.
+
+    WHAT "MAY FAIL" MEANS IN PRACTICE, because the sentence above reads as more
+    permissive than the enforcement is, and the gap misled a reader on 2026-09-04.
+    `known_failures` is currently EMPTY, and `Tier 2 Gate` is a required status check
+    that treats any failure not on that list as a regression. So tier 2 is enforced as
+    must-pass today. "May fail" is a door, not a state: it is opened one test at a time
+    by adding an entry with an item reference and an owner, and the gate then fails if
+    that test starts passing.
+
+    Five required contexts hold tier-2 code to must-pass on top of that gate — see the
+    `required_contexts` block below, which names each one and why. That is a deliberate
+    position, not a drift, as of the date on that block; what had drifted was that
+    nobody had written it down, so "may fail" and "blocks the merge queue" were both
+    true of the same package and only one of them was recorded here.
   rules:
     skips_allowed: true        # only for genuine environmental preconditions
     known_failures_allowed: true
@@ -1163,6 +1177,283 @@ tier2:
     # diagnosis, not just a symptom, and the diagnosis was wrong for a day. The symptom
     # (which tests fail) is what the gate checks; the cause is prose and rots like any
     # other prose.
+
+# ---------------------------------------------------------------------------
+# What blocks a merge, and which tier each blocking check speaks for.
+#
+# Branch protection on develop lists 32 required status contexts. That list lives in
+# GitHub, not in this tree, so nothing kept it honest against the tiers above -- and it
+# had drifted in a direction nobody had written down. Measured 2026-09-04:
+#
+#   * FIVE required contexts gate tier-2 code as must-pass:
+#       Test Go (plugins)    -> ./plugins/...            (tier2.packages)
+#       Test Go (manifests)  -> ./tests/manifests/...    (tier2.packages)
+#       Test Go (scale)      -> ./tests/scale/...        (tier2.packages)
+#       Test Go (support)    -> ./migration/...          (tier2.packages), mixed with
+#                               ./plugin/... ./pluginapi/... ./auth/..., all tier 1
+#       Cluster Integration Tests -> ./tests/cluster/... (tier2.packages)
+#
+#   * TWO packages inside a required context are in no tier at all:
+#       ./monitoring/...  ./packaging/...   (both in the `support` matrix entry)
+#
+#   * `Test Go (crash)` is the ONE matrix entry that is not required, and it runs a
+#     tier-1 package. That is not a hole: tier1.packages includes ./tests/crash/... and
+#     the required `Tier 1 Gate` runs the whole list. Recorded so the next reader does
+#     not chase it.
+#
+# Re-derive all three:
+#
+#     scripts/check-required-contexts.py --report
+#
+# and the live half, which no in-tree guard can see (reading branch protection needs
+# admin scope, which GITHUB_TOKEN does not have -- the same limitation tier2.gated_by
+# records for its own mapping):
+#
+#     gh api repos/cleat-team/cleat/branches/develop/protection \
+#       --jq '.required_status_checks.contexts[]' | sort
+#
+# THE POINT OF THIS BLOCK is not that gating tier 2 is wrong. It is that it was
+# undeclared. A tier-2 package held to must-pass is a fine thing to decide and a bad
+# thing to discover, and every entry below that covers tier-2 code now has to say why
+# in `why_required` -- scripts/check-required-contexts.py fails without it.
+#
+# On `Test Go (scale)` specifically, which is what prompted this: it stays tier 2 and it
+# stays required. Tier 1 is not available to it -- tier 1's contract is "green on every
+# dialect", and every file in tests/scale calls engine.NewPostgresStore against
+# testutil.DialectPostgres, so there is nothing for the other two dialects to run:
+#
+#     grep -rn "NewPostgresStore\|NewMySQLStore\|NewMSSQLStore\|Dialect" tests/scale/*.go
+#
+# Promoting it would mean either rewriting the suite for three dialects or granting
+# tier 1 to a Postgres-only package, and the second is the kind of claim tiers.yaml
+# exists to refuse.
+# ---------------------------------------------------------------------------
+required_contexts:
+  branch: develop
+  measured: 2026-09-04
+  total: 32
+
+  # `covers` is one of:
+  #   tier1        the context runs only tier-1 packages/modules
+  #   tier2        the context runs at least one tier-2 package -- REQUIRES why_required
+  #   undeclared   the context runs a package in no tier       -- REQUIRES why_required
+  #   infra        the context checks something that is not a Go test suite
+  contexts:
+    # --- the two tier gates ----------------------------------------------------------
+    - context: Tier 1 Gate
+      workflow: tier1-gate.yml
+      job: tier1
+      covers: tier1
+    - context: Tier 2 Gate
+      workflow: tier2-gate.yml
+      job: tier2
+      covers: tier2
+      why_required: |
+        This is the gate that enforces tier 2's contract, so requiring it is the point
+        rather than an anomaly. Note what it enforces with known_failures empty: any
+        tier-2 failure is a regression and fails the gate. See the note on
+        tier2.contract -- "may fail" is a door, and it is currently shut.
+
+    # --- Go test matrix, .github/workflows/ci.yml `test-go` ---------------------------
+    - context: Test Go (core) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier1          # matrix `core` is dir: cleat, path: ./... -> tier1.modules
+    - context: Test Go (engine) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier1
+    - context: Test Go (wasm) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier1
+    - context: Test Go (internal) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier1
+    - context: Test Go (commands) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier1
+    - context: Test Go (integrity) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier1
+    - context: Test Go (upgrade) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier1
+    - context: Test Go (plugins) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier2
+      packages: ["./plugins/..."]
+      why_required: |
+        The 21 built-in plugins are tier 2 as a support claim -- what is frontier about
+        them is the breadth of the surface, not whether they run. They ship in the
+        binary, so a plugin that stops building or stops passing is a defect in a
+        shipped artifact, and holding them to must-pass costs nothing while the suite
+        is green.
+    - context: Test Go (manifests) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier2
+      packages: ["./tests/manifests/..."]
+      why_required: |
+        tests/manifests is what checks that plugin and workflow manifests parse and
+        round-trip. It is tier 2 because the manifest format is still moving, but a
+        break here is a break in what every SDK writes, and it is fast.
+    - context: Test Go (scale) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: tier2
+      packages: ["./tests/scale/..."]
+      why_required: |
+        Tier 1 is unreachable for it: every file in the package is Postgres-only
+        (engine.NewPostgresStore over testutil.DialectPostgres), so it cannot be green
+        on three dialects. It stays required anyway because since #727 its assertions
+        are correctness invariants rather than wall-clock thresholds.
+
+        That change is the reason this entry is defensible. The suite used to assert
+        `p50 > 100ms` and `p99 > 500ms`, which made a required check a function of how
+        loaded the GitHub runner was -- it failed on develop at 491a0f7 with a P99 of
+        623.876463ms over a 2.676839ms median. Requiring a green from an assertion the
+        runner controls is how a gate teaches people to re-run rather than to read.
+        See IMPROVEMENT-PLAN.md §3.401 and scripts/scale-latency-history.py.
+    - context: Test Go (support) on 1.26
+      workflow: ci.yml
+      job: test-go
+      covers: undeclared
+      packages:
+        - ./plugin/...       # tier 1
+        - ./pluginapi/...    # tier 1
+        - ./auth/...         # tier 1
+        - ./migration/...    # tier 2
+        - ./monitoring/...   # IN NO TIER
+        - ./packaging/...    # IN NO TIER
+      why_required: |
+        Three tier-1 packages, one tier-2 package and two that this file has never
+        assigned. It is required because of the tier-1 three; the other three ride
+        along, which is exactly the kind of thing this block exists to make visible.
+
+        ./monitoring/... and ./packaging/... are the open question, and this entry is
+        not the place to answer it -- assigning a tier is a product call, not a
+        by-product of writing a guard. Tracked in IMPROVEMENT-PLAN.md §3.402. Until
+        then they are gated at must-pass without any tier claiming them, which is
+        strictly safer than the reverse and still wrong.
+
+    # --- other suites in ci.yml ------------------------------------------------------
+    - context: Cluster Integration Tests
+      workflow: ci.yml
+      job: cluster-tests
+      covers: tier2
+      packages: ["./tests/cluster/..."]
+      why_required: |
+        tests/cluster is tier2.packages and needs a compose stack (tier3 lists
+        cluster-and-scale among the suites that do). It is required because multi-worker
+        claim/fence behaviour has no other blocking coverage: the tier-1 engine suite
+        runs one process.
+    - context: AssemblyScript Tests
+      workflow: ci.yml
+      job: test-assemblyscript
+      covers: tier2
+      why_required: |
+        tier2.components sdk-assemblyscript. Required because the SDK ships to npm and
+        its stop-bit parity with the host is one of the boundaries §3.400 lists as
+        guarded; an unrequired check there would let the guest and host drift apart
+        between releases.
+    - context: Java Tests
+      workflow: ci.yml
+      job: test-java
+      covers: tier2
+      why_required: |
+        tier2.components sdk-java, and the same parity argument as AssemblyScript.
+        Note gradle's own trap, recorded because it cost a session: `gradle test` prints
+        green with every task UP-TO-DATE and zero tests executed.
+    - context: Test Rust
+      workflow: ci.yml
+      job: test-rust
+      covers: tier2
+      why_required: |
+        tier2.components sdk-rust -- "the only non-Go language with cross-language
+        tests", so it is the one SDK whose break would show up as a cross-language
+        failure rather than a compile error.
+    - context: Build
+      workflow: ci.yml
+      job: build
+      covers: infra
+    - context: Fuzz Tests
+      workflow: ci.yml
+      job: fuzz
+      covers: infra
+    - context: Vulnerability Check
+      workflow: ci.yml
+      job: vulncheck
+      covers: infra
+    - context: Lint
+      workflow: ci.yml
+      job: lint
+      covers: infra
+    - context: lint-go
+      workflow: ci.yml
+      job: lint-go
+      covers: infra          # no `name:` on the job, so the context IS the job id
+
+    # --- tier2.gated_by suites, which have their own stricter jobs -------------------
+    - context: Cross-Language WASM E2E
+      workflow: e2e-cross-language.yml
+      job: e2e-cross-language
+      covers: tier2
+      why_required: |
+        Named in tier2.gated_by, which records why these run outside tier2-gate.sh:
+        their own jobs are STRICTER than that gate. This one sets
+        CLEAT_REQUIRE_TOOLCHAINS and runs check-skip-budget.sh with a budget of 0, so an
+        absent toolchain is a Fatal rather than a skip.
+    - context: Layer 1 — SDK (cleattest)
+      workflow: plugin-harness-ci.yml
+      job: test-layer1
+      covers: tier2
+      why_required: tier2.gated_by; skip budget of 0. See Cross-Language WASM E2E.
+    - context: Layer 2 — WASM Integration
+      workflow: plugin-harness-ci.yml
+      job: test-layer2
+      covers: tier2
+      why_required: tier2.gated_by; skip budget of 0. See Cross-Language WASM E2E.
+    - context: Layer 3 — Multi-DB
+      workflow: plugin-harness-ci.yml
+      job: test-multi-db
+      covers: tier2
+      why_required: tier2.gated_by; skip budget of 0. See Cross-Language WASM E2E.
+    - context: Blobstore S3 Round-Trip
+      workflow: plugin-harness-ci.yml
+      job: test-blobstore-s3
+      covers: tier2
+      why_required: tier2.gated_by; skip budget of 0. See Cross-Language WASM E2E.
+
+    # --- the other two dialects ------------------------------------------------------
+    - context: Test MySQL
+      workflow: multi-db-ci.yml
+      job: test-mysql
+      covers: tier1
+    - context: Test SQL Server
+      workflow: multi-db-ci.yml
+      job: test-mssql
+      covers: tier1
+
+    # --- repo hygiene, no Go suite behind them ---------------------------------------
+    - context: Developer Certificate of Origin
+      workflow: dco-check.yml
+      job: dco
+      covers: infra
+    - context: Validate branch name
+      workflow: branch-naming.yml
+      job: branch-name
+      covers: infra
+    - context: Contributor License Agreement
+      workflow: cla-assistant.yml
+      job: cla
+      covers: infra
+
 
 tier3:
   name: parked
