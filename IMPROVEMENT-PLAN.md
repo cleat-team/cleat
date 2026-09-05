@@ -3184,3 +3184,67 @@ Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED
 ### 3.300 A defer segment could still reach the three string-returning calls — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.303 Five assertion-shaped skips in the plugin harness reported a broken Java/Python build as a pass — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`tests/plugin-harness/wasm_plugin_test.go` decoded the Java/TeaVM result with two
+`t.Skipf`s. A module returning the wrong shape — the exact defect class #455 fixed for
+`examples/saga-java-port` — was reported as SKIP, which CI reads as a pass. Three more
+skips in the build helpers had the same shape: two `reading cleat build output` reads
+that happen *after* a build the same function has already declared successful, and a
+Python `produced no .wasm` whose Java twin (`buildJavaWorkflowWasm`) already used
+`t.Fatalf`. All five are now `t.Fatalf`. Baseline 214 → 209 skip sites
+(`scripts/check-skips.sh`).
+
+**The falsification target originally proposed for this does not work, and the way it
+fails is the interesting part.** The plan said to revert #455 and watch the new assertion
+go red. #455 touched `crates/cleat-java/src/main/java/cleat/{HostCalls,JsonHelper}.java`,
+`examples/saga-java-port/.../MoneyTransfer.java`, `engine/java_workflow_e2e_test.go` and
+`tiers.yaml` — and its two SDK edits are **javadoc only**:
+
+    git show 115b421 -- crates/cleat-java/ | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+      | sed 's/^[+-]//;s/^[[:space:]]*//' | grep -vE '^(\*|/\*\*|\*/|$)'    # prints nothing
+
+None of it is an input to `TestPluginCalls_Wasm_Java`, which compiles
+`tests/plugin-harness/testdata/javaworkflow/`. Reverting #455 therefore leaves this test
+green — and a green falsification would have been read as "the new assertion is dead", the
+precise misreading CLAUDE.md's "a falsification that stays green is telling you which case
+you did not write" warns about. **A fix and a test can be about the same defect and still
+share no code.** Check that the revert reaches the test's build inputs before believing
+either outcome.
+
+What was falsified instead — the same defect, applied to the code this test actually
+compiles. Both perturbations were reverted; both went red on the intended line:
+
+| perturbation to `PluginHarnessWorkflow.callAllPlugins` | fires | message |
+|---|---|---|
+| return `Map` via `JsonHelper.parseObject` (i.e. #455's own fix, applied here) | outer | `not the JSON-encoded string the ABI contract requires: json: cannot unmarshal object into Go value of type string` |
+| return `"cleat-falsification-not-json"` | inner | `unwrapped to text that is not a JSON object: invalid character 'c'` |
+| `os.ReadDir(tmpDir + "/no-such-dir")` | ReadDir | `reading cleat build output <path>: ... no such file or directory` |
+
+Each fired on its own line, so the two decode assertions are independent rather than one
+assertion reached two ways. Under the old code all three printed SKIP.
+
+**Note what this workflow's return type says about #455.** It still returns a hand-built
+JSON `String`, the idiom #455's javadoc now argues against — so the double unwrap here is
+correct *for this workflow*, and the first row above is a shape change, not a bug fix.
+`grep -rn 'public static String.*HostCalls' --include='*.java' .` returns 10 lines
+(2026-09-04) — and they are not all workflows. Two are javadoc that #455 missed while
+rewriting the same example in `HostCalls.java`: `CleatEntry.java:26` and
+`TerminalError.java:14` still show `public static String placeOrder(...)` returning
+hand-built JSON. Read the output rather than the count; five of the ten are string
+literals inside `CleatEntryProcessorTest.java`.
+
+Two things seen while doing this and **not** fixed here, both needing their own change:
+
+- `TestPluginCalls_Wasm_Java`'s `expectedKeys` loop checks each key is *present*, not that
+  its value is a success. The raw result printed by the first perturbation above contains
+  `{"error":"plugin function pgvector/upsert not registered..."}` and
+  `{"error":"blobstore: no tenant context"}` under expected keys, and the test passes.
+  This is the same "only checked the field was PRESENT" trap #455's own commit message
+  confesses to. Some of those errors may be legitimate for an in-memory env; deciding
+  which is the work.
+- `TestPluginCalls_Wasm_AS` rewrites the checked-in
+  `tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm` on every run, so any test
+  run leaves `git status` dirty. `testdata/javaworkflow/prebuilt/README.md` documents
+  having solved exactly this for Java by moving the fixture out of the build directory.

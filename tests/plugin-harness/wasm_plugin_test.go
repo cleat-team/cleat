@@ -308,7 +308,11 @@ func buildPythonWorkflowWasm(t *testing.T) []byte {
 
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil {
-		t.Skipf("reading cleat build output: %v", err)
+		// Fatal, not Skip, for the same reason as the build failure above:
+		// toolchain presence was already decided, and the build reported
+		// success. An output directory that will not read at this point is a
+		// real failure.
+		t.Fatalf("reading cleat build output %s: %v", tmpDir, err)
 	}
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) == ".wasm" {
@@ -320,7 +324,7 @@ func buildPythonWorkflowWasm(t *testing.T) []byte {
 			return wasmBytes
 		}
 	}
-	t.Skipf("Python componentize-py build produced no .wasm — pipeline may need setup, skipping")
+	t.Fatalf("Python componentize-py build reported success but produced no .wasm in %s", tmpDir)
 	return nil
 }
 
@@ -347,7 +351,11 @@ func buildJavaWorkflowWasm(t *testing.T) []byte {
 
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil {
-		t.Skipf("reading cleat build output: %v", err)
+		// Fatal, not Skip, for the same reason as the build failure above:
+		// toolchain presence was already decided, and the build reported
+		// success. An output directory that will not read at this point is a
+		// real failure.
+		t.Fatalf("reading cleat build output %s: %v", tmpDir, err)
 	}
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) == ".wasm" {
@@ -754,10 +762,12 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 	var results map[string]interface{}
 	var rawJSON string
 	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
-		t.Skipf("failed to decode outer wrapper: %v\nraw: %.500s", err, result)
+		t.Fatalf("Java/TeaVM result is not the JSON-encoded string the ABI "+
+			"contract requires: %v\nraw: %.500s", err, result)
 	}
 	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-		t.Skipf("failed to parse result JSON: %v", err)
+		t.Fatalf("Java/TeaVM result unwrapped to text that is not a JSON "+
+			"object: %v\nunwrapped: %.500s", err, rawJSON)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 
