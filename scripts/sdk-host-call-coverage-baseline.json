@@ -1,22 +1,27 @@
 {
   "go": {
     "covered": 37,
-    "surface": 37
+    "surface": 37,
+    "executed": 26
   },
   "python": {
     "covered": 73,
-    "surface": 73
+    "surface": 73,
+    "executed": 10
   },
   "rust": {
     "covered": 61,
-    "surface": 61
+    "surface": 61,
+    "executed": 7
   },
   "java": {
     "covered": 68,
-    "surface": 68
+    "surface": 68,
+    "executed": 8
   },
   "assemblyscript": {
     "covered": 66,
-    "surface": 66
+    "surface": 66,
+    "executed": 7
   }
 }

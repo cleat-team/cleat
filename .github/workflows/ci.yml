@@ -163,6 +163,26 @@ jobs:
       - name: SDK host-call coverage guard
         run: scripts/sdk-host-call-coverage.py --check
 
+      # The EXECUTED half, which is a different question and the one that
+      # matters. The guard above is at 100% on all five SDKs and says only that
+      # a fixture compiles the call; every binding defect found on 2026-09-04
+      # and 09-05 compiles. This one counts calls a fixture some test BUILDS
+      # AND RUNS, and it reads 26/37/10/8/7 -- so the two numbers must never be
+      # allowed to substitute for each other, which is why they sit in separate
+      # baseline keys and separate steps.
+      #
+      # It also checks WIRING in both directions, because a declared list with
+      # no check is worth nothing:
+      #   * a declared fixture's test exists and some job's -run selects it
+      #     (3.211: a harness sat in the tree, green, selected by no pattern);
+      #   * every -run pattern in every workflow selects a test that exists
+      #     (a pattern matching nothing prints "ok ... [no tests to run]" and
+      #     exits 0 -- CLAUDE.md's TestTenantIsolationAcrossDialects case).
+      # Same file-ownership note as above: this is WS-3's file, and the guard
+      # is unwired without the step.
+      - name: SDK host-call EXECUTED coverage guard
+        run: scripts/sdk-host-call-coverage.py --check-executed
+
       - name: ABI doc/code consistency guard
         run: scripts/check-doc-consistency.sh
 
