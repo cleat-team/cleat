@@ -105,7 +105,7 @@ SDKS = {
     ),
     "assemblyscript": (
         as_surface,
-        ["examples/as-workflow/assembly/*.ts", "examples/widget-store-as/assembly/*.ts", "tests/plugin-harness/testdata/asworkflow/assembly/*.ts"],
+        ["examples/as-workflow/assembly/*.ts", "examples/widget-store-as/assembly/*.ts", "tests/plugin-harness/testdata/asworkflow/assembly/*.ts", "packages/cleat-as/assembly/__compile__/*.ts"],
         lambda n: rf"\b(?:h|host|hc)\.{n}\s*\(",
     ),
 }

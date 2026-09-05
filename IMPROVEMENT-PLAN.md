@@ -3734,6 +3734,46 @@ report:
 Coverage after §3.207 and this: rust 61/61, java 68/68. AssemblyScript (11/66) is the remaining
 tier-2 row; go and python reach 37/37 and 73/73 when §3.204 and §3.205 land.
 
+### 3.209 The AssemblyScript host-call surface: 11 of 66 compiled, now all 66 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Last tier-2 row of §3.206. `examples/as-workflow`, `examples/widget-store-as` and the
+plugin-harness fixture between them called **11 of 66** `HostCalls` methods.
+
+`packages/cleat-as/assembly/__compile__/all-host-calls.ts` calls all 66, type-checked by
+`asc --noEmit`. As with Rust (§3.207) and Java (§3.208), **no SDK defect** — three for three on
+the hand-written SDKs, against four uncompilable host calls in the one SDK whose adapter is
+generated (§3.204). The pattern is now well enough evidenced to state: **the Go breakage was a
+property of code generation, not of breadth.**
+
+**It began as an as-pect spec and that was wrong, for a reason worth keeping.** as-pect
+*instantiates* the module it compiles, and the host imports are not callable in that runner —
+`LinkError: Import "env" "cleat_call": function import requires a callable`. The package's other
+specs say so in their own header: they test "pure functions and constants that do not require
+`@external` host function imports". So the fixture lives in `assembly/__compile__/`, outside the
+spec directory, and is type-checked rather than run. **The compile was already the assertion; the
+harness was adding an instantiation nobody wanted.**
+
+Wired through `package.json` rather than through a workflow: `test` now runs
+`check:host-calls && asp`. The **required** `AssemblyScript Tests` job already does `npm ci &&
+npm test`, so the surface is compiled by a job that exists with **no change to
+`.github/workflows/`** — the same move as §3.208's, which used `gradle test` in the required
+`Java Tests` job. Only §3.207 needed workflow-adjacent wiring, because only Rust had to build a
+`cdylib` for `wasm32-wasip1`.
+
+**The coverage script found the one method a hand-written fixture missed.** After the first pass it
+read 65/66, uncovered: `childWorkflowWithOptions` — declared across a single long line with a
+defaulted `options` parameter, which the signature extraction I was reading from had skipped while
+the surface extraction caught it. **Two extractors disagreeing is what surfaced it**; one alone
+would have reported 65 as complete.
+
+**Falsified:** adding `h.noSuchHostCall("x")` fails with
+`ERROR TS2339: Property 'noSuchHostCall' does not exist on type 'assembly/host-calls/HostCalls'`,
+and `asc` exits 1 where the clean fixture exits 0.
+
+Coverage after §3.207–§3.209: **rust 61/61, java 68/68, assemblyscript 66/66.** Go and Python
+reach 37/37 and 73/73 when §3.204 and §3.205 land, which completes compile coverage for all five
+SDKs. **What remains unmeasured is execution** — see §3.210.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
