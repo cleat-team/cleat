@@ -4866,3 +4866,67 @@ workflow YAML and running *that* — a cached binary that lands somewhere off `P
 127 *after* a green install, which is how the gitleaks step in §3.403 failed on its first CI run
 having been verified locally by absolute path. The local and CI invocations must be the same
 command, not an approximation retyped into a shell.
+### 3.309 `AwaitAllChildren` does not await — it records "child not completed" as the child's permanent outcome — 🔴 **OPEN** (WS-2, 2026-09-05)
+
+Found while settling a question WS-1 raised for #744's B1: "AwaitAllChildren returns ok on a
+run ID that AwaitChild SUSPENDS on — either a real inconsistency or a design difference
+nobody has written down." It is the first, and the no-backend framing understates it. **The
+divergence is on the ordinary path, with a store configured and children genuinely running.**
+
+Three siblings, one of which does not do what its name says:
+
+| host function | child not complete | `engine/children.go` |
+|---|---|---|
+| `AwaitChild` | **suspends** | 299 |
+| `AwaitAnyChild` | **suspends** | 435 |
+| `AwaitAllChildren` | returns `{"error":"child not completed"}` with `errCode 0` | 504 |
+
+    grep -rn "packAwaitChildResultSuspend" --include='*.go' . | grep -v _test.go
+    # exactly two callers, and AwaitAllChildren is not one of them
+
+**Why "returns an error string" is not the defect.** `freshAwaitAllChildren` marshals those
+outcomes into the `EventRecord` it records at `children.go:521`, and `replayAwaitAllChildren` hands
+`rec.Response` back to the guest verbatim on every future replay. So "this child had not
+finished when I looked" is written into the workflow's permanent history **as the child's
+result**. The child then completes, and no replay will ever say so.
+
+The irony is local: the 30-line comment in that same function, three lines above the
+`else` that produces this, exists to explain why `context.Background()` is used rather than
+`ctx` — because cancelling those queries would write `"context canceled"` into permanent
+history and "a transient shutdown would become a durable wrong answer, which is a strictly
+worse failure than the one cancellation avoids." That is precisely what the `else` branch
+below it does, unconditionally, and not on shutdown.
+
+**Every specification of this call says it waits.** The implementation is alone:
+
+- `ABI.md` §2.53 — "Companion to `cleat_await_all_children` (§2.23), **which waits for all
+  of them**."
+- `ABI.md` §2.22, for the sibling — "If the child is not complete, the workflow should
+  suspend." §2.23 says nothing about the incomplete case at all.
+- `cleat/runtime.go:265` — "AwaitAllChildren **waits for all child workflows** identified by
+  runIDs **to complete**. ... Unlike calling AwaitChild in a loop, all children are awaited
+  concurrently." The stated difference is concurrency, not whether it waits.
+- `python-sdk/README.md:86` and `crates/cleat-sdk/README.md:132` — "await multiple children
+  concurrently".
+
+**What pins the current behaviour is a test that asserts it without justifying it.**
+`TestAwaitAllChildren_SomeRunning` (`engine/children_test.go:796`) sets `run-b` still
+running, asserts `errCode 0`, and asserts the outcome for `run-b` is exactly
+`"child not completed"`. The name states the scenario, not a mechanism, and no comment
+anywhere says why this sibling alone must not suspend. It reads as a test written to match
+the code.
+
+**The fix is two halves, and the second is why this is filed rather than fixed.**
+
+1. `freshAwaitAllChildren`: when any child is incomplete, record the event without a
+   response and suspend, as `AwaitChild` does at `children.go:287-299`.
+2. `replayAwaitAllChildren` **cannot currently replay such a record.** It has no equivalent
+   of `AwaitChild`'s "no cached result yet — fall through to fresh" path
+   (`children.go:238-246`); it serves `rec.Response` unconditionally, so a suspended record
+   would replay as an empty result. Half 1 without half 2 converts a durable wrong answer
+   into a durable empty one.
+
+**Not started, deliberately.** This changes what a shipped host function does at runtime and
+what an existing test asserts, and the question of whether any caller wants partial outcomes
+is not mine to answer alone. Filed with the evidence so the decision is made on it rather
+than rediscovered.
