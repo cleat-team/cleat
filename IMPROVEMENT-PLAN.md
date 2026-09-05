@@ -5520,3 +5520,28 @@ not prove replay suppression the way Go's can.
 
 `tests/plugin-harness/testdata/hostcallsjava/build/` is gitignored with the directory rather
 than after the first dirty `git status`, which is how §3.305 and §3.308 both started.
+
+**The first version of the harness change was wrong in review, and the way it was wrong is
+worth more than the fix.** Handling Java's wrapper by unwrapping *whenever the payload happened
+to be a JSON string* is one line shorter and made the harness blind in the other three
+languages: a Go SDK that regressed to returning a JSON-encoded string decoded cleanly and
+reported `ok`, where the day before it had failed as `undecodable result`. Measured on all
+three inputs — object, Java-wrapped, and Go-wrapped-by-mistake — the third was
+indistinguishable from correct. The comment sitting directly above that code said *"a tolerant
+decoder is how a harness stops being able to tell a wrong answer from a differently-shaped
+right one"*, so the principle was stated and then not applied to the line beneath it.
+
+The shape is now a parameter the caller states, enforced in **both** directions: a wrapped
+payload from an object language fails, and an unwrapped payload from Java fails too. The second
+half is not symmetry for its own sake — without it, the Java SDK silently dropping its wrapper
+would read as correct, which is the same defect one language over. Falsified both ways:
+
+| perturbation | result |
+|---|---|
+| Go call site claims `resultJSONWrapped` | `this SDK returns the outcome as a JSON-encoded string and this result is not one` |
+| Java call site claims `resultObject` | `this SDK returns the outcome object directly and this result is a JSON-ENCODED STRING` |
+
+**This is the same shape as §3.213's parity guard**, found by WS-1 in review: that one widened
+what it accepted by dropping a prefix filter, this one widened what it accepted to accommodate
+one language's real contract. Both are correct locally and lose a distinction globally, and
+neither is visible from inside the change — the tests stay green either way.

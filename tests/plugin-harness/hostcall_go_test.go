@@ -204,7 +204,7 @@ func TestHostCallsGo(t *testing.T) {
 	invoked := 0
 	for _, call := range wave1Calls {
 		t.Run(call, func(t *testing.T) {
-			got := executeOneCall(t, wenv.H(), wasmBytes, call)
+			got := executeOneCall(t, wenv.H(), wasmBytes, call, resultObject)
 			invoked++
 			if recordMode() {
 				recordOutcome(got)
