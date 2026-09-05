@@ -228,7 +228,83 @@ comparing counts:**
     go test ./... -list '<pattern>'      # what does this pattern actually select?
 
 `-run` answers that only by implication, and is silent when the answer is "less than you think".
-This is the same shape as "no pending checks also matches checks never started", two sections up.
+This is the same shape as **"No pending checks" also matches "checks never started"** — earlier in
+this same section, not two sections up as this line said until #755. Cite a rule here by its
+quoted phrase, which `grep` finds; a positional reference rots the moment anything is inserted
+between, and this one was wrong the day it was written.
+
+**These are one rule, and naming it is cheaper than meeting it a fifth time.** A check can tell
+you whether it is **consistent with itself**. It cannot tell you **what it is not looking at**.
+Every fix above is the same move: a *second, deliberately different* reading of the same source,
+chosen so that it goes wrong in the opposite direction.
+
+| what the check answers about itself | the second reading that answers what it misses |
+|---|---|
+| "does it pass when the tree is fine?" | a **known-positive** — a case already proven broken |
+| "does `-run` run what I meant?" | **`-list`**, which names the set it selects |
+| "does the extractor parse without error?" | a **looser parse** of the same file, over-matching on purpose |
+
+The right-hand column is not the more correct one. The loose parse is deliberately wrong and would
+make a bad extractor; its only job is to **disagree**, so the difference can be examined. A strict
+parse that runs clean and a loose parse that finds nothing more is evidence. A strict parse alone
+is a claim.
+
+The fourth instance arrived the same day, and is the one that shows the cost. `rust_surface()`
+matched `pub fn <name>(`, and a Rust generic method is `pub fn <name><T: …>(`, so **ten of
+seventy-one methods on `HostCalls` were invisible to it**. Nothing failed, nothing was skipped, no
+count went down. Coverage was reported as **61/61 = 100% when it was 63/71 = 88.7%** — and that
+100% had been written into four places in `IMPROVEMENT-PLAN.md` and repeated to the user before
+anyone read the same file a second way (#753). And one host call is reachable **only** through
+methods the scan could not see: the `cleat_call_retry` extern is referenced from exactly one place
+in the SDK, inside `cleat_call_with_host_retry<T, R>`, which is generic — so a fixture exercised
+it and neither metric counted it.
+
+**Watch the direction, because it is not random.** All four of these inflate rather than break: a
+smaller surface is a smaller denominator, so a method the scan cannot see *raises* the percentage;
+an under-selecting `-run` reduces the failures available to find; a permissive guard passes a tree
+it should fail. **The measurement errors that survive are the ones that flatter the number** —
+nobody re-derives a figure that looks good. That is the same asymmetry as the UTC-offset error in
+*Ground rules for changes* below, which inflated a count "in the direction that flattered the
+finding — which is why it was not questioned."
+
+**The fifth instance is the sharpest, and it is one line of source.** A scan for binding names
+scored the AssemblyScript SDK as *having* `cleat_register_query_handler` — by matching this, at
+`packages/cleat-as/assembly/host-calls.ts:391`:
+
+    // There is no import_cleat_register_query_handler here (removed 2026-08-09).
+
+An explicit denial, read as a confirmation. A second scan got the right answer only because `\b`
+cannot match after the `_` in `import_cleat_` — not a mechanism anyone chose, and not one that
+survives a rename. The two agreeing would have proved nothing; their *disagreeing* is the only
+reason anybody looked, and it is why #757 publishes no binding counts until they reconcile. This
+is the "grep a retraction satisfies" trap under *Build*, one level up, and worse: that line is the
+**only** occurrence of `register_query_handler` in the file
+(`grep -c register_query_handler packages/cleat-as/assembly/host-calls.ts` → 1). The sole evidence
+the scan had was a sentence denying the thing it recorded.
+
+So when a check and the thing it checks agree, ask what a differently-wrong reading would say
+before recording the agreement as a result.
+
+**The mechanism under all of them: a tool applied to a format it does not model.** Four separate
+failures on 2026-09-05, plus one already recorded above from 2026-08-31 — one shape —
+
+| the read | the format it did not model | what models it |
+|---|---|---|
+| `cmd \| tail; echo $?` | a pipeline's exit status is the *last* command's | redirect, or `${PIPESTATUS[0]}` |
+| `grep -oE '"Output":"[^"]*"'` | a JSON string can contain `"` | a JSON decoder |
+| `grep -cE '^\S+\s+pending'` | a tab-delimited table whose fields contain spaces | `awk -F'\t'` |
+| `pub fn <name>(` | a declaration can carry generics | a parse that admits them |
+| a name scan over `.ts` | source contains prose *about* names | anchor to where the artifact lives |
+
+"Check your regex" is the weak form of this. The strong form is that **a text search cannot tell a
+thing from a sentence about the thing**, and neither can a line-oriented read of a structured
+format. When the answer matters, read it with something that knows the shape.
+
+**And the portable version of that, which needs no parser: anchor to where the artifact lives, not
+to what it is called.** "Extract the declarations" requires a tool per language. `^` does not. A
+retraction is prose in a body and can never sit at a declaration site; a changelog row recording a
+removal cannot start a heading line. That one move covers every row above — and it is applicable
+to a file you have never seen, which "write a real parser" is not.
 
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
@@ -461,7 +537,48 @@ ABI is written twice — `engine/imports.go` for wazero, `engine/wasmtime_hostfu
 wasmtime. `engine/hostabi_runtime_parity_test.go` does. It found a real defect on its first run:
 `cleat_create_promise` was registered on wasmtime with a parameter no guest passed, so durable
 promises could not link on the worker at all (§3.55). **Note what a name-only comparison would
-have said** — both sides register the same 56 names, and did then too.
+have said** — both sides register the same names, and did then too.
+
+**But read that sentence carefully, because it is narrower than it looks.** The test filters both
+sides on the `cleat_` prefix (`engine/hostabi_runtime_parity_test.go:114` and `:332`), so what it
+compares is **55 `cleat_`-prefixed names**. Three more are registered on both sides and **never
+compared**: `plugin_call`, `plugin_call_streaming`, `set_query_state`. The §3.55 defect this test
+caught — a host function registered on wasmtime with a parameter no guest passed, so durable
+promises could not link on the worker — would be invisible today if it happened to any of those
+three.
+
+The number here read **56** until 2026-09-05 and carried no date, so it is corrected rather than
+preserved — this file's header says *"If you find one without a date that turns out to be wrong,
+fix it in the same PR."* It was right when written: 56 `cleat_` names on 2026-09-01, and
+`cleat_child_workflow_in_schema` was removed the next day (#582, 2026-09-02), so 56 − 1 = 55. The
+same stale 56 is in the test's own doc comment at `:33` and in its vacuous-pass control at `:362`.
+
+**And do not conflate the two counts, because they answer different questions.** The engine
+exports **58** names; the parity test compares **55** of them.
+
+    grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u | grep -c .
+
+**Do not put `cleat_` inside that pattern when you want the export total.** Three exports are
+unprefixed — the same three above — and all three are workflow API, so a prefix-anchored scan
+returns 55 and silently drops the plugin calls. A pattern that can only return names of the shape
+it assumes cannot test the assumption; it encodes the conclusion. That error produced a **55** on
+2026-09-05 whose digits matched a differently-derived 55 — the workflow-facing target, 58 less two
+handshake calls and one deliberately unbindable one — with **six** members different, three in
+each direction. Two derivations agreeing on a number while disagreeing on more than a tenth of its
+membership is the 876/581/4 costume from this file's opening section (IMPROVEMENT-PLAN §3.213).
+Re-derive the difference rather than the totals — this runs, and prints six lines:
+
+    E=$(grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u)
+    comm -3 <(grep '^cleat_' <<<"$E") \
+            <(grep -v -e '^cleat_poll_work$' -e '^cleat_complete$' \
+                      -e '^cleat_register_query_handler$' <<<"$E")
+
+The six are `cleat_poll_work`, `cleat_complete` and `cleat_register_query_handler` on one side,
+`plugin_call`, `plugin_call_streaming` and `set_query_state` on the other. **Compare the sets, not
+the counts** — the same instruction as "diff the SET rather than comparing counts" under the
+`-list` rule, and this is what it looks like when nobody does. **One prefix assumption produced
+all three errors above**: a wrong denominator, a stale doc number, and a guard that has never
+compared three of the names it exists to compare.
 
 **"Which backend runs this" and "which code path inside that backend runs this" are different
 questions.** The wasmtime backend has **two** execution paths — core module and native
