@@ -231,7 +231,7 @@ broken checkout:
 Environmental is not the same as unavoidable — that distinction cost this stream a day, and cost
 WS-2 one too, because I fed them my wrong diagnosis as agreement.
 
-**Wave 1 is the 23 result-carrying calls, not all 50.** Those are the adapters that decode
+**Wave 1 is the 24 result-carrying calls, not all 50.** Those are the adapters that decode
 something the guest must interpret — an out buffer, a packed length, a host message — and every
 one of the six defects above lived in one:
 
@@ -241,12 +241,21 @@ one of the six defects above lived in one:
     ListCrons PluginCall PluginCallStreaming PollCancellation PollChild
     PollSignal RunID ScheduleCron SideEffect WorkflowID
 
-The **14** scalar-only calls — `AcquireLock`, `Now`, `Random`, `DurableSleep` and the rest — carry
-no buffer to mis-decode and are wave 2. The split is "does the error path read a buffer".
+    AcquireLock
+
+The **13** scalar-only calls — `Now`, `Random`, `DurableSleep` and the rest — carry nothing the
+host computed and are wave 2.
+
+**The split rule is "does the guest have to decode something the host computed",** and it was
+"does the error path read a buffer" until WS-3's C1 found the case that separates them.
+`AcquireLock` reads no buffer on its error path, so the old rule put it in wave 2 — but its
+success path decodes `acquired := (result>>8)&0x1`, a bit the host computed. A guest returning a
+constant `true` would compile, pass every compile-coverage check, and be silently wrong about
+holding a lock. That is the §3.200 defect class, so it is wave 1.
 Re-derive both lists against `wasm.AdapterFieldNames()` rather than by grepping the file, because
 the struct literal's shape defeats the obvious regex:
 
-    23 + 14 = 37, and every wave-1 name resolves — checked 2026-09-05 by diffing
+    24 + 13 = 37, and every wave-1 name resolves — checked 2026-09-05 by diffing
     the list above against AdapterFieldNames(), which returns 37.
 
 This said 15 until 2026-09-05, from before #735 removed `AcquireLockMs`. A wave-2 list is exactly
@@ -262,7 +271,7 @@ task, and the harness lands before the second.
 
 | | task | done when |
 |---|---|---|
-| A1 | a table-driven host-call execution harness: one fixture per language, one row per call, expected-outcome table | the 23 wave-1 calls run for **Go**, each with a recorded expected outcome, and a call whose outcome changes fails |
+| A1 | a table-driven host-call execution harness: one fixture per language, one row per call, expected-outcome table | the 24 wave-1 calls run for **Go**, each with a recorded expected outcome, and a call whose outcome changes fails |
 | A2 | executed-coverage measurement becomes a guard | `sdk-host-call-coverage.py` grows an `--executed` mode over the fixtures tests actually run, with its own ratchet |
 | A3 | falsify A1 | revert §3.200's fix; the harness must redden **on the Go row of a specific call**, not on a whole-fixture failure |
 
@@ -274,8 +283,8 @@ language, it will not localise the next one either.
 
 | | task | done when |
 |---|---|---|
-| B1 | *(independent, start now)* the expected-outcome table for the 23 calls: what each returns with no backend configured | a reason per call, written down with **why**, in the §3.303 style |
-| B2 | Python and Java fixtures through WS-1's harness | both languages run the 23, and their outcomes match Go's table or differ with a recorded reason |
+| B1 | *(independent, start now)* the expected-outcome table for the 24 calls: what each returns with no backend configured | a reason per call, written down with **why**, in the §3.303 style |
+| B2 | Python and Java fixtures through WS-1's harness | both languages run the 24, and their outcomes match Go's table or differ with a recorded reason |
 | B3 | falsify B2 | revert §3.201; the Python row must redden on the calls that discarded their result, and Java's must not |
 
 B1 is the part that cannot be rushed and does not need the harness. §3.303's lesson is that the
@@ -290,13 +299,48 @@ the two #742 constraints above before starting it, not after.
 | | task | done when |
 |---|---|---|
 | C1 | *(independent, start now)* decide where the harness runs and what it costs | a written answer for whether wave 1 fits the existing tier-2 jobs or needs its own, with measured job times |
-| C2 | Rust and AssemblyScript fixtures through WS-1's harness | both run the 23 with recorded outcomes |
+| C2 | Rust and AssemblyScript fixtures through WS-1's harness | both run the 24 with recorded outcomes |
 | C3 | tier and required-context wiring for whatever C1 concludes | `tiers.yaml` and `check-required-contexts.py` agree with reality, as §3.402 established |
 
 C1 first because it may change A1. If wave 1 cannot run in CI at a tolerable cost, the harness
 needs to be sampleable by call or by language, and that is a design input rather than a
 retrofit — the scale suite's `assertAllSampled` (§3.401) is the cautionary case for sampling
 added late.
+
+**C1 is answered, 2026-09-05.** Wave 1 fits the existing `Cross-Language WASM E2E` job. No new
+job and no sampling — **provided the harness builds each guest once and invokes it N times.**
+The cost driver is fixture *shape*, not call count:
+
+| shape | added | E2E total |
+|---|---|---|
+| one fixture per call (23/lang) | ~460s | 825s — 2.3× the job, within 25s of the critical path |
+| one module per language, invoked N times | ~145s | ~510s, 340s below the critical path, wave 2 fits on top |
+
+Measured job times on run 33973787289 (sha `fa6dd10a`, all green): Tier 1 Gate 848s is the
+critical path, E2E 364s. **A1 is built this way and the Go reference measures 3.6s for 24
+invocations plus the build.**
+
+The number that decides it is one nobody would have guessed: **a Python invocation costs ~0.93s
+and does not amortise.** Five consecutive executions of a prebuilt 19.87 MB component in one
+process: 995 / 937 / 934 / 891 / 935 ms, flat. Building the component costs 1.8s *once*; every
+invocation after that costs the same as the first, with no cache. So Python is ~50% of the added
+cost and is the term that breaks first if anything ever multiplies invocations — a per-dialect
+matrix, a retry loop, wave 1 and wave 2 under one sampling scheme.
+
+Shape C is not new capability: `asworkflow` already exports 8 entry points from one module,
+`rustworkflow` carries ~8 `#[cleat_entry]`, and the Java tree generates a `CleatEntryIndex`.
+Python differs in mechanism only — `componentize-py` takes a single `--entry` and the component
+always exports `run` as its sole entry point — so Python dispatches on input inside one entry
+rather than exporting 24 symbols. The Go reference does the same, so the shape is uniform.
+
+**Two costs stated as soft, because they are.** Java's build/execute split is not measured (CI
+totals only), so the ~1s/invocation Java figure is the weakest number in the costing — it does
+not change the verdict, since Java could be 3× that and shape C still fits, but do not quote it
+as measured. And the Python CI split (5.9 build / 3.0 exec) is the Mac ratio applied to a
+measured CI total: a model, and the only modelled number in it.
+
+**Unrelated to the harness and worth more than anything it saves:** `Install Python WASM
+toolchain` is 137s of E2E's 364s — 38% of the job, pure install, cacheable.
 
 ### What would make this round a failure
 
