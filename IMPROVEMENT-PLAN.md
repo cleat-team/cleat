@@ -5455,3 +5455,93 @@ are round-trip equality, so the outcome does not vary.
 
 Measured against MinIO on `localhost:9000` and WS-2's PostgreSQL 5433: PASS in 0.07s, and
 SKIP with an accurate message when the endpoint is unset.
+### 3.312 A Java host-call fixture, and the arity defect it found on its first run — 🟢 **FIXED 2026-09-05** (WS-2, 2026-09-05)
+
+Java was the weakest "bound but never executed" case in the tree: 8 host calls executed
+against a 70-method surface, every one of the 70 compile-checked, which is exactly why it read
+as covered. This adds the Java fixture to the host-call harness (§3.211's shape: one fixture,
+built once, invoked once per call, dispatching on `{"call":"<Name>"}`), bringing it to four
+languages over the 24 wave-1 calls.
+
+**It found a defect on its first run, and the defect is why compile-time coverage could not
+have found it.** `crates/cleat-java`'s `cleat_child_workflow_with_options` import declared
+**nine** parameters against the host's **ten** — no `priority`, the second `i64`
+(`engine/imports.go`, `(ptr,len x3, i64, i64, ptr,len, ptr,maxLen)`). The Java side compiled
+perfectly against a signature the host does not have.
+
+A WASM import whose arity disagrees does not fail at that call. **The module fails to
+instantiate**, so every one of the 24 calls died together:
+
+    incompatible import type for `env::cleat_child_workflow_with_options`
+    expected (i32 i32 i32 i32 i64 i32 i32 i32 i32) -> i64      [the guest's import]
+    found    (i32 i32 i32 i32 i64 i64 i32 i32 i32 i32) -> i64  [the host]
+
+So **any Java workflow that so much as referenced `childWorkflowWithOptions` could not run at
+all** — and nothing noticed, because TeaVM tree-shakes unreferenced imports and no Java test
+called it. Same defect class as §3.55, where `cleat_create_promise` was registered on wasmtime
+with a parameter no guest passed and durable promises could not link on the worker.
+
+Fixed by adding `priority` to the raw import and passing `0L`, which the Go SDK documents as
+the default and the highest (`cleat/runtime_children.go`, "0 = highest priority"). Exposing
+priority in Java's *public* API is additive and deliberately not bundled here — the arity is
+what stops the module linking.
+
+**Falsified both ways.** Reverting the SDK fix reddens every row with the instantiation error
+above; perturbing a single table row (`PollSignal` to `statusOK, "present=false"`) reddens
+that row alone, with the row's `why` printed beside it.
+
+**One cross-language divergence, recorded and NOT endorsed.** `PollSignal` is `ok` with
+`present=false` on Go and an **error** on Java — `CleatResult<String>` has no `present`
+channel, so "no signal pending" has nowhere to go but the error case, and a Java workflow
+cannot distinguish "not yet" from "broken". The row asserts the text so that a Java binding
+growing a `present` flag must change it.
+
+**Two rows are `statusUnsupported`.** `grep -rn cron crates/cleat-java/src/main/java/cleat/`
+returns nothing, while the host exports both cron functions and the AssemblyScript SDK binds
+them — a guest-side gap, not a host limitation, and the same position Rust is in.
+
+**Two things the fixture had to teach the shared harness.** Java exports the `@CleatEntry`
+name **verbatim** where Go, Rust and AssemblyScript snake_case theirs, so the fixture spells
+its entry `exercise_host_call` to match the one name `executeOneCall` asks for; getting that
+wrong builds cleanly and traps with `export "exercise_host_call" not found`. And Java returns
+the entry's value as a **JSON-encoded string** — a JSON string containing the object — where
+the other three return the object, so `executeOneCall` now unwraps exactly once, and only when
+the payload really is a JSON string, so a malformed object still fails rather than being
+massaged into shape. That is the Java SDK's ABI contract, the same one
+`TestPluginCalls_Wasm_Java` unwraps for and §3.303 turned from a skip into a failure.
+
+**Table conventions, per §3.211's lesson.** Every `why` says what the row would **catch**, not
+what it asserts — a `why` that restates the assertion is how a row goes green through the
+defect it points at. No row asserts a count. Three rows carry an explicit LIMITATION:
+`AcquireLock` cannot tell a decoded bit from a hardcoded `true` while the in-memory lock is
+re-entrant for one holder; `RunID` and `WorkflowID` are the same value in this environment;
+and Java's `sideEffect` takes an already-computed value rather than a closure, so its row does
+not prove replay suppression the way Go's can.
+
+`tests/plugin-harness/testdata/hostcallsjava/build/` is gitignored with the directory rather
+than after the first dirty `git status`, which is how §3.305 and §3.308 both started.
+
+**The first version of the harness change was wrong in review, and the way it was wrong is
+worth more than the fix.** Handling Java's wrapper by unwrapping *whenever the payload happened
+to be a JSON string* is one line shorter and made the harness blind in the other three
+languages: a Go SDK that regressed to returning a JSON-encoded string decoded cleanly and
+reported `ok`, where the day before it had failed as `undecodable result`. Measured on all
+three inputs — object, Java-wrapped, and Go-wrapped-by-mistake — the third was
+indistinguishable from correct. The comment sitting directly above that code said *"a tolerant
+decoder is how a harness stops being able to tell a wrong answer from a differently-shaped
+right one"*, so the principle was stated and then not applied to the line beneath it.
+
+The shape is now a parameter the caller states, enforced in **both** directions: a wrapped
+payload from an object language fails, and an unwrapped payload from Java fails too. The second
+half is not symmetry for its own sake — without it, the Java SDK silently dropping its wrapper
+would read as correct, which is the same defect one language over. Falsified both ways:
+
+| perturbation | result |
+|---|---|
+| Go call site claims `resultJSONWrapped` | `this SDK returns the outcome as a JSON-encoded string and this result is not one` |
+| Java call site claims `resultObject` | `this SDK returns the outcome object directly and this result is a JSON-ENCODED STRING` |
+
+**This is the same shape as §3.213's parity guard**, found by WS-1 in review: that one widened
+what it accepted by dropping a prefix filter, this one widened what it accepted to accommodate
+one language's real contract. Both are correct locally and lose a distinction globally, and
+neither is visible from inside the change — the tests stay green either way.

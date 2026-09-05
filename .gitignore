@@ -146,6 +146,14 @@ examples/*/build/
 # outside any directory Gradle owns.
 tests/plugin-harness/testdata/javaworkflow/build/
 
+# Same for the Java host-call fixture, which TestHostCallsJava rebuilds on
+# every run. Nothing under build/ is a fixture here -- the harness reads the
+# .wasm out of the -o directory, never from the source tree -- so unlike
+# javaworkflow there is no prebuilt/ counterpart to keep. Added with the
+# directory rather than after the first dirty `git status`, which is how
+# §3.305 and §3.308 both started.
+tests/plugin-harness/testdata/hostcallsjava/build/
+
 # CI test-report artifacts (go test -json | tee ...), written into the repo
 # root by the workflow steps that check skip budgets.
 *-report.json
