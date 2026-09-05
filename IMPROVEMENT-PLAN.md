@@ -4017,6 +4017,142 @@ intended at all — a promise created by one workflow may be meant for an extern
 it is not, four SDKs bind something Go deliberately omits and `tiers.yaml` says nothing either way.
 The nil-guard message is worth fixing regardless: it is wrong in both worlds.
 
+### 3.213 The release rule, and the denominator that makes it checkable — 🔵 **PLAN 2026-09-05** (WS-1, 2026-09-05)
+
+The bar for release, as stated by the project owner on 2026-09-05:
+
+> All workflow functionality in all SDKs should be tested to function correctly. Any gaps in SDK
+> functionality should be clearly documented. We should also try to fill gaps where feasible. But
+> if some of the language implementations make that very difficult, we can accept a few gaps if
+> they exist for good reasons.
+
+That is three obligations — **tested**, **documented**, **filled where feasible** — and none of
+them can be checked without first agreeing what "all workflow functionality" is. This section
+settles that, and everything below it is work that follows.
+
+## Why the existing coverage numbers cannot answer it
+
+`scripts/sdk-host-call-coverage.py` reports per-SDK percentages against **each SDK's own surface**:
+Go's 37 adapter entries, Python's 73 `HostCalls` methods, Rust's 71, Java's 70, AssemblyScript's
+66. Those denominators are unrelated to each other. 37/37 and 66/66 are both "100%" and they are
+not the same claim — they are not even claims about the same set. §3.207's `61/61` survived four
+places in this document precisely because a percentage against a private denominator cannot be
+wrong in any way a reader can see.
+
+**The host ABI is the only denominator shared by all five.** It is what the engine exports and
+what every guest, in every language, has to go through:
+
+    grep -oE '\.Export\("cleat_[a-z0-9_]+"\)' engine/imports.go | sort -u | grep -c .   # 55
+
+## The classification: 53 workflow-facing, 2 runtime protocol
+
+Two of the 55 are not workflow functionality and no SDK but Go should bind them:
+
+| export | why it is not workflow-facing |
+|---|---|
+| `cleat_poll_work` | supplies entry point and input to **Go wasip1** modules via `_start`/`main`. A Go WASM build calls it from `main()` to receive work before dispatching. |
+| `cleat_complete` | called by the **Go WASM export wrapper** before returning, so the worker can capture the result. |
+
+Both are the Go module handshake, not API a workflow author calls. The other four SDKs reach the
+guest through the Component Model or their own entry convention and have no use for either.
+
+The classification has a mechanical tell that is worth stating, because it means the boundary was
+already legible in the tree and nobody had read it: **these two are the only exports in
+`engine/imports.go` whose registration carries a prose comment.** The other 53 carry an ABI
+signature and nothing else (`// cleat_set_state: (ptr,len x2) -> i64`). Re-derive by extracting the
+comment block above each `.Export(...)` and asking which are not of the form `<name>: <signature>`.
+
+So **the denominator for the release rule is 53**, and `cleat_poll_work` / `cleat_complete` are
+the first two entries on the documented-gap list, with the reason above.
+
+## Measured against 53: two instruments, two answers, no number published
+
+Two independent scans were run over the same tree on 2026-09-05. They agree on Rust (49/53) and
+Java (48/53) and disagree on the other three:
+
+| SDK | scan A | scan B |
+|---|---|---|
+| assemblyscript | 53/53 | **52/53** |
+| rust | 49/53 | 49/53 |
+| java | 48/53 | 48/53 |
+| python | 42/53 | **41/53** |
+| go | 34/53 | **32/53** |
+
+**No per-SDK binding figure is recorded here, because one of these is wrong in every disagreeing
+row and the failure is understood in only one of them.** That one is worth writing down, because
+both scans get it wrong in a way this file already has a name for.
+
+`packages/cleat-as/assembly/host-calls.ts:391` reads:
+
+    // There is no import_cleat_register_query_handler here (removed 2026-08-09).
+
+Scan A searched for the export name as a substring, matched it **inside a comment stating the
+binding was removed**, and recorded AssemblyScript as binding it. That is the §1.1 trap — a grep
+that a *retraction* satisfies — and it is the reason scan A reports 53/53.
+
+Scan B gets that row right and **not for a reason that generalises**. Its pattern is
+`\bcleat_register_query_handler\b`; the text is `import_cleat_register_query_handler`; `_` is a
+word character, so there is no word boundary before `cleat` and the match fails. Correct output,
+accidental mechanism. A retraction comment written without the `import_` prefix would fool scan B
+exactly as it fooled scan A, and neither scan distinguishes a binding from a sentence about one.
+
+So the honest state is: **the classification below is measured and the binding counts are not.**
+What can be said without either scan is the shape, which both agree on — Rust and Java are short
+by a handful, and Go is short by the most, which is not in tension with Go's reported 37/37 but is
+what 37/37 hides. The Go adapter list is 37 entries and every one is wired; the list is simply
+short of the host, and a percentage against itself can never say so. §3.212's seven non-functional
+methods are a subset of a larger shape, not the shape.
+
+One Go row was checked by hand, away from both scans, because it is the kind of claim that should
+not rest on a regex: `cleat_set_state` has five non-test Go references and **all five are
+host-side** — the registration in `engine/imports.go`, the wasmtime binding in
+`engine/wasmtime_hostfuncs_core.go`, a base-name case in `wasm/scan.go`, and the Component Model
+WIT mapping in `wasm/component_rewrite.go`. None is a guest binding. A Go workflow cannot call it.
+
+## What "tested to function correctly" requires: three states, not two
+
+Binding is not the property the rule asks about. The matrix above has two states and the rule needs
+three, per export per SDK:
+
+1. **not bound** — the guest has no way to make the call.
+2. **bound, never executed** — a binding exists and no test has ever run it. This is the state that
+   shipped §3.204 (four Go host calls that did not compile) and §3.205 (a Python end-to-end test
+   one call wide). It reads as coverage and is not.
+3. **executed, with a recorded outcome** — some fixture invokes it and an assertion checks what
+   came back. Only this state satisfies "tested to function correctly".
+
+The host-call execution harness (§3.406, `tests/plugin-harness/`) produces state 3 for wave-1 on
+Go, Rust and AssemblyScript today. Nothing produces it for the other 29 exports on any SDK.
+
+## Work items, in order
+
+1. **Make the 53 x 5 matrix a guarded script, and do not scan for names in text.** Both scans
+   above are textual, and a textual scan cannot tell a binding from a comment about a binding.
+   The instrument has to resolve the actual declaration: the `extern`/`@external`/`native` block
+   per language, and for Go the generated adapter set, which is not textual at all. Nothing here
+   is publishable until that exists in `scripts/` with a baseline and a CI step.
+2. **Give it input assertions.** The mapping from SDK method to host export is many-to-one and
+   language-specific — Go binds through generated adapters, not textual call sites, so the
+   instrument that works for the other four is the wrong one for Go. A scan that silently resolves
+   nothing reports 0% or 100% with equal confidence; both have already happened in this file's
+   history. It needs a known-positive: one export known bound and one known unbound, per SDK.
+3. **Raise the three-state matrix.** State 2 is invisible in every report the project currently
+   produces.
+4. **Fill, or document with a reason.** The `*_state` family is 6 of Go's 19 and 5 of Python's 11;
+   one abstraction, not eleven fixes. The cron family is 3 of Rust's 4 and 3 of Java's 5. That is
+   two mechanisms covering 17 of the 39 unbound pairs — ask whether the answer is a sweep or a
+   mechanism before opening 39 items.
+5. **Record every accepted gap in `tiers.yaml`**, which is where support claims are checked, rather
+   than in prose here. Two entries are already known: `cleat_poll_work` and `cleat_complete`.
+
+## Not settled here
+
+Whether all 53 *should* be bound by all five SDKs is a product question this section does not
+answer — §3.212 raises a live instance, where four SDKs bind `resolve`/`reject` from inside a guest
+and Go deliberately omits it, and `tiers.yaml` says nothing either way. The classification above
+separates "workflow-facing" from "runtime protocol"; it does not assert that every workflow-facing
+export belongs in every language. That decision is an input to item 4, not an output of it.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
