@@ -408,7 +408,18 @@ func (s *MSSQLStore) AppendEventHistory(ctx context.Context, workflowID string, 
 }
 
 // AppendEventHistoryBatch appends multiple events to the history atomically.
+//
+// Retried on a rollback-guaranteed error, like every other MSSQL transaction
+// boundary. IMPROVEMENT-PLAN.md 2.26 deferred this file and
+// mssql_signals_promises.go because 2.60 was rewriting them; 2.60 landed as
+// #283 on 2026-08-04 and the deferral was never lifted.
 func (s *MSSQLStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error {
+	return withRollbackGuaranteedRetry(ctx, "append history batch", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.appendEventHistoryBatchOnce(ctx, workflowID, recs)
+	})
+}
+
+func (s *MSSQLStore) appendEventHistoryBatchOnce(ctx context.Context, workflowID string, recs []EventRecord) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("append history batch: begin tx: %w", err)

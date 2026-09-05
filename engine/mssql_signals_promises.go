@@ -128,6 +128,12 @@ func (s *MSSQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID str
 // missing workflow that is not missing. What would be wrong is claiming a test
 // covers it.
 func (s *MSSQLStore) SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error {
+	return withRollbackGuaranteedRetry(ctx, "set allowed signal callers", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.setAllowedSignalCallersOnce(ctx, workflowID, callers)
+	})
+}
+
+func (s *MSSQLStore) setAllowedSignalCallersOnce(ctx context.Context, workflowID string, callers []string) error {
 	encoded, err := encodeAllowedSignals(callers)
 	if err != nil {
 		return fmt.Errorf("set allowed signal callers: %w", err)
@@ -159,7 +165,28 @@ func (s *MSSQLStore) SetAllowedSignalCallers(ctx context.Context, workflowID str
 	return tx.Commit()
 }
 
+// PollAndClaimSignal is retried on a rollback-guaranteed error. The retry is
+// safe for the same reason it is everywhere else: SQL Server has definitively
+// undone the transaction, so the DELETE that claims the signal did not happen
+// and the row is still there to claim. A claimed-twice signal would need the
+// commit to have succeeded, which is the case withRollbackGuaranteedRetry
+// excludes by construction -- see its doc comment on why mssqlRetry, which also
+// retries unknown-outcome errors, must not be used at a transaction boundary.
 func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+	var payload string
+	var found bool
+	err := withRollbackGuaranteedRetry(ctx, "poll and claim signal", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		payload, found, err = s.pollAndClaimSignalOnce(ctx, workflowID, signalName)
+		return err
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return payload, found, nil
+}
+
+func (s *MSSQLStore) pollAndClaimSignalOnce(ctx context.Context, workflowID, signalName string) (string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", false, err
