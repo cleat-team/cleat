@@ -104,10 +104,13 @@ var asHostCallOutcomes = map[string]expectedOutcome{
 
 	// ---- the row that shows what the other two languages hide ----
 	"AwaitAllChildren": {
-		status:         statusOK,
-		detailContains: `[{"run_id":"00000000-0000-0000-0000-000000000001","error":"child not completed"}]`,
-		why: "reports the host's raw JSON where Go and Rust report `1 child result(s)`, and the difference is worth keeping: the single child result carries \"error\":\"child not completed\", which the count in the other two tables hides completely. Both of those rows are green over a child result that is an error. " +
-			"The fixture reports raw because it cannot honestly count -- its first version counted commas and returned 2 for this one-element array, since the element is an object with a comma inside it",
+		status:         statusSuspended,
+		detailContains: "await_all_children(00000000-0000-0000-0000-000000000001)",
+		why: "an incomplete child suspends, matching Go and Rust. THIS ROW IS WHY THE DEFECT WAS VISIBLE AT ALL: it asserted the host's raw JSON, " +
+			"`[{\"run_id\":\"...\",\"error\":\"child not completed\"}]`, where Go and Rust asserted `1 child result(s)` -- and its own note said both of those were " +
+			"\"green over a child result that is an error\". That was correct, and #754 fixed it, so the row that named the defect is the row that had to change. " +
+			"The reason it could name it is that the fixture reports raw rather than counting: its first version counted commas and returned 2 for this one-element array, " +
+			"since the element is an object with a comma inside it. A count would have hidden the error the same way the other two tables did",
 	},
 
 	// ---- calls that fail, and how badly the message survives ----
