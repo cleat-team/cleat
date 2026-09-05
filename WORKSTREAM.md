@@ -167,7 +167,7 @@ six findings below are that same shape, which is why they are worth a round.
 | 3 | The convergence metric double-counts, and inflates when a status marker is corrected | 2026-09-03: 48 `+###` lines, **27** distinct sections, §3.94 counted 5× |
 | 4 | Assertion-shaped skips are grandfathered into the skip baseline | `tests/plugin-harness/wasm_plugin_test.go:757,760` skip on a JSON decode failure |
 | 5 | `gosec` is disabled, so §3.33's 281 classified findings are unenforced | `.golangci.yml` `disable:` lists `gosec`, `errcheck`, `unused`, `gocyclo` |
-| 6 | Five SDKs carry three versions, against two repo tags | python `0.2.0`; rust, java, AS `0.1.0`; `git tag` → `v0.1.0`, `v0.2.0` |
+| 6 | `CONTRIBUTING.md`'s release section documents three things the repo does not do | no `windows` in `.goreleaser.yml`; `git log -S'cargo publish'` is **empty**; no `ghcr.io` under `.github/`, no `dockers:` in `.goreleaser.yml` |
 
 Finding 2 is the release blocker: a published claim that no check defends. Finding 1 is a month-old
 task whose blocker cleared and whose marker never moved. Finding 3 is why nobody can currently say
@@ -223,20 +223,50 @@ punishes the discipline CLAUDE.md most insists on.**
 | | task | done when |
 |---|---|---|
 | B1 | convert the four assertion-shaped skips in `tests/plugin-harness/wasm_plugin_test.go` (757, 760, 311, 350) to failures | a Java/TeaVM module returning an unparseable result **fails** the harness |
-| B2 | falsify B1 against a real defect | revert #455 in a scratch tree, run the harness, confirm B1's assertion is what goes red |
-| B3 | one release-version story for the five SDKs | `CONTRIBUTING.md` states the policy, and python/rust/java/AS either agree with it or carry a recorded reason not to |
+| B2 | falsify B1 against the code the test actually compiles | each converted assertion goes red on its own line, under its own perturbation of `testdata/javaworkflow/` |
+| B3 | correct the release section, and explain the version spread rather than flattening it | every claim in `CONTRIBUTING.md`'s release section is true of the repo or removed; the four SDK versions are explained, **not** normalised |
 
 B1 is not hygiene. Lines 757 and 760 read `t.Skipf("failed to decode outer wrapper: %v")` and
 `t.Skipf("failed to parse result JSON: %v")` — so a Java plugin workflow that returns garbage is
-reported as a skip, which CI reads as a pass. The two most recent fixes on `develop` are #455,
-"a Java workflow's result is now a JSON object, not JSON in a string", and #456. **That is the
-exact failure these two lines were swallowing**, which is what makes B2 a falsification with a
-known answer rather than a hopeful one: if reverting #455 does not turn B1 red, B1 is not done.
+reported as a skip, which CI reads as a pass. It landed as #724: **five** sites, not the four this
+plan first named.
 
-`scripts/check-skips.sh` will not catch these on its own — it is a set-membership guard, so it
-blocks a *new* silent skip but grandfathers the 214 already in the baseline. Converting a skip
+**B2's first draft named the wrong falsification target, and it failed in the direction that looks
+like success.** It said to revert #455 — "a Java workflow's result is now a JSON object, not JSON
+in a string" — calling that the exact defect these lines had been swallowing. Two things were
+wrong. #455 is 2026-08-09, not recent; `develop` is at #722. And its edits under
+`crates/cleat-java/` are **javadoc only**:
+
+    git show 115b421 -- crates/cleat-java/ | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+      | sed 's/^[+-]//;s/^[[:space:]]*//' | grep -vE '^(\*|/\*\*|\*/|$)'    # prints nothing
+
+Its code changes went to `examples/saga-java-port`, `engine/java_workflow_e2e_test.go` and
+`tiers.yaml`. `TestPluginCalls_Wasm_Java` compiles `tests/plugin-harness/testdata/javaworkflow/`,
+which #455 never touched — so the revert leaves the test green, and the draft's own wording ("if
+reverting #455 does not turn B1 red, B1 is not done") would then have rejected a **correct** B1.
+**A fix and a test can be about the same defect and share no code.** Check the revert reaches the
+test's build inputs before trusting it as a control.
+
+The general form, which is what WS-2 ran instead: perturb the code the test actually compiles,
+once per assertion, and confirm each goes red on *its own* line — which also proves the assertions
+are independent rather than one being reached twice. Applying #455's own fix to this workflow's
+`return` hits the outer decode; returning a non-JSON literal hits the inner parse; a bad `ReadDir`
+path hits the third. All three printed `SKIP` before the change.
+
+`scripts/check-skips.sh` will not catch any of this on its own — it is a set-membership guard, so
+it blocks a *new* silent skip but grandfathers the 214 already in the baseline. Converting a skip
 lowers a count, which the guard reports and never fails on. **Regenerate the baseline after,** per
-this file's protocol for that file.
+this file's protocol for that file. #724 took it 214 → 209.
+
+**B3 turned out larger than a version mismatch, and "one release-version story" was the wrong
+instruction.** The four numbers are not drift to be reconciled; they record which packages have
+ever shipped. `CONTRIBUTING.md`'s release section claims Windows binaries, crates.io publishing of
+`cleat-macro` and `cleat-sdk`, and a GHCR Docker push. The repo does none of the three, and
+`git log -S'cargo publish'` is **empty rather than stale** — it was never true. Only Go is
+versioned by the repo tag; of the other four only Python has a publisher at all, and
+`publish-pypi.yml` has never run. Normalising the three `0.1.0`s would have asserted a `0.2.0` for
+packages whose `0.1.0` never shipped. Left open as §3.304 on purpose: the repair publishes
+irreversibly, so it is the owner's call.
 
 ### WS-3 — two CI contracts that contradict the manifest
 
@@ -464,7 +494,7 @@ tenant (`default`), one `tenant_` schema. Re-derive:
 
 | file | protocol |
 |---|---|
-| `IMPROVEMENT-PLAN.md` | Edit only your own `§` sections. **Do not pick a number — run `scripts/next-section-number.sh`.** Blocks are per stream (WS-1 `3.200–299`, WS-2 `3.300–399`, WS-3 `3.400–499`; `scripts/section-blocks.sh`), and `.githooks/pre-commit` refuses a commit that adds one outside yours. Closed sections are archived by `scripts/archive-closed-sections.py`, never deleted. |
+| `IMPROVEMENT-PLAN.md` | Edit only your own `§` sections. **Do not pick a number — run `scripts/next-section-number.sh`.** Blocks are per stream (WS-1 `3.200–299`, WS-2 `3.300–399`, WS-3 `3.400–499`; `scripts/section-blocks.sh`), and `.githooks/pre-commit` refuses a commit that adds one outside yours. The script reads `origin/develop`, so it cannot see a number already claimed by an *open* PR — open two at once and it hands out the same number twice. Take the second by hand and say so in the PR. Closed sections are archived by `scripts/archive-closed-sections.py`, never deleted. |
 | `scripts/skip-ledger.tsv` | **Add a line; never edit a number.** A job's budget is the sum of its lines, so two streams adding skips do not contend for one total. Attribute a new skip by test name, never by delta. `test-go/engine` and `cluster` move together — the cluster job also runs `./engine/...`. |
 | `scripts/skip-baseline.txt` | Never hand-edit. Regenerate with `scripts/check-skips.sh --update` **after** rebasing. A count going down is the point; a count going up needs a sentence. |
 | `scripts/deadcode-baseline.txt` | Same; `scripts/check-test-only-code.sh --update`. A shrinking baseline is the honest evidence that wiring landed. |
