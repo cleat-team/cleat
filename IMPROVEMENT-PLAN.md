@@ -2938,11 +2938,22 @@ four scalar calls are guarded and the three string ones are not:
       echo -n "$f "; sed -n "/func (s \*execSession) $f(/,/^}/p" engine/*.go \
         | grep -c callSuspendSentinel
     done
-    # SignalWorkflow 1  SendSignalAndWait 0  DurableSend 1  SideEffect 0
-    # AcquireLock 1  ScheduleCron 0  DurableScheduleInvoke 1
+    # 19:55 -- SignalWorkflow 1  SendSignalAndWait 0  DurableSend 1  SideEffect 0
+    #          AcquireLock 1  ScheduleCron 0  DurableScheduleInvoke 1
+    # 20:30 -- all seven 1, after §3.300
 
-So §3.111 is not four-sevenths of the way to the same fix seven times; it is finished for the shape
-it could finish, and the remainder is one WIT change gating three calls.
+**That reading was true when taken and false nineteen minutes later.** §3.300 (`1d70483`, 20:14)
+guarded the three string-returning calls; the paragraph above was measured at about 19:55 and
+merged at 20:2x, so it shipped describing a remainder that no longer existed. §3.111 is now
+complete: all seven return the sentinel.
+
+The measurement is left standing rather than rewritten, because the failure it illustrates is not
+in the number. **A dated measurement stays true; a dated *remainder* does not.** "Four of seven are
+guarded" is a fact about 19:55 and still is. "The remainder is one WIT change gating three calls"
+was a claim about the future of a shared frontier, and a peer stream closed it while this entry was
+in review. When writing about what is left on something two other streams are also working, date
+the measurement and re-derive the remainder at merge, not at authoring — this file's own
+stale-marker rule, applied to the sentence rather than to the heading.
 
 The rule correction itself has landed: `TestTheThreeStopSurfacesAgree` no longer demands
 `result<string, call-failure>` of a scalar-returning stop site — `witCallOutcomeFuncs` reports a
