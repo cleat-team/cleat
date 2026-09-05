@@ -455,6 +455,13 @@ tier1:
     - ./internal/...
     - ./cmd/...
     - ./pluginapi/...
+    # Added 2026-09-05. It was in NO tier while `Test Go (support)` gated it at
+    # must-pass -- see the required_contexts block. Tier 1 because it already ships:
+    # cmd/cleat-worker/{main,setup}.go and cleat/backendkit/metrics.go all import
+    # monitoring/prometheus, so a break already fails this gate at COMPILE time via
+    # ./cmd/... . What this adds is that its own tests now run here too. Costs 0.25s
+    # and needs no DSN.
+    - ./monitoring/...
     - ./tests/integrity/...
     - ./tests/upgrade/...
     - ./tests/crash/...
@@ -973,6 +980,12 @@ tier2:
     - ./tests/manifests/...
     - ./tests/cluster/...
     - ./tests/scale/...
+    # Added 2026-09-05, same reason as ./monitoring/... in tier 1: it was in no tier
+    # while a required context gated it. Tier 2 rather than tier 1 because it has
+    # ZERO runtime imports -- it is the Homebrew formula's own tests (that the formula
+    # pins a tagged tarball, builds the worker with CGO, and runs it in its test
+    # block). Release tooling is real, and it is not a product support claim.
+    - ./packaging/...
 
   # Tier-2 suites gated by a dedicated job rather than by scripts/tier2-gate.sh, because
   # that job already enforces something STRICTER than this gate would.
@@ -1193,13 +1206,22 @@ tier2:
 #                               ./plugin/... ./pluginapi/... ./auth/..., all tier 1
 #       Cluster Integration Tests -> ./tests/cluster/... (tier2.packages)
 #
-#   * TWO packages inside a required context are in no tier at all:
+#   * TWO packages inside a required context were in no tier at all:
 #       ./monitoring/...  ./packaging/...   (both in the `support` matrix entry)
+#     RESOLVED 2026-09-05: monitoring -> tier 1 (it ships inside cmd/cleat-worker and
+#     cleat/backendkit), packaging -> tier 2 (zero runtime imports; it tests the
+#     Homebrew formula). See IMPROVEMENT-PLAN.md §3.402.
 #
 #   * `Test Go (crash)` is the ONE matrix entry that is not required, and it runs a
 #     tier-1 package. That is not a hole: tier1.packages includes ./tests/crash/... and
-#     the required `Tier 1 Gate` runs the whole list. Recorded so the next reader does
-#     not chase it.
+#     the required `Tier 1 Gate` runs the whole list.
+#
+#     DECIDED 2026-09-05: leave it unrequired. What is genuinely not blocking is the
+#     `-race` variant -- the matrix job runs `go test -race`, the Tier 1 Gate does not,
+#     so a data race in the crash tests would not stop a merge. That was judged not
+#     worth a required context of its own; correctness there is gated, only the race
+#     detector is advisory. Recorded because "the only one of twelve that is not
+#     required" reads as an oversight, and twice now someone has started chasing it.
 #
 # Re-derive all three:
 #
@@ -1323,24 +1345,26 @@ required_contexts:
     - context: Test Go (support) on 1.26
       workflow: ci.yml
       job: test-go
-      covers: undeclared
+      covers: tier2
       packages:
         - ./plugin/...       # tier 1
         - ./pluginapi/...    # tier 1
         - ./auth/...         # tier 1
+        - ./monitoring/...   # tier 1, assigned 2026-09-05
         - ./migration/...    # tier 2
-        - ./monitoring/...   # IN NO TIER
-        - ./packaging/...    # IN NO TIER
+        - ./packaging/...    # tier 2, assigned 2026-09-05
       why_required: |
-        Three tier-1 packages, one tier-2 package and two that this file has never
-        assigned. It is required because of the tier-1 three; the other three ride
-        along, which is exactly the kind of thing this block exists to make visible.
+        Four tier-1 packages and two tier-2 ones. Required because of the tier-1 four;
+        the other two ride along, which is the kind of thing this block exists to make
+        visible.
 
-        ./monitoring/... and ./packaging/... are the open question, and this entry is
-        not the place to answer it -- assigning a tier is a product call, not a
-        by-product of writing a guard. Tracked in IMPROVEMENT-PLAN.md §3.402. Until
-        then they are gated at must-pass without any tier claiming them, which is
-        strictly safer than the reverse and still wrong.
+        This entry read `covers: undeclared` until 2026-09-05, because ./monitoring/...
+        and ./packaging/... were in NO tier while this required context gated them at
+        must-pass. Both now have one, decided on what they are rather than on where
+        they sit in the matrix: monitoring/prometheus is imported by
+        cmd/cleat-worker/{main,setup}.go and cleat/backendkit/metrics.go, so it ships
+        inside the worker -> tier 1. packaging/homebrew has zero runtime imports and
+        tests the Homebrew formula -> tier 2. See IMPROVEMENT-PLAN.md §3.402.
 
     # --- other suites in ci.yml ------------------------------------------------------
     - context: Cluster Integration Tests

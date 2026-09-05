@@ -3591,7 +3591,7 @@ for the first time.
 The scale job stays a **required** status check while `./tests/scale/...` is tier 2, which is a
 separate defect — see §3.402. Removing a flaky assertion makes that gate quieter; it does not
 make it correct.
-### 3.402 Five required checks gated tier-2 code, and nothing in the tree said so — 🔷 **GUARDED; two packages still untiered** (WS-3, 2026-09-04)
+### 3.402 Five required checks gated tier-2 code, and nothing in the tree said so — 🟢 **CLOSED 2026-09-05; both packages now tiered** (WS-3, 2026-09-04)
 
 Branch protection on `develop` lists 32 required status contexts. That list lives in
 GitHub, this repo's tier claims live in `tiers.yaml`, and **nothing compared them.** The
@@ -3666,13 +3666,73 @@ declared:** the self-test's first version asked check 3 to catch a relabelled `T
 Gate` and printed `MISSED`. A guard shipped without one would have carried the gap
 silently.
 
-#### Still open
+#### Closed 2026-09-05 — both packages assigned, and the guard had a hole
 
-`./monitoring/...` and `./packaging/...` are in **no tier** and are gated at must-pass by
-`Test Go (support)`. Assigning them is a product call, not a by-product of writing a
-guard, so this item stays 🔷 rather than 🟢. The `undeclared` classification and its
-`why_required` make the state visible in the meantime, and the guard fails if anyone
-relabels it away without writing a reason.
+`./monitoring/...` → **tier 1**, `./packaging/...` → **tier 2**. Decided on what they are, not
+on where they sit in the matrix:
+
+* `monitoring/prometheus` (1734 LOC, 1 test, 0.25s, no DSN) is imported by
+  `cmd/cleat-worker/main.go`, `cmd/cleat-worker/setup.go` and `cleat/backendkit/metrics.go`, so
+  it **ships inside the worker** and is reachable from the public Go API. A break already failed
+  the tier-1 gate at *compile* time through `./cmd/...`; what tier 1 adds is that its own test
+  now runs there.
+* `packaging/homebrew` (141 LOC, 3 tests) has **zero runtime imports** — it asserts the Homebrew
+  formula pins a tagged tarball, builds the worker with CGO, and runs it in its test block.
+  Real, and not a product support claim, so tier 2.
+
+Verified rather than assumed: `scripts/tier2-gate.sh` ran green with the new entry
+(`ran=1546 pass=1534 fail=0 skip=12, 0 regressions`) and its JSON shows all three
+`TestFormula*` tests actually executing, so the new pattern is not matching nothing.
+`scripts/tier-gate.sh` **refused to run locally** — `wasm-tools` is not on PATH and it fails
+closed rather than printing a green that measured nothing — so the tier-1 half is verified by
+running `./monitoring/...` directly (`ok, 0.200s`) plus CI.
+
+**`Test Go (crash)` stays unrequired, decided rather than left.** `./tests/crash/...` is tier 1
+and the required `Tier 1 Gate` runs the whole list, so correctness is gated. What is genuinely
+non-blocking is narrower than "the crash tests": the matrix job runs `go test -race` and the
+gate does not, so a **data race** in them would not stop a merge. Judged not worth a required
+context; recorded because "the only one of twelve that is not required" reads as an oversight
+and has now sent two readers chasing it.
+
+#### The guard shipped with a hole, and assigning the tiers is what exposed it
+
+`check-required-contexts.py` checked a stale `covers: tier1` and a stale `covers: tier2`, and
+**not** a stale `covers: undeclared`. So the moment the two packages got tiers, the
+`Test Go (support)` entry went on claiming they had none — and the guard passed. It printed
+`OK, 32 required contexts declared and consistent` over a manifest whose own header still said
+"IN NO TIER".
+
+That is the failure mode this script's docstring is about, in the script itself. It is also a
+particular shape worth naming: **an `undeclared` label rots by being *fixed*.** The other two
+labels rot when someone changes a tier; this one rots when someone closes the gap it exists to
+report, which is exactly when nobody is looking for it.
+
+Fixed, with a seventh self-test case (`a context still marked undeclared after its packages got
+a tier`), which fails against the pre-fix script and passes after.
+
+#### And a second hole: the list already existed somewhere else
+
+`.github/required-checks.txt` has held the same 32 context names since 2026-08-07, and
+`scripts/check-workflow-guards.py` reads it. **The `required_contexts` block shipped in #729 as a
+second hand-maintained copy of that list, and nothing compared them.** Found while wiring §3.403,
+not by any guard.
+
+That is the exact shape `.golangci.yml` refuses for `unused`: *"one class of finding two
+mechanisms with two baselines, which is the shape that let the routing tables in 2.72 drift
+apart."* The irony is not incidental — this block exists because branch protection and
+`tiers.yaml` were two uncompared copies of one fact, and closing that gap introduced a third
+copy.
+
+They were identical when checked (32 = 32, empty symmetric difference), so nothing had drifted
+yet. Check 5 now asserts equality in both directions, with the two failure modes named
+separately: a context only in the file is undeclared here, and a context only here is **not
+checked against the workflow jobs at all**, since `check-workflow-guards.py` reads the file.
+
+Its self-test case drops a context **and decrements `total`**, so only check 5 fires —
+WORKSTREAM.md's protocol: *"A falsification that fires two assertions proves neither."*
+
+The division of labour is now explicit rather than accidental: the `.txt` is the list of *which*
+contexts are required, and the `tiers.yaml` block is *what each one covers and why*.
 
 ### 3.301 A defer segment could still take a distributed lock — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
