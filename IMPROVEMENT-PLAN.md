@@ -3774,6 +3774,79 @@ Coverage after §3.207–§3.209: **rust 61/61, java 68/68, assemblyscript 66/66
 reach 37/37 and 73/73 when §3.204 and §3.205 land, which completes compile coverage for all five
 SDKs. **What remains unmeasured is execution** — see §3.210.
 
+### 3.210 The host is fully exercised and the guest bindings are not — 🔵 **MEASURED 2026-09-05** (WS-1, 2026-09-05)
+
+The measurement §3.209 said was missing, and the evidence base for the 2026-09-05 three-stream
+plan. §3.206 measured whether a fixture *calls* a host method. This measures whether anything
+*runs* it, which is a different question and the one that matters.
+
+## The host side: every handler, no exceptions
+
+`go test ./engine/ -coverprofile` with all three dialects connected, cross-referenced against the
+handlers `engine/imports.go` registers:
+
+| | |
+|---|---|
+| host handlers reachable from `imports.go` | **56** |
+| with zero coverage | **0** |
+| engine package | 86.7% of statements |
+| lowest covered | `ListCrons` 25.0%, `DeleteCron` 44.8%, `AwaitAllChildren` 66.7% |
+
+**Every host call is executed by some test.** This was not obvious beforehand and is the more
+reassuring half of the result.
+
+## The guest side: 11% to 29%
+
+Host calls a test actually builds **and runs**, per SDK — the compile fixtures of §3.204–§3.209 are
+excluded, because they exist to be compiled and are never executed:
+
+| SDK | executed | surface | compiled |
+|---|---|---|---|
+| go | 11 | 37 | 37 |
+| python | 10 | 73 | 73 |
+| java | 8 | 68 | 68 |
+| rust | 7 | 61 | 61 |
+| assemblyscript | 7 | 66 | 66 |
+
+**The spread is flatter than expected, and that changed the plan.** The working assumption was that
+Go would be well covered by the engine suite and the other four near zero — which would have made
+the work "do the other four". Go is 29%. It is five roughly equal gaps, not one plus four.
+
+**One caveat on the Go row, since it reads worse than it is.** It counts *guest-side* execution:
+host calls made by a Go workflow that a test compiles and runs. Go host handlers are also driven
+directly by unit tests with no guest at all, which is why the host-side table above shows full
+coverage while this row shows 11 of 37. Both numbers are correct and they answer different
+questions.
+
+**The Go surface is 37 and not 38** because #735 removed the `AcquireLockMs` adapter entry, which
+had no host call behind it. A surface that shrinks is the one direction worth noticing: it moves
+the denominator without anything being covered.
+
+## Why the difference between the two tables is the risk
+
+Every binding-layer defect found on 2026-09-04 and 09-05 was a **guest** defect against a host that
+already worked: §3.204 (Go could not compile locks, promises or side effects), §3.200 (the Go guest
+discarded the host's message), §3.201 (the Python SDK discarded the host's answer on 13 calls),
+§3.202 (a stop read as a timeout), §3.303 (16 of 17 plugin calls failing, five green test suites),
+and #455 (a Java result as JSON inside a string).
+
+**Six defects, six guests, zero hosts.** And compile coverage — which this week went from ~11% to
+100% on three SDKs — **cannot catch any of the six**, because every one of them compiles.
+
+## Re-derive
+
+    go test ./engine/ -count=1 -p 1 -coverprofile=/tmp/eng.cov     # needs all three DSNs
+    go tool cover -func=/tmp/eng.cov
+
+then intersect the function names with those `engine/imports.go` reaches via
+`handlerFromContext(ctx).X(`. The per-SDK executed table is
+`scripts/sdk-host-call-coverage.py` restricted to the fixture globs a test builds and runs; the
+list of those was established by grepping the tests for the fixtures they name, and is written into
+the plan rather than inferred.
+
+**The executed table is a hand-run measurement, not yet a guard.** Turning it into one is A2 of the
+2026-09-05 plan. Until then it is a dated number like any other and will rot.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
