@@ -3841,11 +3841,23 @@ and #455 (a Java result as JSON inside a string).
 then intersect the function names with those `engine/imports.go` reaches via
 `handlerFromContext(ctx).X(`. The per-SDK executed table is
 `scripts/sdk-host-call-coverage.py` restricted to the fixture globs a test builds and runs; the
-list of those was established by grepping the tests for the fixtures they name, and is written into
-the plan rather than inferred.
+list of those was established by grepping the tests for the fixtures they name.
 
-**The executed table is a hand-run measurement, not yet a guard.** Turning it into one is A2 of the
-2026-09-05 plan. Until then it is a dated number like any other and will rot.
+**That sentence used to end "and is written into the plan rather than inferred", and it was
+false** — `grep` finds no such list in `WORKSTREAM.md`, so this table was not re-derivable by
+anyone including its author. Corrected 2026-09-05 while A2 turned it into a script, which is how
+it was found: reproducing the numbers required the list, and the list was not there. It now lives
+in `EXECUTED` in `scripts/sdk-host-call-coverage.py`, where each entry names the test that runs it
+and a guard checks both that the test exists and that some job selects it.
+
+**The executed table WAS a hand-run measurement.** A2 made it a guard —
+`scripts/sdk-host-call-coverage.py --check-executed`, with its own ratchet and its own baseline
+key, separate from the compile numbers so that neither can stand in for the other.
+
+The script reproduces this table exactly for python (10), java (8), rust (7) and assemblyscript
+(7). **Go reads 26 rather than 11**, because A1's harness added 24 wave-1 calls; the two overlap
+by 2. So the hand measurement was right about four rows and the fifth moved for a reason the plan
+predicted.
 
 ### 3.211 A guard can be in the tree, green, and selected by no CI pattern at all — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
 
