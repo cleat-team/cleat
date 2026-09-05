@@ -3278,3 +3278,42 @@ Two things seen while doing this and **not** fixed here, both needing their own 
   `tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm` on every run, so any test
   run leaves `git status` dirty. `testdata/javaworkflow/prebuilt/README.md` documents
   having solved exactly this for Java by moving the fixture out of the build directory.
+### 3.304 The Python SDK's only publish path cannot fire, so `cleat-sdk` has never reached PyPI — 🔴 **OPEN** (WS-2, 2026-09-04)
+
+python is tier 1 and PyPI is the one registry `tier1-gate.yml` accepts as a dependency,
+but `cleat-sdk` is not on PyPI:
+
+    curl -s -o /dev/null -w '%{http_code}\n' https://pypi.org/pypi/cleat-sdk/json   # 404
+    curl -s -o /dev/null -w '%{http_code}\n' https://pypi.org/pypi/requests/json    # 200 (control)
+
+`.github/workflows/publish-pypi.yml` has **zero runs, ever**
+(`gh run list --workflow publish-pypi.yml --json databaseId` → `[]`; control:
+`--workflow ci.yml` is non-empty). It has two triggers and neither can fire here:
+
+- `push: tags: ["python-sdk/v*"]` — no such tag exists (`git tag -l 'python-sdk/*'` is
+  empty). Both tags in the repo are plain `v*`.
+- `release: types: [published]` — the release *is* published, but by GoReleaser running
+  under `secrets.GITHUB_TOKEN` (`.github/workflows/release.yml:115`). **GitHub does not
+  trigger workflows from events created with `GITHUB_TOKEN`**, which is the recursion
+  guard, so a GoReleaser-created release cannot start this workflow. Release `v0.2.0` was
+  published 2026-08-10T19:45:42Z; the Release run that created it succeeded at
+  19:42:57Z (`gh run list --workflow release.yml`); `publish-pypi` did not run.
+
+**This is not fixed here, because the repair is a release-policy decision, not a
+mechanical one**, and it publishes to an external registry that cannot be un-published.
+The two options differ in what they couple:
+
+1. Trigger on `push: tags: ["v*"]`. Simple, but it ships whatever `pyproject.toml` says
+   at that moment — today a `v0.3.0` tag would publish `cleat-sdk 0.2.0`, because the
+   Python version has never tracked the repo tag (see CONTRIBUTING, "SDK versions").
+2. Keep the versions independent and start pushing the `python-sdk/v*` tags the workflow
+   already expects. Nothing has ever pushed one, so this trigger has never been exercised
+   either.
+
+**A note on how nearly this went wrong.** The first reading here was "the release
+automation has never executed", from `gh run list --limit 200` showing no Release run.
+That listing reached back **2.5 hours** (`gh run list --limit 200 --json createdAt --jq
+'[.[].createdAt] | min'` → `2026-09-05T00:02:38Z`), so it could not have seen a run from
+2026-08-10 whatever the truth was. Querying the workflow directly showed one run, and it
+succeeded. A limit-bounded listing answers "not in the last N", never "never" — take the
+window's own lower bound before writing "never" down.
