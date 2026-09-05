@@ -148,156 +148,125 @@ different question than the one asked.
 
 ## The next 24 hours
 
-Written 2026-09-04, after a review of the tree, both gates, and the two plan files. **The previous
-round is done**: A1–A4, B1–B2 and C1 all closed, C2 ranked. C3 is the only task that did not move,
-and it returns below as WS-3's C3.
+Written 2026-09-05. **The previous round is complete** — A1–A3, B1–B3, C1–C3 all closed, fifteen
+PRs merged. A2 was the last row and shipped as `scripts/convergence.py`.
 
-The review's conclusion is that the *engineering discipline* here is in better shape than the
-*release claims*. The tree is clean by every count that was checked — 6 `TODO`s in all of Go, 20
-dead exports, no 🔴 heading left in the plan (`grep -cE '^### .*🔴' IMPROVEMENT-PLAN.md` → 0; a
-bare `grep -c '🔴'` returns 3, all of them prose inside §3.113's note about the last one), and
-4642 pass / 0 fail / 6 skip locally across all three dialects.
-What is not clean is the set of places where a **claim** and a **check** have drifted apart. All
-six findings below are that same shape, which is why they are worth a round.
+This round has one subject, and it is chosen from a measurement rather than from a hunch. The
+measurement is §3.210; the short version is two tables.
 
-| # | finding | evidence, re-derivable |
-|---|---|---|
-| 1 | §2.26's remainder — 2 of the MSSQL store's files still have unretried transaction boundaries, and its stated blocker cleared a month ago | `grep -c 'withRollbackGuaranteedRetry(' engine/mssql_events.go engine/mssql_signals_promises.go` → 0 and 0; every other MSSQL file uses it (28 production call sites) |
-| 2 | `Test Go (scale)` is a **required check** on a **tier-2** package, whose contract permits failure | required contexts include it; `tiers.yaml` `tier2.packages` includes `./tests/scale/...` |
-| 3 | The convergence metric double-counts, and inflates when a status marker is corrected | 2026-09-03: 48 `+###` lines, **27** distinct sections, §3.94 counted 5× |
-| 4 | Assertion-shaped skips are grandfathered into the skip baseline | `tests/plugin-harness/wasm_plugin_test.go:757,760` skip on a JSON decode failure |
-| 5 | `gosec` is disabled, so §3.33's 281 classified findings are unenforced | `.golangci.yml` `disable:` lists `gosec`, `errcheck`, `unused`, `gocyclo` |
-| 6 | `CONTRIBUTING.md`'s release section documents three things the repo does not do | no `windows` in `.goreleaser.yml`; `git log -S'cargo publish'` is **empty**; no `ghcr.io` under `.github/`, no `dockers:` in `.goreleaser.yml` |
+**The host is exercised. Every one of it.**
 
-Finding 2 is the release blocker: a published claim that no check defends. Finding 1 is a month-old
-task whose blocker cleared and whose marker never moved. Finding 3 is why nobody can currently say
-whether the project is close to done. Each stream takes one substantive item, one guard, and the
-falsification of its own guard.
+    go tool cover -func on ./engine/ with all three dialects:
+      56 host handlers reachable from engine/imports.go
+      0 with zero coverage        lowest: ListCrons 25.0%, DeleteCron 44.8%
+      engine package: 86.7% of statements
 
-**Take section numbers from `scripts/next-section-number.sh --stream WS-N`, not from this table.**
-As of writing it hands out WS-1 `3.200`, WS-2 `3.303`, WS-3 `3.401`, and those move as siblings land.
+**The guest bindings are not.** Host calls a test actually builds *and runs*, per SDK:
 
-### WS-1 — a tier-1 dialect whose retry path is dead code
+| SDK | executed | surface | compiled |
+|---|---|---|---|
+| go | 11 | 38 | 38 (on #735) |
+| python | 10 | 73 | 73 (on #736) |
+| java | 8 | 68 | 68 ✅ |
+| rust | 7 | 61 | 61 ✅ |
+| assemblyscript | 7 | 66 | 66 ✅ |
 
-| | task | done when |
-|---|---|---|
-| A1 | §2.26's remainder: wrap the transaction boundaries in `engine/mssql_events.go` and `engine/mssql_signals_promises.go` in `withRollbackGuaranteedRetry` | both files use the wrapper, a test proves a 1205 deadlock victim is replayed on those paths, and §2.26's "Still to do" paragraph is retired |
-| A2 | replace the convergence metric with a first-appearance count | `scripts/convergence.py` prints one row per day, carries a `--self-test` that fails on the double-counting input below, and the table in this file is regenerated from it |
-| A3 | falsify A1 | unwrap one boundary, watch the A1 test go red, and **check the message names the deadlock** — not a connection error or a constraint violation standing in for it |
+**The gap between those last two columns is this round's subject**: roughly fifty calls per
+language that now compile and have never been run against a host in that language.
 
-A1 is the single `OPEN` marker left in `IMPROVEMENT-PLAN.md`, and it is narrower than that marker
-makes it sound. **The first draft of this plan got it wrong in a way worth recording**, because the
-same mistake is available to whoever picks it up. Grepping for `mssqlRetry` finds it called from
-nothing but tests, which reads as "SQL Server has no retry path" — a tier-1 dialect claim with
-nothing behind it. That is not the situation. The live wrapper has a different name,
-`withRollbackGuaranteedRetry`, and it has **28 production call sites across 7 files**.
+### Why this and not something else
 
-`mssqlRetry` is uncalled *by design*, and wiring it would be a defect. Its own doc comment says so:
-it gates on `isMSSQLRetryable`, which includes timeouts (258) and dropped connections — errors that
-leave the outcome **unknown**, where the commit may have succeeded and only the acknowledgement was
-lost. Replaying a non-idempotent transaction after one of those double-applies it, which for a
-workflow engine is a duplicated side effect. `withRollbackGuaranteedRetry` gates on the narrower
-set — deadlock victim (1205), snapshot conflicts (3960, 41301–41325) — where the server has
-definitively undone the work. **Do not wire `mssqlRetry`.**
+Every binding-layer defect found on 2026-09-04 and 09-05 was a **guest** defect against a host
+that already worked:
 
-What is actually left is §2.26's own last paragraph: `mssql_events.go` and
-`mssql_signals_promises.go` were deferred because §2.60 was changing them, and told to wait. §2.60
-landed as #283 on 2026-08-04. **The task has been unblocked for a month and the marker never
-moved** — the same stale-marker shape as §3.113, which cost a session last week.
+| | |
+|---|---|
+| §3.204 | Go could not compile locks, promises or side effects at all |
+| §3.200 | the Go guest decoded the host's error length and discarded the message |
+| §3.201 | the Python SDK discarded the host's answer on 13 calls |
+| §3.202 | a stop read as a timeout on Python `await_signals` |
+| §3.303 | 16 of 17 plugin calls failing in every language, all five tests green |
+| #455 | a Java workflow's result was JSON inside a string |
 
-One number to re-derive rather than inherit: §2.26 says 9 boundaries, and `grep -c BeginTx` over
-the two files gives 3. That section has already corrected its own count once — it says so, "there
-are ~20 transaction boundaries in the MSSQL store, not 8." Count them before wrapping them.
+**Six defects, six guests, zero hosts.** That is not a coincidence to note in passing — it says
+where the remaining risk is, and the coverage numbers above say the same thing from the other
+direction. Compile coverage, which this week took from ~11% to 100% on three SDKs, cannot catch
+any of the six: every one of them compiles.
 
-A2 matters because it is the instrument the project steers by. Measured 2026-09-04, the published
-command counts `+### ` diff lines, so a section is counted once per commit that rewrites its
-heading — and rewriting a heading is exactly what correcting a status marker does. **The metric
-punishes the discipline CLAUDE.md most insists on.**
+### The shape of the work, and the trap in it
 
-    git log --since="2026-09-03 00:00" --until="2026-09-03 23:59" -p --format="" \
-      -- IMPROVEMENT-PLAN.md | grep -cE '^\+### [0-9]+\.[0-9]+ '     # 48
-    # distinct section numbers among those 48: 27. Thirteen counted 2-5 times; 3.94 five times.
+**Do not write 250 tests.** Fifty calls times five languages is a sweep, and CLAUDE.md's rule
+applies — a backlog of similar findings is usually one missing abstraction. The abstraction here
+already exists in one place: `tests/plugin-harness/wasm_plugin_test.go` runs one fixture per
+language, collects a result per call, and compares against a table of expected outcomes. §3.303
+extended it to require a *reason* per failure rather than a present key. **That pattern generalises
+from 17 plugin calls to N host calls; nothing else in the tree does.**
 
-### WS-2 — the Java result path, and the skip that hid it
+`tests/cross-language/` is not it — 594 lines, Go and Rust only, one hand-written test per case.
 
-| | task | done when |
-|---|---|---|
-| B1 | convert the four assertion-shaped skips in `tests/plugin-harness/wasm_plugin_test.go` (757, 760, 311, 350) to failures | a Java/TeaVM module returning an unparseable result **fails** the harness |
-| B2 | falsify B1 against the code the test actually compiles | each converted assertion goes red on its own line, under its own perturbation of `testdata/javaworkflow/` |
-| B3 | correct the release section, and explain the version spread rather than flattening it | every claim in `CONTRIBUTING.md`'s release section is true of the repo or removed; the four SDK versions are explained, **not** normalised |
+**Wave 1 is the 23 result-carrying calls, not all 50.** Those are the adapters that decode
+something the guest must interpret — an out buffer, a packed length, a host message — and every
+one of the six defects above lived in one:
 
-B1 is not hygiene. Lines 757 and 760 read `t.Skipf("failed to decode outer wrapper: %v")` and
-`t.Skipf("failed to parse result JSON: %v")` — so a Java plugin workflow that returns garbage is
-reported as a skip, which CI reads as a pass. It landed as #724: **five** sites, not the four this
-plan first named.
+    AwaitAllChildren AwaitAnyChild AwaitChild AwaitPromise ChildWorkflow
+    ChildWorkflowWithOptions CreatePromise DurableAwaitSignals DurableCall
+    DurableCallWithHeartbeat DurableCallWithRetry DurableDefer DurableDeferFunc
+    ListCrons PluginCall PluginCallStreaming PollCancellation PollChild
+    PollSignal RunID ScheduleCron SideEffect WorkflowID
 
-**B2's first draft named the wrong falsification target, and it failed in the direction that looks
-like success.** It said to revert #455 — "a Java workflow's result is now a JSON object, not JSON
-in a string" — calling that the exact defect these lines had been swallowing. Two things were
-wrong. #455 is 2026-08-09, not recent; `develop` is at #722. And its edits under
-`crates/cleat-java/` are **javadoc only**:
+The 15 scalar-only calls — `AcquireLock`, `Now`, `Random`, `DurableSleep` and the rest — carry no
+buffer to mis-decode and are wave 2. Re-derive both lists from `wasm/adapter_metadata.go`; the
+split is "does the error path read a buffer".
 
-    git show 115b421 -- crates/cleat-java/ | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
-      | sed 's/^[+-]//;s/^[[:space:]]*//' | grep -vE '^(\*|/\*\*|\*/|$)'    # prints nothing
+### The dependency, stated rather than wished away
 
-Its code changes went to `examples/saga-java-port`, `engine/java_workflow_e2e_test.go` and
-`tiers.yaml`. `TestPluginCalls_Wasm_Java` compiles `tests/plugin-harness/testdata/javaworkflow/`,
-which #455 never touched — so the revert leaves the test green, and the draft's own wording ("if
-reverting #455 does not turn B1 red, B1 is not done") would then have rejected a **correct** B1.
-**A fix and a test can be about the same defect and share no code.** Check the revert reaches the
-test's build inputs before trusting it as a control.
+**WS-2 and WS-3 cannot start their main task until WS-1's harness exists.** A plan that pretends
+otherwise produces three streams writing three harnesses. So each stream has an independent first
+task, and the harness lands before the second.
 
-The general form, which is what WS-2 ran instead: perturb the code the test actually compiles,
-once per assertion, and confirm each goes red on *its own* line — which also proves the assertions
-are independent rather than one being reached twice. Applying #455's own fix to this workflow's
-`return` hits the outer decode; returning a non-JSON literal hits the inner parse; a bad `ReadDir`
-path hits the third. All three printed `SKIP` before the change.
-
-`scripts/check-skips.sh` will not catch any of this on its own — it is a set-membership guard, so
-it blocks a *new* silent skip but grandfathers the 214 already in the baseline. Converting a skip
-lowers a count, which the guard reports and never fails on. **Regenerate the baseline after,** per
-this file's protocol for that file. #724 took it 214 → 209.
-
-**B3 turned out larger than a version mismatch, and "one release-version story" was the wrong
-instruction.** The four numbers are not drift to be reconciled; they record which packages have
-ever shipped. `CONTRIBUTING.md`'s release section claims Windows binaries, crates.io publishing of
-`cleat-macro` and `cleat-sdk`, and a GHCR Docker push. The repo does none of the three, and
-`git log -S'cargo publish'` is **empty rather than stale** — it was never true. Only Go is
-versioned by the repo tag; of the other four only Python has a publisher at all, and
-`publish-pypi.yml` has never run. Normalising the three `0.1.0`s would have asserted a `0.2.0` for
-packages whose `0.1.0` never shipped. Left open as §3.304 on purpose: the repair publishes
-irreversibly, so it is the owner's call.
-
-### WS-3 — two CI contracts that contradict the manifest
+### WS-1 — the harness, and Go as its reference implementation
 
 | | task | done when |
 |---|---|---|
-| C1 | reconcile the required-check list with `tiers.yaml` | a script asserts that every required context maps to a tier-1 package, or that its tier-2 package is named with a reason; `tests/scale` lands on one side or the other |
-| C2 | remove the wall-clock thresholds from `tests/scale/latency_test.go` | no assertion in the scale suite compares a measured duration to a constant |
-| C3 | §3.33 — re-enable `gosec` behind a baseline file | `gosec` is out of `.golangci.yml`'s `disable:` list, its findings are a ceiling that can only shrink, and CI fails on 282 |
+| A1 | a table-driven host-call execution harness: one fixture per language, one row per call, expected-outcome table | the 23 wave-1 calls run for **Go**, each with a recorded expected outcome, and a call whose outcome changes fails |
+| A2 | executed-coverage measurement becomes a guard | `sdk-host-call-coverage.py` grows an `--executed` mode over the fixtures tests actually run, with its own ratchet |
+| A3 | falsify A1 | revert §3.200's fix; the harness must redden **on the Go row of a specific call**, not on a whole-fixture failure |
 
-C1 and C2 are one incident seen from two sides. `Test Go (scale) on 1.26` is one of the required
-contexts on `develop`, and `./tests/scale/...` is in `tier2.packages` — tier 2's contract is "must
-*run*; may fail against a tracked list", and `tier2.known_failures` is `[]`. So a package the
-manifest permits to fail is blocking merges, and the list that was supposed to make that visible is
-empty. It failed on `491a0f71` (#720, already merged) and passed on the 13 other recent runs.
+A3 is the acceptance test for the harness design, not a formality. §3.200 was a guest discarding
+the host's message on `plugin_call`; if the harness cannot localise that to one call in one
+language, it will not localise the next one either.
 
-C2 is the reason it failed, and CLAUDE.md is explicit: *"If an assertion depends on wall-clock
-time, remove the timing rather than widening it."* **Do not widen the threshold.** The distribution
-says something more interesting anyway — 200 samples, P50 2.676ms, and two samples at 623.876ms and
-625.203ms:
+### WS-2 — Python and Java through the harness
 
-    latency_test.go:144: P99 latency 623.876463ms exceeds threshold 500ms
+| | task | done when |
+|---|---|---|
+| B1 | *(independent, start now)* the expected-outcome table for the 23 calls: what each returns with no backend configured | a reason per call, written down with **why**, in the §3.303 style |
+| B2 | Python and Java fixtures through WS-1's harness | both languages run the 23, and their outcomes match Go's table or differ with a recorded reason |
+| B3 | falsify B2 | revert §3.201; the Python row must redden on the calls that discarded their result, and Java's must not |
 
-That is bimodal, not runner noise: a P50 of 2.7ms with a pair of near-identical ~624ms outliers
-looks like a fixed stall — a lock wait, a retry backoff, a connection-pool timeout — not a slow
-machine. **Find what the 624ms is before deleting the assertion**, and if it is a real stall, that
-is a finding worth its own section rather than a threshold to remove.
+B1 is the part that cannot be rushed and does not need the harness. §3.303's lesson is that the
+table is the test: "a key is present" passed over 16 failures, and "a reason that matches, with a
+why" did not.
 
-C3 fits `.golangci.yml`'s one-linter-per-PR protocol; say in the PR that you are taking `gosec`.
-Note that §3.33's own count is recorded as not re-derivable — `golangci-lint` was not installed when
-it was checked — so **re-measure before writing the baseline**, and let the new number be the one
-that carries the date.
+### WS-3 — Rust and AssemblyScript, and the CI shape
+
+| | task | done when |
+|---|---|---|
+| C1 | *(independent, start now)* decide where the harness runs and what it costs | a written answer for whether wave 1 fits the existing tier-2 jobs or needs its own, with measured job times |
+| C2 | Rust and AssemblyScript fixtures through WS-1's harness | both run the 23 with recorded outcomes |
+| C3 | tier and required-context wiring for whatever C1 concludes | `tiers.yaml` and `check-required-contexts.py` agree with reality, as §3.402 established |
+
+C1 first because it may change A1. If wave 1 cannot run in CI at a tolerable cost, the harness
+needs to be sampleable by call or by language, and that is a design input rather than a
+retrofit — the scale suite's `assertAllSampled` (§3.401) is the cautionary case for sampling
+added late.
+
+### What would make this round a failure
+
+Not "wave 1 is incomplete" — that is a schedule outcome. It fails if **the harness lands and finds
+nothing**, because six defects in two days says the next one is there, and a harness that
+reports green over it is §3.303 again one level up. Every stream's falsification is a real reverted
+defect for exactly that reason.
 
 ---
 
