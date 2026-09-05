@@ -3910,6 +3910,99 @@ diverge as fixtures land.
 `.github/workflows/` is WS-3's file; adding there follows WORKSTREAM.md's protocol — another stream
 may when leaving the mechanism unwired would be worse — and the comment says so at the change.
 
+### 3.212 Seven Go SDK methods are non-functional, and each blames the caller for it — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
+
+`h.ResolvePromise(id, value)` from inside a Go workflow returns:
+
+    durable: ResolvePromise can only be called from within a workflow function (the HostCalls
+    runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] /
+    @CleatEntry / @cleatEntry function.
+
+**It was inside one.** Measured 2026-09-05 by adding a `ResolvePromise` case to the §3.211
+host-call harness fixture and running it: the same `h`, in the same entry point, in the same
+invocation, serves 24 other wave-1 calls correctly. Reproduce by adding to
+`tests/plugin-harness/testdata/hostcallsgo/main.go`:
+
+    id, err := h.CreatePromise("probe")
+    if err != nil { return bad(req.Call, err) }
+    if err := h.ResolvePromise(id, `{"v":1}`); err != nil { return bad(req.Call, err) }
+
+## Why the message is wrong
+
+`cleat/runtime_promises.go:74` guards on `h.resolvePromise == nil` and attributes a nil field to
+being outside a workflow. That is one cause of a nil field. The other is that **nothing ever sets
+it**: `cleat_resolve_promise` has no entry in `adapterDefs`, so `GenerateHostAdapter` emits no
+field assignment, and the guard fires for every caller in every context. The diagnostic describes
+a mistake the user cannot make here and hides the one that is real.
+
+Same for `RejectPromise` (`runtime_promises.go:81`).
+
+## It is seven methods, not one
+
+Every `HostCallsOptions` field is assigned by the generated adapter. A field with no entry in
+`adapterDefs` is never assigned, so its method takes the nil branch **always**. Where that branch
+returns the not-initialized error and nothing else runs, the method cannot work at all:
+
+| method | export |
+|---|---|
+| `ResolvePromise` | `cleat_resolve_promise` |
+| `RejectPromise` | `cleat_reject_promise` |
+| `DurableSend` | `cleat_send` |
+| `ScheduleInvoke` | `cleat_schedule_invoke` |
+| `SendSignalAndWait` | `cleat_send_signal_and_wait` |
+| `ReplyToSignal` | `cleat_reply_to_signal` |
+| `SignalWorkflow` | `cleat_signal_workflow` |
+
+**All seven confirmed by execution**, not inferred — each was called from the harness fixture and
+each returned its own "can only be called from within a workflow function" message.
+
+So a Go workflow cannot signal another workflow, reply to a signal, send a fire-and-forget durable
+message, schedule a delayed invoke, or resolve a promise. **Five feature areas, one cause.**
+
+**Nineteen fields lack an adapter; only these seven are broken.** The other twelve nil-check and
+then fall back to a working implementation — `DurableCallTyped` marshals and calls `DurableCall`,
+`NewUUID` is built on `h.Random()`, `AwaitCondition` polls. Reporting the gap as nineteen would
+have been wrong by twelve, and the difference is invisible in the adapter table: it is in whether
+the method body continues past the nil branch. Re-derive by searching those bodies for the message
+text, not by listing unadapted fields.
+
+## Scope: Go only
+
+| | binds `cleat_resolve_promise` / `cleat_reject_promise` |
+|---|---|
+| python, rust, java, assemblyscript | yes |
+| **go** | **no** |
+
+Re-derive:
+
+    grep -l cleat_resolve_promise python-sdk/cleat_sdk/host_calls.py \
+      crates/cleat-sdk/src/host_calls.rs \
+      crates/cleat-java/src/main/java/cleat/HostCalls.java \
+      packages/cleat-as/assembly/host-calls.ts
+
+So a Go workflow can `CreatePromise` and `AwaitPromise` — which suspends — and nothing in Go can
+resolve one. **The durable-promise feature is not usable end to end from the Go SDK**, and
+`AwaitPromise` suspending forever is the visible symptom of a cause two layers away.
+
+## Why no test caught it
+
+Compile coverage cannot: there is no adapter, so there is nothing to compile, and
+`sdk-host-call-coverage.py`'s Go surface is `adapterDefs` itself — **the measurement's denominator
+excludes exactly what is missing.** A guard whose surface is derived from the thing under test
+cannot report an absence in that thing. The other four SDKs' surfaces are their own `HostCalls`
+classes and have the same property.
+
+That is the argument for measuring against the **host ABI** rather than per-SDK surfaces: 55
+exports, `grep -oE '\.Export\("cleat_[a-z0-9_]+"\)' engine/imports.go | sort -u | wc -l`. Against
+that denominator the gap is visible; against `adapterDefs` it is invisible by construction.
+
+## Not fixed here
+
+Two questions this section does not settle. Whether `resolve`/`reject` from *inside* a guest is
+intended at all — a promise created by one workflow may be meant for an external resolver — and if
+it is not, four SDKs bind something Go deliberately omits and `tiers.yaml` says nothing either way.
+The nil-guard message is worth fixing regardless: it is wrong in both worlds.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
