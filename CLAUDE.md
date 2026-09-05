@@ -187,6 +187,49 @@ confirm the count is non-zero. A loop that cannot see the state it looks for doe
 it prints a confident green, which is the same failure this file's whole "Is this result real?"
 section is about.
 
+**And a negative control is not enough — it needs a KNOWN-POSITIVE too.** The rule above asks
+"can it see the state it looks for". This one asks the harder question: **"does it report a case
+that is genuinely broken?"** Those come apart, because *"it passes when everything is fine"* is
+satisfied by every broken version of a guard.
+
+Measured 2026-09-05 on one new guard (#749), which shipped three bugs, all found this way, all
+**permissive** — each made the guard pass a tree it should have failed:
+
+  * It parsed `go test` **to end of line**, so a `-run` on a continuation line read as
+    *unfiltered* — and unfiltered means "selects everything". The step the guard existed to
+    protect is itself line-continued.
+  * It treated any `./...` as covering any module. `./...` is module-relative, so an unfiltered
+    run in one module vouched for a test in another.
+  * It walked the tree with `rglob`, descending into `.claude/worktrees/` — a whole second copy
+    of the repo — and attributed a test to a module that exists only in a scratch checkout.
+
+All three passed a green tree and a negative control. What found them was declaring one case
+already known to be broken — a test that no CI job selected — and checking the guard said so. It
+did not, three times. The third is the one to watch for, because it is not a parsing mistake: it
+is a scope mistake, and it makes the guard **more** likely to pass as the working tree gets
+messier. Prefer `git ls-files` over `rglob`/`find` for anything that reasons about "the repo".
+
+The same defect has an over-reporting sign, and it is the cheaper one to have: a checker that
+greps for `go test` without excluding comment lines reports a line of prose as an invocation, and
+sends you chasing a defect that is not there (measured 2026-09-05, #748). Neither direction
+models the difference between a command and text that looks like one. Join line-continuations and
+drop comments **before** asking any question about a shell command in a workflow.
+
+**A count answers "did this go up". It never answers "is anything still missing".** Same day,
+same family: a `-run` pattern was widened to select a test that was running nowhere, and the fix
+was verified by counting that test's subtests, 0 before and 24 after. That is proof about one
+test and silent about its siblings — a sibling guard was still selected by nothing, because the
+pattern `TestHostCalls` stops matching one character into `TestHostCallTable…`: `s` against `T`.
+A widened pattern that fixes one name can leave the next one out, and the count cannot say so.
+
+**Use `-list`, which answers directly what a pattern selects, and diff the SET rather than
+comparing counts:**
+
+    go test ./... -list '<pattern>'      # what does this pattern actually select?
+
+`-run` answers that only by implication, and is silent when the answer is "less than you think".
+This is the same shape as "no pending checks also matches checks never started", two sections up.
+
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
 head*, which contains your commit — not your own SHA.
