@@ -406,10 +406,32 @@ func TestParityCoversEveryRegisteredHostFunction(t *testing.T) {
 	for _, m := range regexp.MustCompile(`\.Export\("([^"]+)"\)`).FindAllStringSubmatch(string(src), -1) {
 		registered[m[1]] = true
 	}
-	if len(registered) < 40 {
-		t.Fatalf("found only %d .Export( registrations in imports.go, expected at least 40.\n\n"+
-			"If registration moved behind a helper, this scan sees nothing and "+
-			"reports coverage it never checked.", len(registered))
+	// The source scan is the SECOND reading, and it needs its own check --
+	// otherwise "moved behind a helper" silently shrinks the set this test
+	// verifies and the test still passes, which is the failure it exists to
+	// prevent, one level up.
+	//
+	// A floor would not do it: a floor answers "did the scan find enough",
+	// never "did it find everything". So compare the two readings directly.
+	// `compared` comes from instantiating the host module and asking wazero
+	// what it exports; `registered` comes from reading imports.go as text.
+	// Anything in the first and not the second is a registration this regex
+	// cannot see, and every name it cannot see is a name it cannot require.
+	var unscanned []string
+	for name := range compared {
+		if !registered[name] {
+			unscanned = append(unscanned, name)
+		}
+	}
+	sort.Strings(unscanned)
+	if len(unscanned) > 0 {
+		t.Fatalf("the instantiated host module exports %d function(s) that the "+
+			"imports.go source scan did not find: %s\n\n"+
+			"The scan looks for a literal .Export(\"name\"). If a registration moved "+
+			"behind a helper, a loop or a variable, this test quietly stops requiring "+
+			"it -- a smaller expectation, not a failure. Teach the scan the new "+
+			"spelling; do not narrow what it demands.", len(unscanned),
+			strings.Join(unscanned, ", "))
 	}
 
 	var missing []string
