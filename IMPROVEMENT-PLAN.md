@@ -3074,7 +3074,7 @@ Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-### 3.200 A Go guest was told "error 1 (timeout)" for every plugin failure, and the host's real message was in the buffer beside it — 🟢 **FIXED 2026-09-04** (WS-1, 2026-09-04); the other 13 adapters are 🔴 **OPEN**
+### 3.200 A Go guest was told "error 1 (timeout)" for every plugin failure, and the host's real message was in the buffer beside it — 🟢 **FIXED 2026-09-04**; the remaining 18 adapters closed 2026-09-05 (WS-1)
 
 Found by WS-2 while dumping every plugin key in every language for §3.306, and handed over as
 ABI-adjacent. Same host, same 10 plugins, same 17 calls:
@@ -3148,6 +3148,56 @@ describes the live defect in thirteen other calls.** Five more adapters —
 `ContinueAsNew`, `ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`, `ReleaseLock` — print
 the legend with no output buffer at all, so they have nothing better to print and need the legend
 removed rather than replaced.
+
+## The other 18, closed 2026-09-05
+
+The open half above is done. Every adapter now either reads the host's message or reports a bare
+code; no adapter prints the `CallErrorCode` legend inline.
+
+**The classification had to be done per call, and two of my assumptions above were wrong.**
+
+*First*, the split was 13-with-buffer and 5-without, but the boundary that matters is not "does the
+legend apply" — it is "did the host write something to read". Checked against the host rather than
+inferred: `AwaitChild`'s replay path is `writeResult(ctx, m, resultPtr, rec.Err, resultMaxLen)`
+then `packAwaitChildResult(written, 1)`; `SideEffect`'s is an `errMsg` then
+`packSimpleResult(1, written)`; `AwaitPromise`'s is `rec.PromiseError` then
+`packAwaitPromiseResult(written, false, 1)`. **In each case the reason is in the buffer and the
+guest was returning before reading it** — the same defect as `PluginCall`, on a different packer.
+
+*Second*, I expected several of these error branches to be dead. `CreatePromise`'s handler returns
+`packSimpleResult(0, written)` on every path, so from the handler alone `errCode` is never
+non-zero. **That reasoning stops one layer too early.** `engine/imports.go` returns `errBadParam`
+= `0xFFFFFFFF_00000001` from **64 sites** when it cannot read a guest string, before the handler
+runs at all. Its low byte is 1, so the branch is reachable for every one of these calls — and
+every such failure printed "error 1", which the legend reads as a **timeout** rather than a bad
+parameter.
+
+`hostErrMessage` is safe on exactly those paths, and not by accident: it bounds-checks the length
+against the buffer, so `errBadParam`'s `0xFFFFFFFF` decodes to a length no buffer satisfies and it
+returns "no detail reported by the host" instead of reading out of range.
+
+**The sharpest single case is `AwaitPromise`.** `packAwaitPromiseResult(written, false, 1)` is a
+*rejected promise* — an ordinary application outcome, carrying `rec.PromiseError`. A Go guest was
+told `error 1 (1=timeout)`. The rejection reason was in the buffer the whole time.
+
+The five with no output buffer — `ContinueAsNew`, `ContinueAsNewWithVersion`, `AcquireLock`,
+`AcquireLockMs`, `ReleaseLock` — have nothing to read, so they report the bare code with the
+legend removed rather than a legend for an enum they do not carry.
+
+`ScheduleCron` and `ListCrons` already used `hostErrMessage`, which is what makes this the house
+pattern rather than a new one — and `hostErrMessage`'s doc comment had described the defect in the
+other 18 since it was written.
+
+Two guards, both falsified by restoring the legend on `AwaitChild` alone, which reddens both while
+the other 17 stay green: `TestNoAdapterPrintsTheCallErrorCodeLegendForAnotherLayout` and
+`TestAdaptersWithAnOutputBufferReportWhatTheHostWroteThere`.
+
+**One thing this did not get: nothing in `./wasm/` compiles generated code.** A wrong buffer name
+would pass every test in that package. Verified instead by checking that each buffer and length
+identifier used in an error branch is also used elsewhere in the same adapter, where it compiles
+today — 15 of 15, zero mismatches. A test that builds a workflow exercising every host call would
+be strictly better and does not exist; `examples/dag` does not currently build, for an unrelated
+reason (the HostCalls threading verifier rejects four of its functions).
 
 **Falsification.** Reverting `adapter_metadata.go` and keeping the test reddens
 `TestDurableCallAdaptersReportTheHostsMessageNotJustACode` on `PluginCall` and

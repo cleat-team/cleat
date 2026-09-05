@@ -166,3 +166,75 @@ func TestPluginAdaptersDoNotPrefixWhatCallErrorMessageAlreadyNames(t *testing.T)
 		}
 	}
 }
+
+// TestNoAdapterPrintsTheCallErrorCodeLegendForAnotherLayout asserts that no
+// adapter prints the cleat.CallErrorCode legend inline.
+//
+// The legend enumerates CallErrorCode values, and only packDurableCallResult
+// carries a CallErrorCode -- it is `responseLen<<40 | callErrorCode<<8 |
+// errCode`. Every other packer the host uses (packSimpleResult,
+// packAwaitChildResult, packAwaitPromiseResult, packAwaitSignalsResult,
+// packAcquireLockResult) has an errCode and no such field, so an adapter on one
+// of those was printing a legend for a field that does not exist in its own
+// result word.
+//
+// The five packDurableCallResult adapters do still print the legend, but from
+// inside callErrorMessage and only when the host wrote no message -- which is
+// the one case where it is both true and all there is. That is why this test
+// looks for the legend in adapterDefs rather than in the generated file.
+//
+// What the legend cost, concretely: engine/imports.go returns errBadParam
+// (0xFFFFFFFF_00000001) from 64 sites when it cannot read a guest string. Its
+// low byte is 1, so every one of those surfaced as "error 1", which the legend
+// reads as a timeout rather than a bad parameter. And a rejected promise --
+// packAwaitPromiseResult(written, false, 1), carrying rec.PromiseError in the
+// buffer -- reported "error 1 (1=timeout)" instead of the rejection reason.
+func TestNoAdapterPrintsTheCallErrorCodeLegendForAnotherLayout(t *testing.T) {
+	const legend = "0=unknown 1=timeout"
+	for name, def := range adapterDefs {
+		stmts := strings.Join(def.ResultStmts, "\n")
+		if strings.Contains(stmts, legend) {
+			t.Errorf("%s: prints the CallErrorCode legend inline. Only "+
+				"packDurableCallResult carries a CallErrorCode; if this call is on "+
+				"that layout use callErrorMessage, and otherwise use hostErrMessage "+
+				"or report the bare code.", name)
+		}
+	}
+}
+
+// TestAdaptersWithAnOutputBufferReportWhatTheHostWroteThere asserts that an
+// adapter holding an output buffer reads it on the error path.
+//
+// The host writes the reason into that same buffer and packs its length:
+// AwaitChild's replay path is `writeResult(ctx, m, resultPtr, rec.Err,
+// resultMaxLen)` then `packAwaitChildResult(written, 1)`, SideEffect's is
+// `errMsg` then `packSimpleResult(1, written)`, AwaitPromise's is
+// `rec.PromiseError` then `packAwaitPromiseResult(written, false, 1)`. An
+// adapter that returns before reading the buffer throws that away.
+//
+// hostErrMessage is safe on the paths where nothing was written: it bounds-checks
+// the length against the buffer, so errBadParam's 0xFFFFFFFF decodes to a length
+// no buffer satisfies and it returns "no detail reported by the host" rather
+// than reading out of range.
+//
+// Adapters with no output buffer -- ContinueAsNew, ContinueAsNewWithVersion,
+// AcquireLock, AcquireLockMs, ReleaseLock -- are exempt because there is nothing
+// to read. They report the bare code, without a legend describing an enum they
+// do not carry.
+func TestAdaptersWithAnOutputBufferReportWhatTheHostWroteThere(t *testing.T) {
+	for name, def := range adapterDefs {
+		stmts := strings.Join(def.ResultStmts, "\n")
+		if !strings.Contains(stmts, "if errCode != 0 {") {
+			continue // no error branch to check
+		}
+		if !strings.Contains(stmts, "Buf[") && !strings.Contains(stmts, "Buf)") {
+			continue // no output buffer; exempt, see doc comment
+		}
+		if strings.Contains(stmts, "hostErrMessage(") || strings.Contains(stmts, "callErrorMessage(") {
+			continue
+		}
+		t.Errorf("%s: has an output buffer and an error branch, but reads neither "+
+			"hostErrMessage nor callErrorMessage from it -- the host writes the "+
+			"reason into that buffer and packs its length, and this discards it", name)
+	}
+}
