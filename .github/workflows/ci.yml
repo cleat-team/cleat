@@ -151,6 +151,18 @@ jobs:
       - name: Conditional-skip guard
         run: scripts/check-skips.sh
 
+      # Added by WS-1 rather than WS-3, who own this file, because an unwired
+      # guard is worse than none -- it reads as coverage nobody has. Said here
+      # rather than only in the PR, per WORKSTREAM.md's protocol for this file.
+      #
+      # Fails when a host call stops being exercised by any workflow fixture.
+      # A call no fixture makes is one no test compiles and no test runs, which
+      # is how four Go host calls shipped uncompilable (IMPROVEMENT-PLAN 3.204)
+      # and how the Python end-to-end test's coverage stayed one method wide
+      # (3.205). The baseline can only shrink; a rise is reported, not failed.
+      - name: SDK host-call coverage guard
+        run: scripts/sdk-host-call-coverage.py --check
+
       - name: ABI doc/code consistency guard
         run: scripts/check-doc-consistency.sh
 

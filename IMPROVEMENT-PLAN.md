@@ -3485,7 +3485,9 @@ than baselined.
 
 The test must not learn to skip. `wasip1` ships with the standard toolchain, so there is no
 environmental precondition to detect; a skip here restores exactly the blind spot the test removes.
-It is guarded only by `-short`.
+**It has no skip at all** — the `-short` guard this sentence used to claim lived for about an hour
+before CI rejected it, and the paragraph above records why. Confirm with
+`grep -n 'testing.Short' cmd/cleat/generated_adapter_compiles_test.go` → nothing.
 ### 3.205 The Python end-to-end test's coverage was one host call wide — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
 
 The Python half of §3.204. `TestPythonWasmEndToEnd` compiles
@@ -3566,6 +3568,55 @@ That control is the only reason they are not recorded here as a finding.
 The calls sit in `_exercise_every_host_call`, which the entry point reaches only when its request
 says so. `continue_as_new`, `extend_timeout` and `release_lock` would change a running workflow's
 fate, and this file is on the compile path, not the behaviour path.
+
+### 3.206 A host call no fixture calls is one nothing compiles and nothing runs — 🟡 **MEASURED AND GUARDED 2026-09-05**; the fixtures themselves are open (WS-1, 2026-09-05)
+
+§3.204 and §3.205 were the same defect in two languages: the tests existed, the toolchains were
+provisioned, and the *fixtures* covered almost none of the surface. Four Go host calls shipped
+uncompilable and the Python end-to-end test's coverage was one method wide. Neither was found by a
+test; both were found by someone going looking.
+
+This makes the thing they have in common a number.
+
+`scripts/sdk-host-call-coverage.py` extracts each SDK's public host-call surface and the methods
+any workflow fixture actually calls, and `--check` fails when coverage falls below a baseline that
+can only shrink — the pattern `skip-baseline.txt` and `deadcode-baseline.txt` already use. Wired
+into the `Lint` job.
+
+**Measured 2026-09-05 on `develop`**, before §3.204's and §3.205's fixtures land:
+
+| SDK | covered | surface | |
+|---|---|---|---|
+| python | 13 | 73 | 17.8% |
+| go | 11 | 38 | 28.9% |
+| assemblyscript | 11 | 66 | 16.7% |
+| java | 8 | 68 | 11.8% |
+| rust | 7 | 61 | 11.5% |
+
+§3.205's fixture takes python to 73/73 and §3.204's takes go to 37/37. **The three tier-2 SDKs are
+untouched and are the open half of this item** — roughly 195 host calls across Rust, Java and
+AssemblyScript, each of which has to compile under its own toolchain. One language at a time.
+
+**Read the percentages as a floor, not a measure of risk.** The extractor counts a method as
+covered when a fixture *calls* it; whether the fixture then *asserts* anything about the result is
+a different question, and one WS-2 answered badly for plugins in §3.303 — 16 of 17 plugin calls
+were failing while all five language tests passed, because `expectedKeys` checked that a key was
+present rather than that the call worked. **Coverage is necessary and nowhere near sufficient.**
+
+Written in Python, not shell, deliberately: the surface extraction needs multi-line patterns and
+bracket expressions, and CLAUDE.md records that ugrep, BSD grep and GNU grep disagree on exactly
+those — three tools, three answers, one command. `re` behaves the same everywhere.
+
+The extractor fails rather than reports when a surface comes back empty, because a scan that finds
+zero methods in an SDK with dozens would otherwise read as perfect coverage of nothing.
+
+**Falsified:** rewriting the Go plugin-harness fixture's `h.PluginCall(` calls to
+`h.PluginCallStreaming(` — a name already covered, so the surface loses exactly one — fails
+`--check` with `FAIL go: coverage fell 11 -> 10 of 38`.
+
+`.github/workflows/ci.yml` is WS-3's file. Adding the step there rather than leaving the guard
+unwired follows that file's stated protocol, and the reason is in the workflow comment: an unwired
+guard reads as coverage nobody has.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
