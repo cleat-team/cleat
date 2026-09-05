@@ -3451,3 +3451,125 @@ fixture, which fails exactly the `assemblyscript` subtest in each and nothing el
 (`grep -rn 'dist/workflow\.\(js\|d\.ts\)' --include='*.go' --include='*.md'
 --exclude-dir=node_modules .` finds none), so they are untracked rather than moved — the
 same call `.gitignore` already made for `examples/*/dist/`.
+
+### 3.306 The Go adapter decoded the host's error message and threw it away — 🟢 **FIXED by #730 (§3.200) 2026-09-04** (WS-2 found, WS-1 diagnosed and fixed)
+
+Found by dumping every key of `TestPluginCalls_Wasm_*`'s result. Same host, same 10
+registered plugins, same 17 calls, four guest languages — and one of them said something
+completely different:
+
+| guest | failed `blobstore.put` | failed `pgvector.upsert` |
+|---|---|---|
+| Rust, AssemblyScript, Java | `blobstore: no tenant context` | `plugin function pgvector/upsert not registered…` |
+| **Go**, before #730 | `plugin_call: error 1 (0=unknown 1=timeout …)` | `plugin_call: error 1 (0=unknown 1=timeout …)` |
+| **Go**, after #730 | `plugin_call: blobstore: no tenant context` | `plugin_call: plugin function pgvector/upsert not registered…` |
+
+(Python could not be measured: `componentize-py` is killed with signal 9 building this
+workflow in this sandbox.)
+
+**The mechanism.** The host wrote the text and the adapter decoded its length; the adapter
+then discarded both. `PluginCall`'s `ResultStmts` computed `responseLen` and never read
+`responseBuf` on the error branch. Three faults on one line: the message discarded
+(`engine/plugins.go:361` writes it, and the other guests read it); the number printed taken
+from `result & 0xFF`, which is `errCode` — **hardcoded to a literal 1 on every failure** —
+and printed against the **CallErrorCode** legend, whose field is bits 8-39
+(`packDurableCallResult` is `responseLen<<40 | callErrorCode<<8 | errCode`,
+`engine/memory.go:243`); and the real classification, `callFailureCode`, never read. So
+"why is it 1 for a not-registered plugin" had a flat answer: **it was 1 for everything.**
+
+**Fixed for the two adapters this finding pointed at**, `PluginCall` and
+`PluginCallStreaming`, by #730 (recorded as §3.200). They now decode `callErrorCode` from
+bits 8-39 and pass `responseBuf` to `callErrorMessage`, as the three §2.10 adapters have
+since §2.10. Measured on develop after #730:
+
+    grep -c '0=unknown 1=timeout' wasm/adapter_metadata.go   # 18, was 20
+    grep -c 'callErrorMessage' wasm/adapter_metadata.go      # 5, was 3
+
+**18 adapters still print that legend, and they are a *different* defect** — deliberately
+not taken in #730. `packDurableCallResult` is the only packer with a `CallErrorCode` field
+and it reaches exactly the five above. The other 18 sit over `packSimpleResult`,
+`packAwaitChildResult`, `packAwaitPromiseResult`, `packAwaitSignalsResult` and
+`packAcquireLockResult`, which have no such field at all, so there is nothing to decode:
+13 of them have an output buffer and want `hostErrMessage`; 5 (`ContinueAsNew`,
+`ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`, `ReleaseLock`) have no buffer
+and want the legend **removed** rather than replaced. `hostErrMessage` already exists in
+`wasm/generator.go` for exactly this, and its doc comment warns the legend "would describe
+a rejected cron expression as a timeout" — describing the live defect in 13 other calls.
+
+**§2.10 is why this survived: comment general, test specific.**
+`TestHostAdapterReportsCallErrorCodeNotErrCode` pins this exact property and its doc
+comment states the general rule, but the assertion substring-matches one call name. That
+is the inverse of the trap CLAUDE.md names — there, a test's *name* claimed a mechanism its
+body did not check.
+
+**How it was first mis-diagnosed, because the mistake is reusable.** WS-2 reported the
+symptom with two candidate mechanisms — "the host wrote no response bytes" or "the length
+failed its bounds check" — and **both were wrong**, because both assumed `PluginCall` went
+through `callErrorMessage`. It did not; it had its own literal copy of the format string.
+The assumption came from
+
+    grep -rn '0=unknown 1=timeout' --include='*.go' . | grep -v wasm_plugin_test | head
+
+whose **first** hit is `wasm/generator.go:427` inside `callErrorMessage`, and whose 10th
+line is not its last. The string occurred **22 times in non-test Go across 3 files**, 20 of
+them in `wasm/adapter_metadata.go` — including the `PluginCall` entry that `head` cut off.
+The first hit was a plausible decoy: `callErrorMessage`'s `"%s: error %d"` with
+`callName="plugin_call"` renders byte-identically to the literal that actually produced it.
+**A `| head` on "who produces this string" answers "who produces it first in path order",
+and the two coincide only by luck.** Re-derive the shape, not the first line:
+
+    grep -rn '0=unknown 1=timeout' --include='*.go' . | awk -F: '{print $1}' | sort | uniq -c
+
+Refusing to name a mechanism is what kept the wrong one out of the record. Had the section
+asserted "the host wrote no response bytes", the search would have gone to `engine/` and
+the adapter line would have stayed unread.
+
+### 3.307 Five plugin tests checked that a key was present, not that the call worked — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`TestPluginCalls_Wasm_{Go,Rust,AS,Python,Java}` each verified their 17 expected keys with
+
+    if _, ok := results[key]; !ok { t.Errorf("missing result key: %s", key) }
+
+so `{"error":"plugin function pgvector/upsert not registered…"}` under an expected key
+passed. Measured 2026-09-04: **16 of the 17 calls fail in every language**, and all five
+tests were green. The one that works is `llm.list_models` — which is also the only key any
+of them checked for success, in Go alone, behind two `if …; ok` guards that pass silently
+when the shape is unexpected.
+
+This is the same shape as the skips of §3.303 — a check that reports success without
+checking — and #455's own commit message confesses to the identical trap: *"my own shape
+assertion missed it because it only checked the field was PRESENT."* Known, written down,
+and still shipped in five more places.
+
+**The fix is not to demand success.** The failures are honest: the in-memory harness has
+no tenant context, does not register pgvector, and wires no plugin stream registry. So
+`assertPluginOutcomes` requires instead that every failure match a reason **written down
+with why**, and that `llm.list_models` keeps working. `pluginCallsThatMustSucceed` is the
+list meant to grow; `knownPluginFailures` is the one meant to shrink. A call that starts
+succeeding is an error telling you to lock it in, which is how the second list gets
+smaller rather than staler.
+
+Falsified four ways, each firing its own branch and no other:
+
+| perturbation | result |
+|---|---|
+| drop the `no tenant context` reason | **12** keys report `failed for a reason not in knownPluginFailures` in Go **and** 12 in Java — matching the 12 measured |
+| drop `llm.list_models` from `pluginCallsThatMustSucceed` | `llm.list_models now succeeds… add it` |
+| add `blobstore.put` to `pluginCallsThatMustSucceed` | `blobstore.put must succeed in this environment and did not` |
+| revert #730's `wasm/adapter_metadata.go` change | **Go alone** reddens, with `"plugin_call: error 1 ("` — Java and Rust stay green in the same run |
+
+That last one is a discriminating negative control rather than a mere trigger: this test
+now *depends* on #730, because Go's two bespoke reasons were deleted once it carried the
+host's text like every other guest. The perturbation proves a regression of #730 would be
+caught here, and that the other guests are not covering for it.
+
+**Those two Go entries were removed, not left harmless.** Before #730 `knownPluginFailures`
+carried `plugin_call: error ` and `plugin_call_streaming: error ` to keep the divergence
+visible; re-measured after #730, all 16 of Go's failures match the three host reasons and
+neither entry can fire. A dead reason in a list whose whole purpose is to shrink is exactly
+the rot the list exists to prevent, so the file now carries a comment saying why there is
+no Go-specific entry rather than an entry nothing matches.
+
+Also removed a duplicated `"llm.chat_stream"` from three of the five key lists (Go, Rust,
+Python) — 18 entries, 17 distinct, so one key was checked twice and the count in the log
+line never matched the list.
