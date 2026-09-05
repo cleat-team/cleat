@@ -246,8 +246,15 @@ jobs:
           # and the three drift guards that keep their tables honest.
           #   cd tests/plugin-harness && go test -list 'TestHostCalls|HostCallTableCovers' ./...
           # must list 6. If it lists 3, the guards have come unselected again.
+          #
+          # EverySDKImportIsAHostExport is named separately because it matches
+          # none of the other terms -- it is not a TestHostCalls* and not a
+          # TableCovers*. Added as its own term rather than by renaming the
+          # test to fit an existing one: the name should say what the test
+          # does, and the pattern should say what CI runs. Confirm with
+          #   go test -list 'EverySDKImportIsAHostExport' ./...    -> 1
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDKImportIsAHostExport' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only

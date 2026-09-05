@@ -182,7 +182,7 @@ public class HostCalls {
     private static native long cleatSendRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen);
 
 
-    @Import(module = "env", name = "schedule_invoke")
+    @Import(module = "env", name = "cleat_schedule_invoke")
     private static native long scheduleInvokeRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen, long delayMs);
 
     @Import(module = "env", name = "cleat_run_detached")

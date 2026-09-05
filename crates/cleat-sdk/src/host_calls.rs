@@ -234,7 +234,11 @@ mod imports {
         // cleat_send - ABI 2.33, three strings in
         pub fn cleat_send(svc_ptr: *const u8, svc_len: u32, op_ptr: *const u8, op_len: u32, req_ptr: *const u8, req_len: u32) -> i64;
 
-        // schedule_invoke - ABI 2.34, three strings in, i64 delay
+        // schedule_invoke - ABI 2.34, three strings in, i64 delay.
+        // The host exports this as cleat_schedule_invoke. Without the
+        // link_name the import is env::schedule_invoke, which no runtime
+        // defines, and any module referencing it fails INSTANTIATION.
+        #[link_name = "cleat_schedule_invoke"]
         pub fn schedule_invoke(svc_ptr: *const u8, svc_len: u32, op_ptr: *const u8, op_len: u32, req_ptr: *const u8, req_len: u32, delay_ms: i64) -> i64;
 
         // cleat_run_detached - ABI 2.36, two strings in
