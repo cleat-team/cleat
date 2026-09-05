@@ -150,12 +150,12 @@ tests/integrity	newStressEngine	1
 tests/plugin-harness	TestPluginCalls_MultiDB	1
 tests/plugin-harness	TestPluginCalls_Wasm_AS	1
 tests/plugin-harness	TestPluginCalls_Wasm_Go	1
-tests/plugin-harness	TestPluginCalls_Wasm_Java	3
+tests/plugin-harness	TestPluginCalls_Wasm_Java	1
 tests/plugin-harness	TestPluginCalls_Wasm_Python	1
 tests/plugin-harness	TestPluginCalls_Wasm_Rust	1
 tests/plugin-harness	buildASWorkflowWasm	1
 tests/plugin-harness	buildGoWorkflowWasm	2
-tests/plugin-harness	buildJavaWorkflowWasm	2
-tests/plugin-harness	buildPythonWorkflowWasm	4
+tests/plugin-harness	buildJavaWorkflowWasm	1
+tests/plugin-harness	buildPythonWorkflowWasm	2
 tests/plugin-harness	buildRustWorkflowWasm	2
 tests/soak	TestSoakWorkflowMix	1

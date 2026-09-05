@@ -525,9 +525,10 @@ var adapterDefs = map[string]adapterDef{
 		},
 		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
+			"callErrorCode := uint32((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`	return "", fmt.Errorf("plugin_call: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", fmt.Errorf("%s", callErrorMessage("plugin_call", responseBuf, responseLen, callErrorCode))`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
 		),
@@ -654,9 +655,10 @@ var adapterDefs = map[string]adapterDef{
 		},
 		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
+			"callErrorCode := uint32((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`		return nil, fmt.Errorf("plugin_call_streaming: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`		return nil, fmt.Errorf("%s", callErrorMessage("plugin_call_streaming", responseBuf, responseLen, callErrorCode))`,
 			"}",
 			"var events []cleat.StreamEvent",
 			`if err := json.Unmarshal(responseBuf[:responseLen], &events); err != nil {`,

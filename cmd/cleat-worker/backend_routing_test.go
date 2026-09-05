@@ -29,7 +29,7 @@ func TestRealFixturesRouteToWasmtime(t *testing.T) {
 		name, path, wantLang string
 		wantWasmtime         bool
 	}{
-		{"assemblyscript", "../../tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm", "assemblyscript", true},
+		{"assemblyscript", "../../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm", "assemblyscript", true},
 		{"java-teavm", "../../tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm", "java", true},
 	}
 

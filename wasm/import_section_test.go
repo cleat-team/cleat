@@ -32,7 +32,7 @@ func TestReadImportSection_ParsesEveryImport(t *testing.T) {
 	}{
 		{
 			name:      "assemblyscript",
-			path:      "../tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm",
+			path:      "../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm",
 			wantCount: 3,
 			wantFirst: wasmImport{module: "env", field: "abort"},
 			wantHas:   wasmImport{module: "env", field: "plugin_call_streaming"},
@@ -94,7 +94,7 @@ func TestDetectLanguage_IdentifiesNonGoGuests(t *testing.T) {
 	cases := []struct {
 		name, path, want string
 	}{
-		{"assemblyscript", "../tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm", "assemblyscript"},
+		{"assemblyscript", "../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm", "assemblyscript"},
 		{"java-teavm", "../tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm", "java"},
 	}
 	for _, tc := range cases {
@@ -125,7 +125,7 @@ func TestDetectLanguage_IdentifiesNonGoGuests(t *testing.T) {
 // silently taken on every module with more than one import -- so the
 // optimisation it exists for had never applied.
 func TestNeededEnvImports_NoLongerAlwaysNil(t *testing.T) {
-	b, err := os.ReadFile("../tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm")
+	b, err := os.ReadFile("../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm")
 	if err != nil {
 		t.Fatalf("fixture missing: %v", err)
 	}

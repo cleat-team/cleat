@@ -458,16 +458,65 @@ include any `Co-authored-by` trailers for contributors who participated.
 ## Release process overview
 
 Releases are automated via GoReleaser. When a maintainer pushes a version tag
-(e.g., `v0.5.0`) to the repository, the release workflow:
+(e.g., `v0.5.0`), `.github/workflows/release.yml` runs GoReleaser, which:
 
-1. Builds release binaries for Linux (amd64, arm64), macOS (amd64, arm64), and
-   Windows (amd64).
-2. Publishes the `cleat`, `cleat-worker`, and `cleat-gen` binaries to the
-   GitHub release page.
-3. Publishes the `cleat-macro` and `cleat-sdk` crates to crates.io.
-4. Builds and publishes the `cleat` Docker image to GitHub Container Registry.
+1. Builds `cleat` and `cleat-gen` for **linux and darwin**, amd64 and arm64,
+   and `cleat-worker` for **linux only** — it links wasmtime through CGO, so
+   each artifact is built on a matching host. **There is no Windows build**
+   (`grep -i windows .goreleaser.yml` returns nothing).
+2. Publishes those binaries to the GitHub release page.
+
+That is the whole of it, and the list above is short on purpose. Three things
+this section previously claimed do **not** happen, and the corrections are
+dated 2026-09-04 with the command that re-derives each:
+
+| previously claimed | actually |
+|---|---|
+| Windows amd64 binaries | no `windows` anywhere in `.goreleaser.yml` |
+| `cleat-macro` and `cleat-sdk` published to crates.io | nothing publishes any crate. `git log -S'cargo publish' -- .goreleaser.yml .github/` is **empty**, so this was never true rather than having rotted |
+| `cleat` Docker image pushed to GHCR | `.goreleaser.yml` has no `dockers:` section and `grep -rl ghcr.io .github/` finds nothing. The root `Dockerfile` is real and builds by hand; no automation pushes it |
 
 Release candidates follow semver pre-release tags (e.g., `v0.5.0-rc.1`).
+
+### SDK versions: which numbers are load-bearing
+
+The five SDKs do not share a version, and **should not be bumped to agree**.
+Only one of the five is versioned by the repo tag, and only one more has a
+publisher at all. Measured 2026-09-04:
+
+| SDK | version | set by | publisher |
+|---|---|---|---|
+| Go | repo tag | `git tag` (`v0.1.0`, `v0.2.0`) | the module path — Go's proxy serves the tag |
+| Python (`cleat-sdk`) | `0.2.0` | `python-sdk/pyproject.toml` | `.github/workflows/publish-pypi.yml` |
+| Rust (`cleat-sdk`, `cleat-macro`, `cleat-test`) | `0.1.0` | `crates/*/Cargo.toml` | **none** |
+| Java | `0.1.0` | `crates/cleat-java/build.gradle.kts` | **none** |
+| AssemblyScript | `0.1.0` | `packages/cleat-as/package.json` | **none** |
+
+A version in a manifest that no workflow publishes is inert: nothing reads it,
+and nothing would break if it changed. The three `0.1.0`s are therefore left
+alone deliberately. **Bumping them to 0.2.0 would be worse than leaving them**,
+because it would assert a 0.2.0 release of a package whose 0.1.0 never shipped
+either — so if crate or npm publishing is wired up later, the first real
+release would find its version already claimed.
+
+The Python number is different: it *is* load-bearing, because a publisher reads
+it. Note that it does not track the repo tag and never has — `python-sdk` went
+`0.1.0` → `0.2.0` on **2026-05-07**, six days before the `v0.1.0` tag
+(2026-05-13) and three months before `v0.2.0` (2026-08-10). The agreement
+between "python-sdk 0.2.0" and "tag v0.2.0" is a coincidence of numbering, not
+a policy. Re-derive with
+`git log --format='%h %cI %s' -S'version = "0.2.0"' -- python-sdk/pyproject.toml`.
+
+Which registries the project depends on is decided by tier, and
+`.github/workflows/tier1-gate.yml` already states it: PyPI is accepted because
+python is tier 1; crates.io, npm and Maven Central are not, because their
+languages are tier 2. That is the reason the three inert versions have no
+publisher, and it is a deliberate position rather than an oversight.
+
+**The Python publish path is currently broken — see IMPROVEMENT-PLAN 3.304.**
+`cleat-sdk` is not on PyPI (`curl -s -o /dev/null -w '%{http_code}'
+https://pypi.org/pypi/cleat-sdk/json` → `404`, against `200` for a control
+package), and `publish-pypi.yml` has never run.
 
 ## Areas that need help
 

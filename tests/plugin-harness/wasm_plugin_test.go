@@ -26,6 +26,111 @@ import (
 	_ "github.com/cleat-team/cleat/plugins/webhookingest"
 )
 
+// What the five TestPluginCalls_Wasm_* tests assert about each plugin call.
+//
+// They used to assert only that the key was PRESENT. Measured 2026-09-04, that
+// hid a great deal: 16 of the 17 calls FAIL in every guest language, and the
+// tests passed. A result of
+//
+//	{"error":"plugin function pgvector/upsert not registered. ..."}
+//
+// under an expected key was indistinguishable from a working plugin. That is
+// the same shape as the skips converted in IMPROVEMENT-PLAN 3.303 -- a check
+// that reports success without checking -- and #455's own commit message
+// confesses to the identical trap ("my own shape assertion missed it because it
+// only checked the field was PRESENT").
+//
+// The failures are not a defect in the guests. The in-memory harness
+// environment genuinely has no tenant context, does not register pgvector, and
+// wires no plugin stream registry. So the fix is not to demand success; it is
+// to require that every failure match a REASON WRITTEN DOWN HERE, and that the
+// one call which does work keeps working. A new failure mode, or a new key
+// failing, then has to be looked at rather than absorbed.
+//
+// pluginCallsThatMustSucceed is the list that should grow. knownPluginFailures
+// is the list that should shrink.
+var pluginCallsThatMustSucceed = map[string]bool{
+	// The only one of the seventeen that works: the llm plugin's mock HTTP
+	// server is wired up by NewTestPluginEnvInMemory and needs no tenant.
+	"llm.list_models": true,
+}
+
+// knownPluginFailures are the reasons a plugin call is allowed to fail in the
+// in-memory environment. Each entry says why, so that removing one is a
+// decision rather than an edit.
+var knownPluginFailures = []struct {
+	substr string
+	why    string
+}{
+	{"no tenant context", "NewTestPluginEnvInMemory installs no tenant, and most plugins scope their storage by tenant"},
+	{"not registered. Check that the plugin is deployed", "pgvector is not among the 10 plugins the harness registers"},
+	{"no plugin stream registry configured", "llm.chat_stream needs a stream registry the in-memory env does not wire"},
+
+	// There is deliberately no entry here for Go's old "plugin_call: error 1"
+	// legend. Until #730 (3.200, and 3.306 for the finding) the Go adapter
+	// discarded the host's message and printed a constant errCode against
+	// another field's legend, so Go needed two entries of its own. It now
+	// carries the host's text and matches the three reasons above like every
+	// other guest -- re-measured 2026-09-04 after #730, all 16 of its
+	// failures. Those two entries were removed rather than left harmless:
+	// a dead reason in a list whose whole purpose is to shrink is the rot
+	// this list exists to prevent.
+}
+
+// pluginResultError reports the error text a plugin result carries, if any.
+//
+// A result that is not a JSON object cannot carry an {"error": ...} field and
+// is treated as a success. That is deliberate rather than an oversight: the
+// harness workflows emit an object per call, so a non-object here is a shape
+// change the caller's own decode assertions are responsible for catching.
+func pluginResultError(v interface{}) (string, bool) {
+	m, isObject := v.(map[string]interface{})
+	if !isObject {
+		return "", false
+	}
+	e, hasErr := m["error"]
+	if !hasErr {
+		return "", false
+	}
+	return fmt.Sprint(e), true
+}
+
+// assertPluginOutcomes checks every expected key for presence AND outcome.
+func assertPluginOutcomes(t *testing.T, results map[string]interface{}, expectedKeys []string) {
+	t.Helper()
+	for _, key := range expectedKeys {
+		v, present := results[key]
+		if !present {
+			t.Errorf("missing result key: %s", key)
+			continue
+		}
+		errText, failed := pluginResultError(v)
+		mustSucceed := pluginCallsThatMustSucceed[key]
+
+		switch {
+		case mustSucceed && failed:
+			t.Errorf("%s must succeed in this environment and did not: %s", key, errText)
+		case !mustSucceed && !failed:
+			t.Errorf("%s now succeeds. That is progress, and it has to be "+
+				"locked in: add %q to pluginCallsThatMustSucceed so it "+
+				"cannot regress silently.", key, key)
+		case failed && !isKnownPluginFailure(errText):
+			t.Errorf("%s failed for a reason not in knownPluginFailures: %q\n"+
+				"Either the environment changed or this is a real break. Do "+
+				"not widen the list without saying why.", key, errText)
+		}
+	}
+}
+
+func isKnownPluginFailure(errText string) bool {
+	for _, k := range knownPluginFailures {
+		if strings.Contains(errText, k.substr) {
+			return true
+		}
+	}
+	return false
+}
+
 // findProjectRoot walks up from the working directory to locate the repo root.
 //
 // It looks for the go.mod declaring the ROOT module, not merely the nearest
@@ -308,7 +413,11 @@ func buildPythonWorkflowWasm(t *testing.T) []byte {
 
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil {
-		t.Skipf("reading cleat build output: %v", err)
+		// Fatal, not Skip, for the same reason as the build failure above:
+		// toolchain presence was already decided, and the build reported
+		// success. An output directory that will not read at this point is a
+		// real failure.
+		t.Fatalf("reading cleat build output %s: %v", tmpDir, err)
 	}
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) == ".wasm" {
@@ -320,7 +429,7 @@ func buildPythonWorkflowWasm(t *testing.T) []byte {
 			return wasmBytes
 		}
 	}
-	t.Skipf("Python componentize-py build produced no .wasm — pipeline may need setup, skipping")
+	t.Fatalf("Python componentize-py build reported success but produced no .wasm in %s", tmpDir)
 	return nil
 }
 
@@ -347,7 +456,11 @@ func buildJavaWorkflowWasm(t *testing.T) []byte {
 
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil {
-		t.Skipf("reading cleat build output: %v", err)
+		// Fatal, not Skip, for the same reason as the build failure above:
+		// toolchain presence was already decided, and the build reported
+		// success. An output directory that will not read at this point is a
+		// real failure.
+		t.Fatalf("reading cleat build output %s: %v", tmpDir, err)
 	}
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) == ".wasm" {
@@ -420,22 +533,9 @@ func TestPluginCalls_Wasm_Go(t *testing.T) {
 		"pgvector.upsert", "pgvector.search", "pgvector.delete",
 		"slack-notify.send_message",
 		"webhook-ingest.await_webhook",
-		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream", "llm.chat_stream",
+		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
 	}
-	for _, key := range expectedKeys {
-		if _, ok := results[key]; !ok {
-			t.Errorf("missing result key: %s", key)
-		}
-	}
-
-	// llm.list_models should have succeeded (mock HTTP server wired up).
-	if v, ok := results["llm.list_models"]; ok {
-		if m, ok := v.(map[string]interface{}); ok {
-			if _, hasErr := m["error"]; hasErr {
-				t.Errorf("llm.list_models unexpectedly failed: %v", m["error"])
-			}
-		}
-	}
+	assertPluginOutcomes(t, results, expectedKeys)
 
 	// Replay verification: replaying from the recorded history must produce
 	// the exact same result.
@@ -522,13 +622,9 @@ func TestPluginCalls_Wasm_Rust(t *testing.T) {
 		"pgvector.upsert", "pgvector.search", "pgvector.delete",
 		"slack-notify.send_message",
 		"webhook-ingest.await_webhook",
-		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream", "llm.chat_stream",
+		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
 	}
-	for _, key := range expectedKeys {
-		if _, ok := results[key]; !ok {
-			t.Errorf("missing result key: %s", key)
-		}
-	}
+	assertPluginOutcomes(t, results, expectedKeys)
 
 	result2, err := wenv.Replay(t, wasmBytes, "call_all_plugins", `{}`, history)
 	if err != nil {
@@ -610,11 +706,7 @@ func TestPluginCalls_Wasm_AS(t *testing.T) {
 		"webhook-ingest.await_webhook",
 		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
 	}
-	for _, key := range expectedKeys {
-		if _, ok := results[key]; !ok {
-			t.Errorf("missing result key: %s", key)
-		}
-	}
+	assertPluginOutcomes(t, results, expectedKeys)
 
 	result2, err := wenv.Replay(t, wasmBytes, "call_all_plugins", `{}`, history)
 	if err != nil {
@@ -700,13 +792,9 @@ func TestPluginCalls_Wasm_Python(t *testing.T) {
 		"pgvector.upsert", "pgvector.search", "pgvector.delete",
 		"slack-notify.send_message",
 		"webhook-ingest.await_webhook",
-		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream", "llm.chat_stream",
+		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
 	}
-	for _, key := range expectedKeys {
-		if _, ok := results[key]; !ok {
-			t.Errorf("missing result key: %s", key)
-		}
-	}
+	assertPluginOutcomes(t, results, expectedKeys)
 
 	// Replay verification: replaying from the recorded history must produce
 	// the exact same result.
@@ -754,10 +842,12 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 	var results map[string]interface{}
 	var rawJSON string
 	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
-		t.Skipf("failed to decode outer wrapper: %v\nraw: %.500s", err, result)
+		t.Fatalf("Java/TeaVM result is not the JSON-encoded string the ABI "+
+			"contract requires: %v\nraw: %.500s", err, result)
 	}
 	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-		t.Skipf("failed to parse result JSON: %v", err)
+		t.Fatalf("Java/TeaVM result unwrapped to text that is not a JSON "+
+			"object: %v\nunwrapped: %.500s", err, rawJSON)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 
@@ -773,11 +863,7 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 		"webhook-ingest.await_webhook",
 		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
 	}
-	for _, key := range expectedKeys {
-		if _, ok := results[key]; !ok {
-			t.Errorf("missing result key: %s", key)
-		}
-	}
+	assertPluginOutcomes(t, results, expectedKeys)
 
 	result2, err := wenv.Replay(t, wasmBytes, "CallAllPlugins", `{}`, history)
 	if err != nil {

@@ -1386,8 +1386,14 @@ its TTL and blocks every later run using that key, and `TerminateWorkflow`, wher
 a run that the HTTP layer already answered 409 for still runnable — the §1.2 defect fixed in
 #263, reachable again through a different door.
 
-**Still to do:** `mssql_events.go` and `mssql_signals_promises.go` (9 boundaries), which
-§2.60 (#283) is changing. Do those after it lands rather than into a conflict.
+**Done 2026-09-05 — see §3.203.** This paragraph read "**Still to do:** `mssql_events.go` and
+`mssql_signals_promises.go` (9 boundaries), which §2.60 (#283) is changing. Do those after it
+lands rather than into a conflict." It was written at 17:27 on 2026-08-04; #283 landed at 22:23
+the same day, and the deferral outlived its own precondition by a month. The 9 is
+`mssql_signals_promises.go`'s own count of DB write sites (1 `BeginTx` + 8 `s.db.ExecContext`),
+not transaction boundaries across both files — there were 3 of those, all now wrapped, and
+single-statement calls are out of scope for every increment of this item. §3.203 has the
+measurement.
 
 ### 2.50 Parent close policy fails silently on all three dialects — ✅ **FIXED**
 
@@ -3137,6 +3143,202 @@ Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
+### 3.200 A Go guest was told "error 1 (timeout)" for every plugin failure, and the host's real message was in the buffer beside it — 🟢 **FIXED 2026-09-04** (WS-1, 2026-09-04); the other 13 adapters are 🔴 **OPEN**
+
+Found by WS-2 while dumping every plugin key in every language for §3.306, and handed over as
+ABI-adjacent. Same host, same 10 plugins, same 17 calls:
+
+| guest | what it reported |
+|---|---|
+| Rust / AS / Java | `plugin function pgvector/upsert not registered. Check that...` |
+| Go | `plugin_call: error 1 (0=unknown 1=timeout 2=transient ...)` |
+
+WS-2 posed two candidates — the host wrote no response bytes, or the length failed
+`callErrorMessage`'s bounds check — and deliberately did not guess between them. **It was
+neither.** The host writes the text and the guest decodes the length correctly. The Go adapter
+then discards it:
+
+```go
+responseLen := uint32(uint64(result) >> 40)
+errCode := uint32(result & 0xFF)
+if errCode != 0 {
+	return "", fmt.Errorf("plugin_call: error %d (0=unknown 1=timeout ...)", errCode)
+}
+return unsafe.String(&responseBuf[0], int(responseLen)), nil
+```
+
+`responseLen` is computed and then unused on the error branch; `responseBuf` is never read there.
+The host side is `engine/plugins.go`:
+
+```go
+written, _ := s.writeResult(ctx, m, responsePtr, errStr, responseMaxLen)
+return packDurableCallResult(int(written), callFailureCode, 1)
+```
+
+**Three things were wrong at once, which is why the symptom looked like a length bug.**
+
+1. *The message is discarded.* Nothing reads `responseBuf` on the failure path.
+2. *The printed number comes from a different field than the legend describes.*
+   `packDurableCallResult` is `responseLen<<40 | callErrorCode<<8 | errCode`, so `result & 0xFF`
+   is `errCode` — which the host hardcodes to literal `1` on **every** failure path. Simulating
+   the packer with `callErrorCode` varied over 0/2/3/5 prints `1` every time. The legend beside
+   it enumerates `CallErrorCode`, which lives at bits 8–39.
+3. *The real classification is discarded too.* `callFailureCode = callErrorUnavailable = 2`,
+   never decoded.
+
+So "why is it 1 for a not-registered plugin" has a flat answer: **it is 1 for everything.** Not a
+timeout, not a classification — a constant.
+
+**This is a mechanism, not a bug, and the scope is the finding.** 20 of the 23 adapters in
+`wasm/adapter_metadata.go` print that legend; three call `callErrorMessage`. Those three —
+`DurableCall`, `DurableCallWithRetry`, `DurableCallWithHeartbeat` — are exactly the calls named in
+§2.10. **The fix was applied to the report's examples and never generalised.**
+
+The set that legend can *ever* be right for is decidable, because only one packer carries a
+`CallErrorCode`:
+
+    grep -rn 'packDurableCallResult(' --include='*.go' engine/ | grep -v _test.go
+
+reaches `durablecalls.go`, `heartbeats.go` and `plugins.go` — five adapters. The three above, plus
+`PluginCall` and `PluginCallStreaming`. **Those two are this fix.** Both now decode
+`callErrorCode` from bits 8–39 and pass the buffer to `callErrorMessage`, which is what the other
+three have done since §2.10.
+
+**Still open: the other 13.** `packSimpleResult`, `packAwaitChildResult`, `packAwaitPromiseResult`,
+`packAwaitSignalsResult` and `packAcquireLockResult` each carry an `errCode` and **no
+`callErrorCode` field at all** — so `DurableAwaitSignals`, `DurableDefer`, `DurableDeferFunc`,
+`PollSignal`, `ChildWorkflow`, `ChildWorkflowWithOptions`, `AwaitChild`, `AwaitAllChildren`,
+`PollChild`, `AwaitAnyChild`, `CreatePromise`, `AwaitPromise` and `SideEffect` print a legend for
+a field that does not exist. That is a different defect with a different fix — `hostErrMessage`,
+or no legend — and it is not taken here. `wasm/generator.go` already says so in
+`hostErrMessage`'s doc comment, which warns that printing the `CallErrorCode` legend beside a
+simple-result code "would describe a rejected cron expression as a timeout". **That comment
+describes the live defect in thirteen other calls.** Five more adapters —
+`ContinueAsNew`, `ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`, `ReleaseLock` — print
+the legend with no output buffer at all, so they have nothing better to print and need the legend
+removed rather than replaced.
+
+**Falsification.** Reverting `adapter_metadata.go` and keeping the test reddens
+`TestDurableCallAdaptersReportTheHostsMessageNotJustACode` on `PluginCall` and
+`PluginCallStreaming` — both assertions, both adapters, naming the discarded message — and
+`TestPluginCallDecodesCallErrorCodeFromTheRightBits` on the shift. **`DurableCall`,
+`DurableCallWithRetry` and `DurableCallWithHeartbeat` stay green in the same run**, which is the
+negative control: the test discriminates the two broken adapters from the three correct ones
+rather than merely firing.
+
+**Why the existing guard did not catch it.** `TestHostAdapterReportsCallErrorCodeNotErrCode`
+(§2.10) pins exactly this property — its doc comment describes a call that "reported Code 4
+(invalid request) and then said 'error 1', which the legend reads as a *timeout*". Its assertion
+is a substring match on `callErrorMessage("cleat_call", ...)`. **The comment states the general
+rule and the assertion names one call**, so it stayed green while two other adapters on the same
+layout carried the same defect. This is CLAUDE.md's "a test whose NAME asserts the mechanism"
+in its other form: here the *comment* asserted the mechanism and the test checked an instance.
+
+**Follow-up, same day — the fix prefixed what `callErrorMessage` already names.** Wrapping its
+result in `fmt.Errorf("plugin_call: %s", ...)` doubles the call name on the fallback path
+(`plugin_call: plugin_call: error 2 (...)`) and, on the success path, prepends a name the other
+guests do not print. The second half is the one that matters: this section exists to make a Go
+guest report what Rust, AS and Java report, and `plugin_call: blobstore: no tenant context`
+against their `blobstore: no tenant context` is still a divergence — a smaller one than
+`error 1`, but the same kind. Measured by WS-2 on the harness: `llm.chat_stream` read
+`plugin_call_streaming: plugin_call_streaming: no plugin stream registry configured`. Fixed by
+returning `callErrorMessage`'s result verbatim; the fallback keeps the call name because
+`callErrorMessage` puts it there itself, which is exactly why the wrapper must not. Pinned by
+`TestPluginAdaptersDoNotPrefixWhatCallErrorMessageAlreadyNames`. **This decides the question for
+the remaining 13 too** — whatever `hostErrMessage` does about prefixing will do it for all of
+them at once, so settling it here is cheaper than unpicking it later.
+
+CLAUDE.md records that all four prior defects at this boundary were "the value meant the wrong
+thing on one side of the boundary", and none was an overflow. This is a fifth, and it is that
+exactly — twice over: a length that was read and dropped, and a code read from the wrong field.
+
+### 3.203 §2.26's last two files were deferred pending §2.60, which landed a month earlier — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+§2.26 wrapped the MSSQL store's transaction boundaries in `withRollbackGuaranteedRetry` one file
+at a time, and its last paragraph reads:
+
+> **Still to do:** `mssql_events.go` and `mssql_signals_promises.go` (9 boundaries), which
+> §2.60 (#283) is changing. Do those after it lands rather than into a conflict.
+
+**§2.60 landed as #283 at 2026-08-04T22:23 and the deferral was never lifted.** The instruction
+was correct when written — the paragraph is dated 17:27 the same day, five hours before the thing
+it was waiting for. It then outlived its own precondition by a month. Same shape as §3.113: a
+marker that was accurate when filed and stopped being accurate without anyone editing it.
+
+Three boundaries wrapped: `AppendEventHistoryBatch`, `SetAllowedSignalCallers` and
+`PollAndClaimSignal`, each split into a `…Once` body the way `CompactHistory` and
+`DeleteExpiredEvents` already were. `PollAndClaimSignal` returns `(string, bool, error)` and the
+wrapper takes `func() error`, so its results are captured in the closure.
+
+**Retrying `PollAndClaimSignal` cannot claim a signal twice**, and the reason is the wrapper's
+whole design rather than anything about this call: `withRollbackGuaranteedRetry` gates on
+`isMSSQLRollbackGuaranteed` — deadlock victim (1205), snapshot conflicts (3960, 41301–41325) —
+where SQL Server has definitively undone the transaction, so the claiming `DELETE` did not happen.
+A double claim needs the commit to have *succeeded*, which is the unknown-outcome case that
+wrapper excludes by construction and `mssqlRetry` does not. **Do not substitute `mssqlRetry` here.**
+
+## The "9 boundaries" was counting something else, and it reproduces exactly
+
+Not recorded as "9 was wrong", because it was not — it answered a different question than the
+sentence around it asks. Measured at `f0074d46`, the commit that wrote the line:
+
+| file, at `f0074d46` | `BeginTx` | `s.db.ExecContext` |
+|---|---|---|
+| `mssql_signals_promises.go` | 1 | 8 |
+| `mssql_events.go` | 1 | 0 |
+
+**1 + 8 = 9 is `mssql_signals_promises.go` alone**, counting every DB write site rather than every
+transaction boundary. The sentence attributes the 9 to both files, so on its own terms the figure
+should have been 10.
+
+The units matter more than the total. **No bare `s.db.ExecContext` is wrapped anywhere in the
+MSSQL store**, including in the files §2.26 declared done — `mssql_deployment.go` still has 7 and
+`mssql_schedules.go` 8. Single-statement autocommit calls were consistently out of scope for every
+increment, so reading the 9 as work-remaining would reopen every finished file. Re-derive with:
+
+    for f in engine/mssql_*.go; do case "$f" in *_test.go) continue;; esac
+      printf "%-34s BeginTx=%s dbExec=%s wrapped=%s\n" "$(basename $f)" \
+        "$(grep -c BeginTx $f)" "$(grep -c 's\.db\.ExecContext' $f)" \
+        "$(grep -c 'withRollbackGuaranteedRetry(' $f)"; done
+
+This is WS-3's correction, and it generalises past this number: **check what a stale count was
+counting, not only whether it reproduces.** Two counts went wrong the same way on 2026-09-04 —
+§3.33's "only two actionable findings" was true of the root module and missed a G112 in
+`examples/`, and a gosec comment claimed 0 findings where the config actually run gave 67. A count
+is scoped to what was walked, and the scope is the part nobody writes down.
+
+## The guard is structural, and it is the part that outlives the fix
+
+`TestEveryMSSQLTransactionBoundaryIsRetried` walks every `engine/mssql_*.go` with `go/ast` and
+fails on any function that opens **and commits** a transaction without being reached through
+`withRollbackGuaranteedRetry`. A set-membership baseline would not have caught the original
+defect, because the deferred boundaries were never in a baseline to begin with.
+
+It fired on its first run, on a false positive worth keeping in the definition: keying on
+`BeginTx` alone flags `beginTxWithContext`, which opens a transaction and hands it back, and
+`tenantSessionConn.BeginTx`, a driver passthrough. Neither commits. **A boundary is a function
+that opens and commits**; its callers are checked on their own.
+
+Deliberately structural rather than behavioural. Proving a retry happens needs a live deadlock,
+which `engine/mssql_deadlock_test.go` does for the paths it covers — and which skips wherever
+`CLEAT_TEST_MSSQL` is unset, so it cannot be the thing that stops a boundary being added
+unwrapped.
+
+**Falsified:** removing the wrapper from `AppendEventHistoryBatch` alone reddens the guard naming
+that function, with the other two still passing.
+
+`engine/mssql_tenant_predicate_test.go`'s allowlist caught the refactor within seconds — its entry
+keyed on `PollAndClaimSignal` and the unscoped statement had moved to `pollAndClaimSignalOnce`.
+Renamed rather than deleted, matching `compactHistoryOnce` and `deleteExpiredEventsOnce` from
+§2.26's earlier increments, which is evidence the split follows the house pattern.
+
+Verified 4623 pass / 0 fail / 6 skip on `./engine/ -p 1` with all three dialects connected.
+**The first attempt at that run reported 825 failures** because the DSNs were reconstructed from
+memory and named a database `cleat_test` that does not exist — the exact failure CLAUDE.md's
+"Is this result real?" section describes itself committing. The DSNs are written down in
+`WORKSTREAM.md`; read them. The probe used afterwards has a negative control: the good DSN passes
+`TestPluginMigrations_AllDialects` and a wrong password fails it.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
@@ -3272,6 +3474,74 @@ the whole finding turns on. What surfaced it was `store_lifecycle.go:1045` namin
 remediation string, which contradicted a list built by grep. **The narrower pattern was the one
 that flattered the story** — it still showed a gap, just not the interesting one — which is why
 it was not questioned until something outside the grep disagreed with it.
+
+### 3.401 The scale suite's wall-clock thresholds measured the CI host, not cleat — 🟢 **FIXED 2026-09-04** (WS-3, 2026-09-04)
+
+`tests/scale/latency_test.go` carried two wall-clock assertions: `p50 > 100ms` and
+`p99 > 500ms`. The second failed on develop at `491a0f7` (#720) with
+**P99 623.876463ms over a P50 of 2.676839ms**, one failure in the scale job's last 20 develop
+runs.
+
+The thresholds are **removed, not widened** — CLAUDE.md: *"If an assertion depends on wall-clock
+time, remove the timing rather than widening it."*
+
+#### The hypothesis that had to be refuted first
+
+Removal is the cheap answer, and the cheap answer is wrong if the number means something. The
+opening read of that failure was that it did: two near-identical outliers (623.876ms and
+625.203ms) over a 2.7ms median look like a **fixed stall** — a lock wait, a retry backoff, a pool
+timeout — rather than a slow machine, and a fixed stall deserves its own section rather than a
+deleted line. That is the right instinct and it is worth writing down that it did not survive
+contact with more than one run.
+
+Three measurements over the scale job's last 20 develop runs. Re-derive all three with
+`scripts/scale-latency-history.py`:
+
+1. **The magnitude is not fixed.** `TestLatencyP99`'s P99 across those runs is a continuum over
+   three orders of magnitude with no cluster anywhere, least of all at 624ms:
+
+       4.4, 4.8, 5.2, 5.2, 5.9, 6.0, 6.4, 6.5, 7.3, 13.7, 14.5, 15.1, 15.2, 16.2,
+       18.4, 27.1, 33.0, 92.1, 377.4, 623.9   (ms; median 14.1, max 44x the median)
+
+2. **The "near-identical pair" recurs at other magnitudes.** `b35c52f`'s top two were 377.4ms and
+   387.9ms — the same shape at 60% of the size. Four goroutines are in flight at once, so
+   whatever is in flight during one host stall window all records that window's length. The pair
+   is a signature of the concurrency, not of a constant in the code.
+
+3. **The sequential test shows the same tail.** `TestLatencyP50` runs one goroutine — no lock
+   contention, no pool competition, and no retry path anywhere in `AppendEventHistory`, which
+   `BeginTx → setRLS → SELECT prev checksum → INSERT → UPDATE → Commit` with no loop. Its Max was
+   **219.3ms on the failing run** and 126.9ms on `b35c52f`, and across the 20 runs it correlates
+   with the concurrent test's Max at **Pearson r = 0.937**.
+
+(3) is the one that settles it. No lock, backoff or pool timeout inside the code under test can
+slow down a single goroutine that contends with nothing; a slow host slows down both tests, which
+is exactly what the correlation says happened. The tail is a per-run property of the runner, and
+any fixed threshold under ~700ms sits below its noise floor.
+
+#### What replaced them
+
+Not nothing, and not a bigger number. Both tests now call `assertAllSampled`, which fails if any
+slot in the fixed-size latency slice was never written. That closes a real hole the thresholds
+never looked at: in `TestLatencyP99` a goroutine that fails its INSERT calls `t.Errorf` and
+returns **without writing `latencies[idx]`**, and a zero left behind sorts to the FRONT, pulling
+both the median and the P99 down. A run that measured fewer samples than it claimed would report
+itself as *faster*, not as broken.
+
+Falsified before landing: mutating one goroutine to skip its record produced
+`1 of 200 samples were never recorded`, with `Min: 0s` in the logged distribution above it —
+red for the stated reason, not for a neighbouring one.
+
+`TestLatencyUnderConcurrency` in the same file already worked this way — it measures, logs, and
+asserts nothing about the clock. The other two now match it, so the file is internally consistent
+for the first time.
+
+#### What this does not fix
+
+The scale job stays a **required** status check while `./tests/scale/...` is tier 2, which is a
+separate defect — see §3.402. Removing a flaky assertion makes that gate quieter; it does not
+make it correct.
+
 ### 3.301 A defer segment could still take a distributed lock — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
@@ -3283,3 +3553,267 @@ Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED
 ### 3.300 A defer segment could still reach the three string-returning calls — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.303 Five assertion-shaped skips in the plugin harness reported a broken Java/Python build as a pass — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`tests/plugin-harness/wasm_plugin_test.go` decoded the Java/TeaVM result with two
+`t.Skipf`s. A module returning the wrong shape — the exact defect class #455 fixed for
+`examples/saga-java-port` — was reported as SKIP, which CI reads as a pass. Three more
+skips in the build helpers had the same shape: two `reading cleat build output` reads
+that happen *after* a build the same function has already declared successful, and a
+Python `produced no .wasm` whose Java twin (`buildJavaWorkflowWasm`) already used
+`t.Fatalf`. All five are now `t.Fatalf`. Baseline 214 → 209 skip sites
+(`scripts/check-skips.sh`).
+
+**The falsification target originally proposed for this does not work, and the way it
+fails is the interesting part.** The plan said to revert #455 and watch the new assertion
+go red. #455 touched `crates/cleat-java/src/main/java/cleat/{HostCalls,JsonHelper}.java`,
+`examples/saga-java-port/.../MoneyTransfer.java`, `engine/java_workflow_e2e_test.go` and
+`tiers.yaml` — and its two SDK edits are **javadoc only**:
+
+    git show 115b421 -- crates/cleat-java/ | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+      | sed 's/^[+-]//;s/^[[:space:]]*//' | grep -vE '^(\*|/\*\*|\*/|$)'    # prints nothing
+
+None of it is an input to `TestPluginCalls_Wasm_Java`, which compiles
+`tests/plugin-harness/testdata/javaworkflow/`. Reverting #455 therefore leaves this test
+green — and a green falsification would have been read as "the new assertion is dead", the
+precise misreading CLAUDE.md's "a falsification that stays green is telling you which case
+you did not write" warns about. **A fix and a test can be about the same defect and still
+share no code.** Check that the revert reaches the test's build inputs before believing
+either outcome.
+
+What was falsified instead — the same defect, applied to the code this test actually
+compiles. Both perturbations were reverted; both went red on the intended line:
+
+| perturbation to `PluginHarnessWorkflow.callAllPlugins` | fires | message |
+|---|---|---|
+| return `Map` via `JsonHelper.parseObject` (i.e. #455's own fix, applied here) | outer | `not the JSON-encoded string the ABI contract requires: json: cannot unmarshal object into Go value of type string` |
+| return `"cleat-falsification-not-json"` | inner | `unwrapped to text that is not a JSON object: invalid character 'c'` |
+| `os.ReadDir(tmpDir + "/no-such-dir")` | ReadDir | `reading cleat build output <path>: ... no such file or directory` |
+
+Each fired on its own line, so the two decode assertions are independent rather than one
+assertion reached two ways. Under the old code all three printed SKIP.
+
+**Note what this workflow's return type says about #455.** It still returns a hand-built
+JSON `String`, the idiom #455's javadoc now argues against — so the double unwrap here is
+correct *for this workflow*, and the first row above is a shape change, not a bug fix.
+`grep -rn 'public static String.*HostCalls' --include='*.java' .` returns 10 lines
+(2026-09-04) — and they are not all workflows. Two are javadoc that #455 missed while
+rewriting the same example in `HostCalls.java`: `CleatEntry.java:26` and
+`TerminalError.java:14` still show `public static String placeOrder(...)` returning
+hand-built JSON. Read the output rather than the count; five of the ten are string
+literals inside `CleatEntryProcessorTest.java`.
+
+Two things seen while doing this and **not** fixed here, both needing their own change:
+
+- `TestPluginCalls_Wasm_Java`'s `expectedKeys` loop checks each key is *present*, not that
+  its value is a success. The raw result printed by the first perturbation above contains
+  `{"error":"plugin function pgvector/upsert not registered..."}` and
+  `{"error":"blobstore: no tenant context"}` under expected keys, and the test passes.
+  This is the same "only checked the field was PRESENT" trap #455's own commit message
+  confesses to. Some of those errors may be legitimate for an in-memory env; deciding
+  which is the work.
+- `TestPluginCalls_Wasm_AS` rewrites the checked-in
+  `tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm` on every run, so any test
+  run leaves `git status` dirty. `testdata/javaworkflow/prebuilt/README.md` documents
+  having solved exactly this for Java by moving the fixture out of the build directory.
+### 3.304 The Python SDK's only publish path cannot fire, so `cleat-sdk` has never reached PyPI — 🔴 **OPEN** (WS-2, 2026-09-04)
+
+python is tier 1 and PyPI is the one registry `tier1-gate.yml` accepts as a dependency,
+but `cleat-sdk` is not on PyPI:
+
+    curl -s -o /dev/null -w '%{http_code}\n' https://pypi.org/pypi/cleat-sdk/json   # 404
+    curl -s -o /dev/null -w '%{http_code}\n' https://pypi.org/pypi/requests/json    # 200 (control)
+
+`.github/workflows/publish-pypi.yml` has **zero runs, ever**
+(`gh run list --workflow publish-pypi.yml --json databaseId` → `[]`; control:
+`--workflow ci.yml` is non-empty). It has two triggers and neither can fire here:
+
+- `push: tags: ["python-sdk/v*"]` — no such tag exists (`git tag -l 'python-sdk/*'` is
+  empty). Both tags in the repo are plain `v*`.
+- `release: types: [published]` — the release *is* published, but by GoReleaser running
+  under `secrets.GITHUB_TOKEN` (`.github/workflows/release.yml:115`). **GitHub does not
+  trigger workflows from events created with `GITHUB_TOKEN`**, which is the recursion
+  guard, so a GoReleaser-created release cannot start this workflow. Release `v0.2.0` was
+  published 2026-08-10T19:45:42Z; the Release run that created it succeeded at
+  19:42:57Z (`gh run list --workflow release.yml`); `publish-pypi` did not run.
+
+**This is not fixed here, because the repair is a release-policy decision, not a
+mechanical one**, and it publishes to an external registry that cannot be un-published.
+The two options differ in what they couple:
+
+1. Trigger on `push: tags: ["v*"]`. Simple, but it ships whatever `pyproject.toml` says
+   at that moment — today a `v0.3.0` tag would publish `cleat-sdk 0.2.0`, because the
+   Python version has never tracked the repo tag (see CONTRIBUTING, "SDK versions").
+2. Keep the versions independent and start pushing the `python-sdk/v*` tags the workflow
+   already expects. Nothing has ever pushed one, so this trigger has never been exercised
+   either.
+
+**A note on how nearly this went wrong.** The first reading here was "the release
+automation has never executed", from `gh run list --limit 200` showing no Release run.
+That listing reached back **2.5 hours** (`gh run list --limit 200 --json createdAt --jq
+'[.[].createdAt] | min'` → `2026-09-05T00:02:38Z`), so it could not have seen a run from
+2026-08-10 whatever the truth was. Querying the workflow directly showed one run, and it
+succeeded. A limit-bounded listing answers "not in the last N", never "never" — take the
+window's own lower bound before writing "never" down.
+### 3.305 A checked-in test fixture was rewritten by its own test, and was stale under the rewrite — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm` is read by
+`wasm/import_section_test.go` and `cmd/cleat-worker/backend_routing_test.go`, neither of
+which can build it (a Go-only CI job has no `npx`). But `TestPluginCalls_Wasm_AS` compiles
+the same workflow on every run, and `asc` writes `dist/workflow.wasm` — so a test run
+overwrote the fixture and left `git status` dirty. Moved to `prebuilt/`, out of the
+build's reach, exactly as `javaworkflow/prebuilt/` already was for the same reason;
+`dist/` is now gitignored whole.
+
+`.gitignore` had reasoned about this case and got one step wrong. Its rule named only
+`dist/workflow.stamped.wasm`, on the grounds that "only dist/workflow.wasm is a fixture"
+— a true statement about **which file has readers** used to answer a question about
+**which files the build writes**.
+
+**The interesting part is what the overwrite was hiding.** Measured 2026-09-04:
+
+| | bytes | sha256 (16) |
+|---|---|---|
+| committed | 13369 | `36c46f1395c1092a` |
+| after one `TestPluginCalls_Wasm_AS` | 13672 | `17cb617f1563a736` |
+| after a second run | 13672 | `17cb617f1563a736` |
+
+The AS build is reproducible — unlike TeaVM, where `javaworkflow/prebuilt/README.md`
+records successive builds of unchanged source differing in hash. So the 303-byte gap was
+**age, not nondeterminism**: the committed fixture predated its own source or toolchain
+(`asc` inside the `^0.28.19` pin resolves to 0.28.20). Nothing had noticed, because every
+AS test run silently refreshed it in place.
+
+**That makes "move it" and "refresh it" one change rather than two.** Moving the stale
+bytes to `prebuilt/` would have frozen the staleness permanently, with the mechanism that
+had been concealing it now removed — strictly worse than leaving it. Both reader tests
+pass against either version, so the refresh changed no assertion; falsified by hiding the
+fixture, which fails exactly the `assemblyscript` subtest in each and nothing else.
+
+`workflow.js` and `workflow.d.ts` are generated glue with no reader
+(`grep -rn 'dist/workflow\.\(js\|d\.ts\)' --include='*.go' --include='*.md'
+--exclude-dir=node_modules .` finds none), so they are untracked rather than moved — the
+same call `.gitignore` already made for `examples/*/dist/`.
+
+### 3.306 The Go adapter decoded the host's error message and threw it away — 🟢 **FIXED by #730 (§3.200) 2026-09-04** (WS-2 found, WS-1 diagnosed and fixed)
+
+Found by dumping every key of `TestPluginCalls_Wasm_*`'s result. Same host, same 10
+registered plugins, same 17 calls, four guest languages — and one of them said something
+completely different:
+
+| guest | failed `blobstore.put` | failed `pgvector.upsert` |
+|---|---|---|
+| Rust, AssemblyScript, Java | `blobstore: no tenant context` | `plugin function pgvector/upsert not registered…` |
+| **Go**, before #730 | `plugin_call: error 1 (0=unknown 1=timeout …)` | `plugin_call: error 1 (0=unknown 1=timeout …)` |
+| **Go**, after #730 | `plugin_call: blobstore: no tenant context` | `plugin_call: plugin function pgvector/upsert not registered…` |
+
+(Python could not be measured: `componentize-py` is killed with signal 9 building this
+workflow in this sandbox.)
+
+**The mechanism.** The host wrote the text and the adapter decoded its length; the adapter
+then discarded both. `PluginCall`'s `ResultStmts` computed `responseLen` and never read
+`responseBuf` on the error branch. Three faults on one line: the message discarded
+(`engine/plugins.go:361` writes it, and the other guests read it); the number printed taken
+from `result & 0xFF`, which is `errCode` — **hardcoded to a literal 1 on every failure** —
+and printed against the **CallErrorCode** legend, whose field is bits 8-39
+(`packDurableCallResult` is `responseLen<<40 | callErrorCode<<8 | errCode`,
+`engine/memory.go:243`); and the real classification, `callFailureCode`, never read. So
+"why is it 1 for a not-registered plugin" had a flat answer: **it was 1 for everything.**
+
+**Fixed for the two adapters this finding pointed at**, `PluginCall` and
+`PluginCallStreaming`, by #730 (recorded as §3.200). They now decode `callErrorCode` from
+bits 8-39 and pass `responseBuf` to `callErrorMessage`, as the three §2.10 adapters have
+since §2.10. Measured on develop after #730:
+
+    grep -c '0=unknown 1=timeout' wasm/adapter_metadata.go   # 18, was 20
+    grep -c 'callErrorMessage' wasm/adapter_metadata.go      # 5, was 3
+
+**18 adapters still print that legend, and they are a *different* defect** — deliberately
+not taken in #730. `packDurableCallResult` is the only packer with a `CallErrorCode` field
+and it reaches exactly the five above. The other 18 sit over `packSimpleResult`,
+`packAwaitChildResult`, `packAwaitPromiseResult`, `packAwaitSignalsResult` and
+`packAcquireLockResult`, which have no such field at all, so there is nothing to decode:
+13 of them have an output buffer and want `hostErrMessage`; 5 (`ContinueAsNew`,
+`ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`, `ReleaseLock`) have no buffer
+and want the legend **removed** rather than replaced. `hostErrMessage` already exists in
+`wasm/generator.go` for exactly this, and its doc comment warns the legend "would describe
+a rejected cron expression as a timeout" — describing the live defect in 13 other calls.
+
+**§2.10 is why this survived: comment general, test specific.**
+`TestHostAdapterReportsCallErrorCodeNotErrCode` pins this exact property and its doc
+comment states the general rule, but the assertion substring-matches one call name. That
+is the inverse of the trap CLAUDE.md names — there, a test's *name* claimed a mechanism its
+body did not check.
+
+**How it was first mis-diagnosed, because the mistake is reusable.** WS-2 reported the
+symptom with two candidate mechanisms — "the host wrote no response bytes" or "the length
+failed its bounds check" — and **both were wrong**, because both assumed `PluginCall` went
+through `callErrorMessage`. It did not; it had its own literal copy of the format string.
+The assumption came from
+
+    grep -rn '0=unknown 1=timeout' --include='*.go' . | grep -v wasm_plugin_test | head
+
+whose **first** hit is `wasm/generator.go:427` inside `callErrorMessage`, and whose 10th
+line is not its last. The string occurred **22 times in non-test Go across 3 files**, 20 of
+them in `wasm/adapter_metadata.go` — including the `PluginCall` entry that `head` cut off.
+The first hit was a plausible decoy: `callErrorMessage`'s `"%s: error %d"` with
+`callName="plugin_call"` renders byte-identically to the literal that actually produced it.
+**A `| head` on "who produces this string" answers "who produces it first in path order",
+and the two coincide only by luck.** Re-derive the shape, not the first line:
+
+    grep -rn '0=unknown 1=timeout' --include='*.go' . | awk -F: '{print $1}' | sort | uniq -c
+
+Refusing to name a mechanism is what kept the wrong one out of the record. Had the section
+asserted "the host wrote no response bytes", the search would have gone to `engine/` and
+the adapter line would have stayed unread.
+
+### 3.307 Five plugin tests checked that a key was present, not that the call worked — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`TestPluginCalls_Wasm_{Go,Rust,AS,Python,Java}` each verified their 17 expected keys with
+
+    if _, ok := results[key]; !ok { t.Errorf("missing result key: %s", key) }
+
+so `{"error":"plugin function pgvector/upsert not registered…"}` under an expected key
+passed. Measured 2026-09-04: **16 of the 17 calls fail in every language**, and all five
+tests were green. The one that works is `llm.list_models` — which is also the only key any
+of them checked for success, in Go alone, behind two `if …; ok` guards that pass silently
+when the shape is unexpected.
+
+This is the same shape as the skips of §3.303 — a check that reports success without
+checking — and #455's own commit message confesses to the identical trap: *"my own shape
+assertion missed it because it only checked the field was PRESENT."* Known, written down,
+and still shipped in five more places.
+
+**The fix is not to demand success.** The failures are honest: the in-memory harness has
+no tenant context, does not register pgvector, and wires no plugin stream registry. So
+`assertPluginOutcomes` requires instead that every failure match a reason **written down
+with why**, and that `llm.list_models` keeps working. `pluginCallsThatMustSucceed` is the
+list meant to grow; `knownPluginFailures` is the one meant to shrink. A call that starts
+succeeding is an error telling you to lock it in, which is how the second list gets
+smaller rather than staler.
+
+Falsified four ways, each firing its own branch and no other:
+
+| perturbation | result |
+|---|---|
+| drop the `no tenant context` reason | **12** keys report `failed for a reason not in knownPluginFailures` in Go **and** 12 in Java — matching the 12 measured |
+| drop `llm.list_models` from `pluginCallsThatMustSucceed` | `llm.list_models now succeeds… add it` |
+| add `blobstore.put` to `pluginCallsThatMustSucceed` | `blobstore.put must succeed in this environment and did not` |
+| revert #730's `wasm/adapter_metadata.go` change | **Go alone** reddens, with `"plugin_call: error 1 ("` — Java and Rust stay green in the same run |
+
+That last one is a discriminating negative control rather than a mere trigger: this test
+now *depends* on #730, because Go's two bespoke reasons were deleted once it carried the
+host's text like every other guest. The perturbation proves a regression of #730 would be
+caught here, and that the other guests are not covering for it.
+
+**Those two Go entries were removed, not left harmless.** Before #730 `knownPluginFailures`
+carried `plugin_call: error ` and `plugin_call_streaming: error ` to keep the divergence
+visible; re-measured after #730, all 16 of Go's failures match the three host reasons and
+neither entry can fire. A dead reason in a list whose whole purpose is to shrink is exactly
+the rot the list exists to prevent, so the file now carries a comment saying why there is
+no Go-specific entry rather than an entry nothing matches.
+
+Also removed a duplicated `"llm.chat_stream"` from three of the five key lists (Go, Rust,
+Python) — 18 entries, 17 distinct, so one key was checked twice and the count in the log
+line never matched the list.
