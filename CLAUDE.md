@@ -228,7 +228,47 @@ comparing counts:**
     go test ./... -list '<pattern>'      # what does this pattern actually select?
 
 `-run` answers that only by implication, and is silent when the answer is "less than you think".
-This is the same shape as "no pending checks also matches checks never started", two sections up.
+This is the same shape as **"No pending checks" also matches "checks never started"** — earlier in
+this same section, not two sections up as this line said until #755. Cite a rule here by its
+quoted phrase, which `grep` finds; a positional reference rots the moment anything is inserted
+between, and this one was wrong the day it was written.
+
+**These are one rule, and naming it is cheaper than meeting it a fifth time.** A check can tell
+you whether it is **consistent with itself**. It cannot tell you **what it is not looking at**.
+Every fix above is the same move: a *second, deliberately different* reading of the same source,
+chosen so that it goes wrong in the opposite direction.
+
+| what the check answers about itself | the second reading that answers what it misses |
+|---|---|
+| "does it pass when the tree is fine?" | a **known-positive** — a case already proven broken |
+| "does `-run` run what I meant?" | **`-list`**, which names the set it selects |
+| "does the extractor parse without error?" | a **looser parse** of the same file, over-matching on purpose |
+
+The right-hand column is not the more correct one. The loose parse is deliberately wrong and would
+make a bad extractor; its only job is to **disagree**, so the difference can be examined. A strict
+parse that runs clean and a loose parse that finds nothing more is evidence. A strict parse alone
+is a claim.
+
+The fourth instance arrived the same day, and is the one that shows the cost. `rust_surface()`
+matched `pub fn <name>(`, and a Rust generic method is `pub fn <name><T: …>(`, so **ten of
+seventy-one methods on `HostCalls` were invisible to it**. Nothing failed, nothing was skipped, no
+count went down. Coverage was reported as **61/61 = 100% when it was 63/71 = 88.7%** — and that
+100% had been written into four places in `IMPROVEMENT-PLAN.md` and repeated to the user before
+anyone read the same file a second way (#753). And one host call is reachable **only** through
+methods the scan could not see: the `cleat_call_retry` extern is referenced from exactly one place
+in the SDK, inside `cleat_call_with_host_retry<T, R>`, which is generic — so a fixture exercised
+it and neither metric counted it.
+
+**Watch the direction, because it is not random.** All four of these inflate rather than break: a
+smaller surface is a smaller denominator, so a method the scan cannot see *raises* the percentage;
+an under-selecting `-run` reduces the failures available to find; a permissive guard passes a tree
+it should fail. **The measurement errors that survive are the ones that flatter the number** —
+nobody re-derives a figure that looks good. That is the same asymmetry as the UTC-offset error in
+*Ground rules for changes* below, which inflated a count "in the direction that flattered the
+finding — which is why it was not questioned."
+
+So when a check and the thing it checks agree, ask what a differently-wrong reading would say
+before recording the agreement as a result.
 
 **A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
