@@ -3472,6 +3472,88 @@ for the first time.
 The scale job stays a **required** status check while `./tests/scale/...` is tier 2, which is a
 separate defect — see §3.402. Removing a flaky assertion makes that gate quieter; it does not
 make it correct.
+### 3.402 Five required checks gated tier-2 code, and nothing in the tree said so — 🔷 **GUARDED; two packages still untiered** (WS-3, 2026-09-04)
+
+Branch protection on `develop` lists 32 required status contexts. That list lives in
+GitHub, this repo's tier claims live in `tiers.yaml`, and **nothing compared them.** The
+reported symptom was one context — `Test Go (scale) on 1.26` gating `./tests/scale/...`,
+which `tiers.yaml` puts in tier 2, whose contract says "may fail". Measuring it found
+five, plus two packages in no tier at all.
+
+#### What is actually required, measured 2026-09-04
+
+Re-derive with `scripts/check-required-contexts.py --report`:
+
+| required context | runs | tier |
+|---|---|---|
+| `Test Go (plugins) on 1.26` | `./plugins/...` | **2** |
+| `Test Go (manifests) on 1.26` | `./tests/manifests/...` | **2** |
+| `Test Go (scale) on 1.26` | `./tests/scale/...` | **2** |
+| `Test Go (support) on 1.26` | `./migration/...` | **2** (mixed with three tier-1 packages) |
+| `Cluster Integration Tests` | `./tests/cluster/...` | **2** |
+| `Test Go (support) on 1.26` | `./monitoring/...`, `./packaging/...` | **none** |
+
+And the mirror image, which is *not* a hole but reads like one: **`Test Go (crash)` is the
+only matrix entry that is not required**, and it runs a tier-1 package. `./tests/crash/...`
+is in `tier1.packages`, and the required `Tier 1 Gate` runs that whole list, so it is
+covered — by a different context than the one whose name suggests it.
+
+#### The contract was already stricter than its own prose
+
+`tier2.contract` says "must run; may fail, against `known_failures`". `known_failures` is
+**empty**, and `scripts/tier2-gate.sh` fails on any failure not in it, and `Tier 2 Gate` is
+required. So tier 2 is enforced as must-pass today, by a mechanism independent of the five
+contexts above. "May fail" is a door, not a state: it opens one test at a time, and only
+with an item reference and an owner.
+
+That is the honest reading of the reported defect. It is not that scale is special. It is
+that **tier 2 is gated as must-pass in two independent ways and the manifest described
+neither**, so any of its packages going red blocks the queue while `tiers.yaml` says it is
+permitted to fail.
+
+#### What changed
+
+**The enforcement was not loosened.** Tempting, and wrong: the prose was the inaccurate
+half. Loosening the gates to match the sentence would delete real coverage to make a
+sentence true.
+
+1. `tier2.contract` now describes what is enforced, with the empty list and the required
+   gate named.
+2. `tiers.yaml` gains a **`required_contexts:` block** — all 32, each mapped to its
+   workflow and job id, each classified `tier1` / `tier2` / `undeclared` / `infra`, and
+   every non-tier-1 entry carrying a `why_required` that has to argue for itself.
+3. `scripts/check-required-contexts.py` enforces it, wired into `Lint`.
+
+On **`Test Go (scale)`** specifically: it stays tier 2 and stays required. Tier 1 is not
+available to it — tier 1 means green on every dialect, and every file in `tests/scale`
+calls `engine.NewPostgresStore` against `testutil.DialectPostgres`, so there is nothing
+for the other two to run. Promoting it would mean granting tier 1 to a Postgres-only
+package, which is the sort of claim `tiers.yaml` exists to refuse. It is defensible as a
+required check only because §3.401 removed its wall-clock assertions; requiring a green
+from an assertion the runner controls is how a gate teaches people to re-run instead of
+read.
+
+#### What the guard cannot do, and one thing it caught in itself
+
+It cannot see branch protection. Reading it needs admin scope, which `GITHUB_TOKEN` does
+not have — the same limitation `tier2.gated_by` already records. `--check-live` does the
+diff for a caller who has the scope (run 2026-09-04: *"32 contexts, declared list matches
+exactly"*), and `--report` prints the command for anyone else.
+
+Its third check — "is this `covers:` claim true?" — resolves a context against the
+`test-go` matrix, so it can only reach `Test Go (...)` contexts. `covers:` on the other 21
+is a hand claim nothing verifies. **That limit was found by the negative control, not
+declared:** the self-test's first version asked check 3 to catch a relabelled `Tier 2
+Gate` and printed `MISSED`. A guard shipped without one would have carried the gap
+silently.
+
+#### Still open
+
+`./monitoring/...` and `./packaging/...` are in **no tier** and are gated at must-pass by
+`Test Go (support)`. Assigning them is a product call, not a by-product of writing a
+guard, so this item stays 🔷 rather than 🟢. The `undeclared` classification and its
+`why_required` make the state visible in the meantime, and the guard fails if anyone
+relabels it away without writing a reason.
 
 ### 3.301 A defer segment could still take a distributed lock — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
