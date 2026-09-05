@@ -3652,6 +3652,48 @@ zero methods in an SDK with dozens would otherwise read as perfect coverage of n
 unwired follows that file's stated protocol, and the reason is in the workflow comment: an unwired
 guard reads as coverage nobody has.
 
+### 3.207 The Rust host-call surface: 7 of 61 compiled, now all 61 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+The first tier-2 row of §3.206. `examples/rust-workflow` and the plugin-harness fixture between
+them called **7 of 61** `cleat_sdk::HostCalls` methods, so passing the Rust tests meant "a Rust
+workflow builds", not "the Rust host-call surface builds".
+
+`examples/rust-all-host-calls` calls all 61 and is built for `wasm32-wasip1` by
+`TestRustAllHostCallsCompiles`. Coverage is now 61/61.
+
+**It compiled on the first try, and that is the result.** The equivalent Go exercise found four
+host calls that could not be built at all (§3.204) — locks, promises, side effects. Rust has no
+such defect, and the reason is structural rather than lucky: **the Go SDK's host adapter is
+generated** from three tables that had to agree and did not, while the Rust SDK is hand-written,
+so `rustc` had already checked every signature the moment it was written. The hole was never in
+the Rust code; it was in what the tests compiled.
+
+So the honest summary of this section is a negative result — **nothing was broken** — and the
+value is that the surface is now checked rather than presumed, and stays checked.
+
+Two mechanical points worth keeping:
+
+**`#[cleat_entry]` expands to code referencing `serde_json`**, so the crate needs `serde` and
+`serde_json` as dependencies even though the fixture's own source names neither. The failure is
+`cannot find module or crate serde_json` pointing at the attribute, not at any line you wrote.
+
+**The test is excluded from tier 1 on its first push**, and the entry above it in `tiers.yaml` is
+why: it records that `TestRustDeferSegmentRunsOnlyTheDefers` was *not* excluded on its first push,
+that the gate caught it, and that "adding an engine test that builds a guest toolchain and not
+tiering it is the default mistake, not an unusual one." Reading that is what prompted the check.
+**A note that names its own failure mode saved the round trip it describes.**
+
+The coverage half needs no toolchain and is deliberately not excluded:
+`scripts/sdk-host-call-coverage.py` runs in `Lint`, so a call deleted from the fixture fails even
+in a job that cannot build Rust.
+
+**Falsified:** adding `h.no_such_host_call("x")` fails with
+`error[E0599]: no method named 'no_such_host_call' found for reference '&HostCalls'`.
+
+`result bound` stays at 5 of 61, and that is correct rather than a gap: the fixture is
+`let _ = h.x()` throughout because it exists to be compiled, not run. §3.206 predicted exactly this
+and is why that column is reported and not baselined.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

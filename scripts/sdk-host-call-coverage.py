@@ -95,7 +95,7 @@ SDKS = {
     ),
     "rust": (
         rust_surface,
-        ["examples/rust-workflow/src/*.rs", "tests/plugin-harness/testdata/rustworkflow/src/*.rs", "crates/cleat-sdk/examples/*.rs"],
+        ["examples/rust-workflow/src/*.rs", "examples/rust-all-host-calls/src/*.rs", "tests/plugin-harness/testdata/rustworkflow/src/*.rs", "crates/cleat-sdk/examples/*.rs"],
         lambda n: rf"\b(?:h|host|hc)\.{n}\s*\(",
     ),
     "java": (
