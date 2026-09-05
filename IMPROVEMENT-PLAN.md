@@ -4091,14 +4091,27 @@ single entry:
 | §3.212's re-derivation command | shipped the same pattern into a merged section |
 | `engine/hostabi_runtime_parity_test.go` | filtered **both** sides on `cleat_`, so the guard against ABI drift compared 55 of 58 and never saw `plugin_call` — #759 |
 | `CLAUDE.md`'s "the same 56 names" | a count derived from the prefixed subset, describing a test that compares a different set again — corrected in #755 |
+| `wasm/scan.go:208` | **read as dead code that should be deleted** — see below |
 
 The third is the expensive one. That guard exists because the host ABI is written twice and it
 caught §3.55 on its first run; the identical defect on `plugin_call` was silent. Measured by
 renaming one registration on the wasmtime side: `plugin_call` → `ok`, `cleat_sleep` → `FAIL`. The
 same defect, caught or not caught on whether the name began with five particular characters.
 
-None of the four was found by looking at it. WS-2 re-derived a denominator they had been handed,
-and the other three came out of asking where else the habit lived.
+**The fifth row is the one that argues the case, because its error runs the other way.**
+`wasm/scan.go:208` is `case "schedule_invoke": return "cleat_sleep"`, and reading this file I called
+it dead — reasoning that every import name is `cleat_`-prefixed, so a bare `schedule_invoke` could
+never match. The arm is alive. It exists *because* one import name is not prefixed: the Rust and
+Java SDKs both declared `schedule_invoke`, which no runtime defines, and any guest referencing it
+failed instantiation (#762).
+
+Everywhere else the assumption inflated a number. Here it would have **deleted working code** while
+leaving the defect it was compensating for. A habit that only ever fails in one direction is a bias
+you can correct for; one that reverses is not, and that is the better argument for removing the
+habit than any of the four rows above, which all failed the same way.
+
+None of the five was found by looking at it. WS-2 re-derived a denominator they had been handed,
+and the rest came out of asking where else the habit lived.
 
 ## The classification: 55 workflow-facing, and NOT the 55 above
 
@@ -4164,51 +4177,57 @@ Note the tell's limit, which `cleat_register_query_handler` demonstrates: it is 
 **comments**, so it separates the two handshake calls and is blind to the third exclusion entirely.
 The semantic reading is what decides; the comment shape agrees with it for two of three.
 
-## Measured: two instruments, two answers, no number published
+## Measured: the binding column, from declaration sites
 
-Two independent scans were run over the same tree on 2026-09-05, **against the superseded 53-call
-set**, so the figures below are wrong twice over — wrong denominator, and disputed numerator. They
-are kept only because their disagreement is the finding. They agree on Rust and Java and disagree
-on the other three:
+Two earlier textual scans disagreed on three of five SDKs and neither was published. Both were
+wrong in the same way — a textual scan cannot tell a binding from a sentence about one, which
+`packages/cleat-as/assembly/host-calls.ts:391` demonstrates by carrying
+`// There is no import_cleat_register_query_handler here (removed 2026-08-09).` One scan counted
+that retraction as the binding; the other missed it only because `\b` cannot match after the `_`
+in `import_cleat_`.
 
-| SDK | scan A | scan B |
-|---|---|---|
-| assemblyscript | 53 | **52** |
-| rust | 49 | 49 |
-| java | 48 | 48 |
-| python | 42 | **41** |
-| go | 34 | **32** |
+Replaced with extraction from **declaration sites**, per CLAUDE.md. Measured 2026-09-05, after
+#762:
 
-**No per-SDK binding figure is recorded here, because one of these is wrong in every disagreeing
-row and the failure is understood in only one of them.** That one is worth writing down, because
-both scans get it wrong in a way this file already has a name for.
+| SDK | binds | of 55 | not bound |
+|---|---|---|---|
+| assemblyscript | **55** | 100% | — |
+| rust | 52 | 94.5% | the cron family: `schedule_cron`, `list_crons`, `delete_cron` |
+| java | 52 | 94.5% | the same three |
+| python | 50 | 90.9% | `await_any_child`, `poll_child`, `run_detached`, `json_parse`, `json_stringify` |
+| **go** | **35** | **63.6%** | 20 — the whole `*_state` family, both scopes, all three promise/signal replies, `fetch`, `send`, `send_signal_and_wait`, `signal_workflow`, `run_detached`, `schedule_invoke`, `uuid`, and both JSON helpers |
 
-`packages/cleat-as/assembly/host-calls.ts:391` reads:
+Where each number comes from, because "declaration site" means something different per language:
 
-    // There is no import_cleat_register_query_handler here (removed 2026-08-09).
+| SDK | site |
+|---|---|
+| rust | `pub fn` inside the `#[link(wasm_import_module = "env")] extern "C"` block, with `#[link_name]` overriding the name |
+| java | `@Import(module = "env", name = "…")` |
+| assemblyscript | `@external("env", "…")` |
+| go | `hostFunctions` in `wasm/usage.go` — there is **no `//go:wasmimport` in the tree**, only in docs; a Go guest's imports come from a generated adapter and this table decides the name |
+| python | `WitToEnvImport` in `wasm/component_rewrite.go`, cross-checked against `python-sdk/wit/cleat.wit` — 51 WIT functions, 51 mapping keys, every WIT function mapped |
 
-Scan A searched for the export name as a substring, matched it **inside a comment stating the
-binding was removed**, and recorded AssemblyScript as binding it. That is the §1.1 trap — a grep
-that a *retraction* satisfies — and it is the reason scan A scored AssemblyScript as binding everything.
+**Two corroborations worth more than the table.** AssemblyScript's 55 is not 55 of anything it was
+told: it declares exactly the 55 workflow-facing exports and omits precisely `cleat_complete`,
+`cleat_poll_work` and `cleat_register_query_handler`. **An SDK author independently drew the same
+boundary this section derives from the engine** — a fourth derivation of the 55, and the only
+semantic one. And Python's two sources agree exactly, which is why its number is stated at all.
 
-Scan B gets that row right and **not for a reason that generalises**. Its pattern is
-`\bcleat_register_query_handler\b`; the text is `import_cleat_register_query_handler`; `_` is a
-word character, so there is no word boundary before `cleat` and the match fails. Correct output,
-accidental mechanism. A retraction comment written without the `import_` prefix would fool scan B
-exactly as it fooled scan A, and neither scan distinguishes a binding from a sentence about one.
+**Go binds the fewest workflow-facing host calls of any SDK, at 35 of 55, and is the reference
+implementation.** This is not in tension with Go's reported 37/37 — it is what 37/37 hides. The Go
+adapter list is 37 entries and every one is wired; the list is 20 short of the host, and a
+percentage against itself can never say so. §3.212's seven non-functional methods are a subset of
+a larger shape, not the shape.
 
-So the honest state is: **the classification above is measured and the binding counts are not.**
-What can be said without either scan is the shape, which both agree on — Rust and Java are short
-by a handful, and Go is short by the most, which is not in tension with Go's reported 37/37 but is
-what 37/37 hides. The Go adapter list is 37 entries and every one is wired; the list is simply
-short of the host, and a percentage against itself can never say so. §3.212's seven non-functional
-methods are a subset of a larger shape, not the shape.
+One row was checked by hand, away from every scan: `cleat_set_state` has five non-test Go
+references and **all five are host-side** — the registration in `engine/imports.go`, the wasmtime
+binding in `engine/wasmtime_hostfuncs_core.go`, a base-name case in `wasm/scan.go`, and the
+Component Model WIT mapping in `wasm/component_rewrite.go`. None is a guest binding. A Go workflow
+cannot call it.
 
-One Go row was checked by hand, away from both scans, because it is the kind of claim that should
-not rest on a regex: `cleat_set_state` has five non-test Go references and **all five are
-host-side** — the registration in `engine/imports.go`, the wasmtime binding in
-`engine/wasmtime_hostfuncs_core.go`, a base-name case in `wasm/scan.go`, and the Component Model
-WIT mapping in `wasm/component_rewrite.go`. None is a guest binding. A Go workflow cannot call it.
+**This is the binding column only, and binding is not the property the release rule asks about.**
+See the three states below: every figure here is states 1-vs-2-and-3 combined, and says nothing
+about whether any of it has ever been executed.
 
 ## What "tested to function correctly" requires: three states, not two
 
@@ -4229,11 +4248,12 @@ that arithmetic is item 1's output, not an input to it.
 
 ## Work items, in order
 
-1. **Make the 55 x 5 matrix a guarded script, and do not scan for names in text.** Both scans
-   above are textual, and a textual scan cannot tell a binding from a comment about a binding.
-   The instrument has to resolve the actual declaration: the `extern`/`@external`/`native` block
-   per language, and for Go the generated adapter set, which is not textual at all. Nothing here
-   is publishable until that exists in `scripts/` with a baseline and a CI step.
+1. **Put the binding column in a guard.** ~~Not publishable until extraction resolves
+   declarations rather than names~~ — done, and the table above is the result. The extractors now
+   live in `TestEverySDKImportIsAHostExport` (#762), which asserts the weaker property that every
+   declared import is a real export; that is what caught Rust and Java importing
+   `schedule_invoke`, a name no runtime defines. **The counts themselves are still not baselined**,
+   so a binding that disappears moves the table above and trips nothing.
 2. **Give it input assertions.** The mapping from SDK method to host export is many-to-one and
    language-specific — Go binds through generated adapters, not textual call sites, so the
    instrument that works for the other four is the wrong one for Go. A scan that silently resolves
@@ -4241,10 +4261,11 @@ that arithmetic is item 1's output, not an input to it.
    history. It needs a known-positive: one export known bound and one known unbound, per SDK.
 3. **Raise the three-state matrix.** State 2 is invisible in every report the project currently
    produces.
-4. **Fill, or document with a reason.** Do not open an item per unbound pair before re-measuring
-   against the corrected set: on the superseded numbers the `*_state` family and the cron family
-   alone accounted for roughly half the gap, which is two mechanisms rather than dozens of fixes.
-   Ask whether the answer is a sweep or a mechanism first.
+4. **Fill, or document with a reason — and note the gap is two mechanisms, not 31 fixes.** Of the
+   31 unbound pairs in the table above, the cron family is 6 (three calls x Rust and Java) and Go's
+   `*_state` family is 6, with Go's scope/promise/signal group accounting for most of the rest.
+   AssemblyScript needs nothing. Ask whether the answer is a sweep or a mechanism before opening
+   items.
 5. **Record every accepted gap in `tiers.yaml`**, which is where support claims are checked, rather
    than in prose here. Three entries are already known, and they are not one kind: `cleat_poll_work`
    and `cleat_complete` are protocol, `cleat_register_query_handler` is a call the repo forbids
