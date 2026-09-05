@@ -197,7 +197,31 @@ def main() -> int:
                 )
                 failed = True
             elif d["executed"] > want:
-                print(f"  {name}: executed rose {want} -> {d['executed']}; run --update-executed")
+                # A RISE FAILS TOO, and that is deliberate.
+                #
+                # WS-3's point, and it is a real gap in a shrink-only ratchet:
+                # such a ratchet cannot tell a stale baseline from an accurate
+                # one. Once a PR raises executed coverage without recording it,
+                # the file says 7 while the tree does 9 and nothing ever says
+                # so -- the guard is silent about staleness BY CONSTRUCTION,
+                # and an advisory line on a green run is read by nobody.
+                #
+                # Same discipline as scripts/skip-ledger.tsv, which fails when
+                # a line matches FEWER skips than declared as well as more, on
+                # identical reasoning: "a line that matches nothing is a grant
+                # covering something that is not there".
+                #
+                # The cost is that a PR which raises coverage must run
+                # --update-executed. That is one command, and it is the PR that
+                # knows why the number moved.
+                print(
+                    f"FAIL {name}: executed coverage rose {want} -> {d['executed']}. "
+                    f"That is good news and it has to be recorded, or the baseline "
+                    f"goes stale and a later fall back to {want} passes unnoticed. "
+                    f"Run: scripts/sdk-host-call-coverage.py --update-executed",
+                    file=sys.stderr,
+                )
+                failed = True
         return 1 if failed else 0
 
     if mode == "--update-executed":
