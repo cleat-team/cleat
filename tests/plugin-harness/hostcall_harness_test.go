@@ -55,6 +55,22 @@ const (
 	statusOK        hostCallStatus = "ok"
 	statusError     hostCallStatus = "error"
 	statusSuspended hostCallStatus = "suspended"
+	// statusUnsupported: the SDK offers no binding for this host call, so the
+	// fixture could not make it. Added for C2, where the Rust SDK turned out
+	// to declare neither cron import.
+	//
+	// A first-class status rather than an "error" with a distinctive message,
+	// because the two are different facts: an error is a binding that ran and
+	// was refused, and this is a binding that does not exist. Collapsing them
+	// puts a missing SDK feature in the same bucket as a host refusal, which
+	// is the distinction the harness exists to draw.
+	//
+	// It also reddens usefully. The day an SDK gains the binding, its row
+	// starts reporting ok or error, stops matching the table, and somebody has
+	// to decide what the right answer is -- rather than the gap closing
+	// silently and the table going on describing a world that no longer
+	// exists.
+	statusUnsupported hostCallStatus = "unsupported"
 )
 
 // hostCallOutcome is the fixture's report for one call.

@@ -182,6 +182,17 @@ jobs:
           java-version: "17"
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
+      # Explicit, for the same reason Java 17 is pinned two steps up: the
+      # AssemblyScript host-call fixture needs npx, ubuntu-latest happens to
+      # ship Node, and "happens to" is what changes without us. buildASHostCallWasm
+      # SKIPS on a missing npx rather than failing, so an image that dropped Node
+      # would retire the whole AssemblyScript half of the harness quietly -- the
+      # skip budget below is what would catch it, and only because this step
+      # makes the toolchain this job's own promise rather than the runner's.
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
       # -json into a report, and a skip budget over it. Without that, this step
       # ran `go test` with no -v, so a skipped language and a passing one looked
       # identical in the log -- which is how TestPluginCalls_Wasm_Go sat
@@ -228,6 +239,13 @@ jobs:
           # not:
           #   go test ./... -list 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers'
           #     -> the harness, its table guard, and the five plugin tests
+          #
+          # The count is now SIX, not two: C2 added Rust and AssemblyScript
+          # fixtures, so the pattern selects TestHostCalls{Go,Rust,AS} and
+          # TestHostCallTableCovers.../TestRust.../TestAS... -- three harnesses
+          # and the three drift guards that keep their tables honest.
+          #   cd tests/plugin-harness && go test -list 'TestHostCalls|HostCallTableCovers' ./...
+          # must list 6. If it lists 3, the guards have come unselected again.
           go test -count=1 -timeout=600s -json \
             ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers' \
             2>&1 | tee ../../wasm-integration-report.json
