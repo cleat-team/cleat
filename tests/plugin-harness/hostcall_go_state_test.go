@@ -23,9 +23,12 @@ import (
 // EventTypeStateMutation per operation (engine/lifecycle.go) and a map records
 // nothing. Measured across the fix: 0 events before, 8 after.
 func TestGoStateOpsReachTheHost(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping WASM compilation test in short mode")
-	}
+	// NO testing.Short() SKIP. The neighbouring TestHostCalls* have one and it
+	// is baselined; copying it here was reflex, and check-skips.sh was right to
+	// reject it. Building a Go WASM fixture needs only the Go toolchain, which
+	// is category (c) -- always satisfiable in this repo -- so a skip would be
+	// a pass wearing a skip's clothing. It costs a few seconds; the defect it
+	// guards shipped for months.
 	env := NewTestPluginEnvInMemory(t)
 	defer env.Close()
 	wasmBytes := buildGoHostCallWasm(t)

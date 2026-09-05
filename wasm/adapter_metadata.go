@@ -206,8 +206,13 @@ var adapterDefs = map[string]adapterDef{
 	// The state family (IMPROVEMENT-PLAN 3.214). Return packings are ABI.md
 	// 2.28-2.33; every one puts errCode in bits 0-31.
 	//
-	// These carry the suspend check because a state call runs mid-segment and
-	// the host can refuse it like any other.
+	// NO withSuspendCheck. These are not stop sites: the host's state
+	// functions return packSimpleResult synchronously and never set the
+	// sentinel. Adding the check would be actively harmful rather than merely
+	// redundant -- bit 31 is the top bit of errCode in these layouts, so a
+	// large error code would be decoded as a stop and panic with ErrSuspend.
+	// TestTheThreeStopSurfacesAgree in engine/ enforces this correspondence
+	// and caught it when this file first shipped the check.
 	"SetState": {
 		FieldName:  "SetState",
 		ReturnType: "error",
@@ -215,12 +220,12 @@ var adapterDefs = map[string]adapterDef{
 			{"key", "string"},
 			{"value", "string"},
 		},
-		ResultStmts: withSuspendCheck(
+		ResultStmts: []string{
 			"if errCode := uint32(result); errCode != 0 {",
 			`	return fmt.Errorf("cleat_set_state: error %d", errCode)`,
 			"}",
 			"return nil",
-		),
+		},
 	},
 	"GetState": {
 		FieldName:  "GetState",
@@ -228,7 +233,7 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"key", "string"},
 		},
-		ResultStmts: withSuspendCheck(
+		ResultStmts: []string{
 			"valueLen := uint32(uint64(result) >> 32)",
 			"if errCode := uint32(result); errCode != 0 {",
 			`	return "", fmt.Errorf("cleat_get_state: error %d", errCode)`,
@@ -243,7 +248,7 @@ var adapterDefs = map[string]adapterDef{
 			`	return "", nil`,
 			"}",
 			"return unsafe.String(&valueBuf[0], int(valueLen)), nil",
-		),
+		},
 	},
 	"DeleteState": {
 		FieldName:  "DeleteState",
@@ -251,12 +256,12 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"key", "string"},
 		},
-		ResultStmts: withSuspendCheck(
+		ResultStmts: []string{
 			"if errCode := uint32(result); errCode != 0 {",
 			`	return fmt.Errorf("cleat_delete_state: error %d", errCode)`,
 			"}",
 			"return nil",
-		),
+		},
 	},
 	"IncrState": {
 		FieldName:  "IncrState",
@@ -265,12 +270,12 @@ var adapterDefs = map[string]adapterDef{
 			{"key", "string"},
 			{"delta", "int64"},
 		},
-		ResultStmts: withSuspendCheck(
+		ResultStmts: []string{
 			"if errCode := uint32(result); errCode != 0 {",
 			`	return 0, fmt.Errorf("cleat_incr_state: error %d", errCode)`,
 			"}",
 			"return int64(uint64(result) >> 32), nil",
-		),
+		},
 	},
 	"HasState": {
 		FieldName:  "HasState",
@@ -278,12 +283,12 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"key", "string"},
 		},
-		ResultStmts: withSuspendCheck(
+		ResultStmts: []string{
 			"if errCode := uint32(result); errCode != 0 {",
 			`	return false, fmt.Errorf("cleat_has_state: error %d", errCode)`,
 			"}",
 			"return uint32(uint64(result)>>32) != 0, nil",
-		),
+		},
 	},
 	"ListState": {
 		FieldName:  "ListState",
@@ -291,7 +296,7 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"prefix", "string"},
 		},
-		ResultStmts: withSuspendCheck(
+		ResultStmts: []string{
 			"keysLen := uint32(uint64(result) >> 32)",
 			"if errCode := uint32(result); errCode != 0 {",
 			`	return "", fmt.Errorf("cleat_list_state: error %d", errCode)`,
@@ -300,7 +305,7 @@ var adapterDefs = map[string]adapterDef{
 			`	return "[]", nil`,
 			"}",
 			"return unsafe.String(&keysBuf[0], int(keysLen)), nil",
-		),
+		},
 	},
 	"ContinueAsNew": {
 		FieldName:  "ContinueAsNew",
