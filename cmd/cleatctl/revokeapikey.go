@@ -58,6 +58,14 @@ import (
 // as an exec argument. Use --key-stdin, which reads the key on stdin and
 // hashes it locally without it ever reaching argv.
 
+// gosec G101 reports this constant as "potential hardcoded credentials", HIGH
+// severity. It is the --help text, and it is flagged for containing the words
+// `--key-hash` and `key`. There is no credential in it.
+//
+// Worth noting where the finding lands: this string is the OUTPUT of the
+// paragraph above, which exists because passing a live key in argv leaks it to
+// any co-resident user. The scanner flags the documentation of the mitigation
+// and has nothing to say about the mitigation itself.
 const revokeAPIKeyUsage = `Usage: cleatctl revoke-api-key [flags]
 
 Revokes a cleat API key so it can no longer authenticate. Exactly one of

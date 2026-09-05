@@ -26,6 +26,18 @@ type providerEndpoints struct {
 	scope       string
 }
 
+// endpoints holds each provider's PUBLIC OAuth URLs. No secret is stored here:
+// the client ID and secret come from tenant configuration at request time.
+//
+// gosec's G101 reports one HIGH-severity "potential hardcoded credentials"
+// finding per entry -- three as of 2026-09-04, one for each provider block. It
+// is matching the field NAME `tokenURL` against its credential-name pattern,
+// not looking at the value, and every value here is a documented endpoint
+// published by Google, GitHub and Okta. Three findings, one cause, no secret.
+//
+// Verified before this comment was written rather than assumed: the only
+// `%s`-bearing entries are Okta's, where the host is the tenant's own Okta
+// domain, and nothing in this map is read as a credential.
 var endpoints = map[string]providerEndpoints{
 	"google": {
 		authURL:     "https://accounts.google.com/o/oauth2/v2/auth",
