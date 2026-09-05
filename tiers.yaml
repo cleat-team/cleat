@@ -1065,8 +1065,21 @@ tier2:
       job: "Layer 2 — WASM Integration"
       workflow: .github/workflows/plugin-harness-ci.yml
       why: >-
-        The Go, Rust, AssemblyScript and Python guest plugins. Its skip budget is what
-        keeps a missing toolchain from reading as a pass.
+        Two things, not one. The Go, Rust, AssemblyScript and Python guest PLUGINS
+        (TestPluginCalls_Wasm), and since 2026-09-05 the host-call execution HARNESS
+        (TestHostCalls*, IMPROVEMENT-PLAN 3.406) -- Go, Rust and AssemblyScript guests
+        each making all 24 wave-1 host calls against a real host, one call per
+        invocation, checked against recorded outcome tables. Both are named explicitly
+        in the job's -run pattern, and neither is run by any other workflow: every job
+        in plugin-harness-ci.yml filters with -run, so a test no pattern names runs
+        nowhere at all. That is not hypothetical -- the harness was in the tree and
+        selected by no pattern until #748, and its own drift guards were still
+        unselected after that fix because `TestHostCalls` does not match
+        `TestHostCallTable...`. Confirm with -list, which answers what a pattern
+        selects; -run answers only by implication:
+        `cd tests/plugin-harness && go test -list 'TestHostCalls|HostCallTableCovers' ./...`
+        must return 6. Its skip budget of 0 (scripts/skip-ledger.tsv, key
+        plugin-harness/wasm) is what keeps a missing toolchain from reading as a pass.
     - suite: ./tests/plugin-harness/...
       job: "Layer 3 — Multi-DB"
       workflow: .github/workflows/plugin-harness-ci.yml
