@@ -3451,3 +3451,74 @@ fixture, which fails exactly the `assemblyscript` subtest in each and nothing el
 (`grep -rn 'dist/workflow\.\(js\|d\.ts\)' --include='*.go' --include='*.md'
 --exclude-dir=node_modules .` finds none), so they are untracked rather than moved — the
 same call `.gitignore` already made for `examples/*/dist/`.
+
+### 3.306 The Go guest reports an error code where the other four report the host's message — 🔴 **OPEN** (WS-2, 2026-09-04)
+
+Same host, same 10 registered plugins, same 17 calls, four guest languages. Measured
+2026-09-04 by dumping every key of `TestPluginCalls_Wasm_*`'s result:
+
+| guest | what a failed `blobstore.put` says | what a failed `pgvector.upsert` says |
+|---|---|---|
+| Rust, AssemblyScript, Java | `blobstore: no tenant context` | `plugin function pgvector/upsert not registered. Check that the plugin is deployed…` |
+| **Go** | `plugin_call: error 1 (0=unknown 1=timeout …)` | `plugin_call: error 1 (0=unknown 1=timeout …)` |
+
+All 16 of Go's failures read `error 1`, for at least three genuinely different causes,
+and the legend printed beside it calls 1 a **timeout** — which none of them is. The other
+three guests distinguish the three causes exactly. (Python could not be measured here:
+`componentize-py` is killed with signal 9 building this workflow in this sandbox.)
+
+**What is established and what is not.** `wasm/generator.go`'s `callErrorMessage` returns
+the host's response text when `responseLen > 0 && int(responseLen) <= len(responseBuf)`,
+and otherwise falls back to the code legend. Go printed the fallback for all 16, so on
+that path either the host wrote no response bytes or the length failed that bounds check.
+**Which of the two has not been determined**, and the answer decides whether this is a
+host defect, a guest buffer-sizing defect, or a length-encoding mismatch at the boundary.
+Do not assume; the four real defects this repo has found at that boundary were all
+"the value meant the wrong thing on one side", not overflow.
+
+Note the code is already the *corrected* one — §2.10 fixed this same helper for printing
+`errCode` against a `CallErrorCode` legend, and its doc comment explains the distinction
+at length. So `error 1` here is a `callErrorCode` of 1, not the old confusion resurfacing.
+That makes "why is it 1 for a not-registered plugin" a live question rather than a known
+one.
+
+Pinned meanwhile by `knownPluginFailures` in `tests/plugin-harness/wasm_plugin_test.go`
+(3.307), which carries the two `plugin_call*: error ` entries explicitly so the
+divergence stays visible rather than silently accepted.
+
+### 3.307 Five plugin tests checked that a key was present, not that the call worked — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`TestPluginCalls_Wasm_{Go,Rust,AS,Python,Java}` each verified their 17 expected keys with
+
+    if _, ok := results[key]; !ok { t.Errorf("missing result key: %s", key) }
+
+so `{"error":"plugin function pgvector/upsert not registered…"}` under an expected key
+passed. Measured 2026-09-04: **16 of the 17 calls fail in every language**, and all five
+tests were green. The one that works is `llm.list_models` — which is also the only key any
+of them checked for success, in Go alone, behind two `if …; ok` guards that pass silently
+when the shape is unexpected.
+
+This is the same shape as the skips of §3.303 — a check that reports success without
+checking — and #455's own commit message confesses to the identical trap: *"my own shape
+assertion missed it because it only checked the field was PRESENT."* Known, written down,
+and still shipped in five more places.
+
+**The fix is not to demand success.** The failures are honest: the in-memory harness has
+no tenant context, does not register pgvector, and wires no plugin stream registry. So
+`assertPluginOutcomes` requires instead that every failure match a reason **written down
+with why**, and that `llm.list_models` keeps working. `pluginCallsThatMustSucceed` is the
+list meant to grow; `knownPluginFailures` is the one meant to shrink. A call that starts
+succeeding is an error telling you to lock it in, which is how the second list gets
+smaller rather than staler.
+
+Falsified three ways, each firing its own branch and no other:
+
+| perturbation | result |
+|---|---|
+| drop the `no tenant context` reason | **12** keys report `failed for a reason not in knownPluginFailures` — matching the 12 measured |
+| drop `llm.list_models` from `pluginCallsThatMustSucceed` | `llm.list_models now succeeds… add it` |
+| add `blobstore.put` to `pluginCallsThatMustSucceed` | `blobstore.put must succeed in this environment and did not` |
+
+Also removed a duplicated `"llm.chat_stream"` from three of the five key lists (Go, Rust,
+Python) — 18 entries, 17 distinct, so one key was checked twice and the count in the log
+line never matched the list.
