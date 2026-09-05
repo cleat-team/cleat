@@ -3531,18 +3531,37 @@ positional pairs. Without guard 3 that line would have looked like coverage fore
 `h.nonexistent_call("x")` fails guard 2 naming it; dropping `acquire_lock`'s second argument fails
 guard 3 with `missing a required argument: 'ttl_seconds'`.
 
-## What is not verified here, and why
+## Verified locally, in the container the repo already provides
 
-**The fixture has not been compiled on this machine.** `componentize-py` is SIGKILLed here —
-exit `-9` — and that is the environment, not the fixture: the *existing* `durable_call_workflow.py`
-dies the same way, which is the control that separates the two. WS-2 reported the same signal 9 in
-their sandbox. So the compile runs first in CI.
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+      cleat-py-toolchain go test ./engine/ -run TestPythonAllHostCallsWorkflowCompiles -count=1
 
-What that leaves unverified is narrow, because the likely failure modes are covered elsewhere: the
-fixture **imports cleanly** under plain Python, so `cleat_entry`, `HostCalls`, `RetryPolicy` and
-`ChildWorkflowOptions` all resolve and the decorator runs; and guards 2 and 3 cover wrong names and
-wrong arities. What remains is whatever only `componentize-py` can reject, which is the thing CI is
-for.
+    --- PASS (1.71s).  Build SUCCESS, 17.94 MB component, all 73 calls.
+
+**This section first said the fixture "has not been compiled on this machine", and that hedge was
+wrong in an instructive way.** `componentize-py` does die here with exit `-9`, and the control was
+sound — the *existing* `durable_call_workflow.py` dies identically, so it is the environment rather
+than the fixture. **But "environmental" is not "unavoidable", and stopping at the first
+correct-sounding answer is what made it look like one.**
+
+`scripts/docker/python-toolchain.Dockerfile` has documented the cause and the fix since 2026-08-06,
+in its header: componentize-py's embedded wasmtime "installs a mach exception handler into a
+guarded port and the process dies with EXC_GUARD / GUARD_TYPE_MACH_PORT. That guard is a Darwin
+kernel feature with no Linux equivalent, which is why the Linux CI runners have always been able to
+build Python components while a developer's Mac could not." Deterministic, platform-specific, and
+already solved. The image was prebuilt on this machine.
+
+So the diagnosis in the first draft — memory pressure, a sandbox limit — was wrong, and it was
+passed to WS-2 as agreement with their own signal-9 report rather than checked against the tree.
+
+**Two caveats, both from the Dockerfile and both already paid for by someone.**
+`--context desktop-linux` is not optional on a Mac that also runs colima: colima cannot bind-mount
+these paths and **says nothing**, so `-v "$PWD":/src` yields an *empty* directory and the run fails
+with `go: go.mod file not found`, which reads as a broken checkout. Sanity-check the mount before
+believing any failure from this image. And two warnings — `wasm-tools component decompose not
+available` and `metadata stamping failed (non-fatal)` — appear identically when building
+`durable_call_workflow.py`, so they are pre-existing rather than anything this fixture introduced.
+That control is the only reason they are not recorded here as a finding.
 
 The calls sit in `_exercise_every_host_call`, which the entry point reaches only when its request
 says so. `continue_as_new`, `extend_timeout` and `release_lock` would change a running workflow's

@@ -25,6 +25,21 @@ import (
 // CLEAT_REQUIRE_TOOLCHAINS has installed componentize-py on purpose, so a
 // missing tool there is a failure rather than a skip. The tier-1 gate declares
 // it -- tiers.yaml puts python in tier1.languages, and tier 1 forbids skips.
+//
+// ON A MAC THIS SKIPS, AND THAT IS NOT A REASON TO LEAVE IT UNVERIFIED.
+// componentize-py cannot run on Darwin at all: its embedded wasmtime installs a
+// mach exception handler into a guarded port and dies with EXC_GUARD /
+// GUARD_TYPE_MACH_PORT, which has no Linux equivalent. Run it in the container
+// the repo already ships for this:
+//
+//	docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+//	  cleat-py-toolchain go test ./engine/ -run TestPythonAllHostCallsWorkflowCompiles
+//
+// --context desktop-linux is not optional on a machine that also runs colima --
+// colima bind-mounts these paths as an EMPTY directory without saying so, and
+// the run then fails with "go.mod file not found", which reads as a broken
+// checkout rather than a wrong context. See
+// scripts/docker/python-toolchain.Dockerfile, which documents both.
 func TestPythonAllHostCallsWorkflowCompiles(t *testing.T) {
 	pythonWasm := newPythonWasmTestHelper(t)
 	if !pythonWasm.toolsAvailable() {
