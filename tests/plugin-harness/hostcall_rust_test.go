@@ -47,8 +47,11 @@ var rustHostCallOutcomes = map[string]expectedOutcome{
 
 	// ---- calls that succeed ----
 	"AwaitAllChildren": {
-		status: statusOK, detailContains: "1 child result(s)",
-		why: "matches Go's count. Go's binding returns a typed slice and Rust's returns the raw JSON array, so the fixture counts the decoded array -- the agreement is about the host's answer, not about the binding shape",
+		status: statusSuspended, detailContains: "await_all_children(00000000-0000-0000-0000-000000000001)",
+		why: "an incomplete child suspends, matching Go's row. This asserted statusOK and `1 child result(s)` until #754 made the call actually await; " +
+			"the count was green over a single child result whose content was `\"error\":\"child not completed\"`, which is what a count over a result hides. " +
+			"The suspend reason is produced by engine/children.go and is byte-identical across Go, Rust and AssemblyScript -- so unlike the OK rows, " +
+			"this one carries no binding-shape difference to record: all three now assert the same string",
 	},
 	"ChildWorkflow": {
 		status: statusOK, detailRegex: `^child-child-workflow-[0-9a-f]{8}$`,
