@@ -3734,6 +3734,78 @@ WORKSTREAM.md's protocol: *"A falsification that fires two assertions proves nei
 The division of labour is now explicit rather than accidental: the `.txt` is the list of *which*
 contexts are required, and the `tiers.yaml` block is *what each one covers and why*.
 
+
+### 3.403 Nothing in CI looked for committed credentials — 🟢 **FIXED 2026-09-05** (WS-3, 2026-09-05)
+
+Enabling gosec (§3.33, #731) excluded G306 and every `_test.go`, and both exclusions carry a
+written note that they stop catching a credential written to disk or committed in a test.
+Nothing else covered it — measured 2026-09-05, `grep -rilE "gitleaks|trufflehog|secret.scan"
+.github/ scripts/` returned **nothing**. gosec's G101 was never that tool: it fired three times
+on this tree and was wrong all three (a usage string, an ephemeral test-role password, a
+localhost default DSN).
+
+`gitleaks` v8.30.1 now runs in `Lint`, pinned, against `.gitleaks.toml`.
+
+#### What the measurement found, and why it decided the design
+
+| scan | findings | what they are |
+|---|---|---|
+| `gitleaks dir .` (working tree) | **7** | all placeholders — `cleat_sk_testvalidkey123`, `tok_abc123def456`, `cleat_sk_abc123...` (a docs example, ellipsis and all), two `a1b2c3d4e5f6g7h8` idempotency keys, `incident_abc123`, and a JWT in `engine/redact_test.go` that exists *so the redaction test has one to redact* |
+| `gitleaks git .` (1234 commits) | **16**, 9 unique locations | 8 the same placeholders, and **one real 64-hex `cleat_sk_` agent key** in `clew-agent.json`, plus its copy in `cmd/cleatctl/revokeapikey_test.go` until #480 removed it |
+
+**The gate scans the working tree, never the history**, and that is the load-bearing decision
+rather than a default. The real historical key is **known and closed**: public since `1dcf116`
+(2026-06-06), and measured 2026-08-30 it is absent from the production database, so every
+lookup's `WHERE key_hash = ? AND revoked_at IS NULL` misses it and revocation is a no-op. There
+is a standing decision not to rewrite history for it — that would invalidate the `v0.2.0` tag,
+`main` and every clone, and GitHub serves unreferenced blobs by SHA until support purges them,
+so the rewrite would not even un-expose it.
+
+So a history scan is permanently red on something nobody intends to fix. The only ways to green
+it are to baseline a real-looking credential — the one entry that should never be easy to add —
+or to leave the check red, which trains people to ignore it. A tree scan fails on anything
+**new**, which is the actual goal.
+
+#### The allowlist is by VALUE, not by rule and not by path
+
+Seven regexes matching the exact placeholder strings. Disabling the `generic-api-key` rule, or
+excluding `auth/` and `plugins/`, would each also hide the next real secret in the same file.
+
+**Falsified, because an allowlist is exactly the thing that can silently pass everything.** Two
+secrets were planted — one in a new file, and one appended to `auth/middleware_test.go`, the
+same file as an allowlisted placeholder, specifically to test that the allowlist is value-scoped
+and not file-scoped:
+
+    generic-api-key    auth/middleware_test.go:639
+    generic-api-key    zz_probe_secret.go:4
+
+Both caught; removed; re-scan clean. A third probe, `AKIAIOSFODNN7EXAMPLE`, was **not** flagged
+— that is gitleaks' own default allowlist for the canonical AWS documentation key, which is
+correct, and is recorded here so the next person does not use it as a probe and conclude the
+scanner is broken.
+
+#### The first version of the CI step failed, and local verification could not have caught it
+
+`go install` then bare `gitleaks` -> **`gitleaks: command not found`, exit 127**, *after* the
+install succeeded. `go install` writes to `$(go env GOPATH)/bin`, which is not on `PATH` in the
+`lint` job. What made it look safe is that `lint-go` two jobs down does exactly this with
+`golangci-lint` and works; both jobs run `actions/setup-go@v7`, so the difference is not the
+obvious one and was not worth chasing.
+
+**Locally it could not fail**, because every local run invoked the binary by absolute path out of
+`$(go env GOPATH)/bin` — so the local command and the CI command were different commands, and
+only the one that was never run locally was wrong. Now `"$(go env GOPATH)/bin/gitleaks"` in CI
+too, which does not depend on whatever the PATH difference is and makes the two identical.
+
+Verified by extracting the step's `run:` block straight out of the parsed YAML and executing
+*that*, rather than a hand-retyped approximation of it: `bash -n` clean, then `no leaks found`,
+exit 0.
+
+#### What it does not cover
+
+History, deliberately, per the above. And the scan is ~10s over 320 MB, so it is cheap enough
+that the cost is not the reason for any future narrowing.
+
 ### 3.301 A defer segment could still take a distributed lock — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

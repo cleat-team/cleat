@@ -113,6 +113,35 @@ jobs:
           scripts/check-required-contexts.py --self-test
           scripts/check-required-contexts.py
 
+      # Secret scanning. Nothing in this repo looked for credentials until
+      # 2026-09-05: gosec's G101 is not that tool (it fired 3 times here and was
+      # wrong all 3), and #731 excluded G306 and every _test.go from gosec, both
+      # of which carry a written note that they stop catching a committed secret.
+      #
+      # `gitleaks dir`, NOT `gitleaks git` -- the working tree, never the history.
+      # The reason is measured and load-bearing; it is written out in full in
+      # .gitleaks.toml. Short version: history holds one real, KNOWN, closed
+      # credential that the project has deliberately decided not to rewrite, so a
+      # history scan is permanently red on something nobody intends to fix.
+      #
+      # Pinned, like golangci-lint in lint-go, so a new upstream rule cannot turn
+      # this red on a commit that changed nothing.
+      - name: Secret scan (gitleaks)
+        run: |
+          set -euo pipefail
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          # Invoked by absolute path, not by name. `go install` writes to
+          # $(go env GOPATH)/bin, and that is NOT on PATH in this job -- the
+          # first version of this step ran bare `gitleaks` and died with
+          # "gitleaks: command not found", exit 127, AFTER the install had
+          # succeeded. lint-go gets away with a bare `golangci-lint`, which is
+          # what made this look safe; whatever the difference is between the two
+          # jobs, the absolute path does not depend on it. It also matches how
+          # the binary is invoked locally, so a local run and CI exercise the
+          # same command.
+          "$(go env GOPATH)/bin/gitleaks" dir . \
+            --config .gitleaks.toml --no-banner --exit-code 1
+
       # A t.Skip is reported by `go test` as neither a pass nor a failure, and
       # so is read as a pass. That mechanism hid four separate defects found in
       # one session: a Postgres service with no published port (twice), a

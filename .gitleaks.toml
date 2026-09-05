@@ -1,0 +1,65 @@
+# gitleaks configuration for cleat.
+#
+# WHY THIS EXISTS: enabling gosec in #731 excluded G306 (file permissions) and all
+# _test.go files, and both exclusions carry a written note that they stop catching a
+# credential written to disk or committed in a test. Nothing else in CI looked for
+# secrets -- `grep -rilE "gitleaks|trufflehog|secret.scan" .github/ scripts/` returned
+# nothing on 2026-09-05. gosec's G101 was never the tool for it: it fired three times on
+# this tree and was wrong all three (a usage string, an ephemeral test-role password, and
+# a localhost default DSN).
+#
+# WORKING TREE ONLY -- `gitleaks dir`, never `gitleaks git`. This is the load-bearing
+# decision in this file and it is not an oversight.
+#
+# Measured 2026-09-05 with gitleaks v8:
+#
+#     gitleaks dir .   ->  7 findings, ALL placeholders (allowlisted below)
+#     gitleaks git .   -> 16 findings over 1234 commits, 9 unique locations, of which
+#                         ONE is a real 64-hex `cleat_sk_` agent key in `clew-agent.json`
+#                         (and in cmd/cleatctl/revokeapikey_test.go until #480 removed it)
+#
+# That real one is known and CLOSED. It has been public since `1dcf116` (2026-06-06);
+# measured 2026-08-30 it is absent from the production database, so every lookup's
+# `WHERE key_hash = ? AND revoked_at IS NULL` misses it and revocation would be a no-op.
+# There is a standing decision NOT to rewrite history for it: that would invalidate the
+# v0.2.0 tag, `main` and every clone, and GitHub serves unreferenced blobs by SHA until
+# support purges them, so the rewrite would not even un-expose it.
+#
+# So a history scan would be permanently red on something the project has decided not to
+# fix. The only ways to make it green are to baseline a real-looking credential -- which
+# is precisely the entry nobody should ever be able to add casually -- or to let the
+# check sit red, which trains people to ignore it. Scanning the tree fails on anything
+# NEW, which is the actual goal. If you want the history finding re-examined, that is
+# IMPROVEMENT-PLAN §3.403 and the memory on clew-service key rotation, not this gate.
+#
+# Re-derive both numbers:
+#     gitleaks dir . --no-banner --report-format json --report-path /tmp/tree.json
+#     gitleaks git . --no-banner --report-format json --report-path /tmp/hist.json
+
+title = "cleat"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+The seven findings present on 2026-09-05, every one a placeholder. Allowlisted by
+regex on the matched value, NOT by disabling a rule and NOT by excluding a path --
+both of those would also hide the next real secret in the same file. `auth/` and
+`plugins/` keep full coverage; only these exact strings are exempt.
+"""
+regexes = [
+  # auth/middleware_test.go -- a fixture key whose value says what it is.
+  '''cleat_sk_testvalidkey123''',
+  # docs/explanation/security-model.md -- a documentation example, ellipsis included.
+  '''cleat_sk_abc123\.\.\.''',
+  # crates/cleat-sdk/benches/host_calls_bench.rs -- bench fixture.
+  '''tok_abc123def456''',
+  # plugins/pagerdutyalert -- behavioural-test dedup key.
+  '''incident_abc123''',
+  # docs/contributor/design/cleat-execution-design.md -- idempotency key in two examples.
+  '''a1b2c3d4e5f6g7h8''',
+  # engine/redact_test.go -- a JWT that exists SO THAT the redaction test has one to
+  # redact. Allowlisting the value keeps the `jwt` rule live everywhere else.
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiJ1c2VyMTIzIn0\.a1b2c3d4e5f6g7h8i9j0''',
+]
