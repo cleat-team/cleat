@@ -179,11 +179,14 @@ without a WIT change. Measured 2026-09-04 on `develop`:
       echo -n "$f "; sed -n "/func (s \*execSession) $f(/,/^}/p" engine/*.go \
         | grep -c callSuspendSentinel
     done
-    # 1 0 1 0 1 0 1 -- the zeros are SendSignalAndWait, SideEffect, ScheduleCron
+    # 19:55 -- 1 0 1 0 1 0 1, the zeros being SendSignalAndWait, SideEffect, ScheduleCron
+    # 20:30 -- 1 1 1 1 1 1 1, after §3.300 (1d70483) closed exactly those three
 
-A `string` return has nowhere to put the sentinel, so those three need
-`result<string, call-failure>` in `python-sdk/wit/cleat.wit` first — §3.110's situation. See
-§3.113's closing note.
+A `string` return has nowhere to put the sentinel, so those three needed
+`result<string, call-failure>` in `python-sdk/wit/cleat.wit` first — §3.110's situation. **WS-2
+did it as §3.300 at 20:14 on 2026-09-04, so B2 is now seven of seven and both rows are done.** The
+19:55 reading above is kept because it was accurate when taken; see §3.113's closing note on why a
+dated remainder rots where a dated measurement does not.
 
 ### WS-3 — make discovery systematic
 
