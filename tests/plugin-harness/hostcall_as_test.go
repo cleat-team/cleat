@@ -106,11 +106,12 @@ var asHostCallOutcomes = map[string]expectedOutcome{
 	"AwaitAllChildren": {
 		status:         statusSuspended,
 		detailContains: "await_all_children(00000000-0000-0000-0000-000000000001)",
-		why: "an incomplete child suspends, matching Go and Rust. THIS ROW IS WHY THE DEFECT WAS VISIBLE AT ALL: it asserted the host's raw JSON, " +
-			"`[{\"run_id\":\"...\",\"error\":\"child not completed\"}]`, where Go and Rust asserted `1 child result(s)` -- and its own note said both of those were " +
-			"\"green over a child result that is an error\". That was correct, and #754 fixed it, so the row that named the defect is the row that had to change. " +
-			"The reason it could name it is that the fixture reports raw rather than counting: its first version counted commas and returned 2 for this one-element array, " +
-			"since the element is an object with a comma inside it. A count would have hidden the error the same way the other two tables did",
+		why: "an incomplete child suspends, matching Go and Rust. This asserted the host's raw JSON until #754 -- " +
+			"`[{\"run_id\":\"...\",\"error\":\"child not completed\"}]` -- where Go and Rust asserted `1 child result(s)`, and it was the only one of the three " +
+			"whose failure said WHICH result came back rather than how many. Keep the reason it could, because it was not foresight: the fixture reports raw " +
+			"because it could not count honestly, its first version having counted commas and returned 2 for this one-element array whose element is an object. " +
+			"The count was dropped for being wrong, and the visibility was a consequence. The rule that generalises is not \"assert raw\" but \"a count cannot fail " +
+			"on the contents of what it counted\" -- which is why the other two rows stayed green through the defect they were pointed at",
 	},
 
 	// ---- calls that fail, and how badly the message survives ----
