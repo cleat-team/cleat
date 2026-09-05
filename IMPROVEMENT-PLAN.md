@@ -4141,17 +4141,54 @@ same call `.gitignore` already made for `examples/*/dist/`.
 ### 3.306 The Go adapter decoded the host's error message and threw it away — 🟢 **FIXED by #730 (§3.200) 2026-09-04** (WS-2 found, WS-1 diagnosed and fixed)
 
 Found by dumping every key of `TestPluginCalls_Wasm_*`'s result. Same host, same 10
-registered plugins, same 17 calls, four guest languages — and one of them said something
+registered plugins, same 17 calls, **five** guest languages — and one of them said something
 completely different:
 
 | guest | failed `blobstore.put` | failed `pgvector.upsert` |
 |---|---|---|
 | Rust, AssemblyScript, Java | `blobstore: no tenant context` | `plugin function pgvector/upsert not registered…` |
+| Python | `cleat call plugin:blobstore.put: [2] blobstore: no tenant context` | `cleat call plugin:pgvector.upsert: [2] plugin function pgvector/upsert not registered…` |
 | **Go**, before #730 | `plugin_call: error 1 (0=unknown 1=timeout …)` | `plugin_call: error 1 (0=unknown 1=timeout …)` |
 | **Go**, after #730 | `plugin_call: blobstore: no tenant context` | `plugin_call: plugin function pgvector/upsert not registered…` |
 
-(Python could not be measured: `componentize-py` is killed with signal 9 building this
-workflow in this sandbox.)
+**The Python row was measured 2026-09-05 and it settles the question the Go row raised.**
+Python carries the host's text *and* surfaces the classification, and it takes that number
+from the right place: `python-sdk/cleat_sdk/host_calls.py:305` formats
+`[{call_error_code}]`, which is the CallErrorCode field at bits 8-39 — the field Go's
+adapter was printing the *legend* for while reading `errCode` from bits 0-7. So `[2]` is
+`callErrorUnavailable` (`engine/callerrors.go`, `Retryable: true`), and `llm.chat_stream`
+answers `[0]`. Both are correct: `[2]` is `callFailureCode`, and the streaming path's `[0]`
+for a missing registry is deliberate — see the comment at `engine/plugins.go:431`, which
+matches the non-streaming path's answer for the same condition because "a worker with no
+registry is not a service that might succeed next time". **Python was never affected**, and
+the five guests had four different answers where only Python printed a classification at all.
+
+**"Could not be measured" was wrong, and worth reading twice.** This said
+`componentize-py` is killed with signal 9 building this workflow — true as a symptom, and
+useless as a conclusion. The cause is not memory pressure and not a sandbox limit:
+`scripts/docker/python-toolchain.Dockerfile` has documented it since 2026-08-06 —
+componentize-py's embedded wasmtime installs a mach exception handler into a guarded port,
+so the process dies with `EXC_GUARD` / `GUARD_TYPE_MACH_PORT`, a Darwin kernel feature with
+no Linux equivalent. It is deterministic, platform-specific, and **already solved in this
+repo**. The whole measurement above takes six seconds:
+
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+      cleat-py-toolchain go test ./tests/plugin-harness/ \
+      -run TestPluginCalls_Wasm_Python -count=1 -v
+
+`--context desktop-linux` is not optional on a Mac that also runs colima, and getting it
+wrong does not look like a mount problem: colima cannot bind-mount these paths and says
+nothing, so `-v "$PWD":/src` yields an *empty* directory and the run fails with `go: go.mod
+file not found`, which reads as a broken checkout. Sanity-check the mount before believing
+any failure, and check it is *this* tree rather than another checkout:
+
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src cleat-py-toolchain ls /src
+
+The general lesson is the one this section already carries in another form: **"environmental"
+is not the same as "unavoidable."** Establishing that a failure was not caused by my change
+is a control, not an answer, and stopping there left a row of this table blank for a day
+while the fix sat in the tree. (WS-1 hit the identical stop on §3.205 the same week and
+found the Dockerfile only when asked "don't you run componentize-py in docker?")
 
 **The mechanism.** The host wrote the text and the adapter decoded its length; the adapter
 then discarded both. `PluginCall`'s `ResultStmts` computed `responseLen` and never read
@@ -4171,7 +4208,23 @@ since §2.10. Measured on develop after #730:
     grep -c '0=unknown 1=timeout' wasm/adapter_metadata.go   # 18, was 20
     grep -c 'callErrorMessage' wasm/adapter_metadata.go      # 5, was 3
 
-**18 adapters still print that legend, and they are a *different* defect** — deliberately
+**Both of those follow-ups are now closed by #734 (2026-09-05), and the counts above are
+frozen at #730 — re-derive before quoting them.** On develop at `fa6dd10` the first command
+returns **0**: the legend is gone from `wasm/adapter_metadata.go` entirely, and survives in
+exactly two places in non-test Go, both correct — `wasm/generator.go:427`, the
+`callErrorMessage` helper used by the five adapters whose result word really does carry a
+CallErrorCode, and an explanatory comment at `engine/memory.go:310`.
+
+    grep -rn '0=unknown' --include='*.go' . | grep -v _test.go | grep -c .   # 2, both intended
+    grep -c 'hostErrMessage' wasm/adapter_metadata.go                        # 15
+
+A zero from that first command deserves suspicion rather than belief: this file's struct
+literals defeat the obvious regex, so a grep over it can return zero for a pattern that was
+never going to match and "confirm" whatever was being claimed. What makes this zero real is
+that #734 exists and says so, not the zero itself. Cross-check against
+`wasm.AdapterFieldNames()`, which is exported for this.
+
+**What the 18 were, and why they were a *different* defect** — deliberately
 not taken in #730. `packDurableCallResult` is the only packer with a `CallErrorCode` field
 and it reaches exactly the five above. The other 18 sit over `packSimpleResult`,
 `packAwaitChildResult`, `packAwaitPromiseResult`, `packAwaitSignalsResult` and
@@ -4180,7 +4233,17 @@ and it reaches exactly the five above. The other 18 sit over `packSimpleResult`,
 `ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`, `ReleaseLock`) have no buffer
 and want the legend **removed** rather than replaced. `hostErrMessage` already exists in
 `wasm/generator.go` for exactly this, and its doc comment warns the legend "would describe
-a rejected cron expression as a timeout" — describing the live defect in 13 other calls.
+a rejected cron expression as a timeout" — describing what was then the live defect in 13
+other calls.
+
+#734 took both halves, and corrected two things this section had inferred rather than
+checked. The useful split was not "does the legend apply" but "did the host write something
+to read" — AwaitChild, SideEffect and AwaitPromise all write the reason into the buffer on
+the replay path and the guest returned before reading it, which is this section's own defect
+on a different packer. And branches that looked dead were not: `engine/imports.go` returns
+`errBadParam = 0xFFFFFFFF_00000001` from 64 sites before a handler runs, and its low byte is
+1, so every one of those failures printed "error 1" — read by the legend as a timeout rather
+than a bad parameter.
 
 **§2.10 is why this survived: comment general, test specific.**
 `TestHostAdapterReportsCallErrorCodeNotErrCode` pins this exact property and its doc
