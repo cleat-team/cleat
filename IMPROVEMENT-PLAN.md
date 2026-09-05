@@ -3603,6 +3603,40 @@ a different question, and one WS-2 answered badly for plugins in §3.303 — 16 
 were failing while all five language tests passed, because `expectedKeys` checked that a key was
 present rather than that the call worked. **Coverage is necessary and nowhere near sufficient.**
 
+## A metric that improves as the thing degrades
+
+WS-3's framing, and it is worth stating as a class because **three separate instances of it were
+found on 2026-09-05 alone**, in three different subsystems:
+
+| where | the metric | what it did as things got worse |
+|---|---|---|
+| §3.401 | scale-suite percentiles | a goroutine that failed its `INSERT` left a zero in the slice, and zeros sort to the **front** — so a run that lost measurements reported itself as **faster** |
+| §3.303 | plugin `expectedKeys` | checked a key was **present**, not that the call worked, so a failing call still populated its key |
+| §3.206 | this coverage number | counts a call, not an assertion — a fixture that calls everything and asserts nothing scores **100%** |
+
+This is nastier than an optimistic metric, and the difference is the gradient. An optimistic metric
+is wrong by a constant and you can learn to discount it. **These get better as the system gets
+worse**, so the reading that should alarm you is the one that reassures you. Every guard this repo
+adds should be asked which way its gradient points.
+
+**One cheap notch against it here, and it is not a solution.** The report now also counts, per SDK,
+how many covered methods have their result **bound** rather than discarded — `v, err := h.X()`
+versus a bare `h.X()`. Syntactic, on the same walk; it cannot tell a bound result that is checked
+from one ignored two lines later. It separates exactly one thing: *the fixture compiles this call*
+from *the fixture does something with what came back*.
+
+    assemblyscript  called  11/66   16.7%   result bound   8
+    go              called  11/38   28.9%   result bound   7
+    java            called   8/68   11.8%   result bound   5
+    python          called  13/73   17.8%   result bound   9
+    rust            called   7/61   11.5%   result bound   5
+
+**It is deliberately not baselined**, because the §3.204 and §3.205 fixtures will make it look
+worse and should. Both exist to be *compiled*, not run — §3.204's is full of `_, _ = h.X()` and
+§3.205's calls into a function the entry point does not reach — so both will raise `called` sharply
+and `bound` barely. **That is the honest shape of a compile fixture**, and a ratchet on `bound`
+would punish exactly the work this item asks for.
+
 Written in Python, not shell, deliberately: the surface extraction needs multi-line patterns and
 bracket expressions, and CLAUDE.md records that ugrep, BSD grep and GNU grep disagree on exactly
 those — three tools, three answers, one command. `re` behaves the same everywhere.

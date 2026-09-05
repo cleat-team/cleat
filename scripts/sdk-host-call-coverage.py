@@ -111,16 +111,50 @@ SDKS = {
 }
 
 
+# A call whose result goes nowhere. Matched per line: the call opens the
+# statement, or its only targets are blanks.
+#
+# This is syntactic and it is NOT assertion coverage -- it cannot tell a bound
+# result that is checked from one that is ignored two lines later. It separates
+# exactly one thing: "the fixture compiles this call" from "the fixture does
+# something with what came back". WS-3's suggestion, and the reason for it is in
+# 3.206 -- the failure it points at is a metric that improves as the thing it
+# measures degrades.
+_DISCARD_PREFIX = re.compile(r"^\s*(?:let\s+)?(?:_\s*(?:,\s*_\s*)*=\s*)?$")
+
+
+def _binding(blob: str, pattern: str) -> tuple[int, int]:
+    """Return (bound, discarded) call-site counts for one method."""
+    bound = discarded = 0
+    for m in re.finditer(pattern, blob):
+        line_start = blob.rfind("\n", 0, m.start()) + 1
+        prefix = blob[line_start : m.start()]
+        if _DISCARD_PREFIX.match(prefix):
+            discarded += 1
+        else:
+            bound += 1
+    return bound, discarded
+
+
 def measure() -> dict[str, dict]:
     out: dict[str, dict] = {}
     for name, (surface_fn, globs, pat) in SDKS.items():
         surface = surface_fn()
         blob = "\n".join(_read(p) for p in _files(globs))
-        called = {m for m in surface if re.search(pat(m), blob)}
+        called = set()
+        bound_methods = set()
+        for m in surface:
+            b, d = _binding(blob, pat(m))
+            if b or d:
+                called.add(m)
+            if b:
+                bound_methods.add(m)
         out[name] = {
             "surface": len(surface),
             "covered": len(called),
+            "bound": len(bound_methods),
             "uncovered": sorted(surface - called),
+            "called_but_discarded": sorted(called - bound_methods),
         }
     return out
 
@@ -144,7 +178,10 @@ def main() -> int:
     width = max(len(n) for n in got)
     for name, d in sorted(got.items()):
         pct = 100.0 * d["covered"] / d["surface"]
-        print(f"  {name:<{width}}  {d['covered']:>3}/{d['surface']:<3} {pct:5.1f}%")
+        print(
+            f"  {name:<{width}}  called {d['covered']:>3}/{d['surface']:<3} {pct:5.1f}%"
+            f"   result bound {d['bound']:>3}"
+        )
         if mode == "--report" and d["uncovered"]:
             print(f"      uncovered: {', '.join(d['uncovered'][:12])}"
                   + (f" … +{len(d['uncovered']) - 12} more" if len(d["uncovered"]) > 12 else ""))
