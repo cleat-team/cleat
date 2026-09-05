@@ -1386,8 +1386,14 @@ its TTL and blocks every later run using that key, and `TerminateWorkflow`, wher
 a run that the HTTP layer already answered 409 for still runnable — the §1.2 defect fixed in
 #263, reachable again through a different door.
 
-**Still to do:** `mssql_events.go` and `mssql_signals_promises.go` (9 boundaries), which
-§2.60 (#283) is changing. Do those after it lands rather than into a conflict.
+**Done 2026-09-05 — see §3.203.** This paragraph read "**Still to do:** `mssql_events.go` and
+`mssql_signals_promises.go` (9 boundaries), which §2.60 (#283) is changing. Do those after it
+lands rather than into a conflict." It was written at 17:27 on 2026-08-04; #283 landed at 22:23
+the same day, and the deferral outlived its own precondition by a month. The 9 is
+`mssql_signals_promises.go`'s own count of DB write sites (1 `BeginTx` + 8 `s.db.ExecContext`),
+not transaction boundaries across both files — there were 3 of those, all now wrapped, and
+single-statement calls are out of scope for every increment of this item. §3.203 has the
+measurement.
 
 ### 2.50 Parent close policy fails silently on all three dialects — ✅ **FIXED**
 
@@ -3176,6 +3182,93 @@ them at once, so settling it here is cheaper than unpicking it later.
 CLAUDE.md records that all four prior defects at this boundary were "the value meant the wrong
 thing on one side of the boundary", and none was an overflow. This is a fifth, and it is that
 exactly — twice over: a length that was read and dropped, and a code read from the wrong field.
+
+### 3.203 §2.26's last two files were deferred pending §2.60, which landed a month earlier — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+§2.26 wrapped the MSSQL store's transaction boundaries in `withRollbackGuaranteedRetry` one file
+at a time, and its last paragraph reads:
+
+> **Still to do:** `mssql_events.go` and `mssql_signals_promises.go` (9 boundaries), which
+> §2.60 (#283) is changing. Do those after it lands rather than into a conflict.
+
+**§2.60 landed as #283 at 2026-08-04T22:23 and the deferral was never lifted.** The instruction
+was correct when written — the paragraph is dated 17:27 the same day, five hours before the thing
+it was waiting for. It then outlived its own precondition by a month. Same shape as §3.113: a
+marker that was accurate when filed and stopped being accurate without anyone editing it.
+
+Three boundaries wrapped: `AppendEventHistoryBatch`, `SetAllowedSignalCallers` and
+`PollAndClaimSignal`, each split into a `…Once` body the way `CompactHistory` and
+`DeleteExpiredEvents` already were. `PollAndClaimSignal` returns `(string, bool, error)` and the
+wrapper takes `func() error`, so its results are captured in the closure.
+
+**Retrying `PollAndClaimSignal` cannot claim a signal twice**, and the reason is the wrapper's
+whole design rather than anything about this call: `withRollbackGuaranteedRetry` gates on
+`isMSSQLRollbackGuaranteed` — deadlock victim (1205), snapshot conflicts (3960, 41301–41325) —
+where SQL Server has definitively undone the transaction, so the claiming `DELETE` did not happen.
+A double claim needs the commit to have *succeeded*, which is the unknown-outcome case that
+wrapper excludes by construction and `mssqlRetry` does not. **Do not substitute `mssqlRetry` here.**
+
+## The "9 boundaries" was counting something else, and it reproduces exactly
+
+Not recorded as "9 was wrong", because it was not — it answered a different question than the
+sentence around it asks. Measured at `f0074d46`, the commit that wrote the line:
+
+| file, at `f0074d46` | `BeginTx` | `s.db.ExecContext` |
+|---|---|---|
+| `mssql_signals_promises.go` | 1 | 8 |
+| `mssql_events.go` | 1 | 0 |
+
+**1 + 8 = 9 is `mssql_signals_promises.go` alone**, counting every DB write site rather than every
+transaction boundary. The sentence attributes the 9 to both files, so on its own terms the figure
+should have been 10.
+
+The units matter more than the total. **No bare `s.db.ExecContext` is wrapped anywhere in the
+MSSQL store**, including in the files §2.26 declared done — `mssql_deployment.go` still has 7 and
+`mssql_schedules.go` 8. Single-statement autocommit calls were consistently out of scope for every
+increment, so reading the 9 as work-remaining would reopen every finished file. Re-derive with:
+
+    for f in engine/mssql_*.go; do case "$f" in *_test.go) continue;; esac
+      printf "%-34s BeginTx=%s dbExec=%s wrapped=%s\n" "$(basename $f)" \
+        "$(grep -c BeginTx $f)" "$(grep -c 's\.db\.ExecContext' $f)" \
+        "$(grep -c 'withRollbackGuaranteedRetry(' $f)"; done
+
+This is WS-3's correction, and it generalises past this number: **check what a stale count was
+counting, not only whether it reproduces.** Two counts went wrong the same way on 2026-09-04 —
+§3.33's "only two actionable findings" was true of the root module and missed a G112 in
+`examples/`, and a gosec comment claimed 0 findings where the config actually run gave 67. A count
+is scoped to what was walked, and the scope is the part nobody writes down.
+
+## The guard is structural, and it is the part that outlives the fix
+
+`TestEveryMSSQLTransactionBoundaryIsRetried` walks every `engine/mssql_*.go` with `go/ast` and
+fails on any function that opens **and commits** a transaction without being reached through
+`withRollbackGuaranteedRetry`. A set-membership baseline would not have caught the original
+defect, because the deferred boundaries were never in a baseline to begin with.
+
+It fired on its first run, on a false positive worth keeping in the definition: keying on
+`BeginTx` alone flags `beginTxWithContext`, which opens a transaction and hands it back, and
+`tenantSessionConn.BeginTx`, a driver passthrough. Neither commits. **A boundary is a function
+that opens and commits**; its callers are checked on their own.
+
+Deliberately structural rather than behavioural. Proving a retry happens needs a live deadlock,
+which `engine/mssql_deadlock_test.go` does for the paths it covers — and which skips wherever
+`CLEAT_TEST_MSSQL` is unset, so it cannot be the thing that stops a boundary being added
+unwrapped.
+
+**Falsified:** removing the wrapper from `AppendEventHistoryBatch` alone reddens the guard naming
+that function, with the other two still passing.
+
+`engine/mssql_tenant_predicate_test.go`'s allowlist caught the refactor within seconds — its entry
+keyed on `PollAndClaimSignal` and the unscoped statement had moved to `pollAndClaimSignalOnce`.
+Renamed rather than deleted, matching `compactHistoryOnce` and `deleteExpiredEventsOnce` from
+§2.26's earlier increments, which is evidence the split follows the house pattern.
+
+Verified 4623 pass / 0 fail / 6 skip on `./engine/ -p 1` with all three dialects connected.
+**The first attempt at that run reported 825 failures** because the DSNs were reconstructed from
+memory and named a database `cleat_test` that does not exist — the exact failure CLAUDE.md's
+"Is this result real?" section describes itself committing. The DSNs are written down in
+`WORKSTREAM.md`; read them. The probe used afterwards has a negative control: the good DSN passes
+`TestPluginMigrations_AllDialects` and a wrong password fails it.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
