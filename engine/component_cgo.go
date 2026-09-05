@@ -555,12 +555,6 @@ const (
 	cbTypeUUID     // (string) -> string
 
 	// durable-stream-state interface
-	cbTypeSetState    // (string,string) -> u64
-	cbTypeGetState    // (string) -> string
-	cbTypeDeleteState // (string) -> u64
-	cbTypeIncrState   // (string,u64) -> u64
-	cbTypeHasState    // (string) -> u64
-	cbTypeListState   // (string) -> string
 
 	// durable-extended-lifecycle interface
 	cbTypeContinueAsNewVersioned // (string,u32) -> u64
@@ -844,18 +838,6 @@ func goComponentCallback(
 		return entry.backend.dispatchGetScope(args, nargs, results, nresults)
 	case cbTypeUUID:
 		return entry.backend.dispatchUUID(args, nargs, results, nresults)
-	case cbTypeSetState:
-		return entry.backend.dispatchSetState(args, nargs, results, nresults)
-	case cbTypeGetState:
-		return entry.backend.dispatchGetState(args, nargs, results, nresults)
-	case cbTypeDeleteState:
-		return entry.backend.dispatchDeleteState(args, nargs, results, nresults)
-	case cbTypeIncrState:
-		return entry.backend.dispatchIncrState(args, nargs, results, nresults)
-	case cbTypeHasState:
-		return entry.backend.dispatchHasState(args, nargs, results, nresults)
-	case cbTypeListState:
-		return entry.backend.dispatchListState(args, nargs, results, nresults)
 	case cbTypeContinueAsNewVersioned:
 		return entry.backend.dispatchContinueAsNewVersioned(args, nargs, results, nresults)
 	case cbTypeSideEffect:

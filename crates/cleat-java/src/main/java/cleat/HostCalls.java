@@ -204,23 +204,11 @@ public class HostCalls {
     @Import(module = "env", name = "cleat_run_detached")
     private static native long cleatRunDetachedRaw(int namePtr, int nameLen, int inputPtr, int inputLen);
 
-    @Import(module = "env", name = "cleat_set_state")
-    private static native long cleatSetStateRaw(int keyPtr, int keyLen, int valPtr, int valLen);
 
-    @Import(module = "env", name = "cleat_get_state")
-    private static native long cleatGetStateRaw(int keyPtr, int keyLen, int outPtr, int maxLen);
 
-    @Import(module = "env", name = "cleat_delete_state")
-    private static native long cleatDeleteStateRaw(int keyPtr, int keyLen);
 
-    @Import(module = "env", name = "cleat_incr_state")
-    private static native long cleatIncrStateRaw(int keyPtr, int keyLen, long delta);
 
-    @Import(module = "env", name = "cleat_has_state")
-    private static native long cleatHasStateRaw(int keyPtr, int keyLen);
 
-    @Import(module = "env", name = "cleat_list_state")
-    private static native long cleatListStateRaw(int prefixPtr, int prefixLen, int outPtr, int maxLen);
 
     @Import(module = "env", name = "cleat_await_all_children")
     private static native long cleatAwaitAllChildrenRaw(int idsPtr, int idsLen, int outPtr, int maxLen);
@@ -1796,30 +1784,6 @@ public class HostCalls {
     // State operations (scoped for virtual objects)
     // ========================================================================
 
-    /**
-     * Set a key-value pair in the workflow's durable state.
-     * <p>
-     * If a virtual object scope has been set via
-     * {@link #setScope(String, String)}, the key is automatically prefixed.
-     *
-     * @param key   the state key
-     * @param value the state value (typically a JSON string)
-     * @return a result indicating success, or an error description on failure
-     */
-    public CleatResult<Void> setState(String key, String value) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped, value);
-        int keyOff = p[0], valOff = p[1];
-        int keyLen = p[2], valLen = p[3];
-
-        long result = cleatSetStateRaw(keyOff, keyLen, valOff, valLen);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        if (errCode != 0) {
-            return CleatResult.err("setState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key is valid and state operations are available.");
-        }
-        return CleatResult.ok(null);
-    }
 
     /**
      * Record a side-effect result for deterministic replay.
@@ -1855,126 +1819,10 @@ public class HostCalls {
         return CleatResult.ok(output);
     }
 
-    /**
-     * Get a value from the workflow's durable state by key.
-     * <p>
-     * If a virtual object scope has been set, the key is automatically prefixed.
-     *
-     * @param key the state key
-     * @return a result containing the state value on success, or an error
-     *         description on failure (including if the key is not found)
-     */
-    public CleatResult<String> getState(String key) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped);
 
-        long result = cleatGetStateRaw(p[0], p[1], Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int valueLen = Memory.decodeSimpleExtra(result);
 
-        if (errCode != 0) {
-            return CleatResult.err("getState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key exists and state operations are available.");
-        }
 
-        String value = readOutput(valueLen);
-        return CleatResult.ok(value);
-    }
-
-    /**
-     * Delete a key from the workflow's durable state.
-     * <p>
-     * If a virtual object scope has been set, the key is automatically prefixed.
-     *
-     * @param key the state key to delete
-     * @return a result indicating success, or an error description on failure
-     */
-    public CleatResult<Void> deleteState(String key) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped);
-
-        long result = cleatDeleteStateRaw(p[0], p[1]);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        if (errCode != 0) {
-            return CleatResult.err("deleteState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key is valid and state operations are available.");
-        }
-        return CleatResult.ok(null);
-    }
-
-    /**
-     * Atomically increment a numeric state value by the given delta.
-     * <p>
-     * If a virtual object scope has been set, the key is automatically prefixed.
-     * If the key does not exist, it is created with the delta as its initial value.
-     *
-     * @param key   the state key
-     * @param delta the amount to add (may be negative to decrement)
-     * @return a result containing the new value after increment, or an error
-     *         description on failure
-     */
-    public CleatResult<Long> incrState(String key, long delta) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped);
-
-        long result = cleatIncrStateRaw(p[0], p[1], delta);
-
-        int errCode = (int) (result & 0xFFL);
-        if (errCode != 0) {
-            return CleatResult.err("incrState(key=\"" + key + "\", delta=" + delta + ") failed: host returned error code " + errCode + ". Check that the key is valid for numeric operations.");
-        }
-
-        long newValue = result >>> 8;
-        return CleatResult.ok(newValue);
-    }
-
-    /**
-     * Check whether a key exists in the workflow's durable state.
-     * <p>
-     * If a virtual object scope has been set, the key is automatically prefixed.
-     *
-     * @param key the state key
-     * @return {@code true} if the key exists in state, {@code false} otherwise
-     */
-    public boolean hasState(String key) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped);
-
-        long result = cleatHasStateRaw(p[0], p[1]);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        if (errCode != 0) {
-            return false;
-        }
-        return Memory.decodeSimpleExtra(result) != 0;
-    }
-
-    /**
-     * List state keys matching the given prefix.
-     * <p>
-     * If a virtual object scope has been set, the prefix is automatically
-     * prefixed.  The returned keys include the scope prefix.
-     *
-     * @param prefix the key prefix to match
-     * @return a result containing the matching keys as a JSON array string,
-     *         or an error description on failure
-     */
-    public CleatResult<String> listState(String prefix) {
-        String scoped = scopedKey(prefix);
-        int[] p = packStrings(scoped);
-
-        long result = cleatListStateRaw(p[0], p[1], Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int listLen = Memory.decodeSimpleExtra(result);
-
-        if (errCode != 0) {
-            return CleatResult.err("listState(prefix=\"" + prefix + "\") failed: host returned error code " + errCode + ". Check that state operations are available.");
-        }
-
-        String listJson = readOutput(listLen);
-        return CleatResult.ok(listJson);
-    }
 
     // ========================================================================
     // awaitAllChildren

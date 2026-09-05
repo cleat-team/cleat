@@ -20,7 +20,7 @@ This guide covers conceptual mapping, API differences, code examples, and known 
 | `ctx.run()` | `call()` | Non-deterministic code wrapped in host call |
 | Journal / Log | `log()` | Similar deterministic logging |
 | `ctx.serviceClient()` | `child_workflow()` | Starting another workflow |
-| State keys (`ctx.get`/`ctx.set`/`ctx.clear`) | `get_state()` / `set_state()` / `delete_state()` | Similar key-value state |
+| State keys (`ctx.get`/`ctx.set`/`ctx.clear`) | **No equivalent** | See "No virtual object keyed state" below |
 | `ctx.endpointContext()` | `current_workflow_id()` / `current_run_id()` | Identity info as host calls |
 | Virtual Objects | `set_scope()` / virtual object decorator | Cleat has explicit scope management |
 | Idempotency / deduplication | Idempotency-Key header | REST-level idempotency |
@@ -169,11 +169,11 @@ await ctx.set("my-key", "new-value");
 await ctx.clear("my-key");
 ```
 
-**Cleat (Python):**
+**Cleat (Python):** no equivalent — use a local variable, and publish anything an
+external caller must read:
 ```python
-val = h.get_state("my-key", str)
-h.set_state("my-key", "new-value")
-h.delete_state("my-key")
+my_key = "new-value"            # durable within the run, via replay
+h.set_query_state("my-key", my_key)   # readable at GET /api/workflows/:id/query
 ```
 
 ### Starting a Service
@@ -339,7 +339,7 @@ def place_order(h: HostCalls, order: dict) -> str:
     ship_resp = h.call("shipping", "createShipment", {"orderId": order["orderId"]})
     ship_data = json.loads(ship_resp)
 
-    h.set_state("status", "confirmed")
+    h.set_query_state("status", "confirmed")
     return json.dumps({"status": "shipped", "trackingId": ship_data.get("trackingId", "")})
 ```
 
@@ -368,24 +368,37 @@ var result ChargeResult
 err := h.CallTyped("payment", "charge", request, &result)
 ```
 
-### 2. No Virtual Object Keyed State (Automatic)
+### 2. No Virtual Object Keyed State
 
-Restate has built-in virtual object state that is automatically scoped to the
-object key. Cleat requires explicit scope management.
+Restate's virtual objects have durable key-value state that persists **across
+invocations** of the same object key. **Cleat has no equivalent, and this is a
+deliberate product decision rather than a gap to be closed.**
 
-- **Gap**: Virtual object state requires `set_scope()` / `clear_scope()` calls.
-- **Workaround**: Use Cleat's scope API:
+Neither Temporal nor DBOS offers state scoped beyond a single workflow either:
+Temporal's workflow state is local variables made durable by replay, and DBOS
+uses your own database tables inside transactions. Restate is the outlier.
+Introducing persistent state not tied to a workflow is a large feature with a
+large problem surface, and cleat does not need it to match the engines it is
+measured against.
 
-```python
-@virtual_object("shopping_cart")
-def cart_handler(h: HostCalls, input: str) -> str:
-    prev = h.set_scope("shopping_cart", extract_key(input))
-    try:
-        state = h.get_state("items", list)
-        # ...
-    finally:
-        h.clear_scope()
-```
+- **Gap**: there is no per-object durable key-value store.
+- **What to do instead**: hold state in ordinary local variables — replay makes
+  them durable within a run, which is exactly Temporal's model — and carry
+  values across a `continue_as_new` by passing them in the new input. Publish
+  anything an external caller must read with `set_query_state()`.
+
+> **This section previously said the gap was ergonomic** — that Restate scopes
+> automatically and cleat "requires explicit `set_scope()` calls" — and showed a
+> worked example calling `h.get_state("items", list)` inside a scope. That
+> example did not work: two invocations for the same key are two workflow runs
+> with two histories, so nothing was shared. The `set_state`/`get_state` family
+> it referred to was removed on 2026-09-05; see IMPROVEMENT-PLAN §3.216.
+
+`set_scope()` / `clear_scope()` remain, and still do something useful: they
+acquire a **concurrency key**, so at most one workflow holds a given
+`objectType:instanceKey` at a time. That is virtual-object *mutual exclusion*
+without virtual-object *state*.
+
 
 ### 3. Unit Differences
 

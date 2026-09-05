@@ -114,12 +114,6 @@ type HostHandler interface {
 	RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64
 
 	// State operations (Stream R)
-	SetState(ctx context.Context, m api.Module, key, value string) int64
-	GetState(ctx context.Context, m api.Module, key string, valuePtr, valueMaxLen uint32) int64
-	DeleteState(ctx context.Context, m api.Module, key string) int64
-	IncrState(ctx context.Context, m api.Module, key string, delta int64) int64
-	HasState(ctx context.Context, m api.Module, key string) int64
-	ListState(ctx context.Context, m api.Module, prefix string, keysPtr, keysMaxLen uint32) int64
 
 	// Detached execution (Stream R)
 	RunDetached(ctx context.Context, m api.Module, name, inputJSON string) int64
@@ -740,83 +734,11 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(h.RunDetached(ctx, m, name, inputJSON))
 	}).Export("cleat_run_detached")
 
-	// cleat_set_state: (ptr,len x2) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen, valPtr, valLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
-		if !ok {
-			return errBadParam
-		}
-		value, ok := readWasmPayload(mem, valPtr, valLen, MaxWasmStringLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.SetState(ctx, m, key, value))
-	}).Export("cleat_set_state")
 
-	// cleat_get_state: (ptr,len, ptr,maxLen) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen, valuePtr, valueMaxLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.GetState(ctx, m, key, valuePtr, valueMaxLen))
-	}).Export("cleat_get_state")
 
-	// cleat_delete_state: (ptr,len) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.DeleteState(ctx, m, key))
-	}).Export("cleat_delete_state")
 
-	// cleat_incr_state: (ptr,len, i64) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen uint32, delta int64) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.IncrState(ctx, m, key, delta))
-	}).Export("cleat_incr_state")
 
-	// cleat_has_state: (ptr,len) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.HasState(ctx, m, key))
-	}).Export("cleat_has_state")
 
-	// cleat_list_state: (ptr,len, ptr,maxLen) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		prefixPtr, prefixLen, keysPtr, keysMaxLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		// An empty prefix lists every key: ListState filters with
-		// strings.HasPrefix, and HasPrefix(k, "") is true for all k.
-		prefix, ok := readWasmPayload(mem, prefixPtr, prefixLen, MaxWasmStringLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.ListState(ctx, m, prefix, keysPtr, keysMaxLen))
-	}).Export("cleat_list_state")
 
 	// cleat_fetch: (ptr,len x4, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

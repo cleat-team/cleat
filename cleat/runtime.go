@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sync"
 	"time"
 )
 
@@ -324,12 +323,6 @@ type Promises interface {
 // StateManager provides durable key-value state operations scoped to the workflow.
 type StateManager interface {
 	SetQueryState(key, value string)
-	SetState(key string, value interface{})
-	GetState(key string, result interface{}) error
-	DeleteState(key string)
-	HasState(key string) bool
-	IncrState(key string, delta int64) int64
-	ListState(prefix string) []string
 }
 
 // UpdateHandlers provides workflow update-handler registration.
@@ -503,55 +496,6 @@ func (e *CallError) Retryable() bool {
 	default:
 		return false
 	}
-}
-
-// ---- Virtual Object definitions ----
-
-// VirtualObjectDef describes a virtual object type for key-scoped
-// stateful services.
-type VirtualObjectDef struct {
-	// Name is the unique name for this virtual object type.
-	Name string
-
-	// EntryPoint is the function that handles invocations for this
-	// virtual object type. It receives a HostCalls (with state scoped
-	// to the instance) and the input JSON, and returns the result JSON
-	// or an error.
-	EntryPoint func(h HostCalls, input string) (string, error)
-}
-
-// virtualObjectRegistry is the package-level registry of virtual object
-// definitions.
-var virtualObjectRegistry = struct {
-	mu   sync.RWMutex
-	defs map[string]VirtualObjectDef
-}{
-	defs: make(map[string]VirtualObjectDef),
-}
-
-// RegisterVirtualObject registers a virtual object definition in the
-// global registry. Returns an error if a definition with the same name
-// already exists or if the name is empty.
-func RegisterVirtualObject(def VirtualObjectDef) error {
-	virtualObjectRegistry.mu.Lock()
-	defer virtualObjectRegistry.mu.Unlock()
-	if def.Name == "" {
-		return fmt.Errorf("durable: virtual object name must not be empty")
-	}
-	if _, exists := virtualObjectRegistry.defs[def.Name]; exists {
-		return fmt.Errorf("durable: virtual object %q already registered", def.Name)
-	}
-	virtualObjectRegistry.defs[def.Name] = def
-	return nil
-}
-
-// GetVirtualObject returns a registered virtual object definition by name.
-// The second return value is false if no definition with that name exists.
-func GetVirtualObject(name string) (VirtualObjectDef, bool) {
-	virtualObjectRegistry.mu.RLock()
-	defer virtualObjectRegistry.mu.RUnlock()
-	def, ok := virtualObjectRegistry.defs[name]
-	return def, ok
 }
 
 // TerminalError is a sentinel error that marks a workflow error as
@@ -793,8 +737,6 @@ type HostCallsImpl struct {
 
 	sideEffect func(computedResult string) (string, error)
 
-	// State map for typed K/V operations.
-	stateMap       map[string]interface{}
 	updateHandlers map[string]updateHandlerEntry
 
 	// Scope management for virtual object instances.

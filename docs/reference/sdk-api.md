@@ -28,7 +28,7 @@ func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, erro
 - `Signaler` -- signal communication between workflows
 - `Lifecycle` -- versioning, child workflows, cancellation, logging, defer
 - `Promises` -- durable promise operations
-- `StateManager` -- durable key-value state
+- `StateManager` -- `SetQueryState`, for state a caller can read via the REST API
 - `UpdateHandlers` -- workflow update-handler registration
 - `CronScheduler` -- durable cron schedule operations
 - `Scoper` -- virtual object instance scoping
@@ -456,7 +456,7 @@ h.LogKV("payment processed", "amount", 5000, "currency", "USD")
 
 ---
 
-## StateManager -- Key-Value State
+## StateManager -- Queryable State
 
 ```go
 SetQueryState(key, value string)
@@ -467,19 +467,6 @@ Sets workflow state that is visible via the REST API (`GET /api/workflows/:id?ke
 ```go
 h.SetQueryState("order_status", "shipped")
 ```
-
----
-
-```go
-SetState(key string, value interface{})
-GetState(key string, result interface{}) error
-DeleteState(key string)
-HasState(key string) bool
-IncrState(key string, delta int64) int64
-ListState(prefix string) []string
-```
-
-Full key-value state management scoped to the current workflow.
 
 ---
 

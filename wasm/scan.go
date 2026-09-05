@@ -202,9 +202,6 @@ func normalizeImportName(name string) string {
 		return "cleat_await_signals"
 	case "cleat_acquire_lock", "cleat_release_lock":
 		return "cleat_acquire_lock"
-	case "cleat_set_state", "cleat_get_state", "cleat_delete_state",
-		"cleat_incr_state", "cleat_has_state", "cleat_list_state":
-		return "set_query_state"
 	case "schedule_invoke":
 		return "cleat_sleep"
 	}

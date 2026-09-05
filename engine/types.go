@@ -442,7 +442,6 @@ type execSession struct {
 	defName          string            // workflow definition name (for metrics labels)
 	execRunID        string            // current execution run ID
 	queryState       map[string]string // key-value state set via SetQueryState
-	stateStore       map[string]string // workflow state for Stream R state operations
 	tenantID         string            // tenant ID injected into plugin function context
 	callerPluginName string            // for WASM plugins, the calling plugin's name (for call_plugin enforcement)
 	queryHandlers    []string          // registered query handler names
@@ -489,7 +488,7 @@ type execSession struct {
 	// avoiding a DB round-trip to re-fetch it for the next step's chain.
 	lastChecksum string
 
-	// mu protects maps (queryState, stateStore, deferrals) from
+	// mu protects maps (queryState, deferrals) from
 	// concurrent access when wasmtime host functions race with Go dispatch.
 	mu sync.Mutex
 
