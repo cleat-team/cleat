@@ -1,5 +1,7 @@
 package wasm
 
+import "sort"
+
 // adapterDef describes how to generate the closure for a single HostCalls
 // method, bridging the clean Go interface to the //go:wasmimport call.
 type adapterDef struct {
@@ -494,7 +496,11 @@ var adapterDefs = map[string]adapterDef{
 		ReturnType: "(string, bool, error)",
 		Params: []adapterParam{
 			{"promiseID", "string"},
-			{"timeoutMs", "int64"},
+			// time.Duration, not int64: cleat.HostCallsOptions.AwaitPromise is
+			// func(promiseID string, timeout time.Duration). The generator
+			// emits `timeoutMs := timeout.Milliseconds()` for a Duration param,
+			// which is also what the import's timeoutMs argument needs.
+			{"timeout", "time.Duration"},
 		},
 		ResultStmts: []string{
 			"resultLen := uint32(uint64(result) >> 32)",
@@ -549,22 +555,6 @@ var adapterDefs = map[string]adapterDef{
 			"return acquired, nil",
 		),
 	},
-	"AcquireLockMs": {
-		FieldName:  "AcquireLockMs",
-		ReturnType: "(bool, error)",
-		Params: []adapterParam{
-			{"key", "string"},
-			{"ttlMs", "int64"},
-		},
-		ResultStmts: withSuspendCheck(
-			"errCode := uint32(result & 0xFF)",
-			"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
-			"if errCode != 0 {",
-			`    return false, fmt.Errorf("cleat_acquire_lock: error %d", errCode)`,
-			"}",
-			"return acquired, nil",
-		),
-	},
 	"ReleaseLock": {
 		FieldName:  "ReleaseLock",
 		ReturnType: "error",
@@ -583,7 +573,13 @@ var adapterDefs = map[string]adapterDef{
 		FieldName:  "SideEffect",
 		ReturnType: "(string, error)",
 		Params: []adapterParam{
-			{"fn", "func() (string, error)"},
+			// A string, not the func. cleat.HostCallsImpl.SideEffect takes the
+			// closure, calls it, and passes the computed string to
+			// HostCallsOptions.SideEffect -- which is
+			// func(computedResult string) (string, error). Emitting the func
+			// signature here produced a closure the struct literal would not
+			// accept, so no workflow calling SideEffect could compile.
+			{"computedResult", "string"},
 		},
 		ResultStmts: withSuspendCheck(
 			"cachedResultLen := uint32(uint64(result) >> 32)",
@@ -839,4 +835,19 @@ var hostWrapperDefs = map[string]hostWrapperDef{
 			`return json.Unmarshal([]byte(resp), result)`,
 		},
 	},
+}
+
+// AdapterFieldNames returns every cleat.HostCallsOptions field the host-adapter
+// generator can emit, sorted.
+//
+// Exported for cmd/cleat's compile test, which needs to assert that its fixture
+// exercises the whole table -- a host call the fixture never calls is a host
+// call nobody compiles. See IMPROVEMENT-PLAN.md 3.204.
+func AdapterFieldNames() []string {
+	names := make([]string, 0, len(adapterDefs))
+	for _, def := range adapterDefs {
+		names = append(names, def.FieldName)
+	}
+	sort.Strings(names)
+	return names
 }

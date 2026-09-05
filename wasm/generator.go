@@ -196,15 +196,15 @@ var importDefs = map[string]importDef{
 		ImportName: "cleat_create_promise",
 		Params: []paramSpec{
 			{"name", kindInString},
-			{"promise_id_out", kindOutString},
+			{"promiseIDOut", kindOutString},
 		},
 	},
 	"cleat_await_promise": {
 		ImportName: "cleat_await_promise",
 		Params: []paramSpec{
-			{"promise_id", kindInString},
-			{"timeout_ms", kindInt64},
-			{"result_out", kindOutString},
+			{"promiseID", kindInString},
+			{"timeoutMs", kindInt64},
+			{"resultOut", kindOutString},
 		},
 	},
 	"cleat_now": {
@@ -241,13 +241,13 @@ var importDefs = map[string]importDef{
 		ImportName: "cleat_acquire_lock",
 		Params: []paramSpec{
 			{"key", kindInString},
-			{"ttl_ms", kindInt64},
+			{"ttlMs", kindInt64},
 		},
 	},
 	"cleat_side_effect": {
 		ImportName: "cleat_side_effect",
 		Params: []paramSpec{
-			{"result", kindInString},
+			{"computedResult", kindInString},
 			{"cachedResult", kindOutString},
 		},
 	},
