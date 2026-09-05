@@ -4113,11 +4113,18 @@ that and cannot be audited by the next reader.
 
 The handshake pair also has a mechanical tell, which is worth stating but is **not** what decides
 the classification: they are the only two of the 58 whose registration carries a prose comment
-rather than an ABI signature. Measured 2026-09-05, partitioning all three ways: **0 uncommented,
-53 signature-only, 2 prose** — and the first number is the load-bearing one, because a scan that
-classifies "found no comment" as "not prose" reports the same 2 whether the rest are documented or
-bare. WS-2's first attempt at this parse returned **10**, by walking back from `.Export(...)` to
-the nearest comment and landing *inside* a long function body rather than above the builder.
+rather than an ABI signature. Measured 2026-09-05 over all 58, partitioning three ways:
+**0 uncommented, 56 signature-only, 2 prose**. The first number is the load-bearing one, because a
+scan that classifies "found no comment" as "not prose" reports the same 2 whether the rest are
+documented or bare. WS-2's first attempt at this parse returned **10**, by walking back from
+`.Export(...)` to the nearest comment and landing *inside* a long function body rather than above
+the builder.
+
+**That partition read `0 / 53 / 2` until this section was read end to end, and 0+53+2 is 55, not
+58** — it had been measured with the prefix-anchored pattern and left standing under a heading
+already corrected to 58. It was self-contradicting in the same paragraph and survived four edits,
+because each edit fixed what it was aimed at. A number carried across a correction has to be
+re-measured, not re-read.
 
 Note the tell's limit, which `cleat_register_query_handler` demonstrates: it is a property of the
 **comments**, so it separates the two handshake calls and is blind to the third exclusion entirely.
@@ -4182,7 +4189,9 @@ three, per export per SDK:
    came back. Only this state satisfies "tested to function correctly".
 
 The host-call execution harness (§3.406, `tests/plugin-harness/`) produces state 3 for wave-1 on
-Go, Rust and AssemblyScript today. Nothing produces it for the other 29 exports on any SDK.
+Go, Rust and AssemblyScript today. Wave-1 is 24 SDK *methods*, which do not map one-to-one onto
+host exports, so the count of exports left in state 1 or 2 is not 55 − 24 and is not derived here —
+that arithmetic is item 1's output, not an input to it.
 
 ## Work items, in order
 
