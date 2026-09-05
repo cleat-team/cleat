@@ -85,7 +85,16 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 // mysqlCleanupTables and mssqlCleanupTables so the three can be diffed by eye --
 // they had drifted, and TestCleanupTableListsAgree now fails if they do again.
 var postgresCleanupTables = []string{
-	"tenant_api_keys",
+	// Schema-qualified, and it must be. The table is admin.tenant_api_keys;
+	// unqualified, the name resolves through search_path ("$user", public) and
+	// what it finds depends on the database rather than on the schema. Measured
+	// 2026-09-04 across the three local instances: to_regclass returned NULL on
+	// one (so existingTables dropped the entry and cleanup skipped it) and a
+	// stray public./cleat. copy on the other two (so the DELETE hit a decoy).
+	// On none of them did the real table get cleared -- the entry 2.60d added
+	// here to stop tenant_api_keys accumulating had been inert since it landed.
+	// TestCleanupPostgresTestDataClearsAdminTenantAPIKeys is the regression.
+	"admin.tenant_api_keys",
 	"workflow_tags",
 	"workflow_routing",
 	"workflow_update_requests",
@@ -116,6 +125,11 @@ func CleanupPostgresTestData(t *testing.T, db *sql.DB) {
 	// always done. Without it, widening this list to match the other dialects
 	// fails every minimal-schema test on `relation "tenant_api_keys" does not
 	// exist`.
+	//
+	// This stays correct for the schema-qualified entry: to_regclass returns
+	// NULL for a missing schema as readily as for a missing table, so a
+	// minimal-schema database drops admin.tenant_api_keys from the list rather
+	// than erroring on it.
 	present := existingTables(t, db, DialectPostgres, postgresCleanupTables)
 
 	for _, table := range present {

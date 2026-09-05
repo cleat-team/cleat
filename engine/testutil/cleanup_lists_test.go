@@ -21,10 +21,20 @@ import (
 // Not a sweep of the current contents — those are already reconciled — but the
 // thing that keeps them reconciled.
 
-// normaliseTable strips the schema qualifier SQL Server needs. Only
-// admin.tenant_api_keys carries one, and it must: unqualified, the DELETE
-// resolves against the connecting principal's default schema and fails, while
-// the existence check passes because sys.tables is keyed on name alone.
+// normaliseTable strips the schema qualifier so the three lists can be compared
+// on membership and order. Only tenant_api_keys carries one, on the two dialects
+// that have schemas -- and it must, on both, for the same reason spelled
+// differently: unqualified, the name resolves against something other than the
+// admin schema. On SQL Server the DELETE fails outright while the existence
+// check passes, because sys.tables is keyed on name alone. On PostgreSQL it is
+// quieter and worse -- to_regclass follows search_path, so the entry either
+// vanishes from the list or lands on a stray copy, and nothing fails at all.
+//
+// Because this function normalises the qualifier away, TestCleanupTableListsAgree
+// is structurally blind to it: "admin.tenant_api_keys" and "tenant_api_keys"
+// compare equal, which is why PostgreSQL kept an unqualified entry for as long
+// as it did with three green lists. TestCleanupListsQualifyWhereTheDialectHasSchemas
+// below is the assertion that comparison cannot make.
 func normaliseTable(s string) string {
 	if i := strings.IndexByte(s, '.'); i >= 0 {
 		return s[i+1:]
@@ -68,6 +78,48 @@ func TestCleanupTableListsAgree(t *testing.T) {
 					name, i, got[i], want[i])
 				break
 			}
+		}
+	}
+}
+
+// TestCleanupListsQualifyWhereTheDialectHasSchemas asserts the axis
+// TestCleanupTableListsAgree normalises away.
+//
+// tenant_api_keys is the only cleanup table that does not live beside the
+// others. On PostgreSQL and SQL Server it is admin.tenant_api_keys and the entry
+// has to say so; on MySQL there is no schema to qualify with -- a connection has
+// exactly one default database -- so qualifying it there would be wrong, not
+// merely redundant. Three lists, two of which must carry a prefix and one of
+// which must not, is precisely what an equality check over stripped names cannot
+// express.
+func TestCleanupListsQualifyWhereTheDialectHasSchemas(t *testing.T) {
+	for _, tc := range []struct {
+		dialect string
+		list    []string
+		want    string
+	}{
+		{"postgres", postgresCleanupTables, "admin.tenant_api_keys"},
+		{"mssql", mssqlCleanupTables, "admin.tenant_api_keys"},
+		{"mysql", mysqlCleanupTables, "tenant_api_keys"},
+	} {
+		var found string
+		for _, tbl := range tc.list {
+			if normaliseTable(tbl) == "tenant_api_keys" {
+				found = tbl
+				break
+			}
+		}
+		if found == "" {
+			t.Errorf("%s: no tenant_api_keys entry in the cleanup list at all", tc.dialect)
+			continue
+		}
+		if found != tc.want {
+			t.Errorf("%s cleanup list spells it %q, want %q\n"+
+				"  PostgreSQL and SQL Server keep this table in the admin schema, "+
+				"so an unqualified entry does not resolve to it: SQL Server fails "+
+				"the DELETE, PostgreSQL silently cleans a stray copy or nothing. "+
+				"MySQL has no schema to qualify with. See IMPROVEMENT-PLAN 2.60d.",
+				tc.dialect, found, tc.want)
 		}
 	}
 }
