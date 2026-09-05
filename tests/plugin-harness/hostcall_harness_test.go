@@ -108,7 +108,19 @@ type expectedOutcome struct {
 // result exists (cleat/wasmtest/wasmtest.go:634). For a harness whose job is
 // to distinguish outcomes per call, "suspended" arriving as "ok with an empty
 // result" is the exact failure this file exists to prevent.
-func executeOneCall(t *testing.T, eng *engine.Engine, wasmBytes []byte, call string) hostCallOutcome {
+// resultShape is how one SDK returns the fixture's outcome. It is a parameter
+// rather than something the decoder sniffs, because sniffing makes the two
+// shapes interchangeable and the whole point is that they are not.
+type resultShape int
+
+const (
+	// resultObject: the entry returns the outcome object. Go, Rust, AssemblyScript.
+	resultObject resultShape = iota
+	// resultJSONWrapped: the entry returns a JSON string containing the object. Java.
+	resultJSONWrapped
+)
+
+func executeOneCall(t *testing.T, eng *engine.Engine, wasmBytes []byte, call string, shape resultShape) hostCallOutcome {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -130,20 +142,49 @@ func executeOneCall(t *testing.T, eng *engine.Engine, wasmBytes []byte, call str
 		return hostCallOutcome{Call: call, Status: statusSuspended, Detail: suspended.Reason}
 	}
 
+	// The shape is asserted, not accommodated.
+	//
 	// Java/TeaVM returns the entry's value as a JSON-ENCODED STRING -- a JSON
 	// string whose contents are the JSON object -- where Go, Rust and
 	// AssemblyScript return the object itself. That is the Java SDK's ABI
 	// contract, not a fixture bug: TestPluginCalls_Wasm_Java unwraps the same
 	// way, and #724 turned the two skips that hid it into failures.
 	//
-	// Unwrapped exactly once, and only when the payload really is a JSON
-	// string, so a malformed object still fails here rather than being
-	// massaged into one. A tolerant decoder is how a harness stops being able
-	// to tell a wrong answer from a differently-shaped right one.
+	// The first version of this handled it by unwrapping whenever the payload
+	// happened to be a JSON string. That is one line shorter and it made the
+	// harness blind in three languages: a Go SDK that regressed to returning a
+	// JSON-encoded string decoded cleanly and reported ok, where it had failed
+	// as undecodable the day before. Measured on all three inputs; the
+	// regression case was indistinguishable from correct. Caught in review by
+	// WS-1, against the principle the comment itself stated -- a tolerant
+	// decoder is how a harness stops being able to tell a wrong answer from a
+	// differently-shaped right one.
+	//
+	// So the caller states the shape and it is enforced in BOTH directions: a
+	// wrapped payload from an object language fails, and an unwrapped payload
+	// from Java fails too. The second half matters as much as the first --
+	// without it, Java silently dropping the wrapper would read as correct.
 	payload := result
-	var wrapped string
-	if err := json.Unmarshal([]byte(result), &wrapped); err == nil {
+	switch shape {
+	case resultJSONWrapped:
+		var wrapped string
+		if err := json.Unmarshal([]byte(result), &wrapped); err != nil {
+			t.Fatalf("%s: this SDK returns the outcome as a JSON-encoded string "+
+				"and this result is not one: %v\nraw: %.500s\n"+
+				"If the SDK stopped wrapping, that is an ABI change and this "+
+				"call site is what must be updated -- not this decoder.",
+				call, err, result)
+		}
 		payload = wrapped
+	case resultObject:
+		var wrapped string
+		if err := json.Unmarshal([]byte(result), &wrapped); err == nil {
+			t.Fatalf("%s: this SDK returns the outcome object directly and this "+
+				"result is a JSON-ENCODED STRING.\nraw: %.500s\n"+
+				"That is the shape Java returns. A guest that started wrapping "+
+				"is an ABI change, and decoding it anyway is how this harness "+
+				"would stop being able to see one.", call, result)
+		}
 	}
 
 	var got hostCallOutcome
