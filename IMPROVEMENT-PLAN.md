@@ -3203,6 +3203,74 @@ the whole finding turns on. What surfaced it was `store_lifecycle.go:1045` namin
 remediation string, which contradicted a list built by grep. **The narrower pattern was the one
 that flattered the story** — it still showed a gap, just not the interesting one — which is why
 it was not questioned until something outside the grep disagreed with it.
+
+### 3.401 The scale suite's wall-clock thresholds measured the CI host, not cleat — 🟢 **FIXED 2026-09-04** (WS-3, 2026-09-04)
+
+`tests/scale/latency_test.go` carried two wall-clock assertions: `p50 > 100ms` and
+`p99 > 500ms`. The second failed on develop at `491a0f7` (#720) with
+**P99 623.876463ms over a P50 of 2.676839ms**, one failure in the scale job's last 20 develop
+runs.
+
+The thresholds are **removed, not widened** — CLAUDE.md: *"If an assertion depends on wall-clock
+time, remove the timing rather than widening it."*
+
+#### The hypothesis that had to be refuted first
+
+Removal is the cheap answer, and the cheap answer is wrong if the number means something. The
+opening read of that failure was that it did: two near-identical outliers (623.876ms and
+625.203ms) over a 2.7ms median look like a **fixed stall** — a lock wait, a retry backoff, a pool
+timeout — rather than a slow machine, and a fixed stall deserves its own section rather than a
+deleted line. That is the right instinct and it is worth writing down that it did not survive
+contact with more than one run.
+
+Three measurements over the scale job's last 20 develop runs. Re-derive all three with
+`scripts/scale-latency-history.py`:
+
+1. **The magnitude is not fixed.** `TestLatencyP99`'s P99 across those runs is a continuum over
+   three orders of magnitude with no cluster anywhere, least of all at 624ms:
+
+       4.4, 4.8, 5.2, 5.2, 5.9, 6.0, 6.4, 6.5, 7.3, 13.7, 14.5, 15.1, 15.2, 16.2,
+       18.4, 27.1, 33.0, 92.1, 377.4, 623.9   (ms; median 14.1, max 44x the median)
+
+2. **The "near-identical pair" recurs at other magnitudes.** `b35c52f`'s top two were 377.4ms and
+   387.9ms — the same shape at 60% of the size. Four goroutines are in flight at once, so
+   whatever is in flight during one host stall window all records that window's length. The pair
+   is a signature of the concurrency, not of a constant in the code.
+
+3. **The sequential test shows the same tail.** `TestLatencyP50` runs one goroutine — no lock
+   contention, no pool competition, and no retry path anywhere in `AppendEventHistory`, which
+   `BeginTx → setRLS → SELECT prev checksum → INSERT → UPDATE → Commit` with no loop. Its Max was
+   **219.3ms on the failing run** and 126.9ms on `b35c52f`, and across the 20 runs it correlates
+   with the concurrent test's Max at **Pearson r = 0.937**.
+
+(3) is the one that settles it. No lock, backoff or pool timeout inside the code under test can
+slow down a single goroutine that contends with nothing; a slow host slows down both tests, which
+is exactly what the correlation says happened. The tail is a per-run property of the runner, and
+any fixed threshold under ~700ms sits below its noise floor.
+
+#### What replaced them
+
+Not nothing, and not a bigger number. Both tests now call `assertAllSampled`, which fails if any
+slot in the fixed-size latency slice was never written. That closes a real hole the thresholds
+never looked at: in `TestLatencyP99` a goroutine that fails its INSERT calls `t.Errorf` and
+returns **without writing `latencies[idx]`**, and a zero left behind sorts to the FRONT, pulling
+both the median and the P99 down. A run that measured fewer samples than it claimed would report
+itself as *faster*, not as broken.
+
+Falsified before landing: mutating one goroutine to skip its record produced
+`1 of 200 samples were never recorded`, with `Min: 0s` in the logged distribution above it —
+red for the stated reason, not for a neighbouring one.
+
+`TestLatencyUnderConcurrency` in the same file already worked this way — it measures, logs, and
+asserts nothing about the clock. The other two now match it, so the file is internally consistent
+for the first time.
+
+#### What this does not fix
+
+The scale job stays a **required** status check while `./tests/scale/...` is tier 2, which is a
+separate defect — see §3.402. Removing a flaky assertion makes that gate quieter; it does not
+make it correct.
+
 ### 3.301 A defer segment could still take a distributed lock — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
