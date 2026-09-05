@@ -1560,9 +1560,15 @@ tier3:
 
     - id: comparative-benchmarks
       why: |
-        benchmarks/COMPARISON.md is entirely TBD; the Temporal and DBOS harnesses are written
-        but have never been run. Real numbers would be an asset — until then this is a claim
-        with nothing behind it.
+        Still tier 3, and for the same reason: no head-to-head cleat/Temporal/DBOS numbers
+        exist. What changed is where the work lives. benchmarks/comparative/ and
+        benchmarks/COMPARISON.md were removed from this repo — four workloads, no
+        infrastructure, never run — in favour of cleat-team/cleat-bench, which has runners
+        for all three frameworks, seven workload specs, AWS infrastructure and cost
+        analysis. Its committed results are a cleat round 5 and a DBOS round 4 with no
+        Temporal round at either, so they are not yet a three-way comparison. Real numbers
+        would be an asset; until cleat-bench produces them this remains a claim with
+        nothing behind it.
 
 # ---------------------------------------------------------------------------
 # Decisions. Each changes what the gate enforces.
