@@ -4219,7 +4219,37 @@ adapter list is 37 entries and every one is wired; the list is 20 short of the h
 percentage against itself can never say so. §3.212's seven non-functional methods are a subset of
 a larger shape, not the shape.
 
-One row was checked by hand, away from every scan: `cleat_set_state` has five non-test Go
+**Do not read Go's 35 as "Go supports fewer features". For the `*_state` family it is worse than
+absence, and this clause must travel with the number.** Go *has* `GetState`, `SetState`,
+`HasState`, `IncrState`, `ListState`, `DeleteState`, `GetScope`, `SetScope` and `UUID` as methods
+on `HostCallsImpl` in `cleat/runtime_workflow.go`. None of them is a binding.
+
+`SetState` writes `h.stateMap` — a `map[string]interface{}` **inside the guest** — and then
+one-way-persists through `set_query_state`. `GetState` reads that map and nothing else.
+`HasState`, `IncrState` and `DeleteState` are likewise map operations. Every write to `stateMap` is
+the guest's own and the map is only ever created empty; **no path anywhere populates it from the
+host**, so after a `continue_as_new`, or in any second instance, `GetState` returns "state not
+found" for a key the host is holding. The host side is not missing — `cleat_get_state`,
+`cleat_has_state`, `cleat_incr_state`, `cleat_list_state` and `cleat_delete_state` are all exported
+and tested (`engine/lifecycle_test.go:686`). Go cannot read any of them. None of the Go methods
+carries a doc comment saying so. Re-derive with:
+
+    grep -n 'stateMap' cleat/runtime_workflow.go     # every write is guest-side; no host read
+    grep -n 'setQueryState' cleat/runtime_workflow.go # the only host call in the family, write-only
+
+**A reader who takes the matrix at face value will assume the gap is absence, and a same-named
+method with different semantics is the more dangerous shape** — absence fails at compile time and
+this fails silently, later, on a different instance. Whether that is intended is not settled here;
+see §3.214.
+
+This is also the row where anchoring *saved* a number instead of correcting one, and it is the
+mirror of §3.207. There a strict extractor missed generics and **inflated** Rust's coverage; here a
+loose scan of Go method names would find nine that exist and **credit bindings that do not**. Same
+rule — anchor on the declaration, not the name — opposite failure mode. Confirmed independently by
+WS-3, who derived the 35 twice from `wasm/usage.go` and reconciled it: 35 bound + 20 unbound + 2
+handshake + 1 unbindable = 58, with no phantom imports in the other direction.
+
+One further row was checked by hand, away from every scan: `cleat_set_state` has five non-test Go
 references and **all five are host-side** — the registration in `engine/imports.go`, the wasmtime
 binding in `engine/wasmtime_hostfuncs_core.go`, a base-name case in `wasm/scan.go`, and the
 Component Model WIT mapping in `wasm/component_rewrite.go`. None is a guest binding. A Go workflow
