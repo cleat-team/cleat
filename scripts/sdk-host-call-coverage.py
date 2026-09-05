@@ -60,13 +60,27 @@ def python_surface() -> set[str]:
 def rust_surface() -> set[str]:
     src = _read(ROOT / "crates" / "cleat-sdk" / "src" / "host_calls.rs")
     # Methods on the HostCalls impl, not free functions or the raw externs.
-    return set(re.findall(r"^\s{4}pub fn ([a-z_][a-z0-9_]*)\s*\(", src, re.M))
+    # host_calls.rs has exactly one `impl` block, so the four-space indent is
+    # the whole of the qualification.
+    #
+    # NO `\(` ANCHOR after the name. A generic method is `pub fn name<T: ...>(`,
+    # and requiring the paren excluded all ten of them -- including
+    # cleat_call_with_retry and defer_func, which are the ONLY Rust bindings for
+    # DurableCallWithRetry and DurableDeferFunc. Found by WS-3 2026-09-05, and
+    # the direction is what made it worth fixing rather than noting: a smaller
+    # denominator makes coverage look HIGHER, and a call that cannot be counted
+    # reads as a call nobody needs to write. 61 -> 71.
+    return set(re.findall(r"^\s{4}pub fn ([a-z_][a-z0-9_]*)", src, re.M))
 
 
 def java_surface() -> set[str]:
     src = _read(ROOT / "crates" / "cleat-java" / "src" / "main" / "java" / "cleat" / "HostCalls.java")
+    # The `.` in the return-type class is load-bearing: a method returning
+    # CleatResult<java.util.List<AwaitSignalsResult>> was excluded without it,
+    # taking awaitSignalsWithQuorum and awaitSignalsWithQuorumMs with it. 68 -> 70.
+    # Same class as the Rust generics bug, found while checking whether it was.
     return set(
-        re.findall(r"^    public (?:static )?[\w<>,\[\]\s]+? ([a-zA-Z][A-Za-z0-9]*)\s*\(", src, re.M)
+        re.findall(r"^    public (?:static )?[\w<>,\[\]\.\s]+? ([a-zA-Z][A-Za-z0-9]*)\s*\(", src, re.M)
     )
 
 
@@ -199,7 +213,11 @@ def main() -> int:
     # coverage is at 100% on all five SDKs and executed coverage is not close,
     # and a single number would let the first stand in for the second.
     if mode in ("--executed", "--check-executed"):
-        problems = check_executed_wiring() + check_run_patterns_select_something()
+        problems = (
+            check_executed_wiring()
+            + check_run_patterns_select_something()
+            + check_surface_extraction()
+        )
         for p in problems:
             print(f"FAIL {p}", file=sys.stderr)
         ex = measure_executed()
@@ -646,6 +664,59 @@ def check_run_patterns_select_something() -> list[str]:
             f"nothing and exits 0 -- `go test` prints 'ok ... [no tests to run]'. "
             f"Either the test was renamed or it was never written."
         )
+    return problems
+
+
+# A surface extractor that silently under-counts is the worst failure this
+# script has, and it has happened twice.
+#
+# Both were regexes that required something optional right after the method
+# name -- Rust wanted `(` and missed every `pub fn name<T>(`, Java's return-type
+# class lacked `.` and missed `java.util.List<...>` returns. Neither errored.
+# Both made coverage look HIGHER, because the surface is the denominator, and a
+# method that cannot be counted reads as one nobody needs to write.
+#
+# So each extractor is checked against a deliberately LOOSER parse of the same
+# file. The loose parse is not more correct -- it over-matches on purpose. It
+# exists to answer "is the strict one missing anything", which is the question
+# a passing scan cannot answer about itself.
+LOOSE = {
+    "rust": (
+        "crates/cleat-sdk/src/host_calls.rs",
+        r"^\s{4}pub fn ([a-z_][a-z0-9_]*)",
+    ),
+    "java": (
+        "crates/cleat-java/src/main/java/cleat/HostCalls.java",
+        r"^    public\s+(?:static\s+)?[\w<>,\[\]\.\s]+?\s+([a-zA-Z][A-Za-z0-9]*)\s*\(",
+    ),
+    "assemblyscript": (
+        "packages/cleat-as/assembly/host-calls.ts",
+        r"^  ([a-zA-Z][A-Za-z0-9]*)\s*(?:<[^)]*>)?\s*\(",
+    ),
+}
+_AS_KEYWORDS = {"constructor", "if", "for", "while", "return", "switch", "catch"}
+
+
+def check_surface_extraction() -> list[str]:
+    """Each strict extractor must see everything a looser parse of the same file sees."""
+    problems = []
+    for sdk, (path, pattern) in LOOSE.items():
+        f = ROOT / path
+        if not f.exists():
+            problems.append(f"{sdk}: {path} is missing; the surface scan has nothing to read")
+            continue
+        loose = set(re.findall(pattern, _read(f), re.M)) - _AS_KEYWORDS
+        strict = SDKS[sdk][0]()
+        missed = loose - strict
+        if missed:
+            problems.append(
+                f"{sdk}: the surface scan misses {len(missed)} method(s) a looser parse finds: "
+                f"{', '.join(sorted(missed))}. A smaller surface is a smaller DENOMINATOR, so this "
+                f"inflates coverage rather than failing loudly. Fix the extractor, do not widen "
+                f"the baseline."
+            )
+        if not strict:
+            problems.append(f"{sdk}: surface extraction found 0 methods -- the scan is broken")
     return problems
 
 
