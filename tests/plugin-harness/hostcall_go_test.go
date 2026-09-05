@@ -56,7 +56,7 @@ var goHostCallOutcomes = map[string]expectedOutcome{
 		status: statusOK, detailContains: "1 child result(s)",
 		why: "returns immediately with a result per run ID rather than suspending, UNLIKE AwaitChild and AwaitAnyChild on the same run ID. " +
 			"NOT a no-backend artifact, which is how this row was first worded: WS-2 traced it to the ordinary path (§3.309, #746). " +
-			"An incomplete child is recorded as childOutcome{Error: \"child not completed\"} at children.go:505 with errCode 0, that outcome is marshalled into the EventRecord, " +
+			"An incomplete child is recorded as childOutcome{Error: \"child not completed\"} at children.go:504 with errCode 0, that outcome is marshalled into the EventRecord, " +
 			"and replayAwaitAllChildren serves rec.Response back verbatim -- its only exitReplay is the out-of-history case, so unlike AwaitChild there is no \"no cached result, re-check\" path. " +
 			"\"This child had not finished when I looked\" therefore becomes the child's permanent answer. Recorded as measured and explicitly NOT endorsed; the fix is not this PR's",
 	},
