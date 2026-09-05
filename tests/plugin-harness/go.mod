@@ -21,6 +21,7 @@ go 1.25.11
 require (
 	github.com/cleat-team/cleat v0.0.0
 	github.com/cleat-team/cleat/cleat v0.0.0
+	github.com/minio/minio-go/v7 v7.1.0
 )
 
 require (
@@ -44,7 +45,6 @@ require (
 	github.com/microsoft/go-mssqldb v1.10.0 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/minio/minio-go/v7 v7.1.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
