@@ -539,23 +539,34 @@ wasmtime. `engine/hostabi_runtime_parity_test.go` does. It found a real defect o
 promises could not link on the worker at all (§3.55). **Note what a name-only comparison would
 have said** — both sides register the same names, and did then too.
 
-That number was **56** here until 2026-09-05 and carried no date, so it is corrected rather than
+**But read that sentence carefully, because it is narrower than it looks.** The test filters both
+sides on the `cleat_` prefix (`engine/hostabi_runtime_parity_test.go:114` and `:332`), so what it
+compares is **55 `cleat_`-prefixed names**. Three more are registered on both sides and **never
+compared**: `plugin_call`, `plugin_call_streaming`, `set_query_state`. The §3.55 defect this test
+caught — a host function registered on wasmtime with a parameter no guest passed, so durable
+promises could not link on the worker — would be invisible today if it happened to any of those
+three.
+
+The number here read **56** until 2026-09-05 and carried no date, so it is corrected rather than
 preserved — this file's header says *"If you find one without a date that turns out to be wrong,
-fix it in the same PR."* It is **58**, and the count is the whole export list, not the
-`cleat_`-prefixed part of it:
+fix it in the same PR."* It was right when written: 56 `cleat_` names on 2026-09-01, and
+`cleat_child_workflow_in_schema` was removed the next day (#582, 2026-09-02), so 56 − 1 = 55. The
+same stale 56 is in the test's own doc comment at `:33` and in its vacuous-pass control at `:362`.
+
+**And do not conflate the two counts, because they answer different questions.** The engine
+exports **58** names; the parity test compares **55** of them.
 
     grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u | grep -c .
 
-**Do not put `cleat_` inside that pattern.** Three exports are unprefixed — `plugin_call`,
-`plugin_call_streaming`, `set_query_state` — and all three are workflow API, so a scan that
-matches only `cleat_` returns 55 and silently drops the plugin calls. A pattern that can only
-return names of the shape it assumes cannot test the assumption; it encodes the conclusion. That
-error produced a **55** on 2026-09-05 whose digits matched a differently-derived 55 — the
-workflow-facing target, 58 less two handshake calls and one deliberately unbindable one — with
-**six** members different, three in each direction. Two derivations agreeing on a number while
-disagreeing on more than a tenth of its membership is the 876/581/4 costume from this file's
-opening section (IMPROVEMENT-PLAN §3.213). Re-derive the difference rather than the totals — this
-runs, and prints six lines, three in each column:
+**Do not put `cleat_` inside that pattern when you want the export total.** Three exports are
+unprefixed — the same three above — and all three are workflow API, so a prefix-anchored scan
+returns 55 and silently drops the plugin calls. A pattern that can only return names of the shape
+it assumes cannot test the assumption; it encodes the conclusion. That error produced a **55** on
+2026-09-05 whose digits matched a differently-derived 55 — the workflow-facing target, 58 less two
+handshake calls and one deliberately unbindable one — with **six** members different, three in
+each direction. Two derivations agreeing on a number while disagreeing on more than a tenth of its
+membership is the 876/581/4 costume from this file's opening section (IMPROVEMENT-PLAN §3.213).
+Re-derive the difference rather than the totals — this runs, and prints six lines:
 
     E=$(grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u)
     comm -3 <(grep '^cleat_' <<<"$E") \
@@ -564,8 +575,10 @@ runs, and prints six lines, three in each column:
 
 The six are `cleat_poll_work`, `cleat_complete` and `cleat_register_query_handler` on one side,
 `plugin_call`, `plugin_call_streaming` and `set_query_state` on the other. **Compare the sets, not
-the counts** — that is the same instruction as "diff the SET rather than comparing counts" under
-the `-list` rule, and this is what it looks like when nobody does.
+the counts** — the same instruction as "diff the SET rather than comparing counts" under the
+`-list` rule, and this is what it looks like when nobody does. **One prefix assumption produced
+all three errors above**: a wrong denominator, a stale doc number, and a guard that has never
+compared three of the names it exists to compare.
 
 **"Which backend runs this" and "which code path inside that backend runs this" are different
 questions.** The wasmtime backend has **two** execution paths — core module and native
