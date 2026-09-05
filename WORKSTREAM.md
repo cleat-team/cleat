@@ -166,11 +166,24 @@ A1 and A2 first: they are what let A3 and the other streams proceed without conf
 
 | | task | done when |
 |---|---|---|
-| B1 | §3.113 — Python SDK binds and checks host results | a refused `signal_workflow` raises rather than returning `None` |
+| B1 | §3.113 — Python SDK binds and checks host results | ~~done~~ shipped as §3.201 (`e4de0a4`), wider than §3.113 measured: `SetState`/`DeleteState` were discarding a non-determinism report too. A refused `signal_workflow` raises. §3.113's marker was left 🔴 until #714 closed it. |
 | B2 | the seven "start something" calls of §3.111, now unblocked by B1 | each guarded host-side with its guest half in all five SDKs |
 
-B1 is a live defect, not only a prerequisite: a Python workflow whose signal is refused by the auth
-check is currently told nothing.
+B1 was a live defect, not only a prerequisite: a Python workflow whose signal was refused by the
+auth check was told nothing. **B1 is done** (§3.201, §3.202). **B2 is four of seven** — the scalar
+calls are guarded (§3.302 and earlier), the three string-returning ones are not, and cannot be
+without a WIT change. Measured 2026-09-04 on `develop`:
+
+    for f in SignalWorkflow SendSignalAndWait DurableSend SideEffect AcquireLock \
+             ScheduleCron DurableScheduleInvoke; do
+      echo -n "$f "; sed -n "/func (s \*execSession) $f(/,/^}/p" engine/*.go \
+        | grep -c callSuspendSentinel
+    done
+    # 1 0 1 0 1 0 1 -- the zeros are SendSignalAndWait, SideEffect, ScheduleCron
+
+A `string` return has nowhere to put the sentinel, so those three need
+`result<string, call-failure>` in `python-sdk/wit/cleat.wit` first — §3.110's situation. See
+§3.113's closing note.
 
 ### WS-3 — make discovery systematic
 

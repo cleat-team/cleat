@@ -2855,96 +2855,115 @@ Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-### 3.113 The Python SDK discards the host's result on fire-and-forget calls, so a refusal is reported as success — 🔴 **OPEN** (WS-1, 2026-09-04)
+### 3.113 The Python SDK discards the host's result on fire-and-forget calls, so a refusal is reported as success — 🟢 **FIXED 2026-09-04 by §3.201**; the finding was real, most of its evidence table was not (WS-1, 2026-09-04)
 
-Found while costing §3.111's remaining candidates, and it **blocks** them. It is also a live
-defect on its own, independent of defer segments.
+Filed 11:41, fixed 13:02 the same day — `15f83ca` to `e4de0a4`, 81 minutes. The marker stayed 🔴
+after that and was the **only** 🔴 left in the plan, so a scan for open work reported an
+already-closed item as the project's top outstanding defect. That is §1.1's failure mode with the
+sign flipped: not a ✅ over a stale body but a 🔴 over a fixed one, and it costs the same session.
 
-`python-sdk/cleat_sdk/host_calls.py` calls several host imports and throws the return value away:
+**The defect was real.** `execSession.SignalWorkflow` (`engine/signaller.go:266`) returns
+`errSignalAuthRequiredInt` when `signalAuthCheck` refuses the send; the SDK returned `None` on the
+refusal and `None` on success. WS-2 took it as **§3.201**, which is wider than this entry measured
+— it found `SetState` and `DeleteState` discarding a non-determinism report, the worse half — and
+closed it with one helper rather than thirteen edits.
 
-```python
-_import_cleat_signal_workflow(target_run_id, signal_name, payload_str)
-_import_cleat_send(service, operation, req_str)
-```
+**The close condition, re-verified 2026-09-04 against `develop` at `699c010`.**
+`_check_host_result` (`python-sdk/cleat_sdk/host_calls.py:437`) masks bit 31 first, then reads the
+low-byte error code; twelve call sites pass their result to it. `errSignalAuthRequiredInt` is
+`-4294967294` = `0xFFFFFFFF_00000002`, so the mask misses and `err_code` is 2 — a refused signal
+now raises. Falsified by deleting the `_raise_if_stopped(r)` line from that helper: three tests go
+red, and red *the right way* — the stop is reported as `CallErrorUnavailable (code 2)` rather than
+raising `SuspendSentinel`, which is the misdecode the ordering exists to prevent, not merely an
+absent check.
 
-No assignment, no error check. The host does not return 0 unconditionally on these paths —
-`SignalWorkflow` (`engine/signaller.go`) returns `errSignalAuthRequiredInt` when
-`signalAuthCheck` refuses the send, and logs it at ERROR host-side. **A Python workflow whose
-signal is refused by the auth check is told nothing**: `signal_workflow` returns `None` on the
-refusal and `None` on success.
+    cd python-sdk && python3 -m pytest tests/test_host_result_binding.py -q   # 7 passed
 
-Measured 2026-09-04 over the ten methods §3.111 costed. Nine of the ten do not bind the host
-result at all; none tests bit 31:
+#### What this entry got wrong, and the instrument that caused it
 
-```
-python method           binds result?  tests any bit?
-side_effect             NO             NO
-send                    NO             NO
-schedule_invoke         NO             NO
-send_signal_and_wait    NO             NO
-reply_to_signal         NO             NO
-signal_workflow         NO             NO
-schedule_cron           NO             NO
-acquire_lock            NO             NO
-release_lock            yes            NO
-```
+Its scan classified a call site by whether the result was **bound to a variable it could name**:
 
-`run_detached` is in that scan and is **not** an instance: Python's `run_detached` takes a
-closure, like Go's, and reaches no import. Checked rather than assumed, because it is the one
-§3.111 had just guarded — `run-detached` is absent from `cleat.wit` and has no component
-dispatcher, so a component guest cannot call it and §3.111's
-`reasonNotInTheComponentWorld` exemption holds.
+    binds = bool(re.search(r'\bresult\s*=|\bres\s*=|\brc\s*=', body))
 
-#### Why this blocks §3.111's remaining seven
+Binding is not using. `return _import_cleat_schedule_cron(...)` hands the word to the caller and
+`resp = _import_side_effect(...)` binds it under a name the pattern does not list; both were
+reported as discards. The only shape that truly throws a result away is a bare `ast.Expr` whose
+value is an `_import*` call, so run that over the same file at the same commit:
 
-The plan there was to guard the calls that *start* something — `SignalWorkflow`,
-`SendSignalAndWait`, `DurableSend`, `SideEffect`, `AcquireLock`, `ScheduleCron`,
-`DurableScheduleInvoke`. Every one is declared in `cleat.wit`, so a Python component guest can
-call it, and `python` is in `deferSegmentLanguages` since §3.110, so those segments run.
+    HC=$(mktemp)   # not a fixed /tmp name: a stale one from an earlier session
+                   # overwrote this very file while this entry was being written
+    git show 15f83ca:python-sdk/cleat_sdk/host_calls.py > "$HC"
+    python3 -c "
+    import ast,pathlib,sys
+    cls=[n for n in ast.parse(pathlib.Path(sys.argv[1]).read_text()).body
+         if isinstance(n,ast.ClassDef) and n.name=='HostCalls'][0]
+    print(sorted({f.name for f in cls.body if isinstance(f,ast.FunctionDef)
+      for n in ast.walk(f) if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call)
+      and isinstance(n.value.func,ast.Name) and n.value.func.id.startswith('_import')}))" "$HC"
 
-Guarding them host-side today would set bit 31 on a result **the Python SDK does not read**. The
-guest would carry on and do the work the segment exists to prevent — §3.83's defect, reproduced
-seven times, on the one language whose SDK cannot see it. The prerequisite is this entry, not
-more host guards.
+That prints the 14 methods that genuinely discarded, at the commit the table was written from.
+Intersect it with the table's nine rows and **four of its eight `NO` rows are wrong**:
+`side_effect`, `schedule_cron`, `send_signal_and_wait` and `acquire_lock` all used their result
+when the row was written. Two of
+those four name methods that **do not exist** — they are `send_signal_and_wait_ms` and
+`acquire_lock_ms` — so those rows were not measured at all, by that command or any other. The four
+rows that were right, `send`, `schedule_invoke`, `reply_to_signal` and `signal_workflow`, are the
+finding, and they are what §3.201 fixed.
 
-#### A correction to a shape §3.111's guard assumes
+The body filter compounds it. `'_import_cleat_' in body` cannot match `_import_side_effect`, so the
+command cannot produce the `side_effect` row the table shows above it. §3.201 found that half
+independently while re-deriving the same scan.
 
-`TestTheThreeStopSurfacesAgree` requires every host stop site to have a WIT function returning
-`result<string, call-failure>`. That is right for all nine current sites, which return strings —
-and it is **not** the right rule for these seven, which return `u64`/`s64`. Bit 31 fits inside a
-`u64`, so the component guest can test it exactly as the core-module SDKs test their `i64`; the
-`result<...>` shape exists for *string*-returning calls where the sentinel had nowhere to live
-(§3.110). Applied to a `u64` call the guard would demand a signature change that is not the fix,
-while the actual gap — the Python SDK not testing the bit — went unchecked.
+**A regex over source cannot tell "the result went nowhere" from "the result went somewhere under a
+name I did not guess", and that distinction is the entire finding.** The AST walk is now a
+structural guard — `TestNoScalarHostCallDiscardsItsResult` in
+`python-sdk/tests/test_host_result_binding.py` — so a fourteenth discarding call site fails on
+arrival rather than when someone thinks to write a test for it.
 
-Not changed yet, because no `u64` call is guarded and a rule loosened before it has a case is a
-rule nobody can falsify. Recorded so that whoever guards the first one changes the rule rather
-than the signature.
+#### §3.111's remaining seven are no longer blocked
 
-#### The fix, specified
+This entry's operative claim was that guarding them host-side would set a bit the Python SDK does
+not read. It reads it now. §3.201 also corrected the shape: **the seven are not uniform.** Four
+return `u64`/`s64` — `durable-signal-workflow`, `durable-send`, `durable-acquire-lock`,
+`durable-schedule-invoke` — and three return `string`: `durable-send-signal-and-wait`,
+`side-effect`, `durable-schedule-cron`. For those three a `string` has nowhere to put a sentinel, so
+`result<string, call-failure>` *is* the right rule and a signature change *is* the fix — §3.110's
+situation, and the opposite of what this entry concluded. Split the seven before touching the rule.
 
-Bind the result and test it, in the order the other four SDKs use — sentinel first, then the
-error code — for each import whose host function can return non-zero. `release_lock` already
-binds its result and is the model for the shape. The Python SDK has no bit-31 constant today:
-`memory.py`'s `SUSPEND_SENTINEL` is `1 << 62` and is a **different mechanism** (the value an
-*export* returns to suspend), so a new one is needed rather than reusing that.
+That split is now the shape of what is left. Measured 2026-09-04 on `develop` at `699c010`, the
+four scalar calls are guarded and the three string ones are not:
 
-Re-derive the scan:
+    for f in SignalWorkflow SendSignalAndWait DurableSend SideEffect AcquireLock \
+             ScheduleCron DurableScheduleInvoke; do
+      echo -n "$f "; sed -n "/func (s \*execSession) $f(/,/^}/p" engine/*.go \
+        | grep -c callSuspendSentinel
+    done
+    # SignalWorkflow 1  SendSignalAndWait 0  DurableSend 1  SideEffect 0
+    # AcquireLock 1  ScheduleCron 0  DurableScheduleInvoke 1
 
-```
-python3 - <<'EOF'
-import pathlib, re
-src = pathlib.Path('python-sdk/cleat_sdk/host_calls.py').read_text().split('\n')
-defs = [(i, re.match(r'    def (\w+)', l).group(1))
-        for i, l in enumerate(src) if re.match(r'    def \w+', l)]
-for idx, (i, name) in enumerate(defs):
-    end = defs[idx+1][0] if idx+1 < len(defs) else len(src)
-    body = '\n'.join(src[i:end])
-    if '_import_cleat_' in body:
-        binds = bool(re.search(r'\bresult\s*=|\bres\s*=|\brc\s*=', body))
-        print(f"{name:<28}{'binds' if binds else 'DISCARDS'}")
-EOF
-```
+So §3.111 is not four-sevenths of the way to the same fix seven times; it is finished for the shape
+it could finish, and the remainder is one WIT change gating three calls.
+
+The rule correction itself has landed: `TestTheThreeStopSurfacesAgree` no longer demands
+`result<string, call-failure>` of a scalar-returning stop site — `witCallOutcomeFuncs` reports a
+third category, and the reasoning is on the `"AcquireLock"` entry of `stopSurfaces` in
+`engine/stop_correspondence_guard_test.go` (named rather than cited by line, because a line number
+into a living file is a dead citation with a delay). §3.201 supplied the case this entry deferred
+it for — `durable-acquire-lock`, which returns `s64`.
+
+#### One citation to this entry is left for its owner
+
+§3.400's **A8** row — "packed result's errCode ≡ what the guest observes" — records its gap as
+"open: `extractStringFromPacked` drops it, so a refusal reaches Python as a success (WS-2,
+§3.113)". Two things about that are now stale and **neither is edited here, because §3.400 is
+WS-3's**. The citation points at a closed entry; and `extractStringFromPacked`
+(`engine/component_cgo.go:746`) has **no production callers** — every reference to it outside its
+own definition is in a `_test.go` file:
+
+    grep -rn "extractStringFromPacked(" --include="*.go" . | grep -v _test.go   # 1 line, the func decl
+
+The gap A8 names may well still be real by another route; what is not real is the mechanism the row
+attributes it to. For WS-3 to re-derive when they next touch that table.
 
 ### 3.111 A defer segment could still call a service through `cleat_call_heartbeat` — 🟢 **FIXED 2026-09-04** (WS-1, 2026-09-04)
 
