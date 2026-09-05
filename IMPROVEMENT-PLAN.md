@@ -4077,10 +4077,28 @@ A retraction and a cross-reference, counted as declarations.
 
 The obvious lesson — "extract declarations, not name mentions" — is true and is not what saved
 route A. Section headings are not declarations either. What saved it is the `^` anchor: **a
-changelog row and an alias table cannot appear at the start of a heading line.** So the rule that
-covers all of these is *anchor to where the artifact lives, not to what it is called* — which also
-covers `packages/cleat-as/assembly/host-calls.ts:391`, where a retraction is prose in a body and
-could never sit at a declaration site.
+changelog row and an alias table cannot appear at the start of a heading line.** The general form
+is WS-2's, and it is now in `CLAUDE.md` under *Is this result real?* rather than restated here:
+*anchor to where the artifact lives, not to what it is called.*
+
+**The prefix assumption had poisoned four artifacts, not one, and three of them were invisible from
+where it was found.** They are listed together because the cost of the habit is the list, not any
+single entry:
+
+| artifact | what the assumption did |
+|---|---|
+| this section's scan | returned 55 and could not have returned a counterexample |
+| §3.212's re-derivation command | shipped the same pattern into a merged section |
+| `engine/hostabi_runtime_parity_test.go` | filtered **both** sides on `cleat_`, so the guard against ABI drift compared 55 of 58 and never saw `plugin_call` — #759 |
+| `CLAUDE.md`'s "the same 56 names" | a count derived from the prefixed subset, describing a test that compares a different set again — corrected in #755 |
+
+The third is the expensive one. That guard exists because the host ABI is written twice and it
+caught §3.55 on its first run; the identical defect on `plugin_call` was silent. Measured by
+renaming one registration on the wasmtime side: `plugin_call` → `ok`, `cleat_sleep` → `FAIL`. The
+same defect, caught or not caught on whether the name began with five particular characters.
+
+None of the four was found by looking at it. WS-2 re-derived a denominator they had been handed,
+and the other three came out of asking where else the habit lived.
 
 ## The classification: 55 workflow-facing, and NOT the 55 above
 
