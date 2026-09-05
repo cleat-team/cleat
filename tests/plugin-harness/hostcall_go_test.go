@@ -29,6 +29,14 @@ var goHostCallOutcomes = map[string]expectedOutcome{
 		status: statusSuspended, detailContains: "await_child(00000000-0000-0000-0000-000000000001)",
 		why: "awaiting an unresolved child suspends; the reason carries the run ID the guest passed, which is the only view of the guest's argument",
 	},
+	"AwaitAllChildren": {
+		status: statusSuspended, detailContains: "await_all_children(00000000-0000-0000-0000-000000000001)",
+		why: "an incomplete child suspends, as AwaitChild and AwaitAnyChild do on the same run ID. " +
+			"This row asserted statusOK until 2026-09-05, with the raw result `[{\"run_id\":\"...\",\"error\":\"child not completed\"}]` -- and that was the defect, not the contract. " +
+			"It is the row that found §3.309: WS-1 flagged the disagreement with AwaitChild, WS-2 traced it off the no-backend path onto the ordinary one, and #754 fixed both halves " +
+			"(the fresh path suspends, and replayAwaitAllChildren gained the \"no cached result, re-check\" fall-through it lacked -- without which suspending alone would have replayed as an EMPTY result). " +
+			"Worth keeping the history: the row asserted \"1 child result(s)\" before that, and went green through the very defect it was flagging, because a count over a result hides which result it was",
+	},
 	"AwaitAnyChild": {
 		status: statusSuspended, detailContains: `await_any_child(["00000000-0000-0000-0000-000000000001"])`,
 		why: "same as AwaitChild, and the JSON array shows the guest encoded a list rather than a single ID",
@@ -52,16 +60,6 @@ var goHostCallOutcomes = map[string]expectedOutcome{
 	},
 
 	// ---- calls that succeed with no backend ----
-	"AwaitAllChildren": {
-		status: statusOK, detailContains: `[{"run_id":"00000000-0000-0000-0000-000000000001","error":"child not completed"}]`,
-		why: "returns immediately with a result per run ID rather than suspending, UNLIKE AwaitChild and AwaitAnyChild on the same run ID. " +
-			"The detail is the RAW result and not a count, on WS-3's finding that the AssemblyScript row exposed what a count hides: the single result IS the error. " +
-			"This row asserted \"1 child result(s)\" until 2026-09-05 and went green through the very defect it was flagging -- a summary statistic over a result is where a wrong answer hides. " +
-			"NOT a no-backend artifact, which is how this row was first worded: WS-2 traced it to the ordinary path (§3.309, #746). " +
-			"An incomplete child is recorded as childOutcome{Error: \"child not completed\"} at children.go:504 with errCode 0, that outcome is marshalled into the EventRecord, " +
-			"and replayAwaitAllChildren serves rec.Response back verbatim -- its only exitReplay is the out-of-history case, so unlike AwaitChild there is no \"no cached result, re-check\" path. " +
-			"\"This child had not finished when I looked\" therefore becomes the child's permanent answer. Recorded as measured and explicitly NOT endorsed; the fix is not this PR's",
-	},
 	"ChildWorkflow": {
 		status: statusOK, detailRegex: `^child-child-workflow-[0-9a-f]{8}$`,
 		why: "starting a child returns its run ID synchronously; the suffix is generated, so the shape is asserted rather than the value",

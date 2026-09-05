@@ -5023,9 +5023,19 @@ running child; `TestFreshAwaitAllChildren_NoStore` asserted `errCode 0` with
 what it asserted until 2026-09-05 and why that held the defect in place. A third test,
 `TestAwaitAllChildren_ReplayOfSuspendRecordFallsThroughToFresh`, is new and covers half 2.
 
+**A third test encoded the old behaviour, in another stream's work.** WS-1's host-call
+harness (#744/#749) carried `AwaitAllChildren` under "calls that succeed with no backend"
+with `status: statusOK` and the raw result `[{"run_id":"…","error":"child not completed"}]`,
+and its `why` said the fix "is not this PR's". It is now, so the row moves to the suspend
+section beside `AwaitChild` and `AwaitAnyChild` — the two calls it was flagged for
+disagreeing with. `TestHostCallTableCoversEveryWave1Call` still passes, so the move did not
+drop it from the table. That row is how this section began: WS-1 flagged the disagreement,
+WS-2 traced it off the no-backend path onto the ordinary one.
+
 Measured: `go test ./engine/` 0 failures; child/replay/suspend tests against a real
 PostgreSQL (`-p 1`, WS-2's 5433) 400 pass, 0 fail, with the DSN confirmed to connect by
-`TestPluginMigrations_AllDialects` rather than assumed.
+`TestPluginMigrations_AllDialects` rather than assumed; `TestHostCallsGo` and
+`TestHostCallTableCoversEveryWave1Call` pass.
 
 ### 3.310 One harness test ran nowhere and one harness job has never run a test — 🟡 **PARTLY FIXED 2026-09-05** (WS-2, 2026-09-05)
 
