@@ -3486,6 +3486,86 @@ than baselined.
 The test must not learn to skip. `wasip1` ships with the standard toolchain, so there is no
 environmental precondition to detect; a skip here restores exactly the blind spot the test removes.
 It is guarded only by `-short`.
+### 3.205 The Python end-to-end test's coverage was one host call wide — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+The Python half of §3.204. `TestPythonWasmEndToEnd` compiles
+`python-sdk/examples/durable_call_workflow.py`, which calls `h.call()` and nothing else. Passing
+it means **"Python can make a durable call"**, not "the Python host-call surface builds" — so a
+binding that does not exist, or does not accept what the SDK passes it, reaches users rather than
+CI. `cleat_sdk.HostCalls` has **73** public methods; one was covered.
+
+**Python is better defended than the Go side was, and that was deliberate.** `tiers.yaml` puts
+python in `tier1.languages`, and `.github/workflows/tier1-gate.yml` installs `componentize-py`
+with a comment saying exactly why:
+
+> python is tier 1 (D2), so this is a tier-1 precondition rather than a convenience — without it
+> `TestPythonWasmEndToEnd` and `TestPythonComponentExecutionFence` skip, and the gate fails on the
+> skip rather than letting the run go quietly green.
+
+The gap was never the toolchain. It was the fixture.
+
+## Three guards, in two places, for two different costs
+
+`python-sdk/tests/test_all_host_calls_fixture.py` — **no toolchain, runs everywhere**:
+
+1. every public `HostCalls` method appears in the fixture;
+2. every `h.<name>` in the fixture is a real `HostCalls` method (a typo would otherwise sit there
+   looking like coverage);
+3. every call **binds** to the real signature, via `inspect.signature().bind`.
+
+`engine/python_all_host_calls_test.go` — **needs `componentize-py`**, and builds the fixture for
+real through `python-sdk/scripts/build_wasm.py`, the same path `TestPythonWasmEndToEnd` uses. Its
+prerequisite handling is copied from that test deliberately, including the `toolchainRequired`
+escalation: a job declaring `python` in `CLEAT_REQUIRE_TOOLCHAINS` **fails** rather than skips.
+
+Both halves use AST rather than text. A `grep` for `h.<name>(` would count names inside this
+fixture's own docstrings, which name host calls.
+
+**Guard 3 is the one worth having, and it found a defect in the fixture on its first run.**
+`componentize-py` cannot catch an arity error — Python binds arguments at call time, so a wrong
+call count compiles into the component happily and fails only when the workflow runs. This fixture
+is never run. `h.log_kv("m", k="v")` was wrong; `log_kv(self, message: str, *kvs: Any)` takes
+positional pairs. Without guard 3 that line would have looked like coverage forever.
+
+**Falsified, each separately:** deleting `h.release_lock("k")` fails guard 1 naming it; adding
+`h.nonexistent_call("x")` fails guard 2 naming it; dropping `acquire_lock`'s second argument fails
+guard 3 with `missing a required argument: 'ttl_seconds'`.
+
+## Verified locally, in the container the repo already provides
+
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+      cleat-py-toolchain go test ./engine/ -run TestPythonAllHostCallsWorkflowCompiles -count=1
+
+    --- PASS (1.71s).  Build SUCCESS, 17.94 MB component, all 73 calls.
+
+**This section first said the fixture "has not been compiled on this machine", and that hedge was
+wrong in an instructive way.** `componentize-py` does die here with exit `-9`, and the control was
+sound — the *existing* `durable_call_workflow.py` dies identically, so it is the environment rather
+than the fixture. **But "environmental" is not "unavoidable", and stopping at the first
+correct-sounding answer is what made it look like one.**
+
+`scripts/docker/python-toolchain.Dockerfile` has documented the cause and the fix since 2026-08-06,
+in its header: componentize-py's embedded wasmtime "installs a mach exception handler into a
+guarded port and the process dies with EXC_GUARD / GUARD_TYPE_MACH_PORT. That guard is a Darwin
+kernel feature with no Linux equivalent, which is why the Linux CI runners have always been able to
+build Python components while a developer's Mac could not." Deterministic, platform-specific, and
+already solved. The image was prebuilt on this machine.
+
+So the diagnosis in the first draft — memory pressure, a sandbox limit — was wrong, and it was
+passed to WS-2 as agreement with their own signal-9 report rather than checked against the tree.
+
+**Two caveats, both from the Dockerfile and both already paid for by someone.**
+`--context desktop-linux` is not optional on a Mac that also runs colima: colima cannot bind-mount
+these paths and **says nothing**, so `-v "$PWD":/src` yields an *empty* directory and the run fails
+with `go: go.mod file not found`, which reads as a broken checkout. Sanity-check the mount before
+believing any failure from this image. And two warnings — `wasm-tools component decompose not
+available` and `metadata stamping failed (non-fatal)` — appear identically when building
+`durable_call_workflow.py`, so they are pre-existing rather than anything this fixture introduced.
+That control is the only reason they are not recorded here as a finding.
+
+The calls sit in `_exercise_every_host_call`, which the entry point reaches only when its request
+says so. `continue_as_new`, `extend_timeout` and `release_lock` would change a running workflow's
+fate, and this file is on the compile path, not the behaviour path.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 

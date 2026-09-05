@@ -66,6 +66,7 @@ engine	TestMySQLStoreConfigOptions	1
 engine	TestMySQLStoreFactory	1
 engine	TestMySQLTenantSettings	1
 engine	TestPluginMigrations_AllDialects	1
+engine	TestPythonAllHostCallsWorkflowCompiles	1
 engine	TestPythonComponentExecutionFence	1
 engine	TestPythonCronEndToEnd	1
 engine	TestPythonDeferSegmentRunsOnlyTheDefers	1
