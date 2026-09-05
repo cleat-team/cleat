@@ -257,8 +257,8 @@ Each row was connected to on 2026-09-04 by the stream that owns it.
 
 | | PostgreSQL | MySQL | SQL Server |
 |---|---|---|---|
-| **WS-1** | `postgres:postgres@localhost:5432` | `root:cleat@tcp(127.0.0.1:3306)` | `1433` — **broken**, below |
-| **WS-2** | `cleat:cleat@localhost:5433` | `root:cleat@tcp(127.0.0.1:3307)` | `1434` — connects, migrations fail |
+| **WS-1** | `postgres:postgres@localhost:5432` | `root:cleat@tcp(127.0.0.1:3306)` | `1433` — works since 2026-09-04 |
+| **WS-2** | `cleat:cleat@localhost:5433` | `root:cleat@tcp(127.0.0.1:3307)` | `1434` — needs `encrypt=disable`; migrations fail |
 | **WS-3** | `postgres:postgres@localhost:5434` | `root:cleat@tcp(127.0.0.1:3308)` | `1435` — the only working one |
 
     CLEAT_TEST_POSTGRES='postgres://postgres:postgres@localhost:5434/cleat?sslmode=disable'
@@ -293,42 +293,66 @@ schema** — not an error, half a schema, which is the failure mode this whole s
 That is also the hazard behind `engine/flush_rls_test.go`'s connection-pinning comment: the
 symptom is `relation "<table>" does not exist` from a test whose neighbours pass.
 
-### SQL Server: only one stream can run it locally
+### SQL Server: two of the three streams can run it locally
 
-Every part of this has cost a session at least once.
+Every part of this has cost a session at least once. Rewritten 2026-09-04 after 1433 was revived;
+the three corrections are marked, because each of them was believed for weeks.
 
 | port | server | version | state |
 |---|---|---|---|
-| 1433 | `colima-cleat-ws1/cleat-ws1-mssql` | SQL Server 2022 image | **no TDS handshake** |
-| 1434 | `colima/cleat-ws2-mssql` | Azure SQL Edge 15.0 | connects; migrations fail |
-| 1435 | `colima-cleat-ws3/cleat-ws3-mssql` | SQL Server 2022 16.0 | works |
+| 1433 | `colima-cleat-ws1/cleat-ws1-mssql` | SQL Server 2022 16.0.4265.3 | **works** (since 2026-09-04) |
+| 1434 | `colima/cleat-ws2-mssql` | Azure SQL Edge 15.0.2000.1574 | connects, but see below — migrations fail |
+| 1435 | `colima-cleat-ws3/cleat-ws3-mssql` | SQL Server 2022 16.0.4265.3 | works |
 
-**1433 reports `Up 4 weeks` and is not serving.** The port listens, so a connection is accepted
-and then dropped — four different encryption settings all return `EOF` — while `docker logs`
-shows `Error: 17300 … Failed to start system task` repeating in real time. A container's `Up` is not a
-statement about the database inside it.
+**CORRECTION 1: 1433 was not broken, it was starved.** For four weeks it reported `Up`, accepted a
+connection, dropped it (`EOF` under all four encryption settings), and logged
+`Error: 17300 … Failed to start system task` on repeat. That is SQL Server failing to start under
+memory pressure, not a corrupt container. The `cleat-ws1` colima profile had **4 GiB**; `cleat-ws3`,
+whose identical image worked, had **6 GiB**. Raising it fixed the server outright:
 
-**1434 cannot run this repo's migrations.** `migrations/mssql/011_json_scalar_payloads.sql` uses
-the two-argument `ISJSON`, introduced in SQL Server 2022; Azure SQL Edge is 15.0, so all 540
-failures come from that one file. CI covers MSSQL, so this bounds local work only — but it means a
-"passes on three dialects" claim made from that sandbox is not one.
+    colima stop cleat-ws1 && colima start cleat-ws1 --memory 6 --cpu 2
+    docker --context colima-cleat-ws1 start cleat-ws1-mssql
 
-**SQL Server needs its own VM**: it cannot start under QEMU (`Invalid mapping of address …`), and
-only the `cleat-ws3` colima profile has Rosetta. Manage it with an explicit
-`docker --context colima-cleat-ws3`, and note that **`colima start` rewrites the global docker
-context** — set it back with `docker context use colima` or every other stream's bare `docker`
-silently retargets.
+**So treat 17300 as a memory reading, not a diagnosis.** 4 GiB is below the floor for this image
+and 6 GiB is above it; the exact floor was not measured. Nothing in the log says "out of memory",
+which is why this read as corruption for a month.
 
-**A container name is not unique across docker contexts, and `docker ps` in one context will lie
-to you about a port another context owns.** Two containers named `cleat-ws1-mssql` exist in
-different colima VMs, and *two different containers both publish host port 1435* — the default
-context's `cleat-ws1-mssql` and `colima-cleat-ws3`'s `cleat-ws3-mssql`. Only one can hold it, bind
-order decides, and nothing records which won. Today it is WS-3's.
+**CORRECTION 2: Rosetta is on `cleat-ws1` AND `cleat-ws3`, not only ws3.** This file said only ws3
+had it. The image is amd64-only, so both profiles need it and both have it; `default` does not,
+which is the real reason WS-2's server is Azure SQL Edge rather than SQL Server. Re-derive:
 
-That ambiguity is not cosmetic. `engine/testutil`'s `CleanupMSSQLTestData`
-(`engine/testutil/mssql_schema.go:118`) is an unqualified `DELETE FROM` across **15 tables**. If
-the default VM restarts and takes 1435, WS-3's suite silently starts wiping WS-1's server — and
-`-p 1` cannot help, because it serialises packages inside one `go test`, not streams across VMs.
+    grep -E '^(rosetta|memory|arch|vmType):' ~/.colima/{default,cleat-ws1,cleat-ws3}/colima.yaml
+
+**CORRECTION 3: the 1435 collision is resolved.** Two containers did publish host port 1435 — the
+**`colima`** context's `cleat-ws1-mssql` (Azure SQL Edge) and `colima-cleat-ws3`'s
+`cleat-ws3-mssql`. This file blamed the `default` context, which holds **no containers at all**,
+so anyone following it looked in the wrong VM. The Edge duplicate was removed 2026-09-04
+(`docker --context colima rm -f cleat-ws1-mssql`); it could not run the migrations anyway, so
+nothing was lost.
+
+**Keep the hazard in mind even though this instance is gone.** `engine/testutil`'s
+`CleanupMSSQLTestData` (`engine/testutil/mssql_schema.go:118`) is an unqualified `DELETE FROM`
+across **15 tables**. Two containers racing for one host port means bind order decides which server
+a suite wipes, and `-p 1` cannot help — it serialises packages inside one `go test`, not streams
+across VMs.
+
+**1434 needs `encrypt=disable`, and this is new.** The default DSN shape fails on
+`x509: negative serial number` — Azure SQL Edge's self-signed certificate. Measured across four
+settings: only `encrypt=disable` connects; `TrustServerCertificate=true` does **not** help, because
+the certificate fails to parse before trust is considered.
+
+**1434 still cannot run this repo's migrations.** `migrations/mssql/011_json_scalar_payloads.sql`
+uses the two-argument `ISJSON`, introduced in SQL Server 2022; Edge is 15.0, so all 540 failures
+come from that one file. CI covers MSSQL, so this bounds local work only — but a "passes on three
+dialects" claim made from that sandbox is not one.
+
+**WS-2 cannot have a local SQL Server 2022 on this machine, and that is a capacity fact.** The host
+has 24 GiB; the three VMs now commit 20 (default 8, cleat-ws1 6, cleat-ws3 6). A fourth Rosetta VM
+does not fit. Shrinking `default` is the only route and it runs all six Postgres and MySQL
+containers.
+
+**`colima start` rewrites the global docker context.** Set it back with `docker context use colima`
+or every other stream's bare `docker` silently retargets.
 
 **So probe the port; do not read the table.** `docker ps` answers a different question:
 
@@ -338,7 +362,30 @@ the default VM restarts and takes 1435, WS-3's suite silently starts wiping WS-1
     SELECT @@SERVERNAME, SERVERPROPERTY('ProductVersion')
 
 `@@SERVERNAME` is the container ID, so it distinguishes two instances that share a name and a port.
-That is what settled the 1435 question: it returned `1a4890c33e6e`, WS-3's container.
+That is what settled the 1435 question: `1a4890c33e6e`, WS-3's container.
+
+### PostgreSQL: unqualified names resolve differently per database
+
+`admin.tenant_api_keys` is the only cleanup table outside the default schema, and referring to it
+unqualified was a live defect in two places until 2026-09-04 (#720, #721). An unqualified name
+resolves through `search_path` (`"$user", public`), so on the 5433 sandbox — whose role is named
+`cleat` — it resolved somewhere different from 5432 and 5434.
+
+Two things that cost time here and are worth stating so nobody re-derives them:
+
+- **The `cleat` schema is legitimate and exists on all three.** `assert_tenant_set()` lives in it
+  and eleven RLS policies depend on it. It is not a stray, and `DROP SCHEMA cleat` is not a
+  cleanup step — PostgreSQL refuses it, which is the only reason a session that tried did not
+  break RLS on 5433.
+- **A stray `tenant_api_keys` beside it *was* a defect**, manufactured by an unqualified
+  `CREATE TABLE` in `cmd/cleat-worker/auth_test.go`. Fixed in #721; the copies were dropped by
+  hand the same day. If one reappears, that test is the first place to look.
+
+Baseline after the 2026-09-04 cleanup, true of all three: one `tenant_api_keys` (in `admin`), one
+tenant (`default`), one `tenant_` schema. Re-derive:
+
+    select table_schema||'.'||table_name from information_schema.tables
+     where table_name='tenant_api_keys';
 
 ### Shared files, and the protocol for each
 
