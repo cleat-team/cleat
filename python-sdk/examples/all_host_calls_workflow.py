@@ -21,7 +21,6 @@ if a public HostCalls method is missing from this file.
 """
 
 from dataclasses import dataclass
-from typing import Any
 
 from cleat_sdk import ChildWorkflowOptions, HostCalls, RetryPolicy, cleat_entry
 
@@ -36,7 +35,7 @@ class Reply:
     value: str = ""
 
 
-def _exercise_every_host_call(h: HostCalls) -> None:  # noqa: C901 - breadth is the point
+def _exercise_every_host_call(h: HostCalls) -> None:
     # ---- identity, determinism sources ----
     h.set_scope("obj", "key")
     h.get_scope()
