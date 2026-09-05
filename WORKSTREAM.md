@@ -304,25 +304,34 @@ that carries the date.
 ## The convergence metric
 
 New `IMPROVEMENT-PLAN.md` sections per day, counted by **first appearance** of each section number
-anywhere in the tree. Corrected 2026-09-04; the previous table on this line counted `+###` diff
-lines and roughly doubled every figure. WS-1's A2 turns this into a script.
+anywhere in the tree. **Regenerate with `scripts/convergence.py --markdown`** — do not retype it,
+and do not count `+###` diff lines (see below).
 
-| 08-31 | 09-01 | 09-02 | 09-03 | 09-04 |
-|---|---|---|---|---|
-| 4 | 27 | 16 | 23 | 11* |
+| 08-31 | 09-01 | 09-02 | 09-03 | 09-04 | 09-05 |
+|---|---|---|---|---|---|
+| 4 | 27 | 16 | 23 | 17 | 4* |
 
-\* to 21:30 local. The superseded row read 8 / 37 / 37 / 48 / 9.
+\* partial day. The superseded row read 8 / 37 / 37 / 48 / 9.
+
+**Partial days undercount, and by a lot.** 09-04 read **11** when it was measured at 21:30 local
+and closed at **17**. The last row of this table is always partial, so a low final figure is not
+the metric bending — it is the day not being over. That reading was published as evidence of a
+possible dip; it was not.
 
 Re-derive by walking every commit that touched either plan file, oldest first, and recording the
 first day each `### N.M` is present in the tree — **not** by counting `+###` lines, which counts a
 section again every time its heading is rewritten, and a heading is rewritten precisely when a
 status marker is corrected. On 2026-09-03 that difference is 48 versus 27.
 
-**It has still not bent.** 27 → 16 → 23 → 11 is noise around roughly twenty a day, and 09-04's 11
-is a nearly-complete day, so it is the first plausible dip — one point, not a trend. The corrected
-numbers change the magnitude and not the conclusion: **the project is still finding work faster
-than a converging project would.** The open-item count says the opposite (0 🔴, 157 of 158 closed)
-and it is the less honest of the two, because closing fast and finding fast look identical in it.
+**It has still not bent.** 27 → 16 → 23 → 17 is noise around roughly twenty a day. This paragraph
+previously read "27 → 16 → 23 → 11" and called 09-04 "a nearly-complete day, so it is the first
+plausible dip". **That was wrong, and wrong in the way this section is about**: 09-04 was measured
+at 21:30 local and closed at 17, so the dip was six sections of day left. A partial reading was
+published as evidence of the very trend the metric exists to detect.
+
+The conclusion is unchanged: **the project is still finding work faster than a converging project
+would.** The open-item count says the opposite — 1 🔴 heading out of 168 in the plan — and it is the less honest
+of the two, because closing fast and finding fast look identical in it.
 
 Read it once a day. The first day it falls while the fix rate holds is the first evidence that the
 work is finishing rather than continuing.
