@@ -31,15 +31,15 @@ import (
 //   - SideEffect -- closure emitted as func(fn func() (string, error)) where
 //     the field is func(computedResult string)
 //
-// This test is slow by nature: it invokes the Go compiler for wasip1/wasm. It
-// is worth the seconds. Do NOT make it skip when the toolchain looks
-// unavailable -- wasip1 is part of the standard toolchain, and a skip here
-// restores exactly the blind spot the test exists to remove.
+// This test invokes the Go compiler for wasip1/wasm and is worth the seconds.
+//
+// It has no skip, deliberately, and it had a -short one for about an hour.
+// scripts/check-skips.sh rejected that and its taxonomy says why: this is case
+// (c), "the precondition is always satisfiable in this repo", because wasip1
+// ships with the standard toolchain. There is no environmental question to
+// ask, so any skip here is a choice not to run the test -- which restores
+// exactly the blind spot it exists to remove.
 func TestGeneratedAdapterCompilesForEveryHostCall(t *testing.T) {
-	if testing.Short() {
-		t.Skip("invokes the Go compiler; skipped under -short")
-	}
-
 	pattern := filepath.Join(testdataDir(t), "allhostcalls")
 	result, _, _, _, usage, tr := analyze(pattern)
 	if result == nil {

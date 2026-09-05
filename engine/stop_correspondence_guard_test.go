@@ -97,7 +97,13 @@ var stopSurfaces = map[string]stopSurface{
 		// numeric calls and deliberately did not change it, on the grounds
 		// that a rule loosened before it has a case is a rule nobody can
 		// falsify. This is the case.
-		adapters: []string{"AcquireLock", "AcquireLockMs"},
+		// "AcquireLockMs" was here until 2026-09-05. It named an adapterDefs
+		// entry for a field cleat.HostCallsOptions does not have, so the
+		// generator emitted `AcquireLockMs:` into the struct literal and no
+		// workflow using a lock could compile. cleat_acquire_lock reaches the
+		// host through the AcquireLock adapter alone -- HostCallsImpl.AcquireLockMs
+		// calls opts.AcquireLock. See IMPROVEMENT-PLAN.md 3.204.
+		adapters: []string{"AcquireLock"},
 		wit:      []string{"durable-acquire-lock"},
 		py:       []string{"acquire_lock_ms"},
 	},

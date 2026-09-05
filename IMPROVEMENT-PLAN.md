@@ -3400,6 +3400,20 @@ is a call nobody compiles. It caught three on its first run (`DurableCallWithHea
 **Falsified:** restoring `ttl_ms` alone fails the compile test with
 `gen_host_adapter.go:388:53: undefined: ttl_ms` — the generator's own output, not a proxy for it.
 
+**CI caught two things this section's own reasoning had missed.**
+
+`engine/stop_correspondence_guard_test.go`'s `stopSurfaces` table named `"AcquireLockMs"` as a Go
+adapter, so removing the entry made that guard fail with *`stopSurfaces["AcquireLock"] names Go
+adapter "AcquireLockMs", which is not in adapterDefs`*. The table is right to notice — it
+cross-references three surfaces — and the entry is now `{"AcquireLock"}` with the reason recorded
+beside it.
+
+And the test shipped with a `-short` skip, one paragraph below a comment saying it must never
+learn to skip. `scripts/check-skips.sh` rejected it, and its taxonomy names the error exactly:
+this is case (c), *"the precondition is always satisfiable in this repo"*. There is no
+environmental question to ask, so a skip here is a decision not to run the test. Removed rather
+than baselined.
+
 The test must not learn to skip. `wasip1` ships with the standard toolchain, so there is no
 environmental precondition to detect; a skip here restores exactly the blind spot the test removes.
 It is guarded only by `-short`.
