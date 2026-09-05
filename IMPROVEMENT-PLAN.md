@@ -5062,3 +5062,148 @@ Left as-is rather than rewritten: the statement is measurably false, but the
 `working-directory` form those comments justify may still be wanted for reasons the comments
 do not give, and guessing a replacement rationale is how stale prose gets replaced with
 confident prose that is also wrong.
+### 3.406 Three SDKs, three different amounts of the truth about the same host call — 🟢 **MEASURED 2026-09-05** (WS-3, 2026-09-05)
+
+C2. Rust and AssemblyScript fixtures through the host-call execution harness (§3.210), 24 wave-1
+calls each, one call per invocation, tables recorded from measurement rather than predicted.
+
+The one-line result: **`ListCrons` returns the host's message in Go, cannot be called at all from
+Rust, and arrives as `null` with the message already gone in AssemblyScript.** Every one of those
+three guests compiles. Compile coverage cannot see any of it, which was the argument for this
+round.
+
+#### 1. The Rust SDK cannot make two of the 24 calls
+
+    grep -c cron crates/cleat-sdk/src/host_calls.rs                      # 0
+    grep -c cleat_schedule_cron packages/cleat-as/assembly/host-calls.ts # non-zero
+    grep -oE 'Export\("[a-z_0-9]+"\)' engine/imports.go | sort -u | grep cron   # 3
+
+No `cleat_schedule_cron` import, no `cleat_list_crons`, and the string "cron" appears zero times
+in the file. The host exports both and the AssemblyScript SDK binds both, so this is a guest-side
+gap and not a host limitation.
+
+Recorded through a **new `statusUnsupported`** on the harness rather than as an error. The two are
+different facts: an error is a binding that ran and was refused, and this is a binding that does
+not exist. Collapsing them files a missing SDK feature under "the host said no", which is the
+distinction the whole harness exists to draw. It also reddens usefully — when Rust gains cron the
+row stops reporting `unsupported`, stops matching, and someone has to decide what the right answer
+is, rather than the gap closing silently.
+
+Falsified: making the fixture pretend the binding exists gives
+`rust/ListCrons: status ok, table says unsupported`.
+
+#### 2. The AssemblyScript SDK discards the host's message and prints its own legend
+
+`ScheduleCron` reports
+
+    failed: timeout (code 1)
+
+It is not a timeout. Patching `scheduleCron` to read the output buffer and re-recording shows what
+the host actually said:
+
+    no workflow store configured: workflow <uuid> cannot schedule "harness-workflow"
+
+which names the workflow *and* the schedule, and is strictly more than Go's own row asserts. Go
+gets that message; AssemblyScript throws it away and substitutes a wrong word.
+
+`packages/cleat-as/assembly/host-calls.ts` does this at **25 call sites**
+(`grep -c errorCodeName`), and `errorCodeName` is a six-entry legend —
+unknown / timeout / transient / not_found / invalid_request / permission_denied. That is
+`cleat_call`'s `callErrorCode` legend, applied to `decodeSimpleResult`'s `errCode` from a
+different result layout. **This is §3.200 in another language, and broader**: the Go defect was
+one adapter class, and `wasm/adapter_hostmessage_test.go`'s
+`TestNoAdapterPrintsTheCallErrorCodeLegendForAnotherLayout` exists precisely to stop the Go side
+doing it. Nothing checks this side.
+
+**Not fixed here** — one PR, one thing. The table row asserts the *wrong* text deliberately, so
+the day the SDK is fixed the row reddens and has to be rewritten to assert the host's message.
+That is how a known defect stays visible instead of being forgotten. Falsified by exactly that
+route: patching the SDK to carry the message reddens the row with `detail changed`.
+
+#### 3. Four AssemblyScript bindings lose the message by signature, not by choice
+
+`awaitAllChildren`, `awaitAnyChild`, `listCrons` and `sideEffect` all return `string | null`, so a
+failure arrives with the host's words already gone before the guest can see them. There is no bug
+to fix in a fixture here; the API has nowhere to put the text.
+
+Only `listCrons` is observed failing in this environment, so it is the only one the table can pin.
+Its recorded detail is written by the *fixture* and says so:
+`<no host message: listCrons returns string|null and discards it>`. Recording that as an ordinary
+error would have put invented text where the Go table puts the host's own words, and made the two
+tables look comparable when they are not.
+
+#### What the AssemblyScript table shows that the Go and Rust tables hide
+
+Go and Rust both report `1 child result(s)` for `AwaitAllChildren`. The AssemblyScript row reports
+the host's raw JSON:
+
+    [{"run_id":"00000000-0000-0000-0000-000000000001","error":"child not completed"}]
+
+**Both counts are green over a child result that is an error.** A count is a lossy rendering, and
+the two rows that use one cannot fail on the contents of what they counted.
+
+That `"error":"child not completed"` is **§3.309**, filed by WS-2 the same day and still open:
+`AwaitAllChildren` does not await, it records the not-yet-completed state as the child's permanent
+outcome. Two streams reached it independently and from opposite directions — WS-2 by reading the
+branch, this table by printing what the host returned instead of counting it. Worth noting which
+one would have caught it alone: WS-2's would, this one only because the row stopped summarising.
+
+The route to that row is worth recording too, because it is the same lesson from the other side.
+The fixture's first version counted commas to match Go's wording and returned **2** for that
+one-element array — the element is an object with a comma inside it. AssemblyScript has no JSON
+parser in scope there (the SDK's `jsonParse` is itself a host call, which would put a second call
+inside every measurement of this one), so there is no honest way to produce the count. It reports
+what it received instead. **A fixture that computes a wrong number and reports it confidently is
+the exact failure this harness exists to catch**, and the near-miss was in the harness's own
+fixture.
+
+#### What the three tables agree on, which is also evidence
+
+All four suspending calls produce byte-identical suspend reasons in all three languages, rendered
+arguments included — `await_signals(["harness-signal"], 10ms)` among them. Three SDKs encode the
+same values the same way on the wire: Go passes an `int64` of milliseconds, Rust a `Duration`,
+AssemblyScript a hand-built JSON string and an explicit `…Ms` variant. Reaching that agreement in
+AssemblyScript required `awaitSignalsMs`, `awaitPromiseMs` and `acquireLockMs`; the plain forms
+take **seconds** and would have rounded the harness's 10ms to 0 and asked a different question.
+
+Three caveats reproduce in all three languages and are recorded in every table rather than in one:
+`RunID` and `WorkflowID` return the **same value** in this environment, so no row can catch a guest
+that returns one for the other; the in-memory lock is **re-entrant for the same holder**, so
+`AcquireLock`'s `first=true second=true` still cannot distinguish a decoded bit from a hardcoded
+one; and `ChildWorkflowWithOptions` is indistinguishable from `ChildWorkflow` because the in-memory
+store ignores `Version`.
+
+#### Cost, against §3.404's model
+
+All three languages, 72 host-call executions, **5.3s** locally. Rust builds in 2.7s and executes
+in 0.17s; AssemblyScript is 3.65s end to end. Build-once-invoke-N held.
+
+#### What it did to the executed-coverage guard, and two calls that guard cannot see
+
+`scripts/sdk-host-call-coverage.py --check-executed` (§3.207) moved **rust 7 → 23** and
+**assemblyscript 7 → 25**, and *failed* on the rise until the baseline was recorded — the
+bidirectional ratchet landed in #749 hours before this, on the reasoning that a guard which only
+forbids shrinking cannot tell a stale baseline from an accurate one.
+
+**Two wave-1 calls this fixture exercises are invisible to both coverage metrics, and the reason
+is one character of regex.** `rust_surface()` matches `^\s{4}pub fn ([a-z_][a-z0-9_]*)\s*\(` —
+the name must be followed by `(`. A Rust generic method is `pub fn name<T: …>(`, so every generic
+method on `HostCalls` is excluded:
+
+    counted (surface) = 61
+    all `pub fn`      = 71
+    excluded (10): await_child_typed, child_workflow_typed, cleat_call_heartbeat_typed,
+                   cleat_call_typed, cleat_call_with_host_retry, cleat_call_with_retry,
+                   defer_func, plugin_call_streaming_typed, plugin_call_typed, side_effect_typed
+
+Two of those ten are the **only** Rust bindings for a wave-1 call: `cleat_call_with_retry` is the
+whole of `DurableCallWithRetry` (there is no string-in/string-out form) and `defer_func` is the
+whole of `DurableDeferFunc`. So this fixture calls them, the table asserts their outcomes, and
+both coverage numbers are computed as though neither existed. **The Rust surface of 61 understates
+by 10, and the direction is the dangerous one** — a smaller denominator makes coverage look
+*higher*, and an uncountable call reads as a call nobody needs to write.
+
+Not fixed here; the fix changes every Rust number at once and belongs with its own baseline
+update. The same shape may affect Java — 77 `public` members against a counted surface of 68 —
+but that is flagged rather than claimed, because the Java regex admits `<>` inside the return
+type and the four-member remainder was not investigated.

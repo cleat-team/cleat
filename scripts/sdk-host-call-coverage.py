@@ -435,6 +435,23 @@ EXECUTED = {
             "test": "TestRustWorkflowExecute",
             "why": "engine/rust_workflow_test.go:67 builds examples/rust-workflow and executes it",
         },
+        # The host-call execution harness (C2, IMPROVEMENT-PLAN 3.406). 24
+        # wave-1 calls, one workflow invocation each, outcomes checked against
+        # a recorded table.
+        #
+        # It credits 22 and not 24, which is correct and worth stating so the
+        # gap is not read as a scan failure: the fixture's ScheduleCron and
+        # ListCrons arms make no host call at all. They return `unsupported`,
+        # because crates/cleat-sdk/src/host_calls.rs declares neither
+        # cleat_schedule_cron nor cleat_list_crons -- the string "cron" appears
+        # in it zero times. Crediting them here would be this mode's own
+        # failure case in miniature: a call counted as executed by a fixture
+        # that cannot make it.
+        {
+            "globs": ["tests/plugin-harness/testdata/hostcallsrust/src/*.rs"],
+            "test": "TestHostCallsRust",
+            "why": "the host-call execution harness (C2); 22 of the 24 wave-1 calls, one invocation each -- the two cron calls have no Rust binding to execute",
+        },
     ],
     "java": [
         {
@@ -458,6 +475,14 @@ EXECUTED = {
             "globs": ["examples/as-workflow/assembly/*.ts"],
             "test": "TestAssemblyScriptWorkflowExecute",
             "why": "engine/as_workflow_e2e_test.go:30 builds examples/as-workflow and executes it",
+        },
+        # The host-call execution harness (C2, IMPROVEMENT-PLAN 3.406). All 24
+        # wave-1 calls execute here -- unlike Rust, the AssemblyScript SDK
+        # binds both cron imports.
+        {
+            "globs": ["tests/plugin-harness/testdata/hostcallsas/assembly/*.ts"],
+            "test": "TestHostCallsAS",
+            "why": "the host-call execution harness (C2); all 24 wave-1 calls, one invocation each",
         },
     ],
 }
