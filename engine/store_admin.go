@@ -99,6 +99,66 @@ var reReplayableStatuses = []string{"failed", "terminated", "dead_lettered"}
 // 501 is still the honest answer for it.
 var ErrAdminOpNotImplemented = errors.New("not implemented")
 
+// The four classes an admin operation's failure falls into, for the HTTP layer
+// to choose a status code from.
+//
+// They exist because the layer above used to choose by SUBSTRING. store_admin's
+// own comment said so out loud -- "the HTTP layer maps them to 404 and 409 by
+// substring (handleAdminOpError), so the wording is load-bearing" -- which made
+// an operator-facing sentence and a status code the same artefact. Two things
+// went wrong with that:
+//
+//   - Re-replaying a workflow in the wrong status, and re-replaying one with an
+//     unresolved ambiguous call, are both refusals the caller can act on. Their
+//     messages match none of the patterns, so both were 500: "the server broke"
+//     for an operation the server declined on purpose.
+//   - `strings.Contains(msg, "not found")` claims any error whose text happens
+//     to contain those words. A driver reporting a missing relation is a 500
+//     dressed as a 404, and nothing in the code says so.
+//
+// A message is for a person reading a log; a sentinel is for a program choosing
+// a response. Keeping them separate means rewording an error cannot silently
+// change an API's status code.
+var (
+	// ErrAdminBadRequest: the request itself is wrong, and re-sending it
+	// unchanged will fail the same way. 400.
+	ErrAdminBadRequest = errors.New("bad request")
+
+	// ErrAdminNotFound: no such workflow in the caller's tenant. 404.
+	ErrAdminNotFound = errors.New("workflow not found")
+
+	// ErrAdminGenerationMismatch: the workflow moved on between the caller
+	// reading it and asking to change it. 409.
+	ErrAdminGenerationMismatch = errors.New("generation mismatch")
+
+	// ErrAdminStateConflict: the workflow exists and the request is
+	// well-formed, but the workflow's current state does not permit the
+	// operation -- a done workflow cannot be re-replayed, a history with an
+	// unresolved ambiguous call must be reconciled first, an audit row was
+	// taken by a concurrent writer. 409, because retrying after changing the
+	// workflow's state is exactly what the caller should do.
+	ErrAdminStateConflict = errors.New("workflow state conflict")
+)
+
+// adminErrorf builds an admin error that carries both a message written for an
+// operator and a class written for the HTTP layer, without either constraining
+// the other. The message is formatted exactly as given -- no class name is
+// appended -- so these errors read the same in a log as they always have.
+func adminErrorf(class error, format string, args ...any) error {
+	return classifiedError{err: fmt.Errorf(format, args...), class: class}
+}
+
+// classifiedError reports BOTH its message error and its class to errors.Is
+// and errors.As, so wrapping one loses neither: the HTTP layer asks for the
+// class, and a caller unwrapping for a driver error underneath still finds it.
+type classifiedError struct {
+	err   error
+	class error
+}
+
+func (c classifiedError) Error() string   { return c.err.Error() }
+func (c classifiedError) Unwrap() []error { return []error{c.err, c.class} }
+
 // adminForce is one force-resolve request: the terminal state to write, and
 // the audit event to record beside it.
 type adminForce struct {
@@ -139,14 +199,15 @@ func (a adminForce) auditEvent(step int) EventRecord {
 }
 
 // adminNotFound and adminGenerationMismatch are the two outcomes a zero-row
-// UPDATE has to be resolved into. The HTTP layer maps them to 404 and 409 by
-// substring (handleAdminOpError), so the wording is load-bearing.
+// UPDATE has to be resolved into. Each carries its class, so the HTTP layer
+// reads the class and not the sentence; the sentences are unchanged.
 func adminNotFound(action, workflowID string) error {
-	return fmt.Errorf("admin %s: workflow %s not found", action, workflowID)
+	return adminErrorf(ErrAdminNotFound, "admin %s: workflow %s not found", action, workflowID)
 }
 
 func adminGenerationMismatch(action, workflowID string, stored, requested int64) error {
-	return fmt.Errorf("admin %s: generation mismatch for workflow %s: stored generation is %d, request carried %d",
+	return adminErrorf(ErrAdminGenerationMismatch,
+		"admin %s: generation mismatch for workflow %s: stored generation is %d, request carried %d",
 		action, workflowID, stored, requested)
 }
 
@@ -162,8 +223,9 @@ func adminGenerationMismatch(action, workflowID string, stored, requested int64)
 // ones whose worker is gone -- there is no concurrent writer and this never
 // fires.
 func adminAuditCollision(action, workflowID string, step int) error {
-	return fmt.Errorf("admin %s: audit event for workflow %s step %d was displaced by a concurrent writer; "+
-		"the force-resolve was rolled back rather than applied without an audit record",
+	return adminErrorf(ErrAdminStateConflict,
+		"admin %s: audit event for workflow %s step %d was displaced by a concurrent writer; "+
+			"the force-resolve was rolled back rather than applied without an audit record",
 		action, workflowID, step)
 }
 

@@ -262,27 +262,47 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 
 // handleAdminOpError maps engine admin operation errors to HTTP status codes.
 //
-// 501 is separated from 500 deliberately. Every one of these operations was a
-// stub returning "not implemented yet", and the caller was told 500 -- the
-// same answer as a database failure, for an operation that had never existed.
+// By CLASS, not by substring. It used to switch on `strings.Contains(msg,
+// "not found")` and `strings.Contains(msg, "generation mismatch")`, which made
+// an operator-facing sentence part of the API contract -- store_admin.go said
+// so: "the wording is load-bearing". Two things followed from that:
 //
-// All three are real now: re-replay was the last stub, and its body landed
-// with IMPROVEMENT-PLAN 3.20. No store in this repo returns
-// ErrAdminOpNotImplemented any more, so this branch is unreachable from the
-// bundled dialects -- it is kept because WorkflowStore is a public interface
-// and an out-of-tree store may implement some of it and not the rest. See that
-// error's doc comment.
+//   - Every refusal whose wording matched no pattern was a 500. Re-replaying a
+//     `done` workflow and re-replaying one with an unresolved ambiguous call
+//     are decisions the server makes on purpose, and both were reported as the
+//     server having broken. Measured 2026-09-06 against a live worker:
+//     POST .../re-replay on a done workflow returned 500 with the correct
+//     explanation in the body.
+//   - Any error whose text merely contained "not found" was claimed as a 404.
+//     A driver reporting a missing relation is a server fault, and it answered
+//     as though the workflow did not exist.
+//
+// 501 is separated from 500 deliberately. Every one of these operations was
+// once a stub returning "not implemented yet", and the caller was told 500 --
+// the same answer as a database failure, for an operation that had never
+// existed. All three are real now, so no store in this repo returns
+// ErrAdminOpNotImplemented; the branch is kept because WorkflowStore is a
+// public interface and an out-of-tree store may implement some of it and not
+// the rest.
+//
+// The default is still 500, and that is the point of classifying: an
+// unclassified error is a genuine server fault, not a refusal nobody got round
+// to labelling.
 func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, engine.ErrAdminOpNotImplemented):
 		s.writeError(w, 501, msg)
-	case strings.Contains(msg, "generation mismatch"):
+	case errors.Is(err, engine.ErrAdminGenerationMismatch):
+		// detail is a stable machine-readable discriminator, so a client can
+		// tell "you raced another writer" from the other 409 without parsing
+		// the message. The state conflict below carries its own.
 		s.writeJSON(w, 409, map[string]string{"error": msg, "detail": "generation_mismatch"})
-	case strings.Contains(msg, "not found"):
+	case errors.Is(err, engine.ErrAdminStateConflict):
+		s.writeJSON(w, 409, map[string]string{"error": msg, "detail": "state_conflict"})
+	case errors.Is(err, engine.ErrAdminNotFound):
 		s.writeError(w, 404, msg)
-	case strings.Contains(msg, "must be valid JSON"), strings.Contains(msg, "is required"),
-		strings.Contains(msg, "must be >= 0"):
+	case errors.Is(err, engine.ErrAdminBadRequest):
 		s.writeError(w, 400, msg)
 	default:
 		s.writeError(w, 500, msg)

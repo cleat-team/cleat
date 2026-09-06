@@ -12,10 +12,10 @@ import (
 // writes. An audit event is written atomically with the status change.
 func ForceComplete(ctx context.Context, store WorkflowStore, workflowID string, generation int64, operator string, result string) error {
 	if workflowID == "" {
-		return fmt.Errorf("force-complete: workflow ID is required")
+		return adminErrorf(ErrAdminBadRequest, "force-complete: workflow ID is required")
 	}
 	if generation < 0 {
-		return fmt.Errorf("force-complete: generation must be >= 0")
+		return adminErrorf(ErrAdminBadRequest, "force-complete: generation must be >= 0")
 	}
 	if operator == "" {
 		operator = "unknown"
@@ -29,7 +29,7 @@ func ForceComplete(ctx context.Context, store WorkflowStore, workflowID string, 
 		result = "null"
 	}
 	if !json.Valid([]byte(result)) {
-		return fmt.Errorf("force-complete: result must be valid JSON")
+		return adminErrorf(ErrAdminBadRequest, "force-complete: result must be valid JSON")
 	}
 
 	if err := store.AdminForceComplete(ctx, workflowID, generation, result, operator); err != nil {
@@ -49,10 +49,10 @@ func ForceComplete(ctx context.Context, store WorkflowStore, workflowID string, 
 // writes. An audit event is written atomically with the status change.
 func ForceFail(ctx context.Context, store WorkflowStore, workflowID string, generation int64, operator string, errorMsg, errorCode string) error {
 	if workflowID == "" {
-		return fmt.Errorf("force-fail: workflow ID is required")
+		return adminErrorf(ErrAdminBadRequest, "force-fail: workflow ID is required")
 	}
 	if generation < 0 {
-		return fmt.Errorf("force-fail: generation must be >= 0")
+		return adminErrorf(ErrAdminBadRequest, "force-fail: generation must be >= 0")
 	}
 	if operator == "" {
 		operator = "unknown"
@@ -77,10 +77,10 @@ func ForceFail(ctx context.Context, store WorkflowStore, workflowID string, gene
 // the status change.
 func ReReplay(ctx context.Context, store WorkflowStore, workflowID string, generation int64, operator string) error {
 	if workflowID == "" {
-		return fmt.Errorf("re-replay: workflow ID is required")
+		return adminErrorf(ErrAdminBadRequest, "re-replay: workflow ID is required")
 	}
 	if generation < 0 {
-		return fmt.Errorf("re-replay: generation must be >= 0")
+		return adminErrorf(ErrAdminBadRequest, "re-replay: generation must be >= 0")
 	}
 	if operator == "" {
 		operator = "unknown"
@@ -100,9 +100,10 @@ func ReReplay(ctx context.Context, store WorkflowStore, workflowID string, gener
 	if history, herr := store.LoadEventHistory(ctx, workflowID); herr == nil {
 		for _, rec := range history {
 			if rec.isPendingIntent() {
-				return fmt.Errorf("re-replay: workflow %s has an unresolved ambiguous call at step %d "+
-					"(%s.%s): re-replaying would report it again. Check the external service and record "+
-					"the outcome with POST /api/admin/instances/%s/steps/%d/resolve first",
+				return adminErrorf(ErrAdminStateConflict,
+					"re-replay: workflow %s has an unresolved ambiguous call at step %d "+
+						"(%s.%s): re-replaying would report it again. Check the external service and record "+
+						"the outcome with POST /api/admin/instances/%s/steps/%d/resolve first",
 					workflowID, rec.Step, rec.Service, rec.Op, workflowID, rec.Step)
 			}
 		}
