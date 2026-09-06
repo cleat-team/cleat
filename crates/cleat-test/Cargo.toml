@@ -9,3 +9,7 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 cleat-macro = { path = "../cleat-macro" }
+# For signal_envelope: the request/reply wire format has ONE definition,
+# shared with the SDK, so this harness cannot drift from what a workflow
+# actually sends. IMPROVEMENT-PLAN 3.220.
+cleat-sdk = { path = "../cleat-sdk" }

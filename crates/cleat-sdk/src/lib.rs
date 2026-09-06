@@ -8,6 +8,7 @@ pub mod host_calls;
 pub mod memory;
 pub mod plugins;
 pub mod saga;
+pub mod signal_envelope;
 pub mod test;
 pub mod version;
 

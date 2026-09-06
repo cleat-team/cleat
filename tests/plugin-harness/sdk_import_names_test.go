@@ -50,7 +50,18 @@ func TestEverySDKImportIsAHostExport(t *testing.T) {
 		floor int
 		fn    func(*testing.T, string) map[string]string // import name -> where
 	}{
-		{"rust", 45, rustDeclaredImports},
+		// Rust's floor is 44 where the others are 45, and the two are the
+		// externs IMPROVEMENT-PLAN 3.220 removed: cleat_send_signal_and_wait
+		// and cleat_reply_to_signal. Request/reply is now composed from
+		// create_promise + signal_workflow + await_promise + resolve_promise,
+		// so a Rust guest declares neither import.
+		//
+		// The floor exists to catch the EXTRACTOR breaking, not to freeze the
+		// count, so it moves when imports are deliberately removed -- but only
+		// after checking the drop is the removal and not a silently broken
+		// parse. Measured 2026-09-06, extracting the extern block from each
+		// revision: origin/develop 46, this branch 44.
+		{"rust", 44, rustDeclaredImports},
 		{"java", 45, javaDeclaredImports},
 		{"assemblyscript", 45, asDeclaredImports},
 

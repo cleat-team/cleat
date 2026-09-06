@@ -85,7 +85,22 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"signal_workflow", "SignalWorkflow"},
 	{"cleat_send", "DurableSend"},
 	{"schedule_invoke_ms", "DurableScheduleInvoke"},
-	{"send_signal_and_wait_ms", "SendSignalAndWait"},
+	// send_signal_and_wait_ms was here until 2026-09-06. It is no longer a
+	// host call: IMPROVEMENT-PLAN 3.220 made it a composite over
+	// create_promise + signal_workflow + await_promise, so there is no
+	// import of its own for the host to refuse.
+	//
+	// Removing it does NOT weaken this guard, and that was checked rather
+	// than assumed. Of the three callees, only SignalWorkflow calls
+	// stopBeforeNewWork -- CreatePromise, AwaitPromise and ResolvePromise do
+	// not, which is why none of them was ever on this list -- and
+	// signal_workflow is on it, one line above. So every refusable call the
+	// composite makes is still covered, by the entry that owns it.
+	//
+	//	for f in CreatePromise AwaitPromise ResolvePromise SignalWorkflow; do
+	//	  awk "/func \(s \*execSession\) $f\(/,/^}$/" engine/promises.go \
+	//	    engine/signaller.go | grep -c stopBeforeNewWork; done
+	//	# 0 0 0 1
 	{"side_effect", "SideEffect"},
 	{"cleat_fetch", "Fetch"},
 	{"run_detached", "RunDetached"},

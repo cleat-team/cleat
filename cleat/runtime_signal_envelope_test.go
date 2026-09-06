@@ -107,3 +107,26 @@ func TestUnwrapSignalResultExtractsTheReplyAddress(t *testing.T) {
 		t.Errorf("name %q, want %q", out.Name, "sig")
 	}
 }
+
+// TestSignalEnvelopeWireFormatIsPinned fixes the exact bytes this SDK puts on
+// the wire, because the Rust SDK's signal_envelope.rs pins the same literal in
+// wire_format_matches_the_go_sdk. A Go workflow can answer a Rust one, so the
+// two encoders agreeing is a correctness requirement rather than a stylistic
+// one -- and cross-language interop is exactly the thing no local test run
+// exercises, so a drift would otherwise surface as a receiver that cannot
+// reply, in an integration suite, long after the change that caused it.
+//
+// Field ORDER is part of what is pinned, not incidental: encoding/json emits
+// struct fields in declaration order, so reordering the two fields in
+// signalEnvelope would change these bytes while every round-trip test above
+// kept passing.
+func TestSignalEnvelopeWireFormatIsPinned(t *testing.T) {
+	got, err := encodeSignalEnvelope("promise-123", `{"key":"val"}`)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	want := `{"cleat_reply_to":"promise-123","payload":"{\"key\":\"val\"}"}`
+	if got != want {
+		t.Errorf("wire format changed:\n got %s\nwant %s", got, want)
+	}
+}
