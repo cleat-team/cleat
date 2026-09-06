@@ -245,10 +245,11 @@ jobs:
     env:
       # Explicit, not inherited. Go defaults CGO_ENABLED to 1 only when a C
       # compiler is present and 0 otherwise, so relying on the default would
-      # silently remove NewWasmtimeBackend on a runner without gcc and run
-      # everything on wazero -- which tier 1 does not name. The gate checks
-      # this too and fails on CGO_ENABLED=0; pinning it here means the check
-      # never has to fire.
+      # silently remove NewWasmtimeBackend on a runner without gcc -- leaving
+      # NO backend at all, since the wazero one was deleted in #459. The gate
+      # checks this too and fails on CGO_ENABLED=0; pinning it here means the
+      # check never has to fire. (This said "and run everything on wazero"
+      # until 2026-09-06.)
       CGO_ENABLED: "1"
 
       # Both PostgreSQL names. The tree carries two conventions for the same

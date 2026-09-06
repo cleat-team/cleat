@@ -2,8 +2,13 @@ name: Plugin Harness Tests
 
 # CGO on, everywhere in this file. It was "0" in all four jobs, which does not
 # skip a check -- NewWasmtimeBackend is behind //go:build cgo, so disabling CGO
-# removes the primary backend and runs everything on wazero. The same defect
-# 2.70 fixed in multi-db-ci.yml, in a second workflow.
+# removed the primary backend. The same defect 2.70 fixed in multi-db-ci.yml, in
+# a second workflow.
+#
+# When this was written the fallback was wazero. Since #459 (2026-08-10) there is
+# no fallback: a CGO-less build has no WASM backend at all. The history below is
+# left as written because it records a real measurement; only the consequence has
+# changed, and it changed in the direction of failing louder.
 #
 # Here it had a visible cost: TestPluginCalls_Wasm_Go skipped unconditionally on
 # a "wazero v1.11.1 nil Sys context panic", and that panic only happens because
@@ -259,8 +264,9 @@ jobs:
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
           # when a C compiler is present and 0 otherwise, so relying on the
-          # default silently reinstates the wazero-only run on a runner without
-          # gcc. Pinned, that case fails loudly.
+          # default leaves a runner without gcc with no WASM backend at all
+          # (the wazero one was deleted in #459). Pinned, that case fails loudly.
+          # This said "silently reinstates the wazero-only run" until 2026-09-06.
           CGO_ENABLED: "1"
 
       # The tests must not rewrite their own tracked fixtures. This is the
@@ -352,14 +358,20 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-      # This job is currently vacuous, and the budget below is what says so.
+      # This job WAS vacuous, and the budget below is what said so.
       #
-      # It provisions PostgreSQL, MySQL and SQL Server, sets all three DSNs,
-      # and then runs exactly one test -- TestPluginCalls_MultiDB -- whose
-      # first statement is an unconditional t.Skip for a wazero v1.11.1 nil Sys
-      # context panic. So three database containers start, nothing is tested,
-      # and the job reports success. Every dialect claim this job is supposed
-      # to back is currently unverified by it.
+      # It provisions PostgreSQL, MySQL and SQL Server, sets all three DSNs, and
+      # runs exactly one test -- TestPluginCalls_MultiDB -- whose first statement
+      # used to be an unconditional t.Skip for a wazero v1.11.1 nil Sys context
+      # panic. Three database containers started, nothing was tested, and the job
+      # reported success.
+      #
+      # Re-checked 2026-09-06: the skip is gone. `grep -rn 'nil Sys'
+      # --include='*.go' .` finds only the comment recording it, in
+      # tests/plugin-harness/wasm_plugin_test.go. The panic only happened because
+      # the job forced a CGO-less run onto wazero, and CGO is pinned on above.
+      # The budget below stays -- it is what would catch this becoming vacuous
+      # again.
       #
       # The budget is 1 rather than 0 so the state is recorded rather than
       # breaking the build on a known upstream bug -- the same treatment as the

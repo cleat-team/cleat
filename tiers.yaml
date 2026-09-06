@@ -937,10 +937,28 @@ tier2:
         - "the dashboard still shows a non-default tenant's schedule as enabled whether
            or not the deployment can fire it; nothing surfaces which mode a worker is in"
 
-    - id: backend-wazero
+    - id: runtime-wazero
+      # Renamed from `backend-wazero` 2026-09-06. Nothing consumes these ids
+      # (`grep -rn backend-wazero --include='*.sh' --include='*.go'` -> nothing), and the
+      # old name asserted the thing that is no longer true.
       why: |
-        The CGO-less fallback and nothing else (settled 2026-08-05). Cannot be fenced for a
-        compute-bound guest — measured three ways, all failing. Never the backend of record.
+        **Not a backend.** `engine/backend_wazero.go` was deleted in #459 (2026-08-10); there
+        is one WasmBackend, wasmtime, and a build without CGO constructs none at all — the
+        worker exits 1 at startup. This entry read "the CGO-less fallback and nothing else"
+        until 2026-09-06, claiming a deployment mode that cannot exist, in the file that
+        exists so that support status is checked rather than written.
+
+        What is actually here: `engine.Runtime` (`engine/runtime.go`) is a wazero runtime
+        that still executes guest code for CLI and test tooling — `cleat run_embedded`,
+        `cleatctl replay|debug`, `cleat-bench`, `cleat/wasmtest`, and `RunDefer` when no
+        backend is registered, which is those same tools. Re-derive with
+        `grep -rn "NewRuntime(" --include="*.go" . | grep -v _test.go`.
+
+        It cannot be fenced for a compute-bound guest — measured three ways, all failing.
+        That bounds developer tooling, not anything a worker runs.
+      open_items:
+        - "a runaway guest under cleatctl replay|debug, cleat-bench or cleat run_embedded is
+           not stopped: no wall-clock or fuel fence works on wazero"
 
     - id: cluster-and-scale
       why: >-
@@ -1085,10 +1103,14 @@ tier2:
       workflow: .github/workflows/plugin-harness-ci.yml
       why: >-
         Runs TestPluginCalls_MultiDB, which is the ONLY test under ./tests/... that touches
-        MySQL or SQL Server. Measured 2026-08-07: it carries an unconditional t.Skip for a
-        wazero v1.11.1 nil-Sys-context panic, so that coverage is currently absent behind a
-        green ok. Gating the job does not fix that -- see the open item on backend-wazero --
-        but it stops the next regression here from being invisible too.
+        MySQL or SQL Server. Measured 2026-08-07: it carried an unconditional t.Skip for a
+        wazero v1.11.1 nil-Sys-context panic, so that coverage was absent behind a green ok.
+        RESOLVED, re-checked 2026-09-06 -- the skip is gone; `grep -rn 'nil Sys'
+        --include='*.go' .` finds only the comment recording it, in
+        tests/plugin-harness/wasm_plugin_test.go. That panic only happened because the job
+        forced a CGO-less run onto wazero, and wazero is no longer a backend at all (#459);
+        with CGO on, the test passes. Gating the job is still what stops the next regression
+        here from being invisible.
     - suite: ./tests/plugin-harness/...
       job: "Blobstore S3 Round-Trip"
       workflow: .github/workflows/plugin-harness-ci.yml

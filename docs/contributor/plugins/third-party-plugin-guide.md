@@ -43,6 +43,14 @@ module at runtime when a workflow invokes one of its host functions.
 
 ### WASM sandbox
 
+> **Read this section as design intent, not shipped behaviour** (checked
+> 2026-09-06). The plugin loader is real and is genuinely wazero-based, but
+> `PluginLoader.LoadPlugin` has no non-test callers and `cmd/cleat-worker`
+> constructs no loader — nothing on a workflow's path compiles or instantiates
+> a plugin module today. The sandbox properties below are what the design
+> provides once that is wired; they are not a guarantee you can rely on now.
+> See IMPROVEMENT-PLAN §3.314.
+
 Plugins run inside a **wazero** sandbox with no access to:
 
 - The filesystem (no WASI filesystem access)

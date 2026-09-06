@@ -641,16 +641,39 @@ pool.SetMaxIdleConns(2)
 
 ### WASM sandbox resource limits
 
-For WASM plugins, the wazero sandbox enforces:
+> **Corrected 2026-09-06 — this table described enforcement that does not
+> exist, and it is left visible rather than deleted so the gap is not silently
+> re-closed.** Measured on this tree:
+>
+> - `--plugin-memory-limit` and `--plugin-gas-limit` are not flags.
+>   `grep -rn 'plugin-memory-limit\|plugin-gas-limit' --include='*.go' .`
+>   returns nothing; `cmd/cleat-worker/config.go` has `--plugin-config` and
+>   `--max-plugin-connections` and no others in this family.
+> - Nothing in production compiles a plugin module at all.
+>   `PluginLoader.LoadPlugin` has **no non-test callers**, and the only two
+>   non-test `NewPluginLoader` calls are in `cmd/cleat/plugin_cmd.go`, both
+>   passing a nil `*Runtime` (they deploy and list; they do not execute).
+>   `cmd/cleat-worker` constructs no `PluginLoader`.
+> - So the sandbox named below is real code with real wazero types, and it is
+>   not on any path a workflow reaches. **A limits table for an unwired
+>   execution path is the most flattering possible error**: it reads as
+>   defence-in-depth and measures nothing.
+>
+> The wazero attribution itself is *not* the error here — `PluginLoader` is
+> genuinely wazero-typed (`wazero.CompiledModule`), unlike the worker paths
+> corrected elsewhere in this sweep. Tracked as its own item; see
+> IMPROVEMENT-PLAN §3.314.
 
-| Resource | Default limit | Configuration |
+The limits below are the design intent, not the shipped behaviour:
+
+| Resource | Intended limit | Intended configuration |
 |----------|--------------|---------------|
-| Memory | 50 MB | `--plugin-memory-limit` on the worker |
-| CPU instructions (gas) | 10 million per call | `--plugin-gas-limit` on the worker |
+| Memory | 50 MB | `--plugin-memory-limit` on the worker (does not exist) |
+| CPU instructions (gas) | 10 million per call | `--plugin-gas-limit` on the worker (does not exist) |
 | Instance count | 100 concurrent | Fixed; adjust per deployment |
 
-A plugin that exceeds gas limits is killed with an error in the workflow event
-history:
+The intended behaviour when a plugin exceeds its gas limit is an error in the
+workflow event history:
 
 ```
 Plugin "example/hello-world" host function "greet" exceeded instruction budget.

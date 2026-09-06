@@ -20,8 +20,11 @@ security fixes.
 The following areas are considered in scope for security reports:
 
 - **WASM sandbox escapes** -- vulnerabilities that allow a compiled WASM module to
-  escape the wazero runtime sandbox and execute arbitrary code on the host, access
-  the host filesystem, or make unintended network calls.
+  escape the wasmtime sandbox and execute arbitrary code on the host, access
+  the host filesystem, or make unintended network calls. Reports against the
+  wazero runtime that CLI and test tooling still uses (`cleatctl replay|debug`,
+  `cleat-bench`, `cleat/wasmtest`) are also in scope; see the threat model below
+  for which one runs what.
 - **PostgreSQL injection via event history** -- SQL injection vectors where crafted
   workflow inputs, signal payloads, or event history data could manipulate database
   queries executed by the worker daemon.
@@ -134,19 +137,37 @@ fingerprint is available on the GitHub security advisories page.
 
 ### WASM Sandbox Boundary
 
-Cleat uses [wazero](https://github.com/tetratelabs/wazero), a zero-dependency
-WebAssembly runtime for Go, to execute compiled WASM modules. The threat model
-assumes:
+> Corrected 2026-09-06. This section said cleat "uses wazero ... to execute
+> compiled WASM modules", named the wazero runtime as the trust boundary and as
+> the enforcer of memory bounds, and gave the host-function count as 15. A
+> worker has not executed a workflow on wazero since #459 (2026-08-10) deleted
+> the wazero backend, and the count is 52. Getting this wrong in *this* file is
+> the costliest place to get it wrong: it tells a security researcher which
+> runtime to look at, and it named one that a production worker does not run.
 
-- **Trust boundary**: The wazero runtime and the host worker process are trusted.
-  The WASM module is untrusted.
-- **Capabilities**: WASM modules have access only to the 15 cleat host function
-  imports (`cleat_call`, `cleat_sleep`, etc.). They cannot access the filesystem,
-  network, environment variables, or system clock except through these host
-  functions.
-- **Memory isolation**: Each WASM module has its own linear memory. The wazero
-  runtime enforces memory bounds; modules cannot read or write outside their
+Cleat uses [wasmtime](https://wasmtime.dev/) to execute compiled WASM modules on
+a worker. It is the only WASM backend cleat has; a build without CGO constructs
+no backend and the worker exits 1 at startup rather than running unfenced. The
+threat model assumes:
+
+- **Trust boundary**: The wasmtime backend and the host worker process are
+  trusted. The WASM module is untrusted.
+- **Capabilities**: WASM modules have access only to the 52 cleat host function
+  imports (`cleat_call`, `cleat_sleep`, etc. -- `ABI.md` §2 lists them; measured
+  2026-09-06). They cannot access the filesystem, network, environment
+  variables, or system clock except through these host functions.
+- **Memory isolation**: Each WASM module has its own linear memory. The wasmtime
+  store enforces memory bounds (32 MiB per module by default,
+  `--wasm-memory-max-mb`); modules cannot read or write outside their
   allocated memory region.
+- **A second runtime, outside the worker**: [wazero](https://github.com/tetratelabs/wazero)
+  is still in the tree as `engine.Runtime` and still executes guest code under
+  CLI and test tooling -- `cleat run_embedded`, `cleatctl replay|debug`,
+  `cleat-bench`, `cleat/wasmtest`. **It cannot be fenced for a compute-bound
+  guest** (measured three ways, all failing -- see
+  `docs/explanation/security-model.md`), so a runaway guest under those tools is
+  not stopped. No worker is exposed to this; a developer running an unfamiliar
+  module locally is.
 - **Denial of service**: A malicious or buggy WASM module could enter an infinite
   loop or allocate excessive memory. The worker enforces execution timeouts and
   resource limits at the instance level.
@@ -220,8 +241,11 @@ If a `cleat-worker` process is compromised:
 - **Go modules**: All dependencies are fetched via the Go module proxy and
   verified using `go.sum` checksums. Dependabot is configured for automated
   update notifications.
-- **Wazero**: As the WASM runtime, wazero is a critical dependency. We track
-  wazero security advisories and update promptly.
+- **wasmtime**: As the only WASM backend, wasmtime (via
+  `bytecodealliance/wasmtime-go`) is a critical dependency. We track its
+  security advisories and update promptly.
+- **wazero**: still a dependency, and still executes guest code under CLI and
+  test tooling. Tracked on the same terms.
 - **WASM toolchains**: The standard Go toolchain (targeting wasip1) is the
   compilation tool for Go workflows, not a runtime dependency. WASM binaries
   are compiled by the workflow author, not by the cleat project

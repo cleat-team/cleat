@@ -73,7 +73,7 @@ instance is claimed:
 
 1. **Load history**: All events for the instance are loaded from
    `event_history`, ordered by step number.
-2. **Compile WASM**: The module is compiled and instantiated in wazero.
+2. **Compile WASM**: The module is compiled and instantiated on the wasmtime backend.
 3. **Replay**: The entry point export is called. For each step:
    - If the event history has an event at this step, the cached response is
      returned to the WASM module -- the call is NOT re-executed.

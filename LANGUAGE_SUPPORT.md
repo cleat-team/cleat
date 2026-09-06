@@ -183,8 +183,8 @@ open_items and `docs/determinism.md`.
 - SDK: `cleat-js` npm package with `HostCalls` class and `cleatEntry()` decorator
 - Transformer: Babel plugin or `tsc` plugin that wraps entry functions with ABI glue
 - **Binary size:** 1-5 MB (embedded JS engine)
-- **Debugging:** Very difficult — JS running inside QuickJS inside WASM inside wazero.
-  Three layers of abstraction.
+- **Debugging:** Very difficult — JS running inside QuickJS inside WASM inside
+  wasmtime. Three layers of abstraction.
 - **Showstoppers:**
   - QuickJS-in-WASM adds significant overhead and debugging complexity
   - TypeScript type information is erased at compile time — can't generate typed

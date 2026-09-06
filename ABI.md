@@ -1323,20 +1323,43 @@ Host-only extension for streaming plugin function calls. Same signature as `plug
 
 ### Previously undocumented functions
 
-> Added 2026-08-09. This document said "52 host functions" while the actual
-> registered set is **58** on both backends (55 `cleat_*` exports plus
-> `plugin_call`, `plugin_call_streaming`, `set_query_state`). It was 59 until
-> 2026-09-02, when `cleat_child_workflow_in_schema` was removed. Re-derived with:
+> Added 2026-08-09, re-derived 2026-09-06. The registered set is **52** (49
+> `cleat_*` exports plus `plugin_call`, `plugin_call_streaming`,
+> `set_query_state`).
 >
 > ```
-> grep -oE '\.Export\("[a-zA-Z_]+"\)' engine/imports.go | sort -u | wc -l   # wazero: 59
+> python3 -c "import re;print(len(set(re.findall(r'\.Export\("([^"]+)"\)',
+>   open('engine/imports.go').read()))))"                                  # 52
 > grep -oE '"cleat_[a-zA-Z_]+"|"set_query_state"|"plugin_call[a-zA-Z_]*"' \
->   engine/wasmtime_hostfuncs*.go engine/backend_wasmtime*.go | cut -d: -f2 | sort -u | wc -l   # wasmtime: 59
+>   engine/wasmtime_hostfuncs*.go engine/backend_wasmtime*.go | cut -d: -f2 | sort -u | wc -l   # 52
 > ```
 >
-> Both backends register the identical set — there is no wazero/wasmtime
-> split in what is importable, only in how it is enforced (see
-> `docs/explanation/security-model.md`). The seven functions below existed in
+> **The registered count has moved twice since this note was added**: 59 → 58
+> when #582 removed `cleat_child_workflow_in_schema` (2026-09-02) → 52 when
+> #767 removed the six-call durable-state family (2026-09-05).
+>
+> That lands on the same number this document *claimed* before the note was
+> written, and the two 52s are different sets — the old one was the 59
+> registered minus the seven listed below, which were registered but
+> undocumented; today's is the 59 minus `cleat_child_workflow_in_schema` and
+> the six state calls, with all seven below now documented. Naming the
+> coincidence because it is the kind that reads as corroboration: a number
+> that matches a remembered one is the number least likely to be re-derived.
+>
+> **Seven entries in this document describe host calls that no longer exist**
+> — the six `cleat_*_state` calls and `cleat_child_workflow_in_schema`
+> (`grep -c cleat_set_state ABI.md engine/imports.go` → 2 and 0). They are left
+> in place here rather than removed in a docs sweep about something else; an
+> SDK that binds one gets a module that fails to instantiate, which is the
+> §3.312 failure mode, so this is tracked as its own item.
+>
+> The two commands read two different registrations — `engine/imports.go` is
+> the wazero `engine.Runtime` used by CLI and test tooling, the other is the
+> wasmtime backend a worker runs — and they must agree;
+> `engine/hostabi_runtime_parity_test.go` enforces it. Until 2026-09-06 this
+> note called them "both backends". There is only one backend: the wazero one
+> was deleted in #459 (2026-08-10). What is importable does not differ between
+> them; how it is fenced does (see `docs/explanation/security-model.md`). The seven functions below existed in
 > `engine/imports.go` and the wasmtime registration files with no ABI entry
 > at all. The first five are ordinary host calls; the last two
 > (`cleat_poll_work`, `cleat_complete`) are internal plumbing specific to the

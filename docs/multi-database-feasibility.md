@@ -60,7 +60,7 @@ The coupling breaks down into four tiers:
 
 ### Tier 4 — What Does NOT Depend on PostgreSQL
 
-- The WASM runtime (wazero) — zero database dependency
+- The WASM backend (wasmtime) — zero database dependency
 - The transformer pipeline (Go AST → WASM) — operates on files, not databases
 - The SDK surface (HostCalls interface) — callers never see the database
 - Plugin host function implementations — they receive JSON, return JSON

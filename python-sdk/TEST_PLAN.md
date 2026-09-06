@@ -7,8 +7,8 @@ workflow execution path in the cleat durable execution engine. The pipeline is:
 
 ```
 Python workflow  -->  componentize-py  -->  WASM Component Model binary
-  -->  wasm-tools decompose  -->  Core WASM module
-  -->  wazero runtime  -->  Go host (cleat-engine)
+  -->  wasmtime native component path (ExecuteComponentCGo)
+  -->  Go host (cleat-engine)
   -->  execute exports, service calls, signals, timers, ...
   -->  result & event history
 ```
@@ -86,8 +86,8 @@ the parent test suite uses `-short`).
 | Step | Description | Tool | Output |
 |------|-------------|------|--------|
 | 1 | Compile `durable_call_workflow.py` to a WASM Component Model binary | `componentize-py` | `durable_call_workflow.wasm` |
-| 2 | Decompose component model to a core WASM module | `wasm-tools component decompose` | `core.wasm` (or pass-through if already a core module) |
-| 3 | Load core module into wazero runtime | `internal/host/runtime.go` — `NewRuntime()` | Wazero `Runtime` + `api.Module` |
+| 2 | ~~Decompose component model to a core WASM module~~ | — | **Removed.** Decomposition was deleted in #528 (2026-09-01) after failing at instance 81 of 85 on the only Component Model binary in the repo. |
+| 3 | Execute the component on the wasmtime backend | `engine/component_cgo.go` — `ExecuteComponentCGo` | instantiated component |
 | 4 | Call the `run` export with a JSON input | `Runtime.CallExport()` | Raw `i64` result |
 | 5 | Decode result and event history | `Engine.Execute()` | `result`, `history`, `suspended`, `deferrals`, `queryState` |
 | 6 | Verify event history contains expected `cleat_call` and `cleat_log` events | Test assertions | Pass/fail |
@@ -148,10 +148,19 @@ go test ./internal/host/ -run TestPythonWasmEndToEnd -v
 
 ### Why decomposition is needed
 
+> Corrected 2026-09-06. This section described a pipeline that no longer
+> exists: componentize-py output decomposed with `wasm-tools component
+> decompose` and loaded into wazero. Decomposition was deleted in #528
+> (2026-09-01) after failing at instance 81 of 85 on the only Component Model
+> binary in the repo, and wazero is no longer a backend at all (#459,
+> 2026-08-10). The `internal/host/` path cited in the table above moved to
+> `engine/` in 3eeb74e (2026-06-01), three months before this line was last
+> read.
+
 `componentize-py` produces WASM Component Model binaries (wrapped in the
-component model layer). The wazero runtime only supports core WASM modules.
-Therefore the binary must be decomposed using `wasm-tools component decompose`
-to extract the core module before loading into wazero.
+component model layer). These are executed directly by the wasmtime backend's
+native component path (`ExecuteComponentCGo`), which is the only path in the
+tree that runs them.
 
 If `wasm-tools` is unavailable, the test checks whether the binary is already
 a core module by attempting a direct load. This enables testing with pre-decomposed

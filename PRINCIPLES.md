@@ -68,9 +68,9 @@ Rust, AssemblyScript, and more targets), and a security boundary (user code
 cannot access the host system except through explicit HostCalls). No user code
 ever runs in the worker process address space.
 
-**Do this:** Compile workflow code to WASM, execute it in a sandboxed wazero
-runtime, and route all external interactions through the 15 defined HostCall
-imports on the `env` module.
+**Do this:** Compile workflow code to WASM, execute it in the sandboxed
+wasmtime backend, and route all external interactions through the HostCall
+imports on the `env` module (52 as of 2026-09-06 -- `ABI.md` §2).
 
 **Not that:** Load user code as a native Go plugin (`plugin.Open`), execute it
 via shared library FFI, or embed a scripting language interpreter in the worker

@@ -37,8 +37,11 @@
 - Eliminates magic strings from service/operation calls
 
 ### Production host runtime
-- wazero-based Runtime, Engine with Execute/Replay
-- 14 host function imports, WASM memory management
+- Engine with Execute/Replay on the wasmtime backend (this read "wazero-based
+  Runtime" until 2026-09-06; the wazero backend was deleted in #459, and the
+  wazero `Runtime` that remains serves CLI and test tooling only)
+- 52 host function imports (2026-09-06; was 14 when this line was written),
+  WASM memory management
 - Real DurableSleep: suspend/resume protocol via panic/recover sentinel
 - Signal delivery: SignalStore interface, PostgresStore, signals table
 - Cancellation: PollCancellation checks DB flag, RequestCancellation API
