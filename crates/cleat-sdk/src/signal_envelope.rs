@@ -6,9 +6,19 @@
 //! the signal, which is how DBOS and Temporal both handle request/reply --
 //! neither has a primitive for it. See IMPROVEMENT-PLAN 3.220.
 //!
-//! This module is the single definition of that wire format. The Go SDK's
-//! `cleat/runtime_signal_envelope.go` is its counterpart and the two must
-//! agree byte for byte, because a Go workflow can answer a Rust one.
+//! This module is the single definition of that wire format for Rust. The Go
+//! and Python SDKs have counterparts, and all three must agree on the
+//! STRUCTURE -- the two key names, their order, and compact separators --
+//! because a Go or Python workflow can answer a Rust one.
+//!
+//! They do NOT agree byte for byte, and a comment here claimed they did until
+//! 2026-09-06. Go's `encoding/json` HTML-escapes `<`, `>` and `&` by default;
+//! `serde_json` and Python's `json.dumps` do not. So the same payload yields
+//! `\u003c` from a Go sender and `<` from this one. That is harmless -- both
+//! decode to the identical string, because the consumer is a JSON parser --
+//! but it means the pinned literal below guards structure, not bytes, and
+//! `decodes_what_the_other_sdks_encode` is the test for the property that
+//! actually matters.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -130,11 +140,44 @@ mod tests {
         }
     }
 
-    /// The Go SDK produces this exact byte sequence for the same inputs
-    /// (`cleat/runtime_signal_envelope.go`). A Go workflow can answer a Rust
-    /// one, so the two encoders agreeing is a correctness requirement, not a
-    /// stylistic one -- pinning the bytes is what makes a drift fail here
-    /// rather than in a cross-language integration nobody runs locally.
+
+    /// Every SDK's decoder must accept every other SDK's output. This is the
+    /// property cross-language request/reply actually depends on, and it had
+    /// no test in any SDK until 2026-09-06 -- only the byte pin, which cannot
+    /// see the difference because its sample contains no HTML characters.
+    ///
+    /// The two forms below are the SAME envelope. Go emits the first, Rust and
+    /// Python the second. A payload carrying `&` -- a query string, say --
+    /// takes the first shape from a Go sender and the second from this one.
+    #[test]
+    fn decodes_what_the_other_sdks_encode() {
+        let go_form = r#"{"cleat_reply_to":"p1","payload":"{\"q\":\"a\u003cb\u0026c\u003ed\"}"}"#;
+        let rust_python_form = r#"{"cleat_reply_to":"p1","payload":"{\"q\":\"a<b&c>d\"}"}"#;
+        let want_payload = r#"{"q":"a<b&c>d"}"#;
+
+        // Without this, the test would still pass if the go_form literal had
+        // been written unescaped by mistake -- both cases would decode fine
+        // and nothing would be proved about escape handling. Asserting they
+        // DIFFER is what makes the case a known-positive rather than two
+        // copies of the same input.
+        assert_ne!(go_form, rust_python_form, "the two forms must be different encodings");
+
+        for (name, raw) in [("go", go_form), ("rust/python", rust_python_form)] {
+            let (reply_to, payload) = decode_signal_envelope(raw)
+                .unwrap_or_else(|| panic!("{} form was not recognised as an envelope", name));
+            assert_eq!(reply_to, "p1", "{} form", name);
+            assert_eq!(payload, want_payload, "{} form", name);
+        }
+    }
+
+    /// Pins this SDK's exact output, which is how a STRUCTURAL drift -- a
+    /// renamed key, a reordering, a stray space from non-compact separators --
+    /// fails here rather than in a cross-language integration nobody runs
+    /// locally.
+    ///
+    /// The sample deliberately contains no `<`, `>` or `&`, because those are
+    /// exactly where the SDKs legitimately differ (see the module doc). Add
+    /// one and this test would be asserting a false equivalence.
     #[test]
     fn wire_format_matches_the_go_sdk() {
         let raw = encode_signal_envelope("promise-123", r#"{"key":"val"}"#).unwrap();

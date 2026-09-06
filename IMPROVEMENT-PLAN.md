@@ -5134,6 +5134,37 @@ This is the §3.218 shape once more: my own fix changed the engine, and the mock
 engine was not brought along. It surfaced only because a reply address became a promise ID, which
 made "a stale reply address" and "an unknown promise" the same case.
 
+#### "Byte for byte" was wrong, and the property that matters had no test
+
+The Go, Rust and Python envelope modules each claimed the three encoders "must agree byte for
+byte". They do not. `encoding/json` HTML-escapes `<`, `>` and `&` by default; `serde_json` and
+`json.dumps` do not, so one payload takes two shapes:
+
+    GO={"cleat_reply_to":"p1","payload":"{\"q\":\"a\u003cb\u0026c\u003ed\"}"}
+    PY={"cleat_reply_to":"p1","payload":"{\"q\":\"a<b&c>d\"}"}
+
+The pinned literal contains no HTML characters, so it passed and the claim went unchecked. A
+payload with `&` in it -- a query string -- differs between a Go sender and a Python one.
+
+**Interop is not broken**: both decode to the identical string, because the consumer is a JSON
+parser. So the pin guards STRUCTURE -- key names, key order, compact separators, which is a real
+Python hazard since `json.dumps` defaults to `", "`. It is not byte identity, and describing it as
+such sends the next reader chasing a difference that is correct.
+
+The property cross-language request/reply actually depends on -- *every decoder accepts every
+other encoder's output* -- **had no test in any SDK**. It does now, in all three, with both forms
+pinned and an `assert_ne` on the pair: without that, the test would still pass if the escaped
+literal had been written unescaped by mistake, since both would decode fine and nothing about
+escape handling would be proved. That is the known-positive rule from CLAUDE.md applied to a
+fixture rather than to a guard.
+
+**How the difference was nearly lost.** The first attempt to display Go's bytes used
+`echo "$(cat file)"`, and zsh's `echo` interprets `\u003c`, rendering it as `<` -- which made Go's
+output look identical to Python's and contradicted a correct earlier measurement. The file was
+right throughout; the display was not. Resolved by comparing `encodeSignalEnvelope` against
+`json.Marshal` directly rather than trusting either rendering. Same rule as the rest of this
+section: a tool applied to a format it does not model.
+
 #### A defer-segment orphan the composition introduces
 
 Composing costs one thing the single host call did not. `SendSignalAndWait` in a defer segment now

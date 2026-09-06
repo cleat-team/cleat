@@ -6,9 +6,20 @@ promise. The reply address therefore travels as DATA inside the signal, which
 is how DBOS and Temporal both handle request/reply -- neither has a primitive
 for it. See IMPROVEMENT-PLAN 3.220.
 
-This module must agree byte for byte with ``cleat/runtime_signal_envelope.go``
-and ``crates/cleat-sdk/src/signal_envelope.rs``, because a Go or Rust workflow
-can answer a Python one. All three pin the same literal in a test.
+This module must agree on the STRUCTURE of that format with
+``cleat/runtime_signal_envelope.go`` and
+``crates/cleat-sdk/src/signal_envelope.rs`` -- the two key names, their order,
+and compact separators -- because a Go or Rust workflow can answer a Python
+one. All three pin the same literal in a test.
+
+They do NOT agree byte for byte, and this docstring claimed they did until
+2026-09-06. Go's ``encoding/json`` HTML-escapes ``<``, ``>`` and ``&`` by
+default; ``serde_json`` and ``json.dumps`` do not, so the same payload leaves
+a Go sender as ``\u003c`` and this one as ``<``. That is harmless -- both
+decode to the identical string, because the consumer is a JSON parser -- but
+it means the pinned literal guards structure rather than bytes, and
+``test_decodes_what_the_other_sdks_encode`` is the test for the property that
+actually matters.
 """
 
 import json
