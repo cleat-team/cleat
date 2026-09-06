@@ -633,76 +633,6 @@ func TestCleatCallHeartbeat_ReadsParams(t *testing.T) {
 // cleat_send_signal_and_wait wrapper tests
 // ---------------------------------------------------------------------------
 
-// TestCleatSendSignalAndWait_ReadsTargetSignalPayload verifies that
-// SendSignalAndWait dispatches with the correct target, signal, and payload.
-func TestCleatSendSignalAndWait_ReadsTargetSignalPayload(t *testing.T) {
-	store := newMockSignalWorkflowStore()
-	e := &Engine{
-		signalStore: store,
-	}
-	s := &execSession{
-		engine: e,
-	}
-
-	result := s.SendSignalAndWait(context.Background(), nil,
-		"target-wf-001", "order-approved", `{"order_id":"ord-123"}`, 30000, 0, 0)
-
-	// Without a signal waiting, this should record an await_signals event
-	// and return a suspend indicator.
-	if len(s.history) != 1 {
-		t.Fatalf("expected 1 event in history, got %d", len(s.history))
-	}
-	if s.history[0].EventType != EventTypeAwaitSignals {
-		t.Errorf("event type = %q, want %q", s.history[0].EventType, EventTypeAwaitSignals)
-	}
-	if s.history[0].SignalNames != "order-approved" {
-		t.Errorf("SignalNames = %q, want %q", s.history[0].SignalNames, "order-approved")
-	}
-	if s.history[0].TimeoutMs != 30000 {
-		t.Errorf("TimeoutMs = %d, want %d", s.history[0].TimeoutMs, 30000)
-	}
-
-	// Return value should indicate suspend (packSimpleResult with errCode=1)
-	errCode := byte(result & 0xFF)
-	if errCode != 1 {
-		t.Errorf("errCode = %d, want 1 (suspend)", errCode)
-	}
-}
-
-// TestCleatSendSignalAndWait_WithExistingSignal verifies that SendSignalAndWait
-// correctly reads a pre-existing signal.
-func TestCleatSendSignalAndWait_WithExistingSignal(t *testing.T) {
-	store := newMockSignalWorkflowStore()
-	// Pre-deliver a signal so the poll succeeds.
-	err := store.DeliverSignal(context.Background(), "target-wf-001", "order-approved", `{"approved":true}`)
-	if err != nil {
-		t.Fatalf("DeliverSignal: %v", err)
-	}
-	e := &Engine{
-		signalStore: store,
-	}
-	s := &execSession{
-		engine: e,
-	}
-
-	result := s.SendSignalAndWait(context.Background(), nil,
-		"target-wf-001", "order-approved", `{"order_id":"ord-123"}`, 30000, 0, 0)
-
-	// Should find the pre-existing signal and record a signal_received event
-	if len(s.history) != 1 {
-		t.Fatalf("expected 1 event in history, got %d", len(s.history))
-	}
-	if s.history[0].EventType != EventTypeSignalReceived {
-		t.Errorf("event type = %q, want %q", s.history[0].EventType, EventTypeSignalReceived)
-	}
-
-	// Return value should indicate success (errCode=0)
-	errCode := byte(result & 0xFF)
-	if errCode != 0 {
-		t.Errorf("errCode = %d, want 0", errCode)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // cleat_fetch wrapper tests
 // ---------------------------------------------------------------------------
@@ -1566,22 +1496,6 @@ func (h *signalWorkflowRecorder) SignalWorkflow(_ context.Context, _ api.Module,
 	return 0
 }
 
-type sendSignalAndWaitRecorder struct {
-	stubHostHandler
-	targetRunID string
-	signalName  string
-	payload     string
-	timeoutMs   int64
-}
-
-func (h *sendSignalAndWaitRecorder) SendSignalAndWait(_ context.Context, _ api.Module, targetRunID, signalName, payload string, timeoutMs int64, _, _ uint32) int64 {
-	h.targetRunID = targetRunID
-	h.signalName = signalName
-	h.payload = payload
-	h.timeoutMs = timeoutMs
-	return 0
-}
-
 type acquireLockRecorder struct {
 	stubHostHandler
 	key   string
@@ -1749,46 +1663,6 @@ func TestHostFunc_CleatSignalWorkflow(t *testing.T) {
 	}
 	if handler.payload != payload {
 		t.Errorf("payload = %q, want %q", handler.payload, payload)
-	}
-}
-
-func TestHostFunc_CleatSendSignalAndWait(t *testing.T) {
-	handler := &sendSignalAndWaitRecorder{}
-	params := []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI32, wasmI32}
-	h := newTestHostFuncHarness(t, "cleat_send_signal_and_wait", params, []byte{wasmI64}, true, handler)
-
-	targetRunID := "target-wf-002"
-	signalName := "payment_received"
-	payload := `{"amount":99.99}`
-	timeoutMs := int64(15000)
-	if !h.mem.Write(0, []byte(targetRunID)) {
-		t.Fatal("write targetRunID to memory failed")
-	}
-	if !h.mem.Write(256, []byte(signalName)) {
-		t.Fatal("write signalName to memory failed")
-	}
-	if !h.mem.Write(512, []byte(payload)) {
-		t.Fatal("write payload to memory failed")
-	}
-
-	result, err := h.call(0, uint64(len(targetRunID)), 256, uint64(len(signalName)), 512, uint64(len(payload)), uint64(timeoutMs), 768, 4096)
-	if err != nil {
-		t.Fatalf("call cleat_send_signal_and_wait: %v", err)
-	}
-	if result == errBadParam {
-		t.Error("got errBadParam")
-	}
-	if handler.targetRunID != targetRunID {
-		t.Errorf("targetRunID = %q, want %q", handler.targetRunID, targetRunID)
-	}
-	if handler.signalName != signalName {
-		t.Errorf("signalName = %q, want %q", handler.signalName, signalName)
-	}
-	if handler.payload != payload {
-		t.Errorf("payload = %q, want %q", handler.payload, payload)
-	}
-	if handler.timeoutMs != timeoutMs {
-		t.Errorf("timeoutMs = %d, want %d", handler.timeoutMs, timeoutMs)
 	}
 }
 

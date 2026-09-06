@@ -508,11 +508,14 @@ const (
 	cbTypePollCancellation // () -> string
 
 	// durable-signals interface
-	cbTypeAwaitSignals      // (string,u64,u32,u32,u32,u32) -> u64
-	cbTypePollSignal        // (string) -> string
-	cbTypeSendSignalAndWait // (string,string,string,u64) -> string
-	cbTypeReplyToSignal     // (string,string) -> u64
-	cbTypeSignalWorkflow    // (string,string,string) -> u64
+	cbTypeAwaitSignals // (string,u64,u32,u32,u32,u32) -> u64
+	cbTypePollSignal   // (string) -> string
+	// cbTypeSendSignalAndWait and cbTypeReplyToSignal were here until
+	// 2026-09-06 (IMPROVEMENT-PLAN 3.220). Removing them shifts every later
+	// value in this iota, which is safe because the numbers never leave Go:
+	// the C side receives an opaque env handle and goComponentCallback looks
+	// the entry up with lookupCB. Nothing serialises a cbType.
+	cbTypeSignalWorkflow // (string,string,string) -> u64
 
 	// durable-children interface
 	cbTypeChildWorkflow            // (string,string) -> string
@@ -788,10 +791,6 @@ func goComponentCallback(
 		return entry.backend.dispatchAwaitSignals(args, nargs, results, nresults)
 	case cbTypePollSignal:
 		return entry.backend.dispatchPollSignal(args, nargs, results, nresults)
-	case cbTypeSendSignalAndWait:
-		return entry.backend.dispatchSendSignalAndWait(args, nargs, results, nresults)
-	case cbTypeReplyToSignal:
-		return entry.backend.dispatchReplyToSignal(args, nargs, results, nresults)
 	case cbTypeSignalWorkflow:
 		return entry.backend.dispatchSignalWorkflow(args, nargs, results, nresults)
 	case cbTypeChildWorkflow:

@@ -261,7 +261,10 @@ func TestTheRequiredJavaGuardsCoverEveryHostStopSite(t *testing.T) {
 	// stop reads as errCode=0 with extra=0 -- an empty SUCCESSFUL response. The
 	// third, ScheduleCron, is exempt: the Java SDK has no scheduleCron method at
 	// all, so there is nothing to guard. See sdkStopSiteExemptions.
-	const stopSitesOn20260904 = 16
+	// 15 since 2026-09-06: SendSignalAndWait's stop site went with the host
+	// call itself (IMPROVEMENT-PLAN 3.220). Re-derive with
+	//	grep -rn "if s.stopBeforeNewWork() {" engine/*.go | grep -v _test | wc -l
+	const stopSitesOn20260904 = 15
 	if stopSites != stopSitesOn20260904 {
 		t.Errorf("the engine has %d `if s.stopBeforeNewWork() {` sites; this test was written "+
 			"against %d.\n\nIf a site was ADDED, the Java SDK has a call the host can now "+

@@ -335,60 +335,6 @@ func (b *wasmtimeBackend) registerCleatRegisterUpdateHandler(linker *wasmtime.Li
 	})
 }
 
-func (b *wasmtimeBackend) registerCleatSendSignalAndWait(linker *wasmtime.Linker) error {
-	if b.skipIfNotNeeded("cleat_send_signal_and_wait") {
-		return nil
-	}
-
-	return b.hostFunc(linker, "env", "cleat_send_signal_and_wait", func(caller *wasmtime.Caller,
-		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen int32,
-		timeoutMs int64,
-		respPtr, respMaxLen int32) int64 {
-		h := b.handler
-		buf, _, err := callerMemBuf(caller)
-		if err != nil {
-			return errBadParamInt64
-		}
-		targetRunID, ok := wasmtimeReadServiceName(buf, targetPtr, targetLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		signalName, ok := wasmtimeReadServiceName(buf, sigPtr, sigLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		payload, ok := wasmtimeReadPayload(buf, payloadPtr, payloadLen, int32(MaxWasmStringLen))
-		if !ok {
-			return errBadParamInt64
-		}
-		return h.SendSignalAndWait(ctxWithMem(context.Background(), buf), nil, targetRunID, signalName, payload, timeoutMs, uint32(respPtr), uint32(respMaxLen))
-	})
-}
-
-func (b *wasmtimeBackend) registerCleatReplyToSignal(linker *wasmtime.Linker) error {
-	if b.skipIfNotNeeded("cleat_reply_to_signal") {
-		return nil
-	}
-
-	return b.hostFunc(linker, "env", "cleat_reply_to_signal", func(caller *wasmtime.Caller,
-		correlationPtr, correlationLen, respPtr, respLen int32) int64 {
-		h := b.handler
-		buf, _, err := callerMemBuf(caller)
-		if err != nil {
-			return errBadParamInt64
-		}
-		correlationID, ok := wasmtimeReadServiceName(buf, correlationPtr, correlationLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		response, ok := wasmtimeReadPayload(buf, respPtr, respLen, int32(MaxWasmStringLen))
-		if !ok {
-			return errBadParamInt64
-		}
-		return h.ReplyToSignal(context.Background(), nil, correlationID, response)
-	})
-}
-
 func (b *wasmtimeBackend) registerCleatSignalWorkflow(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_signal_workflow") {
 		return nil

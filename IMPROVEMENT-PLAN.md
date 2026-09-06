@@ -4974,7 +4974,7 @@ Final sweep tally: 125 multi-dialect operations compared, 12 flagged, **2 real (
 (§3.217's update divergence), 9 artifacts**. No second instance of the update-request defect. The
 three-dialect split both sessions expected to be widespread is narrow.
 
-### 3.220 `SendSignalAndWait` never sends the signal it then waits for — 🟢 **FIXED 2026-09-06 by composition; the two host calls are now dead** (WS-1, 2026-09-05)
+### 3.220 `SendSignalAndWait` never sends the signal it then waits for — 🟢 **CLOSED 2026-09-06: composed in all five SDKs, host calls removed** (WS-1, 2026-09-05)
 
 Found while wiring signal consumption for §3.215, and deliberately not fixed there: it is a
 different defect and a different change.
@@ -5205,9 +5205,42 @@ diff across 7 files. That docstring belongs to `durable-send-signal-and-wait`, t
 `result<...>` function in the interface, so it leaves *with* the function and regenerating this one
 file is clean. Regenerating the whole tree would have been a toolchain bump wearing a signal change.
 
-**The engine's two exports can therefore now be removed** — the precondition was every SDK
-dropping the import first, because a module importing a name the engine does not export fails at
-*instantiation*, not at the call. That is the remaining work on this item.
+**The engine's two exports are gone as of 2026-09-06**, which closes this item. The precondition
+was every SDK dropping the import first, because a module importing a name the engine does not
+export fails at *instantiation*, not at the call. Exports went from 52 to 50, and `ABI.md` moved
+with them — both give 50 with an empty set difference. ABI 2.14 and 2.15 are marked removed rather
+than reused, so an older document's "2.16" still means `cleat_signal_workflow`.
+
+Removing them took out: the two `.Export` registrations, their wasmtime `hostFunc` registrations,
+the two `execSession` methods, two `HostFunctions` interface entries, two Component Model
+dispatchers with their `cbType` constants and callback-table rows, and eleven tests of the removed
+behaviour. Two guards that had been *carrying* the pair reported themselves stale and were removed
+by name — `sdkStopSiteExemptions` for all three SDKs and `stopSurfaces["SendSignalAndWait"]` —
+each of which had said in its own text that it would go when the export did. The engine's stop-site
+count fell 16 → 15.
+
+#### The crash that reported four failures
+
+Removing the pair segfaulted the engine test binary, and the interesting part is what that looked
+like: `go test ./engine/` reported **4 failures**, which is a plausible number for a change this
+size. It had run **676 of 2978 tests** before dying, so 77% of the package was never measured.
+
+The cause was a real defect the removal walked into. `cgotestDispatchStr` guards a missing
+dispatcher —
+
+    if dispatch == nil {
+        return fmt.Errorf("cgotestDispatchStr: no dispatcher for method %d", method)
+    }
+
+— under a comment saying *"a missing key yields a nil func value, and calling it segfaults rather
+than failing a test … an unknown method must be an error, not a crash."* Its twin
+`cgotestDispatchU64` had no such check, and `cleat_reply_to_signal` was index 18 in **that** map.
+The comment stated the rule for both; only one obeyed it. `cgotestDispatchU64` now has the guard.
+
+The lesson is not "add nil checks". It is that **a crash in a test helper does not fail a test, it
+stops measuring** — and the truncated run still exits 1 with a believable failure list, so it reads
+like an ordinary red rather than a stopped one. After the fix the same command ran 4587 tests. If a
+failure count looks small for the size of a change, check how many tests ran.
 
 Every import removal was verified by diffing the **sets**, never the counts —
 `removed: [cleat_reply_to_signal, cleat_send_signal_and_wait]`, `added: []` — and each SDK's floor

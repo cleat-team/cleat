@@ -240,7 +240,6 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 		18: b.dispatchAwaitAllChildren,
 		19: b.dispatchPluginCallStreaming,
 		20: b.dispatchChildWorkflowWithOptions,
-		21: b.dispatchSendSignalAndWait,
 		22: b.dispatchAwaitPromise,
 		23: b.dispatchPollSignal,
 	}[method]
@@ -279,7 +278,6 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 		15: b.dispatchAcquireLock,
 		16: b.dispatchReleaseLock,
 		17: b.dispatchSignalWorkflow,
-		18: b.dispatchReplyToSignal,
 		19: b.dispatchScheduleInvoke,
 		20: b.dispatchRegisterUpdateHandler,
 		21: b.dispatchRegisterQueryHandler,
@@ -288,6 +286,16 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 		24: b.dispatchAwaitSignals,
 		25: b.dispatchComponentDefault,
 	}[method]
+	// The same nil guard as cgotestDispatchStr, which this helper LACKED until
+	// 2026-09-06 while the comment on the other one claimed the rule for both.
+	// A gap in this map segfaulted instead of failing: removing
+	// cleat_reply_to_signal (index 18) for IMPROVEMENT-PLAN 3.220 crashed the
+	// test binary, which silently truncated the engine package to 676 of 2978
+	// tests and read as "4 failures". A crash in a test helper does not fail
+	// one test, it stops measuring.
+	if dispatch == nil {
+		return fmt.Errorf("cgotestDispatchU64: no dispatcher for method %d", method)
+	}
 	err := dispatch((*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultPtr), 1)
 	if err != nil {
 		var msg C.wasm_byte_vec_t

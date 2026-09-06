@@ -504,57 +504,17 @@ Wait for one or more external signals, with a timeout.
 | 32-47 | `payloadLen` — bytes written to payload buffer |
 | 48-63 | `sigNameLen` — bytes written to signal name buffer |
 
-#### 2.14 `cleat_send_signal_and_wait`
+#### 2.14, 2.15 — removed
 
-Send a signal to another workflow and wait for a correlated reply.
+`cleat_send_signal_and_wait` and `cleat_reply_to_signal` were ABI 2.14 and 2.15 until 2026-09-06.
+Both were **inert**: the first never delivered the signal it then waited for, and the second
+recorded a local event and wrote nothing anywhere. Request/reply is now composed in every SDK from
+`cleat_create_promise` + `cleat_signal_workflow` + `cleat_await_promise` + `cleat_resolve_promise`
+— the reply promise's ID is the correlation ID, so the reply address is data rather than protocol.
+See IMPROVEMENT-PLAN §3.220.
 
-```
-(func (import "env" "cleat_send_signal_and_wait")
-  (param i32 i32 i32 i32 i32 i32 i64 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `target_ptr` | `i32` | Target workflow run ID pointer |
-| `target_len` | `i32` | Target workflow run ID length |
-| `sig_ptr` | `i32` | Signal name pointer |
-| `sig_len` | `i32` | Signal name length |
-| `payload_ptr` | `i32` | Signal payload pointer |
-| `payload_len` | `i32` | Signal payload length |
-| `timeout_ms` | `i64` | Timeout in milliseconds |
-| `resp_ptr` | `i32` | Output buffer for reply response |
-| `resp_max_len` | `i32` | Output buffer capacity (1048576) |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-| 32-63 | `responseLen` — bytes written to response buffer |
-
-#### 2.15 `cleat_reply_to_signal`
-
-Reply to a correlated signal with a response payload.
-
-```
-(func (import "env" "cleat_reply_to_signal")
-  (param i32 i32 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `correlation_ptr` | `i32` | Correlation ID pointer |
-| `correlation_len` | `i32` | Correlation ID length |
-| `resp_ptr` | `i32` | Response payload pointer |
-| `resp_len` | `i32` | Response payload length |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
+The numbers are **not reused**: 2.16 below is still `cleat_signal_workflow`. A renumbering would
+silently change what an older document's "2.16" refers to.
 
 #### 2.16 `cleat_signal_workflow`
 

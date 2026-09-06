@@ -569,12 +569,29 @@ func TestSignalAuthWildcardWithOtherCallers(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// SendSignalAndWait auth tests
+// SignalWorkflow auth tests, through the REAL auth check
+//
+// These were SendSignalAndWait auth tests until 2026-09-06 and are ported
+// rather than deleted (IMPROVEMENT-PLAN 3.220), but not for the reason first
+// written here. The first draft claimed they were the only tests driving auth
+// through a host call; that came from a `grep -rn requireSignalAuth
+// engine/*_test.go | head -8` whose output was TRUNCATED at 8 of 14 matches.
+// host_test.go already has TestSignalWorkflowAuthDenied and ...AuthAllowed,
+// and the Go compiler said so with a redeclaration error. A conclusion drawn
+// from a truncated list is the same failure as a count taken while checks are
+// still registering.
+//
+// They are still worth porting, for a narrower reason. The host_test.go pair
+// installs a STUB signalAuthCheck that returns an error or nil, so it proves
+// SignalWorkflow consults the field. These drive makeSignalAuthCheck against a
+// store, so they also cover what the real predicate decides -- and they add the
+// two cases the pair does not have at all: auth DISABLED, and a "*" wildcard in
+// allowed_signals.
 // ---------------------------------------------------------------------------
 
-// TestSendSignalAndWaitAuthDenied verifies that SendSignalAndWait returns an
-// auth error code when the caller is not in the target's allowed_signals.
-func TestSendSignalAndWaitAuthDenied(t *testing.T) {
+// TestSignalWorkflowAuthDeniedByTheRealCheck verifies SignalWorkflow refuses a
+// caller the real predicate rejects, and refuses it BEFORE delivering.
+func TestSignalWorkflowAuthDeniedByTheRealCheck(t *testing.T) {
 	store := newMockSignalWorkflowStore()
 	store.allowedCallers = []string{"payment-service"}
 
@@ -588,17 +605,22 @@ func TestSendSignalAndWaitAuthDenied(t *testing.T) {
 		defName: "fraud-service",
 	}
 
-	result := s.SendSignalAndWait(context.Background(), nil,
-		"target-wf", "test-signal", `{"key":"value"}`, 10000, 0, 0)
+	result := s.SignalWorkflow(context.Background(), nil,
+		"target-wf", "test-signal", `{"key":"value"}`)
 
 	if result != errSignalAuthRequiredInt {
 		t.Fatalf("expected errSignalAuthRequiredInt (%d), got %d", errSignalAuthRequiredInt, result)
 	}
+	// Ordering matters: a refusal after delivery would send the signal and
+	// return an error code about it, which is not a refusal.
+	if store.deliverCount != 0 {
+		t.Fatalf("a denied signal was delivered anyway (deliverCount=%d)", store.deliverCount)
+	}
 }
 
-// TestSendSignalAndWaitAuthAllowed verifies that SendSignalAndWait proceeds
-// normally when the caller is in the target's allowed_signals.
-func TestSendSignalAndWaitAuthAllowed(t *testing.T) {
+// TestSignalWorkflowAuthAllowedByTheRealCheck verifies SignalWorkflow delivers
+// when the real predicate accepts the caller.
+func TestSignalWorkflowAuthAllowedByTheRealCheck(t *testing.T) {
 	store := newMockSignalWorkflowStore()
 	store.allowedCallers = []string{"payment-service", "order-service"}
 
@@ -612,23 +634,21 @@ func TestSendSignalAndWaitAuthAllowed(t *testing.T) {
 		defName: "payment-service",
 	}
 
-	result := s.SendSignalAndWait(context.Background(), nil,
-		"target-wf", "test-signal", `{"key":"value"}`, 10000, 0, 0)
+	result := s.SignalWorkflow(context.Background(), nil,
+		"target-wf", "test-signal", `{"key":"value"}`)
 
 	if result == errSignalAuthRequiredInt {
 		t.Fatal("expected auth to pass, but got errSignalAuthRequiredInt")
 	}
-	if len(s.history) != 1 {
-		t.Fatalf("expected 1 event in history, got %d", len(s.history))
-	}
-	if s.history[0].EventType != EventTypeAwaitSignals {
-		t.Fatalf("expected AwaitSignals event, got %v", s.history[0].EventType)
+	if store.deliverCount != 1 {
+		t.Fatalf("expected the signal to be delivered once, got deliverCount=%d", store.deliverCount)
 	}
 }
 
-// TestSendSignalAndWaitAuthDisabled verifies that SendSignalAndWait proceeds
-// without auth check when requireSignalAuth is false.
-func TestSendSignalAndWaitAuthDisabled(t *testing.T) {
+// TestSignalWorkflowAuthDisabled verifies SignalWorkflow skips the check
+// entirely when requireSignalAuth is false, even with an empty allow-list that
+// would otherwise deny everyone. No other test covers the disabled case.
+func TestSignalWorkflowAuthDisabled(t *testing.T) {
 	store := newMockSignalWorkflowStore()
 	store.allowedCallers = []string{}
 
@@ -642,17 +662,17 @@ func TestSendSignalAndWaitAuthDisabled(t *testing.T) {
 		defName: "any-service",
 	}
 
-	result := s.SendSignalAndWait(context.Background(), nil,
-		"target-wf", "test-signal", `{"key":"value"}`, 10000, 0, 0)
+	result := s.SignalWorkflow(context.Background(), nil,
+		"target-wf", "test-signal", `{"key":"value"}`)
 
 	if result == errSignalAuthRequiredInt {
 		t.Fatal("expected auth to be skipped when disabled, but got errSignalAuthRequiredInt")
 	}
 }
 
-// TestSendSignalAndWaitAuthWithWildcard verifies that SendSignalAndWait
-// succeeds when the target's allowed_signals includes "*".
-func TestSendSignalAndWaitAuthWithWildcard(t *testing.T) {
+// TestSignalWorkflowAuthWithWildcard verifies a "*" in allowed_signals admits
+// any caller. No other test covers the wildcard through a host call.
+func TestSignalWorkflowAuthWithWildcard(t *testing.T) {
 	store := newMockSignalWorkflowStore()
 	store.allowedCallers = []string{"*"}
 
@@ -666,8 +686,8 @@ func TestSendSignalAndWaitAuthWithWildcard(t *testing.T) {
 		defName: "any-service",
 	}
 
-	result := s.SendSignalAndWait(context.Background(), nil,
-		"target-wf", "test-signal", `{"key":"value"}`, 10000, 0, 0)
+	result := s.SignalWorkflow(context.Background(), nil,
+		"target-wf", "test-signal", `{"key":"value"}`)
 
 	if result == errSignalAuthRequiredInt {
 		t.Fatal("expected wildcard to allow any caller, but got errSignalAuthRequiredInt")

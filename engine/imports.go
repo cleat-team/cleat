@@ -64,8 +64,6 @@ type HostHandler interface {
 	RegisterUpdateHandler(ctx context.Context, m api.Module, name string) int64
 
 	// Signal correlation (ABI 2.23-2.25)
-	SendSignalAndWait(ctx context.Context, m api.Module, targetRunID, signalName, payload string, timeoutMs int64, responsePtr, responseMaxLen uint32) int64
-	ReplyToSignal(ctx context.Context, m api.Module, correlationID, response string) int64
 	SignalWorkflow(ctx context.Context, m api.Module, targetRunID, signalName, payload string) int64
 
 	// Scoped state / virtual objects (ABI 2.26-2.28)
@@ -490,43 +488,16 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(handlerFromContext(ctx).AwaitPromise(ctx, m, promiseID, timeoutMs, resultPtr, resultMaxLen))
 	}).Export("cleat_await_promise")
 
-	// cleat_send_signal_and_wait: (ptr,len x3, i64, ptr,maxLen) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen uint32,
-		timeoutMs int64,
-		respPtr, respMaxLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		targetRunID, ok := readServiceName(mem, targetPtr, targetLen)
-		if !ok {
-			return errBadParam
-		}
-		signalName, ok := readServiceName(mem, sigPtr, sigLen)
-		if !ok {
-			return errBadParam
-		}
-		payload, ok := readWasmPayload(mem, payloadPtr, payloadLen, MaxWasmStringLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.SendSignalAndWait(ctx, m, targetRunID, signalName, payload, timeoutMs, respPtr, respMaxLen))
-	}).Export("cleat_send_signal_and_wait")
-
-	// cleat_reply_to_signal: (ptr,len x2) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		correlationPtr, correlationLen, respPtr, respLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		correlationID, ok := readServiceName(mem, correlationPtr, correlationLen)
-		if !ok {
-			return errBadParam
-		}
-		response, ok := readWasmPayload(mem, respPtr, respLen, MaxWasmStringLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.ReplyToSignal(ctx, m, correlationID, response))
-	}).Export("cleat_reply_to_signal")
+	// cleat_send_signal_and_wait and cleat_reply_to_signal were exported here
+	// until 2026-09-06. Both were INERT: SendSignalAndWait never delivered the
+	// signal it then waited for, and ReplyToSignal recorded a local event and
+	// wrote nothing anywhere. Request/reply is now composed in every SDK from
+	// create_promise + signal_workflow + await_promise + resolve_promise, so
+	// the reply address is a promise ID (IMPROVEMENT-PLAN 3.220).
+	//
+	// The exports could only go after every SDK stopped IMPORTING them, which
+	// completed with the Python WIT removal: a module importing a name the
+	// engine does not export fails at instantiation, not at the call.
 
 	// cleat_signal_workflow: (ptr,len x3) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
