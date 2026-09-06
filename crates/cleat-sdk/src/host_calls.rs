@@ -1127,7 +1127,19 @@ impl HostCalls {
         Ok(())
     }
 
-    /// Run a child workflow detached (fire-and-forget). Mirrors Go's RunDetached.
+    /// Run a child workflow detached (fire-and-forget).
+    ///
+    /// This does NOT mirror Go's `RunDetached`, which the comment here claimed
+    /// until 2026-09-06. Go's is `RunDetached(fn func(h HostCalls) error) error`
+    /// -- it takes a closure, not a name and an input -- so the two methods are
+    /// different features that happen to share a word. A closure cannot cross
+    /// the WASM ABI, so Go's cannot be wired to `cleat_run_detached` at all and
+    /// its unwired branch silently returns nil.
+    ///
+    /// This method is the one that matches the host ABI
+    /// (`cleat_run_detached(name, inputJSON)`), so port Go code to it by
+    /// supplying the child workflow's name and input rather than by translating
+    /// the closure. See IMPROVEMENT-PLAN 3.224.
     pub fn run_detached(&self, name: &str, input_json: &str) -> Result<(), String> {
         let result = unsafe {
             imports::cleat_run_detached(
