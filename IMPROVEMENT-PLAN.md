@@ -5905,6 +5905,58 @@ crosses all of them.
 There is also a unit test on `dropAutoThreaded`, because a filter that removes too much would let a
 genuine threading error through, and that failure is silent.
 
+### 3.231 All four promise host calls reported success when there was no promise store — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+The conformance-port session found that `cmd/cleat-worker/setup.go` never called
+`engine.WithPromiseStore` — so on a real deployment the store was **always** nil, `workflow_promises`
+had never held a row, and every `AwaitPromise` hung forever (their #812). Verified independently
+before building on it: `grep -n "With.*Store" cmd/cleat-worker/setup.go` lists `WithSignalStore`,
+`WithWorkflowStore`, `WithChildWorkflowStore` and `WithConcurrencyKeyStore`, and no promise store.
+
+**This section is the engine half, and it is a correction to §3.218 — my own fix.** §3.218 made
+`CreatePromise` report a store *failure* instead of logging it, and its comment says
+
+    The failure was not unreportable, it was unreported.
+
+**It left the missing-store branch reporting success**, one line above that sentence. All four calls
+had the same shape:
+
+    if s.engine.promiseStore != nil { ... }
+
+| call | with no store, before |
+|---|---|
+| `CreatePromise` | skipped the insert, returned **success** with a promise ID |
+| `AwaitPromise` | fell past the store check and **suspended forever** |
+| `ResolvePromise` | returned **0**, and even *with* a store logged an error and returned 0 |
+| `RejectPromise` | identical |
+
+So §3.218 guarded the legible half: the branch that had an error object in hand. The branch with no
+object at all — which was the one every shipped worker took — stayed silent. **That is the same
+asymmetry as §3.223's "the engine is where the mechanism is legible": a failure that produces
+something to report gets reported, and an absence does not.**
+
+All four now report `errCode 1` and name the missing option. `cleat_resolve_promise`'s adapter
+already decodes `errCode := uint32(result)` and turns non-zero into an error, so — again — the ABI
+had somewhere to put it.
+
+## Six tests asserted the defect, one by name
+
+`TestAwaitPromiseReplayAwaitThenFreshNoStore` set `s.engine.promiseStore = nil` **deliberately**,
+commented *"Fresh path with no promiseStore -> suspend"*, and asserted the hang. So did
+`TestAwaitPromiseFreshNilStore`, which went on to check the deadline encoding of a suspend that
+should never happen. Four more asserted `result == 0` from `CreatePromise`, `ResolvePromise` and
+`RejectPromise` on a session with no store.
+
+**Three others were repaired rather than inverted, and the distinction matters.**
+`TestAwaitPromise_FreshPending`, `TestAwaitPromiseReplayDivergence` and
+`TestAwaitPromiseReplayPastEnd` reached the suspend path *by having no store*, while being named for
+pending promises and replay divergence. They now use a pending `mockPromiseStore`: same assertion,
+correct reason. A test that reaches its outcome through an unrelated defect is not wrong about the
+outcome — it is wrong about what it is testing, and inverting it would have thrown away real
+coverage.
+
+That is the sixth, seventh, eighth and ninth test found codifying a defect in this run.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
