@@ -5385,21 +5385,49 @@ so the first version of this assertion would have been a false positive on a fix
 
 Falsified by deleting `{"cleat_log", "DurableLog"}` from `hostFunctions`: red, naming `DurableLog`.
 
-**It is fixed by wiring the fallback, which is not the same as fixed properly, and the difference
-is worth recording.** `HostCallsImpl.DurableCallTypedWithOptions` (`cleat/runtime.go:1177`) checks
-its own `HostCallsOptions` field first and only falls through to an SDK implementation over
-`DurableCallWithOptions` when that field is nil. `compositeRequires` wires the **fallback's**
-imports; it does not emit the field. The call genuinely happens — strictly better than the silent
-no-op — but through a path with a property the direct one lacks: **the fallback spawns a goroutine**
-to enforce `opts.Timeout`.
+**It is fixed by wiring the fallback, which is not the same as fixed properly, and the difference is
+a live determinism defect that #786 made reachable.**
 
-A goroutine inside a workflow is a determinism hazard, and it is one the engine's own divergence
-message names: *"Your workflow may have a non-determinism bug (time.Now(), random values, map
-iteration, goroutines)."* Whether `cleat vet` catches it is **not checked** — its Go rules run
-E000-E007 with E003 covering wall-clock time, and nobody has confirmed any of them looks at `go`
-statements. Recorded as unverified rather than asserted in either direction. Emitting the field
-instead would remove the question entirely, and that is a `hostFunctions` row plus an `adapterDefs`
-entry — the §3.224 recipe.
+`HostCallsImpl.DurableCallTypedWithOptions` (`cleat/runtime.go:1177`) checks its own
+`HostCallsOptions` field first and only falls through to an SDK implementation over
+`DurableCallWithOptions` when that field is nil. `compositeRequires` wires the **fallback's**
+imports; it does not emit the field. **Measured, on a guest compiled from a workflow whose only
+host call is that method with a `Timeout` set:**
+
+    Generating WASM imports (14 host functions used)... OK
+    imports:  cleat_call, cleat_call_retry, cleat_sleep, cleat_complete, cleat_poll_work
+    grep -c DurableCallTypedWithOptions gen_host_adapter.go   ->  0
+
+Zero. No field is emitted, so `h.durableCallTypedWithOptions` is nil in every compiled Go guest and
+**the fallback is the path that runs.** That fallback is:
+
+    ch := make(chan callResult, 1)
+    go func() { ... h.DurableCallWithOptions(...) ... }()
+    select {
+    case r := <-ch:                     // the durable call finished
+    case <-time.After(opts.Timeout):    // WALL CLOCK, inside a workflow
+        return &CallTimeoutError{...}
+    }
+
+The durable call records its event whichever branch wins, because the goroutine makes it before the
+select resolves. **So the original run and the replay can take different branches**: on replay the
+call returns from history immediately, `<-ch` wins, and the workflow receives the response where the
+original received `CallTimeoutError`. Different branch, different subsequent host calls.
+
+**One of two things is true and which one is not measured.** Either the timer can preempt a
+blocking `//go:wasmimport` under wasip1 — in which case the divergence above is real — or it
+cannot, in which case `opts.Timeout` never fires and is **silently ineffective**. Both are defects;
+this section does not claim to know which. What it does claim, and has measured, is that the
+fallback is what a Go guest runs.
+
+Note the direction: this was harmless while the method was unreachable (§3.224's eighth instance).
+**Making it reachable is what made the hazard live**, which is the ordinary cost of fixing a wiring
+gap and an argument for emitting the field rather than wiring the fallback. Emitting it is a
+`hostFunctions` row plus an `adapterDefs` entry — the §3.224 recipe — and removes the question
+entirely, because the direct path has no goroutine and no `time.After`.
+
+`cleat vet` will not help: its rules scan the user's workflow code, and this `go` statement is in
+the SDK.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
