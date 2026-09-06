@@ -4,27 +4,50 @@ This document describes the current and planned security mechanisms in cleat.
 
 ## WASM Sandbox
 
-> Corrected 2026-08-09 (see CLAUDE.md's "Two WASM backends" section, and
-> `engine/backend_wasmtime.go`, `engine/wasmtime_options.go`). This section
-> previously said the primary security boundary was wazero and never
-> mentioned wasmtime. That was backwards: **wasmtime is the backend of
-> record** (preferred automatically whenever CGO is available — the default —
-> per `cmd/cleat-worker/main.go`), and wazero is the CGO-less fallback only.
-> The two are not equivalent for this purpose: per CLAUDE.md, wazero cannot be
-> fenced for a compute-bound guest (`WithCloseOnContextDone` breaks all
-> execution, fuel only decrements on function entry, and closing the module
-> has no effect on a tight loop — all measured, all failing). Treat a
-> wazero-only deployment as running without CPU/wall-clock enforcement.
+> Corrected 2026-09-06. **wasmtime is the only WASM backend cleat has, and there
+> is no wazero fallback.** `engine/backend_wazero.go` was deleted in #459
+> (2026-08-10) — confirm with `ls engine/backend_wazero.go`. A `CGO_ENABLED=0`
+> build gets the `//go:build !cgo` stub in `engine/backend_wasmtime_stub.go`,
+> which returns `ErrWasmtimeCGOUnavailable`, so no backend is constructed at all
+> and `cleat-worker` exits 1 at startup rather than running unfenced. Find that
+> exit with
+> `grep -rn "there is no fallback" cmd/cleat-worker/main.go` — a line number is
+> not given here on purpose, because CLAUDE.md's citation of this same line
+> (`main.go:790`) is already five lines stale.
+>
+> **What this block said until today, and why it is worth recording.** It said
+> "wazero is the CGO-less fallback only", and instructed the reader to "treat a
+> wazero-only deployment as running without CPU/wall-clock enforcement". That was
+> accurate when written, on 2026-08-09 — and the backend was deleted the next
+> day, so this correction was stale within 24 hours of being made. The advice is
+> the dangerous half rather than the description: it tells an operator to plan for
+> a degraded-but-running deployment mode that cannot exist, when what actually
+> happens is that the worker refuses to start. A reader who provisioned for the
+> first would be surprised by the second at the worst moment.
+>
+> **wazero has not left the tree, though, and the distinction matters.**
+> `engine.Runtime` (`engine/runtime.go`) is still a wazero runtime and still
+> executes guest code — but only on CLI and test paths:
+> `cleat run_embedded`, `cleatctl replay`, `cleatctl debug`, `cleat-bench`,
+> `cleat/wasmtest`, and `RunDefer` when the engine has no backends registered,
+> which is those same tools. A worker registers wasmtime and never reaches it.
+> Re-derive the list with
+> `grep -rn "NewRuntime(" --include="*.go" . | grep -v _test.go`.
+>
+> wazero still cannot be fenced for a compute-bound guest
+> (`WithCloseOnContextDone` breaks all execution, fuel only decrements on function
+> entry, and closing the module has no effect on a tight loop — all measured, all
+> failing). That now bounds **developer tooling**, not anything a worker runs.
 
-The primary security boundary in cleat is the WebAssembly sandbox. On the
-wasmtime backend it is enforced with real resource limits (below); on the
-wazero fallback it is enforced only at the memory-limit and syscall level, not
-at the CPU/wall-clock level.
+The primary security boundary in cleat is the WebAssembly sandbox. Every
+workflow a worker runs is executed by wasmtime, with the real resource limits
+below. The wazero runtime behind CLI and test tooling enforces the memory-limit
+and syscall boundary but not the CPU/wall-clock one.
 
 ### Current
 
 - **No native code execution**: Workflow code runs inside the WASM sandbox
-  (wasmtime by default, wazero as the CGO-less fallback). It cannot execute
+  (wasmtime on a worker, wazero under CLI and test tooling). It cannot execute
   native CPU instructions, make arbitrary syscalls, or access host memory
   outside its linear memory.
 - **WASI limited**: WASI preview 1 is instantiated but does not provide
@@ -36,7 +59,7 @@ at the CPU/wall-clock level.
   a controlled Go function that validates inputs before acting.
 - **Linear memory isolation**: Each WASM module gets its own linear memory.
   Modules cannot read or write each other's memory.
-- **Resource limits are wired on the backend of record**: the wasmtime
+- **Resource limits are wired on the only backend**: the wasmtime
   backend enforces a **guest-execution** timeout via epoch interruption
   (default 30s, `DefaultWasmtimeExecutionTimeout` in
   `engine/wasmtime_options.go`, configurable via `--wasm-instance-timeout`),
@@ -44,8 +67,10 @@ at the CPU/wall-clock level.
   linear-memory ceiling (default 32 MiB per module,
   `DefaultWasmtimeMemoryLimitBytes`, configurable via `--wasm-memory-max-mb`).
   These bound even a WASM module stuck in a tight loop that never calls back
-  into the host — see CLAUDE.md's note that this differs across wasmtime's
-  three execution paths (core module, native component, decomposition).
+  into the host — see CLAUDE.md's note that this differs between wasmtime's two
+  execution paths (core module and native component). There were three:
+  decomposition was deleted in #528 (2026-09-01), and
+  `engine/component_no_decomposition_test.go` guards that it stays deleted.
 - **Guest execution and wall clock are bounded separately.**
   `--wasm-instance-timeout` measures only time the guest is actually running:
   time it spends blocked in a host call — a service call, a plugin call, a
@@ -80,10 +105,15 @@ at the CPU/wall-clock level.
   motivation for WASM compilation is lifecycle decoupling, not security.
   While the WASM sandbox provides defense-in-depth, it should not be the only
   security layer in multi-tenant deployments.
-- **wazero has no CPU/wall-clock enforcement**: unlike wasmtime, wazero
-  cannot be fenced for a compute-bound guest (see the callout above). A
-  deployment that falls back to wazero (`CGO_ENABLED=0`, no CGO toolchain)
-  loses this specific protection, not just performance.
+- **wazero has no CPU/wall-clock enforcement**: unlike wasmtime, wazero cannot
+  be fenced for a compute-bound guest (see the callout above). No worker
+  deployment is exposed to this, because no worker runs on wazero — but a
+  runaway guest under `cleat run_embedded`, `cleatctl replay|debug` or
+  `cleat-bench` is not stopped, and those tools are where a developer first runs
+  workflow code they have not read. (`cleat dev` is not in that list and is not
+  a counter-example: it does not use WASM at all — `buildDevRun` generates a Go
+  runner and `go run`s it as a native subprocess — see `buildDevRun` in
+  `cmd/cleat/dev.go`.)
 - **No WASI preview 2 support**: Current Go `wasip1` target only supports WASI
   preview 1, which has a broader (and less secure) syscall surface than
   preview 2's component model.
@@ -91,9 +121,9 @@ at the CPU/wall-clock level.
 ### Planned
 
 - WASI preview 2 support for finer-grained capability-based security.
-- Per-instruction resource accounting that is uniform across wasmtime's three
-  execution paths (core module, native component, decomposition), which
-  today have had three different answers about what a limit bounds.
+- Per-instruction resource accounting that is uniform across wasmtime's two
+  execution paths (core module and native component), which have had different
+  answers about what a limit bounds.
 
 ## PostgreSQL and SQL Server Row-Level Security
 
@@ -277,7 +307,7 @@ func Middleware(db *sql.DB) func(http.Handler) http.Handler {
 
 | Area | Current State | Planned |
 |------|---------------|---------|
-| WASM sandbox | wasmtime (backend of record: epoch/fuel/memory limits) or wazero (CGO-less fallback, no CPU/wall-clock enforcement); no native code, controlled host functions | WASI preview 2, uniform limits across all three wasmtime execution paths |
+| WASM sandbox | wasmtime, the only backend (epoch/fuel/memory limits); a CGO-less build has no backend and the worker exits 1; no native code, controlled host functions | WASI preview 2, uniform limits across both wasmtime execution paths |
 | PostgreSQL / SQL Server RLS | Database-enforced, FORCEd/FILTER PREDICATE on 8 tables, fail-closed | Per-tenant connection pooling / sharding |
 | MySQL tenancy | Single-tenant only (no RLS feature; documented product boundary, not a gap) | — |
 | API auth | Bearer token / header-based, SHA-256 hashed | Scoped keys, rotation, rate limiting |

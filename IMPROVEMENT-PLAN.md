@@ -7912,3 +7912,85 @@ would read as correct, which is the same defect one language over. Falsified bot
 what it accepted by dropping a prefix filter, this one widened what it accepted to accommodate
 one language's real contract. Both are correct locally and lose a distinction globally, and
 neither is visible from inside the change — the tests stay green either way.
+
+---
+
+### 3.313 The README advertised a WASM backend that was deleted four weeks earlier — 🟢 **FIXED 2026-09-06** (WS-2, 2026-09-06)
+
+`README.md`'s "WASM workflows" bullet read *"wasmtime is the backend of record … wazero is a
+pure-Go, CGO-less fallback with no compute-bound fencing."* There is no second backend.
+`engine/backend_wazero.go` was deleted in #459 (2026-08-10); a `CGO_ENABLED=0` build gets the
+`//go:build !cgo` stub, constructs no backend at all, and `cleat-worker` exits 1 at startup.
+
+    ls engine/backend_wazero.go                                    # No such file or directory
+    grep -rn "there is no fallback" cmd/cleat-worker/main.go       # the exit
+
+**The direction of the error is the point.** It does not merely misdescribe an internal — it
+advertises, in the file a prospective user reads first, a *pure-Go deployment path that does not
+exist*, and it downgrades the CGO requirement from "the worker will not start" to "you lose some
+fencing". That is the one claim on which someone evaluating cleat against a competitor would
+form a portability judgement. It survived 28 days.
+
+**The correction it replaced was itself a correction, and went stale in one day.**
+`docs/explanation/security-model.md` carried a dated callout — *"Corrected 2026-08-09 … wazero is
+the CGO-less fallback only … Treat a wazero-only deployment as running without CPU/wall-clock
+enforcement"* — which was accurate when written and falsified the next day by #459. Its advice
+was the harmful half rather than its description: it told an operator to plan for a
+degraded-but-running mode that cannot exist. **A dated correction is not durable; it is a
+measurement, and it decays at whatever rate the thing it measured changes.** This one had a
+one-day half-life, and the date on it is what made it look safe.
+
+Both files now say wasmtime is the only backend, record what they said before, and separate the
+two questions that were being run together: *which backend runs a worker* (wasmtime, always) and
+*what still executes guest code on wazero* (`engine.Runtime`, on CLI and test paths only —
+`cleat run_embedded`, `cleatctl replay|debug`, `cleat-bench`, `cleat/wasmtest`, and `RunDefer`
+when no backend is registered, which is those same tools). Re-derive with
+
+    grep -rn "NewRuntime(" --include="*.go" . | grep -v _test.go
+
+**Writing that list, `cleat dev` went into it on the strength of its name and had to come out.**
+`cleat dev` does not use WASM at all — `buildDevRun` generates a Go runner and `go run`s it as a
+native subprocess. It is absent from the `NewRuntime` grep above, which is the check that caught
+it, and it is the tool whose name most suggests otherwise. Same lesson as the `-run` probe in
+CLAUDE.md: **the command answers, the name only implies.**
+
+Two further stale facts were corrected in `security-model.md` because they sit in lines being
+rewritten: wasmtime has **two** execution paths, not three — decomposition was deleted in #528
+(2026-09-01), and `engine/component_no_decomposition_test.go` guards it
+(`grep -rn "func.*ExecuteComponent" --include="*.go" .` → one line, `ExecuteComponentCGo`).
+
+**Still open, deliberately not in this PR** (one PR, one thing — but it is the same claim and
+should not be lost):
+
+  * `docs/explanation/architecture.md` carries the *identical* stale callout, plus two mermaid
+    sequence diagrams that label the **worker's** runtime `wazero WASM`, and a node
+    `WR[WASM Runtime wazero]` on the main architecture diagram. That is the primary picture a
+    reader forms of what a worker runs, and it names the wrong runtime.
+  * Its host-function count says 59; the tree exports 58 (§3.213). It carries a date, so per
+    CLAUDE.md's header rule it is a measurement rather than an error — but it should be
+    re-derived, not preserved.
+  * `engine/backend_wasmtime_stub.go`'s doc comment still instructs *"callers that fall back to
+    wazero on error MUST check for `ErrWasmtimeCGOUnavailable`"*. There are no such callers.
+    A comment telling a future reader how to write code that must not exist.
+
+Other tracked files still match a wazero-as-fallback pattern. Measured 2026-09-06, after this
+PR's edits, with `/usr/bin/grep` under `bash -c` rather than the interactive shell's ugrep
+(CLAUDE.md, *"`grep` in an interactive shell here is not the `grep` your script gets"*) — **9**
+files:
+
+    git ls-files | xargs /usr/bin/grep -lniE \
+      'wazero (is|as) (a |the )?(pure-go, )?(cgo-less )?fallback|fall(s|ing)? back to wazero'
+
+and **18** if `|wazero backend` is added to the alternation, which pulls in dated historical
+records (`IMPROVEMENT-PLAN-CLOSED.md`, `REVIEW-2026-08-09.md`, `BRANCH-TRIAGE.md`) and retraction
+prose in CLAUDE.md, all correct as records. **The two counts are given together on purpose:** the
+first draft of this paragraph published the broad number beside the narrow command — 16 against a
+pattern that returns 9 — because the count was taken from one pattern and the command written
+from another. That is the failure this document keeps recording, committed while writing the
+section about it.
+
+**Note that this grep now matches the retractions too, including the two written here.** That is
+the trap CLAUDE.md names under *Build* — a text search cannot tell a thing from a sentence
+denying the thing — and it is unavoidable in prose, where a retraction has to quote what it
+retracts. The usable discriminator is position, not wording: in both files corrected here the
+stale text survives only inside a `>` blockquote or an HTML comment, never in a claim line.
