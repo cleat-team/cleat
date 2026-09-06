@@ -110,8 +110,15 @@ concurrency:
 
 # CGO is load-bearing here, not incidental. Every step in this file used to run
 # `CGO_ENABLED=0 go test`, which does not merely skip a check: `NewWasmtimeBackend`
-# is behind `//go:build cgo`, so disabling CGO removes the primary backend from the
-# binary and silently runs everything on wazero, the fallback with the known bug tail.
+# is behind `//go:build cgo`, so disabling CGO leaves the binary with NO WASM backend
+# at all -- `cleat-worker` logs "wasmtime is the only WASM backend cleat has, there is
+# no fallback" and exits 1, and engine tests fail rather than degrading quietly.
+#
+# This comment read "silently runs everything on wazero, the fallback with the known
+# bug tail" until 2026-09-06. That was true when written and stopped being true when
+# #459 (2026-08-10) deleted the wazero backend. It is worth correcting rather than
+# leaving as a period detail, because it understates the reason for the pin: the risk
+# is not a degraded run, it is no backend.
 #
 # Measured on 2026-08-04: `go test -list` reports 2401 tests in ./engine/ with
 # CGO_ENABLED=0 against 2557 with CGO on. The 156-test difference is the entire

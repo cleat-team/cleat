@@ -453,9 +453,12 @@ when `--rate-limit-per-tenant` is set to a non-zero value.
 |------|---------|-------------|
 | int | `32` | Max WASM linear memory per module in MB |
 
-Corresponds to 512 WASM pages at 32 MB (64 KiB per page). Set to `0` to use
-the wazero default. Increasing this allows workflows with larger memory
-requirements to execute.
+Corresponds to 512 WASM pages at 32 MB (64 KiB per page). Enforced by the
+wasmtime store limiter; set to `0` to use the built-in default
+(`DefaultWasmtimeMemoryLimitBytes`, `engine/wasmtime_options.go`). Increasing
+this allows workflows with larger memory requirements to execute. (This said
+"the wazero default" until 2026-09-06; wazero has not been a backend since
+#459.)
 
 ---
 
@@ -466,7 +469,13 @@ requirements to execute.
 | int | `0` | Max WASM instructions per invocation |
 
 Limits the number of WASM instructions a single workflow invocation can
-execute. Set to `0` for no limit. Enforced via a wazero function listener.
+execute. Set to `0` for no limit. **Enforced via wasmtime fuel**
+(`SetConsumeFuel`/`SetFuel`) — see the flag's own help text in
+`cmd/cleat-worker/config.go`. This said "a wazero function listener" until
+2026-09-06. That mechanism is real but is not what a worker uses: `fuelMeter`
+in `engine/runtime.go` charges one unit per *function entry* on the wazero
+runtime, which is why wazero cannot fence a compute-bound guest at all — a
+tight loop inside one function never enters another.
 
 ---
 

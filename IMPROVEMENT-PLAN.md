@@ -8016,3 +8016,79 @@ the trap CLAUDE.md names under *Build* — a text search cannot tell a thing fro
 denying the thing — and it is unavoidable in prose, where a retraction has to quote what it
 retracts. The usable discriminator is position, not wording: in both files corrected here the
 stale text survives only inside a `>` blockquote or an HTML comment, never in a claim line.
+
+---
+
+### 3.314 Every doc that said a worker runs on wazero — a sweep, and three things it found — 🟢 **FIXED 2026-09-06** (WS-2, 2026-09-06)
+
+§3.313 fixed the README's wazero-as-fallback claim and the one doc it delegated to. This is the
+rest of the tree. **24 files changed** (`git diff --name-only develop.. | grep -v IMPROVEMENT-PLAN`);
+the classification mattered more than the count, because most wazero mentions are correct and
+rewriting them would have destroyed records.
+
+| class | treatment | examples |
+|---|---|---|
+| a worker's runtime named as wazero | rewritten to wasmtime, with a dated note | `SECURITY.md`, `docs/explanation/architecture.md`, `docs/worker-architecture.md` |
+| wazero named as *a backend* | rewritten; there is one backend | `ARCHITECTURE.md`, `ABI.md`, `tiers.yaml` |
+| original design documents | banner added, **body untouched** | `docs/contributor/design/*`, `docs/explanation/go-wasm-plan.md` |
+| dated historical records | left exactly as written | `CHANGELOG.md`, `REVIEW-2026-08-09.md`, `IMPROVEMENT-PLAN-CLOSED.md` |
+| wazero correct | left | plugin loader docs, `cleat/wasmtest` |
+
+**Rewriting a design document to match what was built destroys the only record of what was
+intended.** That is why the third row gets a banner instead of an edit — the distinction between
+"this is wrong" and "this was a plan" is not visible from the text alone, and a sweep that cannot
+make it will quietly launder history into documentation.
+
+#### Three diagrams said the worker ran wazero
+
+`docs/explanation/architecture.md` had `WR[WASM Runtime wazero]` on the main architecture diagram
+and `participant WZ as wazero WASM` in both the first-run and replay sequence diagrams. **A
+diagram is read faster and doubted less than a paragraph**, and these three were the primary
+picture a reader forms of what a worker executes. Grep for stale claims will not find a mermaid
+node label unless you go looking for one.
+
+#### The host-function count is 52, and it was 58 four days ago
+
+Every doc carrying it was wrong, by three different amounts (59, 58, 15, 14). Measured
+2026-09-06:
+
+    python3 -c "import re;print(len(set(re.findall(r'\.Export\(\"([^\"]+)\"\)',
+      open('engine/imports.go').read()))))"      # 52 = 49 cleat_ + 3 unprefixed
+
+58 → 52 is #767 (2026-09-05) removing the six-call durable-state family; 59 → 58 was #582. **This
+is why §3.313 shipped a wrong number in its own first push** — 58 was measured at `c5c30286` and
+was correct there; the rebase moved the tree underneath it.
+
+**And `ABI.md` still documents seven host calls that no longer exist** — the six `cleat_*_state`
+calls and `cleat_child_workflow_in_schema` (`grep -c cleat_set_state ABI.md engine/imports.go` →
+2 and 0). An SDK author who binds one gets a module that **fails to instantiate**, which is
+exactly the §3.312 Java failure: not an error at the call site, a dead module. Recorded in
+`ABI.md` and left for its own PR rather than folded into a sweep about runtime names.
+
+#### A limits table for a sandbox nothing runs
+
+`docs/contributor/plugins/plugin-security.md` documented `--plugin-memory-limit` and
+`--plugin-gas-limit`. **Neither flag exists.** Following that: `PluginLoader.LoadPlugin` has no
+non-test callers, the only two non-test `NewPluginLoader` calls pass a nil `*Runtime`, and
+`cmd/cleat-worker` constructs no loader — so no plugin module is compiled or instantiated on any
+path a workflow reaches.
+
+The wazero attribution there is **correct** — `PluginLoader` is genuinely wazero-typed — which is
+why a sweep keyed on "wazero is wrong" would have passed over it. It was found by checking the
+sentence *next to* the word, not the word. **A resource-limit table for an unwired path is the
+most flattering error available**: it reads as defence-in-depth and measures nothing, and no one
+re-derives a number that makes the system look safer.
+
+Both plugin docs now carry the measurement inline rather than being quietly deleted, so the gap
+cannot be closed by editing prose.
+
+#### What is deliberately still open
+
+  * `ABI.md`'s seven entries for removed host calls (above).
+  * WASM plugin execution is not wired; two contributor guides describe it as if it were.
+  * `engine/backend_wasmtime_stub.go`'s doc comment still tells callers how to fall back to
+    wazero. There are no such callers.
+  * `Engine.Execute`'s doc comment still says it decomposes Component Model binaries; the body
+    directly below says that path was deleted (#528).
+  * CLAUDE.md's own `58` / `55` export counts are now stale for the same reason as everything
+    above. Left for a PR against CLAUDE.md rather than smuggled into a docs sweep.

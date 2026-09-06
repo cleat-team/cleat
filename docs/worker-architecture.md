@@ -14,10 +14,13 @@ long-lived daemon. Startup flow:
    `/api/workflows/...`, `/api/schedules/...`).
 6. Call `w.Run()` which starts six background goroutines.
 
-**WASM runtime**: [wazero](https://github.com/tetratelabs/wazero) — a
-zero-dependency WebAssembly runtime. Workflow WASM modules are stored in the
-`workflow_defs` table and loaded on demand with an in-memory cache
-(`main.go:971-991`).
+**WASM backend**: [wasmtime](https://wasmtime.dev/), the only backend cleat
+has; a build without CGO constructs none and the worker exits 1 at startup.
+Workflow WASM modules are stored in the `workflow_defs` table and loaded on
+demand with an in-memory cache. (This said "wazero" until 2026-09-06 — see
+`docs/explanation/security-model.md`. The line-number citation that was here,
+`main.go:971-991`, is dropped rather than updated: it had already drifted, and
+a line number is the part of a citation guaranteed to rot.)
 
 ### Background Goroutines
 
@@ -35,7 +38,7 @@ zero-dependency WebAssembly runtime. Workflow WASM modules are stored in the
 1. Load WASM bytes for `def_name` + `def_version`.
 2. Load event history from `event_history` table.
 3. Load compaction state if present.
-4. Create a wazero runtime, instantiate the WASM module.
+4. Instantiate the WASM module on the wasmtime backend.
 5. Call `engine.Replay()` — replays existing history through the WASM code:
    - For steps already in history: return cached results (deterministic replay).
    - For new steps: make actual calls, record new events.
@@ -164,7 +167,7 @@ Each claimed workflow runs in its own goroutine via `go w.executeWorkflow(wf)`
 
 **No, there is no dynamic memory awareness.** The `--concurrency` flag is a
 static integer. Each concurrent workflow requires:
-- One wazero runtime instance (~few MB).
+- One wasmtime store and module instance (~few MB).
 - One WASM module instantiation (size of the compiled `.wasm` file).
 - Event history in memory (grows with workflow length until compaction).
 - Goroutine stack (~2KB initially, grows as needed).

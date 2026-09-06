@@ -155,9 +155,12 @@ jobs:
 
     env:
       # Explicit, not inherited. CGO_ENABLED=0 removes NewWasmtimeBackend (//go:build
-      # cgo) and silently runs on wazero -- and tier 2 names wazero as a component in its
-      # own right, so a run that lands there by accident measures the wrong thing. The
-      # gate checks this too; pinning it means the check never has to fire.
+      # cgo), leaving no WASM backend at all -- the wazero backend was deleted in #459
+      # (2026-08-10), so there is nothing to land on by accident any more; the run simply
+      # has no backend. The gate checks this too; pinning it means the check never has to
+      # fire. (This said "and silently runs on wazero -- and tier 2 names wazero as a
+      # component in its own right" until 2026-09-06. Tier 2 still names it, now as
+      # `runtime-wazero`, and the entry says plainly that it is not a backend.)
       CGO_ENABLED: "1"
 
       # Both PostgreSQL names -- the tree carries two conventions for the same DSN and

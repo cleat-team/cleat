@@ -188,21 +188,23 @@ the entry point -- the transformer handles the rest.
 
 ## Host Import Interface
 
-> Corrected 2026-08-09: this section previously said the imports were
-> registered "on the wazero 'env' host module" and never mentioned wasmtime.
-> wasmtime is the backend of record (preferred automatically whenever CGO is
-> available, per `cmd/cleat-worker/main.go`); wazero is the pure-Go,
-> CGO-less fallback. Both backends register the same 59 functions on the
-> `env` module (56 `cleat_*` imports plus `plugin_call`,
-> `plugin_call_streaming`, and `set_query_state` -- see `ABI.md` §2 and the
-> registration code in `engine/imports.go` for wazero and
-> `engine/wasmtime_hostfuncs*.go` for wasmtime).
+> Corrected 2026-09-06. This said wasmtime was "the backend of record" and
+> wazero "the pure-Go, CGO-less fallback", and gave the count as 59. wasmtime
+> is the **only** backend — the wazero one was deleted in #459 (2026-08-10) —
+> and the count is 52.
 
-The WASM module imports host functions from the `env` module -- 59 as of
-2026-08-09 (`ABI.md` documents each one). These are registered by the host
-runtime on whichever backend is active: `engine/imports.go` on wazero, or
-`engine/wasmtime_hostfuncs*.go` / `engine/backend_wasmtime.go` on wasmtime,
-the backend of record.
+The WASM module imports host functions from the `env` module -- **52** as of
+2026-09-06 (`ABI.md` documents each one). Two independent registrations exist
+and are held identical by `engine/hostabi_runtime_parity_test.go`:
+
+- `engine/wasmtime_hostfuncs*.go` / `engine/backend_wasmtime.go` — the wasmtime
+  backend, which is what a worker runs.
+- `engine/imports.go` — the wazero `engine.Runtime`, which is not a backend and
+  is reached only by CLI and test tooling (`cleatctl replay|debug`,
+  `cleat-bench`, `cleat/wasmtest`).
+
+The guest cannot tell them apart, which is the point: the same module has to
+load under `cleat/wasmtest` and on a worker.
 
 ### Import Declarations (from the WASM side)
 
@@ -362,8 +364,8 @@ interface to scalar types only (i32, i64).
 ## WASI Support
 
 WASI preview 1 (`wasi_snapshot_preview1`) is instantiated alongside the `env`
-module, on both backends (wasmtime, the backend of record, and wazero, the
-CGO-less fallback). WASI is required by Go `wasip1` modules for:
+module by both the wasmtime backend and the wazero `engine.Runtime` (see
+above). WASI is required by Go `wasip1` modules for:
 
 - Goroutine scheduling and stack management.
 - `os.Stdout`/`os.Stderr` output capture.

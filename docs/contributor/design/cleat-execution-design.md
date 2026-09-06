@@ -2,6 +2,15 @@
 
 ## A design for resilient, composable, observable workflows with near-standard Go
 
+> **This is an original design document, not a description of the shipped system.**
+> Read it for intent; check `tiers.yaml` and the source for what is true now.
+> Marked 2026-09-06 while sweeping stale wazero references: every mention of
+> wazero as *the* runtime below dates from before #459 (2026-08-10) deleted the
+> wazero backend. wasmtime is the only WASM backend cleat has; the wazero
+> `engine.Runtime` survives for CLI and test tooling only. The body is left as
+> written, because rewriting a design document to match what was built destroys
+> the only record of what was intended.
+
 ---
 
 ## 1. Overview
