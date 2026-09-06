@@ -15,7 +15,6 @@ Usage::
 
     # Record mode: make real calls in-process
     h = LocalHostCalls(mode="record")
-    h.set_state("counter", 0)
     result = h.call("greeter", "Greet", {"name": "World"})
     log = h.get_event_log()
 
@@ -953,100 +952,22 @@ class LocalHostCalls:
         return result_type(data)
 
     # ------------------------------------------------------------------
-    # 29. set_state
     # ------------------------------------------------------------------
 
-    def set_state(self, key: str, value: Any) -> None:
-        """Set typed cleat state (marshals *value* to JSON)."""
-        if self._mode == "replay":
-            self._replay_next("set_state")
-            return
-        sk = self._scoped_key(key)
-        self._state[sk] = value
-        self._record("set_state", key=key, value=value)
-
     # ------------------------------------------------------------------
-    # 30. get_state
     # ------------------------------------------------------------------
 
-    def get_state(self, key: str, result_type: type[T] = str) -> T:
-        """Get typed cleat state, deserialised into *result_type*."""
-        if self._mode == "replay":
-            return self._replay_next("get_state")
-        sk = self._scoped_key(key)
-        value = self._state.get(sk)
-        if value is None:
-            raise KeyError(f"state key {key!r} not found (scoped: {sk!r})")
-        self._record("get_state", result=value, key=key, result_type=str)
-        if result_type is str:
-            return str(value)  # type: ignore[return-value]
-        if isinstance(value, dict):
-            return result_type(**value)
-        return result_type(value)
-
     # ------------------------------------------------------------------
-    # 31. delete_state
     # ------------------------------------------------------------------
 
-    def delete_state(self, key: str) -> None:
-        """Delete a cleat state key."""
-        if self._mode == "replay":
-            self._replay_next("delete_state")
-            return
-        sk = self._scoped_key(key)
-        self._state.pop(sk, None)
-        self._record("delete_state", key=key)
-
     # ------------------------------------------------------------------
-    # 32. incr_state
     # ------------------------------------------------------------------
 
-    def incr_state(self, key: str, delta: int = 1) -> int:
-        """Atomically increment a numeric cleat state value.
-
-        Returns
-        -------
-        int
-            The new value after incrementing.
-        """
-        if self._mode == "replay":
-            return self._replay_next("incr_state")
-        sk = self._scoped_key(key)
-        current = self._state.get(sk, 0)
-        if not isinstance(current, (int, float)):
-            current = 0
-        new_val = int(current) + delta
-        self._state[sk] = new_val
-        self._record("incr_state", result=new_val, key=key, delta=delta)
-        return new_val
-
     # ------------------------------------------------------------------
-    # 33. has_state
     # ------------------------------------------------------------------
 
-    def has_state(self, key: str) -> bool:
-        """Check if a cleat state key exists."""
-        if self._mode == "replay":
-            return self._replay_next("has_state")
-        sk = self._scoped_key(key)
-        result = sk in self._state
-        self._record("has_state", result=result, key=key)
-        return result
-
     # ------------------------------------------------------------------
-    # 34. list_state
     # ------------------------------------------------------------------
-
-    def list_state(self, prefix: str = "") -> list[str]:
-        """List all cleat state keys matching the given prefix."""
-        if self._mode == "replay":
-            return self._replay_next("list_state")
-        if prefix:
-            result = [k for k in self._state if k.startswith(prefix)]
-        else:
-            result = list(self._state.keys())
-        self._record("list_state", result=result, prefix=prefix)
-        return result
 
     # ------------------------------------------------------------------
     # 35. create_promise

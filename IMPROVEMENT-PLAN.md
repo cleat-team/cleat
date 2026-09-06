@@ -4457,6 +4457,42 @@ rather than assuming one of us was wrong.
     grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sort -u | grep -c .   # 52
     grep -oE '\.Export\("cleat_[^"]+"\)' engine/imports.go | sort -u | grep -c .   # 49
 
+**And the blind spot covers half of the only surface cleat has ever proved in practice.**
+`testdata/clew-lifecycle/workflow.go` is a real workflow from the one workload cleat has carried,
+preserved as test data. It uses **four** host calls out of ~55:
+
+    h.DurableLog       3 sites   -> cleat_log
+    h.SetQueryState    1 site    -> set_query_state      UNPREFIXED
+    h.PluginCall       1 site    -> plugin_call          UNPREFIXED
+    h.SignalWorkflow   1 site
+
+**Two of the four are among the three unprefixed exports.** So "#759's parity guard compared 55 of
+58 names and never saw `plugin_call`" is not an abstract tidiness point — the guard was blind to
+half the calls the only real user actually made. A prefix-derived surface omits three names, and
+those three are not a random three.
+
+Found by the conformance-port session while establishing whether §3.215's signal overwrite was
+hypothetical. **It is not, and the first version of this paragraph named the wrong evidence.** It
+cited `h.SignalWorkflow(parent, "child_done", taskID)` at line 235 of the fixture as the affected
+fan-in. With access to `cleat-team/clew` the same session established that **nothing consumes
+`child_done`** — the parent fans in via `AwaitAllChildren`/`AwaitAnyChild`, so that signal is
+advisory and §3.215 does not hurt it. Recorded rather than quietly replaced, because "the shape is
+present in the code" and "the shape is load-bearing" are different claims and only the second is
+evidence.
+
+The real instances are worse. `workflows/leafphase/workflow.go:404` and
+`workflows/review/workflow.go:452` each run
+
+    received := 0
+    for received < len(pending) {
+        signal := h.AwaitSignals([]string{"agent_result"}, timeout)
+
+— N concurrent tasks, each replying with **one signal under the same name**, counted in and matched
+by a `task_id` the application puts in the payload because it had to solve that problem itself. The
+workflow is careful and correct; the storage layer cannot deliver what it asks for.
+
+See §3.215 for why the consequence is a hang and not only a lost payload.
+
 ## The comparison that decided it
 
 | engine | state scoped beyond one workflow? |

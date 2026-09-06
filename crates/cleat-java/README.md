@@ -123,10 +123,6 @@ failure:
 
 ### State & Promises
 - `void setQueryState(String key, String value)` -- set externally queryable state
-- `CleatResult<String> getState(String key)` -- read workflow state
-- `CleatResult<Void> setState(String key, String value)` -- set workflow state
-- `CleatResult<Void> deleteState(String key)` -- delete a state key
-- `CleatResult<Long> incrState(String key, long delta)` -- atomically increment a numeric key
 - `CleatResult<String> createPromise(String name)` -- create a durable promise
 - `CleatResult<AwaitPromiseResult> awaitPromiseMs(String promiseId, long timeoutMs)` -- await a promise
 

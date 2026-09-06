@@ -74,14 +74,8 @@ DURABLE_LEAVES: set[str] = {
     "await_child",
     "await_all_children",
     # State
-    "set_state",
-    "get_state",
     "set_query_state",
     "get_query_state",
-    "delete_state",
-    "incr_state",
-    "has_state",
-    "list_state",
     # Promises
     "create_promise",
     "await_promise",

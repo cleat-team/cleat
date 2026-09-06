@@ -554,7 +554,6 @@ def query_handler(name: str | None = None) -> Callable:
         @query_handler("get_status")
         def get_status(h: HostCalls, order_id: str) -> str:
             # Read-only — no call, sleep, etc.
-            state = h.get_state(order_id, dict)
             return json.dumps({"status": state.get("status", "unknown")})
 
     The decorated function carries ``wrapper._is_query_handler = True``

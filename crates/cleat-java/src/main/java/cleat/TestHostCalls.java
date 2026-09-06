@@ -564,83 +564,11 @@ public class TestHostCalls {
         return CleatResult.ok(null);
     }
 
-    /**
-     * Set a state value.
-     */
-    public CleatResult<Void> setState(String key, String value) {
-        workflowState.put(scopedKey(key), value);
-        return CleatResult.ok(null);
-    }
 
-    /**
-     * Get a state value.
-     */
-    public CleatResult<String> getState(String key) {
-        String val = workflowState.get(scopedKey(key));
-        if (val != null) {
-            return CleatResult.ok(val);
-        }
-        return CleatResult.err("no such key: " + key);
-    }
 
-    /**
-     * Delete a state key.
-     */
-    public CleatResult<Void> deleteState(String key) {
-        workflowState.remove(scopedKey(key));
-        return CleatResult.ok(null);
-    }
 
-    /**
-     * Atomically increment a numeric state value.
-     */
-    public long incrState(String key, long delta) {
-        String scoped = scopedKey(key);
-        long current = 0;
-        String existing = workflowState.get(scoped);
-        if (existing != null) {
-            try {
-                current = Long.parseLong(existing);
-            } catch (NumberFormatException e) {
-                System.err.println("Warning: non-numeric state value for key '" + key + "': " + existing + ". Resetting to 0.");
-            }
-        }
-        current += delta;
-        workflowState.put(scoped, String.valueOf(current));
-        return current;
-    }
 
-    /**
-     * Check if a state key exists.
-     * Uses the raw (unscoped) key, so that scoped state is isolated
-     * from unscoped lookups.  This allows tests to verify scope isolation:
-     * after {@link #setState} with a scope active, {@code hasState}
-     * with the same raw key returns {@code false} because the stored
-     * key is prefixed.
-     */
-    public boolean hasState(String key) {
-        return workflowState.containsKey(key);
-    }
 
-    /**
-     * List state keys matching a prefix.
-     */
-    public CleatResult<String> listState(String prefix) {
-        String scoped = scopedKey(prefix);
-        StringBuilder sb = new StringBuilder("[");
-        boolean first = true;
-        for (String k : workflowState.keySet()) {
-            if (k.startsWith(scoped)) {
-                if (!first) {
-                    sb.append(",");
-                }
-                sb.append("\"").append(k).append("\"");
-                first = false;
-            }
-        }
-        sb.append("]");
-        return CleatResult.ok(sb.toString());
-    }
 
     /**
      * Await all children workflows.

@@ -90,20 +90,7 @@ def _exercise_every_host_call(h: HostCalls) -> None:
 
     # ---- state ----
     h.set_query_state("k", "v")
-    h.set_state("k", "v")
-    h.get_state("k", Reply)
-    h.delete_state("k")
-    h.incr_state("k", 1)
-    h.has_state("k")
-    h.list_state("pre")
 
-    # ---- streaming state ----
-    h.stream_set_state("k", "v")
-    h.stream_get_state("k")
-    h.stream_delete_state("k")
-    h.stream_incr_state("k", 1)
-    h.stream_has_state("k")
-    h.stream_list_state("pre")
 
     # ---- promises ----
     h.create_promise("p")

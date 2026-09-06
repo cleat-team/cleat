@@ -87,10 +87,6 @@ The `HostCalls` class wraps all 36 WASM host function imports grouped by categor
 
 ### State
 - `set_query_state(key, value) -> None` -- set queryable state key-value pair
-- `set_state(key, value) -> None` -- set typed state (marshals to JSON)
-- `get_state(key, result_type) -> T` -- get typed state (unmarshals from JSON)
-- `delete_state(key) -> None` -- delete a state key
-- `incr_state(key, delta=1) -> int` -- atomically increment a numeric state key
 
 ### Promises
 - `create_promise(name, ttl_ms=None) -> str` -- create a durable promise, returns promise ID
@@ -395,7 +391,7 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
     # Initialize or restore state
     count = 0
     if h.has_state("count"):
-        count = int(h.get_state("count", int))
+        count = counter          # an ordinary local: replay makes it durable
 
     h.cleat_log(f"Counter {instance_key} starting at {count}")
 
@@ -415,7 +411,7 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
             h.cleat_log(f"Counter {instance_key} incremented to {count}")
 
         elif name == "reset":
-            h.set_state("count", 0)
+            counter = 0
             count = 0
             h.cleat_log(f"Counter {instance_key} reset to 0")
 
@@ -547,7 +543,7 @@ Cleat does **not** have an `all_handlers_finished` equivalent (found in Temporal
 ```python
 @cleat_entry
 def tracked_workflow(h: HostCalls, input: str) -> str:
-    h.set_state("pending_handlers", 0)
+    pending_handlers = 0
 
     def handler(payload: str) -> str:
         h.incr_state("pending_handlers", 1)

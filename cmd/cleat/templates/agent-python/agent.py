@@ -105,7 +105,6 @@ def research_agent(h: HostCalls, topic: str) -> str:
 
         if not tool_calls:
             content = message.get("content", "")
-            h.set_state("research_result", {"topic": topic, "result": content, "steps": step + 1})
             h.cleat_log(f"ResearchAgent returned final answer at step {step + 1}")
             return content
 

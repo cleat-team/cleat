@@ -56,23 +56,6 @@ class TestARefusalIsNotReportedAsSuccess:
         with mock.patch("cleat_sdk.host_calls._import_cleat_signal_workflow", return_value=0):
             assert hc.signal_workflow("run-1", "approve", {"ok": True}) is None
 
-    def test_a_diverged_replay_is_reported_on_state_mutation(self, hc: HostCalls) -> None:
-        """SetState/DeleteState return 1 when replay diverges.
-
-        Discarding that let a Python workflow replay non-deterministically and
-        carry on against a state store the host had refused to update.
-        """
-        with mock.patch(
-            "cleat_sdk.host_calls._import_stream_set_state", return_value=ERR_REPLAY_DIVERGED
-        ), pytest.raises(RuntimeError, match="stream_set_state"):
-            hc.stream_set_state("k", "v")
-
-        with mock.patch(
-            "cleat_sdk.host_calls._import_stream_delete_state", return_value=ERR_REPLAY_DIVERGED
-        ), pytest.raises(RuntimeError, match="stream_delete_state"):
-            hc.stream_delete_state("k")
-
-
 class TestTheStopSentinelIsTestedBeforeTheWordIsDecoded:
     """Order, not just presence. See CALL_SUSPEND_SENTINEL in memory.py."""
 

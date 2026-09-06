@@ -204,11 +204,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
     plugins = Plugins(h)
 
     # --- Track overall agent status in durable state ---------------------
-    h.set_state("agent_status", {
-        "topic": topic,
-        "started_at": h.now(),
-        "status": "researching",
-    })
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": RESEARCH_PROMPT},
@@ -224,11 +219,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
         cancelled, reason = h.poll_cancellation()
         if cancelled:
             h.cleat_log(f"Agent cancelled at step {step + 1}: {reason}")
-            h.set_state("agent_status", {
-                "status": "cancelled",
-                "reason": reason,
-                "steps": step,
-            })
             return json.dumps({
                 "cancelled": True,
                 "reason": reason,
@@ -252,11 +242,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
             total_cost += llm_result.cost
 
         # Record per-step progress so the dashboard can show live status.
-        h.set_state(f"step_{step + 1}", {
-            "llm_calls": llm_calls,
-            "total_cost": round(total_cost, 6),
-            "timestamp": h.now(),
-        })
 
         # Handle empty response.
         if not llm_result.choices:
@@ -276,12 +261,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
         # The model returned content without asking for tools — we are done.
         if not tool_calls and finish_reason == "stop":
             content = message.get("content", "")
-            h.set_state("agent_status", {
-                "status": "completed",
-                "steps": step + 1,
-                "llm_calls": llm_calls,
-                "total_cost": round(total_cost, 6),
-            })
             h.cleat_log(
                 f"Research complete: {step + 1} steps, "
                 f"{llm_calls} LLM calls, ${total_cost:.4f}"
@@ -321,12 +300,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
 
     # --- Max steps reached ----------------------------------------------
     h.cleat_log("Max research steps reached")
-    h.set_state("agent_status", {
-        "status": "max_steps_reached",
-        "steps": MAX_RESEARCH_STEPS,
-        "llm_calls": llm_calls,
-        "total_cost": round(total_cost, 6),
-    })
     return json.dumps({
         "error": "Max steps reached",
         "steps": MAX_RESEARCH_STEPS,
@@ -387,15 +360,6 @@ def run_test() -> None:
         def cleat_log(self, message: str) -> None:
             self.logs.append(message)
             print(f"  [LOG] {message}")
-
-        def set_state(self, key: str, value: Any) -> None:
-            self.state[key] = value
-
-        def get_state(self, key: str, result_type: type = str) -> Any:
-            return self.state.get(key)
-
-        def list_state(self, prefix: str = "") -> list[str]:
-            return [k for k in self.state if k.startswith(prefix)]
 
         def now(self) -> int:
             return self._current_time
