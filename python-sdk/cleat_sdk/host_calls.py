@@ -56,6 +56,7 @@ from .memory import (
     read_string,
     write_string,
 )
+from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 
 # Message for host calls that have no WIT binding at all.
 #
@@ -521,6 +522,17 @@ class SignalResult:
 
     timed_out: bool
     """``True`` if the timeout expired before any signal arrived."""
+
+    reply_to: str = ""
+    """Address to answer this signal at.
+
+    Non-empty only when the sender used :meth:`HostCalls.send_signal_and_wait`
+    and is suspended waiting for a reply; pass it to
+    :meth:`HostCalls.reply_to_signal`. A signal sent with
+    :meth:`HostCalls.signal_workflow` leaves it empty, which is how a receiver
+    tells a request that wants an answer from a one-way notification.
+    IMPROVEMENT-PLAN 3.220.
+    """
 
 
 @dataclass
@@ -1933,7 +1945,17 @@ class HostCalls:
             read_string(payload_offset, payload_len) if not timed_out and payload_len > 0 else ""
         )
 
-        return SignalResult(name=sig_name, payload=payload, timed_out=timed_out)
+        # Strip the reply envelope, if this is a request/reply signal, so the
+        # receiver reads its payload exactly as the sender passed it and gets
+        # the address separately rather than having to parse it out.
+        reply_to = ""
+        unwrapped = decode_signal_envelope(payload)
+        if unwrapped is not None:
+            reply_to, payload = unwrapped
+
+        return SignalResult(
+            name=sig_name, payload=payload, timed_out=timed_out, reply_to=reply_to
+        )
 
     # --------------------------------------------------------------------
     # 13. poll_signal — non-blocking signal check
@@ -2865,15 +2887,37 @@ class HostCalls:
         RuntimeError
             If the host reports an error or the timeout expires.
         """
+        # Composed from three durable primitives rather than being a host call
+        # of its own: a promise is the reply channel, its ID is the correlation
+        # ID, and answering is resolving it (IMPROVEMENT-PLAN 3.220).
+        # cleat_send_signal_and_wait was inert engine-side -- it never
+        # delivered the signal it then waited for -- so this is the first
+        # version that works at all.
         payload_str = self._marshal(payload)
-        # result<string, call-failure> since IMPROVEMENT-PLAN 3.300, so a stop
-        # arrives as the `suspended` case and _call_or_raise unwinds on it. It
-        # used to be a bare `string`, which had nowhere to carry the refusal.
-        return _call_or_raise(
-            "signal", "send_signal_and_wait",
-            _import_cleat_send_signal_and_wait,
-            target_run_id, signal_name, payload_str, timeout_ms,
+        reply_to = self.create_promise(f"__reply:{signal_name}")
+        self.signal_workflow(
+            target_run_id, signal_name, encode_signal_envelope(reply_to, payload_str)
         )
+
+        res = self.await_promise_ms(reply_to, timeout_ms)
+        if res.rejected:
+            raise RuntimeError(
+                f"send_signal_and_wait: reply to signal {signal_name!r} was rejected: {res.result}"
+            )
+        # Raising on timed_out is correct even though await_promise reports
+        # timed_out for a SUSPENSION as well as a real timeout. The host
+        # distinguishes them and this code does not have to: engine/promises.go
+        # sets session.suspendErr before returning, and engine/executor.go:264
+        # treats a workflow error as a failure only when suspendErr is nil --
+        # ":315 deliberately lets a suspension win over the error that
+        # accompanied it". There is nothing in the result to check: the engine
+        # signals suspension host-side, not through a sentinel.
+        if res.timed_out:
+            raise RuntimeError(
+                f"send_signal_and_wait: no reply to signal {signal_name!r} from "
+                f"workflow {target_run_id!r} within {timeout_ms}ms"
+            )
+        return res.result
 
     # --------------------------------------------------------------------
     # 33. reply_to_signal — respond to a signal from within a handler
@@ -2898,10 +2942,18 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        _check_host_result(
-            _import_cleat_reply_to_signal(correlation_id, response),
-            f"reply_to_signal(correlation_id={correlation_id!r})",
-        )
+        # correlation_id is SignalResult.reply_to, which is the reply promise's
+        # ID, so replying is resolving that promise. An ID matching no promise
+        # is an error rather than a silent success, which is what makes a stale
+        # address visible instead of leaving the sender suspended until its
+        # timeout. IMPROVEMENT-PLAN 3.220.
+        if not correlation_id:
+            raise RuntimeError(
+                "reply_to_signal: empty correlation ID. Pass SignalResult.reply_to "
+                "from the signal being answered; it is empty when the sender used "
+                "signal_workflow and is not waiting for a reply."
+            )
+        self.resolve_promise(correlation_id, response)
 
     # --------------------------------------------------------------------
     # 34. await_signals_with_quorum — wait for quorum of signals
