@@ -42,10 +42,25 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 	}
 	s.recordEvent(rec)
 
-	// Also persist to promise store if available.
+	// Persist to the promise store, and REPORT A FAILURE rather than logging it.
+	//
+	// This used to log and continue, returning errCode 0 to the guest. The
+	// consequence was not "history and the store disagree" -- it was a hang.
+	// The event above already asserts the promise exists, the guest gets an ID
+	// and proceeds, and the later AwaitPromise calls GetPromise, finds nothing,
+	// falls past both the resolved and rejected branches, and SUSPENDS. It
+	// waits for a promise no external caller can ever resolve, because the row
+	// they would resolve against was never written. Nothing errors and the log
+	// line is the only trace. IMPROVEMENT-PLAN 3.218.
+	//
+	// The ABI has always had somewhere to put this: cleat_create_promise
+	// returns errCode in bits 0-31 (ABI.md 2.34). The failure was not
+	// unreportable, it was unreported.
 	if s.engine.promiseStore != nil {
 		if err := s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID); err != nil {
 			s.engine.log().ErrorContext(ctx, "create_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			written, _ := s.writeResult(ctx, m, promiseIDPtr, err.Error(), promiseIDMaxLen)
+			return packSimpleResult(1, written)
 		}
 	}
 
