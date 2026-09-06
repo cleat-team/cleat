@@ -303,18 +303,80 @@ func TestNowFresh(t *testing.T) {
 	}
 }
 
-func TestNowReplay(t *testing.T) {
+func TestNowReplayTakesTheLaterAnchor(t *testing.T) {
+	// Now() is the later of the last consumed event's timestamp and s.nowMs.
+	//
+	// This test previously required the event to win unconditionally, using a
+	// state where nowMs was AHEAD of it -- which is exactly the state a
+	// completed sleep produces, since DurableSleep sets nowMs to
+	// anchor+duration and records no event and does not advance stepCount.
+	// Requiring the event there handed the guest a pre-sleep instant after the
+	// sleep had finished: 163ms of apparent elapsed time across a 3000ms sleep.
+
+	t.Run("nowMs ahead, as after a sleep", func(t *testing.T) {
+		s := newTestExecSession()
+		s.nowMs = 1000
+		s.stepCount = 1
+		s.history = []EventRecord{
+			{Step: 0, EventType: EventTypeCall, TimestampMs: 500},
+			{Step: 1, EventType: EventTypeCall, TimestampMs: 900},
+		}
+		if got := s.Now(context.Background()); got != 1000 {
+			t.Errorf("Now() = %d, want 1000: a sleep advanced the virtual clock "+
+				"past the last recorded event and the clock must not run backwards", got)
+		}
+	})
+
+	t.Run("history ahead", func(t *testing.T) {
+		// The other direction. advanceReplayStep keeps nowMs on the consumed
+		// event, so a replay normally reaches Now() with the two already equal;
+		// this covers the window before that has happened, where nowMs is still
+		// the session seed and the event is the later, correct anchor.
+		s := newTestExecSession()
+		s.nowMs = 100
+		s.stepCount = 1
+		s.history = []EventRecord{
+			{Step: 0, EventType: EventTypeCall, TimestampMs: 500},
+			{Step: 1, EventType: EventTypeCall, TimestampMs: 900},
+		}
+		if got := s.Now(context.Background()); got != 500 {
+			t.Errorf("Now() = %d, want 500 (the last consumed event)", got)
+		}
+	})
+}
+
+func TestReplayTracksTheClockOffConsumedEvents(t *testing.T) {
+	// The fix for a replay divergence found by the DBOS port suite, not by this
+	// package: a fresh execution's nowMs follows its events (recordEvent sets
+	// it), but a replay's used to sit at the session seed the whole way. Once
+	// Now() started taking the later of the two anchors, that asymmetry became
+	// visible -- the seed is the workflow row's created_at written by the
+	// DATABASE, while event timestamps are written by the WORKER, and the two
+	// clocks were 40ms apart in a container. A seed 40ms ahead of the first
+	// event made the replay read a later instant than the original execution,
+	// which fails the workflow.
 	s := newTestExecSession()
-	s.nowMs = 1000
-	s.stepCount = 1
+	s.nowMs = 5000 // a seed later than the events, as a skewed clock produces
 	s.history = []EventRecord{
-		{Step: 0, EventType: EventTypeCall, TimestampMs: 500},
-		{Step: 1, EventType: EventTypeCall, TimestampMs: 900},
+		{Step: 0, EventType: EventTypeCall, TimestampMs: 4000},
+		{Step: 1, EventType: EventTypeCall, TimestampMs: 4200},
 	}
-	// stepCount=1 and history[0] is the last consumed event.
-	result := s.Now(context.Background())
-	if result != 500 {
-		t.Errorf("expected 500 (timestamp of last consumed event), got %d", result)
+
+	for i := range s.history {
+		if !s.advanceReplayStep(context.Background(), &s.history[i]) {
+			t.Fatalf("advanceReplayStep(%d) aborted", i)
+		}
+		want := s.history[i].TimestampMs
+		if s.nowMs != want {
+			t.Errorf("after consuming step %d: nowMs = %d, want %d "+
+				"(the clock must follow consumed events, not stay at the seed)",
+				i, s.nowMs, want)
+		}
+		if got := s.Now(context.Background()); got != want {
+			t.Errorf("after consuming step %d: Now() = %d, want %d "+
+				"(a replay must not read a later instant than the original execution)",
+				i, got, want)
+		}
 	}
 }
 

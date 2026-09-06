@@ -53,6 +53,21 @@ func (e *Engine) replayCompiled(ctx context.Context, compiled wazero.CompiledMod
 // Returns false if the callback returned ReplayQuit (caller should abort).
 func (s *execSession) advanceReplayStep(ctx context.Context, rec *EventRecord) bool {
 	s.stepCount++
+
+	// Track the virtual clock off consumed events, mirroring recordEvent doing
+	// it off recorded ones. Without this the two executions are asymmetric: a
+	// fresh run's nowMs follows its events, while a replay's stays at the
+	// session seed for the whole replay.
+	//
+	// That asymmetry is observable because the seed and the event timestamps do
+	// not come from the same clock. The seed is the workflow row's created_at,
+	// written by the database; event timestamps are written by the worker
+	// process. Measured 40ms apart with PostgreSQL in a container -- enough
+	// that a replay could read a LATER clock than the original execution did,
+	// which is a replay divergence and fails any SideEffect that read it.
+	if rec != nil && rec.TimestampMs > 0 {
+		s.nowMs = rec.TimestampMs
+	}
 	if s.stepCallback == nil {
 		return true
 	}
