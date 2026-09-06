@@ -160,20 +160,12 @@ interface durable-signals {
     /// Returns the signal payload, or empty string if none.
     durable-poll-signal: func(name: string) -> string;
 
-    /// Send a signal with correlation and wait for a reply.
-    /// Returns the response payload string.
-    durable-send-signal-and-wait: func(
-        target-run-id: string,
-        signal-name: string,
-        payload: string,
-        timeout-ms: u64,
-    ) -> result<string, call-failure>;
-
-    /// Reply to a correlated signal from within a handler.
-    durable-reply-to-signal: func(
-        correlation-id: string,
-        response: string,
-    ) -> u64;
+    // durable-send-signal-and-wait and durable-reply-to-signal were removed
+    // on 2026-09-06. Both mapped to host calls that were inert engine-side,
+    // and request/reply is now composed from create-promise + signal-workflow
+    // + await-promise + resolve-promise (IMPROVEMENT-PLAN 3.220). Declaring
+    // them here made every Python component import two host functions it
+    // never called.
 
     /// Send a signal to a target workflow (fire-and-forget, recorded).
     durable-signal-workflow: func(
