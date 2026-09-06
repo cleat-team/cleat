@@ -4799,6 +4799,67 @@ Cross-instance shared state, of the kind Restate's virtual objects provide, **st
 in cleat for any language** — it never did. This removes an API that implied otherwise; it does not
 add the capability. If that capability is ever wanted it is engine work — persisting state keyed by
 scope and seeding `stateStore` at session start — and a much larger change than these six calls.
+### 3.217 An update name is spent for a workflow's whole life, and MySQL does not say so — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
+
+**This section did not exist until now, and it was cited twice.** §3.219's body refers to
+"§3.217's update divergence" and "after §3.217's dialect work". Both references were correct about
+what belonged here; the section was simply never written. A dangling `§` is worse than a wrong one,
+because `grep '3\.217' IMPROVEMENT-PLAN.md` returns hits and a reader concludes it exists.
+
+`workflow_update_requests` is
+
+    PRIMARY KEY (workflow_id, update_name)          migrations/postgres/001_schema.sql:379
+
+which is **the same "a name is not an identity" shape as `workflow_signals`** before §3.215
+replaced it with a surrogate key. §3.215 said promises and update-requests do not share the signal
+defect, and that is true of the half it was about — consumption, which these express through a
+`status` column rather than by deletion. It is **not** true of the other half.
+
+## Measured, not reasoned. Second `approve` for the same workflow, all three dialects:
+
+| dialect | `CreateUpdateRequest` returns |
+|---|---|
+| postgres | `pq: duplicate key value violates unique constraint "workflow_update_requests_pkey" (23505)` |
+| mssql | `Violation of PRIMARY KEY constraint 'pk_workflow_update_requests'` |
+| mysql | **`<nil>`** — `INSERT IGNORE` (`engine/mysql_ops.go:139`), silently dropped |
+
+All three end holding the FIRST payload. So the second update is lost on every backend; MySQL is
+the one that reports success while losing it, and `GetPendingUpdateRequests` then returns nothing,
+so a caller has no way to learn the update was discarded.
+
+## The sharper half, and the reason this is a product limit rather than a race
+
+Completing the first update does not free the name. Measured the same way: `CompleteUpdateRequest`
+sets `status='done'`, the row stays, and a third request for `approve` is refused identically on
+postgres and mssql and silently dropped on mysql, with `pending count = 0`.
+
+**A workflow can therefore accept at most one update of a given name for its entire lifetime.** Not
+one pending at a time — one, ever. Temporal permits repeated updates of the same name, so any port
+of an update conformance suite hits this immediately, and its MySQL leg hits it without an error.
+
+## Why the fix is not a small one, and should not be bolted onto this entry
+
+It is the same surgery §3.215 did to signals: surrogate monotonic key, `(workflow_id, update_name)`
+demoted to an index, the dialect-specific conflict clause deleted. Two differences make it its own
+change rather than a repeat:
+
+  * These rows carry `status`, so "which one is pending" is already expressible and the FIFO read
+    has to respect it — `GetPendingUpdateRequests` filters `status = 'pending'` and would need an
+    order.
+  * `CompleteUpdateRequest` addresses a row by `(workflow_id, update_name)`
+    (`engine/mysql_ops.go:185` and the two siblings). With more than one row per name that becomes
+    ambiguous, and picking the wrong one completes an update the caller did not answer. **That is a
+    correctness question the signal change did not have to answer**, because nothing addressed a
+    signal by name once it had been read.
+
+Re-derive the whole table with a probe that creates two same-named requests and reads back
+`GetPendingUpdateRequests`, run under `-p 1` with all three `CLEAT_TEST_*` DSNs set.
+
+**And note the direction of the dialect split, because it is the opposite of the usual worry.**
+Postgres and SQL Server fail loudly on a supported operation; MySQL succeeds and drops data. Fixing
+only the divergence — making all three behave the same — would be a choice between two wrong
+answers. The key is what is wrong.
+
 ### 3.218 A promise the store refused was reported as created, and the workflow then hung — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
 
 `CreatePromise` (`engine/promises.go`) logged a store failure and continued, returning `errCode 0`
