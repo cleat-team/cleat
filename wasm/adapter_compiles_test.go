@@ -124,16 +124,24 @@ func usageCoveringEveryAdapterDef(t *testing.T) *UsageInfo {
 	seenImport := map[string]bool{}
 
 	add := func(field string) {
-		imp, ok := fieldImport[field]
-		if !ok {
-			missing = append(missing, field)
+		if imp, ok := fieldImport[field]; ok {
+			u.Used[imp] = true
+			if !seenImport[field] {
+				seenImport[field] = true
+				u.Funcs = append(u.Funcs, HostFunction{ImportName: imp, FieldName: field})
+			}
 			return
 		}
-		u.Used[imp] = true
-		if !seenImport[field] {
-			seenImport[field] = true
-			u.Funcs = append(u.Funcs, HostFunction{ImportName: imp, FieldName: field})
+		// Reachable through compositeRequires instead: the wrapper's imports are
+		// wired and no field is emitted for it, so there is nothing for this test
+		// to compile -- but it is not unreachable.
+		if imps, ok := compositeRequires[field]; ok {
+			for _, imp := range imps {
+				u.Used[imp] = true
+			}
+			return
 		}
+		missing = append(missing, field)
 	}
 
 	for field := range adapterDefs {
@@ -143,31 +151,24 @@ func usageCoveringEveryAdapterDef(t *testing.T) *UsageInfo {
 		add(field)
 	}
 
-	// A def with no hostFunctions row can never be emitted by a real build --
-	// generateField is reached only through the table -- so it is also outside
-	// what THIS test can compile. It is reported rather than asserted, and the
-	// distinction is deliberate.
+	// A def named by NEITHER table is unreachable: nothing can request it, so no
+	// build can emit it and this test cannot compile it either.
 	//
-	// One such def exists today: DurableCallTypedWithOptions. It is public
-	// (cleat/runtime.go:64), has a HostCallsOptions field, a HostCallsImpl
-	// method and a hostWrapperDefs entry -- and no row, so a workflow whose
-	// only host call is h.DurableCallTypedWithOptions(...) compiles with
-	// `Generating WASM imports (0 host functions used)`. Verified by building
-	// one. That is an eighth instance of IMPROVEMENT-PLAN 3.224, and the worst
-	// kind, because a durable call that silently does not happen leaves the
-	// workflow proceeding as though it had.
-	//
-	// It is not asserted here because the mechanism a wrapper should use to
-	// request its inner import is being changed in #786 -- adding a plain row
-	// for a wrapper invents a closure field carrying parameters the inner
-	// import's body never reads, which is what broke eleven CI jobs there. An
-	// assertion written now would encode the shape that is being replaced.
-	// This becomes t.Errorf once #786 lands. IMPROVEMENT-PLAN 3.225.
+	// Both tables have to be consulted, and the distinction is #786's:
+	// hostFunctions is bidirectional -- a row requests an import AND emits a
+	// field named FieldName implemented by that import's body -- while
+	// compositeRequires only requests imports, for SDK-level wrappers that must
+	// NOT get a field of their own. Checking hostFunctions alone reported
+	// DurableCallTypedWithOptions as unreachable when it is reachable through
+	// the second table. IMPROVEMENT-PLAN 3.225.
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		t.Logf("NOT COMPILED HERE -- adapter definitions with no hostFunctions row, so no build "+
-			"can emit them: %s. See IMPROVEMENT-PLAN 3.225; this becomes an assertion once #786 "+
-			"settles how a wrapper requests its inner import.", strings.Join(missing, ", "))
+		t.Errorf("adapter definitions named by neither hostFunctions nor compositeRequires, "+
+			"so no build can emit them: %s\n"+
+			"Either name it in one of those tables (if a guest is supposed to be able to call it) "+
+			"or delete the definition (if it is dead). A public method in this state compiles to "+
+			"nothing and the build says OK -- see IMPROVEMENT-PLAN 3.224.",
+			strings.Join(missing, ", "))
 	}
 
 	sort.Slice(u.Funcs, func(i, j int) bool { return u.Funcs[i].ImportName < u.Funcs[j].ImportName })

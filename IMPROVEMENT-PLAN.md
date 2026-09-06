@@ -5320,7 +5320,7 @@ field of their own.
 Not started here: `wasm/usage.go` is being edited concurrently by #786, and two changes to that
 table at once is the R6 collision WORKSTREAM.md warns about.
 
-### 3.225 Nothing compiled the generated adapter, and an eighth method turned up when something did — 🟢 **GUARD ADDED 2026-09-06**, the method it found is 🔴 **OPEN** (WS-1, 2026-09-06)
+### 3.225 Nothing compiled the generated adapter, and an eighth method turned up when something did — 🟢 **GUARD ADDED 2026-09-06**; the method it found was closed by #786 (WS-1, 2026-09-06)
 
 Two failures on 2026-09-05, hours apart, both one-line compile errors in generated code, both
 caught only by CI:
@@ -5366,14 +5366,40 @@ signalling, scoping and scheduling. This one is a **durable call** — the opera
 exists to provide. A durable call that silently does not happen leaves the workflow proceeding as
 though the external effect occurred.
 
-## Why the guard reports it instead of asserting it
+## Closed by #786, and the assertion is live
 
-The mechanism a wrapper should use to request its inner import is being changed in #786: a plain
-row invents a closure field, which is what broke eleven jobs there, and the replacement is a
-separate `compositeRequires` map. **An assertion written now would encode the shape being
-replaced.** The test therefore names it in a `t.Logf` and says so, and this becomes `t.Errorf` once
-#786 lands. That is a deliberate exception to "a skip is indistinguishable from a pass": the
-condition is reported on every run and recorded here, rather than silently tolerated.
+`compositeRequires` (added by #786) covers `DurableCallTypedWithOptions`, so the call now happens.
+Proven on the branch by the port session, not recalled:
+
+    before:  Generating WASM imports (0 host functions used)  -> cleat_complete, cleat_poll_work
+    after:   Generating WASM imports (14 host functions used) -> cleat_call, cleat_call_retry,
+                                                                 cleat_sleep, ...
+
+The guard's reachability check is therefore an assertion (`t.Errorf`), not a report — but it had to
+learn to read **both** tables first, and the distinction is the one #786 exists to make.
+`hostFunctions` is bidirectional: a row requests an import **and** emits a field named `FieldName`
+implemented by that import's body. `compositeRequires` only requests imports, for SDK-level
+wrappers that must *not* get a field. **Checking `hostFunctions` alone reported
+`DurableCallTypedWithOptions` as unreachable when it is reachable through the second table** —
+so the first version of this assertion would have been a false positive on a fixed tree.
+
+Falsified by deleting `{"cleat_log", "DurableLog"}` from `hostFunctions`: red, naming `DurableLog`.
+
+**It is fixed by wiring the fallback, which is not the same as fixed properly, and the difference
+is worth recording.** `HostCallsImpl.DurableCallTypedWithOptions` (`cleat/runtime.go:1177`) checks
+its own `HostCallsOptions` field first and only falls through to an SDK implementation over
+`DurableCallWithOptions` when that field is nil. `compositeRequires` wires the **fallback's**
+imports; it does not emit the field. The call genuinely happens — strictly better than the silent
+no-op — but through a path with a property the direct one lacks: **the fallback spawns a goroutine**
+to enforce `opts.Timeout`.
+
+A goroutine inside a workflow is a determinism hazard, and it is one the engine's own divergence
+message names: *"Your workflow may have a non-determinism bug (time.Now(), random values, map
+iteration, goroutines)."* Whether `cleat vet` catches it is **not checked** — its Go rules run
+E000-E007 with E003 covering wall-clock time, and nobody has confirmed any of them looks at `go`
+statements. Recorded as unverified rather than asserted in either direction. Emitting the field
+instead would remove the question entirely, and that is a `hostFunctions` row plus an `adapterDefs`
+entry — the §3.224 recipe.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
