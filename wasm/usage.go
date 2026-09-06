@@ -71,6 +71,14 @@ var hostFunctions = []HostFunction{
 	{"cleat_signal_workflow", "SignalWorkflow"},
 	// IMPROVEMENT-PLAN 3.224, same omission: a Go workflow calling
 	// h.ScheduleInvoke(...) compiled with no cleat_schedule_invoke import.
+	// The three methods of IMPROVEMENT-PLAN 3.226: a public Go method and a
+	// host export with no path between them. Every other SDK -- Python, Rust,
+	// Java, AssemblyScript -- exposes all three; Go was the only one that did
+	// not, which is what settled whether they were meant to be callable from a
+	// workflow at all.
+	{"cleat_send", "DurableSend"},
+	{"cleat_resolve_promise", "ResolvePromise"},
+	{"cleat_reject_promise", "RejectPromise"},
 	{"cleat_schedule_invoke", "ScheduleInvoke"},
 	{"cleat_await_signals", "AwaitSignals"},
 	// Defer

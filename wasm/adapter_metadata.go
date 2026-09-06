@@ -203,6 +203,58 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&payloadBuf[0], int(payloadLen)), found, nil",
 		},
 	},
+	// DurableSend: three strings in, nothing out. IMPROVEMENT-PLAN 3.226.
+	// ScheduleInvoke below is the same call with a delay; both get only an
+	// error code back, since there is no response buffer.
+	"DurableSend": {
+		FieldName:  "DurableSend",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"service", "string"},
+			{"operation", "string"},
+			{"requestJSON", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_send: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
+	// ResolvePromise: two strings in, nothing out. IMPROVEMENT-PLAN 3.226.
+	"ResolvePromise": {
+		FieldName:  "ResolvePromise",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"id", "string"},
+			{"value", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_resolve_promise: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
+	// RejectPromise: two strings in, nothing out. The mirror of ResolvePromise.
+	// IMPROVEMENT-PLAN 3.226.
+	"RejectPromise": {
+		FieldName:  "RejectPromise",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"id", "string"},
+			{"errMsg", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_reject_promise: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
 	// ScheduleInvoke: three strings and a delay in, nothing out.
 	// IMPROVEMENT-PLAN 3.224. Same shape as SignalWorkflow below: no response
 	// buffer, so the error code is all the guest gets.
