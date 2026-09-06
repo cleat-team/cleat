@@ -5606,6 +5606,55 @@ measurement is recorded here so the decision can be made against numbers rather 
 **Note the direction, which is the same as every other measurement error this file records:** the
 circular denominator *flatters*. Go reads 100% and is the worst-covered SDK in the repo.
 
+### 3.227 `ci-check.sh` had a blocking step that could never pass, so it always exited 1 — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+Found by finally running it, after a day in which **six separate scope gaps** cost a CI round each
+— `go vet` not seeing `testdata/`, `cargo check` being lib-only, `pytest` not being the linter,
+`ruff` never run, a `\b` grep that cannot match after an underscore, and `gofmt` not being covered
+by build-vet-test. The conclusion recorded at the time was *"the defence is a single local script
+mirroring the lint job, not six commands someone remembers."*
+
+**That script already existed.** `scripts/ci-check.sh` runs gofmt, `go vet`, `ruff`,
+`cargo clippy --all-targets`, `pytest`, `npm test` and the cargo builds — exactly the six. The
+problem was never that it was missing.
+
+    run_step "cleat vet (go) ./... (blocking)" \
+        go run ./cmd/cleat vet --lang go --json ./...
+
+`./...` from the repo root has **no workflow entry points** — the root module is the engine, not a
+workflow — so this printed
+
+    Error loading package: no workflow entry points found in ./...
+
+on every run, and being **blocking**, took the whole script to exit 1. So anyone who ran it saw it
+fail immediately on a step unrelated to their change, concluded it was broken, and stopped.
+
+**This is the second time this file has rotted into always-failing**, and its own header describes
+the first: until 2026-08-09 it tested `./durable/...` and built `crates/durable-*`, five steps
+pointing at paths that no longer existed, *"so it exited 1 at the first test step and had done for
+months, while its header claimed to run the full pipeline."* The preflight added then catches a
+path that **disappears**. It cannot catch a target that was **never valid**, which is what this
+was — and the distinction is the transferable part: rot-detection that watches for things going
+away is blind to things that never worked.
+
+Fixed by pointing it at `./testdata/basic`, the smallest package with real entry points, which
+vets clean (3 entry points, 9 durable leaves, OK). A second step,
+`shellcheck scripts/*.sh benchmarks/*.sh`, failed on a glob matching nothing — there are no shell
+scripts under `benchmarks/` — so it reported a filesystem error rather than a finding.
+
+**What is still not clean, recorded rather than changed:** on a machine without `pip`, `ruff` or
+`shellcheck` the script still fails those steps with exit 127. That is arguably right — install the
+tools — but combined with the blocking defect above it is why the script was unusable, and a reader
+cannot tell "tool absent" from "check failed" in the summary. Whether a missing toolchain should
+report as a distinct outcome is a design question about someone else's script, and this repo is
+strict about skips for good reason, so it is left as an observation.
+
+**And a finding on the way, not pursued:** `cleat vet ./examples/dag` **fails** with three errors
+of the form *"extractText is reachable from a workflow entry point (it calls durable SDK methods)
+but does not have a HostCalls parameter."* A shipped example that the project's own linter rejects
+is either a broken example or a false positive in `cleat vet`, and which it is has not been
+established here.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
