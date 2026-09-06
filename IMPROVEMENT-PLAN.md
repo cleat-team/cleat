@@ -7966,9 +7966,18 @@ should not be lost):
     sequence diagrams that label the **worker's** runtime `wazero WASM`, and a node
     `WR[WASM Runtime wazero]` on the main architecture diagram. That is the primary picture a
     reader forms of what a worker runs, and it names the wrong runtime.
-  * Its host-function count says 59; the tree exports 58 (§3.213). It carries a date, so per
-    CLAUDE.md's header rule it is a measurement rather than an error — but it should be
-    re-derived, not preserved.
+  * Its host-function count says 59. **It is 52** — measured 2026-09-06, on the develop this
+    branch is rebased onto:
+
+        python3 -c "import re;print(len(set(re.findall(r'\.Export\("([^"]+)"\)',
+          open('engine/imports.go').read()))))"      # 52 = 49 cleat_ + 3 unprefixed
+
+    **This paragraph said 58 in the first push of this PR, and 58 was right when measured.**
+    #767 landed on develop between that measurement and the rebase, removing the six-call
+    durable-state family (`cleat_{set,get,delete,incr,has,list}_state`): 58 − 6 = 52. The
+    number was not wrong through carelessness — it was wrong because a number is a
+    measurement with a timestamp, and this one aged out inside a single PR. CLAUDE.md's
+    stale 58/55 pair, and §3.213's, are the same casualty.
   * `engine/backend_wasmtime_stub.go`'s doc comment still instructs *"callers that fall back to
     wazero on error MUST check for `ErrWasmtimeCGOUnavailable`"*. There are no such callers.
     A comment telling a future reader how to write code that must not exist.
