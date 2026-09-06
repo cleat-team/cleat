@@ -267,7 +267,11 @@ require %s %s
 	// protocol packages, sibling modules) need those path-based replaces
 	// carried forward so that go mod tidy resolves local files instead of
 	// trying to pull from the network.
-	if err := propagateReplaces(cfg.ProjectRoot, cfg.OutDir, modPath); err != nil {
+	//
+	// Whether the SDK and root replaces were written above is passed in rather
+	// than assumed: see the skip in propagateReplaces, which is correct only
+	// when they were.
+	if err := propagateReplaces(cfg.ProjectRoot, cfg.OutDir, modPath, sdkDir != ""); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: propagating replace directives: %v\n", err)
 	}
 
@@ -486,7 +490,7 @@ func sdkRequiredVersion(projectRoot string) string {
 // the build directory, and appends them to the build directory's go.mod.
 // The generated go.mod only has a single replace for the cleat submodule,
 // but workflows often import other local modules that use path-based replaces.
-func propagateReplaces(projectRoot, outDir, modPath string) error {
+func propagateReplaces(projectRoot, outDir, modPath string, wroteSDKReplaces bool) error {
 	srcModPath := filepath.Join(projectRoot, "go.mod")
 	data, err := os.ReadFile(srcModPath)
 	if err != nil {
@@ -510,10 +514,23 @@ func propagateReplaces(projectRoot, outDir, modPath string) error {
 		if !modfile.IsDirectoryPath(r.New.Path) {
 			continue
 		}
-		// The SDK's replace, if one is needed, was already written above.
-		// Emitting it twice is not a duplicate that go tolerates -- it is
-		// "go.mod: repeated replacement of <path>", and the build fails.
-		if r.Old.Path == SDKModulePath || r.Old.Path == RootModulePath {
+		// The SDK's replace, if one was needed AND found, was already written
+		// above. Emitting it twice is not a duplicate that go tolerates -- it
+		// is "go.mod: repeated replacement of <path>", and the build fails.
+		//
+		// The condition used to be unguarded, and "already written above" is
+		// true only when sdkReplaceDir found a checkout. When it returned "",
+		// nothing was written above and this dropped the only replaces that
+		// could resolve the SDK locally -- so a project that deliberately pins
+		// the SDK to its own checkout got a workflow compiled against whatever
+		// the module proxy served, with no diagnostic. See #771: cleat-ports
+		// clones cleat to .cleat-src/ and pins the workflow module there, a
+		// layout sdkReplaceDir cannot find, and every workflow it built would
+		// have been testing a published release while reporting on a commit.
+		// It surfaced only because v0.0.0 does not exist on the proxy and go
+		// mod tidy failed for that unrelated reason; a project pinning a real
+		// version would have gotten a clean, wrong build.
+		if wroteSDKReplaces && (r.Old.Path == SDKModulePath || r.Old.Path == RootModulePath) {
 			continue
 		}
 		absReplace, err := filepath.Abs(filepath.Join(projectRoot, r.New.Path))
