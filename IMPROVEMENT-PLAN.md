@@ -4312,7 +4312,13 @@ and Go deliberately omits it, and `tiers.yaml` says nothing either way. The clas
 separates "workflow-facing" from "runtime protocol"; it does not assert that every workflow-facing
 export belongs in every language. That decision is an input to item 4, not an output of it.
 
-### 3.214 Go's state reads never reach the host, and the docs promise they do — 🔴 **OPEN 2026-09-05**; a defect against a written contract, not an undocumented choice (WS-1, 2026-09-05)
+### 3.214 Go's state reads never reach the host, and the docs promise they do — 🟢 **CLOSED 2026-09-05 by §3.216**, which removed the feature rather than repairing it (WS-1, 2026-09-05)
+
+**Resolved by removal, not by repair.** §3.216 deleted the whole state family on the same day: the
+question below — whether the guest-local read was a deliberate scratchpad or a data-loss bug — was
+answered by establishing that a run-scoped key-value API is equivalent to a local variable in every
+SDK, so neither reading justified keeping it. The analysis is kept because the *evidence* is what
+decided the removal, and because the shape it describes recurs.
 
 `HostCallsImpl` in `cleat/runtime_workflow.go` offers `SetState`, `GetState`, `HasState`,
 `IncrState`, `ListState` and `DeleteState`. **None of them is a host binding.**
