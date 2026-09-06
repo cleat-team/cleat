@@ -250,8 +250,20 @@ identity, capabilities, and host function API.
 | `signal_workflow` | `false` | Can signal running workflows. Granted by default for community plugins. |
 | `http_routes` | `false` | Can register HTTP routes. Denied by default for community plugins. |
 | `http_middleware` | `false` | Can register HTTP middleware. Denied by default. |
-| `call_plugin` | `[]` | List of plugins this plugin can call via `plugin_call`. An empty list denies all. `["*"]` allows all. |
+| `call_plugin` | `[]` | List of plugins this plugin can call via `plugin_call`. Checked at **deploy** against the operator's limits — see the warning below. |
 | `background_worker` | `false` | Can run background goroutines. Denied by default. |
+
+> **`call_plugin` is not enforced at call time.** This table said "an empty list
+> denies all", and that is not true of a running worker: the declaration is
+> validated when the plugin is deployed, against what the operator permits, and
+> then never consulted again. The runtime check exists in the engine
+> (`PluginCallGuard`) and is unreachable — nothing installs it, and the caller
+> identity it needs is never set. So a deployed plugin can call any plugin,
+> whatever its own `call_plugin` list says.
+>
+> Declare it accurately anyway: the deploy-time check is real, it is what an
+> operator's policy bounds, and it is what a fix will enforce. But do not rely
+> on it to contain a plugin you do not trust. Tracked in IMPROVEMENT-PLAN 3.232.
 
 Be conservative: only declare capabilities you actually need. Each capability
 is a vector for accidental damage if your plugin has a bug.
@@ -577,7 +589,11 @@ warning:
 - **`background_worker: true`** -- the plugin runs persistent background
   goroutines
 - **`call_plugin: ["*"]`** -- the plugin can call any other plugin's host
-  functions
+  functions. Note that today *every* value behaves this way at run time, `["*"]`
+  or not, because the call-time check is unreachable -- see the warning under
+  the capability table and IMPROVEMENT-PLAN 3.232. The warning on `["*"]` is
+  still worth heeding: it is what the deploy-time check reads, and what a fix
+  will enforce.
 
 ### Default operator limits
 
