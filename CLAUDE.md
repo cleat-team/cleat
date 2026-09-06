@@ -352,6 +352,16 @@ felt sound. It was then re-derived from scratch hours later and turned out to be
 written. The artefact discarded here is a correct fix, discarded with evidence in hand, which makes
 this more expensive than a test that passes for the wrong reason.
 
+That rule has a second edge, and it is the mechanism that catches you while you are being
+careful: **a falsification has two steps, and only one of them announces failure.** Applying the
+revert is loud — the suite goes red and you read the message. Restoring afterwards is silent, so a
+restore that does not restore looks exactly like a fix that does not work. `git checkout -- <file>`
+restores from the *index*, and a revert applied with `git checkout <commit> -- <file>` is staged
+there, so the "restore" puts the broken version straight back and the suite stays red. The reading
+that follows is "my fix does not work", and the artefact discarded is again a correct fix. Verify
+the restore the same way you verify the revert: `git diff` against the **commit**, not against the
+index, and rebuild before believing the second result.
+
 **A probe that does not fire is a measurement, not a dead end.** Chasing the same defect, a
 temporary print in `recordEvent`'s persist branch never printed while rows were demonstrably being
 written. That was read as a failed experiment; it was in fact the strongest available signal —
