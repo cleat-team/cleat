@@ -241,15 +241,23 @@ var compositeRequires = map[string][]string{
 	// cleat_now is enough: info.Funcs is hostFunctions filtered by Used, so
 	// marking the import used pulls in {"cleat_now", "Now"} and the emitted Now
 	// field is what populates h.now. IMPROVEMENT-PLAN 3.234.
-	"NowMs":                         {"cleat_now"},
-	"NewUUID":                       {"cleat_random"},
-	"NewUUIDv7":                     {"cleat_random", "cleat_now"},
-	"UUID":                          {"cleat_workflow_id"},
-	"Log":                           {"cleat_log"},
-	"Call":                          {"cleat_call"},
-	"AwaitCondition":                {"cleat_await_signals", "cleat_now"},
-	"AwaitSignalsWithQuorum":        {"cleat_await_signals"},
-	"AwaitPromiseMs":                {"cleat_await_promise"},
+	"NowMs":                  {"cleat_now"},
+	"NewUUID":                {"cleat_random"},
+	"NewUUIDv7":              {"cleat_random", "cleat_now"},
+	"UUID":                   {"cleat_workflow_id"},
+	"Log":                    {"cleat_log"},
+	"Call":                   {"cleat_call"},
+	"AwaitCondition":         {"cleat_await_signals", "cleat_now"},
+	"AwaitSignalsWithQuorum": {"cleat_await_signals"},
+	"AwaitPromiseMs":         {"cleat_await_promise"},
+
+	// SendSignalAndWait and ReplyToSignal are composites, not host calls:
+	// the reply channel is a promise and its ID is the correlation ID, so
+	// request/reply needs no ABI of its own (IMPROVEMENT-PLAN 3.220). Each
+	// row is the transitive set its method actually reaches -- send, create
+	// the reply promise, await it; reply by resolving it.
+	"SendSignalAndWait":             {"cleat_create_promise", "cleat_signal_workflow", "cleat_await_promise"},
+	"ReplyToSignal":                 {"cleat_resolve_promise"},
 	"PollSignals":                   {"cleat_poll_signal"},
 	"ChildWorkflowWithOptions":      {"cleat_child_workflow"},
 	"DurableCallWithHeartbeat":      {"cleat_call"},

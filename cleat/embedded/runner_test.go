@@ -990,17 +990,51 @@ func TestDurableDeferFunc(t *testing.T) {
 	}
 }
 
-func TestSendSignalAndWait(t *testing.T) {
+// TestSendSignalAndWaitSendsAReplyAddressedEnvelope replaces a test that
+// asserted resp == `{"status":"delivered"}` -- a constant the embedded
+// runner returned without sending, waiting, or receiving anything. It could
+// not fail for any reason connected to request/reply (IMPROVEMENT-PLAN
+// 3.220).
+//
+// The embedded runner keeps outgoing and incoming signals in one list, so a
+// workflow observes its own envelope here. That is what makes the round trip
+// assertable in a single-threaded runner: send (nobody answers, so it times
+// out), read the envelope back, reply to the address it carried, and see the
+// promise settle.
+func TestSendSignalAndWaitSendsAReplyAddressedEnvelope(t *testing.T) {
 	r := New()
 	r.Register("test", func(ctx *Context) error {
 		h := ctx.H()
-		resp, err := h.SendSignalAndWait("target", "evt", `{"data":"x"}`, time.Second)
+
+		if _, err := h.SendSignalAndWait("target", "evt", `{"data":"x"}`, time.Second); err == nil {
+			return errors.New("expected a timeout: nothing replied")
+		}
+
+		sig := h.PollSignals([]string{"evt"})
+		if sig.TimedOut {
+			return errors.New("the signal was never sent")
+		}
+		if sig.Payload != `{"data":"x"}` {
+			return fmt.Errorf("receiver must see the payload as sent, got %q", sig.Payload)
+		}
+		if sig.ReplyTo == "" {
+			return errors.New("expected a reply address on a signal sent with SendSignalAndWait")
+		}
+
+		if err := h.ReplyToSignal(sig.ReplyTo, `{"status":"done"}`); err != nil {
+			return fmt.Errorf("ReplyToSignal: %w", err)
+		}
+		got, timedOut, err := h.AwaitPromise(sig.ReplyTo, time.Second)
 		if err != nil {
-			return err
+			return fmt.Errorf("AwaitPromise after the reply: %w", err)
 		}
-		if resp != `{"status":"delivered"}` {
-			return fmt.Errorf("expected delivered response, got %q", resp)
+		if timedOut {
+			return errors.New("the reply promise is still pending after ReplyToSignal")
 		}
+		if got != `{"status":"done"}` {
+			return fmt.Errorf("expected the reply, got %q", got)
+		}
+
 		ctx.SetOutput(`{"ok":true}`)
 		return nil
 	})
@@ -1013,24 +1047,20 @@ func TestSendSignalAndWait(t *testing.T) {
 	}
 }
 
-func TestReplyToSignal(t *testing.T) {
+// TestReplyToSignalUnknownAddressIsAnError: the embedded runner had no way to
+// settle a promise at all until 3.220, so ReplyToSignal here appended the
+// response to the signal list under the correlation ID as a name -- and the
+// test asserted exactly that, polling the reply back as though it were an
+// inbound signal. Replying to an address nobody is waiting on must be an
+// error, not a message filed under a name.
+func TestReplyToSignalUnknownAddressIsAnError(t *testing.T) {
 	r := New()
 	r.Register("test", func(ctx *Context) error {
-		h := ctx.H()
-		err := h.ReplyToSignal("corr-123", `{"status":"done"}`)
-		if err != nil {
-			return err
+		if err := ctx.H().ReplyToSignal("corr-123", `{"status":"done"}`); err == nil {
+			return errors.New("expected an error replying to an unknown address")
 		}
-		// After reply, verify the signal was stored by polling it.
-		payload, found, err := h.PollSignal("corr-123")
-		if err != nil {
-			return err
-		}
-		if !found {
-			return errors.New("expected to find reply signal")
-		}
-		if payload != `{"status":"done"}` {
-			return fmt.Errorf("expected reply payload, got %q", payload)
+		if err := ctx.H().ReplyToSignal("", `{"status":"done"}`); err == nil {
+			return errors.New("expected an error replying to an empty address")
 		}
 		ctx.SetOutput(`{"ok":true}`)
 		return nil

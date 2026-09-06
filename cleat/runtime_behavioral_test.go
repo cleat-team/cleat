@@ -1291,20 +1291,54 @@ func TestHostCallsImpl_NilGuard_ReplyToSignal(t *testing.T) {
 	}
 }
 
-func TestHostCallsImpl_ReplyToSignalSuccess(t *testing.T) {
-	var captured bool
+// TestHostCallsImpl_ReplyToSignalResolvesTheReplyPromise pins the composition
+// itself: replying to a signal IS resolving the promise whose ID is the
+// correlation ID (IMPROVEMENT-PLAN 3.220). It replaces a test that supplied a
+// HostCallsOptions.ReplyToSignal hook and asserted only that the hook ran --
+// which pinned the indirection rather than the behaviour, and kept passing
+// while the host call behind it did nothing at all.
+func TestHostCallsImpl_ReplyToSignalResolvesTheReplyPromise(t *testing.T) {
+	var gotID, gotValue string
 	h := NewHostCalls(HostCallsOptions{
-		ReplyToSignal: func(corrID, resp string) error {
-			captured = true
+		ResolvePromise: func(id, value string) error {
+			gotID, gotValue = id, value
 			return nil
 		},
 	})
-	err := h.ReplyToSignal("corr-id", "ok")
-	if err != nil {
+	if err := h.ReplyToSignal("corr-id", "ok"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !captured {
-		t.Error("expected ReplyToSignal to be called")
+	if gotID != "corr-id" || gotValue != "ok" {
+		t.Errorf("expected ResolvePromise(%q, %q), got (%q, %q)", "corr-id", "ok", gotID, gotValue)
+	}
+}
+
+// A settle failure must reach the caller. If it did not, a reply to a stale
+// address would report success and leave the sender suspended until its
+// timeout, with the error visible nowhere.
+func TestHostCallsImpl_ReplyToSignalSurfacesASettleFailure(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		ResolvePromise: func(id, value string) error {
+			return errors.New("promise not found")
+		},
+	})
+	if err := h.ReplyToSignal("stale-id", "ok"); err == nil {
+		t.Fatal("expected the ResolvePromise failure to surface")
+	}
+}
+
+// An empty address must be refused before it reaches the store, because
+// SignalResult.ReplyTo is empty for every one-way signal -- so the mistake
+// this catches is replying to a notification nobody is waiting on.
+func TestHostCallsImpl_ReplyToSignalRejectsAnEmptyAddress(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		ResolvePromise: func(id, value string) error {
+			t.Error("ResolvePromise must not be reached for an empty correlation ID")
+			return nil
+		},
+	})
+	if err := h.ReplyToSignal("", "ok"); err == nil {
+		t.Fatal("expected an error for an empty correlation ID")
 	}
 }
 

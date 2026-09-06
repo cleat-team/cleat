@@ -31,15 +31,14 @@ import (
 // closure is genuinely optional. Both are exemptions, and an exemption that
 // stops describing anything is what the second half of this test is for.
 var unwiredClosureMethods = map[string]string{
-	// Not yet reachable. These have a real closure field, no fallback, and no
-	// usage row: calling either from a workflow gets the "can only be called
-	// from within a workflow function" error, which names the one cause that
-	// is not the cause.
-	"ReplyToSignal": "IMPROVEMENT-PLAN 3.220: the reply protocol is undecided, so " +
-		"cleat_reply_to_signal has no usage row. Blocked on a design decision, not an " +
-		"oversight -- delete this entry when 3.220 lands.",
-	"SendSignalAndWait": "IMPROVEMENT-PLAN 3.220, same decision as ReplyToSignal: a " +
-		"caller-side wait needs the reply protocol settled first.",
+	// ReplyToSignal and SendSignalAndWait were exempted here until 2026-09-06
+	// as "blocked on a design decision, not an oversight -- delete this entry
+	// when 3.220 lands". 3.220 landed: both are now composites over
+	// CreatePromise/SignalWorkflow/AwaitPromise/ResolvePromise and reach no
+	// closure field of their own, so the exemptions stopped describing
+	// anything and this test said so by name. That is the second direction
+	// working, and it is the reason to keep writing the remedy into the
+	// failure message.
 
 	// Not a defect. The closure is an override, not the mechanism: HandleUpdate
 	// uses it when present and otherwise dispatches to handlers registered

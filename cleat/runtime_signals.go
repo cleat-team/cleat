@@ -8,29 +8,87 @@ import (
 )
 
 type SignalResult struct {
-	Name     string
-	Payload  string
+	Name    string
+	Payload string
+	// ReplyTo is the address to answer this signal at, and is non-empty
+	// only when the sender used SendSignalAndWait and is suspended waiting
+	// for a reply. Pass it to ReplyToSignal. A signal sent with
+	// SignalWorkflow leaves it empty, which is how a receiver tells a
+	// request that wants an answer from a one-way notification.
+	ReplyTo  string
 	TimedOut bool
 	Err      error
 }
 
+// SendSignalAndWait sends a signal to another workflow and suspends until
+// that workflow replies or the timeout elapses.
+//
+// It is composed from three durable primitives rather than being a host call
+// of its own: a promise is the reply channel, its ID is the correlation ID,
+// and answering is resolving it. That composition is the whole of
+// IMPROVEMENT-PLAN 3.220, and it is possible only because #813/#821 made a
+// promise ID a globally unique token any holder can settle, whose settlement
+// wakes the creator and reports ErrPromiseNotFound rather than silently
+// succeeding when it matches nothing.
+//
+// The three implementations this replaces disagreed with each other: the
+// host call was inert engine-side, cleattest routed replies over an
+// in-memory Go channel that cannot cross a process, and embedded returned a
+// canned {"status":"delivered"} without waiting for anything -- so a test
+// asserting a reply passed there for no reason. Building from primitives
+// that already work identically in all three environments is what removes
+// that divergence, not a fourth implementation.
+//
+// Each step is separately durable, so a crash between them replays correctly:
+// the promise is created once, the signal is sent once, and the await
+// resumes.
 func (h *HostCallsImpl) SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
-	if h.sendSignalAndWait == nil {
-		return "", errors.New("durable: SendSignalAndWait can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	replyTo, err := h.CreatePromise("__reply:" + signalName)
+	if err != nil {
+		return "", fmt.Errorf("durable: SendSignalAndWait: create reply promise: %w", err)
 	}
-	return h.sendSignalAndWait(targetRunID, signalName, payload, timeout)
+	envelope, err := encodeSignalEnvelope(replyTo, payload)
+	if err != nil {
+		return "", fmt.Errorf("durable: SendSignalAndWait: encode envelope: %w", err)
+	}
+	if err := h.SignalWorkflow(targetRunID, signalName, envelope); err != nil {
+		return "", fmt.Errorf("durable: SendSignalAndWait: send signal %q to %q: %w", signalName, targetRunID, err)
+	}
+	response, timedOut, err := h.AwaitPromise(replyTo, timeout)
+	if err != nil {
+		return "", fmt.Errorf("durable: SendSignalAndWait: await reply to signal %q: %w", signalName, err)
+	}
+	if timedOut {
+		return "", fmt.Errorf("durable: SendSignalAndWait: no reply to signal %q from workflow %q within %v", signalName, targetRunID, timeout)
+	}
+	return response, nil
 }
 
+// ReplyToSignal answers a signal sent with SendSignalAndWait, waking the
+// sender with response.
+//
+// correlationID is SignalResult.ReplyTo, which is the reply promise's ID, so
+// replying is resolving that promise. An ID that matches no promise reports
+// ErrPromiseNotFound rather than reporting success, which is what makes a
+// stale or wrong address a visible failure instead of a sender that hangs
+// until its timeout.
 func (h *HostCallsImpl) ReplyToSignal(correlationID, response string) error {
-	if h.replyToSignal == nil {
-		return errors.New("durable: ReplyToSignal can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	if correlationID == "" {
+		return errors.New("durable: ReplyToSignal: empty correlation ID. Pass SignalResult.ReplyTo from the signal being answered; it is empty when the sender used SignalWorkflow and is not waiting for a reply.")
 	}
-	return h.replyToSignal(correlationID, response)
+	if err := h.ResolvePromise(correlationID, response); err != nil {
+		return fmt.Errorf("durable: ReplyToSignal(%q): %w", correlationID, err)
+	}
+	return nil
 }
 
 func (h *HostCallsImpl) AwaitSignalsWithQuorum(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error) {
 	if h.awaitSignalsWithQuorum != nil {
-		return h.awaitSignalsWithQuorum(signalNames, minCount, maxRejections, timeout)
+		results, err := h.awaitSignalsWithQuorum(signalNames, minCount, maxRejections, timeout)
+		for i := range results {
+			results[i] = unwrapSignalResult(results[i])
+		}
+		return results, err
 	}
 	// Fallback: poll-based loop using DurableAwaitSignals.
 	deadline := time.Now().Add(timeout)
@@ -83,12 +141,12 @@ func (h *HostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration
 		}
 	}
 	name, payload, timedOut, err := h.DurableAwaitSignals(signalNames, timeout.Milliseconds())
-	return SignalResult{
+	return unwrapSignalResult(SignalResult{
 		Name:     name,
 		Payload:  payload,
 		TimedOut: timedOut,
 		Err:      err,
-	}
+	})
 }
 
 func (h *HostCallsImpl) PollSignals(names []string) SignalResult {
@@ -98,7 +156,7 @@ func (h *HostCallsImpl) PollSignals(names []string) SignalResult {
 			return SignalResult{Err: err}
 		}
 		if found {
-			return SignalResult{Name: name, Payload: payload}
+			return unwrapSignalResult(SignalResult{Name: name, Payload: payload})
 		}
 	}
 	return SignalResult{TimedOut: true}

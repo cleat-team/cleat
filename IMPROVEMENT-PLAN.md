@@ -4974,7 +4974,7 @@ Final sweep tally: 125 multi-dialect operations compared, 12 flagged, **2 real (
 (§3.217's update divergence), 9 artifacts**. No second instance of the update-request defect. The
 three-dialect split both sessions expected to be widespread is narrow.
 
-### 3.220 `SendSignalAndWait` never sends the signal it then waits for — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
+### 3.220 `SendSignalAndWait` never sends the signal it then waits for — 🟢 **FIXED 2026-09-06 by composition; the two host calls are now dead** (WS-1, 2026-09-05)
 
 Found while wiring signal consumption for §3.215, and deliberately not fixed there: it is a
 different defect and a different change.
@@ -5020,6 +5020,120 @@ no store method, so a reply is durable in the replier's history and invisible to
 **Note what a name-based scan says about all of this: nothing.** `SendSignalAndWait` registers,
 dispatches, has tests, and appears in every SDK's surface list. Its being wired end to end is what
 the parity guards check, and it is wired — to a function that does not do the thing.
+
+---
+
+#### The decision (2026-09-06): the reply address is a promise ID
+
+The repo owner chose composition over a repaired host call. `SendSignalAndWait` is now an SDK
+composite over `CreatePromise` + `SignalWorkflow` + `AwaitPromise`, and `ReplyToSignal` is
+`ResolvePromise`. **No new engine mechanism was needed**, which is only true because §3.233 had
+just landed: settling by promise ID alone (#813) made an ID a globally unique token any holder
+can settle, #818 made a settle that matches no row report `ErrPromiseNotFound` instead of
+succeeding silently, and the settle wakes the creator. Those three properties are exactly a reply
+channel. §3.233 recorded settle-by-ID as a design question with a cost; this is the payment.
+
+**Both reference systems agree, and neither has the primitive.** This repo's own
+`docs/migration/from-dbos.md` maps the whole of DBOS's communication surface — `send`, `recv`,
+`setEvent`, `getEvent` — and all four are one-way; DBOS composes request/reply by putting the
+requester's workflow ID in the message. Temporal's signals are likewise one-way. Neither
+migration guide mentions `SendSignalAndWait` or `ReplyToSignal` at all
+(`grep -rn 'SendSignalAndWait\|ReplyToSignal' docs/migration/` → nothing), so no one porting
+from either would look for them. **In both systems the reply address is data, not protocol** —
+which is the argument for making it a promise ID rather than inventing a correlation namespace.
+
+The rejected option was a correlation-ID signal delivered to the caller's queue. It needs the
+caller's workflow ID to reach the replier — by encoding it into the ID, making it a parseable
+capability token, or by a mapping table, a new durable object with its own lifecycle — and it
+rebuilds inside the signal table what `workflow_promises` already does.
+
+#### Three implementations that disagreed, replaced by one
+
+Nothing about this was a single broken function. The pair had three implementations and no two
+matched:
+
+| environment | `SendSignalAndWait` | how a reply arrived |
+|---|---|---|
+| engine (real guest) | inert — never called `DeliverSignal` | nothing |
+| `cleattest` | spliced `_correlation_id` into the payload object | in-memory Go channel |
+| `cleat/embedded` | returned a canned `{"status":"delivered"}` without waiting | nothing |
+
+So a workflow that passed under `cleattest` could not work in production, and `embedded`'s
+version satisfied any assertion trivially. **Two shipped tests asserted those fakes**:
+`TestSendSignalAndWait` checked `resp == '{"status":"delivered"}'` — a constant, unreachable by
+any real reply — and embedded's `TestReplyToSignal` polled the response back as an inbound signal
+named by the correlation ID. Both are now round-trip tests.
+
+The composite is one implementation for all three, because `CreatePromise`, `SignalWorkflow`,
+`AwaitPromise` and `ResolvePromise` already behave the same way in each. That is the substantive
+argument for composition over a fourth implementation, and it is worth more than the ABI saving.
+
+#### The envelope, and why it wraps rather than splices
+
+The reply address travels under a reserved key, `cleat_reply_to`, in a two-key envelope whose
+other key carries the caller's payload **as a JSON string**. `AwaitSignals` and `PollSignals`
+strip it, so a receiver reads `SignalResult.Payload` unchanged and gets the address in a new
+`SignalResult.ReplyTo` field, empty for a one-way signal.
+
+Wrapping rather than splicing is the correction of a real failure mode in the `cleattest`
+version: splicing a key requires the payload to *be* a JSON object, and for a bare scalar, an
+array, or an empty string that code silently sent **no correlation ID at all** — so the receiver
+had nothing to reply to and the sender waited out its whole timeout with no error anywhere.
+`TestSignalEnvelopeRoundTripsAnyPayload` covers those shapes.
+
+The decoder requires **exactly** the two keys with a non-empty address, because auto-stripping
+offers every inbound payload to it: an over-matching decoder would hand a receiver a truncated
+payload plus an address pointing at no promise. `TestSignalEnvelopeDoesNotMisreadAnOrdinaryPayload`
+is the negative control, and it earns its place — deleting the key-count check alone makes
+`{"cleat_reply_to":"p1","payload":"x","extra":1}` read as an envelope, silently discarding
+`extra`. It also covers a payload that merely *mentions* the key, which is this file's recurring
+lesson: a text match cannot tell a thing from a sentence about the thing. The discriminator is
+the object's shape, not the presence of a string.
+
+#### What the guards caught, in the direction that matters
+
+Two guards from #820/#823 failed on this change, both on their **second** direction — the one
+that reports a check no longer describing anything:
+
+  * `TestEveryClosureBackedMethodIsWiredOrTracked` reported `unwiredClosureMethods` as having two
+    entries that no longer describe an unwired method, and named both. The list is now empty.
+    Its own comment predicted this: *"delete this entry when 3.220 lands."*
+  * `TestEveryCompositeHostCallHasAnImportRow` reported all four new call edges —
+    `SendSignalAndWait → CreatePromise / SignalWorkflow / AwaitPromise` and
+    `ReplyToSignal → ResolvePromise` — as reaching imports no `compositeRequires` row granted.
+    Without those rows a guest calling only `SendSignalAndWait` would compile with the imports
+    missing, which is §3.234's defect (`h.NowMs()` → epoch 0) exactly.
+
+Neither is a failure this change would have found by testing; both were found by a guard failing
+because its exemption stopped being true. That is the case for writing the remedy into the
+failure message.
+
+#### A stale mock caught on the way
+
+`cleattest`'s `resolvePromiseImpl` returned nil unconditionally, under a comment reading *"Matches
+the engine: engine/promises.go logs rather than returns a store error, and the store's UPDATE
+matching no rows is not an error in SQL. A harness that failed here would let a test assert a
+failure mode production cannot produce."* Both halves were true when written; **#818 made the
+"failure mode production cannot produce" the documented one**, and `engine/promises.go:280` turns
+any store error into `packSimpleResult(1, 0)`. The mock was left more permissive than production,
+held there by a test named `TestResolvePromise_UnknownIDIsNotAnError`. Both are inverted, and the
+public `TestEnv.ResolvePromise` driver keeps the no-op contract with a paired test saying so, so
+the two paths cannot be confused again. `cleat/embedded` had no way to settle a promise at all —
+`CreatePromise` and `AwaitPromise` and nothing else — so a promise created there could only ever
+time out; `ResolvePromise`/`RejectPromise` are now wired.
+
+This is the §3.218 shape once more: my own fix changed the engine, and the mock that models the
+engine was not brought along. It surfaced only because a reply address became a promise ID, which
+made "a stale reply address" and "an unknown promise" the same case.
+
+#### Not done here
+
+The two host calls `cleat_send_signal_and_wait` and `cleat_reply_to_signal` are now dead on the Go
+path but **still exported by the engine and still imported by the Rust, Java, AssemblyScript and
+Python SDKs**. Removing them is a separate change with the §3.216 shape (SDK imports first, then
+the engine export — a module importing a name the engine does not export fails at
+instantiation, not at the call). Until then the ABI is unchanged and those four SDKs keep the
+inert behaviour described above.
 
 ### 3.221 Every child result was lost to a brace scan that did not model strings — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
 
@@ -6125,13 +6239,61 @@ used pulls in `{"cleat_now", "Now"}`, and the emitted `Now` field is what popula
 Verified by compiling: `cleat_now` imported, `Now` field emitted. Falsified by removing the row:
 red with `imports wired: []`.
 
-## The guard this wants, and what blocks it
+## The guard this wants — written, and its blocker since cleared
 
 The rule above — *every method invoking a closure field must be named by a table* — is mechanical
-and would have caught this. It cannot be written today because it would be **red on
-`ReplyToSignal` and `SendSignalAndWait`**, which are genuinely unwired and blocked on §3.220's
-reply-protocol decision. Recorded here so it can be added the moment that lands, rather than
-discovered again.
+and would have caught this. It shipped as `TestEveryClosureBackedMethodIsWiredOrTracked` (#823)
+with the two methods it could not yet be green on, `ReplyToSignal` and `SendSignalAndWait`,
+carried in an `unwiredClosureMethods` map whose entries read *"delete this entry when 3.220
+lands."*
+
+**3.220 landed on 2026-09-06 and the guard collected on that promise itself.** Both methods became
+composites over promises, stopped touching a closure field, and the guard went red — not on a new
+defect, but on its own exemptions no longer describing anything, naming both and saying "delete
+them". The list is now empty. The list-may-only-shrink property is what turned a note-to-self into
+a check that reported its own obsolescence, and it is the argument for writing the remedy into a
+failure message rather than into a comment.
+
+### 3.235 `cleattest`'s `AwaitPromise` cannot observe a promise anyone else resolves — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+
+Found while landing §3.220, which is what makes it matter: once a reply address is a promise ID,
+"can a test see a promise resolved by someone else" and "can a test see a request/reply round
+trip" are the same question.
+
+`TestEnv.awaitPromiseImpl` (`cleat/cleattest/cleattest.go:1415`) reads the promise's status once.
+Resolved or rejected, it returns it; **pending, it advances the mock clock by the whole timeout
+and returns `timedOut = true` immediately.** It never waits. So a promise that is pending at the
+instant of the call can never be observed resolving, no matter what any other goroutine does.
+
+    grep -n -A4 'Pending -- advance time to simulate timeout' cleat/cleattest/cleattest.go
+
+The consequence is narrow and total: in `cleattest`, `SendSignalAndWait` **always** times out. The
+composite creates the promise, sends the signal, and awaits — and the await returns pending before
+anything could possibly reply. `cleat/embedded` has the same shape at `runner.go:614` and is
+single-threaded besides, so the same holds there.
+
+**This is not a regression from §3.220, and it is important to say why.** The old `cleattest`
+implementation did support a concurrent reply, because it used a Go channel and a real `select`
+rather than the promise machinery — so the test that covered it spun up a goroutine and worked.
+But that implementation existed **only** in `cleattest`: the engine's host call was inert and
+`embedded` returned a canned string, so what the goroutine test proved was a property of the test
+double alone. §3.220 traded a round trip that worked in exactly one environment and nowhere else
+for one that works in production and is only partly assertable in the harness. That is the right
+trade and it is still a gap.
+
+What is asserted today, in `cleattest` and `embedded` both: the outgoing signal carries a reply
+address, the receiver sees the payload byte-identical, replying to that address settles the
+promise, and a one-way `SignalWorkflow` carries no address. What is **not** asserted anywhere:
+the sender waking up with the reply. That last hop is engine-only and currently has no test.
+
+The fix is to make `awaitPromiseImpl` genuinely wait — resolved-or-deadline rather than
+status-at-entry. It is deliberately not done in §3.220's change because the blast radius needs its
+own measurement: every existing test that awaits a pending promise currently returns instantly,
+and a naive "block for the requested timeout" would make a suite that passes `7*24*time.Hour`
+hang. A bounded real-time wait (resolve wins immediately; a short ceiling, not the simulated
+timeout, decides the miss) is the likely shape, but the ceiling has to be chosen against a count
+of the tests that hit this path, not guessed.
+
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 

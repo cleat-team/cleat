@@ -1,7 +1,6 @@
 package cleattest
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -369,57 +368,77 @@ func TestHandleUpdateWithoutHandler(t *testing.T) {
 // 2d: Signal Tests
 // ---------------------------------------------------------------------------
 
-func TestSendSignalAndWaitWithReply(t *testing.T) {
+// TestSendSignalAndWaitDeliversAReplyAddressAndTheOriginalPayload asserts the
+// three things the request/reply envelope has to get right: the receiver sees
+// the caller's payload EXACTLY as sent, it gets a reply address without having
+// to parse one out of that payload, and replying to the address settles the
+// promise the sender is suspended on.
+//
+// What it replaces asserted an "_correlation_id" key spliced into the payload
+// object by cleattest's own SendSignalAndWait -- an implementation that
+// existed nowhere else. The engine's host call was inert and the embedded
+// runner returned a canned response without waiting, so this test passed
+// against behaviour no workflow could ever get in production
+// (IMPROVEMENT-PLAN 3.220).
+//
+// It cannot assert the SENDER waking, because cleattest's AwaitPromise
+// returns immediately for a pending promise instead of suspending, so a
+// resolution from another goroutine is never observed. That is a gap in the
+// test environment rather than in the protocol; see IMPROVEMENT-PLAN 3.235.
+func TestSendSignalAndWaitDeliversAReplyAddressAndTheOriginalPayload(t *testing.T) {
 	env := NewTestEnv()
 
-	type signalResult struct {
-		resp string
-		err  error
-	}
-	resultCh := make(chan signalResult)
-
-	go func() {
-		resp, err := env.H().SendSignalAndWait("target", "sig", `{"key":"val"}`, 5*time.Second)
-		resultCh <- signalResult{resp, err}
-	}()
-
-	// Spin until the signal is available in the pending queue.
-	var payload string
-	for i := 0; i < 100; i++ {
-		var found bool
-		payload, found, _ = env.H().PollSignal("sig")
-		if found {
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	if payload == "" {
-		t.Fatal("signal not delivered within timeout")
+	if _, err := env.H().SendSignalAndWait("target", "sig", `{"key":"val"}`, 5*time.Second); err == nil {
+		t.Fatal("expected a timeout error: nothing replied to the signal")
 	}
 
-	// Parse the correlation ID embedded by sendSignalAndWaitImpl.
-	var sp struct {
-		CorrelationID string `json:"_correlation_id"`
+	// cleattest loops a sent signal back onto the same env's queue, so the
+	// envelope the target would have received is observable from here.
+	sig := env.H().PollSignals([]string{"sig"})
+	if sig.TimedOut {
+		t.Fatal("the signal was never delivered")
 	}
-	if err := json.Unmarshal([]byte(payload), &sp); err != nil {
-		t.Fatalf("failed to parse signal payload: %v", err)
+	if sig.Payload != `{"key":"val"}` {
+		t.Fatalf("the receiver must see the payload as sent, got %q", sig.Payload)
 	}
-	if sp.CorrelationID == "" {
-		t.Fatal("expected correlation ID in signal payload")
+	if sig.ReplyTo == "" {
+		t.Fatal("expected a reply address on a signal sent with SendSignalAndWait")
 	}
 
-	// Reply through the HostCalls interface.
-	err := env.H().ReplyToSignal(sp.CorrelationID, "reply-response")
-	if err != nil {
+	if err := env.H().ReplyToSignal(sig.ReplyTo, "reply-response"); err != nil {
 		t.Fatalf("ReplyToSignal failed: %v", err)
 	}
-
-	result := <-resultCh
-	if result.err != nil {
-		t.Fatalf("SendSignalAndWait failed: %v", result.err)
+	got, timedOut, err := env.H().AwaitPromise(sig.ReplyTo, time.Second)
+	if err != nil {
+		t.Fatalf("AwaitPromise after the reply: %v", err)
 	}
-	if result.resp != "reply-response" {
-		t.Fatalf("expected %q, got %q", "reply-response", result.resp)
+	if timedOut {
+		t.Fatal("the reply promise is still pending after ReplyToSignal")
+	}
+	if got != "reply-response" {
+		t.Fatalf("expected %q, got %q", "reply-response", got)
+	}
+}
+
+// TestSignalWorkflowCarriesNoReplyAddress is the negative control for the test
+// above. A one-way signal must leave ReplyTo empty: if every signal looked
+// replyable, a receiver could not tell a request that wants an answer from a
+// notification, and would reply into a promise nobody is awaiting.
+func TestSignalWorkflowCarriesNoReplyAddress(t *testing.T) {
+	env := NewTestEnv()
+
+	if err := env.H().SignalWorkflow("target", "sig", `{"key":"val"}`); err != nil {
+		t.Fatalf("SignalWorkflow failed: %v", err)
+	}
+	sig := env.H().PollSignals([]string{"sig"})
+	if sig.TimedOut {
+		t.Fatal("the signal was never delivered")
+	}
+	if sig.ReplyTo != "" {
+		t.Fatalf("a one-way signal must carry no reply address, got %q", sig.ReplyTo)
+	}
+	if sig.Payload != `{"key":"val"}` {
+		t.Fatalf("a one-way signal's payload must pass through unchanged, got %q", sig.Payload)
 	}
 }
 
@@ -1182,18 +1201,42 @@ func TestRejectPromise_FromInsideTheWorkflow(t *testing.T) {
 	}
 }
 
-func TestResolvePromise_UnknownIDIsNotAnError(t *testing.T) {
+// TestSettlingAnUnknownPromiseFromTheWorkflowIsAnError is the inverse of what
+// this test asserted until 2026-09-06, and the inversion is the point.
+//
+// It read "UnknownIDIsNotAnError", justified by: "Matches the engine:
+// engine/promises.go logs rather than returns a store error, and the store's
+// UPDATE matching no rows is not an error in SQL." Both halves were true when
+// written and neither is now. #818 made a settle matching no row return
+// ErrPromiseNotFound, and engine/promises.go:280 turns any store error into
+// packSimpleResult(1, 0) -- a non-zero code the adapter raises. So the
+// harness had become MORE PERMISSIVE than production, and this test was the
+// thing holding it there.
+//
+// It matters beyond promises because SendSignalAndWait's reply address is a
+// promise ID (IMPROVEMENT-PLAN 3.220): a stale or wrong reply address and an
+// unknown promise are now the same case, and silently succeeding on it would
+// leave the sender suspended until its timeout with no error anywhere.
+func TestSettlingAnUnknownPromiseFromTheWorkflowIsAnError(t *testing.T) {
 	env := NewTestEnv()
-	// Matches the engine: engine/promises.go logs rather than returns a store
-	// error, and the store's UPDATE matching no rows is not an error in SQL.
-	// A harness that failed here would let a test assert a failure mode
-	// production cannot produce.
-	if err := env.H().ResolvePromise("no-such-promise", "v"); err != nil {
-		t.Errorf("resolving an unknown promise returned %v, want nil", err)
+	if err := env.H().ResolvePromise("no-such-promise", "v"); err == nil {
+		t.Error("resolving an unknown promise returned nil, want a not-found error")
 	}
-	if err := env.H().RejectPromise("no-such-promise", "e"); err != nil {
-		t.Errorf("rejecting an unknown promise returned %v, want nil", err)
+	if err := env.H().RejectPromise("no-such-promise", "e"); err == nil {
+		t.Error("rejecting an unknown promise returned nil, want a not-found error")
 	}
+}
+
+// TestSettlingAnUnknownPromiseFromTheDRIVERIsNotAnError is the counterpart:
+// TestEnv.ResolvePromise is the out-of-band handle a test uses to steer a
+// workflow, not a call the workflow makes, and it stays a no-op so a test can
+// settle speculatively. The pair exists so the two paths cannot be confused
+// for each other again -- they go through one settlePromise and differ only
+// in whether they report the miss.
+func TestSettlingAnUnknownPromiseFromTheDriverIsNotAnError(t *testing.T) {
+	env := NewTestEnv()
+	env.ResolvePromise("no-such-promise", "v")
+	env.RejectPromise("no-such-promise", "e")
 }
 
 func TestContinueAsNewWithVersion_RecordsInputAndVersion(t *testing.T) {

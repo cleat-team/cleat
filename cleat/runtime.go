@@ -728,8 +728,6 @@ type HostCallsImpl struct {
 	pluginCallStreaming    func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
 	durableSend            func(service, operation, requestJSON string) error
 	scheduleInvoke         func(service, operation, requestJSON string, delayMs int64) error
-	sendSignalAndWait      func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
-	replyToSignal          func(correlationID, response string) error
 	awaitSignalsWithQuorum func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
 	signalWorkflow         func(targetRunID, signalName, payload string) error
 	scheduleCron           func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
@@ -799,8 +797,6 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		pluginCallStreaming:           opts.PluginCallStreaming,
 		durableSend:                   opts.DurableSend,
 		scheduleInvoke:                opts.ScheduleInvoke,
-		sendSignalAndWait:             opts.SendSignalAndWait,
-		replyToSignal:                 opts.ReplyToSignal,
 		awaitSignalsWithQuorum:        opts.AwaitSignalsWithQuorum,
 		signalWorkflow:                opts.SignalWorkflow,
 		scheduleCron:                  opts.ScheduleCron,
@@ -884,8 +880,6 @@ type HostCallsOptions struct {
 	PluginCallStreaming           func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
 	DurableSend                   func(service, operation, requestJSON string) error
 	ScheduleInvoke                func(service, operation, requestJSON string, delayMs int64) error
-	SendSignalAndWait             func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
-	ReplyToSignal                 func(correlationID, response string) error
 	AwaitSignalsWithQuorum        func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
 	SignalWorkflow                func(targetRunID, signalName, payload string) error
 	ScheduleCron                  func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
