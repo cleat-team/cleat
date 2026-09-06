@@ -18,6 +18,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID
 
@@ -47,6 +48,18 @@ class CleatCallbackHandler:
         self._llm_starts: dict[str, int] = {}
         self._tool_starts: dict[str, int] = {}
 
+    def _record(self, key: str, value: Any) -> None:
+        """Publish one trace record as queryable state.
+
+        These callbacks are write-only -- nothing here ever reads back -- so
+        set_query_state is the right mechanism and always was. They used the
+        durable-state family until it was removed (IMPROVEMENT-PLAN 3.216);
+        that family was per-run and equivalent to a local variable, so it
+        never gave these records the one property they need, which is being
+        readable by something outside the workflow.
+        """
+        self.h.set_query_state(key, json.dumps(value, default=str))
+
     # ------------------------------------------------------------------
     # LLM callbacks
     # ------------------------------------------------------------------
@@ -67,7 +80,7 @@ class CleatCallbackHandler:
         rid = str(run_id) if run_id else ""
         self._llm_starts[rid] = self.h.now()
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_llm_start",
             {
                 "class": serialized.get(
@@ -105,7 +118,7 @@ class CleatCallbackHandler:
         # Extract response info duck-typed (works with langchain and openai)
         resp_info = self._extract_llm_response(response)
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_llm_end",
             {
                 "run_id": rid,
@@ -127,7 +140,7 @@ class CleatCallbackHandler:
         rid = str(run_id) if run_id else ""
         self._llm_starts.pop(rid, None)
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_llm_error",
             {"run_id": rid, "error": str(error)},
         )
@@ -168,7 +181,7 @@ class CleatCallbackHandler:
 
         tool_name = serialized.get("name", "unknown")
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_tool_start",
             {
                 "tool": tool_name,
@@ -195,7 +208,7 @@ class CleatCallbackHandler:
 
         output_str = str(output)[:2000] if output else ""
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_tool_end",
             {
                 "run_id": rid,
@@ -217,7 +230,7 @@ class CleatCallbackHandler:
         rid = str(run_id) if run_id else ""
         self._tool_starts.pop(rid, None)
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_tool_error",
             {"run_id": rid, "error": str(error)},
         )
@@ -304,7 +317,7 @@ class CleatCallbackHandler:
         tool_input = getattr(action, "tool_input", "")
         log = getattr(action, "log", str(action))
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_agent_action",
             {
                 "tool": str(tool),
@@ -329,7 +342,7 @@ class CleatCallbackHandler:
 
         output = return_values.get("output", log)
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_agent_finish",
             {"output": str(output)[:5000], "step": self.step_counter},
         )
@@ -354,7 +367,7 @@ class CleatCallbackHandler:
         """Called when a retriever starts."""
         self.step_counter += 1
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_retriever_start",
             {
                 "query": query[:1000],
@@ -376,7 +389,7 @@ class CleatCallbackHandler:
         except TypeError:
             doc_count = 1
 
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_retriever_end",
             {"document_count": doc_count},
         )
@@ -389,7 +402,7 @@ class CleatCallbackHandler:
         **kwargs: Any,
     ) -> None:
         """Called when a retriever errors."""
-        self.h.set_state(
+        self._record(
             f"langchain_step_{self.step_counter}_retriever_error",
             {"error": str(error)},
         )

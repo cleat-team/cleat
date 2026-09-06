@@ -88,12 +88,6 @@ function exerciseEveryHostCall(h: HostCalls): void {
 
   // ---- state ----
   h.setQueryState("k", "v");
-  h.setState("k", "v");
-  h.getState("k");
-  h.deleteState("k");
-  h.incrState("k", 1);
-  h.hasState("k");
-  h.listState("pre");
 
   // ---- locks ----
   h.acquireLock("k", 1);

@@ -1800,8 +1800,6 @@ func TestClosure_SimpleStringIn(t *testing.T) {
 	}{
 		{"cleat_release_lock", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64})},
 		{"cleat_register_update_handler", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64})},
-		{"cleat_delete_state", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64})},
-		{"cleat_has_state", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64})},
 		{"cleat_register_query_handler", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64})},
 	}
 
@@ -1810,12 +1808,6 @@ func TestClosure_SimpleStringIn(t *testing.T) {
 			return err
 		}
 		if err := b.registerCleatRegisterUpdateHandler(l); err != nil {
-			return err
-		}
-		if err := b.registerCleatDeleteState(l); err != nil {
-			return err
-		}
-		if err := b.registerCleatHasState(l); err != nil {
 			return err
 		}
 		return b.registerCleatRegisterQueryHandler(l)
@@ -1828,8 +1820,6 @@ func TestClosure_SimpleStringIn(t *testing.T) {
 	}{
 		{"test_cleat_release_lock", "cleat_release_lock", "ReleaseLock"},
 		{"test_cleat_register_update_handler", "cleat_register_update_handler", "RegisterUpdateHandler"},
-		{"test_cleat_delete_state", "cleat_delete_state", "DeleteState"},
-		{"test_cleat_has_state", "cleat_has_state", "HasState"},
 		{"test_cleat_register_query_handler", "cleat_register_query_handler", "RegisterQueryHandler"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1849,7 +1839,6 @@ func TestClosure_TwoStringIn(t *testing.T) {
 		name string
 		ft   []byte
 	}{
-		{"cleat_set_state", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})},
 		{"cleat_resolve_promise", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})},
 		{"cleat_reject_promise", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})},
 		{"set_query_state", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})},
@@ -1858,9 +1847,6 @@ func TestClosure_TwoStringIn(t *testing.T) {
 	}
 
 	s := newClosureSetup(t, imports, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
-		if err := b.registerCleatSetState(l); err != nil {
-			return err
-		}
 		if err := b.registerCleatResolvePromise(l); err != nil {
 			return err
 		}
@@ -1882,7 +1868,6 @@ func TestClosure_TwoStringIn(t *testing.T) {
 		second string
 		method string
 	}{
-		{"test_cleat_set_state", "mykey", "myval", "SetState"},
 		{"test_cleat_resolve_promise", "promise-1", "resolved", "ResolvePromise"},
 		{"test_cleat_reject_promise", "promise-2", "error-msg", "RejectPromise"},
 		{"test_set_query_state", "qk", "qv", "SetQueryState"},
@@ -1947,14 +1932,13 @@ func TestClosure_StringAndI64(t *testing.T) {
 		ft   []byte
 	}{
 		{"cleat_acquire_lock", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI64}, []byte{wasmValI64})},
-		{"cleat_incr_state", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI64}, []byte{wasmValI64})},
 	}
 
 	s := newClosureSetup(t, imports, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
 		if err := b.registerCleatAcquireLock(l); err != nil {
 			return err
 		}
-		return b.registerCleatIncrState(l)
+		return nil
 	})
 
 	t.Run("cleat_acquire_lock", func(t *testing.T) {
@@ -1964,14 +1948,6 @@ func TestClosure_StringAndI64(t *testing.T) {
 			t.Errorf("got %v, want 0", got)
 		}
 		s.expectCall(t, "AcquireLock")
-	})
-	t.Run("cleat_incr_state", func(t *testing.T) {
-		s.writeString(60, "counter-key")
-		got := s.call(t, "test_cleat_incr_state", i32(60), i32(11), int64(5))
-		if got != 0 {
-			t.Errorf("got %v, want 0", got)
-		}
-		s.expectCall(t, "IncrState")
 	})
 }
 
@@ -2127,42 +2103,6 @@ func TestClosure_SideEffect(t *testing.T) {
 		t.Errorf("got %v, want 0", got)
 	}
 	s.expectCall(t, "SideEffect")
-}
-
-func TestClosure_GetState(t *testing.T) {
-	// cleat_get_state: (keyPtr,keyLen, valuePtr,valueMaxLen) -> i64
-	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
-	s := newClosureSetup(t, []struct {
-		name string
-		ft   []byte
-	}{{"cleat_get_state", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
-		return b.registerCleatGetState(l)
-	})
-
-	s.writeString(100, "my-key")
-	got := s.call(t, "test_cleat_get_state", i32(100), i32(6), i32(200), i32(256))
-	if got != 0 {
-		t.Errorf("got %v, want 0", got)
-	}
-	s.expectCall(t, "GetState")
-}
-
-func TestClosure_ListState(t *testing.T) {
-	// cleat_list_state: (prefixPtr,prefixLen, keysPtr,keysMaxLen) -> i64
-	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
-	s := newClosureSetup(t, []struct {
-		name string
-		ft   []byte
-	}{{"cleat_list_state", ft}}, func(b *wasmtimeBackend, l *wasmtime.Linker) error {
-		return b.registerCleatListState(l)
-	})
-
-	s.writeString(100, "prefix-")
-	got := s.call(t, "test_cleat_list_state", i32(100), i32(7), i32(200), i32(512))
-	if got != 0 {
-		t.Errorf("got %v, want 0", got)
-	}
-	s.expectCall(t, "ListState")
 }
 
 func TestClosure_Fetch(t *testing.T) {
@@ -2723,18 +2663,9 @@ func TestClosure_ErrorPaths(t *testing.T) {
 		{"cleat_register_update_handler", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64}),
 			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatRegisterUpdateHandler(l) },
 			[]any{i32(0), i32(0)}},
-		{"cleat_delete_state", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64}),
-			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatDeleteState(l) },
-			[]any{i32(0), i32(0)}},
-		{"cleat_has_state", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64}),
-			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatHasState(l) },
-			[]any{i32(0), i32(0)}},
 		{"cleat_register_query_handler", wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64}),
 			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatRegisterQueryHandler(l) },
 			[]any{i32(0), i32(0)}},
-		{"cleat_incr_state", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI64}, []byte{wasmValI64}),
-			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatIncrState(l) },
-			[]any{i32(0), i32(0), int64(0)}},
 		{"cleat_acquire_lock", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI64}, []byte{wasmValI64}),
 			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatAcquireLock(l) },
 			[]any{i32(0), i32(0), int64(0)}},
@@ -2743,9 +2674,6 @@ func TestClosure_ErrorPaths(t *testing.T) {
 			[]any{i32(0), i32(0), i32(0), i32(0)}},
 		{"cleat_reject_promise", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
 			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatRejectPromise(l) },
-			[]any{i32(0), i32(0), i32(0), i32(0)}},
-		{"cleat_set_state", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
-			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatSetState(l) },
 			[]any{i32(0), i32(0), i32(0), i32(0)}},
 		{"cleat_run_detached", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
 			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatRunDetached(l) },
@@ -2802,9 +2730,6 @@ func TestClosure_MoreErrorPaths(t *testing.T) {
 			[]any{i32(0), i32(0), i32(0), i32(0)}},
 		{"cleat_await_any_child", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
 			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatAwaitAnyChild(l) },
-			[]any{i32(0), i32(0), i32(0), i32(0)}},
-		{"cleat_get_state", wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64}),
-			func(b *wasmtimeBackend, l *wasmtime.Linker) error { return b.registerCleatGetState(l) },
 			[]any{i32(0), i32(0), i32(0), i32(0)}},
 		// cleat_list_state is deliberately absent: a zero-length prefix is a
 		// legitimate call meaning "every key", not a bad parameter. This entry

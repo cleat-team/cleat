@@ -805,12 +805,6 @@ class TestHostCallsMethodExistence:
         "await_all_children",
         # State
         "set_query_state",
-        "set_state",
-        "get_state",
-        "delete_state",
-        "incr_state",
-        "has_state",
-        "list_state",
         # Promises
         "create_promise",
         "await_promise",
@@ -897,33 +891,7 @@ class TestHostCallsNewMethods:
 
     # --- has_state ---
 
-    def test_has_state_delegates(self, host):
-        """``has_state`` delegates to ``call('state', 'has', ...)``."""
-        with mock.patch.object(host, "call", return_value="true") as mock_call:
-            result = host.has_state("my_key")
-            mock_call.assert_called_once_with("state", "has", {"key": "my_key"})
-            assert result is True
-
-    def test_has_state_false(self, host):
-        """``has_state`` returns ``False`` when the key does not exist."""
-        with mock.patch.object(host, "call", return_value="false"):
-            assert host.has_state("missing") is False
-
     # --- list_state ---
-
-    def test_list_state_delegates(self, host):
-        """``list_state`` delegates to ``call('state', 'list', ...)``."""
-        with mock.patch.object(host, "call", return_value='["k1", "k2"]') as mock_call:
-            result = host.list_state("prefix_")
-            mock_call.assert_called_once_with("state", "list", {"prefix": "prefix_"})
-            assert result == ["k1", "k2"]
-
-    def test_list_state_empty_prefix(self, host):
-        """``list_state`` with an empty prefix passes ``{"prefix": ""}``."""
-        with mock.patch.object(host, "call", return_value="[]") as mock_call:
-            result = host.list_state()
-            mock_call.assert_called_once_with("state", "list", {"prefix": ""})
-            assert result == []
 
     # --- cleat_fetch_json ---
 

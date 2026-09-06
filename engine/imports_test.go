@@ -1191,51 +1191,6 @@ func TestHostFunc_CleatUUID(t *testing.T) {
 	}
 }
 
-func TestHostFunc_CleatSetState(t *testing.T) {
-	handler := &stateRecorder{}
-	h := newTestHostFuncHarness(t, "cleat_set_state", []byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, handler)
-
-	key := "my_state_key"
-	val := `{"count":42}`
-	if !h.mem.Write(0, []byte(key)) {
-		t.Fatal("write key to memory failed")
-	}
-	if !h.mem.Write(256, []byte(val)) {
-		t.Fatal("write value to memory failed")
-	}
-
-	result, err := h.call(0, uint64(len(key)), 256, uint64(len(val)))
-	if err != nil {
-		t.Fatalf("call cleat_set_state: %v", err)
-	}
-	if result == errBadParam {
-		t.Error("got errBadParam")
-	}
-	if handler.key != key {
-		t.Errorf("state key = %q, want %q", handler.key, key)
-	}
-	if handler.value != val {
-		t.Errorf("state value = %q, want %q", handler.value, val)
-	}
-}
-
-func TestHostFunc_CleatGetState(t *testing.T) {
-	h := newTestHostFuncHarness(t, "cleat_get_state", []byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, &stubHostHandler{})
-
-	key := "my_state_key"
-	if !h.mem.Write(0, []byte(key)) {
-		t.Fatal("write key to memory failed")
-	}
-
-	result, err := h.call(0, uint64(len(key)), 256, 100)
-	if err != nil {
-		t.Fatalf("call cleat_get_state: %v", err)
-	}
-	if result == errBadParam {
-		t.Error("got errBadParam")
-	}
-}
-
 func TestHostFunc_CleatSetQueryState(t *testing.T) {
 	handler := &queryStateRecorder{}
 	h := newTestHostFuncHarness(t, "set_query_state", []byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, handler)
@@ -1556,27 +1511,6 @@ func TestHostFunc_CleatLog_EmptyMsg(t *testing.T) {
 	}
 	if result == errBadParam {
 		t.Error("cleat_log refused an empty message")
-	}
-}
-
-func TestHostFunc_CleatSetState_InvalidKey(t *testing.T) {
-	h := newTestHostFuncHarness(t, "cleat_set_state", []byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, &stubHostHandler{})
-
-	// Invalid key (contains a space) should fail readServiceName -> errBadParam
-	invalidKey := "bad key with spaces"
-	if !h.mem.Write(0, []byte(invalidKey)) {
-		t.Fatal("write key to memory failed")
-	}
-	if !h.mem.Write(256, []byte("value")) {
-		t.Fatal("write value to memory failed")
-	}
-
-	result, err := h.call(0, uint64(len(invalidKey)), 256, 5)
-	if err != nil {
-		t.Fatalf("call cleat_set_state invalid: %v", err)
-	}
-	if result != errBadParam {
-		t.Errorf("expected errBadParam, got %x", result)
 	}
 }
 

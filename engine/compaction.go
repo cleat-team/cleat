@@ -26,22 +26,31 @@ const DefaultMaxCompactedEvents = 10000
 // Event type codes for compact JSONB storage. Short int codes minimize
 // storage size when a workflow has thousands of compacted events.
 const (
-	EventCodeCall                  = 0
-	EventCodeSleep                 = 1
-	EventCodeAwaitSignals          = 2
-	EventCodeSignalReceived        = 3
-	EventCodeDefer                 = 4
-	EventCodeChildWorkflow         = 5
-	EventCodeAwaitChild            = 6
-	EventCodeContinueAsNew         = 7
-	EventCodeHeartbeat             = 8
-	EventCodeAwaitAllChildren      = 9
-	EventCodePluginCall            = 10
-	EventCodeCreatePromise         = 11
-	EventCodeAwaitPromise          = 12
-	EventCodePromiseResolved       = 13
-	EventCodePromiseRejected       = 14
-	EventCodeUpdateHandler         = 15
+	EventCodeCall             = 0
+	EventCodeSleep            = 1
+	EventCodeAwaitSignals     = 2
+	EventCodeSignalReceived   = 3
+	EventCodeDefer            = 4
+	EventCodeChildWorkflow    = 5
+	EventCodeAwaitChild       = 6
+	EventCodeContinueAsNew    = 7
+	EventCodeHeartbeat        = 8
+	EventCodeAwaitAllChildren = 9
+	EventCodePluginCall       = 10
+	EventCodeCreatePromise    = 11
+	EventCodeAwaitPromise     = 12
+	EventCodePromiseResolved  = 13
+	EventCodePromiseRejected  = 14
+	EventCodeUpdateHandler    = 15
+	// RETIRED 2026-09-05 with the durable-state family (IMPROVEMENT-PLAN 3.216).
+	// Nothing produces this event any more -- the six host calls are gone -- but
+	// the code and its decode case below are KEPT, and 16 must never be reused.
+	//
+	// The decoder has no default case: an unknown code falls through the switch
+	// and yields a record with only the common fields set. So deleting this arm
+	// would make any history recorded before today decode SILENTLY into empty
+	// state records rather than failing loudly. Reserving the number costs a
+	// constant; reusing it would corrupt old histories without a symptom.
 	EventCodeStateMutation         = 16
 	EventCodeRunDetached           = 17
 	EventCodeAcquireLock           = 18

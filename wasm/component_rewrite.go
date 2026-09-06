@@ -82,14 +82,6 @@ var WitToEnvImport = map[string]map[string]string{
 		"get-scope": "cleat_get_scope",
 		"uuid":      "cleat_uuid",
 	},
-	"cleat:host-calls/durable-stream-state": {
-		"set-state":    "cleat_set_state",
-		"get-state":    "cleat_get_state",
-		"delete-state": "cleat_delete_state",
-		"incr-state":   "cleat_incr_state",
-		"has-state":    "cleat_has_state",
-		"list-state":   "cleat_list_state",
-	},
 	"cleat:host-calls/durable-extended-lifecycle": {
 		"continue-as-new-versioned": "cleat_continue_as_new_versioned",
 		"side-effect":               "cleat_side_effect",

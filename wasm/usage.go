@@ -89,10 +89,6 @@ var hostFunctions = []HostFunction{
 	{"cleat_min_version", "MinVersion"},
 	// State
 	{"set_query_state", "SetQueryState"},
-	// State mutation methods (all map to set_query_state import)
-	{"set_query_state", "SetState"},
-	{"set_query_state", "DeleteState"},
-	{"set_query_state", "IncrState"},
 	// Promises
 	{"cleat_create_promise", "CreatePromise"},
 	{"cleat_await_promise", "AwaitPromise"},

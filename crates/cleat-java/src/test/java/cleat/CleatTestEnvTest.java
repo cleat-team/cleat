@@ -354,21 +354,6 @@ class CleatTestEnvTest {
     // 13. State operations via bridge
     // ======================================================================
 
-    @Test
-    void testStateOperations() {
-        env.execute(h -> {
-            h.setState("key1", "val1");
-            return "";
-        });
-
-        String result = env.execute(h -> {
-            CleatResult<String> getResult = h.getState("key1");
-            return getResult.isOk() ? getResult.getValue() : "error";
-        });
-
-        assertEquals("val1", result,
-            "getState should return the value set by setState");
-    }
 
     // ======================================================================
     // 14. Promise operations
@@ -677,63 +662,14 @@ class CleatTestEnvTest {
     // There is no registerQueryHandler test here (removed 2026-08-09; see
     // docs/determinism.md, "Why there is no RegisterQueryHandler").
 
-    // ======================================================================
-    // 31. Durable state (setState / getState / deleteState / hasState)
-    // ======================================================================
 
-    @Test
-    void testDurableStateCRUD() {
-        env.execute(h -> {
-            h.setState("key", "value");
-            return "";
-        });
 
-        String result = env.execute(h -> {
-            boolean has = h.hasState("key");
-            CleatResult<String> getResult = h.getState("key");
-            h.deleteState("key");
-            boolean hasAfterDelete = h.hasState("key");
-            return has + "|" + getResult.getValue() + "|" + hasAfterDelete;
-        });
 
-        assertEquals("true|value|false", result,
-            "State CRUD operations should work through the bridge");
-    }
-
-    // ======================================================================
-    // 32. incrState
-    // ======================================================================
-
-    @Test
-    void testIncrState() {
-        Long result = env.execute(h -> {
-            CleatResult<Long> r1 = h.incrState("counter", 5);
-            return r1.getValue();
-        });
-
-        assertEquals(5L, result.longValue(),
-            "incrState should return the incremented value");
-    }
 
     // ======================================================================
     // 33. List state
     // ======================================================================
 
-    @Test
-    void testListState() {
-        env.execute(h -> {
-            h.setState("alpha", "1");
-            h.setState("beta", "2");
-            return "";
-        });
-
-        String result = env.execute(h -> h.listState("al").getValue());
-
-        assertTrue(result.contains("alpha"),
-            "listState('al') should include 'alpha', but got: [" + result + "]");
-        assertFalse(result.contains("beta"),
-            "listState('al') should NOT include 'beta', but got: [" + result + "]");
-    }
 
     // ======================================================================
     // 34. HTTP fetch

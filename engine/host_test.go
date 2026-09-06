@@ -1373,7 +1373,6 @@ func newTestExecSession() *execSession {
 		engine:     NewEngine(nil, nil),
 		nowMs:      1000000,
 		deferrals:  make(map[string]string),
-		stateStore: make(map[string]string),
 		queryState: make(map[string]string),
 	}
 }

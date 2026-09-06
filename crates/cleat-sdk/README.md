@@ -137,8 +137,6 @@ The `HostCalls` struct wraps all WASM imports from the `"env"` module.
 
 | Method | Description |
 |--------|-------------|
-| `set_state` / `get_state` / `delete_state` | Typed state operations |
-| `incr_state` / `has_state` / `list_state` | Numeric state, existence, prefix listing |
 | `set_query_state` | Set externally-queryable state |
 | `create_promise` / `await_promise` | Durable promise creation and awaiting |
 | `resolve_promise` / `reject_promise` | Promise resolution |

@@ -1240,24 +1240,6 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatRunDetached(linker); err != nil {
 		return err
 	}
-	if err := b.registerCleatSetState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatGetState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatDeleteState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatIncrState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatHasState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatListState(linker); err != nil {
-		return err
-	}
 	if err := b.registerCleatFetch(linker); err != nil {
 		return err
 	}

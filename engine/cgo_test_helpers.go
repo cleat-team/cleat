@@ -230,8 +230,6 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 		5:  b.dispatchCreatePromise,
 		6:  b.dispatchPluginCall,
 		7:  b.dispatchSetScope,
-		8:  b.dispatchGetState,
-		9:  b.dispatchListState,
 		10: b.dispatchPollCancellation,
 		11: b.dispatchWorkflowID,
 		12: b.dispatchRunID,
@@ -246,6 +244,13 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 		22: b.dispatchAwaitPromise,
 		23: b.dispatchPollSignal,
 	}[method]
+	// A missing key yields a nil func value, and calling it segfaults rather
+	// than failing a test. The map has had gaps since the durable-state family
+	// was removed (IMPROVEMENT-PLAN 3.216) and it will have more whenever a
+	// dispatcher goes; an unknown method must be an error, not a crash.
+	if dispatch == nil {
+		return fmt.Errorf("cgotestDispatchStr: no dispatcher for method %d", method)
+	}
 	err := dispatch((*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultPtr), 1)
 	if err != nil {
 		var msg C.wasm_byte_vec_t
@@ -271,10 +276,6 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 		8:  b.dispatchRejectPromise,
 		9:  b.dispatchSetQueryState,
 		10: b.dispatchDurableSend,
-		11: b.dispatchSetState,
-		12: b.dispatchIncrState,
-		13: b.dispatchHasState,
-		14: b.dispatchDeleteState,
 		15: b.dispatchAcquireLock,
 		16: b.dispatchReleaseLock,
 		17: b.dispatchSignalWorkflow,

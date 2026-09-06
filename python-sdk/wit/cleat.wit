@@ -337,17 +337,6 @@ interface durable-scope {
     uuid: func(seed: string) -> string;
 }
 
-/// State operations (Stream R) (ABI 2.37-2.44)
-interface durable-stream-state {
-    set-state: func(key: string, val: string) -> u64;
-    /// Returns the state value string.
-    get-state: func(key: string) -> string;
-    delete-state: func(key: string) -> u64;
-    incr-state: func(key: string, delta: u64) -> u64;
-    has-state: func(key: string) -> u64;
-    /// Returns the list of keys as a JSON array string.
-    list-state: func(prefix: string) -> string;
-}
 
 /// Extended lifecycle (ABI 2.15)
 interface durable-extended-lifecycle {
@@ -428,7 +417,6 @@ world cleat-workflow {
     import plugin;
     import durable-lock;
     import durable-scope;
-    import durable-stream-state;
     import durable-extended-lifecycle;
     import durable-fetch;
     import durable-cron;

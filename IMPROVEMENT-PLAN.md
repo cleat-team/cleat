@@ -4312,7 +4312,13 @@ and Go deliberately omits it, and `tiers.yaml` says nothing either way. The clas
 separates "workflow-facing" from "runtime protocol"; it does not assert that every workflow-facing
 export belongs in every language. That decision is an input to item 4, not an output of it.
 
-### 3.214 Go's state reads never reach the host, and the docs promise they do — 🔴 **OPEN 2026-09-05**; a defect against a written contract, not an undocumented choice (WS-1, 2026-09-05)
+### 3.214 Go's state reads never reach the host, and the docs promise they do — 🟢 **CLOSED 2026-09-05 by §3.216**, which removed the feature rather than repairing it (WS-1, 2026-09-05)
+
+**Resolved by removal, not by repair.** §3.216 deleted the whole state family on the same day: the
+question below — whether the guest-local read was a deliberate scratchpad or a data-loss bug — was
+answered by establishing that a run-scoped key-value API is equivalent to a local variable in every
+SDK, so neither reading justified keeping it. The analysis is kept because the *evidence* is what
+decided the removal, and because the shape it describes recurs.
 
 `HostCallsImpl` in `cleat/runtime_workflow.go` offers `SetState`, `GetState`, `HasState`,
 `IncrState`, `ListState` and `DeleteState`. **None of them is a host binding.**
@@ -4433,6 +4439,127 @@ Found by WS-3 while re-deriving §3.213's Go figure of 35, and confirmed here in
 the mirror of §3.207: there a strict extractor missed generics and **inflated** Rust's coverage;
 here a loose scan of Go method names finds nine methods that exist and would **credit bindings that
 do not**. Anchoring on the import table rather than on method names is what makes 35 correct.
+### 3.216 The durable-state family is removed — 🟢 **DONE 2026-09-05** (WS-1, 2026-09-05)
+
+`cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`
+and `cleat_list_state` are gone, with the `cleat:host-calls/durable-stream-state` component
+interface and every SDK wrapper. This closes §3.214, which asked whether Go's guest-local reads
+were a bug or a design, by removing the feature both readings were about.
+
+**The count is 58 → 52 exports total, of which 49 are `cleat_`-prefixed**, and saying which is not
+pedantry: `plugin_call`, `plugin_call_streaming` and `set_query_state` carry no prefix, so both
+numbers are true and will be quoted interchangeably forever unless a doc commits. A `grep 'cleat_'`
+over this surface undercounts by three, which is the defect that produced §3.213's wrong
+denominator and the blind spot in the runtime parity guard (#759). Flagged here by the
+conformance-port session, which reached 55 where this branch reached 58 and chased the difference
+rather than assuming one of us was wrong.
+
+    grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sort -u | grep -c .   # 52
+    grep -oE '\.Export\("cleat_[^"]+"\)' engine/imports.go | sort -u | grep -c .   # 49
+
+**And the blind spot covers half of the only surface cleat has ever proved in practice.**
+`testdata/clew-lifecycle/workflow.go` is a real workflow from the one workload cleat has carried,
+preserved as test data. It uses **four** host calls out of ~55:
+
+    h.DurableLog       3 sites   -> cleat_log
+    h.SetQueryState    1 site    -> set_query_state      UNPREFIXED
+    h.PluginCall       1 site    -> plugin_call          UNPREFIXED
+    h.SignalWorkflow   1 site
+
+**Two of the four are among the three unprefixed exports.** So "#759's parity guard compared 55 of
+58 names and never saw `plugin_call`" is not an abstract tidiness point — the guard was blind to
+half the calls the only real user actually made. A prefix-derived surface omits three names, and
+those three are not a random three.
+
+Found by the conformance-port session while establishing whether §3.215's signal overwrite was
+hypothetical. **It is not, and the first version of this paragraph named the wrong evidence.** It
+cited `h.SignalWorkflow(parent, "child_done", taskID)` at line 235 of the fixture as the affected
+fan-in. With access to `cleat-team/clew` the same session established that **nothing consumes
+`child_done`** — the parent fans in via `AwaitAllChildren`/`AwaitAnyChild`, so that signal is
+advisory and §3.215 does not hurt it. Recorded rather than quietly replaced, because "the shape is
+present in the code" and "the shape is load-bearing" are different claims and only the second is
+evidence.
+
+The real instances are worse. `workflows/leafphase/workflow.go:404` and
+`workflows/review/workflow.go:452` each run
+
+    received := 0
+    for received < len(pending) {
+        signal := h.AwaitSignals([]string{"agent_result"}, timeout)
+
+— N concurrent tasks, each replying with **one signal under the same name**, counted in and matched
+by a `task_id` the application puts in the payload because it had to solve that problem itself. The
+workflow is careful and correct; the storage layer cannot deliver what it asks for.
+
+See §3.215 for why the consequence is a hang and not only a lost payload.
+
+## The comparison that decided it
+
+| engine | state scoped beyond one workflow? |
+|---|---|
+| **Temporal** | No. Workflow state is local variables made durable by replay. Memo and Search Attributes are per-execution visibility metadata. |
+| **DBOS** | No framework API. Durable state is your own tables inside `@DBOS.transaction`; `setEvent`/`getEvent` is `set_query_state`, which `from-dbos.md:17` maps correctly. |
+| **Restate** | **Yes** — virtual objects have keyed state durable across invocations. |
+
+The repo's own migration guides had already voted. References to the state family:
+`from-restate.md` **6**, `from-temporal.md` **0**, `from-dbos.md` **0**. Only the guide for the one
+engine that has the feature had any use for it.
+
+    for f in docs/migration/from-*.md; do
+      echo "$f $(grep -cE 'get_state|set_state|GetState|SetState' "$f")"; done
+
+## Why a run-scoped key-value API is worse than none
+
+Measured before deciding, not assumed: cleat's state was rebuilt from that run's event history, and
+`s.stateStore` was **never seeded from persistence** — for every SDK, not just Go. So it did not
+persist across `continue_as_new` or between instances for anybody.
+
+**Within a run it was therefore exactly equivalent to a local variable**, because replay
+re-executes the workflow and rebuilds either one. That equivalence is not a theory: it is why a Go
+guest-local map passed a set-then-get probe indistinguishably from the real host calls (§3.214),
+and why `TestHostCallsImpl_StateOperations` was green for as long as it existed.
+
+So the API offered nothing a variable did not, while carrying Restate's names and shape. A reader
+coming from Restate would find `set_state`/`get_state` where they expected keyed cross-invocation
+state and get a per-run scratchpad, with no doc saying so. **That is confusion with no benefit, and
+it is a worse failure mode than absence** — absence fails at compile time, at the desk of whoever
+is writing the workflow.
+
+## What survives, and why none of it is this feature
+
+- **`set_query_state`.** The queryable-state mechanism and the DBOS `setEvent` equivalent, which
+  `docs/contributor/design/cleat-execution-design.md:1152` explicitly calls "derived state, not
+  durable state". Untouched.
+- **`set_scope` / `get_scope` / `clear_scope`.** These call `AcquireConcurrencyKey`, so they give
+  at most one workflow per `objectType:instanceKey`. **That is virtual-object mutual exclusion
+  without virtual-object state**, and it stands on its own merits. Checked rather than assumed —
+  `scopedKey()` had exactly six callers and all six were state methods, so the question "does
+  scoping still have a purpose" had to be answered from the engine, not the SDK.
+- **`EventCodeStateMutation = 16`, retired rather than removed.** The compaction decoder has no
+  `default:` case, so an unknown code falls through and yields a record with only the common fields
+  set. Deleting the arm would make any history recorded before today decode **silently** into empty
+  state records rather than failing loudly. The number is reserved and must never be reused.
+
+Also removed: `cleat/virtualobject.go` — six of its eight methods were state accessors and nothing
+outside its own test used it — and the `VirtualObjectDef` registry, which had no callers at all.
+
+## Docs corrected, not just updated
+
+`from-restate.md` is the one that mattered. It described the gap as **ergonomic** — Restate scopes
+automatically, "cleat requires explicit `set_scope()` calls" — and showed a worked example calling
+`h.get_state("items", list)` inside a scope. **That example never worked**: two invocations for one
+key are two workflow runs with two histories, so nothing was shared. The gap was not ergonomic and
+the workaround was not a workaround.
+
+`sdk-api.md` no longer says "durable key-value state" in two places. ABI.md loses §2.28-§2.33,
+which are left vacant per the §2.21 precedent.
+
+## What this does not do
+
+Cross-instance shared state, of the kind Restate's virtual objects provide, **still does not exist
+in cleat for any language** — it never did. This removes an API that implied otherwise; it does not
+add the capability. If that capability is ever wanted it is engine work — persisting state keyed by
+scope and seeding `stateStore` at session start — and a much larger change than these six calls.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 

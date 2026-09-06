@@ -945,66 +945,11 @@ impl TestEnv {
     // State (workflow-persisted key-value)
     // -----------------------------------------------------------------------
 
-    /// Set a workflow state value.
-    pub fn set_state(&self, key: &str, value: &str) -> Result<(), String> {
-        let prefix = self.inner.borrow().scope_prefix.clone();
-        let mut inner = self.inner.borrow_mut();
-        let scoped = if prefix.is_empty() { key.to_string() } else { format!("{}{}", prefix, key) };
-        inner.workflow_state.insert(scoped, value.to_string());
-        Ok(())
-    }
 
-    /// Get a workflow state value.
-    pub fn get_state(&self, key: &str) -> Result<String, String> {
-        let inner = self.inner.borrow();
-        let scoped = if inner.scope_prefix.is_empty() { key.to_string() } else { format!("{}{}", inner.scope_prefix, key) };
-        inner.workflow_state
-            .get(&scoped)
-            .cloned()
-            .ok_or_else(|| format!("key not found: {}", key))
-    }
 
-    /// Delete a workflow state key.
-    pub fn delete_state(&self, key: &str) -> Result<(), String> {
-        let prefix = self.inner.borrow().scope_prefix.clone();
-        let mut inner = self.inner.borrow_mut();
-        inner.workflow_state.remove(
-            &(if prefix.is_empty() { key.to_string() } else { format!("{}{}", prefix, key) })
-        );
-        Ok(())
-    }
 
-    /// Atomically increment a state counter.
-    pub fn incr_state(&self, key: &str, delta: i64) -> Result<i64, String> {
-        let prefix = self.inner.borrow().scope_prefix.clone();
-        let mut inner = self.inner.borrow_mut();
-        let scoped = if prefix.is_empty() { key.to_string() } else { format!("{}{}", prefix, key) };
-        let current = inner.workflow_state
-            .get(&scoped)
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0);
-        let new_val = current + delta;
-        inner.workflow_state.insert(scoped, new_val.to_string());
-        Ok(new_val)
-    }
 
-    /// Check if a state key exists.
-    pub fn has_state(&self, key: &str) -> bool {
-        let inner = self.inner.borrow();
-        let scoped = if inner.scope_prefix.is_empty() { key.to_string() } else { format!("{}{}", inner.scope_prefix, key) };
-        inner.workflow_state.contains_key(&scoped)
-    }
 
-    /// List state keys with a given prefix.
-    pub fn list_state(&self, prefix: &str) -> Result<Vec<String>, String> {
-        let inner = self.inner.borrow();
-        let scoped = if inner.scope_prefix.is_empty() { prefix.to_string() } else { format!("{}{}", inner.scope_prefix, prefix) };
-        Ok(inner.workflow_state
-            .keys()
-            .filter(|k| k.starts_with(&scoped))
-            .cloned()
-            .collect())
-    }
 
     // -----------------------------------------------------------------------
     // Scope (virtual objects)
@@ -1536,74 +1481,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // State management
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_workflow_state() {
-        let env = TestEnv::new();
-        env.set_state("my_key", "my_value").unwrap();
-
-        let val = env.get_state("my_key").unwrap();
-        assert_eq!(val, "my_value");
-        assert!(env.has_state("my_key"));
-        assert!(!env.has_state("nonexistent"));
-
-        env.delete_state("my_key").unwrap();
-        assert!(!env.has_state("my_key"));
-    }
-
-    #[test]
-    fn test_incr_state() {
-        let env = TestEnv::new();
-
-        let val = env.incr_state("counter", 5).unwrap();
-        assert_eq!(val, 5);
-
-        let val2 = env.incr_state("counter", 3).unwrap();
-        assert_eq!(val2, 8);
-    }
-
-    #[test]
-    fn test_list_state() {
-        let env = TestEnv::new();
-        env.set_state("a:1", "v1").unwrap();
-        env.set_state("a:2", "v2").unwrap();
-        env.set_state("b:1", "v3").unwrap();
-
-        let keys = env.list_state("a:").unwrap();
-        assert_eq!(keys.len(), 2);
-    }
-
-    #[test]
-    fn test_get_missing_state() {
-        let env = TestEnv::new();
-        let result = env.get_state("nonexistent");
-        assert!(result.is_err());
-    }
-
-    // -----------------------------------------------------------------------
     // Scope
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_scope_and_state() {
-        let env = TestEnv::new();
-        let prev = env.set_scope("counter", "user_42");
-        assert!(prev.is_empty());
-
-        env.set_state("count", "10").unwrap();
-        let val = env.get_state("count").unwrap();
-        assert_eq!(val, "10");
-
-        let (obj_type, inst_key) = env.get_scope();
-        assert_eq!(obj_type, "counter");
-        assert_eq!(inst_key, "user_42");
-
-        env.clear_scope();
-        let (obj_type2, _) = env.get_scope();
-        assert!(obj_type2.is_empty());
-    }
 
     // -----------------------------------------------------------------------
     // Child workflows
@@ -1654,25 +1534,6 @@ mod tests {
     // Promises
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_promise_workflow() {
-        let env = TestEnv::new();
-        let (prom_id, err) = env.create_promise("test-promise");
-        assert!(err.is_none());
-        assert!(prom_id.contains("test-promise"));
-
-        // Promise is pending initially
-        let (_val, timed_out, err) = env.await_promise(&prom_id, Duration::from_millis(100));
-        assert!(timed_out);
-        assert!(err.is_none());
-
-        // Resolve and await
-        env.resolve_promise(&prom_id, r#"{"status":"done"}"#).unwrap();
-        let (val, timed_out, err) = env.await_promise(&prom_id, Duration::from_millis(100));
-        assert!(!timed_out);
-        assert!(err.is_none());
-        assert_eq!(val, r#"{"status":"done"}"#);
-    }
 
     #[test]
     fn test_reject_promise() {

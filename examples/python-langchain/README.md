@@ -89,14 +89,14 @@ research_agent.py
 ├── _research_agent_impl()     ← Core workflow logic (undecorated, testable)
 │   ├── CleatCallbackHandler   ← Records LangChain agent steps (demonstrated)
 │   ├── Plugins.llm_chat()     ← Deterministic LLM call (cleat-durable)
-│   ├── set_state()            ← Progress persisted in durable state
+│   ├── set_query_state()      ← Progress published as queryable state
 │   ├── poll_cancellation()    ← Graceful cancellation support
 │   └── _execute_tool()        ← Tool dispatch (also durable)
 │
 └── langchain_research_agent() ← @durable_entry wrapper (WASM export)
 
 SDK modules used:
-  cleat_sdk.host_calls         ← HostCalls (durable_log, set_state, now, ...)
+  cleat_sdk.host_calls         ← HostCalls (durable_log, set_query_state, now, ...)
   cleat_sdk.plugins            ← Plugins.llm_chat, Plugins.llm_embed, ...
   cleat_sdk.langchain          ← CleatCallbackHandler
   cleat_sdk.langgraph          ← CleatCheckpointer (for LangGraph state)
@@ -107,7 +107,7 @@ SDK modules used:
 
 ### Deterministic Replay
 
-When a Cleat workflow executes, every `plugin_call`, `durable_call`, `set_state`,
+When a Cleat workflow executes, every `plugin_call`, `durable_call`, `set_query_state`,
 and `durable_sleep` appends an event to the workflow history. If the worker
 crashes and restarts, the runtime replays the history from the beginning.
 Instead of making real API calls, every replayed event returns the result that

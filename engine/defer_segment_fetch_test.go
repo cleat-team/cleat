@@ -40,7 +40,6 @@ func deferPhaseFetchSession(t *testing.T, deferPhase bool) (*execSession, *recor
 		engine:     NewEngine(nil, nil, opts...),
 		nowMs:      1000000,
 		deferrals:  make(map[string]string),
-		stateStore: make(map[string]string),
 		queryState: make(map[string]string),
 	}, f
 }

@@ -777,100 +777,6 @@ func (b *wasmtimeBackend) dispatchUUID(
 // durable-stream-state interface
 // ---------------------------------------------------------------------------
 
-// dispatchSetState handles (string,string) -> u64.
-func (b *wasmtimeBackend) dispatchSetState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-	val := readStrArg(args, 1, nargs)
-	r := b.handler.SetState(context.Background(), nil, key, val)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
-// dispatchGetState handles (string) -> string.
-func (b *wasmtimeBackend) dispatchGetState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-
-	buf := make([]byte, 65536)
-	packed := b.handler.GetState(ctxWithMem(context.Background(), buf), nil, key, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
-	return nil
-}
-
-// dispatchDeleteState handles (string) -> u64.
-func (b *wasmtimeBackend) dispatchDeleteState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-	r := b.handler.DeleteState(context.Background(), nil, key)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
-// dispatchIncrState handles (string,u64) -> u64.
-func (b *wasmtimeBackend) dispatchIncrState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-	delta := int64(readU64Arg(args, 1, nargs))
-	r := b.handler.IncrState(context.Background(), nil, key, delta)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
-// dispatchHasState handles (string) -> u64.
-func (b *wasmtimeBackend) dispatchHasState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-	r := b.handler.HasState(context.Background(), nil, key)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
-// dispatchListState handles (string) -> string.
-func (b *wasmtimeBackend) dispatchListState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil {
-		return nil
-	}
-	prefix := readStrArg(args, 0, nargs)
-
-	buf := make([]byte, 65536)
-	packed := b.handler.ListState(ctxWithMem(context.Background(), buf), nil, prefix, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // durable-extended-lifecycle interface
 // ---------------------------------------------------------------------------
@@ -1113,14 +1019,6 @@ var witTypeMap = map[string]map[string]cbType{
 		"set-scope": cbTypeSetScope,
 		"get-scope": cbTypeGetScope,
 		"uuid":      cbTypeUUID,
-	},
-	"cleat:host-calls/durable-stream-state": {
-		"set-state":    cbTypeSetState,
-		"get-state":    cbTypeGetState,
-		"delete-state": cbTypeDeleteState,
-		"incr-state":   cbTypeIncrState,
-		"has-state":    cbTypeHasState,
-		"list-state":   cbTypeListState,
 	},
 	"cleat:host-calls/durable-extended-lifecycle": {
 		"continue-as-new-versioned": cbTypeContinueAsNewVersioned,

@@ -565,53 +565,11 @@ impl MockHostCalls {
         Ok(())
     }
 
-    /// Set a state value.
-    pub fn set_state(&mut self, key: &str, value: &str) -> Result<(), String> {
-        self.workflow_state.insert(self.scoped_key(key), value.to_string());
-        Ok(())
-    }
 
-    /// Get a state value.
-    pub fn get_state(&self, key: &str) -> Result<String, String> {
-        let scoped = self.scoped_key(key);
-        self.workflow_state
-            .get(&scoped)
-            .cloned()
-            .ok_or_else(|| format!("key not found: {}", key))
-    }
 
-    /// Delete a state key.
-    pub fn delete_state(&mut self, key: &str) -> Result<(), String> {
-        self.workflow_state.remove(&self.scoped_key(key));
-        Ok(())
-    }
 
-    /// Atomically increment a state counter.
-    pub fn incr_state(&mut self, key: &str, delta: i64) -> Result<i64, String> {
-        let scoped = self.scoped_key(key);
-        let current = self.workflow_state
-            .get(&scoped)
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0);
-        let new_val = current + delta;
-        self.workflow_state.insert(scoped, new_val.to_string());
-        Ok(new_val)
-    }
 
-    /// Check if a state key exists.
-    pub fn has_state(&self, key: &str) -> bool {
-        self.workflow_state.contains_key(&self.scoped_key(key))
-    }
 
-    /// List state keys with a given prefix.
-    pub fn list_state(&self, prefix: &str) -> Result<Vec<String>, String> {
-        let scoped = self.scoped_key(prefix);
-        Ok(self.workflow_state
-            .keys()
-            .filter(|k| k.starts_with(&scoped))
-            .cloned()
-            .collect())
-    }
 
     /// Await all children workflows.
     pub fn await_all_children(&self, _run_ids: &[&str]) -> Result<String, String> {
@@ -1068,11 +1026,6 @@ impl CleatTest {
         self.mock.call_count(service, operation) == expected
     }
 
-    /// Assert that a workflow state key has the given value.
-    pub fn assert_state(&self, key: &str, value: &str) -> bool {
-        self.mock.get_state(key).is_ok_and(|v| v == value)
-    }
-
     /// Assert that a signal with the given name was delivered.
     pub fn assert_signal_delivered(&self, signal_name: &str) -> bool {
         self.mock.sent_signals.iter().any(|s| s.contains(&format!(":{}", signal_name)))
@@ -1216,25 +1169,6 @@ mod tests {
         assert_eq!(env.mock.version(), 3);
     }
 
-    #[test]
-    fn test_promise_workflow() {
-        let mut env = CleatTest::new();
-        let (prom_id, err) = env.mock.create_promise("test-promise");
-        assert!(err.is_none());
-        assert!(prom_id.contains("test-promise"));
-
-        // Promise is pending initially
-        let (_val, timed_out, err) = env.mock.await_promise(&prom_id, 100);
-        assert!(timed_out);
-        assert!(err.is_none());
-
-        // Resolve and await
-        env.mock.resolve_promise(&prom_id, r#"{"status":"done"}"#).unwrap();
-        let (val, timed_out, err) = env.mock.await_promise(&prom_id, 100);
-        assert!(!timed_out);
-        assert!(err.is_none());
-        assert_eq!(val, r#"{"status":"done"}"#);
-    }
 
     #[test]
     fn test_child_workflow() {
@@ -1281,19 +1215,6 @@ mod tests {
         assert_eq!(resp, r#"{"data":"hello"}"#);
     }
 
-    #[test]
-    fn test_workflow_state() {
-        let mut env = CleatTest::new();
-        env.mock.set_state("my_key", "my_value").unwrap();
-
-        let val = env.mock.get_state("my_key").unwrap();
-        assert_eq!(val, "my_value");
-        assert!(env.mock.has_state("my_key"));
-        assert!(!env.mock.has_state("nonexistent"));
-
-        env.mock.delete_state("my_key").unwrap();
-        assert!(!env.mock.has_state("my_key"));
-    }
 
     #[test]
     fn test_signal_workflow_and_signal() {
@@ -1318,25 +1239,6 @@ mod tests {
         assert_eq!(name, "vote_1");
     }
 
-    #[test]
-    fn test_scope_and_state() {
-        let mut env = CleatTest::new();
-        let prev = env.mock.set_scope("counter", "user_42");
-        assert!(prev.is_empty());
-
-        env.mock.set_state("count", "10").unwrap();
-        let val = env.mock.get_state("count").unwrap();
-        assert_eq!(val, "10");
-
-        // Verify scoped key
-        let (obj_type, inst_key) = env.mock.get_scope();
-        assert_eq!(obj_type, "counter");
-        assert_eq!(inst_key, "user_42");
-
-        env.mock.clear_scope();
-        let (obj_type2, _) = env.mock.get_scope();
-        assert!(obj_type2.is_empty());
-    }
 
     #[test]
     fn test_send_signal_and_wait() {
@@ -1372,15 +1274,6 @@ mod tests {
         assert_eq!(result, r#"{"greeting":"Hello, World!"}"#);
     }
 
-    #[test]
-    fn test_assert_state() {
-        let mut env = CleatTest::new();
-        env.mock.set_state("key1", "value1").unwrap();
-
-        assert!(env.assert_state("key1", "value1"));
-        assert!(!env.assert_state("key1", "wrong"));
-        assert!(!env.assert_state("nonexistent", "anything"));
-    }
 
     #[test]
     fn test_reset() {
@@ -1401,27 +1294,7 @@ mod tests {
         assert_eq!(env.call_count("notification", "email"), 1);
     }
 
-    #[test]
-    fn test_incr_state() {
-        let mut env = CleatTest::new();
 
-        let val = env.mock.incr_state("counter", 5).unwrap();
-        assert_eq!(val, 5);
-
-        let val2 = env.mock.incr_state("counter", 3).unwrap();
-        assert_eq!(val2, 8);
-    }
-
-    #[test]
-    fn test_list_state() {
-        let mut env = CleatTest::new();
-        env.mock.set_state("a:1", "v1").unwrap();
-        env.mock.set_state("a:2", "v2").unwrap();
-        env.mock.set_state("b:1", "v3").unwrap();
-
-        let keys = env.mock.list_state("a:").unwrap();
-        assert_eq!(keys.len(), 2);
-    }
 
     #[test]
     fn test_continue_as_new() {

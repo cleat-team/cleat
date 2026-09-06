@@ -244,23 +244,11 @@ mod imports {
         // cleat_run_detached - ABI 2.36, two strings in
         pub fn cleat_run_detached(name_ptr: *const u8, name_len: u32, input_ptr: *const u8, input_len: u32) -> i64;
 
-        // cleat_set_state - ABI 2.37, two strings in
-        pub fn cleat_set_state(key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> i64;
 
-        // cleat_get_state - ABI 2.38, one string in, one string out
-        pub fn cleat_get_state(key_ptr: *const u8, key_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
 
-        // cleat_delete_state - ABI 2.39, one string in
-        pub fn cleat_delete_state(key_ptr: *const u8, key_len: u32) -> i64;
 
-        // cleat_incr_state - ABI 2.40, one string in, i64 delta, i64 out
-        pub fn cleat_incr_state(key_ptr: *const u8, key_len: u32, delta: i64) -> i64;
 
-        // cleat_has_state - ABI 2.41, one string in, i64 boolean out
-        pub fn cleat_has_state(key_ptr: *const u8, key_len: u32) -> i64;
 
-        // cleat_list_state - ABI 2.42, one string in (prefix), one string out
-        pub fn cleat_list_state(prefix_ptr: *const u8, prefix_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
 
         // cleat_await_all_children - ABI 2.43, one string in (JSON run_ids), one string out
         pub fn cleat_await_all_children(run_ids_ptr: *const u8, run_ids_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
@@ -1160,94 +1148,6 @@ impl HostCalls {
             return Err(format!("run_detached(name=\"{}\") failed: host error code {}. Check that the workflow name is correct.", name, err_code));
         }
         Ok(())
-    }
-
-    /// Set a state value by key. Mirrors Go's SetState.
-    pub fn set_state(&self, key: &str, value: &str) -> Result<(), String> {
-        let result = unsafe {
-            imports::cleat_set_state(
-                key.as_ptr(), key.len() as u32,
-                value.as_ptr(), value.len() as u32,
-            )
-        };
-        let (_extra, err_code) = memory::decode_simple_result(result);
-        if err_code != 0 {
-            return Err(format!("set_state(key=\"{}\", ...) failed: host error code {}. Check that the key is valid and state operations are available.", key, err_code));
-        }
-        Ok(())
-    }
-
-    /// Get a state value by key. Mirrors Go's GetState.
-    pub fn get_state(&self, key: &str) -> Result<String, String> {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
-        let result = unsafe {
-            imports::cleat_get_state(
-                key.as_ptr(), key.len() as u32,
-                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
-            )
-        };
-        let (val_len, err_code) = memory::decode_simple_result(result);
-        if err_code != 0 {
-            return Err(format!("get_state(key=\"{}\") failed: host error code {}. Check that the key exists and state operations are available.", key, err_code));
-        }
-        let val = unsafe { memory::read_string(buf.as_ptr(), val_len) };
-        Ok(val)
-    }
-
-    /// Delete a state key. Mirrors Go's DeleteState.
-    pub fn delete_state(&self, key: &str) -> Result<(), String> {
-        let result = unsafe {
-            imports::cleat_delete_state(
-                key.as_ptr(), key.len() as u32,
-            )
-        };
-        let (_extra, err_code) = memory::decode_simple_result(result);
-        if err_code != 0 {
-            return Err(format!("delete_state(key=\"{}\") failed: host error code {}. Check that the key is valid and state operations are available.", key, err_code));
-        }
-        Ok(())
-    }
-
-    /// Atomically increment a state counter by delta. Returns the new value.
-    pub fn incr_state(&self, key: &str, delta: i64) -> Result<i64, String> {
-        let result = unsafe {
-            imports::cleat_incr_state(
-                key.as_ptr(), key.len() as u32,
-                delta,
-            )
-        };
-        let (new_value, err_code) = memory::decode_incr_state_result(result);
-        if err_code != 0 {
-            return Err(format!("incr_state(key=\"{}\", delta={}) failed: host error code {}. Check that the key is valid for numeric operations.", key, delta, err_code));
-        }
-        Ok(new_value)
-    }
-
-    /// Check if a state key exists.
-    pub fn has_state(&self, key: &str) -> bool {
-        let result = unsafe {
-            imports::cleat_has_state(
-                key.as_ptr(), key.len() as u32,
-            )
-        };
-        memory::decode_has_state_result(result)
-    }
-
-    /// List state keys with a given prefix. Returns deserialized JSON array of key names.
-    pub fn list_state(&self, prefix: &str) -> Result<Vec<String>, String> {
-        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
-        let result = unsafe {
-            imports::cleat_list_state(
-                prefix.as_ptr(), prefix.len() as u32,
-                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
-            )
-        };
-        let (data_len, err_code) = memory::decode_simple_result(result);
-        if err_code != 0 {
-            return Err(format!("list_state(prefix=\"{}\") failed: host error code {}. Check that state operations are available.", prefix, err_code));
-        }
-        let json_str = unsafe { memory::read_string(buf.as_ptr(), data_len) };
-        serde_json::from_str(&json_str).map_err(|e| format!("list_state parse error: {}", e))
     }
 
     /// Await all children workflows. Returns aggregated JSON results.

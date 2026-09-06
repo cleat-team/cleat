@@ -108,12 +108,6 @@ class AllHostCallsCompileTest {
 
         // ---- state ----
         h.setQueryState("k", "v");
-        h.setState("k", "v");
-        h.getState("k");
-        h.deleteState("k");
-        h.incrState("k", 1L);
-        h.hasState("k");
-        h.listState("pre");
 
         // ---- locks ----
         h.acquireLock("k", 1L);

@@ -108,20 +108,6 @@ func (h *HostCallsImpl) SetQueryState(key, value string) {
 	if h.setQueryState != nil {
 		h.setQueryState(key, value)
 	}
-	// Also store in local state map for typed access.
-	if h.stateMap == nil {
-		h.stateMap = make(map[string]interface{})
-	}
-	h.stateMap[key] = value
-}
-
-// scopedKey returns the internally-stored key, applying the current
-// virtual-object scope prefix when one is active.
-func (h *HostCallsImpl) scopedKey(key string) string {
-	if h.scopeSet && h.scopePrefix != "" {
-		return h.scopePrefix + key
-	}
-	return key
 }
 
 // SetScope sets the state key prefix for virtual object instances.
@@ -248,115 +234,6 @@ func (h *HostCallsImpl) NewUUIDv7() string {
 
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
-func (h *HostCallsImpl) SetState(key string, value interface{}) {
-	sk := h.scopedKey(key)
-	if h.stateMap == nil {
-		h.stateMap = make(map[string]interface{})
-	}
-	// Store as json.RawMessage so GetState can unmarshal directly.
-	data, err := json.Marshal(value)
-	if err != nil {
-		h.stateMap[sk] = value // fallback to raw value
-	} else {
-		h.stateMap[sk] = json.RawMessage(data)
-	}
-	// Persist via existing set_query_state mechanism.
-	if h.setQueryState != nil {
-		if data == nil {
-			data, _ = json.Marshal(value)
-		}
-		h.setQueryState(sk, string(data))
-	}
-}
-
-func (h *HostCallsImpl) GetState(key string, result interface{}) error {
-	sk := h.scopedKey(key)
-	if h.stateMap == nil {
-		return errors.New("durable: state not found for key: " + sk)
-	}
-	val, ok := h.stateMap[sk]
-	if !ok {
-		return errors.New("durable: state key not found: " + sk)
-	}
-	// If val is already json.RawMessage, unmarshal directly.
-	if raw, ok := val.(json.RawMessage); ok {
-		return json.Unmarshal(raw, result)
-	}
-	// Otherwise marshal and unmarshal for consistent type conversion.
-	data, err := json.Marshal(val)
-	if err != nil {
-		return fmt.Errorf("durable: marshal state value: %w", err)
-	}
-	return json.Unmarshal(data, result)
-}
-
-func (h *HostCallsImpl) DeleteState(key string) {
-	sk := h.scopedKey(key)
-	if h.stateMap != nil {
-		delete(h.stateMap, sk)
-	}
-	if h.setQueryState != nil {
-		h.setQueryState(sk, "")
-	}
-}
-
-func (h *HostCallsImpl) HasState(key string) bool {
-	if h.stateMap == nil {
-		return false
-	}
-	_, ok := h.stateMap[h.scopedKey(key)]
-	return ok
-}
-
-func (h *HostCallsImpl) IncrState(key string, delta int64) int64 {
-	sk := h.scopedKey(key)
-	if h.stateMap == nil {
-		h.stateMap = make(map[string]interface{})
-	}
-	var current int64
-	if val, ok := h.stateMap[sk]; ok {
-		switch v := val.(type) {
-		case int64:
-			current = v
-		case float64:
-			current = int64(v)
-		case json.Number:
-			current, _ = v.Int64()
-		default:
-			current = 0
-		}
-	}
-	current += delta
-	h.stateMap[sk] = current
-	// Persist via existing set_query_state mechanism.
-	if h.setQueryState != nil {
-		data, err := json.Marshal(current)
-		if err == nil {
-			h.setQueryState(sk, string(data))
-		}
-	}
-	return current
-}
-
-func (h *HostCallsImpl) ListState(prefix string) []string {
-	if h.stateMap == nil {
-		return nil
-	}
-	sk := h.scopedKey(prefix)
-	var keys []string
-	for k := range h.stateMap {
-		if sk == "" || strings.HasPrefix(k, sk) {
-			// Strip scope prefix from returned key names.
-			if h.scopeSet && h.scopePrefix != "" && strings.HasPrefix(k, h.scopePrefix) {
-				keys = append(keys, k[len(h.scopePrefix):])
-			} else {
-				keys = append(keys, k)
-			}
-		}
-	}
-	return keys
 }
 
 func (h *HostCallsImpl) RunDetached(fn func(h HostCalls) error) error {
