@@ -26,17 +26,6 @@ def durable_poll_signal(name: str) -> str:
     Returns the signal payload, or empty string if none.
     """
     raise NotImplementedError
-def durable_send_signal_and_wait(target_run_id: str, signal_name: str, payload: str, timeout_ms: int) -> str:
-    """
-    Send a signal with correlation and wait for a reply.
-    Returns the response payload string.
-    """
-    raise NotImplementedError
-def durable_reply_to_signal(correlation_id: str, response: str) -> int:
-    """
-    Reply to a correlated signal from within a handler.
-    """
-    raise NotImplementedError
 def durable_signal_workflow(target_run_id: str, signal_name: str, payload: str) -> int:
     """
     Send a signal to a target workflow (fire-and-forget, recorded).

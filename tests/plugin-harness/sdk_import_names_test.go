@@ -86,7 +86,14 @@ func TestEverySDKImportIsAHostExport(t *testing.T) {
 		// in either table is the same fatal-and-silent instantiation failure,
 		// and neither had a check.
 		{"go (wasm/usage.go hostFunctions)", 30, goAdapterImportNames},
-		{"python (wasm/component_rewrite.go WitToEnvImport)", 45, witEnvImportNames},
+		// Python's floor is 43 for the same reason as Rust's and Java's 44:
+		// the two names IMPROVEMENT-PLAN 3.220 removed. Python is the only
+		// SDK whose imports are decided host-side, by this table rather than
+		// by a declaration in its own source, so the removal there IS the
+		// removal here. Measured 2026-09-06 by diffing the SETS, not the
+		// counts -- origin/develop 45, this branch 43, removed exactly
+		// cleat_send_signal_and_wait and cleat_reply_to_signal, added none.
+		{"python (wasm/component_rewrite.go WitToEnvImport)", 43, witEnvImportNames},
 	} {
 		t.Run(sdk.name, func(t *testing.T) {
 			declared := sdk.fn(t, root)

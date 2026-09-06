@@ -36,11 +36,15 @@ var WitToEnvImport = map[string]map[string]string{
 		"durable-poll-cancellation": "cleat_poll_cancellation",
 	},
 	"cleat:host-calls/durable-signals": {
-		"durable-await-signals":        "cleat_await_signals",
-		"durable-poll-signal":          "cleat_poll_signal",
-		"durable-send-signal-and-wait": "cleat_send_signal_and_wait",
-		"durable-reply-to-signal":      "cleat_reply_to_signal",
-		"durable-signal-workflow":      "cleat_signal_workflow",
+		"durable-await-signals": "cleat_await_signals",
+		"durable-poll-signal":   "cleat_poll_signal",
+		// durable-send-signal-and-wait and durable-reply-to-signal were
+		// removed on 2026-09-06 along with their WIT declarations: both host
+		// calls were inert, and request/reply is composed from promises now
+		// (IMPROVEMENT-PLAN 3.220). A mapping for a name the world no longer
+		// declares would be dead, and this table is what the Python half of
+		// TestEverySDKImportIsAHostExport reads.
+		"durable-signal-workflow": "cleat_signal_workflow",
 	},
 	"cleat:host-calls/durable-children": {
 		"durable-child-workflow":              "cleat_child_workflow",

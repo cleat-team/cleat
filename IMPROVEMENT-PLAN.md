@@ -5192,6 +5192,19 @@ change and it should land in both at once, since the behaviour is identical in G
 both and simply no longer calls them; removing those means editing generated `_wit/` bindings,
 `wit/cleat.wit` and `WitToEnvImport`, so it belongs with the export removal.
 
+Python's WIT declarations went on 2026-09-06 as well, so **no guest of any language imports either
+name now**. The bindings were not hand-edited: `python-sdk/cleat_sdk/_wit/` says "not intended for
+manual editing", so the two functions were removed from `wit/cleat.wit` and componentize-py was
+re-run in Docker against the edited world. The regenerated `durable_signals.py` differs from the
+committed one by **exactly the two deletions and nothing else**.
+
+That last part is narrower than it looks. No available componentize-py reproduces the committed
+bindings: 0.13/0.16/0.17/0.18 cannot parse the current world at all (they reject
+`backoff-coefficient-100x`), and 0.19/0.20/0.25 each add a `Raises:` docstring line — a 35-line
+diff across 7 files. That docstring belongs to `durable-send-signal-and-wait`, the only
+`result<...>` function in the interface, so it leaves *with* the function and regenerating this one
+file is clean. Regenerating the whole tree would have been a toolchain bump wearing a signal change.
+
 **The engine's two exports can therefore now be removed** — the precondition was every SDK
 dropping the import first, because a module importing a name the engine does not export fails at
 *instantiation*, not at the call. That is the remaining work on this item.

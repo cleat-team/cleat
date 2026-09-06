@@ -187,12 +187,6 @@ try:
         durable_poll_signal as _import_cleat_poll_signal,
     )
     from wit_world.imports.durable_signals import (
-        durable_reply_to_signal as _import_cleat_reply_to_signal,
-    )
-    from wit_world.imports.durable_signals import (
-        durable_send_signal_and_wait as _import_cleat_send_signal_and_wait,
-    )
-    from wit_world.imports.durable_signals import (
         durable_signal_workflow as _import_cleat_signal_workflow,
     )
     from wit_world.imports.durable_sleep import (
@@ -1010,28 +1004,13 @@ if not _USING_WASM:
 # is no RegisterQueryHandler". Use set_query_state instead.
 
 
-# -- 32. cleat_send_signal_and_wait ----------------------------------------------
-
-
-if not _USING_WASM:
-
-    def _import_cleat_send_signal_and_wait(target_run_id: str, signal_name: str, payload: str, timeout_ms: int) -> str:
-        """Stub for WASM import ``(import "env" "cleat_send_signal_and_wait") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_send_signal_and_wait can only be called within a cleat WASM runtime."
-        )
-
-
-# -- 33. cleat_reply_to_signal ---------------------------------------------------
-
-
-if not _USING_WASM:
-
-    def _import_cleat_reply_to_signal(correlation_id: str, response: str) -> int:
-        """Stub for WASM import ``(import "env" "cleat_reply_to_signal") (param i32 i32 i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_reply_to_signal can only be called within a cleat WASM runtime."
-        )
+# There is no _import_cleat_send_signal_and_wait or
+# _import_cleat_reply_to_signal here (removed 2026-09-06, previously ABI
+# 2.23 / 2.24). Both host calls were inert engine-side -- send_signal_and_wait
+# never delivered the signal it then waited for -- and request/reply is now
+# composed from create_promise + signal_workflow + await_promise +
+# resolve_promise (IMPROVEMENT-PLAN 3.220). The WIT declarations went with
+# them, so a Python component no longer imports either name.
 
 
 # -- 34. cleat_signal_workflow ---------------------------------------------------
