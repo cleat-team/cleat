@@ -54,6 +54,19 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
+	// cleat_schedule_invoke: three input strings and a delay, no output buffer.
+	// IMPROVEMENT-PLAN 3.224, same four-piece omission as cleat_signal_workflow.
+	// Matches engine/imports.go's (svcPtr,svcLen, opPtr,opLen, reqPtr,reqLen,
+	// delayMs) -> i64.
+	"cleat_schedule_invoke": {
+		ImportName: "cleat_schedule_invoke",
+		Params: []paramSpec{
+			{"service", kindInString},
+			{"operation", kindInString},
+			{"requestJSON", kindInString},
+			{"delayMs", kindInt64},
+		},
+	},
 	// cleat_signal_workflow: three input strings, no output buffer.
 	// IMPROVEMENT-PLAN 3.224 -- this entry was missing along with the
 	// hostFunctions row and the adapterDef, which is why a Go guest got no
