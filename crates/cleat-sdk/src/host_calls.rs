@@ -2,6 +2,7 @@
 // matching the cleat host runtime ABI from internal/host/imports.go.
 
 use crate::memory;
+use crate::signal_envelope::{decode_signal_envelope, encode_signal_envelope};
 use crate::CallError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -58,6 +59,12 @@ pub struct AwaitedSignal {
     /// True when the timeout elapsed before any named signal arrived. This is
     /// an ordinary outcome, not an error and not a suspension.
     pub timed_out: bool,
+    /// The address to answer this signal at, non-empty only when the sender
+    /// used `send_signal_and_wait` and is suspended waiting for a reply. Pass
+    /// it to `reply_to_signal`. A signal sent with `signal_workflow` leaves it
+    /// empty, which is how a receiver tells a request that wants an answer
+    /// from a one-way notification. IMPROVEMENT-PLAN 3.220.
+    pub reply_to: String,
 }
 
 /// All host function imports from the "env" WASM module.
@@ -169,20 +176,14 @@ mod imports {
             name_ptr: *const u8, name_len: u32,
         ) -> i64;
 
-        // cleat_send_signal_and_wait - 3 strings in, i64 timeout, 1 string out (ABI 2.23)
-        pub fn cleat_send_signal_and_wait(
-            target_ptr: *const u8, target_len: u32,
-            signal_ptr: *const u8, signal_len: u32,
-            payload_ptr: *const u8, payload_len: u32,
-            timeout_ms: i64,
-            response_ptr: *mut u8, response_max_len: u32,
-        ) -> i64;
-
-        // cleat_reply_to_signal - 2 strings in (ABI 2.24)
-        pub fn cleat_reply_to_signal(
-            correlation_ptr: *const u8, correlation_len: u32,
-            response_ptr: *const u8, response_len: u32,
-        ) -> i64;
+        // cleat_send_signal_and_wait (ABI 2.23) and cleat_reply_to_signal
+        // (ABI 2.24) are deliberately NOT imported. Both were inert
+        // engine-side, and request/reply is now composed from
+        // create_promise + signal_workflow + await_promise + resolve_promise
+        // (IMPROVEMENT-PLAN 3.220). Declaring an extern this SDK never calls
+        // would make every Rust guest import a host function it does not use.
+        // The engine still exports both; removing the exports is a separate
+        // change that has to come after every SDK stops importing them.
 
         // cleat_signal_workflow - 3 strings in (ABI 2.25)
         pub fn cleat_signal_workflow(
@@ -685,7 +686,14 @@ impl HostCalls {
         } else {
             String::new()
         };
-        Ok(AwaitedSignal { name, payload, timed_out })
+        // Strip the reply envelope, if this is a request/reply signal, so the
+        // receiver reads its payload exactly as the sender passed it and gets
+        // the address separately rather than having to parse it out.
+        let (reply_to, payload) = match decode_signal_envelope(&payload) {
+            Some((addr, inner)) => (addr, inner),
+            None => (String::new(), payload),
+        };
+        Ok(AwaitedSignal { name, payload, timed_out, reply_to })
     }
 
     /// Set query state. Mirrors Go's SetQueryState.
@@ -814,52 +822,66 @@ impl HostCalls {
     }
 
     /// Send a signal to a target workflow and wait for a response in milliseconds. Mirrors Go's SendSignalAndWait.
+    ///
+    /// Composed from three durable primitives rather than being a host call of
+    /// its own: a promise is the reply channel, its ID is the correlation ID,
+    /// and answering is resolving it (IMPROVEMENT-PLAN 3.220). `cleat_send_signal_and_wait`
+    /// was inert engine-side -- it never delivered the signal it then waited
+    /// for -- so this is the first version that works at all.
     pub fn send_signal_and_wait_ms(&self, target_run_id: &str, signal_name: &str, payload: &str, timeout_ms: i64) -> Result<String, CallError> {
-        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
-        let result = unsafe {
-            imports::cleat_send_signal_and_wait(
-                target_run_id.as_ptr(), target_run_id.len() as u32,
-                signal_name.as_ptr(), signal_name.len() as u32,
-                payload.as_ptr(), payload.len() as u32,
-                timeout_ms,
-                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
-            )
-        };
-        // The host may return SUSPEND_SENTINEL when the target has not responded yet.
-        if result == memory::SUSPEND_SENTINEL {
-            return Err(suspend());
+        let (reply_to, err) = self.create_promise(&format!("__reply:{}", signal_name));
+        if let Some(e) = err {
+            return Err(CallError::Failed(format!("send_signal_and_wait: create reply promise: {}", e)));
         }
-        // Bit 31 before any field. IMPROVEMENT-PLAN 3.300: a stop decodes here as
-        // response_len=0, err_code=0 -- an empty SUCCESSFUL reply, so the guest
-        // would return "" and carry on as though the target had answered.
-        if stop_requested(result) {
-            return Err(CallError::Failed(
-                "cleat: host refused this call -- the workflow is running its defer phase".to_string(),
-            ));
+        let envelope = encode_signal_envelope(&reply_to, payload)
+            .map_err(|e| CallError::Failed(format!("send_signal_and_wait: {}", e)))?;
+        self.signal_workflow(target_run_id, signal_name, &envelope).map_err(|e| {
+            CallError::Failed(format!(
+                "send_signal_and_wait: send signal \"{}\" to \"{}\": {}",
+                signal_name, target_run_id, e
+            ))
+        })?;
+        let (response, timed_out, err) = self.await_promise_ms(&reply_to, timeout_ms);
+        if let Some(e) = err {
+            return Err(CallError::Failed(format!(
+                "send_signal_and_wait: await reply to signal \"{}\": {}",
+                signal_name, e
+            )));
         }
-        let (response_len, err_code) = memory::decode_simple_result(result);
-        if err_code != 0 {
-            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
-            return Err(CallError::Failed(err_msg));
+        // Returning an error on timed_out is correct even though await_promise
+        // reports timed_out = true for a SUSPENSION as well as for a real
+        // timeout. The host distinguishes them and this code does not have to:
+        // engine/promises.go sets session.suspendErr before returning, and
+        // engine/executor.go:264 treats a workflow error as a failure only when
+        // suspendErr is nil -- ":315 deliberately lets a suspension win over
+        // the error that accompanied it".
+        //
+        // Do not "fix" this into a suspension check. There is nothing in the
+        // returned triple to check: the engine signals suspension host-side,
+        // not through a sentinel, so the guest cannot tell the two apart.
+        if timed_out {
+            return Err(CallError::Failed(format!(
+                "send_signal_and_wait: no reply to signal \"{}\" from workflow \"{}\" within {}ms",
+                signal_name, target_run_id, timeout_ms
+            )));
         }
-        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
-        Ok(resp)
+        Ok(response)
     }
 
     /// Reply to a signal, sending a response back to the sender.
     /// Mirrors Go's ReplyToSignal.
+    ///
+    /// `correlation_id` is `AwaitedSignal::reply_to`, which is the reply
+    /// promise's ID, so replying is resolving that promise. An ID matching no
+    /// promise is an error rather than a silent success, which is what makes a
+    /// stale address visible instead of leaving the sender suspended until its
+    /// timeout.
     pub fn reply_to_signal(&self, correlation_id: &str, response: &str) -> Result<(), String> {
-        let result = unsafe {
-            imports::cleat_reply_to_signal(
-                correlation_id.as_ptr(), correlation_id.len() as u32,
-                response.as_ptr(), response.len() as u32,
-            )
-        };
-        let (_extra, err_code) = memory::decode_simple_result(result);
-        if err_code != 0 {
-            return Err(format!("reply_to_signal(correlation_id=\"{}\") failed: host error code {}. Check that the correlation ID is valid.", correlation_id, err_code));
+        if correlation_id.is_empty() {
+            return Err("reply_to_signal: empty correlation ID. Pass AwaitedSignal::reply_to from the signal being answered; it is empty when the sender used signal_workflow and is not waiting for a reply.".to_string());
         }
-        Ok(())
+        self.resolve_promise(correlation_id, response)
+            .map_err(|e| format!("reply_to_signal(correlation_id=\"{}\"): {}", correlation_id, e))
     }
 
     /// Wait for at least min_count signals from the named set, with rejection tracking.

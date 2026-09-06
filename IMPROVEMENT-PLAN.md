@@ -5126,11 +5126,30 @@ This is the §3.218 shape once more: my own fix changed the engine, and the mock
 engine was not brought along. It surfaced only because a reply address became a promise ID, which
 made "a stale reply address" and "an unknown promise" the same case.
 
+#### A defer-segment orphan the composition introduces
+
+Composing costs one thing the single host call did not. `SendSignalAndWait` in a defer segment now
+creates the reply promise **before** the refusal: of its three callees only `SignalWorkflow` calls
+`stopBeforeNewWork`, so `CreatePromise` succeeds, the send is refused, and the composite returns an
+error having left a pending promise row nobody will ever await. The old host call was refused
+before any state changed.
+
+    for f in CreatePromise AwaitPromise ResolvePromise SignalWorkflow; do
+      awk "/func \(s \*execSession\) $f\(/,/^}$/" engine/promises.go engine/signaller.go \
+        | grep -c stopBeforeNewWork; done
+    # 0 0 0 1
+
+It is garbage rather than corruption — a row in `workflow_promises` that stays `pending` — and the
+ordering cannot simply be swapped, because the envelope needs the promise ID before the send. The
+cheap fix is to reject the promise when the send fails, which works even in a defer segment
+precisely because `RejectPromise` is not refusable. Not done in either SDK yet; it is a small
+change and it should land in both at once, since the behaviour is identical in Go and Rust.
+
 #### Not done here
 
 The two host calls `cleat_send_signal_and_wait` and `cleat_reply_to_signal` are now dead on the Go
-path but **still exported by the engine and still imported by the Rust, Java, AssemblyScript and
-Python SDKs**. Removing them is a separate change with the §3.216 shape (SDK imports first, then
+**and Rust** paths -- the Rust SDK stopped declaring the externs on 2026-09-06 -- but are **still
+exported by the engine and still imported by the Java, AssemblyScript and Python SDKs**. Removing them is a separate change with the §3.216 shape (SDK imports first, then
 the engine export — a module importing a name the engine does not export fails at
 instantiation, not at the call). Until then the ABI is unchanged and those four SDKs keep the
 inert behaviour described above.

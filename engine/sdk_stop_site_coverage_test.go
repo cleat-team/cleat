@@ -42,6 +42,22 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 				"is 0 on 2026-09-04. A Rust guest cannot register a cron trigger at all, " +
 				"so there is no decoder to guard. An absence, not a gap.",
 		},
+		{
+			hostSite: "SendSignalAndWait",
+			why: "the Rust SDK stopped importing cleat_send_signal_and_wait on 2026-09-06: " +
+				"IMPROVEMENT-PLAN 3.220 made send_signal_and_wait a composite over " +
+				"create_promise + signal_workflow + await_promise, and the extern was " +
+				"removed with it, so a Rust guest cannot reach this host function and has " +
+				"no result to decode. The refusable call it DOES make is signal_workflow, " +
+				"which rustCallsTheHostCanRefuse covers. An absence, not a gap. " +
+				"The engine still exports the host function; when it is removed this " +
+				"entry goes with it. " +
+				"Re-derive with `grep -c 'pub fn cleat_send_signal_and_wait' " +
+				"crates/cleat-sdk/src/host_calls.rs` -> 0, and NOT with the bare name, " +
+				"which is 2: both hits are the comment explaining the removal. A grep a " +
+				"retraction satisfies is the trap CLAUDE.md names -- anchor on the " +
+				"declaration site, where prose about a name cannot reach.",
+		},
 	},
 	"java": {
 		{
