@@ -1677,8 +1677,11 @@ func TestCreatePromiseReplayDivergence(t *testing.T) {
 	if s.history[1].PromiseID == "" {
 		t.Error("expected non-empty PromiseID in fresh event")
 	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store. This asserted success, which is
+	// what let 3.231 survive: a create that reaches no store produces an ID the
+	// guest proceeds with and a promise nobody can ever settle.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 }
 
@@ -1702,8 +1705,11 @@ func TestCreatePromiseReplayPastEnd(t *testing.T) {
 	if s.history[0].EventType != EventTypeCreatePromise {
 		t.Errorf("expected EventTypeCreatePromise, got %q", s.history[0].EventType)
 	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store. This asserted success, which is
+	// what let 3.231 survive: a create that reaches no store produces an ID the
+	// guest proceeds with and a promise nobody can ever settle.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 }
 
@@ -1712,8 +1718,11 @@ func TestCreatePromiseFresh(t *testing.T) {
 
 	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
 
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store. This asserted success, which is
+	// what let 3.231 survive: a create that reaches no store produces an ID the
+	// guest proceeds with and a promise nobody can ever settle.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -1836,16 +1845,16 @@ func TestAwaitPromiseReplayAwaitThenFreshNoStore(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected replay to have ended")
 	}
-	// Fresh path with no promiseStore -> suspend.
-	expected := packAwaitPromiseResult(0, true, 0)
-	if result != expected {
-		t.Errorf("expected %d (suspend), got %d", expected, result)
+	// Fresh path with no promiseStore reports an error. This asserted SUSPEND,
+	// and the assertion was the defect stated as a contract: with no store,
+	// nothing can ever resolve the promise, so suspending waits forever. The
+	// test even set promiseStore = nil deliberately and called the outcome
+	// correct. IMPROVEMENT-PLAN 3.231.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
-	if s.suspendErr == nil {
-		t.Fatal("expected suspendErr non-nil")
-	}
-	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
-		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	if s.suspendErr != nil {
+		t.Errorf("expected no suspend with no promise store, got %q", s.suspendErr.Reason)
 	}
 }
 
@@ -1879,6 +1888,12 @@ func TestAwaitPromiseReplayAwaitThenFreshResolved(t *testing.T) {
 
 func TestAwaitPromiseReplayDivergence(t *testing.T) {
 	s := newTestExecSession()
+	// A PENDING store, not a nil one. This test is about replay divergence, and
+	// it used to reach the fresh path with no store at all -- so it asserted
+	// suspend for a reason that has nothing to do with divergence, and broke
+	// when a missing store started reporting an error (IMPROVEMENT-PLAN 3.231).
+	// A pending promise suspends legitimately, which is what this wants.
+	s.engine.promiseStore = &mockPromiseStore{}
 	s.isReplay = true
 	s.history = []EventRecord{{
 		Step:      0,
@@ -1892,7 +1907,7 @@ func TestAwaitPromiseReplayDivergence(t *testing.T) {
 	if !s.isReplay {
 		t.Error("expected isReplay to remain true (exitReplay not called on mismatch)")
 	}
-	// Fresh path suspends since promiseStore is nil.
+	// Fresh path suspends because the promise is pending.
 	expected := packAwaitPromiseResult(0, true, 0)
 	if result != expected {
 		t.Errorf("expected %d (suspend), got %d", expected, result)
@@ -1907,6 +1922,8 @@ func TestAwaitPromiseReplayDivergence(t *testing.T) {
 
 func TestAwaitPromiseReplayPastEnd(t *testing.T) {
 	s := newTestExecSession()
+	// Pending, not nil, for the same reason as TestAwaitPromiseReplayDivergence.
+	s.engine.promiseStore = &mockPromiseStore{}
 	s.isReplay = true
 	s.history = nil // stepCount(0) >= len(history)(0)
 
@@ -1918,7 +1935,7 @@ func TestAwaitPromiseReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected replay to have ended")
 	}
-	// Fresh path suspends (no store).
+	// Fresh path suspends because the promise is pending.
 	expected := packAwaitPromiseResult(0, true, 0)
 	if result != expected {
 		t.Errorf("expected %d (suspend), got %d", expected, result)
@@ -2027,18 +2044,15 @@ func TestAwaitPromiseFreshNilStore(t *testing.T) {
 
 	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
 
-	// Nil store -> suspends immediately.
-	expected := packAwaitPromiseResult(0, true, 0)
-	if result != expected {
-		t.Errorf("expected %d (suspend), got %d", expected, result)
+	// Nil store -> reports an error. This asserted "suspends immediately",
+	// which is the hang: nothing can resolve a promise that was never stored,
+	// so the suspend never ends. The test then checked the deadline encoding on
+	// a suspend that should not happen. IMPROVEMENT-PLAN 3.231.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
-	if s.suspendErr == nil {
-		t.Fatal("expected suspendErr non-nil")
-	}
-	// Verify timeout encoding: nowMs + timeoutMs
-	expectedUntil := time.UnixMilli(s.nowMs).Add(time.Duration(5000) * time.Millisecond)
-	if !s.suspendErr.Until.Equal(expectedUntil) {
-		t.Errorf("expected Until=%v, got %v", expectedUntil, s.suspendErr.Until)
+	if s.suspendErr != nil {
+		t.Errorf("expected no suspend with no promise store, got %q", s.suspendErr.Reason)
 	}
 }
 

@@ -668,6 +668,11 @@ func TestAwaitPromise_ReplayRejected(t *testing.T) {
 
 func TestAwaitPromise_ReplayPendingThenExit(t *testing.T) {
 	s := newTestExecSession()
+	// A PENDING store, not a missing one. This reached the suspend path by
+	// having no store at all, which is a different thing that now reports an
+	// error (IMPROVEMENT-PLAN 3.231). The test is about a pending promise, so
+	// it should have one.
+	s.engine.promiseStore = &mockPromiseStore{}
 	s.isReplay = true
 	// EventTypeAwaitPromise means promise was pending in original execution.
 	s.history = []EventRecord{{
@@ -677,11 +682,11 @@ func TestAwaitPromise_ReplayPendingThenExit(t *testing.T) {
 
 	result := s.AwaitPromise(context.Background(), nil, "prom-1", 5000, 0, 0)
 
-	// Should exitReplay and check store. With no store, should suspend.
+	// Should exitReplay and check store. Pending -> suspend.
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	// With no promiseStore, falls through to suspend.
+	// A pending promise suspends.
 	if s.suspendErr == nil {
 		t.Error("expected suspendErr from pending await")
 	}
@@ -731,7 +736,10 @@ func TestAwaitPromise_FreshRejected(t *testing.T) {
 
 func TestAwaitPromise_FreshPending(t *testing.T) {
 	s := newTestExecSession()
-	// No promiseStore → falls through to suspend.
+	// A pending promise, which is what this test is named for. It used to reach
+	// the suspend path by having no store at all -- a different condition, and
+	// one that now reports an error (IMPROVEMENT-PLAN 3.231).
+	s.engine.promiseStore = &mockPromiseStore{}
 
 	result := s.AwaitPromise(context.Background(), nil, "prom-1", 5000, 0, 0)
 
@@ -762,6 +770,8 @@ func TestResolvePromise_ReplayMatch(t *testing.T) {
 
 	result := s.ResolvePromise(context.Background(), nil, "prom-1", `{"status":"done"}`)
 
+	// Replay returns the recorded outcome without touching the store, so this
+	// stays 0 even with no store configured.
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
 	}
@@ -780,8 +790,13 @@ func TestResolvePromise_ReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store, and this asserted success --
+	// codifying the defect. A resolve that reaches no store settles nothing, so
+	// every awaiter stays suspended; reporting 0 is how that stayed invisible.
+	// IMPROVEMENT-PLAN 3.231. The event is still recorded, which the assertions
+	// below continue to pin.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 }
 
@@ -790,8 +805,13 @@ func TestResolvePromise_Fresh(t *testing.T) {
 
 	result := s.ResolvePromise(context.Background(), nil, "prom-1", `{"status":"done"}`)
 
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store, and this asserted success --
+	// codifying the defect. A resolve that reaches no store settles nothing, so
+	// every awaiter stays suspended; reporting 0 is how that stayed invisible.
+	// IMPROVEMENT-PLAN 3.231. The event is still recorded, which the assertions
+	// below continue to pin.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 	if len(s.history) != 1 {
 		t.Errorf("expected 1 history entry, got %d", len(s.history))
@@ -831,8 +851,9 @@ func TestRejectPromise_Fresh(t *testing.T) {
 
 	result := s.RejectPromise(context.Background(), nil, "prom-1", "error msg")
 
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// Same inversion as TestResolvePromise_Fresh, same reason.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 	if len(s.history) != 1 {
 		t.Errorf("expected 1 history entry, got %d", len(s.history))
