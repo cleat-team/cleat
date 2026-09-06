@@ -5112,6 +5112,57 @@ normal case for a fan-in that polls after a wait. Resolving it needs a completio
 can report and replay can reproduce; `workflow_instances` has no completed-at ordering that is
 currently read for this.
 
+### 3.223 `SetScope`'s doc comment described the state prefixing §3.216 removed — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Residue of my own change, found by pulling on a doc line rather than by a test.
+
+`docs/reference/sdk-api.md` still lists `Scoper` among the SDK interfaces, which prompted the
+check "does this still exist after §3.216 deleted the state family?" It does, and the engine half
+is entirely live: `freshSetScope` (`engine/scope.go`) takes a concurrency key
+`vo:<objectType>:<instanceKey>` and releases it on clear or replace, with replay bookkeeping split
+deliberately between releasing and forgetting. **So the answer to the question that started this
+was "yes, and it does real work" — the finding is next to it, not in it.**
+
+What was stale is the guest-side doc comment, which read:
+
+    // SetScope sets the state key prefix for virtual object instances.
+    // All subsequent SetState/GetState/etc calls are automatically prefixed
+    // with "vo:<objectType>:<instanceKey>:".
+
+`SetState` and `GetState` were removed in §3.216. The prefix is still computed and still returned,
+so the sentence describes a mechanism whose other end is gone — the exact failure this repo's
+CLAUDE.md names: *"When you fix something, fix the prose that describes it."* §3.216 did not, and
+this is the correction rather than a new finding.
+
+The returned string is now only an opaque save/restore token. It retains the `vo:…:` shape, which
+is vestigial, and the comment now says so rather than leaving a caller to infer that parsing it is
+supported.
+
+**One real gap surfaced on the way, and the first command I wrote for it was the misleading kind.**
+`grep -c 'concurrencyKey' cleat/embedded/runner.go` returns **0**, which invites the conclusion
+"the embedded runner has no locking, so of course scope takes none." A looser second read —
+`grep -ci concurrency` — returns **1**, and that one line is `// lock state (in-memory concurrency
+keys)` over a `locks map[string]string` that `AcquireLock` and `ReleaseLock` genuinely use
+(`runner.go:329-342`). **The runner has locking. `setScope` just does not use it**, which is a
+sharper and more damning claim than the one the first grep supported.
+
+    sed -n '/func (e \*execution) setScope/,/^}/p' cleat/embedded/runner.go | grep -c 'locks'   # 0
+    grep -c 'e\.locks' cleat/embedded/runner.go                                                 # 3
+
+Since the concurrency key is now the only remaining effect of `SetScope`, under the embedded runner
+the call has **no observable effect at all** — and not because the runner cannot express one. A
+test written against `embedded` to exercise virtual-object mutual exclusion passes without
+exercising anything. Recorded rather than fixed: making `setScope` take the in-memory lock is a
+behaviour change to a shipped runner and wants its own falsification. The doc comment now warns.
+
+**That is the two-readings rule from CLAUDE.md catching a sentence of mine before it shipped**, and
+note which direction it went: the strict grep flattered the conclusion I was already writing.
+
+**What this cost, and why it is worth a section.** Nothing failed. No test went red, no count moved,
+and the API is self-consistent: you can set a scope and read it back. A caller reading the comment
+would have concluded that state calls were namespaced per instance — an API that no longer exists —
+and the only way to find out otherwise was to go looking for the other end of the sentence.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

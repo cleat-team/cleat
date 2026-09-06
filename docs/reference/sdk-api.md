@@ -555,7 +555,19 @@ GetScope() (objectType, instanceKey string)
 ClearScope() (previousScope string)
 ```
 
-Manages virtual object instance scoping for concurrency control.
+Manages virtual object instance scoping for concurrency control. Entering a
+scope makes the engine take a concurrency key named
+`vo:<objectType>:<instanceKey>` and hold it until the scope is cleared or
+replaced, so two workflows cannot be inside the same instance at once.
+
+The returned string is an **opaque token** for stack-style save/restore — pass
+it back, do not parse it. It has the shape `vo:<objectType>:<instanceKey>:`
+because it once prefixed `SetState`/`GetState` keys; those calls were removed
+on 2026-09-05 and the shape is vestigial.
+
+> **Gap:** `cleat/embedded`'s scope does not take the concurrency key, so under
+> the embedded runner `SetScope` has no observable effect. Exercise
+> virtual-object mutual exclusion against a worker.
 
 ---
 

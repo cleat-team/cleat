@@ -110,10 +110,27 @@ func (h *HostCallsImpl) SetQueryState(key, value string) {
 	}
 }
 
-// SetScope sets the state key prefix for virtual object instances.
-// All subsequent SetState/GetState/etc calls are automatically prefixed
-// with "vo:<objectType>:<instanceKey>:". Returns the previous scope
-// prefix for stack-style save/restore.
+// SetScope enters a virtual object instance.
+//
+// What it does NOW, on a worker: the engine takes a concurrency key named
+// "vo:<objectType>:<instanceKey>" and holds it until the scope is cleared or
+// replaced, so two workflows cannot be inside the same instance at once
+// (engine/scope.go, freshSetScope). That mutual exclusion is the whole of the
+// remaining behaviour.
+//
+// What it used to do, and what this comment used to say: "All subsequent
+// SetState/GetState/etc calls are automatically prefixed with
+// vo:<objectType>:<instanceKey>:". Those calls were removed with the rest of
+// the durable-state family (IMPROVEMENT-PLAN 3.216), so the prefix prefixes
+// nothing. The returned string still has that shape, but treat it as an
+// OPAQUE TOKEN for stack-style save/restore -- pass it back, do not parse it.
+//
+// Note one gap: cleat/embedded's setScope does not take a concurrency key, so
+// under the embedded runner SetScope has NO OBSERVABLE EFFECT AT ALL. That is
+// not a limit of the runner -- it has an in-memory lock map that AcquireLock
+// and ReleaseLock use; setScope simply does not touch it. A test that means to
+// exercise virtual-object mutual exclusion has to run against a worker.
+// IMPROVEMENT-PLAN 3.223.
 func (h *HostCallsImpl) SetScope(objectType, instanceKey string) (previousScope string) {
 	if h.scopeSet {
 		previousScope = h.scopePrefix
