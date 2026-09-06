@@ -272,6 +272,28 @@ architectures, causing replay divergence.
 **Alternative**: Use integer arithmetic or `math.Float64bits()` for exact
 bitwise comparison.
 
+### Single-String Entry Point (W003)
+
+An entry point's parameters bind by exact Go parameter name — `Handle(h cleat.HostCalls, intervalMs int)` takes `{"intervalMs": 400}`. There is one exception: an entry point whose only parameter (after `HostCalls`) is a **single `string`** receives the **entire input JSON** as that parameter.
+
+```go
+func CancelOrder(h cleat.HostCalls, orderID string) error { // WARNING: W003
+	// started with {"orderID": "ord-1"},
+	// orderID == `{"orderID": "ord-1"}`
+```
+
+That is deliberate — it is how a workflow takes an opaque payload it parses itself — so W003 is a warning and the rule is unchanged. It is worth warning about because nothing else says so: the rule is invisible at the call site, at build time and at deploy, and it surfaces as a semantic failure in whatever the parameter was eventually used for. A workflow that used such a parameter as a lock key failed every acquire with `cleat_acquire_lock: error 1`, a message that points at locks rather than at argument binding.
+
+If you want the field rather than the payload, add a second parameter or take a struct — struct parameters are unmarshalled from the input JSON and bind by field:
+
+```go
+type OrderRef struct {
+	OrderID string `json:"orderID"`
+}
+
+func CancelOrder(h cleat.HostCalls, ref OrderRef) error { // binds by field
+```
+
 ### Map Iteration (W001)
 
 ```go
@@ -321,6 +343,7 @@ for _, k := range keys {
 | E020 | Error | Durable calls in `init()` | Package structure |
 | W001 | Warning | Map iteration | Language construct |
 | W002 | Warning | Float in control flow | Language construct |
+| W003 | Warning | Entry point takes one `string` | Entry-point signature |
 
 ---
 
