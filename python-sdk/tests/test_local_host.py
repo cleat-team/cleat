@@ -222,12 +222,27 @@ class TestPromises:
             host.await_promise("nonexistent", 1.0)
 
     def test_resolve_nonexistent_promise(self, host: LocalHostCalls):
-        """Resolving a non-existent promise is a no-op (does not raise)."""
-        host.resolve_promise("nonexistent", '"val"')  # should not raise
+        """Settling a non-existent promise raises, matching the engine.
+
+        These two asserted the opposite until 2026-09-06 -- that settling an
+        unknown promise is a silent no-op -- and that was true of the engine
+        when they were written. #818 made the store report ErrPromiseNotFound
+        for a settle matching no row, and engine/promises.go turns any store
+        error into a non-zero result code, so the harness had become more
+        permissive than production and these tests were what held it there.
+
+        It matters beyond promises because a reply address IS a promise ID
+        (IMPROVEMENT-PLAN 3.220): a stale reply address and an unknown promise
+        are now the same case, and succeeding on it would leave the sender
+        suspended until its timeout with the error visible nowhere.
+        """
+        with pytest.raises(RuntimeError, match="promise not found"):
+            host.resolve_promise("nonexistent", '"val"')
 
     def test_reject_nonexistent_promise(self, host: LocalHostCalls):
-        """Rejecting a non-existent promise is a no-op (does not raise)."""
-        host.reject_promise("nonexistent", "error")  # should not raise
+        """Rejecting a non-existent promise raises. See the test above."""
+        with pytest.raises(RuntimeError, match="promise not found"):
+            host.reject_promise("nonexistent", "error")
 
 
 # ========================================================================
@@ -489,11 +504,45 @@ class TestCallErrorHandling:
         assert result.status == "ok"
         assert result.service == "svc"
 
-    def test_send_signal_and_wait(self, host: LocalHostCalls):
-        """``send_signal_and_wait`` returns a response."""
-        result = host.send_signal_and_wait("target-run", "sig", "{}", 5.0)
-        data = json.loads(result)
-        assert data["status"] == "signal_sent"
+    def test_send_signal_and_wait_delivers_a_reply_address_and_the_original_payload(
+        self, host: LocalHostCalls
+    ):
+        """The receiver sees the payload as sent, plus an address to answer at.
+
+        What this replaces asserted ``data["status"] == "signal_sent"`` -- a
+        constant this harness returned without sending a signal, waiting, or
+        ever receiving a reply, so it could not fail for any reason connected
+        to request/reply (IMPROVEMENT-PLAN 3.220).
+
+        It cannot assert the SENDER waking: await_promise_ms returns
+        immediately for a pending promise rather than suspending. Same gap as
+        the Go and Rust harnesses, IMPROVEMENT-PLAN 3.235.
+        """
+        with pytest.raises(RuntimeError, match="no reply to signal"):
+            host.send_signal_and_wait("target-run", "sig", '{"key":"val"}', 5.0)
+
+        sig = host.await_signals(["sig"], 1.0)
+        assert not sig.timed_out, "the signal was never sent"
+        assert sig.payload == '{"key":"val"}', "receiver must see the payload as sent"
+        assert sig.reply_to, "expected a reply address"
+
+        host.reply_to_signal(sig.reply_to, '"reply-response"')
+
+        res = host.await_promise(sig.reply_to, 1.0)
+        assert not res.timed_out, "the reply promise is still pending after reply_to_signal"
+        assert res.result == '"reply-response"'
+
+    def test_signal_workflow_carries_no_reply_address(self, host: LocalHostCalls):
+        """Negative control: a one-way signal must carry no reply address.
+
+        Without this, a receiver could not tell a request that wants an answer
+        from a notification, and would reply into a promise nobody awaits.
+        """
+        host.signal_workflow("target-run", "sig", '{"key":"val"}')
+        sig = host.await_signals(["sig"], 1.0)
+        assert not sig.timed_out
+        assert sig.reply_to == "", "a one-way signal must carry no reply address"
+        assert sig.payload == '{"key":"val"}', "payload must pass through unchanged"
 
 
 # ========================================================================
@@ -504,9 +553,18 @@ class TestCallErrorHandling:
 class TestReplyToSignal:
     """Reply-to-signal operations."""
 
-    def test_reply_to_signal_no_error(self, host: LocalHostCalls):
-        """``reply_to_signal`` does not raise."""
-        host.reply_to_signal("corr-123", '"ok"')  # should not raise
+    def test_reply_to_an_unknown_address_raises(self, host: LocalHostCalls):
+        """Replying to an address nobody awaits is an error, not a success.
+
+        This asserted the opposite -- that reply_to_signal never raises -- back
+        when it only appended a journal entry and reached nothing. Now it
+        resolves the reply promise, so a stale or empty address has to be
+        visible rather than leaving the sender suspended until its timeout.
+        """
+        with pytest.raises(RuntimeError, match="promise not found"):
+            host.reply_to_signal("corr-123", '"ok"')
+        with pytest.raises(RuntimeError, match="empty correlation ID"):
+            host.reply_to_signal("", '"ok"')
 
 
 # ========================================================================

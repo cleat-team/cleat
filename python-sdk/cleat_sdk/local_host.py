@@ -33,6 +33,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 from .host_calls import (
     INFINITE_TIMEOUT_MS,
     ChildResult,
@@ -619,6 +620,25 @@ class LocalHostCalls:
     # 18. await_signals
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _signal_result_from(sig: dict) -> SignalResult:
+        """Build a :class:`SignalResult`, stripping the reply envelope if there
+        is one, so the receiver reads the payload exactly as the sender passed
+        it and gets the address separately.
+
+        Both delivery paths in :meth:`await_signals_ms` go through this. Doing
+        it in only one would make a reply address depend on whether the signal
+        happened to be pending already. IMPROVEMENT-PLAN 3.220.
+        """
+        payload = sig.get("payload", "")
+        reply_to = ""
+        unwrapped = decode_signal_envelope(payload)
+        if unwrapped is not None:
+            reply_to, payload = unwrapped
+        return SignalResult(
+            name=sig["name"], payload=payload, timed_out=False, reply_to=reply_to
+        )
+
     def await_signals(self, signal_names: list[str], timeout_seconds: float) -> SignalResult:
         """Wait for one or more external signals, with a timeout in seconds."""
         return self.await_signals_ms(signal_names, int(timeout_seconds * 1000))
@@ -632,9 +652,7 @@ class LocalHostCalls:
         for i, sig in enumerate(self._signals):
             if sig["name"] in signal_names:
                 self._signals.pop(i)
-                result = SignalResult(
-                    name=sig["name"], payload=sig.get("payload", ""), timed_out=False
-                )
+                result = self._signal_result_from(sig)
                 self._record("await_signals_ms", result=result, signal_names=signal_names, timeout_ms=timeout_ms)
                 return result
 
@@ -652,9 +670,7 @@ class LocalHostCalls:
         for i, sig in enumerate(self._signals):
             if sig["name"] in signal_names:
                 self._signals.pop(i)
-                result = SignalResult(
-                    name=sig["name"], payload=sig.get("payload", ""), timed_out=False
-                )
+                result = self._signal_result_from(sig)
                 self._record("await_signals_ms", result=result, signal_names=signal_names, timeout_ms=timeout_ms)
                 return result
 
@@ -728,34 +744,54 @@ class LocalHostCalls:
         payload: str,
         timeout_ms: int,
     ) -> str:
-        """Send a signal to a target workflow and wait for a response, ms."""
-        if self._mode == "replay":
-            return self._replay_next("send_signal_and_wait_ms")
-        result = json.dumps(
-            {
-                "status": "signal_sent",
-                "target": target_run_id,
-                "signal": signal_name,
-                "echo": self._marshal(payload),
-            }
+        """Send a signal to a target workflow and wait for a response, ms.
+
+        Composed over this harness's own promises, exactly as the SDK composes
+        over the host's (IMPROVEMENT-PLAN 3.220). What this replaces returned a
+        canned ``{"status": "signal_sent", ...}`` without sending a signal,
+        waiting, or ever receiving a reply -- so any assertion about a response
+        passed for no reason.
+
+        It journals nothing of its own: create_promise, signal_workflow and
+        await_promise_ms each record themselves, so replay reproduces the three
+        steps rather than one composite entry that no longer exists.
+        """
+        reply_to = self.create_promise(f"__reply:{signal_name}")
+        self.signal_workflow(
+            target_run_id,
+            signal_name,
+            encode_signal_envelope(reply_to, self._marshal(payload)),
         )
-        self._record(
-            "send_signal_and_wait_ms", result=result,
-            target_run_id=target_run_id, signal_name=signal_name,
-            payload=payload, timeout_ms=timeout_ms,
-        )
-        return result
+
+        res = self.await_promise_ms(reply_to, timeout_ms)
+        if res.rejected:
+            raise RuntimeError(
+                f"send_signal_and_wait: reply to signal {signal_name!r} was rejected: {res.result}"
+            )
+        if res.timed_out:
+            raise RuntimeError(
+                f"send_signal_and_wait: no reply to signal {signal_name!r} from "
+                f"workflow {target_run_id!r} within {timeout_ms}ms"
+            )
+        return res.result
 
     # ------------------------------------------------------------------
     # 22. reply_to_signal
     # ------------------------------------------------------------------
 
     def reply_to_signal(self, correlation_id: str, response: str) -> None:
-        """Send a response back to the sender of a signal."""
-        if self._mode == "replay":
-            self._replay_next("reply_to_signal")
-            return
-        self._record("reply_to_signal", correlation_id=correlation_id, response=response)
+        """Send a response back to the sender of a signal.
+
+        *correlation_id* is :attr:`SignalResult.reply_to`, the reply promise's
+        ID, so replying is resolving that promise. IMPROVEMENT-PLAN 3.220.
+        """
+        if not correlation_id:
+            raise RuntimeError(
+                "reply_to_signal: empty correlation ID. Pass SignalResult.reply_to "
+                "from the signal being answered; it is empty when the sender used "
+                "signal_workflow and is not waiting for a reply."
+            )
+        self.resolve_promise(correlation_id, response)
 
     # ------------------------------------------------------------------
     # 23. signal_workflow
@@ -1029,9 +1065,16 @@ class LocalHostCalls:
         if self._mode == "replay":
             self._replay_next("resolve_promise")
             return
-        if promise_id in self._promises:
-            self._promises[promise_id].status = "resolved"
-            self._promises[promise_id].result = value
+        # Not a silent no-op. #818 made the store report ErrPromiseNotFound for
+        # a settle matching no row, and engine/promises.go:280 turns any store
+        # error into a non-zero result code, so a harness that succeeded here
+        # would be more permissive than production -- and a stale reply address
+        # and an unknown promise are the same case once a reply address IS a
+        # promise ID (IMPROVEMENT-PLAN 3.220).
+        if promise_id not in self._promises:
+            raise RuntimeError(f"resolve_promise(promise_id={promise_id!r}): promise not found")
+        self._promises[promise_id].status = "resolved"
+        self._promises[promise_id].result = value
         self._record("resolve_promise", promise_id=promise_id, value=value)
 
     # ------------------------------------------------------------------
@@ -1043,9 +1086,12 @@ class LocalHostCalls:
         if self._mode == "replay":
             self._replay_next("reject_promise")
             return
-        if promise_id in self._promises:
-            self._promises[promise_id].status = "rejected"
-            self._promises[promise_id].error = error
+        # Same not-found contract as resolve_promise above; see the comment
+        # there for why silence became wrong after #818.
+        if promise_id not in self._promises:
+            raise RuntimeError(f"reject_promise(promise_id={promise_id!r}): promise not found")
+        self._promises[promise_id].status = "rejected"
+        self._promises[promise_id].error = error
         self._record("reject_promise", promise_id=promise_id, error=error)
 
     # ------------------------------------------------------------------

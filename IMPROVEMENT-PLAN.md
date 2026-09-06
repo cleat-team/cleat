@@ -5055,8 +5055,16 @@ matched:
 | environment | `SendSignalAndWait` | how a reply arrived |
 |---|---|---|
 | engine (real guest) | inert — never called `DeliverSignal` | nothing |
-| `cleattest` | spliced `_correlation_id` into the payload object | in-memory Go channel |
-| `cleat/embedded` | returned a canned `{"status":"delivered"}` without waiting | nothing |
+| `cleattest` (Go) | spliced `_correlation_id` into the payload object | in-memory Go channel |
+| `cleat/embedded` (Go) | returned a canned `{"status":"delivered"}` without waiting | nothing |
+| `cleat-sdk` `test.rs` (Rust) | minted `corr-<target>-<name>-<n>` | private channel map |
+| `cleat-test` (Rust) | minted `corr-<target>-<name>-<n>` | private channel map |
+| `local_host.py` (Python) | returned a canned `{"status":"signal_sent", …}` without sending | nothing |
+
+**Six implementations, no two alike, and not one of them could work in production.** The count is
+the finding. Each was written to make a test pass in one environment, and because the real host
+call was inert there was never anything to disagree with -- so nothing pulled them together. Three
+of the six returned a constant.
 
 So a workflow that passed under `cleattest` could not work in production, and `embedded`'s
 version satisfied any assertion trivially. **Two shipped tests asserted those fakes**:
@@ -5147,9 +5155,12 @@ change and it should land in both at once, since the behaviour is identical in G
 
 #### Not done here
 
-The two host calls `cleat_send_signal_and_wait` and `cleat_reply_to_signal` are now dead on the Go
-**and Rust** paths -- the Rust SDK stopped declaring the externs on 2026-09-06 -- but are **still
-exported by the engine and still imported by the Java, AssemblyScript and Python SDKs**. Removing them is a separate change with the §3.216 shape (SDK imports first, then
+The two host calls `cleat_send_signal_and_wait` and `cleat_reply_to_signal` are now dead on the Go,
+**Rust and Python** paths -- the Rust SDK stopped declaring the externs on 2026-09-06 -- but are
+**still exported by the engine and still imported by the Java and AssemblyScript SDKs**. Python
+still declares its WIT bindings for both and simply no longer calls them; removing those means
+editing generated `_wit/` bindings, `wit/cleat.wit` and `WitToEnvImport`, so it belongs with the
+export removal rather than with the port. Removing them is a separate change with the §3.216 shape (SDK imports first, then
 the engine export — a module importing a name the engine does not export fails at
 instantiation, not at the call). Until then the ABI is unchanged and those four SDKs keep the
 inert behaviour described above.
