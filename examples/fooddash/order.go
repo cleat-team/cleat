@@ -87,19 +87,25 @@ type OrderStatus struct {
 //	v1: items were []OrderItem with SKU/Name/Quantity
 //	v2: items gained DietaryPreferences field
 //	To evolve: bump MinVersion, gate new behavior on h.Version() >= 2
+//
+// PlaceOrder returns its result as a JSON string, not as OrderResult.
+//
+// A workflow entry point's result must be a string: a WASM entry point hands
+// back bytes, and string is the one shape every language SDK expresses
+// identically. IMPROVEMENT-PLAN 3.228.
 func PlaceOrder(h cleat.HostCalls, userID string, restaurantID string,
-	items []OrderItem, address DeliveryAddress) (OrderResult, error) {
+	items []OrderItem, address DeliveryAddress) (string, error) {
 
 	_ = h.MinVersion() // declares minimum version this code requires
 
 	if len(items) == 0 {
-		return OrderResult{}, fmt.Errorf("order must contain at least one item")
+		return "", fmt.Errorf("order must contain at least one item")
 	}
 
 	// Step 1: Validate every item against the restaurant's menu.
 	validated, err := validateMenuItems(restaurantID, items)
 	if err != nil {
-		return OrderResult{}, fmt.Errorf("menu validation failed: %w", err)
+		return "", fmt.Errorf("menu validation failed: %w", err)
 	}
 
 	// Step 2: Calculate the total.
@@ -156,33 +162,33 @@ func PlaceOrder(h cleat.HostCalls, userID string, restaurantID string,
 	)
 
 	if err := s.Run(h); err != nil {
-		return OrderResult{}, err
+		return "", err
 	}
 
 	// Step 6: Wait for the driver to confirm pickup via signal.
 	sr := h.AwaitSignals([]string{"pickup_confirmed"}, 30*time.Minute)
 	if sr.Err != nil {
-		return OrderResult{}, fmt.Errorf("signal error: %w", sr.Err)
+		return "", fmt.Errorf("signal error: %w", sr.Err)
 	}
 	if sr.TimedOut {
 		// Compensate everything if pickup times out.
 		releaseDriver(driver.DriverID)
 		refundCharge(charge.ChargeID)
-		return OrderResult{}, fmt.Errorf("pickup timed out")
+		return "", fmt.Errorf("pickup timed out")
 	}
 
 	// Record queryable state.
 	h.SetQueryState("order_status", "confirmed")
 	h.SetQueryState("driver_name", driver.DriverName)
 
-	return OrderResult{
+	return toJSON(OrderResult{
 		OrderID:    charge.ChargeID,
 		TotalCents: total,
 		DriverID:   driver.DriverID,
 		DriverName: driver.DriverName,
 		ETAMinutes: driver.ETAMinutes,
 		Status:     "confirmed",
-	}, nil
+	}), nil
 }
 
 // CancelOrder cancels an active order using Saga-based compensation.
@@ -211,12 +217,14 @@ func CancelOrder(h cleat.HostCalls, orderID string) error {
 
 // GetOrderStatus is a query handler. It reads state set by PlaceOrder
 // via SetQueryState during workflow execution.
-func GetOrderStatus(h cleat.HostCalls, orderID string) (OrderStatus, error) {
+// GetOrderStatus returns its result as a JSON string, for the same reason
+// PlaceOrder does.
+func GetOrderStatus(h cleat.HostCalls, orderID string) (string, error) {
 	status, err := lookupOrderState(orderID)
 	if err != nil {
-		return OrderStatus{}, err
+		return "", err
 	}
-	return status, nil
+	return toJSON(status), nil
 }
 
 // PlaceLargeOrder demonstrates ContinueAsNew for long-running orders
@@ -303,6 +311,14 @@ func validateMenuItems(restaurantID string, items []OrderItem) ([]validatedItem,
 
 // lookupMenuItem demonstrates DurableCallTyped — both request and response
 // are automatically marshaled/unmarshaled from typed structs.
+// toJSON marshals a value for an entry point's string result. Entry points
+// return strings because a WASM entry point hands back bytes and string is the
+// one shape every language SDK expresses identically (IMPROVEMENT-PLAN 3.228).
+func toJSON(v interface{}) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
 func lookupMenuItem(restaurantID, sku string) (menuItem, error) {
 	type lookupRequest struct {
 		RestaurantID string `json:"restaurant_id"`

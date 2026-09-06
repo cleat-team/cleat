@@ -17,11 +17,13 @@ import (
 )
 
 // PlaceOrderTyped demonstrates the PlaceOrder workflow using typed service clients.
+// PlaceOrderTyped returns its result as a JSON string, for the same reason
+// PlaceOrder does.
 func PlaceOrderTyped(h cleat.HostCalls, userID string, restaurantID string,
-	items []OrderItem, address DeliveryAddress) (OrderResult, error) {
+	items []OrderItem, address DeliveryAddress) (string, error) {
 
 	if len(items) == 0 {
-		return OrderResult{}, fmt.Errorf("order must contain at least one item")
+		return "", fmt.Errorf("order must contain at least one item")
 	}
 
 	// Create typed clients.
@@ -33,7 +35,7 @@ func PlaceOrderTyped(h cleat.HostCalls, userID string, restaurantID string,
 	// Step 1: Validate every item against the restaurant's menu.
 	validated, err := validateMenuItemsTyped(menuClient, restaurantID, items)
 	if err != nil {
-		return OrderResult{}, fmt.Errorf("menu validation failed: %w", err)
+		return "", fmt.Errorf("menu validation failed: %w", err)
 	}
 
 	// Step 2: Calculate the total.
@@ -150,7 +152,7 @@ func PlaceOrderTyped(h cleat.HostCalls, userID string, restaurantID string,
 	)
 
 	if err := s.Run(h); err != nil {
-		return OrderResult{}, err
+		return "", err
 	}
 
 	// Step 6: Wait for the driver to confirm pickup via polling.
@@ -170,21 +172,21 @@ func PlaceOrderTyped(h cleat.HostCalls, userID string, restaurantID string,
 		// Compensate everything if pickup fails.
 		dispatchClient.ReleaseDriver(dispatch.ReleaseDriverRequest{DriverID: driverInfo.DriverID})
 		paymentsClient.Refund(payments.RefundRequest{ChargeID: chargeResult.ChargeID})
-		return OrderResult{}, fmt.Errorf("pickup failed: %w", err)
+		return "", fmt.Errorf("pickup failed: %w", err)
 	}
 
 	// Record queryable state.
 	h.SetQueryState("order_status", "confirmed")
 	h.SetQueryState("driver_name", driverInfo.DriverName)
 
-	return OrderResult{
+	return toJSON(OrderResult{
 		OrderID:    chargeResult.ChargeID,
 		TotalCents: total,
 		DriverID:   driverInfo.DriverID,
 		DriverName: driverInfo.DriverName,
 		ETAMinutes: driverInfo.ETAMinutes,
 		Status:     "confirmed",
-	}, nil
+	}), nil
 }
 
 // validateMenuItemsTyped validates each item against the menu using the typed client.
