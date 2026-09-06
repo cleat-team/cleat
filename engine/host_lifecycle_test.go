@@ -447,108 +447,11 @@ func TestGetScopeSet(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ReplyToSignal tests.
-// ---------------------------------------------------------------------------
-
-func TestReplyToSignalReplayMatch(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step:          0,
-		EventType:     EventTypeSignalReceived,
-		SignalName:    "corr-001",
-		SignalPayload: `{"response":"ok"}`,
-	}}
-	result := s.ReplyToSignal(context.Background(), nil, "corr-001", `{"response":"ok"}`)
-
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1, got %d", s.stepCount)
-	}
-	if !s.isReplay {
-		t.Error("expected isReplay to remain true")
-	}
-}
-
-func TestReplyToSignalReplayDivergence(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step:      0,
-		EventType: "call", // wrong type — should be EventTypeSignalReceived
-	}}
-	result := s.ReplyToSignal(context.Background(), nil, "corr-001", `{"response":"ok"}`)
-
-	// After exitReplay, the fresh path records a new event.
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if len(s.history) < 2 {
-		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
-	}
-	if s.history[1].EventType != EventTypeSignalReceived {
-		t.Errorf("expected EventTypeSignalReceived, got %q", s.history[1].EventType)
-	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-}
-
-func TestReplyToSignalReplayPastEnd(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = nil // stepCount(0) >= len(0) → past end
-
-	result := s.ReplyToSignal(context.Background(), nil, "corr-001", `{"response":"ok"}`)
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if s.isReplay {
-		t.Error("expected replay to have ended")
-	}
-	if len(s.history) != 1 {
-		t.Fatalf("expected 1 history entry, got %d", len(s.history))
-	}
-	if s.history[0].EventType != EventTypeSignalReceived {
-		t.Errorf("expected EventTypeSignalReceived, got %q", s.history[0].EventType)
-	}
-	if s.history[0].SignalName != "corr-001" {
-		t.Errorf("expected SignalName 'corr-001', got %q", s.history[0].SignalName)
-	}
-	if s.history[0].SignalPayload != `{"response":"ok"}` {
-		t.Errorf("expected SignalPayload, got %q", s.history[0].SignalPayload)
-	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-}
-
-func TestReplyToSignalFresh(t *testing.T) {
-	s := newTestExecSession()
-
-	result := s.ReplyToSignal(context.Background(), nil, "corr-001", `{"response":"ok"}`)
-
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-	if len(s.history) != 1 {
-		t.Fatalf("expected 1 history entry, got %d", len(s.history))
-	}
-	r := s.history[0]
-	if r.EventType != EventTypeSignalReceived {
-		t.Errorf("expected EventTypeSignalReceived, got %q", r.EventType)
-	}
-	if r.SignalName != "corr-001" {
-		t.Errorf("expected SignalName 'corr-001', got %q", r.SignalName)
-	}
-	if r.SignalPayload != `{"response":"ok"}` {
-		t.Errorf("expected SignalPayload '{\"response\":\"ok\"}', got %q", r.SignalPayload)
-	}
-}
+// The four ReplyToSignal replay tests lived here until 2026-09-06. They
+// exercised the replay, divergence, past-end and fresh paths of a host call
+// that recorded a local EventTypeSignalReceived named by the correlation ID
+// and wrote nothing anywhere -- so the behaviour they pinned was real, and
+// reached nobody. The host call is gone (IMPROVEMENT-PLAN 3.220);
+// request/reply is an SDK composite over promises now, and its replay
+// behaviour is that of create_promise, signal_workflow and await_promise,
+// each already covered.

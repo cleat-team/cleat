@@ -42,61 +42,14 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 				"is 0 on 2026-09-04. A Rust guest cannot register a cron trigger at all, " +
 				"so there is no decoder to guard. An absence, not a gap.",
 		},
-		{
-			hostSite: "SendSignalAndWait",
-			why: "the Rust SDK stopped importing cleat_send_signal_and_wait on 2026-09-06: " +
-				"IMPROVEMENT-PLAN 3.220 made send_signal_and_wait a composite over " +
-				"create_promise + signal_workflow + await_promise, and the extern was " +
-				"removed with it, so a Rust guest cannot reach this host function and has " +
-				"no result to decode. The refusable call it DOES make is signal_workflow, " +
-				"which rustCallsTheHostCanRefuse covers. An absence, not a gap. " +
-				"The engine still exports the host function; when it is removed this " +
-				"entry goes with it. " +
-				"Re-derive with `grep -c 'pub fn cleat_send_signal_and_wait' " +
-				"crates/cleat-sdk/src/host_calls.rs` -> 0, and NOT with the bare name, " +
-				"which is 2: both hits are the comment explaining the removal. A grep a " +
-				"retraction satisfies is the trap CLAUDE.md names -- anchor on the " +
-				"declaration site, where prose about a name cannot reach.",
-		},
 	},
 	"java": {
-		{
-			hostSite: "SendSignalAndWait",
-			why: "the Java SDK stopped declaring the cleat_send_signal_and_wait @Import on " +
-				"2026-09-06: IMPROVEMENT-PLAN 3.220 made sendSignalAndWait a composite over " +
-				"createPromise + signalWorkflow + awaitPromise, and the import was removed " +
-				"with it, so a Java guest cannot reach this host function and has no result " +
-				"to decode. The refusable call it DOES make is signalWorkflow, which " +
-				"javaCallsTheHostCanRefuse covers. An absence, not a gap. The engine still " +
-				"exports the host function; when it is removed this entry goes with it. " +
-				"Re-derive with `grep -c 'name = \"cleat_send_signal_and_wait\"' " +
-				"crates/cleat-java/src/main/java/cleat/HostCalls.java` -> 0, anchored on the " +
-				"@Import site rather than the bare name, which also matches the comment " +
-				"explaining the removal.",
-		},
 		{
 			hostSite: "ScheduleCron",
 			why: "the Java SDK declares no scheduleCron method and no raw import for it, " +
 				"so a Java guest cannot register a cron trigger and there is no decoder " +
 				"to guard. Same absence as the Rust entry above; AssemblyScript DOES " +
 				"have one and is covered by its list rather than exempted here.",
-		},
-	},
-	"assemblyscript": {
-		{
-			hostSite: "SendSignalAndWait",
-			why: "the AssemblyScript SDK stopped declaring the cleat_send_signal_and_wait " +
-				"@external on 2026-09-06: IMPROVEMENT-PLAN 3.220 made sendSignalAndWait a " +
-				"composite over createPromise + signalWorkflow + awaitPromiseMs, and the " +
-				"import was removed with it, so an AssemblyScript guest cannot reach this " +
-				"host function and has no result to decode. The refusable call it DOES make " +
-				"is signalWorkflow, which asCallsTheHostCanRefuse covers. An absence, not a " +
-				"gap. With this SDK every SDK has stopped importing the name, so the engine " +
-				"export can now be removed and this entry goes with it. Re-derive with " +
-				"`grep -c '@external(\"env\", \"cleat_send_signal_and_wait\")' " +
-				"packages/cleat-as/assembly/host-calls.ts` -> 0, anchored on the declaration " +
-				"site rather than the bare name, which also matches the comment explaining " +
-				"the removal.",
 		},
 	},
 }

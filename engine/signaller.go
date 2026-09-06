@@ -160,106 +160,18 @@ func (s *execSession) PollSignal(ctx context.Context, m api.Module, signalName s
 	return 0 // not found
 }
 
-func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targetRunID, signalName, payload string, timeoutMs int64, responsePtr, responseMaxLen uint32) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeSignalReceived {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-
-				written, _ := s.writeResult(ctx, m, responsePtr, rec.SignalPayload, responseMaxLen)
-				return packSimpleResult(0, written)
-			}
-		}
-		s.exitReplay()
-	}
-
-	// A fresh send_signal_and_wait is new work twice over: it delivers a signal
-	// to another workflow and then blocks this one waiting for a reply that a
-	// terminated workflow can never receive.
-	if s.stopBeforeNewWork() {
-		return callSuspendSentinel
-	}
-
-	// Check signal authorization before delivering.
-	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
-		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
-			s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
-			return errSignalAuthRequiredInt
-		}
-	}
-
-	// Fresh execution: check if target has responded via signal store.
-	if s.engine.signalStore != nil {
-		d, found, err := s.engine.signalStore.PollSignal(ctx, targetRunID, signalName)
-		if err == nil && found {
-			rec := EventRecord{
-				Step:          s.stepCount,
-				EventType:     EventTypeSignalReceived,
-				SignalName:    signalName,
-				SignalPayload: d.Payload,
-			}
-			s.recordEvent(rec)
-			// Deliberately NOT consumed, unlike the two await paths above.
-			//
-			// This poll reads targetRunID's queue -- the workflow this one is
-			// signalling -- and what it is looking for there is a reply. But
-			// SendSignalAndWait never calls DeliverSignal, so it does not
-			// actually send the signal it waits on, and until that is settled
-			// it is not clear whose delivery this read is finding. Consuming
-			// on a path whose semantics are unresolved would delete a row on
-			// a guess. See IMPROVEMENT-PLAN 3.220.
-
-			written, _ := s.writeResult(ctx, m, responsePtr, d.Payload, responseMaxLen)
-			return packSimpleResult(0, written)
-		}
-	}
-
-	// No response yet — record event and suspend.
-	rec := EventRecord{
-		Step:        s.stepCount,
-		EventType:   EventTypeAwaitSignals,
-		SignalNames: signalName,
-		TimeoutMs:   timeoutMs,
-	}
-	s.recordEvent(rec)
-
-	s.suspendErr = &SuspendError{
-		Reason: fmt.Sprintf("send_signal_and_wait(%s, %s)", targetRunID, signalName),
-		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(timeoutMs) * time.Millisecond),
-	}
-
-	return packSimpleResult(1, 0)
-}
-
-func (s *execSession) ReplyToSignal(ctx context.Context, m api.Module, correlationID, response string) int64 {
-	// Record the reply event for replay fidelity.
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeSignalReceived {
-				if !s.advanceReplayStep(ctx, &rec) {
-					return 0
-				}
-				return 0
-			}
-		}
-		s.exitReplay()
-	}
-
-	rec := EventRecord{
-		Step:          s.stepCount,
-		EventType:     EventTypeSignalReceived,
-		SignalName:    correlationID,
-		SignalPayload: response,
-	}
-	s.recordEvent(rec)
-
-	return 0
-}
-
+// SendSignalAndWait and ReplyToSignal lived here until 2026-09-06 and were
+// both INERT (IMPROVEMENT-PLAN 3.220). SendSignalAndWait did the replay check,
+// the stop guard and the authorization check, then polled the TARGET's queue
+// and suspended -- it never called DeliverSignal, so it waited for a reply to
+// a message it had not sent. ReplyToSignal recorded a local
+// EventTypeSignalReceived named by the correlation ID and wrote nothing
+// anywhere.
+//
+// Request/reply is now an SDK composite in all five languages: a promise is
+// the reply channel and its ID is the correlation ID, so the reply address is
+// data rather than protocol -- which is how DBOS and Temporal handle it too,
+// neither having a primitive for it.
 func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRunID, signalName, payload string) int64 {
 	// Fire-and-forget: record the signal event.
 	if s.isReplay {

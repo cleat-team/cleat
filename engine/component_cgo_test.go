@@ -96,8 +96,7 @@ func TestCbTypeConstants(t *testing.T) {
 		cbTypeDurableCallString, cbTypeDurableCallRetry, cbTypeDurableCallHeartbeat,
 		cbTypeDurableSleep, cbTypeNow, cbTypeRandom, cbTypeDurableLog,
 		cbTypeVersion, cbTypeMinVersion, cbTypeDurableDefer, cbTypeContinueAsNew, cbTypePollCancellation,
-		cbTypeAwaitSignals, cbTypePollSignal, cbTypeSendSignalAndWait,
-		cbTypeReplyToSignal, cbTypeSignalWorkflow,
+		cbTypeAwaitSignals, cbTypePollSignal, cbTypeSignalWorkflow,
 		cbTypeChildWorkflow, cbTypeAwaitChild, cbTypeAwaitAllChildren,
 		cbTypeChildWorkflowWithOptions,
 		cbTypeCreatePromise, cbTypeAwaitPromise, cbTypeResolvePromise, cbTypeRejectPromise,
@@ -205,7 +204,6 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"AwaitAllChildren", true, 18, strPtr, 1},
 		{"PluginCallStreaming", true, 19, strPtr, 3},
 		{"ChildWorkflowWithOptions", true, 20, strPtr, 5},
-		{"SendSignalAndWait", true, 21, strPtr, 4},
 		{"AwaitPromise", true, 22, strPtr, 2},
 		{"PollSignal", true, 23, strPtr, 1},
 		{"DurableSleep", false, 0, u64Ptr, 1},
@@ -222,7 +220,6 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"AcquireLock", false, 15, strPtr, 2},
 		{"ReleaseLock", false, 16, strPtr, 1},
 		{"SignalWorkflow", false, 17, strPtr, 3},
-		{"ReplyToSignal", false, 18, strPtr, 2},
 		{"ScheduleInvoke", false, 19, strPtr, 4},
 		{"RegisterUpdateHandler", false, 20, strPtr, 1},
 		{"RegisterQueryHandler", false, 21, strPtr, 1},
@@ -272,7 +269,6 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"AwaitAllChildren(0<1)", true, 18},
 		{"PluginCallStreaming(0<3)", true, 19},
 		{"ChildWorkflowWithOptions(0<5)", true, 20},
-		{"SendSignalAndWait(0<4)", true, 21},
 		{"AwaitPromise(0<2)", true, 22},
 		{"PollSignal(0<1)", true, 23},
 		{"UUID(0<1)", true, 13},
@@ -288,7 +284,6 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"AcquireLock(0<2)", false, 15},
 		{"ReleaseLock(0<1)", false, 16},
 		{"SignalWorkflow(0<3)", false, 17},
-		{"ReplyToSignal(0<2)", false, 18},
 		{"ScheduleInvoke(0<4)", false, 19},
 		{"RegisterUpdateHandler(0<1)", false, 20},
 		{"RegisterQueryHandler(0<1)", false, 21},
@@ -482,19 +477,6 @@ func TestDispatchSignalWorkflow(t *testing.T) {
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchU64(17, strPtr, 3, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 1 {
-		t.Errorf("result = %d, want 1", got)
-	}
-}
-
-func TestDispatchReplyToSignal(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("corr-id", "response")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(18, strPtr, 2, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got := cgotestReadResultU64(resultPtr); got != 1 {
@@ -847,18 +829,6 @@ func TestDispatchChildWorkflowWithOptions(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	wantCallOutcome(t, resultPtr, "ok", 20, 0)
-}
-
-func TestDispatchSendSignalAndWait(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(10)}}
-	argsPtr, _, freeArgs := cgotestMakeMixedArgs("target", "signal", "payload", uint64(5000))
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(21, argsPtr, 4, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// result<string, call-failure> since IMPROVEMENT-PLAN 3.300.
-	wantCallOutcome(t, resultPtr, "ok", 10, 0)
 }
 
 func TestDispatchAwaitPromise(t *testing.T) {

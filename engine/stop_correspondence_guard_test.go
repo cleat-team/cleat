@@ -150,26 +150,6 @@ var stopSurfaces = map[string]stopSurface{
 		adapters: []string{"ScheduleCron"},
 		wit:      []string{"durable-schedule-cron"},
 	},
-	"SendSignalAndWait": {
-		// No guest of any language reaches this host function any more.
-		//
-		// It was already absent from wasm/usage.go, like the three
-		// fire-and-forget calls of §3.302, so no Go adapter existed. On
-		// 2026-09-06 the WIT declaration went too (IMPROVEMENT-PLAN 3.220):
-		// the host call was inert -- it never delivered the signal it then
-		// waited for -- and request/reply is now composed from
-		// create-promise + signal-workflow + await-promise + resolve-promise,
-		// so a Python component no longer imports it either. Rust, Java and
-		// AssemblyScript dropped their declarations in the same series.
-		//
-		// The engine still EXPORTS it and it is still a stop site, which is
-		// why this entry stays rather than being deleted. Removing the export
-		// is the last step of 3.220, and this entry goes with it.
-		adapters:   nil,
-		adapterWhy: reasonNoGoAdapter,
-		wit:        nil,
-		witWhy:     reasonNotInTheComponentWorld,
-	},
 	"DurableCall": {
 		adapters: []string{"DurableCall"},
 		wit:      []string{"durable-call"},

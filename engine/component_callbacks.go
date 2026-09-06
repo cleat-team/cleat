@@ -302,46 +302,6 @@ func (b *wasmtimeBackend) dispatchPollSignal(
 	return nil
 }
 
-// dispatchSendSignalAndWait handles (string,string,string,u64) -> string.
-func (b *wasmtimeBackend) dispatchSendSignalAndWait(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 4 || b.handler == nil {
-		return nil
-	}
-	target := readStrArg(args, 0, nargs)
-	sigName := readStrArg(args, 1, nargs)
-	payload := readStrArg(args, 2, nargs)
-	timeoutMs := int64(readU64Arg(args, 3, nargs))
-
-	buf := make([]byte, 65536)
-	packed := b.handler.SendSignalAndWait(ctxWithMem(context.Background(), buf), nil,
-		target, sigName, payload, timeoutMs, 0, 65536)
-	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
-	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
-	// the component guest as the `suspended` case rather than as a response the
-	// service could also have produced. setResultString discarded those bits.
-	setResultCallOutcome(results, nresults,
-		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
-	return nil
-}
-
-// dispatchReplyToSignal handles (string,string) -> u64.
-func (b *wasmtimeBackend) dispatchReplyToSignal(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil {
-		return nil
-	}
-	correlationID := readStrArg(args, 0, nargs)
-	response := readStrArg(args, 1, nargs)
-	r := b.handler.ReplyToSignal(context.Background(), nil, correlationID, response)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
 // dispatchSignalWorkflow handles (string,string,string) -> u64.
 func (b *wasmtimeBackend) dispatchSignalWorkflow(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
@@ -974,11 +934,9 @@ var witTypeMap = map[string]map[string]cbType{
 		"durable-poll-cancellation": cbTypePollCancellation,
 	},
 	"cleat:host-calls/durable-signals": {
-		"durable-await-signals":        cbTypeAwaitSignals,
-		"durable-poll-signal":          cbTypePollSignal,
-		"durable-send-signal-and-wait": cbTypeSendSignalAndWait,
-		"durable-reply-to-signal":      cbTypeReplyToSignal,
-		"durable-signal-workflow":      cbTypeSignalWorkflow,
+		"durable-await-signals":   cbTypeAwaitSignals,
+		"durable-poll-signal":     cbTypePollSignal,
+		"durable-signal-workflow": cbTypeSignalWorkflow,
 	},
 	"cleat:host-calls/durable-children": {
 		"durable-child-workflow":              cbTypeChildWorkflow,
