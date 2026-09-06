@@ -5135,6 +5135,18 @@ to `cleat_set_scope`, so the host is never told and **no lock is taken**. Combin
 removing the state calls the prefix used to prefix, the Go SDK's three `Scoper` methods are now a
 local variable with an interface around it.
 
+**Confirmed by compilation, which is stronger than the greps above.** The conformance-port session
+built a Go workflow whose entire body is `h.SetScope(obj, key)` plus one log, and read the produced
+binary:
+
+    imports wired:   cleat_complete, cleat_log, cleat_poll_work
+    adapter fields:  DurableLog
+
+So it is not merely that the lock is not taken — **`cleat_set_scope` is not in the binary at all**,
+and `HostCallsImpl.SetScope` sets its three fields against a host call that was never generated.
+The static reading and the compiled artifact agree, which is the pair worth having: the tables say
+it cannot be wired, and the binary shows it was not.
+
 **Go is alone in this.** Verified at declaration and call sites, not by name search:
 
 | SDK | binding |

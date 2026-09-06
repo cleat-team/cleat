@@ -123,7 +123,10 @@ func (h *HostCallsImpl) SetQueryState(key, value string) {
 // HostCallsOptions field for scope, no row in wasm/usage.go's hostFunctions
 // table, and no entry in wasm/adapter_metadata.go -- so nothing generates a
 // call to cleat_set_scope for a Go guest and the host is never told. A Go
-// workflow calling SetScope therefore takes NO LOCK. Rust, Java and
+// workflow calling SetScope therefore takes NO LOCK -- confirmed by compiling
+// one whose body is SetScope plus a log: the binary's imports are
+// cleat_complete, cleat_log and cleat_poll_work, and the generated adapter has
+// exactly one field, so the call is not in the binary at all. Rust, Java and
 // AssemblyScript all declare the import and call it (crates/cleat-sdk
 // host_calls.rs:943, crates/cleat-java HostCalls.java:266,
 // packages/cleat-as host-calls.ts:2053); Go is the only one that does not.
