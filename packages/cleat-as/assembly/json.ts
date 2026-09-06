@@ -245,9 +245,12 @@ class Lexer {
 const TYPE_NULL: i32 = 0;
 const TYPE_BOOL: i32 = 1;
 const TYPE_NUMBER: i32 = 2;
-const TYPE_STRING: i32 = 3;
+export const TYPE_STRING: i32 = 3;
 const TYPE_ARRAY: i32 = 4;
-const TYPE_OBJECT: i32 = 5;
+// Exported so signal-envelope.ts can check a parsed value's shape rather
+// than trusting a key lookup: getString() returns "" for both "absent" and
+// "present but not a string", and the envelope has to tell those apart.
+export const TYPE_OBJECT: i32 = 5;
 
 /**
  * A parsed JSON value. Use `type` to discriminate:

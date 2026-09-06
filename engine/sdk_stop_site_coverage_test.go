@@ -82,6 +82,23 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 				"have one and is covered by its list rather than exempted here.",
 		},
 	},
+	"assemblyscript": {
+		{
+			hostSite: "SendSignalAndWait",
+			why: "the AssemblyScript SDK stopped declaring the cleat_send_signal_and_wait " +
+				"@external on 2026-09-06: IMPROVEMENT-PLAN 3.220 made sendSignalAndWait a " +
+				"composite over createPromise + signalWorkflow + awaitPromiseMs, and the " +
+				"import was removed with it, so an AssemblyScript guest cannot reach this " +
+				"host function and has no result to decode. The refusable call it DOES make " +
+				"is signalWorkflow, which asCallsTheHostCanRefuse covers. An absence, not a " +
+				"gap. With this SDK every SDK has stopped importing the name, so the engine " +
+				"export can now be removed and this entry goes with it. Re-derive with " +
+				"`grep -c '@external(\"env\", \"cleat_send_signal_and_wait\")' " +
+				"packages/cleat-as/assembly/host-calls.ts` -> 0, anchored on the declaration " +
+				"site rather than the bare name, which also matches the comment explaining " +
+				"the removal.",
+		},
+	},
 }
 
 // TestEverySDKCoversEveryHostStopSite closes the hole that

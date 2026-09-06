@@ -5186,16 +5186,40 @@ change and it should land in both at once, since the behaviour is identical in G
 
 #### Not done here
 
-The two host calls `cleat_send_signal_and_wait` and `cleat_reply_to_signal` are now dead on the Go,
-**Rust, Python and Java** paths. Rust dropped its `extern` declarations and Java its `@Import`s on
-2026-09-06, so neither guest imports either name. They remain **exported by the engine and
-imported by the AssemblyScript SDK**, which is the last one. Python still declares its WIT bindings
-for both and simply no longer calls them; removing those means editing generated `_wit/` bindings,
-`wit/cleat.wit` and `WitToEnvImport`, so it belongs with the export removal rather than the port.
+**All five SDKs now compose it**, as of 2026-09-06: Go (#825), Rust (#828), Python (#831), Java
+(#834) and AssemblyScript. Rust dropped its `extern`s, Java its `@Import`s and AssemblyScript its
+`@external`s, so **no guest imports either name any more**. Python still declares WIT bindings for
+both and simply no longer calls them; removing those means editing generated `_wit/` bindings,
+`wit/cleat.wit` and `WitToEnvImport`, so it belongs with the export removal.
 
-Each SDK's import floor in `tests/plugin-harness/sdk_import_names_test.go` moved 45 -> 44 as its
-imports went, and in both cases the drop was verified by diffing the **sets** rather than trusting
-the counts: `removed: [cleat_reply_to_signal, cleat_send_signal_and_wait]`, `added: []`. Removing them is a separate change with the §3.216 shape (SDK imports first, then
+**The engine's two exports can therefore now be removed** — the precondition was every SDK
+dropping the import first, because a module importing a name the engine does not export fails at
+*instantiation*, not at the call. That is the remaining work on this item.
+
+Every import removal was verified by diffing the **sets**, never the counts —
+`removed: [cleat_reply_to_signal, cleat_send_signal_and_wait]`, `added: []` — and each SDK's floor
+in `tests/plugin-harness/sdk_import_names_test.go` moved only after that check. Rust and Java went
+45 -> 44; **AssemblyScript's floor did not move and should not**, because that SDK declares more
+imports than the others (49 -> 47) and 47 still clears 45. A floor exists to catch the extractor
+breaking, not to freeze a count.
+
+#### A falsification that stays green because the code is REDUNDANT, not because the test is weak
+
+Porting to AssemblyScript produced a new variant of the "it stayed red / it stayed green" rules
+above. Removing `if (obj.objKeys.length !== 2) return null;` from `decodeSignalEnvelope` left the
+whole AS suite green. So did removing the `else { return null; }` that rejects an unknown key.
+Removing **both** failed, with `a non-envelope was read as an envelope`.
+
+Neither line is dead and the test is not weak: the two guards independently cover the same case,
+so a one-line falsification can never move it. The reading "it stayed green, so that line does
+nothing" would have deleted a real guard — the same wrong repair the fence-predicate case warns
+about, arrived at by a different route. **Before concluding a line is inert, check whether another
+line covers the case you are testing with.**
+
+This is worth separating from the Java result on the same day, which looked identical and was not:
+there, deleting the key-count check left 288 tests green because Java had **no negative control at
+all**. Same symptom, opposite cause — redundancy in one, absence in the other — and only writing
+the missing test told them apart. Removing them is a separate change with the §3.216 shape (SDK imports first, then
 the engine export — a module importing a name the engine does not export fails at
 instantiation, not at the call). Until then the ABI is unchanged and those four SDKs keep the
 inert behaviour described above.

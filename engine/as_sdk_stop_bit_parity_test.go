@@ -79,7 +79,22 @@ var asCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"signalWorkflow", "SignalWorkflow"},
 	{"cleatSend", "DurableSend"},
 	{"scheduleInvokeMs", "DurableScheduleInvoke"},
-	{"sendSignalAndWaitMs", "SendSignalAndWait"},
+	// sendSignalAndWaitMs was here until 2026-09-06. It is no longer a host
+	// call: IMPROVEMENT-PLAN 3.220 made it a composite over createPromise +
+	// signalWorkflow + awaitPromiseMs, so there is no @external of its own
+	// for the host to refuse.
+	//
+	// Removing it does NOT weaken this guard, and that was checked rather
+	// than assumed. Of the three callees, only SignalWorkflow calls
+	// stopBeforeNewWork -- CreatePromise, AwaitPromise and ResolvePromise do
+	// not, which is why none of them was ever listed -- and signalWorkflow is
+	// on this list, so every refusable call the composite makes is covered by
+	// the entry that owns it.
+	//
+	//	for f in CreatePromise AwaitPromise ResolvePromise SignalWorkflow; do
+	//	  awk "/func \(s \*execSession\) $f\(/,/^}$/" engine/promises.go \
+	//	    engine/signaller.go | grep -c stopBeforeNewWork; done
+	//	# 0 0 0 1
 	{"sideEffect", "SideEffect"},
 	{"scheduleCron", "ScheduleCron"},
 	{"cleatFetch", "Fetch"},
