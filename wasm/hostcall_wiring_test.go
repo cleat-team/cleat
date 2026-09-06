@@ -47,6 +47,28 @@ func TestEachRewiredMethodWiresItsImport(t *testing.T) {
 				"blaming the caller for not being inside a workflow function, which is the one " +
 				"cause that was not the cause",
 		},
+		{
+			method: "DurableSend",
+			pkg:    "github.com/cleat-team/cleat/testdata/durablesend",
+			imp:    "cleat_send",
+			why: "fire-and-forget delivery to a service; Python, Rust, Java and AssemblyScript " +
+				"all expose it, and Go alone could not reach it -- which is what settled that it " +
+				"was meant to be callable from a workflow rather than reserved for the host",
+		},
+		{
+			method: "ResolvePromise",
+			pkg:    "github.com/cleat-team/cleat/testdata/resolvepromise",
+			imp:    "cleat_resolve_promise",
+			why: "completing a promise another workflow is waiting on; unwired, a Go workflow " +
+				"could create the wait and never satisfy it",
+		},
+		{
+			method: "RejectPromise",
+			pkg:    "github.com/cleat-team/cleat/testdata/rejectpromise",
+			imp:    "cleat_reject_promise",
+			why: "the failure half of ResolvePromise, and the half that matters more: unwired, " +
+				"the waiter has no way to be told the thing it waits for will never arrive",
+		},
 	}
 
 	for _, tc := range cases {

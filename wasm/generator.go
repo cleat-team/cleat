@@ -54,6 +54,36 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
+	// cleat_send: three input strings, no output buffer. Fire-and-forget --
+	// the request goes out and nothing comes back but an error code. This is
+	// cleat_schedule_invoke below without the delay. IMPROVEMENT-PLAN 3.226.
+	"cleat_send": {
+		ImportName: "cleat_send",
+		Params: []paramSpec{
+			{"service", kindInString},
+			{"operation", kindInString},
+			{"requestJSON", kindInString},
+		},
+	},
+	// cleat_resolve_promise: two input strings, no output buffer.
+	// Matches engine/imports.go's (idPtr,idLen, valPtr,valLen) -> i64.
+	// IMPROVEMENT-PLAN 3.226.
+	"cleat_resolve_promise": {
+		ImportName: "cleat_resolve_promise",
+		Params: []paramSpec{
+			{"id", kindInString},
+			{"value", kindInString},
+		},
+	},
+	// cleat_reject_promise: two input strings, no output buffer. The mirror of
+	// cleat_resolve_promise above. IMPROVEMENT-PLAN 3.226.
+	"cleat_reject_promise": {
+		ImportName: "cleat_reject_promise",
+		Params: []paramSpec{
+			{"id", kindInString},
+			{"errMsg", kindInString},
+		},
+	},
 	// cleat_schedule_invoke: three input strings and a delay, no output buffer.
 	// IMPROVEMENT-PLAN 3.224, same four-piece omission as cleat_signal_workflow.
 	// Matches engine/imports.go's (svcPtr,svcLen, opPtr,opLen, reqPtr,reqLen,
