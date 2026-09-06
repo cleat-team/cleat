@@ -192,12 +192,19 @@ func goAdapterImportNames(t *testing.T, root string) map[string]string {
 	// Positional struct literals: {"cleat_call", "DurableCall"}. Named fields
 	// would not match, which is why the floor above is not decoration.
 	//
-	// The import name is optional in this pattern because one row is
-	// {"", "RunDetached"} -- an EMPTY import name, meaning the Go adapter for
-	// that method binds no host function at all. It is a real sentinel, not a
-	// typo: it is why a Go workflow cannot call cleat_run_detached. Matched
-	// deliberately and skipped below, so that the row is accounted for rather
-	// than invisible to the row-count agreement check.
+	// The import name is optional in this pattern because a row MAY carry an
+	// empty one, meaning the Go adapter for that method binds no host function
+	// at all. Such a row is a real sentinel, not a typo, and is matched
+	// deliberately and skipped below so that it is accounted for rather than
+	// invisible to the row-count agreement check.
+	//
+	// There are none at present. RunDetached was the last, and it was a
+	// sentinel with a cost: the method worked under localdev and cleattest and
+	// silently did nothing in every compiled workflow. Its signature now
+	// matches cleat_run_detached and the row carries a real import name.
+	//
+	// Note this scans the whole FILE, so a row literal written inside a comment
+	// counts as a row and will disagree with the count taken from the slice.
 	re := regexp.MustCompile(`\{"([a-z_][a-z0-9_]*)?",\s*"[A-Za-z0-9_]+"\}`)
 	for _, m := range re.FindAllStringSubmatch(src, -1) {
 		if m[1] == "" {

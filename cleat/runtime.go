@@ -282,10 +282,15 @@ type Lifecycle interface {
 	// AwaitChildTyped waits for a child workflow and unmarshals its result.
 	AwaitChildTyped(runID string, result interface{}) error
 
-	// RunDetached runs fn with a fresh HostCalls that ignores cancellation.
-	// fn executes immediately, is recorded in history, and survives crash/replay.
-	// On replay, fn IS re-executed (not replayed from cache).
-	RunDetached(fn func(h HostCalls) error) error
+	// RunDetached starts a named workflow fire-and-forget: it does not become a
+	// child of this one and this workflow does not wait for it.
+	//
+	// The signature is (name, inputJSON) because that is what the host call
+	// cleat_run_detached takes, and what every other SDK exposes. It used to
+	// take a closure, which cannot cross the ABI -- so it worked under localdev
+	// and cleattest, which populate the field directly, and silently did
+	// nothing in every compiled workflow.
+	RunDetached(name, inputJSON string) error
 
 	// Version returns the current workflow version number for schema evolution.
 	Version() int
@@ -714,7 +719,7 @@ type HostCallsImpl struct {
 	setQueryState                 func(key, value string)
 	registerUpdateHandler         func(name string)
 	handleUpdate                  func(name, payload string) (string, error)
-	runDetached                   func(fn func(h HostCalls) error) error
+	runDetached                   func(name, inputJSON string) error
 	now                           func() int64
 	random                        func() int64
 	newUUID                       func() string
@@ -871,7 +876,7 @@ type HostCallsOptions struct {
 	SetQueryState                 func(key, value string)
 	RegisterUpdateHandler         func(name string)
 	HandleUpdate                  func(name, payload string) (string, error)
-	RunDetached                   func(fn func(h HostCalls) error) error
+	RunDetached                   func(name, inputJSON string) error
 	Now                           func() int64
 	Random                        func() int64
 	NewUUID                       func() string

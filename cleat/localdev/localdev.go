@@ -716,15 +716,24 @@ func (r *LocalRunner) registerUpdateHandler(name string) {
 	r.logEvent("[%.3fs] register_update_handler %s", r.elapsed().Seconds(), name)
 }
 
-func (r *LocalRunner) runDetached(fn func(h cleat.HostCalls) error) error {
+// runDetached records the request. It does not start the workflow: localdev
+// runs a single workflow and has no scheduler to hand a detached one to.
+//
+// Recording rather than executing is deliberate. The previous version took a
+// closure and ran it inline, which made localdev the only place RunDetached
+// appeared to work -- in a compiled workflow the field was never set and the
+// call silently did nothing. Matching production's shape here means a workflow
+// that runs under localdev and then fails in production fails for a reason the
+// developer can see, rather than behaving differently in each.
+func (r *LocalRunner) runDetached(name, inputJSON string) error {
 	r.mu.Lock()
 	r.events = append(r.events, Event{
 		Type:    "run_detached",
-		Message: "starting detached execution",
+		Message: "detached workflow requested: " + name,
 	})
 	r.mu.Unlock()
-	r.logEvent("[%.3fs] run_detached", r.elapsed().Seconds())
-	return fn(r.h)
+	r.logEvent("[%.3fs] run_detached %s", r.elapsed().Seconds(), name)
+	return nil
 }
 
 func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) (string, bool, error) {

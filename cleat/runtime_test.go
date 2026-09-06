@@ -1569,33 +1569,34 @@ func TestRejectPromiseNotInitialized(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRunDetachedDelegates(t *testing.T) {
-	var fnCalled bool
-	var hc HostCalls
-	hc = NewHostCalls(HostCallsOptions{
-		RunDetached: func(fn func(h HostCalls) error) error {
-			fnCalled = true
-			return fn(hc)
+	var gotName, gotInput string
+	hc := NewHostCalls(HostCallsOptions{
+		RunDetached: func(name, inputJSON string) error {
+			gotName, gotInput = name, inputJSON
+			return nil
 		},
 	})
 
-	err := hc.RunDetached(func(h HostCalls) error {
-		return nil
-	})
-	if err != nil {
+	if err := hc.RunDetached("reconcile", `{"id":7}`); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !fnCalled {
-		t.Error("expected RunDetached function to be called")
+	if gotName != "reconcile" || gotInput != `{"id":7}` {
+		t.Errorf("RunDetached passed (%q, %q), want (\"reconcile\", `{\"id\":7}`)",
+			gotName, gotInput)
 	}
 }
 
-func TestRunDetachedNotInitialized(t *testing.T) {
+func TestRunDetachedNotInitializedReturnsAnError(t *testing.T) {
+	// This test previously asserted the opposite -- "expected no error when not
+	// initialized" -- and so encoded the defect as the contract. RunDetached
+	// took a closure, which cannot cross the ABI, so in every compiled workflow
+	// the field was nil, the method returned nil, and nothing was started. A
+	// caller had no way to tell that from success.
 	h := NewHostCalls(HostCallsOptions{})
-	err := h.RunDetached(func(h HostCalls) error {
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("expected no error when not initialized, got: %v", err)
+	err := h.RunDetached("reconcile", "{}")
+	if err == nil {
+		t.Fatal("RunDetached returned nil with no runtime wired; an uninitialized " +
+			"host call must report failure rather than silently start nothing")
 	}
 }
 
