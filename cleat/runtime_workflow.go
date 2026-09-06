@@ -110,27 +110,37 @@ func (h *HostCallsImpl) SetQueryState(key, value string) {
 	}
 }
 
-// SetScope enters a virtual object instance.
+// SetScope enters a virtual object instance -- but NOT, in this SDK, in any
+// way the engine can see.
 //
-// What it does NOW, on a worker: the engine takes a concurrency key named
-// "vo:<objectType>:<instanceKey>" and holds it until the scope is cleared or
-// replaced, so two workflows cannot be inside the same instance at once
-// (engine/scope.go, freshSetScope). That mutual exclusion is the whole of the
-// remaining behaviour.
+// What the ENGINE does with a scope: freshSetScope (engine/scope.go) takes a
+// concurrency key named "vo:<objectType>:<instanceKey>" and holds it until the
+// scope is cleared or replaced, so two workflows cannot be inside the same
+// instance at once. That mutual exclusion is the whole of the remaining
+// behaviour, and it is real.
+//
+// What THIS implementation does: sets three local fields. There is no
+// HostCallsOptions field for scope, no row in wasm/usage.go's hostFunctions
+// table, and no entry in wasm/adapter_metadata.go -- so nothing generates a
+// call to cleat_set_scope for a Go guest and the host is never told. A Go
+// workflow calling SetScope therefore takes NO LOCK. Rust, Java and
+// AssemblyScript all declare the import and call it (crates/cleat-sdk
+// host_calls.rs:943, crates/cleat-java HostCalls.java:266,
+// packages/cleat-as host-calls.ts:2053); Go is the only one that does not.
 //
 // What it used to do, and what this comment used to say: "All subsequent
 // SetState/GetState/etc calls are automatically prefixed with
 // vo:<objectType>:<instanceKey>:". Those calls were removed with the rest of
 // the durable-state family (IMPROVEMENT-PLAN 3.216), so the prefix prefixes
-// nothing. The returned string still has that shape, but treat it as an
-// OPAQUE TOKEN for stack-style save/restore -- pass it back, do not parse it.
+// nothing either.
 //
-// Note one gap: cleat/embedded's setScope does not take a concurrency key, so
-// under the embedded runner SetScope has NO OBSERVABLE EFFECT AT ALL. That is
-// not a limit of the runner -- it has an in-memory lock map that AcquireLock
-// and ReleaseLock use; setScope simply does not touch it. A test that means to
-// exercise virtual-object mutual exclusion has to run against a worker.
-// IMPROVEMENT-PLAN 3.223.
+// Both halves gone, the honest summary is: in the Go SDK these three methods
+// are a local variable with an interface around it. The returned string is an
+// opaque token for stack-style save/restore -- pass it back, do not parse it.
+//
+// See IMPROVEMENT-PLAN 3.223. cleat/embedded is inert for a second, separate
+// reason: its setScope does not touch the in-memory lock map that its own
+// AcquireLock uses.
 func (h *HostCallsImpl) SetScope(objectType, instanceKey string) (previousScope string) {
 	if h.scopeSet {
 		previousScope = h.scopePrefix
