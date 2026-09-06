@@ -203,6 +203,26 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&payloadBuf[0], int(payloadLen)), found, nil",
 		},
 	},
+	// ScheduleInvoke: three strings and a delay in, nothing out.
+	// IMPROVEMENT-PLAN 3.224. Same shape as SignalWorkflow below: no response
+	// buffer, so the error code is all the guest gets.
+	"ScheduleInvoke": {
+		FieldName:  "ScheduleInvoke",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"service", "string"},
+			{"operation", "string"},
+			{"requestJSON", "string"},
+			{"delayMs", "int64"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_schedule_invoke: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
 	// SignalWorkflow: three strings in, nothing out. IMPROVEMENT-PLAN 3.224.
 	//
 	// errCode is the full 64-bit result rather than a packed field: the engine

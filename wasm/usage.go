@@ -69,6 +69,9 @@ var hostFunctions = []HostFunction{
 	// does call DeliverSignal (engine/signaller.go) -- so this was the engine
 	// able to deliver a signal between workflows and no Go guest able to ask.
 	{"cleat_signal_workflow", "SignalWorkflow"},
+	// IMPROVEMENT-PLAN 3.224, same omission: a Go workflow calling
+	// h.ScheduleInvoke(...) compiled with no cleat_schedule_invoke import.
+	{"cleat_schedule_invoke", "ScheduleInvoke"},
 	{"cleat_await_signals", "AwaitSignals"},
 	// Defer
 	{"cleat_defer", "DurableDefer"},
