@@ -1589,6 +1589,25 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	caller := &dbServiceCaller{store: execStore, workerID: w.id, benchSvcURL: *benchSvcURL}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
+		// The promise store, which the worker never wired.
+		//
+		// Everything else existed: the workflow_promises table, its
+		// migrations, and PostgresStore's full PromiseStore implementation.
+		// Only this line was missing, and every promise path checks
+		// `s.engine.promiseStore != nil` and quietly does nothing when it is.
+		// So CreatePromise recorded its event, skipped the insert and returned
+		// SUCCESS; AwaitPromise then found no row, fell past both the resolved
+		// and rejected branches, and suspended forever. Zero rows had ever been
+		// written to workflow_promises.
+		//
+		// IMPROVEMENT-PLAN 3.218 already fixed this hang for the case where the
+		// store returns an error -- "the failure was not unreportable, it was
+		// unreported". The nil-store path produces the identical hang and was
+		// left reporting success, which is the half of that fix that could not
+		// be seen: WithPromiseStore was called from cleat/wasmtest and from a
+		// unit test, and from nothing that ships, so every test had a promise
+		// store and the worker never did.
+		engine.WithPromiseStore(execStore.(engine.PromiseStore)),
 		engine.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),
 		engine.WithWorkflowID(wf.ID),
 		// Anchors the session clock when the workflow has no history yet.
