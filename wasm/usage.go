@@ -231,6 +231,17 @@ func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInf
 // TestEveryCompositeHostCallHasAnImportRow derives this from the SDK source and
 // fails when a wrapper is added without an entry.
 var compositeRequires = map[string][]string{
+	// NowMs is not a composite in the h.Method(...) sense -- it invokes the
+	// `now` CLOSURE FIELD directly, exactly as Now() does -- which is why
+	// TestEveryCompositeHostCallHasAnImportRow does not see it: that scan looks
+	// for h.<Uppercase>(, and this calls h.now(). Without a row here a workflow
+	// whose only host call is h.NowMs() compiled with ZERO host functions and
+	// the method returned 0, an epoch timestamp, silently.
+	//
+	// cleat_now is enough: info.Funcs is hostFunctions filtered by Used, so
+	// marking the import used pulls in {"cleat_now", "Now"} and the emitted Now
+	// field is what populates h.now. IMPROVEMENT-PLAN 3.234.
+	"NowMs":                         {"cleat_now"},
 	"NewUUID":                       {"cleat_random"},
 	"NewUUIDv7":                     {"cleat_random", "cleat_now"},
 	"UUID":                          {"cleat_workflow_id"},
