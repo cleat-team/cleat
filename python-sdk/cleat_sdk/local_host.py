@@ -33,7 +33,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
-from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 from .host_calls import (
     INFINITE_TIMEOUT_MS,
     ChildResult,
@@ -42,6 +41,7 @@ from .host_calls import (
     RetryPolicy,
     SignalResult,
 )
+from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 
 T = TypeVar("T")
 

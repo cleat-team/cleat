@@ -41,7 +41,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
-from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 from .memory import (
     CALL_SUSPEND_SENTINEL,
     OUT_BUF_SIZE,
@@ -57,6 +56,7 @@ from .memory import (
     read_string,
     write_string,
 )
+from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 
 # Message for host calls that have no WIT binding at all.
 #
