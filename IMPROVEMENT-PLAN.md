@@ -5744,7 +5744,7 @@ failure citing files that are not there is a harness fault, not a finding — an
 gives two passes, so the wrong number was wrong in the direction that made the finding look
 bigger.
 
-### 3.229 The HostCalls threading check rejects two working patterns, one of them a first-party SDK's own — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+### 3.229 The HostCalls threading check rejects two working patterns, one of them a first-party SDK's own — 🟢 **BOTH FIXED 2026-09-06** (WS-1, 2026-09-06)
 
 §3.228 found six Go examples that do not build and called all six example defects. **Four were**
 — three struct-pointer returns (#801) and one `time.Now()` (#802). **The other two are not**, and
@@ -5788,6 +5788,35 @@ satisfiable by adding a reference that would be dead code.
 
 **The error tells the author to do something already done.**
 
+## Both are fixed, and the second was not the defect it looked like
+
+**`dag`** — phase 3b credits a HostCalls field on a **parameter**, symmetric with phase 3's rule for
+receivers (#807).
+
+**`fooddash`** — and here the diagnosis above was wrong in an instructive way. The section proposed
+crediting every function in a package with a global `h`, and warned that doing so "makes the
+threading guarantee vacuous for that package". **Both the proposal and the warning were beside the
+point**, because `internal/transform` *already* auto-threads every durable function in such a
+package — referencers and pass-throughs alike — and rewrites their call sites.
+
+`internal/closure`'s own test says so:
+
+    // validateAndReserve and processPayment are pass-through functions in the closure that
+    // don't reference the global var h directly, so they are correctly reported as
+    // unthreaded BEFORE the transform runs. After the transform they get h added as a
+    // parameter.
+
+So the check is right and the **build gate** was wrong: `cmd/cleat` exited 1 on a pre-transform
+report, rejecting packages the very next stage was designed to fix. `dropAutoThreaded` now filters
+errors for functions the transform gave an `h` to, and fails on the remainder.
+
+**Changing the check, as this section proposed, would have broken that test and been the wrong
+layer.** The measurement that settled it was bypassing the gate and watching the transform
+auto-thread `validateMenuItems` and ten others — the finding was in what happened *after* the point
+where I had stopped looking.
+
+## What the earlier framing got right and wrong
+
 ## Why this is filed rather than fixed
 
 Widening the check is a design decision with a real downside on each side. Crediting any function
@@ -5806,6 +5835,54 @@ follows the message and sees no change learns to disbelieve the tool.
 **Neither example has been shown to run.** They compile as Go and their host access is coherent,
 but nothing in CI builds a Go example to WASM (§3.228), so "these two are fine" means "the check's
 objection does not hold", not "these examples work".
+
+### 3.230 Auto-threading renamed the SDK import and broke every reference to it — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+Found underneath §3.229: with the threading gate bypassed, the transform auto-threaded eleven
+functions in `examples/fooddash` and the result did not compile.
+
+    ./order.go:133:10: undefined: cleat
+    ./order.go:141:10: undefined: cleat
+    ... 19 references in that file
+
+`ensureHostCallsImport` ran this on the SDK import, **unconditionally**:
+
+    if imp.Name == nil || imp.Name.Name != "durable" {
+        imp.Name = ast.NewIdent("durable")
+    }
+
+including when it was **unaliased**, which is the normal spelling. Every existing `cleat.X`
+reference in the file then failed to compile. `addHostCallsParam` and `isHostCallsField` hardcoded
+`"durable"` to match.
+
+**`durable` was the SDK's package name before the 2026-06-01 rename** (commit `3eeb74e`, "promote
+internal packages to public"). The transform kept it for three months.
+
+The fix threads the file's **own** local name through: `ensureHostCallsImport` returns it and never
+renames an existing import, `addHostCallsParam` qualifies with it, `isHostCallsField` compares
+against it. A newly added import is unaliased, because the package is named `cleat` and an alias
+would be noise in a file the user reads.
+
+## Why nothing caught it for three months
+
+Auto-threading engages **only** for a package that declares a global `var h` — `needsH` is populated
+solely under `hasGlobalH`. And for exactly those packages, the threading check rejected the build
+first (§3.229). **So the transform's output was never compiled by anything.** Two defects in series,
+each hiding the other, and neither reachable without fixing the one in front.
+
+That is the same shape as §3.228's `event-driven` (E003 hid a struct return) and #805's `fooddash`
+(a threading error hid three), but a layer deeper: not a linter halting on the first error, but a
+*stage* halting before the stage that would have failed.
+
+**The test that catches it has to compile.** `TestBuildAutoThreadedPackage` runs `cleat build` on
+`testdata/autothread` end to end — the check reports, the gate filters, the transform threads, and
+the emitted Go has to build. Falsified both ways: removing the gate filter gives "cleat build
+failed", and restoring the `durable` rename gives `./order.go:29:7: undefined: cleat`. **No unit
+test on any single stage would have seen either**, which is the argument for having one test that
+crosses all of them.
+
+There is also a unit test on `dropAutoThreaded`, because a filter that removes too much would let a
+genuine threading error through, and that failure is silent.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 

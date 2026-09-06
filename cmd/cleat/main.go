@@ -272,6 +272,20 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		fmt.Printf("  Found %d functions, %d entry point(s), %d in cleat closure.\n",
 			result.NumFuncs, len(result.EntryPoints), leafCount+closureCount)
 		fmt.Printf("  Durable leaves: %s\n", formatDurableLeaves(result, cr))
+		// VerifyThreading reports the PRE-TRANSFORM state, deliberately -- see
+		// TestVerifyThreadingAutothreadReportsPassThroughErrors, whose comment
+		// says pass-through functions in a global-h package "are correctly
+		// reported as unthreaded BEFORE the transform runs. After the transform
+		// they get h added as a parameter."
+		//
+		// So an error naming a function the transform auto-threaded is not a
+		// build failure; it is a stale reading of a state that no longer
+		// exists. Failing on it made `cleat build` reject packages the very
+		// next stage was designed to fix -- examples/fooddash, where the error
+		// told the author to declare a package-level var h that order.go:36
+		// already declares. IMPROVEMENT-PLAN 3.229.
+		threadingErrs = dropAutoThreaded(threadingErrs, tr)
+
 		fmt.Printf("  Verifying HostCalls threading... %s\n", formatThreadingStatus(threadingErrs))
 
 		if len(threadingErrs) > 0 {
@@ -1108,6 +1122,25 @@ func logBuildProgress(format string, jsonOut bool, args ...any) {
 }
 
 // vetJSONOutput builds a VetOutput from analysis results.
+// dropAutoThreaded removes threading errors for functions the transform gave
+// an h parameter to. See the call site for why they are not failures.
+func dropAutoThreaded(errs []closure.ThreadingError, tr *transform.Result) []closure.ThreadingError {
+	if tr == nil || len(tr.AddedH) == 0 || len(errs) == 0 {
+		return errs
+	}
+	added := make(map[string]bool, len(tr.AddedH))
+	for _, name := range tr.AddedH {
+		added[name] = true
+	}
+	kept := errs[:0:0]
+	for _, e := range errs {
+		if !added[e.FuncName] {
+			kept = append(kept, e)
+		}
+	}
+	return kept
+}
+
 func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadingErrs []closure.ThreadingError) VetOutput {
 	var out VetOutput
 	out.Errors = make([]VetResult, 0)
