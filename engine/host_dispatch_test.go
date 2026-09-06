@@ -38,6 +38,22 @@ func TestDurableSendReplayMatch(t *testing.T) {
 }
 
 func TestDurableSendReplayPastEnd(t *testing.T) {
+	// A send past the end of history is NEW WORK: nothing recorded it, so
+	// nothing executed it, and the session must leave replay and dispatch it.
+	//
+	// This test used to assert the opposite, in the implementation's own words:
+	//
+	//	// On past-end, DurableSend returns 0 without calling exitReplay.
+	//	if !s.isReplay {
+	//	    t.Error("expected isReplay to remain true (DurableSend does not exitReplay on past-end)")
+	//	}
+	//
+	// It gave no reason why that would be right, because there is none -- it
+	// restated the code. What the code did was return success having recorded
+	// no event and dispatched nothing, so every send after a workflow's first
+	// suspension was silently dropped, and every defer's send with it. The test
+	// is why the defect survived: changing the behaviour failed three tests,
+	// which reads as "this was intended". cleat#835.
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = nil // past end
@@ -47,9 +63,14 @@ func TestDurableSendReplayPastEnd(t *testing.T) {
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
 	}
-	// On past-end, DurableSend returns 0 without calling exitReplay.
-	if !s.isReplay {
-		t.Error("expected isReplay to remain true (DurableSend does not exitReplay on past-end)")
+	if s.isReplay {
+		t.Error("the session stayed in replay, so the send was neither replayed nor performed")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected the send to be recorded as a fresh event, got %d events", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeDurableSend {
+		t.Errorf("recorded %q, want %q", s.history[0].EventType, EventTypeDurableSend)
 	}
 }
 

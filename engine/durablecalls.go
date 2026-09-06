@@ -638,14 +638,30 @@ func (s *execSession) DurableLog(ctx context.Context, m api.Module, message stri
 
 func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, operation, requestJSON string) int64 {
 	if s.isReplay {
-		// On replay, skip (fire-and-forget is recorded but not re-executed).
+		// On replay, skip: fire-and-forget is recorded but not re-executed.
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0
 			}
+			return 0
 		}
-		return 0
+		// Past recorded history -- switch to fresh execution.
+		//
+		// The `return 0` used to sit outside the bounds check, so a send whose
+		// step was past the end of history returned SUCCESS having recorded no
+		// event and dispatched nothing. Every send after a workflow's first
+		// suspension took that path, because the resumed segment replays the
+		// recorded steps and then runs on with isReplay still set until some
+		// other call crosses the frontier.
+		//
+		// Measured 2026-09-06: a workflow that sleeps and then sends reached
+		// the service 0 times in 3 runs, while the same send before the sleep
+		// arrived every time. A defer's send never arrived at all -- defers run
+		// at the end by definition, so they are always past the frontier.
+		//
+		// DurableDefer, two functions above, is the shape this should have had.
+		s.exitReplay()
 	}
 
 	// A fresh send is new work: it dispatches a request to an external service
@@ -692,8 +708,11 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 			if !s.advanceReplayStep(ctx, &rec) {
 				return 0
 			}
+			return 0
 		}
-		return 0
+		// Past recorded history -- switch to fresh execution. Same defect and
+		// same fix as DurableSend above.
+		s.exitReplay()
 	}
 
 	// A fresh schedule_invoke is new work, and it outlives the segment by
