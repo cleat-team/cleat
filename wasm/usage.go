@@ -109,6 +109,46 @@ var hostFunctions = []HostFunction{
 	{"cleat_now", "Now"},
 	// Random
 	{"cleat_random", "Random"},
+
+	// Composite HostCalls methods -- wrappers implemented in terms of another
+	// host call. AnalyzeUsage scans the USER's AST for h.<Method>(...) and
+	// looks each name up here; it does not follow into the SDK, so a wrapper
+	// with no row contributes no import. The inner field then stays nil and
+	// HostCallsImpl's nil branch returns a zero value: h.NewUUID() returned
+	// 00000000-0000-4000-8000-000000000000 in every compiled workflow, and a
+	// workflow whose body was h.Log(...) plus h.Call(...) compiled with no
+	// host calls wired at all. See #775.
+	//
+	// The DurableCallTyped/DurableCallJSON rows above are the same fix applied
+	// to one family and not the others; the comment there already states the
+	// mechanism.
+	//
+	// TestEveryCompositeHostCallHasAnImportRow keeps this list honest.
+	{"cleat_random", "NewUUID"},
+	{"cleat_random", "NewUUIDv7"},
+	{"cleat_now", "NewUUIDv7"},
+	{"cleat_workflow_id", "UUID"},
+	{"cleat_log", "Log"},
+	{"cleat_call", "Call"},
+	{"cleat_call", "DurableCallTypedWithOptions"},
+	{"cleat_await_signals", "AwaitCondition"},
+	{"cleat_now", "AwaitCondition"},
+	{"cleat_await_signals", "AwaitSignalsWithQuorum"},
+	{"cleat_await_promise", "AwaitPromiseMs"},
+	{"cleat_poll_signal", "PollSignals"},
+
+	// Found by the guard rather than by inspection, and each is a wrapper that
+	// is already in this table for ONE import while needing a second:
+	{"cleat_child_workflow", "ChildWorkflowWithOptions"},
+	{"cleat_call_retry", "DurableCallTypedWithOptions"},
+	{"cleat_call", "DurableCallWithHeartbeat"},
+	// DurableCallWithOptions sleeps between retry attempts, so a workflow that
+	// sets a RetryPolicy and never calls DurableSleep itself would compile with
+	// cleat_sleep unwired and back off for no time at all.
+	{"cleat_sleep", "DurableCallWithOptions"},
+	{"cleat_call", "DurableCallTypedWithHeartbeat"},
+	{"cleat_sleep", "DurableCallJSONWithOptions"},
+	{"cleat_sleep", "DurableCallTypedWithOptions"},
 	// Lock/concurrency key operations
 	{"cleat_acquire_lock", "AcquireLock"},
 	{"cleat_acquire_lock", "AcquireLockMs"},
