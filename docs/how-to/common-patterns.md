@@ -266,9 +266,25 @@ case "escalated":
 | Field | Type | Description |
 |-------|------|-------------|
 | Name | string | Name of the received signal (empty if timed out) |
-| Payload | string | JSON payload from the signal |
+| Payload | string | JSON payload from the signal, exactly as the sender passed it |
+| ReplyTo | string | Address to answer at, or empty for a one-way signal (see below) |
 | TimedOut | bool | True if no signal arrived before the timeout |
 | Err | error | Error if signal delivery failed |
+
+`ReplyTo` is non-empty only when the sender used `SendSignalAndWait` and is
+suspended waiting for an answer. Pass it to `ReplyToSignal` to wake them:
+
+```go
+sig := h.AwaitSignals([]string{"approve"}, time.Hour)
+if sig.ReplyTo != "" {
+    h.ReplyToSignal(sig.ReplyTo, `{"approved":true}`)
+}
+```
+
+A signal sent with `SignalWorkflow` leaves `ReplyTo` empty, so checking it is
+how you tell a request that wants an answer from a notification that does not.
+`Payload` is unaffected either way — the reply address travels in an envelope
+that `AwaitSignals` and `PollSignals` strip before you see it.
 
 See the [onboarding example](../examples/onboarding/signup.go) for a complete
 signal-based email verification workflow.

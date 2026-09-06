@@ -283,12 +283,12 @@ func (e *execution) hostCalls() cleat.HostCalls {
 		Random:              e.random,
 		CreatePromise:       e.createPromise,
 		AwaitPromise:        e.awaitPromise,
+		ResolvePromise:      e.resolvePromise,
+		RejectPromise:       e.rejectPromise,
 		ChildWorkflow:       e.childWorkflow,
 		AwaitChild:          e.awaitChild,
 		WorkflowID:          e.workflowID,
 		RunID:               e.runID,
-		SendSignalAndWait:   e.sendSignalAndWait,
-		ReplyToSignal:       e.replyToSignal,
 		SignalWorkflow:      e.signalWorkflow,
 		AcquireLock:         e.acquireLock,
 		ReleaseLock:         e.releaseLock,
@@ -613,6 +613,36 @@ func (e *execution) createPromise(name string) (string, error) {
 	return id, nil
 }
 
+// resolvePromise and rejectPromise settle a promise created by this
+// execution. They were missing until SendSignalAndWait became a composite
+// over promises (IMPROVEMENT-PLAN 3.220): the embedded runner offered
+// CreatePromise and AwaitPromise but no way to settle one, so a promise
+// created here could only ever time out.
+func (e *execution) resolvePromise(promiseID, value string) error {
+	return e.settlePromise(promiseID, "resolved", value, "")
+}
+
+func (e *execution) rejectPromise(promiseID, errMsg string) error {
+	return e.settlePromise(promiseID, "rejected", "", errMsg)
+}
+
+// settlePromise reports not-found rather than silently doing nothing, which
+// is what the engine does after #818 -- a settle matching no row returns
+// ErrPromiseNotFound, and engine/promises.go turns that into a non-zero
+// result code.
+func (e *execution) settlePromise(promiseID, status, result, errMsg string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ps, ok := e.promises[promiseID]
+	if !ok {
+		return fmt.Errorf("embedded: settle promise %s: promise not found", promiseID)
+	}
+	ps.status = status
+	ps.result = result
+	ps.errMsg = errMsg
+	return nil
+}
+
 func (e *execution) awaitPromise(promiseID string, timeout time.Duration) (string, bool, error) {
 	e.mu.Lock()
 	ps, ok := e.promises[promiseID]
@@ -679,26 +709,6 @@ func (e *execution) awaitChild(runID string) (string, error) {
 		return result.result, nil
 	}
 	return `{"status":"completed"}`, nil
-}
-
-func (e *execution) sendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
-	// Store the outgoing signal for test inspection.
-	e.mu.Lock()
-	e.signals = append(e.signals, signalEvent{name: signalName, payload: payload})
-	e.mu.Unlock()
-
-	// In the embedded runner, simulate an immediate response.
-	// A full implementation would route the signal to the target execution
-	// and wait for a reply.
-	return `{"status":"delivered"}`, nil
-}
-
-func (e *execution) replyToSignal(correlationID, response string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// Store the reply as a signal for the caller to poll.
-	e.signals = append(e.signals, signalEvent{name: correlationID, payload: response})
-	return nil
 }
 
 func (e *execution) signalWorkflow(targetRunID, signalName, payload string) error {

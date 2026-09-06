@@ -323,10 +323,6 @@ type TestEnv struct {
 	cancelled    bool
 	cancelReason string
 
-	// signalReplyChannels maps correlation IDs to reply channels for
-	// SendSignalAndWait / ReplyToSignal.
-	signalReplyChannels map[string]chan string
-
 	// replayMode enables call recording and replay.
 	replayMode bool
 	// replayHistory stores recorded calls for replay matching.
@@ -365,7 +361,6 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		retryBehaviors:           make(map[string]*retryBehavior),
 		childWorkflowCallHistory: make([]ChildWorkflowCallRecord, 0),
 		ConcurrencyKeys:          make(map[string]string),
-		signalReplyChannels:      make(map[string]chan string),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -421,8 +416,6 @@ func (e *TestEnv) hostCallsOptions() cleat.HostCallsOptions {
 		PluginCall:                    e.pluginCallImpl,
 		DurableSend:                   e.durableSendImpl,
 		ScheduleInvoke:                e.durableScheduleInvokeImpl,
-		SendSignalAndWait:             e.sendSignalAndWaitImpl,
-		ReplyToSignal:                 e.replyToSignalImpl,
 		SignalWorkflow:                e.signalWorkflowImpl,
 		AcquireLock:                   e.acquireLockImpl,
 		ReleaseLock:                   e.releaseLockImpl,
@@ -673,7 +666,6 @@ func (e *TestEnv) Reset() {
 	e.childWorkflowCallHistory = nil
 	e.ConcurrencyKeys = make(map[string]string)
 	e.pluginCallStubs = nil
-	e.signalReplyChannels = make(map[string]chan string)
 	e.replayMode = false
 	e.replayHistory = nil
 	e.replayDivergence = 0
@@ -1050,22 +1042,51 @@ func (e *TestEnv) continueAsNewWithVersionImpl(newInputJSON string, newVersion i
 // resolvePromiseImpl is the workflow-side counterpart of the public
 // TestEnv.ResolvePromise driver method.
 //
-// It always returns nil, matching the engine: engine/promises.go records the
-// event, calls the promise store, and LOGS rather than returns a store error --
-// the host function's result is unconditionally success. A mock that surfaced
-// an error here would let a test assert a failure mode production cannot
-// produce. Resolving an unknown promise is likewise a silent no-op, because the
-// store's UPDATE matches no rows and SQL does not call that an error.
+// Settling a promise that does not exist is an ERROR, matching the engine.
+// The comment here used to say the opposite -- that the host function's
+// result is unconditionally success, and that "a mock that surfaced an error
+// here would let a test assert a failure mode production cannot produce" --
+// and that was true when it was written. #818 made the store report
+// ErrPromiseNotFound for a settle matching no row, and engine/promises.go:280
+// turns any store error into packSimpleResult(1, 0), so the failure mode the
+// comment called impossible is now the documented one. The mock was left
+// behind, more permissive than production: a test could settle a wrong or
+// expired ID and see success where a real workflow sees an error.
+//
+// It is caught here because SendSignalAndWait's reply address is a promise ID
+// (IMPROVEMENT-PLAN 3.220), so a stale reply address and an unknown promise
+// became the same case.
 func (e *TestEnv) resolvePromiseImpl(promiseID, value string) error {
-	e.ResolvePromise(promiseID, value)
+	if !e.settlePromise(promiseID, "resolved", value, "") {
+		return fmt.Errorf("cleattest: resolve promise %s: promise not found", promiseID)
+	}
 	return nil
 }
 
 // rejectPromiseImpl is the workflow-side counterpart of TestEnv.RejectPromise.
-// Same contract as resolvePromiseImpl above, including the nil return.
+// Same contract as resolvePromiseImpl above, including the not-found error.
 func (e *TestEnv) rejectPromiseImpl(promiseID, errMsg string) error {
-	e.RejectPromise(promiseID, errMsg)
+	if !e.settlePromise(promiseID, "rejected", "", errMsg) {
+		return fmt.Errorf("cleattest: reject promise %s: promise not found", promiseID)
+	}
 	return nil
+}
+
+// settlePromise moves a promise to its final state, reporting whether it
+// existed. It is the one place both the public driver methods and the
+// workflow-side host calls go through, so the two cannot drift apart.
+func (e *TestEnv) settlePromise(promiseID, status, result, errMsg string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ps, ok := e.promises[promiseID]
+	if !ok {
+		return false
+	}
+	ps.status = status
+	ps.result = result
+	ps.errorMsg = errMsg
+	e.promises[promiseID] = ps
+	return true
 }
 
 // RegisterChildWorkflow registers a handler function for a child workflow with the
@@ -1433,81 +1454,6 @@ func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (re
 	return "", fmt.Errorf("cleattest: no stub registered for PluginCall(%q, %q)", pluginName, functionName)
 }
 
-// sendSignalAndWaitImpl sends a signal and registers a reply channel.
-func (e *TestEnv) sendSignalAndWaitImpl(targetRunID, signalName, payload string, timeout time.Duration) (resp string, retErr error) {
-	e.mu.Lock()
-
-	replayKey := "SendSignalAndWait|" + targetRunID + "|" + signalName + "|" + payload + "|" + timeout.String()
-	if cachedResp, cachedErr, matched := e.replayLookup("SendSignalAndWait", replayKey); matched {
-		e.mu.Unlock()
-		return cachedResp, cachedErr
-	}
-
-	// Generate a correlation ID and embed it in the payload.
-	correlationID := fmt.Sprintf("corr-%s-%s-%d", targetRunID, signalName, e.deferCounter)
-	e.deferCounter++
-
-	// Register a reply channel.
-	replyCh := make(chan string, 1)
-	e.signalReplyChannels[correlationID] = replyCh
-
-	// Create the enriched payload with correlation ID.
-	enrichedPayload := payload
-	if payload != "" && payload != "{}" {
-		// Try to merge correlation ID into the existing JSON payload.
-		var payloadMap map[string]interface{}
-		if err := json.Unmarshal([]byte(payload), &payloadMap); err == nil {
-			payloadMap["_correlation_id"] = correlationID
-			if data, err := json.Marshal(payloadMap); err == nil {
-				enrichedPayload = string(data)
-			}
-		}
-	} else {
-		enrichedPayload = fmt.Sprintf(`{"_correlation_id":%q}`, correlationID)
-	}
-
-	e.mu.Unlock()
-
-	// Send the signal.
-	err := e.H().SignalWorkflow(targetRunID, signalName, enrichedPayload)
-	if err != nil {
-		resp = ""
-		retErr = err
-		e.mu.Lock()
-		e.replayRecord("SendSignalAndWait", replayKey, resp, retErr)
-		e.mu.Unlock()
-		return
-	}
-
-	// Wait for the reply with a timeout.
-	select {
-	case response := <-replyCh: // cleat:allow E002 -- SDK test helper, not user workflow
-		resp = response
-		retErr = nil
-	case <-e.clock.After(timeout): // cleat:allow E002,E014 -- SDK test helper; intentional timeout pattern
-		resp = ""
-		retErr = fmt.Errorf("cleattest: SendSignalAndWait timed out after %v", timeout)
-	}
-
-	e.mu.Lock()
-	e.replayRecord("SendSignalAndWait", replayKey, resp, retErr)
-	e.mu.Unlock()
-	return
-}
-
-// replyToSignalImpl sends a response back via the correlation ID.
-func (e *TestEnv) replyToSignalImpl(correlationID, response string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	ch, ok := e.signalReplyChannels[correlationID]
-	if !ok {
-		return fmt.Errorf("cleattest: no pending signal for correlation ID %q", correlationID)
-	}
-	delete(e.signalReplyChannels, correlationID)
-	ch <- response
-	return nil
-}
-
 // signalWorkflowImpl delivers a signal to a target workflow.
 // In the test env, the target workflow is the current workflow itself.
 func (e *TestEnv) signalWorkflowImpl(targetRunID, signalName, payload string) error {
@@ -1528,26 +1474,18 @@ func (e *TestEnv) signalWorkflowImpl(targetRunID, signalName, payload string) er
 	return nil
 }
 
-// ResolvePromise resolves a promise with the given result.
+// ResolvePromise resolves a promise with the given result. Settling an
+// unknown promise is a no-op here rather than an error, because this is the
+// out-of-band driver a test uses to steer a workflow, not the host call the
+// workflow makes -- that one reports it (resolvePromiseImpl).
 func (e *TestEnv) ResolvePromise(promiseID, result string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if ps, ok := e.promises[promiseID]; ok {
-		ps.status = "resolved"
-		ps.result = result
-		e.promises[promiseID] = ps
-	}
+	e.settlePromise(promiseID, "resolved", result, "")
 }
 
 // RejectPromise rejects a promise with the given error message.
+// Same no-op-on-unknown contract as ResolvePromise above.
 func (e *TestEnv) RejectPromise(promiseID, errMsg string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if ps, ok := e.promises[promiseID]; ok {
-		ps.status = "rejected"
-		ps.errorMsg = errMsg
-		e.promises[promiseID] = ps
-	}
+	e.settlePromise(promiseID, "rejected", "", errMsg)
 }
 
 // ---------------------------------------------------------------------------

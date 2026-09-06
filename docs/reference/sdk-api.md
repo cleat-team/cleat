@@ -248,8 +248,22 @@ Low-level signal wait. Prefer `AwaitSignals`.
 SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (response string, err error)
 ```
 
-Sends a signal to another workflow with an embedded correlation ID and waits
-for a reply.
+Sends a signal to another workflow and suspends until that workflow replies or
+the timeout elapses.
+
+The reply channel is a durable promise: `SendSignalAndWait` creates one, sends
+its ID to the target under the reserved envelope key `cleat_reply_to`, and
+awaits it. The receiver does not parse that envelope — `AwaitSignals` and
+`PollSignals` strip it, so `SignalResult.Payload` is the payload exactly as
+sent and `SignalResult.ReplyTo` carries the address to answer at.
+
+Because the address is a promise ID, replying is resolving that promise, and a
+reply to an address that matches nothing is an error rather than a silent
+no-op. There is no host call behind this: it composes `CreatePromise`,
+`SignalWorkflow` and `AwaitPromise`, each separately durable, so a crash
+between the steps replays correctly.
+
+Returns an error if nobody replies within `timeout`.
 
 ---
 
@@ -257,8 +271,21 @@ for a reply.
 ReplyToSignal(correlationID, response string) error
 ```
 
-Sends a response back to the sender of a signal identified by a correlation
-ID. Used inside a signal handler.
+Answers a signal sent with `SendSignalAndWait`, waking the sender with
+`response`. Pass `SignalResult.ReplyTo` as `correlationID` — it is the reply
+promise's ID, so this resolves that promise.
+
+`ReplyTo` is empty for a signal sent with `SignalWorkflow`, which is how a
+receiver distinguishes a request that wants an answer from a one-way
+notification; replying to an empty or unknown address returns an error rather
+than reporting success.
+
+```go
+sig := h.AwaitSignals([]string{"approve"}, time.Hour)
+if sig.ReplyTo != "" {
+    h.ReplyToSignal(sig.ReplyTo, `{"approved":true}`)
+}
+```
 
 ---
 
