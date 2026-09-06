@@ -65,13 +65,14 @@ func TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP(t *testing.T) {
 		requireAuth: true,
 	}
 	mux := http.NewServeMux()
+	// registerRoutes now carries POST /api/definitions, so this test no longer
+	// registers it by hand. It used to have to: the route was wired inline in
+	// main.go, and the comment here recorded the consequence -- "the route this
+	// test covers is invisible to every other registerRoutes-based test in this
+	// package". That split was the visible edge of a larger one; the same
+	// second table was where /api/instances and /api/admin/instances failed to
+	// be registered at all.
 	registerRoutes(mux, api)
-	// POST /api/definitions is wired inline in main.go rather than in
-	// registerRoutes, so a mux built the usual way for tests does not have it
-	// and every request 404s. Registered here explicitly; the split is worth
-	// noticing, because it means the route this test covers is invisible to
-	// every other registerRoutes-based test in this package.
-	mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
 
 	deploy := func(tenant, name string, wasm []byte) (int, string) {
 		t.Helper()
