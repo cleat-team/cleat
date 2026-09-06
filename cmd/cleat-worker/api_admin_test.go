@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,7 +100,14 @@ func TestAdminForceComplete_GenerationMismatch(t *testing.T) {
 
 	ms := &mockStore{}
 	ms.adminForceCompleteFn = func(_ context.Context, workflowID string, generation int64, result string, operator string) error {
-		return errors.New("admin force-complete: generation mismatch for workflow wf-1")
+		// Wraps the class a real store returns. It used to be a bare
+		// errors.New whose TEXT contained "generation mismatch", which
+		// passed only because handleAdminOpError matched on substrings --
+		// so the test imitated a store's prose rather than its contract,
+		// and would have gone on passing if every real store stopped
+		// classifying.
+		return fmt.Errorf("admin force-complete: generation mismatch for workflow wf-1: %w",
+			engine.ErrAdminGenerationMismatch)
 	}
 	api := newTestAPIServer(ms)
 	mux := http.NewServeMux()
@@ -131,7 +138,8 @@ func TestAdminForceComplete_NotFound(t *testing.T) {
 
 	ms := &mockStore{}
 	ms.adminForceCompleteFn = func(_ context.Context, workflowID string, generation int64, result string, operator string) error {
-		return errors.New("admin force-complete: workflow wf-999 not found")
+		return fmt.Errorf("admin force-complete: workflow wf-999 not found: %w",
+			engine.ErrAdminNotFound)
 	}
 	api := newTestAPIServer(ms)
 	mux := http.NewServeMux()

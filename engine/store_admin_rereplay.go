@@ -37,7 +37,8 @@ func adminReReplayMiss(status string, stored, requested int64, workflowID string
 	if stored != requested {
 		return adminGenerationMismatch(adminActionReReplay, workflowID, stored, requested)
 	}
-	return fmt.Errorf("admin %s: workflow %s is %s, and only %v can be re-replayed",
+	return adminErrorf(ErrAdminStateConflict,
+		"admin %s: workflow %s is %s, and only %v can be re-replayed",
 		adminActionReReplay, workflowID, status, reReplayableStatuses)
 }
 
