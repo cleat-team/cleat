@@ -21,6 +21,12 @@ type batchEntry struct {
 	done       chan error
 	params     []interface{} // 31 values matching insertEventSQL parameter order
 
+	// createdAt is the EVENT's timestamp, not the moment of the write. The
+	// column is what LoadEventHistory reconstructs TimestampMs from, and
+	// execSession.Now() reads that back, so storing the flush time here made
+	// h.Now() non-deterministic across replay. See insertEventSQL's doc.
+	createdAt time.Time
+
 	// workerID and generation are the claiming worker's identity, for
 	// fencing (B4). workerID == "" means the caller did not ask for fencing
 	// (Engine.fencingEnabled() was false), and this entry is never held back
@@ -343,7 +349,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			"payload":           payloadJSONRaw(p[28]),
 			"checksum":          p[29],
 			"tenant_id":         p[30],
-			"created_at":        time.Now(),
+			"created_at":        entry.createdAt,
 		}
 	}
 
@@ -732,7 +738,12 @@ func (af *AdaptiveFlusher) prepareEntry(workflowID string, rec EventRecord, chec
 		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
 		payloadArg, checksum, af.tenantID,
 	}
-	return batchEntry{workflowID: workflowID, step: rec.Step, params: params}, nil
+	return batchEntry{
+		workflowID: workflowID,
+		step:       rec.Step,
+		params:     params,
+		createdAt:  eventCreatedAt(rec),
+	}, nil
 }
 
 func (af *AdaptiveFlusher) InBatchMode() bool {
