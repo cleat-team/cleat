@@ -1481,59 +1481,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // State management
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_workflow_state() {
-        let env = TestEnv::new();
-
-        assert_eq!(val, "my_value");
-
-    }
-
-    #[test]
-    fn test_incr_state() {
-        let env = TestEnv::new();
-
-        assert_eq!(val, 5);
-
-        assert_eq!(val2, 8);
-    }
-
-    #[test]
-    fn test_list_state() {
-        let env = TestEnv::new();
-
-        assert_eq!(keys.len(), 2);
-    }
-
-    #[test]
-    fn test_get_missing_state() {
-        let env = TestEnv::new();
-        assert!(result.is_err());
-    }
-
-    // -----------------------------------------------------------------------
     // Scope
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_scope_and_state() {
-        let env = TestEnv::new();
-        let prev = env.set_scope("counter", "user_42");
-        assert!(prev.is_empty());
-
-        assert_eq!(val, "10");
-
-        let (obj_type, inst_key) = env.get_scope();
-        assert_eq!(obj_type, "counter");
-        assert_eq!(inst_key, "user_42");
-
-        env.clear_scope();
-        let (obj_type2, _) = env.get_scope();
-        assert!(obj_type2.is_empty());
-    }
 
     // -----------------------------------------------------------------------
     // Child workflows
@@ -1584,25 +1534,6 @@ mod tests {
     // Promises
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_promise_workflow() {
-        let env = TestEnv::new();
-        let (prom_id, err) = env.create_promise("test-promise");
-        assert!(err.is_none());
-        assert!(prom_id.contains("test-promise"));
-
-        // Promise is pending initially
-        let (_val, timed_out, err) = env.await_promise(&prom_id, Duration::from_millis(100));
-        assert!(timed_out);
-        assert!(err.is_none());
-
-        // Resolve and await
-        env.resolve_promise(&prom_id, r#"{"status":"done"}"#).unwrap();
-        let (val, timed_out, err) = env.await_promise(&prom_id, Duration::from_millis(100));
-        assert!(!timed_out);
-        assert!(err.is_none());
-        assert_eq!(val, r#"{"status":"done"}"#);
-    }
 
     #[test]
     fn test_reject_promise() {

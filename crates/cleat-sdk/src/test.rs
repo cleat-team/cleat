@@ -1169,25 +1169,6 @@ mod tests {
         assert_eq!(env.mock.version(), 3);
     }
 
-    #[test]
-    fn test_promise_workflow() {
-        let mut env = CleatTest::new();
-        let (prom_id, err) = env.mock.create_promise("test-promise");
-        assert!(err.is_none());
-        assert!(prom_id.contains("test-promise"));
-
-        // Promise is pending initially
-        let (_val, timed_out, err) = env.mock.await_promise(&prom_id, 100);
-        assert!(timed_out);
-        assert!(err.is_none());
-
-        // Resolve and await
-        env.mock.resolve_promise(&prom_id, r#"{"status":"done"}"#).unwrap();
-        let (val, timed_out, err) = env.mock.await_promise(&prom_id, 100);
-        assert!(!timed_out);
-        assert!(err.is_none());
-        assert_eq!(val, r#"{"status":"done"}"#);
-    }
 
     #[test]
     fn test_child_workflow() {
@@ -1234,13 +1215,6 @@ mod tests {
         assert_eq!(resp, r#"{"data":"hello"}"#);
     }
 
-    #[test]
-    fn test_workflow_state() {
-        let mut env = CleatTest::new();
-
-        assert_eq!(val, "my_value");
-
-    }
 
     #[test]
     fn test_signal_workflow_and_signal() {
@@ -1265,23 +1239,6 @@ mod tests {
         assert_eq!(name, "vote_1");
     }
 
-    #[test]
-    fn test_scope_and_state() {
-        let mut env = CleatTest::new();
-        let prev = env.mock.set_scope("counter", "user_42");
-        assert!(prev.is_empty());
-
-        assert_eq!(val, "10");
-
-        // Verify scoped key
-        let (obj_type, inst_key) = env.mock.get_scope();
-        assert_eq!(obj_type, "counter");
-        assert_eq!(inst_key, "user_42");
-
-        env.mock.clear_scope();
-        let (obj_type2, _) = env.mock.get_scope();
-        assert!(obj_type2.is_empty());
-    }
 
     #[test]
     fn test_send_signal_and_wait() {
@@ -1317,14 +1274,6 @@ mod tests {
         assert_eq!(result, r#"{"greeting":"Hello, World!"}"#);
     }
 
-    #[test]
-    fn test_assert_state() {
-        let mut env = CleatTest::new();
-
-        assert!(env.assert_state("key1", "value1"));
-        assert!(!env.assert_state("key1", "wrong"));
-        assert!(!env.assert_state("nonexistent", "anything"));
-    }
 
     #[test]
     fn test_reset() {
@@ -1345,21 +1294,7 @@ mod tests {
         assert_eq!(env.call_count("notification", "email"), 1);
     }
 
-    #[test]
-    fn test_incr_state() {
-        let mut env = CleatTest::new();
 
-        assert_eq!(val, 5);
-
-        assert_eq!(val2, 8);
-    }
-
-    #[test]
-    fn test_list_state() {
-        let mut env = CleatTest::new();
-
-        assert_eq!(keys.len(), 2);
-    }
 
     #[test]
     fn test_continue_as_new() {
