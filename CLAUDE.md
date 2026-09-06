@@ -587,17 +587,28 @@ fix it in the same PR."* It was right when written: 56 `cleat_` names on 2026-09
 same stale 56 is in the test's own doc comment at `:33` and in its vacuous-pass control at `:362`.
 
 **And do not conflate the two counts, because they answer different questions.** The engine
-exports **58** names; the parity test compares **55** of them.
+exports **52** names (measured 2026-09-06); the parity test compares the `cleat_`-prefixed subset.
+
+**This paragraph said 58 and 55 until 2026-09-06, and it is the sharpest example of its own
+rule.** The section exists to warn that a count in prose rots, and its count rotted: six exports
+went with the durable-state family (§3.216) and the two inert signal calls (§3.220), and nothing
+failed, because **no test asserts these numbers**. `ABI.md` stayed correct over the same period —
+it and `engine/imports.go` agree on all 52 with an empty set difference — so the drift was in this
+file alone. Re-derive before quoting, including from here.
 
     grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u | grep -c .
 
 **Do not put `cleat_` inside that pattern when you want the export total.** Three exports are
 unprefixed — the same three above — and all three are workflow API, so a prefix-anchored scan
-returns 55 and silently drops the plugin calls. A pattern that can only return names of the shape
+silently drops the plugin calls. A pattern that can only return names of the shape
 it assumes cannot test the assumption; it encodes the conclusion. That error produced a **55** on
-2026-09-05 whose digits matched a differently-derived 55 — the workflow-facing target, 58 less two
-handshake calls and one deliberately unbindable one — with **six** members different, three in
-each direction. Two derivations agreeing on a number while disagreeing on more than a tenth of its
+2026-09-05 whose digits matched a differently-derived 55 — the workflow-facing target, the export
+total less two handshake calls and one deliberately unbindable one — with **six** members
+different, three in each direction.
+
+**The collision is not a coincidence of that one day: it recurred at 49 on 2026-09-06**, both
+derivations moving together as exports were removed, still differing on the same six members.
+Which is the point — the number agreeing tells you nothing, and will keep telling you nothing. Two derivations agreeing on a number while disagreeing on more than a tenth of its
 membership is the 876/581/4 costume from this file's opening section (IMPROVEMENT-PLAN §3.213).
 Re-derive the difference rather than the totals — this runs, and prints six lines:
 
