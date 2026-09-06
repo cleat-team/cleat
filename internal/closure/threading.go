@@ -143,7 +143,89 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 		})
 	}
 
+	errors = append(errors, verifyEntryPointResults(result)...)
+
 	return errors
+}
+
+// verifyEntryPointResults rejects an entry point whose result value is not a
+// string.
+//
+// THE STRING IS DELIBERATE, not a codegen limitation. A WASM entry point hands
+// back bytes, and `string` is the one shape every language SDK expresses
+// identically -- which is why the interfaces use it. GenerateExports therefore
+// declares `var __r string` (wasm/exports.go) and emits `return []byte(__r)`,
+// and supports exactly four signatures:
+//
+//	func(h cleat.HostCalls, ...) (string, error)
+//	func(h cleat.HostCalls, ...) error
+//	func(h cleat.HostCalls, ...) string
+//	func(h cleat.HostCalls, ...)
+//
+// Anything else compiled until now, and then failed like this:
+//
+//	./gen_wasm_exports.go:340:28: cannot convert __r (variable of type
+//	    *BookingResult) to type []byte
+//
+// -- a Go type error in GENERATED code, naming a variable the author never
+// wrote and a file they did not create. `cleat vet` said OK on the same
+// package. Three of the shipped examples are in that state
+// (IMPROVEMENT-PLAN 3.228), which is how it went unnoticed: nothing in CI runs
+// cleat build on a Go example.
+//
+// This rejects nothing that previously built. A non-string result already
+// failed, later and less legibly.
+//
+// Note it is only the RESULT. Struct PARAMETERS are fine and common --
+// examples/subscription takes a SubscriptionInput and builds -- because the
+// generator unmarshals those from the args JSON.
+func verifyEntryPointResults(result *analyzer.AnalysisResult) []ThreadingError {
+	var errs []ThreadingError
+	for _, name := range result.EntryPoints {
+		fd := result.Funcs[name]
+		if fd == nil || fd.Type == nil {
+			continue
+		}
+		res := fd.Type.Results()
+		if res == nil {
+			continue
+		}
+		for i := 0; i < res.Len(); i++ {
+			t := res.At(i).Type()
+			if isErrorType(t) {
+				continue
+			}
+			if basic, ok := t.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
+				continue
+			}
+			line := 0
+			if fd.Pkg != nil && fd.Pkg.Fset != nil && fd.Ast != nil {
+				line = fd.Pkg.Fset.Position(fd.Ast.Pos()).Line
+			}
+			errs = append(errs, ThreadingError{
+				FuncName: name,
+				Line:     line,
+				Message: fmt.Sprintf(
+					"%s is a workflow entry point returning %s, but an entry point's result must be a string. "+
+						"A WASM entry point hands back bytes, and string is the shape every language SDK expresses "+
+						"identically. Return (string, error) -- marshal the value yourself -- or error alone. "+
+						"Struct parameters are fine; it is only the result.",
+					analyzer.ShortName(name), t.String()),
+			})
+			break
+		}
+	}
+	return errs
+}
+
+// isErrorType reports whether t is the builtin error interface.
+func isErrorType(t types.Type) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj != nil && obj.Pkg() == nil && obj.Name() == "error"
 }
 
 // hasHostCallsParam checks if the function's first parameter is HostCalls.

@@ -150,6 +150,49 @@ func TestVetGo_E021_MapIteration(t *testing.T) {
 	vetFixture(t, "e021_map_iter", "E021")
 }
 
+// TestVetGo_EntryPointMustReturnString pins the rule that an entry point's
+// result must be a string.
+//
+// The string is deliberate: a WASM entry point hands back bytes, and string is
+// the one shape every language SDK expresses identically, which is why the
+// interfaces use it. GenerateExports declares `var __r string` and emits
+// `return []byte(__r)`, so a non-string result produced
+//
+//	./gen_wasm_exports.go:340:28: cannot convert __r (variable of type
+//	    *BookingResult) to type []byte
+//
+// -- a Go type error in GENERATED code, naming a variable the author never
+// wrote. `cleat vet` said OK on the same package, so the rule existed only as
+// a compile failure in a file nobody wrote. Three shipped examples were in that
+// state; nothing in CI runs `cleat build` on a Go example
+// (IMPROVEMENT-PLAN 3.228).
+//
+// Asserted on the message rather than a code because threading errors carry no
+// Code in VetOutput -- see vetJSONOutput -- and this is one.
+func TestVetGo_EntryPointMustReturnString(t *testing.T) {
+	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "entrypoint_struct_result")
+	out, _ := runVetCmd(t, "vet", "--lang", "go", "--json", fixture)
+
+	var result VetOutput
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("failed to parse JSON output: %v\nstdout: %s", err, out)
+	}
+	if len(result.Errors) == 0 {
+		t.Fatalf("vet accepted an entry point returning *Result; it cannot be built.\nstdout: %s", out)
+	}
+
+	found := false
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "an entry point's result must be a string") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an error naming the string-result rule, got: %+v", result.Errors)
+	}
+}
+
 // TestVetGo_NoErrors verifies that a clean package produces no errors.
 func TestVetGo_NoErrors(t *testing.T) {
 	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "no_errors")
