@@ -1715,6 +1715,66 @@ tier3:
 #       recorded because it is a deliberate asymmetry between three sibling transitions,
 #       and an asymmetry nobody wrote down reads as an oversight.
 #
+#   D11 DECIDED 2026-09-05, IMPLEMENTED the same day. STATE SCOPED BEYOND A SINGLE
+#       WORKFLOW IS NOT A CLEAT FEATURE, and the six host calls that implied otherwise
+#       are removed. cleat_set_state, cleat_get_state, cleat_delete_state,
+#       cleat_incr_state, cleat_has_state, cleat_list_state, and the
+#       cleat:host-calls/durable-stream-state component interface. Host exports 58 -> 52
+#       total, of which 49 are cleat_-prefixed. IMPROVEMENT-PLAN 3.216.
+#
+#       WHY, because "we removed an API" reads as a regression unless the reason is
+#       here. Neither Temporal nor DBOS scopes state beyond one workflow -- Temporal's
+#       state is local variables made durable by replay, DBOS uses its own tables inside
+#       transactions. Restate is the only one of the three that does, and cleat's family
+#       carried Restate's names without its semantics: cleat state was rebuilt from the
+#       run's own event history and never seeded from persistence, so it never crossed a
+#       run boundary for any SDK. WITHIN a run it was exactly equivalent to a local
+#       variable, because replay re-executes the workflow and rebuilds either.
+#
+#       WHAT IT COSTS. Nothing that worked stops working: a workflow that used the family
+#       for per-run scratch uses a variable instead, and one that needs an external reader
+#       uses set_query_state, which is unaffected. What is genuinely absent -- and was
+#       absent before this decision too -- is Restate-style virtual-object state shared
+#       across invocations. cleat has never had it. docs/migration/from-restate.md said
+#       the gap was ergonomic and showed a workaround that could not work; that is
+#       corrected.
+#
+#       WHAT IS DELIBERATELY KEPT, so nobody reads the removal as wider than it is:
+#         - set_query_state. The queryable-state mechanism and the DBOS setEvent
+#           equivalent, which the execution design calls "derived state, not durable
+#           state". Untouched.
+#         - set_scope / get_scope / clear_scope. These acquire a CONCURRENCY KEY, giving
+#           at most one workflow per objectType:instanceKey. That is virtual-object
+#           mutual exclusion without virtual-object state and it stands on its own.
+#         - EventCodeStateMutation = 16, RETIRED and reserved. The compaction decoder has
+#           no default case, so reusing the number would make pre-existing histories
+#           decode silently into empty records rather than failing.
+#
+#       Nothing about the gate changes: no new test, no new exclusion. Four SDK coverage
+#       baselines fall by exactly six each, which the ratchet required be declared
+#       deliberate.
+#
+#   D12 DECIDED 2026-09-05. THREE HOST EXPORTS ARE NOT WORKFLOW API AND NO SDK SHOULD
+#       BIND THEM. Recorded because "the SDK does not implement all 52 exports" is
+#       otherwise indistinguishable from a gap, and two of the three have already been
+#       mistaken for one.
+#
+#         cleat_poll_work    Go wasip1 module handshake. Supplies entry point and input
+#         cleat_complete     via _start/main, and reports the result. The other four SDKs
+#                            reach the guest by other means and must not bind these.
+#
+#         cleat_register_query_handler
+#                            A no-op kept ONLY so already-compiled guests still
+#                            instantiate. It does not make a workflow queryable, every
+#                            SDK's public wrapper was removed 2026-08-09, and
+#                            engine/imports.go says "do not add a new one". A parity
+#                            target containing it asks five SDKs to restore a wrapper
+#                            this repo forbids.
+#
+#       So the workflow-facing surface is 52 - 3 = 49, and a coverage number quoted
+#       against 52 is not wrong so much as answering a different question. Say which.
+#       IMPROVEMENT-PLAN 3.213 has the derivation and the command.
+#
 # D1-D4 were settled together on 2026-08-06; D5-D10 have been added since, and this
 # register was still saying "all four" until D7 was recorded. New ones go here with
 # the same shape: what was decided, on what date, and what it changes about what the
