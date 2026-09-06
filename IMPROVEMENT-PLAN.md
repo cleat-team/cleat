@@ -5957,6 +5957,74 @@ coverage.
 
 That is the sixth, seventh, eighth and ninth test found codifying a defect in this run.
 
+### 3.232 The `call_plugin` capability is validated at deploy and never enforced at runtime — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+
+Found by generalising the conformance-port session's `TestWorkerWiresEveryStore` (#812) past
+`With*Store` to **every optional dependency behind a nil check**, which is what that guard's shape
+is really about.
+
+Method: map each `With*` option to the engine field it sets, keep the ones nil-checked in
+`engine/`, and ask which the worker wires.
+
+    options mapping to a field:   43
+    nil-checked fields:           15
+    not wired by the worker:       5   fetcher, logger, pluginCallGuard,
+                                       pluginStreamRegistry, stepCallback
+
+**Three of the five are fine, and checking them is what makes the fourth credible.** `fetcher`
+answers `no fetcher configured: workflow %s attempted %s %s`; `pluginStreamRegistry` returns
+`plugin_call_streaming: no plugin stream registry configured`; `logger` falls back to a default and
+`stepCallback` is a debug hook. Absence is reported, or absence is the design.
+
+## `pluginCallGuard` is unreachable for two independent reasons
+
+    engine/plugins.go:295   if s.engine.pluginCallGuard != nil && s.callerPluginName != "" {
+
+1. **`WithPluginCallGuard` is called from nowhere outside tests.** Same shape as `WithPromiseStore`
+   before #812: declared, exported, tested, never wired.
+2. **`callerPluginName` is never assigned outside tests.** `grep -rn callerPluginName --include='*.go'`
+   returns three writes, all in `_test.go`, plus the two reads in `plugins.go` and its declaration.
+   So even with a guard installed, `!= ""` is false and `Check` never runs.
+
+Either alone would disable it. Both together mean the runtime capability check has never executed
+outside its own tests.
+
+## What IS enforced, so the gap is stated accurately
+
+`engine/plugin_loader.go:381` calls `plugin.ValidateCapabilities(declaredLimits, l.limits)` at
+**deploy**, comparing what a plugin *declares* against the operator's limits. That is live and
+bounds what a plugin may claim.
+
+**The gap is between the declaration and the call.** A plugin that declares `call_plugin: ["llm"]`,
+passes deploy validation, and is loaded may at runtime call **any** plugin: nothing consults its
+declaration again. `PluginCallGuard.Check` is the thing that would, and it is unreachable.
+
+## The documentation states the opposite
+
+`docs/contributor/plugins/third-party-plugin-guide.md:253`:
+
+    | `call_plugin` | `[]` | List of plugins this plugin can call via `plugin_call`.
+      An empty list denies all. `["*"]` allows all. |
+
+**"An empty list denies all" is false at runtime.** A plugin declaring `call_plugin: []` is
+permitted every plugin call it attempts, because the declaration is never read at call time and the
+guard that would read it is never installed.
+
+## Severity, stated plainly rather than dramatised
+
+This is a **plugin-to-plugin** control, not a tenant boundary — nothing here crosses `tenant_id`,
+and the deploy check still bounds what an operator lets a plugin declare. The exposure is that a
+plugin can exceed its own declared capability at runtime, and that the guide tells authors
+otherwise.
+
+## Filed, not fixed
+
+The fix is not a wiring line. `callerPluginName` has to come from somewhere: the engine must know,
+at the moment of a `plugin_call`, which plugin is making it — and that identity does not currently
+flow into `execSession`. The guard also has to be built from the loaded manifests, which is a new
+relationship between `plugin_loader` and the engine. Both are design decisions, and a
+security-adjacent one written at speed is worse than one written down.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
