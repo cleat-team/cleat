@@ -54,6 +54,19 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
+	// cleat_signal_workflow: three input strings, no output buffer.
+	// IMPROVEMENT-PLAN 3.224 -- this entry was missing along with the
+	// hostFunctions row and the adapterDef, which is why a Go guest got no
+	// import for it. Matches engine/imports.go's
+	// (targetPtr,targetLen, sigPtr,sigLen, payloadPtr,payloadLen) -> i64.
+	"cleat_signal_workflow": {
+		ImportName: "cleat_signal_workflow",
+		Params: []paramSpec{
+			{"targetRunID", kindInString},
+			{"signalName", kindInString},
+			{"payload", kindInString},
+		},
+	},
 	"cleat_sleep": {
 		ImportName: "cleat_sleep",
 		Params: []paramSpec{

@@ -62,6 +62,13 @@ var hostFunctions = []HostFunction{
 	{"cleat_sleep", "DurableSleepMs"},
 	// Signals
 	{"cleat_await_signals", "DurableAwaitSignals"},
+	// IMPROVEMENT-PLAN 3.224: this row was missing, so a Go workflow calling
+	// h.SignalWorkflow(...) compiled with no cleat_signal_workflow import at all.
+	// Rust, Java and AssemblyScript all bound it; Go alone did not. The engine
+	// half has always worked -- SignalWorkflow is the one signalling path that
+	// does call DeliverSignal (engine/signaller.go) -- so this was the engine
+	// able to deliver a signal between workflows and no Go guest able to ask.
+	{"cleat_signal_workflow", "SignalWorkflow"},
 	{"cleat_await_signals", "AwaitSignals"},
 	// Defer
 	{"cleat_defer", "DurableDefer"},
