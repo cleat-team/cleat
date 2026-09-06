@@ -121,7 +121,10 @@ func FuzzCompactionEquivalence(f *testing.F) {
 			compacted := events[:sp]
 			tail := events[sp:]
 
-			cs := extractCompactionState(compacted)
+			cs, extractErr := extractCompactionState(compacted)
+			if extractErr != nil {
+				t.Fatalf("extractCompactionState: %v", extractErr)
+			}
 			reconstructed := buildFullHistoryFromCompaction(tail, cs)
 
 			if len(reconstructed) != len(events) {

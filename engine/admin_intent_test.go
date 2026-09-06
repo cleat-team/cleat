@@ -164,7 +164,11 @@ func TestResolvedBySurvivesPayloadAndCompaction(t *testing.T) {
 		t.Errorf("ResolvedBy = %q after the payload round trip, want the operator", back.ResolvedBy)
 	}
 
-	restored := buildFullHistoryFromCompaction(nil, extractCompactionState([]EventRecord{rec}))
+	cs, extractErr := extractCompactionState([]EventRecord{rec})
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
+	restored := buildFullHistoryFromCompaction(nil, cs)
 	if len(restored) != 1 {
 		t.Fatalf("restored %d events, want 1", len(restored))
 	}

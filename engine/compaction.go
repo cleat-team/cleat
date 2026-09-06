@@ -14,6 +14,18 @@ import (
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 )
 
+// DefaultCompactionThreshold IS NOT THE DEFAULT AND NOTHING READS IT. The
+// worker's threshold is cmd/cleat-worker/config.go's `compaction-threshold`
+// flag, default 100, threaded to CompactWorkflowHistory at setup.go:2327. This
+// constant has no non-test reference beyond this declaration, so a reader who
+// takes its name at face value is off by 10x -- which happened on 2026-09-05,
+// in a correction to a defect report, in the direction that understated how
+// reachable the defect was.
+//
+// Left rather than deleted only until someone decides which number is
+// intended; the name is the hazard, not the value. See IMPROVEMENT-PLAN 3.217
+// and #769 on dead symbols whose names assert behaviour they do not control.
+//
 // DefaultCompactionThreshold is the default number of events before history
 // compaction triggers. A workflow with more than this many events is eligible.
 const DefaultCompactionThreshold = 1000
@@ -26,7 +38,19 @@ const DefaultMaxCompactedEvents = 10000
 // Event type codes for compact JSONB storage. Short int codes minimize
 // storage size when a workflow has thousands of compacted events.
 const (
-	EventCodeCall             = 0
+	// EventCodeInvalid is 0 AND IS NEVER A VALID CODE. It exists because 0 used
+	// to be EventCodeCall, and a Go map miss returns 0: an event type absent
+	// from eventTypeToCode was therefore relabelled as a durable call rather
+	// than rejected. EventTypeAwaitAnyChild was absent, is emitted with the
+	// completed child's result in Response, and came back from compaction as an
+	// empty call -- permanent, silent, and proven by execution
+	// (IMPROVEMENT-PLAN 3.217).
+	//
+	// Reserving 0 removes the whole class: any missing lookup, zero-valued
+	// struct field or unset column now decodes to something that cannot be a
+	// real event, instead of to the most common one.
+	EventCodeInvalid          = 0
+	EventCodeCall             = 30
 	EventCodeSleep            = 1
 	EventCodeAwaitSignals     = 2
 	EventCodeSignalReceived   = 3
@@ -65,6 +89,9 @@ const (
 	EventCodeScheduleCron          = 27
 	EventCodeDeleteCron            = 28
 	EventCodeListCrons             = 29
+	EventCodeAwaitAnyChild         = 31
+	EventCodePollChild             = 32
+	EventCodeAdminAction           = 33
 )
 
 // EventCodeSleep (1) is defined above but has no corresponding EventType
@@ -88,6 +115,9 @@ var eventTypeToCode = map[EventType]int{
 	EventTypePromiseRejected:       EventCodePromiseRejected,
 	EventTypeUpdateHandler:         EventCodeUpdateHandler,
 	EventTypeStateMutation:         EventCodeStateMutation,
+	EventTypeAwaitAnyChild:         EventCodeAwaitAnyChild,
+	EventTypePollChild:             EventCodePollChild,
+	EventTypeAdminAction:           EventCodeAdminAction,
 	EventTypeRunDetached:           EventCodeRunDetached,
 	EventTypeAcquireLock:           EventCodeAcquireLock,
 	EventTypeReleaseLock:           EventCodeReleaseLock,
@@ -120,6 +150,9 @@ var codeToEventType = map[int]EventType{
 	EventCodePromiseRejected:       EventTypePromiseRejected,
 	EventCodeUpdateHandler:         EventTypeUpdateHandler,
 	EventCodeStateMutation:         EventTypeStateMutation,
+	EventCodeAwaitAnyChild:         EventTypeAwaitAnyChild,
+	EventCodePollChild:             EventTypePollChild,
+	EventCodeAdminAction:           EventTypeAdminAction,
 	EventCodeRunDetached:           EventTypeRunDetached,
 	EventCodeAcquireLock:           EventTypeAcquireLock,
 	EventCodeReleaseLock:           EventTypeReleaseLock,
@@ -306,7 +339,11 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 
 	// Extract compaction state from the events being compacted.
 	compactedEvents := events[:keepStep]
-	cs := extractCompactionState(compactedEvents)
+	cs, err := extractCompactionState(compactedEvents)
+	if err != nil {
+		// Not compacting is always safe; compacting wrongly is not.
+		return err
+	}
 
 	csJSON, err := json.Marshal(cs)
 	if err != nil {
@@ -359,7 +396,7 @@ func isCompactionDeadlockError(err error) bool {
 
 // extractCompactionState builds a CompactionState from the events being
 // compacted away.
-func extractCompactionState(events []EventRecord) *CompactionState {
+func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 	cs := &CompactionState{
 		Version:       1,
 		CompactedStep: len(events),
@@ -372,8 +409,22 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 	openChildren := make(map[string]bool) // runID -> still open
 
 	for _, ev := range events {
+		// CHECKED, not a bare lookup. A map miss used to yield 0 -- which was
+		// EventCodeCall -- so an unmapped event type was silently relabelled as
+		// a durable call and its payload dropped. Compaction REWRITES stored
+		// history, so that was permanent. See IMPROVEMENT-PLAN 3.217.
+		code, ok := eventTypeToCode[ev.EventType]
+		if !ok {
+			// Refusing is the only safe answer: compaction that cannot
+			// represent an event must not claim to have compacted it. The
+			// caller aborts and the history stays uncompacted, which costs
+			// space and loses nothing.
+			return nil, fmt.Errorf("compact: event type %q has no compaction code; "+
+				"refusing to compact rather than storing it as something else "+
+				"(IMPROVEMENT-PLAN 3.217)", ev.EventType)
+		}
 		ce := CompactedEvent{
-			Type: eventTypeToCode[ev.EventType],
+			Type: code,
 			// TimestampMs is set for every event, not inside the per-type
 			// switch below: Now() during replay needs it regardless of
 			// which event carried it. See the field doc on CompactedEvent.
@@ -445,6 +496,14 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 		case EventTypeUpdateHandler:
 			// Reuse PromiseName/PromiseID fields for storage efficiency.
 			ce.PromiseName = ev.UpdateHandlerName
+		case EventTypeAwaitAnyChild, EventTypePollChild:
+			// Both carry the run IDs asked about and the outcome, in the same
+			// two fields AwaitAllChildren uses.
+			ce.Request = ev.Request
+			ce.Response = ev.Response
+		case EventTypeAdminAction:
+			ce.Response = ev.Response
+			ce.Request = ev.Request
 		case EventTypeStateMutation:
 			ce.ChildName = ev.StateKey
 			ce.Response = ev.StateValue
@@ -502,6 +561,14 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.Op = ev.Op
 			ce.Request = ev.Request
 			ce.DurationMs = ev.DurationMs
+		default:
+			// Reached only by a type that IS in eventTypeToCode but has no arm
+			// above: it would be stored with a correct code and an empty payload.
+			// Quieter than the relabel this section is about, and still wrong, so
+			// it is a refusal rather than a partial write.
+			return nil, fmt.Errorf("compact: event type %q maps to code %d but has "+
+				"no field-copy arm; refusing to compact rather than storing an "+
+				"empty record (IMPROVEMENT-PLAN 3.217)", ev.EventType, code)
 		}
 		cs.Events = append(cs.Events, ce)
 	}
@@ -536,7 +603,7 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 		cs.Summary = &TruncationSummary{TruncatedCount: truncated}
 	}
 
-	return cs
+	return cs, nil
 }
 
 // buildFullHistoryFromCompaction reconstructs the full event history by
@@ -612,6 +679,12 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.PromiseError = ce.PromiseError
 		case EventCodeUpdateHandler:
 			rec.UpdateHandlerName = ce.PromiseName
+		case EventCodeAwaitAnyChild, EventCodePollChild:
+			rec.Request = ce.Request
+			rec.Response = ce.Response
+		case EventCodeAdminAction:
+			rec.Request = ce.Request
+			rec.Response = ce.Response
 		case EventCodeStateMutation:
 			rec.StateKey = ce.ChildName
 			rec.StateValue = ce.Response

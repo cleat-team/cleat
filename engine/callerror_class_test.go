@@ -158,7 +158,11 @@ func TestErrorClassSurvivesCompaction(t *testing.T) {
 		Step: 0, EventType: EventTypeCall, Service: "billing", Op: "charge",
 		Err: "no endpoint registered", ErrNonRetryable: true, ErrCode: "permanent",
 	}}
-	restored := buildFullHistoryFromCompaction(nil, extractCompactionState(original))
+	cs, extractErr := extractCompactionState(original)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
+	restored := buildFullHistoryFromCompaction(nil, cs)
 	if len(restored) != 1 {
 		t.Fatalf("restored %d events, want 1", len(restored))
 	}
