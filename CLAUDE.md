@@ -341,6 +341,29 @@ red, put it back. This catches a test that *cannot* fail; it does not catch one 
 it. Twice this has caught a test passing for the wrong reason, which is why "it went red" is not
 enough on its own — check that it went red *for the reason you expect*.
 
+**And the mirror of that: "it stayed red" is not enough either.** A fix that does not change the
+symptom has not been shown to be unnecessary; it has been shown not to be *sufficient*. Before
+concluding a change is inert, check whether the failing step **moved** — not just whether it still
+fails. #777 needed two fixes in the child-spawn path (#781), and the second was implemented, tested,
+judged ineffective and reverted, because the workflow still failed. It still failed because the
+*first* defect was unfixed at that moment, and the test happened to be a three-child fan-out
+failing at step 3 either way — so the step number was identical before and after, and the reasoning
+felt sound. It was then re-derived from scratch hours later and turned out to be correct as
+written. The artefact discarded here is a correct fix, discarded with evidence in hand, which makes
+this more expensive than a test that passes for the wrong reason.
+
+**A probe that does not fire is a measurement, not a dead end.** Chasing the same defect, a
+temporary print in `recordEvent`'s persist branch never printed while rows were demonstrably being
+written. That was read as a failed experiment; it was in fact the strongest available signal —
+the writer was somewhere else entirely, which was true and load-bearing. An absence is data.
+
+**When output disagrees with expectation, instrument the function that produced it.** The same
+defect survived five hypotheses, each argued from reading the code and each killed by measurement:
+a field set after the checksum, missing columns, the chain, a late response overwriting the row,
+the batch path. What resolved it was one `fmt.Fprintf` inside `computeEventChecksum` printing its
+own inputs and result, which showed the writer chaining from `prev=""` in one line. Reading code
+predicts which input differs; instrumenting shows it.
+
 **Watch which layer is holding the test up.** An assertion can pass because of a layer other than
 the one under test: a fence test passed with its SQL guard deleted because a Go-level rollback
 covered for it; a cross-tenant assertion passed against a wide-open security policy because the
