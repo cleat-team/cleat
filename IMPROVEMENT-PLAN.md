@@ -5669,13 +5669,17 @@ Swept every example directory containing `.go` files, each into a **fresh** outp
 | `datapipeline` | returns `*PipelineResult`; an entry point must return a string |
 | `onboarding` | returns `*Profile`; an entry point must return a string |
 | `travel` | returns `*BookingResult`; an entry point must return a string |
-| `dag` | `Verifying HostCalls threading... 4 error(s)` |
-| `fooddash` | `Verifying HostCalls threading... 1 error(s)` |
+| `dag` | `Verifying HostCalls threading... 4 error(s)` — **not an example defect**, see §3.229 |
+| `fooddash` | `Verifying HostCalls threading... 1 error(s)` — **not an example defect**, see §3.229 |
 | `event-driven` | `E003: time.Now() ... breaking determinism` |
 | ~~`third-party-plugin`~~ | excluded — it is a plugin, not a workflow, so "no entry points" is correct |
 
-**Two of eight.** Three distinct causes, and **all six are defects in the examples** rather than in
-the engine — the tooling's only fault is how it reports one of them.
+**Two of eight.** Three distinct causes — and this section said **all six are defects in the
+examples**, which is wrong about two of them. Four are: three struct-pointer returns (#801) and one
+`time.Now()` (#802), all now fixed. `dag` and `fooddash` turned out to be **false positives in the
+threading check**, corrected in §3.229. Kept here as written rather than quietly edited, because
+the mistake is the same one this file keeps recording: a category assigned to a group after
+checking some of it.
 
 ## Cause 1: three examples return a struct pointer, and an entry point must return a string
 
@@ -5739,6 +5743,69 @@ What caught it was reading an error rather than counting: `travel`'s failure nam
 failure citing files that are not there is a harness fault, not a finding — and the corrected sweep
 gives two passes, so the wrong number was wrong in the direction that made the finding look
 bigger.
+
+### 3.229 The HostCalls threading check rejects two working patterns, one of them a first-party SDK's own — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+
+§3.228 found six Go examples that do not build and called all six example defects. **Four were**
+— three struct-pointer returns (#801) and one `time.Now()` (#802). **The other two are not**, and
+this section is the correction.
+
+`dag` and `fooddash` fail `VerifyThreading` (`internal/closure/threading.go`) with
+
+    X is reachable from a workflow entry point (it calls durable SDK methods) but does not
+    have a HostCalls parameter. Add 'h cleat.HostCalls' as the first parameter, or declare a
+    package-level 'var h cleat.HostCalls' that this function can reference.
+
+Both reach HostCalls perfectly well. The check credits four routes — a first parameter of type
+`cleat.HostCalls` (phase 1), a method whose receiver struct has a HostCalls field (phase 3), a
+reference to a package-level `var h` (phase 0), or a threaded caller that *passes* HostCalls as an
+argument (phase 2). Neither of these is any of those.
+
+## `examples/dag`: HostCalls arrives in a struct PARAMETER's field
+
+    func extractText(ctx *dagplugin.TaskContext) (string, error) {
+        result, err := ctx.H.DurableCall("docproc", "Extract", string(data))
+
+`TaskContext.H` is `cleat.HostCalls` (`cleat/dagrun/dagrun.go:59`). Phase 3 credits a struct with a
+HostCalls field only when it is the **receiver**; here it is a **parameter**. Four task bodies, four
+errors.
+
+**This is the `dagrun` package's designed shape, and its own doc comment names this exact caller:**
+
+    // TaskContext.H is passed through to every user-written task body ... That means
+    // TaskContext cannot be narrowed to a small interface without breaking real callers
+    // (see examples/dag, which calls ctx.H.DurableCall).
+
+So `cleat vet` rejects the pattern a first-party cleat SDK package documents itself as requiring.
+
+## `examples/fooddash`: the remedy the message suggests is already there
+
+`order.go:36` declares `var h cleat.HostCalls`. `validateMenuItems` does not reference it; its
+callee `lookupMenuItem` does (`:313`, `h.DurableCallTyped`). Phase 0 credits **users** of the
+global, not every function in a package that has one — but once a package-level `h` exists, every
+function in that package can reach the host without taking anything, so the requirement is
+satisfiable by adding a reference that would be dead code.
+
+**The error tells the author to do something already done.**
+
+## Why this is filed rather than fixed
+
+Widening the check is a design decision with a real downside on each side. Crediting any function
+in a package that declares a global `h` makes the threading guarantee vacuous for that package.
+Crediting any parameter whose type has a HostCalls field is closer to right — it is how `dagrun`
+works — but it is a new rule about transitive reachability through struct fields, and getting it
+wrong in the permissive direction silently removes a guard rather than loudly breaking a build.
+
+**Note which direction this one errs, because it is the opposite of the day's other findings.**
+Nearly every measurement error recorded in this file **flatters** — a circular denominator reading
+100%, a guard that cannot see the thing it guards. This one is a **false positive**: it reports
+work that is not needed. That makes it cheap in consequence and expensive in trust, because the
+remedy it names is either impossible (`dag`) or already present (`fooddash`), and an author who
+follows the message and sees no change learns to disbelieve the tool.
+
+**Neither example has been shown to run.** They compile as Go and their host access is coherent,
+but nothing in CI builds a Go example to WASM (§3.228), so "these two are fine" means "the check's
+objection does not hold", not "these examples work".
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
