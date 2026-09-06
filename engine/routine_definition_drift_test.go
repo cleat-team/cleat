@@ -455,13 +455,40 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 					}
 				}
 
-				if len(discriminators) == 0 && len(newLines) == 0 {
+				// The third discriminator: body lines the PREVIOUS definition
+				// had and the latest does not.
+				//
+				// The two arms above both look for something new, so neither
+				// can see a migration that only REMOVES a statement -- and that
+				// is a real shape, not a hypothetical: 044 exists solely to
+				// delete the UPDATE that wrote a child's result into its
+				// parent's event row (cleat#845). Against a stale database this
+				// test reported that it could not tell the versions apart,
+				// which is the honest answer and the reason for this arm rather
+				// than for an exemption.
+				//
+				// Compared against the immediately-previous definition, not all
+				// earlier ones: a removal is defined relative to what it
+				// removed from.
+				prev := defList[len(defList)-2]
+				latestLines := map[string]bool{}
+				for _, ln := range normalizedLines(routineBody(latest.body)) {
+					latestLines[ln] = true
+				}
+				var removedLines []string
+				for _, ln := range normalizedLines(routineBody(prev.body)) {
+					if !latestLines[ln] {
+						removedLines = append(removedLines, ln)
+					}
+				}
+
+				if len(discriminators) == 0 && len(newLines) == 0 && len(removedLines) == 0 {
 					t.Errorf("%s is defined in %d migrations (latest %s) and the latest "+
-						"introduces neither a new identifier nor a new body line, so "+
-						"nothing here can tell the versions apart.\n\nThat is a hole in "+
-						"this test, not a property of the schema: it means a stale "+
-						"database would pass. Widen the discriminator rather than "+
-						"skipping the routine.", name, len(defList), latest.migration)
+						"introduces neither a new identifier nor a new body line, and "+
+						"removes none, so nothing here can tell the versions apart.\n\n"+
+						"That is a hole in this test, not a property of the schema: it "+
+						"means a stale database would pass. Widen the discriminator "+
+						"rather than skipping the routine.", name, len(defList), latest.migration)
 					continue
 				}
 
@@ -491,12 +518,26 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 					}
 				}
 
+				// Removal evidence: a line the latest version deleted must not
+				// still be in the database. Unlike the additive arm this is ALL
+				// or nothing in the other direction -- any surviving removed
+				// line proves the installed copy predates the removal. Only
+				// lines that survive normalisation on both sides are compared,
+				// which is the same basis dbLines is built on.
+				var stillPresent []string
+				for _, ln := range removedLines {
+					if dbLines[ln] {
+						stillPresent = append(stillPresent, ln)
+					}
+				}
+
 				checkedDiscriminators++
-				if len(absent) > 0 || !lineEvidence {
+				if len(absent) > 0 || !lineEvidence || len(stillPresent) > 0 {
 					t.Errorf("the database's %s is not the definition %s ships.\n\n"+
 						"%s is the latest of %d migrations defining it. New identifiers "+
 						"%v (missing from the database: %v); new body lines %d, of which "+
-						"the database has %v.\n\n"+
+						"the database has %v; lines the latest version removed that the "+
+						"database still has: %v.\n\n"+
 						"Almost certainly a test database that predates that migration: "+
 						"CREATE TABLE IF NOT EXISTS never adds a column and a stale "+
 						"routine is the same failure one layer down. Drop and recreate "+
@@ -504,7 +545,7 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 						"store_backends_procedures_test.go's hardcoded list will NOT "+
 						"repair this -- it applies %v and nothing else.",
 						name, d.dir, latest.migration, len(defList),
-						discriminators, absent, len(newLines), lineEvidence,
+						discriminators, absent, len(newLines), lineEvidence, stillPresent,
 						procedureMigrationsFor(d.dialect))
 				}
 			}
