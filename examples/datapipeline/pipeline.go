@@ -39,9 +39,20 @@ type PipelineResult struct {
 
 // ---- Parent workflow: fan-out/fan-in ----
 
-func RunPipeline(h cleat.HostCalls, input PipelineInput) (*PipelineResult, error) {
+// RunPipeline returns its result as a JSON string, not as *PipelineResult.
+//
+// A workflow entry point's result must be a string: a WASM entry point hands
+// back bytes, and string is the one shape every language SDK expresses
+// identically. Returning *PipelineResult compiled here and then failed inside
+// cleat build with "cannot convert __r (variable of type *PipelineResult) to
+// type []byte" -- a type error in generated code. cleat vet now rejects it up
+// front. IMPROVEMENT-PLAN 3.228.
+//
+// The struct PARAMETER is unaffected: the generator unmarshals those from the
+// args JSON.
+func RunPipeline(h cleat.HostCalls, input PipelineInput) (string, error) {
 	if len(input.Items) == 0 {
-		return nil, fmt.Errorf("no items to process")
+		return "", fmt.Errorf("no items to process")
 	}
 
 	h.SetQueryState("job_id", input.JobID)
@@ -67,7 +78,7 @@ func RunPipeline(h cleat.HostCalls, input PipelineInput) (*PipelineResult, error
 	// Fan-in: await all children concurrently.
 	results, err := h.AwaitAllChildren(runIDs)
 	if err != nil {
-		return nil, fmt.Errorf("await children failed: %w", err)
+		return "", fmt.Errorf("await children failed: %w", err)
 	}
 
 	// Count outcomes.
@@ -92,13 +103,13 @@ func RunPipeline(h cleat.HostCalls, input PipelineInput) (*PipelineResult, error
 	h.DurableLog(fmt.Sprintf("Pipeline complete: job=%s succeeded=%d failed=%d",
 		input.JobID, succeeded, failed))
 
-	return &PipelineResult{
+	return toJSON(PipelineResult{
 		JobID:      input.JobID,
 		TotalItems: len(input.Items),
 		Succeeded:  succeeded,
 		Failed:     failed,
 		Results:    results,
-	}, nil
+	}), nil
 }
 
 // ---- Child workflow types ----
@@ -117,7 +128,9 @@ type ChildResult struct {
 }
 
 // ProcessItem is the child workflow entry point.
-func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
+// ProcessItem is the child entry point and returns a string for the same
+// reason RunPipeline does -- a child workflow is an entry point too.
+func ProcessItem(h cleat.HostCalls, input ChildInput) (string, error) {
 	h.DurableLog(fmt.Sprintf("Processing item %d/%s: %s", input.Index, input.BatchID, input.Item))
 
 	// Step 1: Fetch data (with heartbeat for long downloads).
@@ -141,7 +154,7 @@ func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
 			}
 		},
 	); err != nil {
-		return nil, fmt.Errorf("fetch failed for %s: %w", input.Item, err)
+		return "", fmt.Errorf("fetch failed for %s: %w", input.Item, err)
 	}
 
 	// Step 2: Transform data.
@@ -151,7 +164,7 @@ func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
 		"raw":  fetchData.Raw,
 	}))
 	if err != nil {
-		return nil, fmt.Errorf("transform failed for %s: %w", input.Item, err)
+		return "", fmt.Errorf("transform failed for %s: %w", input.Item, err)
 	}
 
 	var transformData struct {
@@ -167,15 +180,15 @@ func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
 		"output": transformData.Output,
 		"job_id": input.JobID,
 	})); err != nil {
-		return nil, fmt.Errorf("store failed for %s: %w", input.Item, err)
+		return "", fmt.Errorf("store failed for %s: %w", input.Item, err)
 	}
 
 	h.SetQueryState("stage", "done")
-	return &ChildResult{
+	return toJSON(ChildResult{
 		Item:   input.Item,
 		Output: transformData.Output,
 		Bytes:  transformData.Bytes,
-	}, nil
+	}), nil
 }
 
 func toJSON(v interface{}) string {
