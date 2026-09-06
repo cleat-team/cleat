@@ -117,6 +117,45 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 		}
 	}
 
+	// Phase 3b: Functions with a PARAMETER whose type carries a HostCalls
+	// field.
+	//
+	// The same rule as phase 3, applied to parameters instead of receivers, and
+	// symmetric with it rather than a widening: a function that is handed a
+	// *TaskContext holding a cleat.HostCalls can reach the host exactly as a
+	// method on that struct can.
+	//
+	// This is cleat/dagrun's designed shape, and its package doc says so:
+	//
+	//	// TaskContext.H is passed through to every user-written task body ...
+	//	// That means TaskContext cannot be narrowed to a small interface
+	//	// without breaking real callers (see examples/dag, which calls
+	//	// ctx.H.DurableCall).
+	//
+	// Without this phase, `cleat vet` rejected the pattern a first-party cleat
+	// SDK package documents itself as requiring, and examples/dag failed with
+	// four errors telling its author to add a parameter it already effectively
+	// has. IMPROVEMENT-PLAN 3.229.
+	for name := range durableSet {
+		if threaded[name] {
+			continue
+		}
+		fd := result.Funcs[name]
+		if fd == nil || fd.Type == nil {
+			continue
+		}
+		params := fd.Type.Params()
+		if params == nil {
+			continue
+		}
+		for i := 0; i < params.Len(); i++ {
+			if structHasHostCallsField(params.At(i).Type(), fd.Pkg) {
+				threaded[name] = true
+				break
+			}
+		}
+	}
+
 	// Collect errors for unthreaded functions.
 	var errors []ThreadingError
 	for name := range durableSet {

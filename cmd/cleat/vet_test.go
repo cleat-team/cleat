@@ -193,6 +193,36 @@ func TestVetGo_EntryPointMustReturnString(t *testing.T) {
 	}
 }
 
+// TestVetGo_HostCallsInAParameterStruct pins that a function reaching HostCalls
+// through a field of a struct it is PASSED counts as threaded.
+//
+// The threading check credited a HostCalls field on a RECEIVER (phase 3) but
+// not on a parameter, so `cleat vet` rejected cleat/dagrun's designed shape --
+// TaskContext.H is handed to every user-written task body, and the package doc
+// names examples/dag as a caller that does exactly this. examples/dag failed
+// with four errors telling its author to add a parameter it already
+// effectively had. IMPROVEMENT-PLAN 3.229.
+//
+// Both spellings are in the fixture, by pointer and by value, because
+// structHasHostCallsField unwraps one level of pointer and a regression could
+// plausibly break either.
+func TestVetGo_HostCallsInAParameterStruct(t *testing.T) {
+	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "hostcalls_in_param_struct")
+	out, err := runVetCmd(t, "vet", "--lang", "go", "--json", fixture)
+	if err != nil {
+		t.Fatalf("cleat vet failed on a package that reaches HostCalls through a "+
+			"parameter struct: %v\n%s", err, out)
+	}
+
+	var result VetOutput
+	if jsonErr := json.Unmarshal([]byte(out), &result); jsonErr != nil {
+		t.Fatalf("failed to parse JSON output: %v\nstdout: %s", jsonErr, out)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("expected no errors, got %d: %+v", len(result.Errors), result.Errors)
+	}
+}
+
 // TestVetGo_NoErrors verifies that a clean package produces no errors.
 func TestVetGo_NoErrors(t *testing.T) {
 	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "no_errors")
