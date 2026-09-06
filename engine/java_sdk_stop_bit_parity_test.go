@@ -91,7 +91,22 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"signalWorkflow", "SignalWorkflow"},
 	{"cleatSend", "DurableSend"},
 	{"scheduleInvokeMs", "DurableScheduleInvoke"},
-	{"sendSignalAndWaitMs", "SendSignalAndWait"},
+	// sendSignalAndWaitMs was here until 2026-09-06. It is no longer a host
+	// call: IMPROVEMENT-PLAN 3.220 made it a composite over createPromise +
+	// signalWorkflow + awaitPromise, so there is no @Import of its own for
+	// the host to refuse, and this guard said so by name ("makes no
+	// `long result = ...(` host call, so this entry is stale").
+	//
+	// Removing it does NOT weaken the guard, and that was checked. Of the
+	// three callees, only SignalWorkflow calls stopBeforeNewWork --
+	// CreatePromise, AwaitPromise and ResolvePromise do not, which is why
+	// none was ever listed -- and signalWorkflow is on this list, three lines
+	// above. Every refusable call the composite makes is still covered.
+	//
+	//	for f in CreatePromise AwaitPromise ResolvePromise SignalWorkflow; do
+	//	  awk "/func \(s \*execSession\) $f\(/,/^}$/" engine/promises.go \
+	//	    engine/signaller.go | grep -c stopBeforeNewWork; done
+	//	# 0 0 0 1
 	{"sideEffect", "SideEffect"},
 	{"cleatFetch", "Fetch"},
 	{"runDetached", "RunDetached"},

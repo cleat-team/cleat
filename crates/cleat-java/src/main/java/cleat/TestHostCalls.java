@@ -197,7 +197,6 @@ public class TestHostCalls {
     private final Map<String, Integer> retrySimAttempts = new HashMap<>();
 
     // Signal reply channels
-    private final Map<String, String> signalReplyChannels = new HashMap<>();
 
     // Metadata
     private String workflowId = "test-workflow";
@@ -379,8 +378,17 @@ public class TestHostCalls {
             PendingSignal sig = pendingSignals.get(i);
             if (contains(signalNames, sig.name)) {
                 pendingSignals.remove(i);
+                // Strip the reply envelope so the receiver sees the payload as
+                // sent and gets the address separately. IMPROVEMENT-PLAN 3.220.
+                String replyTo = "";
+                String payload = sig.payload;
+                String[] unwrapped = SignalEnvelope.decode(payload);
+                if (unwrapped != null) {
+                    replyTo = unwrapped[0];
+                    payload = unwrapped[1];
+                }
                 return CleatResult.ok(
-                    new HostCalls.AwaitSignalsResult(sig.name, sig.payload, false));
+                    new HostCalls.AwaitSignalsResult(sig.name, payload, false, replyTo));
             }
         }
 
@@ -607,37 +615,45 @@ public class TestHostCalls {
      */
     public CleatResult<String> sendSignalAndWait(
             String targetRunId, String signalName, String payload, long timeoutMs) {
-        signalReplyCorrIdCounter++;
-        String correlationId = "corr-" + targetRunId + "-"
-            + signalName + "-" + signalReplyCorrIdCounter;
+        // Composed over this harness's own promises, exactly as the SDK
+        // composes over the host's (IMPROVEMENT-PLAN 3.220). The version this
+        // replaces minted a "corr-<target>-<name>-<n>" ID into a private
+        // channel map -- a protocol that existed in no other environment, so a
+        // receiver written against it could not work in a real workflow.
+        CleatResult<String> promise = createPromise("__reply:" + signalName);
+        if (promise.isErr()) {
+            return CleatResult.err("sendSignalAndWait: create reply promise: " + promise.getError());
+        }
+        String replyTo = promise.getValue();
 
-        // Register a reply channel
-        signalReplyChannels.put(correlationId, "__pending__");
-
-        // Send the signal
-        signalWorkflow(targetRunId, signalName, payload);
-
-        // Check if reply already arrived
-        String reply = signalReplyChannels.get(correlationId);
-        if (!"__pending__".equals(reply)) {
-            signalReplyChannels.remove(correlationId);
-            return CleatResult.ok(reply);
+        CleatResult<Void> sent = signalWorkflow(
+            targetRunId, signalName, SignalEnvelope.encode(replyTo, payload));
+        if (sent.isErr()) {
+            return CleatResult.err("sendSignalAndWait: send signal: " + sent.getError());
         }
 
-        // Simulate timeout
-        nowMs += timeoutMs;
-        return CleatResult.err("SendSignalAndWait(target=" + targetRunId + ", signal=" + signalName + ") timed out after " + timeoutMs + "ms");
+        CleatResult<HostCalls.AwaitPromiseResult> awaited = awaitPromise(replyTo, timeoutMs);
+        if (awaited.isErr()) {
+            return CleatResult.err("sendSignalAndWait: await reply to signal \""
+                + signalName + "\": " + awaited.getError());
+        }
+        if (awaited.getValue().timedOut) {
+            return CleatResult.err("sendSignalAndWait: no reply to signal \"" + signalName
+                + "\" from workflow \"" + targetRunId + "\" within " + timeoutMs + "ms");
+        }
+        return CleatResult.ok(awaited.getValue().result);
     }
 
     /**
      * Reply to a signal from within a handler.
      */
     public CleatResult<Void> replyToSignal(String correlationId, String response) {
-        if (signalReplyChannels.containsKey(correlationId)) {
-            signalReplyChannels.put(correlationId, response);
-            return CleatResult.ok(null);
+        if (correlationId == null || correlationId.isEmpty()) {
+            return CleatResult.err("replyToSignal: empty correlation ID. Pass "
+                + "AwaitSignalsResult.replyTo from the signal being answered; it is empty "
+                + "when the sender used signalWorkflow and is not waiting for a reply.");
         }
-        return CleatResult.err("no pending signal for correlation ID: " + correlationId);
+        return resolvePromise(correlationId, response);
     }
 
     /**
@@ -854,7 +870,6 @@ public class TestHostCalls {
         promises.clear();
         promiseResults.clear();
         promiseErrors.clear();
-        signalReplyChannels.clear();
         signalReplyCorrIdCounter = 0;
         sentSignals.clear();
         cancelled = false;
