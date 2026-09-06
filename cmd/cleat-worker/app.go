@@ -1,90 +1,54 @@
 package main
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/cleat-team/cleat/engine"
 )
 
-// StartAPIServer creates and starts the HTTP API server with the given
-// configuration, worker, and plugin chain. It runs in a background goroutine
-// and shuts down when ctx is cancelled.
-//
-// factory is what lets handlers scope each request to the tenant that
-// authenticated it; without it an authenticated request cannot be served at all
-// (storeFor refuses rather than falling back to the default tenant). It is a
-// parameter rather than a Config field because Config holds flag-derived values
-// and this is a live dependency.
-func StartAPIServer(cfg *Config, w *Worker, plugMux, plugHandler http.Handler, plugList any, db *sql.DB, factory engine.StoreFactory) {
-	if cfg.APIAddr == "" {
-		return
-	}
-
-	api := &apiServer{
-		store:       w.store,
-		worker:      w,
-		maxBodySize: cfg.MaxBodySize,
-		db:          db,
-		factory:     factory,
-		taskQueues:  cfg.TaskQueues,
-		requireAuth: cfg.RequireAuth,
-	}
-
-	mux := plugMux
-	if mux == nil {
-		mux = http.NewServeMux()
-	}
-
-	sm, ok := mux.(*http.ServeMux)
-	if !ok {
-		sm = http.NewServeMux()
-	}
-	mux = registerRoutes(sm, api)
-
-	handler := plugHandler
-	if handler == nil {
-		handler = mux
-	}
-
-	srv := &http.Server{
-		Addr:         cfg.APIAddr,
-		Handler:      handler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-
-	go func() {
-		w.logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", w.id, "addr", cfg.APIAddr)
-		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-			w.logger.ErrorContext(context.Background(), "HTTP server error", "worker_id", w.id, "error", err)
-		}
-	}()
-
-	go func() {
-		<-w.ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdownCtx)
-	}()
-}
-
 // registerRoutes attaches all API routes to the given mux.
+//
+// This is the ONLY route table. It used to be one of two: main() registered its
+// own set inline and reached this function not at all, so `/api/instances/...`
+// and every `/api/admin/instances/...` route -- instance state, event history,
+// force-complete, force-fail, re-replay, step resolve -- existed on the table
+// the tests drove and on no table the binary served. Seven endpoints, one of
+// them documented in CHANGELOG.md as a shipped operator feature, none of them
+// reachable since app.go was written (ce48f18). `--enable-admin-api` gated a
+// handler nothing routed to.
+//
+// Nothing reported it because of the SPA fallback below, which answered every
+// unmatched path -- `/api/` included -- with 200 and index.html. A JSON client
+// asking for a missing endpoint got HTML and a parse error naming nothing,
+// rather than a 404 naming the path.
 func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("/healthz", api.handleHealthz)
 	mux.HandleFunc("/metrics", handleMetrics)
+	mux.HandleFunc("/api/admin/drain", api.handleDrain)
+	// Schedule routes before workflow routes so /api/schedules is not caught
+	// by /api/workflows/.
 	mux.HandleFunc("/api/schedules/", api.handleSchedules)
 	mux.HandleFunc("/api/schedules", api.handleSchedulesList)
 	mux.HandleFunc("/api/workflows/", api.handleWorkflows)
 	mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
 	mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
 	mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
+
+	// Workflow definitions.
+	mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
+	mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
+
+	// Version management.
+	//
+	// api.scopedStore, not api.store: store is the process-wide connection
+	// opened at boot against the default tenant, and passing it here served
+	// every caller's version read and -- worst -- POST
+	// /api/versions/<name>/<v>/purge from the default tenant's data regardless
+	// of who authenticated.
+	engine.RegisterVersionHandler(mux, api.scopedStore)
 
 	// Instance inspection endpoints (always on behind auth).
 	mux.HandleFunc("/api/instances/", api.handleInstancesRoutes)
@@ -93,7 +57,37 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// behind --enable-admin-api at request time in handleAdminRoutes (see
 	// api_admin.go), so the route itself can always be registered.
 	mux.HandleFunc("/api/admin/instances/", api.handleAdminRoutes)
+
+	// Plugin discovery, when the binary loaded plugins.
+	if api.plugins != nil {
+		mux.Handle("/api/plugins", api.plugins)
+	}
+
+	// The SPA catch-all, when the binary embeds one.
+	if api.spa != nil {
+		mux.Handle("/", apiAware404(api.spa))
+	}
 	return mux
+}
+
+// apiAware404 wraps the SPA handler so that an unmatched path under /api/ is a
+// JSON 404 rather than the single-page app.
+//
+// Only UNMATCHED paths reach here: ServeMux prefers the longest matching
+// pattern, so every registered /api/ route above still wins. What falls through
+// is a path no handler claims -- a typo, a client built against a newer server,
+// or a route that was never registered at all, which is the case that hid seven
+// endpoints for the life of this file.
+func apiAware404(spa http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+			return
+		}
+		spa.ServeHTTP(w, r)
+	})
 }
 
 // ---- Dead Letter Queue handlers ----

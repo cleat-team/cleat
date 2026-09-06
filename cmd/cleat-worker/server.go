@@ -81,6 +81,20 @@ type apiServer struct {
 	// attempt and is refused; with auth off, there is only ever one tenant and
 	// the default-tenant store is correct. See storeFor.
 	requireAuth bool
+
+	// plugins and spa are the two handlers only the shipped binary has: the
+	// plugin discovery endpoint closes over the loaded plugin list, and the
+	// SPA serves the embedded web/dist. Both are nil in tests, and
+	// registerRoutes skips a nil one.
+	//
+	// They are fields rather than registerRoutes parameters so that there is
+	// one route table with one signature. The reason that matters is what this
+	// pair of fields replaced: main() used to build its own mux inline and
+	// registerRoutes was reached only from StartAPIServer, which nothing but
+	// tests called. Two tables, one shipped and one tested, and the tested one
+	// was the one with the instance and admin routes on it.
+	plugins http.Handler
+	spa     http.Handler
 }
 
 // errNoTenant is returned by storeFor when a request carries no authenticated

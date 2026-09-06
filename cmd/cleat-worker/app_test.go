@@ -319,20 +319,3 @@ func TestHandleDeadLetters_NotFound(t *testing.T) {
 		t.Errorf("expected 404, got %d", w.Code)
 	}
 }
-
-func TestStartAPIServer_EmptyAddr(t *testing.T) {
-	cfg := &Config{}
-	w := newTestWorker(&mockStore{})
-	// Should return immediately without starting a server (no panic).
-	StartAPIServer(cfg, w, nil, nil, nil, nil, nil)
-}
-
-func TestStartAPIServer_WithNilMux(t *testing.T) {
-	ms := &mockStore{}
-	w := newTestWorker(ms)
-	defer w.cancel()
-
-	cfg := &Config{APIAddr: "localhost:0"}
-	// Should create a new mux and start a server in background without panic.
-	StartAPIServer(cfg, w, nil, nil, nil, nil, nil)
-}

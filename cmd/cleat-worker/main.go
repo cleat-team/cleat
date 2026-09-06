@@ -935,38 +935,10 @@ func main() {
 			mux = http.NewServeMux()
 		}
 
-		mux.HandleFunc("/healthz", api.handleHealthz)
-		mux.Handle("/metrics", metricsInstance.ServeHTTP())
-		mux.HandleFunc("/api/admin/drain", api.handleDrain)
-		// Schedule API routes (registered before workflows so /api/schedules is not caught by /api/workflows/).
-		mux.HandleFunc("/api/schedules/", api.handleSchedules)
-		mux.HandleFunc("/api/schedules", api.handleSchedulesList)
-		mux.HandleFunc("/api/workflows/", api.handleWorkflows)
-		mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
-		mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
-		mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
-
-		// Workflow definitions endpoint.
-		mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
-		mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
-
-		// Version management endpoints.
-		//
-		// api.scopedStore, not store: store is the process-wide connection
-		// opened at boot against the default tenant. Passing it here served
-		// every caller's GET /api/versions, listStaleAlerts, runGC,
-		// markDeprecated, and -- worst -- POST
-		// /api/versions/<name>/<v>/purge (which permanently deletes a
-		// workflow definition) from the default tenant's data regardless of
-		// who authenticated. api.scopedStore is the same per-request
-		// tenant resolution every other handler in this file uses (see
-		// server.go's storeFor/scopedStore doc comments); it refuses rather
-		// than falling back to the default tenant when a request has no
-		// authenticated tenant and --require-auth is on.
-		engine.RegisterVersionHandler(mux, api.scopedStore)
-
-		// Plugin discovery endpoint.
-		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
+		// Plugin discovery endpoint. Closes over the loaded plugin list, so it
+		// is built here and handed to the route table rather than declared in
+		// it.
+		api.plugins = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			type pluginStatus struct {
 				plugin.PluginInfo
@@ -987,13 +959,14 @@ func main() {
 			json.NewEncoder(w).Encode(statuses)
 		})
 
-		// Serve embedded SPA for non-API paths.
+		// Embedded SPA for non-API paths. registerRoutes wraps it so that an
+		// unmatched /api/ path is a JSON 404 instead of index.html.
 		webFS, fsErr := fs.Sub(webDist, "web/dist")
 		if fsErr != nil {
 			logger.WarnContext(context.Background(), "web/dist not found in embedded FS", "worker_id", workerID, "error", fsErr)
 		} else {
 			fileServer := http.FileServer(http.FS(webFS))
-			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			api.spa = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				path := strings.TrimPrefix(r.URL.Path, "/")
 				f, ferr := webFS.Open(path)
 				if ferr != nil {
@@ -1004,6 +977,10 @@ func main() {
 				fileServer.ServeHTTP(w, r)
 			})
 		}
+
+		// One route table, shared with the tests. See registerRoutes.
+		registerRoutes(mux, api)
+
 		// Use plugin middleware chain if available.
 		handler := plugHandler
 		if handler == nil {
