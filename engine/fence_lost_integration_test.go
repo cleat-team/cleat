@@ -24,7 +24,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 )
@@ -207,17 +206,16 @@ func TestFinalizeWorkflowSegment_ZombieWriterFence(t *testing.T) {
 				t.Errorf("child generation = %d, want %d (B's, untouched by A)", childAfter.Generation, scenario.liveGeneration)
 			}
 
-			// The parent's await_child event must not have been injected
-			// with A's stale result.
-			parentEvents, err := store.LoadEventHistory(ctx, parentID)
-			if err != nil {
-				t.Fatalf("LoadEventHistory (parent): %v", err)
-			}
-			for _, ev := range parentEvents {
-				if ev.EventType == "await_child" && ev.RunID == childID && strings.Contains(ev.Response, "stale") {
-					t.Fatalf("parent's await_child event was corrupted with A's stale result: %+v", ev)
-				}
-			}
+			// A must not have touched the parent's event history at all.
+			//
+			// This used to look for A's result injected into the parent's
+			// await_child event. That injection is gone -- finalize_workflow_status
+			// no longer writes into another workflow's rows, because doing so left
+			// the row's checksum stale and the parent could never replay (cleat#845).
+			// Looking for it now would pass whatever happened, so the check is on
+			// the property that survives: the parent's chain still verifies, which
+			// no writer but the parent itself can keep true.
+			assertParentHistoryIntact(t, ctx, store, parentID)
 		})
 	}
 }
@@ -313,18 +311,10 @@ func TestFinalizeWorkflowStatus_SQLFenceGuard(t *testing.T) {
 		t.Errorf("child generation = %d, want %d (B's, untouched by A)", childAfter.Generation, scenario.liveGeneration)
 	}
 
-	// ---- The parent's await_child event must not have been injected with
-	// A's stale result. ----
+	// ---- A must not have touched the parent's event history. See
+	// assertParentHistoryIntact for why this is no longer about await_child. ----
 
-	parentEvents, err := store.LoadEventHistory(ctx, scenario.parentID)
-	if err != nil {
-		t.Fatalf("LoadEventHistory (parent): %v", err)
-	}
-	for _, ev := range parentEvents {
-		if ev.EventType == "await_child" && ev.RunID == scenario.childID && strings.Contains(ev.Response, "stale") {
-			t.Fatalf("parent's await_child event was corrupted by the stale writer's direct SQL call: %+v", ev)
-		}
-	}
+	assertParentHistoryIntact(t, ctx, store, scenario.parentID)
 }
 
 // TestFinalizeWorkflowStatus_SQLFenceGuard_MySQL is the MySQL counterpart of
@@ -416,18 +406,10 @@ func TestFinalizeWorkflowStatus_SQLFenceGuard_MySQL(t *testing.T) {
 		t.Errorf("child generation = %d, want %d (B's, untouched by A)", childAfter.Generation, scenario.liveGeneration)
 	}
 
-	// ---- The parent's await_child event must not have been injected with
-	// A's stale result. ----
+	// ---- A must not have touched the parent's event history. See
+	// assertParentHistoryIntact for why this is no longer about await_child. ----
 
-	parentEvents, err := store.LoadEventHistory(ctx, scenario.parentID)
-	if err != nil {
-		t.Fatalf("LoadEventHistory (parent): %v", err)
-	}
-	for _, ev := range parentEvents {
-		if ev.EventType == "await_child" && ev.RunID == scenario.childID && strings.Contains(ev.Response, "stale") {
-			t.Fatalf("parent's await_child event was corrupted by the stale writer's direct SQL call: %+v", ev)
-		}
-	}
+	assertParentHistoryIntact(t, ctx, store, scenario.parentID)
 }
 
 // TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL is the SQL Server
@@ -515,15 +497,32 @@ func TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL(t *testing.T) {
 		t.Errorf("child generation = %d, want %d (B's, untouched by A)", childAfter.Generation, scenario.liveGeneration)
 	}
 
-	// ---- The parent's await_child event must not carry A's stale result. ----
+	// ---- A must not have touched the parent's event history. ----
 
-	parentEvents, err := store.LoadEventHistory(ctx, scenario.parentID)
-	if err != nil {
-		t.Fatalf("LoadEventHistory (parent): %v", err)
-	}
-	for _, ev := range parentEvents {
-		if ev.EventType == "await_child" && ev.RunID == scenario.childID && strings.Contains(ev.Response, "stale") {
-			t.Fatalf("parent's await_child event was corrupted by the stale writer's direct SQL call: %+v", ev)
-		}
+	assertParentHistoryIntact(t, ctx, store, scenario.parentID)
+}
+
+// assertParentHistoryIntact checks that a losing writer left the parent's
+// event history verifiable.
+//
+// These sites used to search the parent's await_child event for the stale
+// worker's result, because finalize_workflow_status injected a completing
+// child's result into that row. The injection is gone: it left the row's
+// checksum stale, so the parent failed its next segment with a checksum
+// mismatch and could never resume (cleat#845).
+//
+// Keeping the old search would have left four assertions that pass no matter
+// what happens, still reading as coverage -- the shape this repository has been
+// bitten by in several allowlists. The chain check is the property that
+// survives the removal and is strictly stronger: it fails on ANY modification
+// to the parent's rows by anyone but the parent, not only on one field
+// containing one substring.
+func assertParentHistoryIntact(t *testing.T, ctx context.Context, store WorkflowStore, parentID string) {
+	t.Helper()
+	if err := store.VerifyWorkflowEvents(ctx, parentID); err != nil {
+		t.Fatalf("the losing writer modified the parent's event history: %v\n"+
+			"A finalize that lost its fence must apply none of the terminal "+
+			"side-effects, and nothing may write into a workflow's event rows "+
+			"but the workflow itself.", err)
 	}
 }

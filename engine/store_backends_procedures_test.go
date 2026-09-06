@@ -48,18 +48,21 @@ var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
 	"004_fix_finalize_workflow_status_fence.sql",
 	"043_query_state_on_suspension.sql",
+	"044_child_does_not_rewrite_parent_event.sql",
 }
 
 var mysqlProcedureMigrations = []string{
 	"003_procedures.sql",
 	"004_fix_finalize_workflow_status_fence.sql",
 	"042_query_state_on_suspension.sql",
+	"043_child_does_not_rewrite_parent_event.sql",
 }
 
 var mssqlProcedureMigrations = []string{
 	"003_procedures.sql",
 	"004_fix_finalize_workflow_status_fence.sql",
 	"046_query_state_on_suspension.sql",
+	"047_child_does_not_rewrite_parent_event.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup
