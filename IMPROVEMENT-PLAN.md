@@ -5655,6 +5655,71 @@ but does not have a HostCalls parameter."* A shipped example that the project's 
 is either a broken example or a false positive in `cleat vet`, and which it is has not been
 established here.
 
+### 3.228 Six of the eight Go example workflows do not build — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+
+Found by pulling on §3.227's loose end: `ci-check.sh`'s vet step failed, and one of the things it
+could have been pointed at was `./examples/dag`, which turned out to fail too.
+
+Swept every example directory containing `.go` files, each into a **fresh** output directory:
+
+| example | `cleat build --target go` |
+|---|---|
+| `saga-temporal-port` | OK |
+| `subscription` | OK |
+| `datapipeline` | codegen: `cannot convert __r (*PipelineResult) to []byte` |
+| `onboarding` | codegen: `cannot convert __r (*Profile) to []byte` |
+| `travel` | codegen: `cannot convert __r (*BookingResult) to []byte` |
+| `dag` | `Verifying HostCalls threading... 4 error(s)` |
+| `fooddash` | `Verifying HostCalls threading... 1 error(s)` |
+| `event-driven` | `E003: time.Now() ... breaking determinism` |
+| ~~`third-party-plugin`~~ | excluded — it is a plugin, not a workflow, so "no entry points" is correct |
+
+**Two of eight.** Three distinct causes.
+
+## Cause 1: an entry point returning a pointer-to-struct generates invalid Go
+
+`GenerateExports` declares `var __r string` (`wasm/exports.go:731`) and emits `return []byte(__r)`
+(`:794`) — it **assumes the entry point returns a string**. An entry point returning `*T` produces
+
+    ./gen_wasm_exports.go:340:28: cannot convert __r (variable of type *BookingResult) to type []byte
+
+which is a compile error in **generated code the user never wrote**, naming a variable that does
+not appear in their source. Whether struct returns should be supported or rejected is a design
+question; producing a Go type error in a generated file is the wrong answer to either.
+
+## Cause 2 and 3 are in the examples themselves
+
+`dag` and `fooddash` fail HostCalls threading — functions reachable from an entry point that call
+durable SDK methods without an `h cleat.HostCalls` parameter. `event-driven` uses `time.Now()`
+inside a workflow and is rejected by the project's own E003, the rule that exists for exactly that.
+
+**`examples/dag`'s doc comment names the command that fails on it:**
+
+    // Build:
+    //	cleat build -o /tmp/out ./examples/dag/
+
+## Why this rotted: they are valid Go, and nothing compiles them to WASM
+
+`cd examples && go build ./... && go vet ./...` is **clean**. So every Go job in CI is happy. The
+only CI reference to `examples/` is `examples/as-workflow`, which is AssemblyScript
+(`.github/workflows/ci.yml:1126`); tier2-gate mentions `./examples/...` only in a comment about how
+that gate was falsified. **No job runs `cleat build` on a Go example**, so the one command the
+examples document is the one nobody runs.
+
+## A methodological note, because the first version of this section was wrong
+
+The first sweep reused **one** output directory for all nine builds. `cleat build` copies the
+source into the build directory and does not clear it, so each example inherited the previous one's
+files, and the errors were things like `toJSON redeclared in this block` naming files from a
+different example. **It reported nine failures out of nine**, and "every Go example is broken" was
+one sentence from being written down.
+
+What caught it was reading an error rather than counting: `travel`'s failure named `billing.go`,
+`pipeline.go` and `signup.go`, and `ls examples/travel/` shows only `booking.go` and `README.md`. A
+failure citing files that are not there is a harness fault, not a finding — and the corrected sweep
+gives two passes, so the wrong number was wrong in the direction that made the finding look
+bigger.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
