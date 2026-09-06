@@ -442,7 +442,10 @@ func TestCronEventsSurviveCompaction(t *testing.T) {
 		{Step: 2, EventType: EventTypeListCrons, CronResult: `[{"schedule_id":"cron-abc123"}]`},
 	}
 
-	state := extractCompactionState(original)
+	state, extractErr := extractCompactionState(original)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	rebuilt := buildFullHistoryFromCompaction(nil, state)
 	if len(rebuilt) != len(original) {
 		t.Fatalf("rebuilt %d events, want %d", len(rebuilt), len(original))

@@ -25,7 +25,10 @@ func TestCompactionPreservesErrNonRetryable(t *testing.T) {
 			Request: `{}`, Err: "connection reset", ErrNonRetryable: false},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(nil, cs)
 	if len(reconstructed) != len(events) {
 		t.Fatalf("expected %d reconstructed events, got %d", len(events), len(reconstructed))
@@ -87,7 +90,10 @@ func TestPluginCallCompactionRoundTrip(t *testing.T) {
 		compacted := events[:split]
 		tail := events[split:]
 
-		cs := extractCompactionState(compacted)
+		cs, extractErr := extractCompactionState(compacted)
+		if extractErr != nil {
+			t.Fatalf("extractCompactionState: %v", extractErr)
+		}
 		reconstructed := buildFullHistoryFromCompaction(tail, cs)
 
 		if len(reconstructed) != len(events) {
@@ -120,7 +126,10 @@ func TestCompactionBelowThreshold(t *testing.T) {
 		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "op3", Request: `{}`, Response: `{"ok":true}`},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if cs == nil {
 		t.Fatal("expected non-nil CompactionState")
 	}
@@ -170,7 +179,10 @@ func TestCompactionAboveThreshold(t *testing.T) {
 	compacted := events[:keepStep]
 	tail := events[keepStep:]
 
-	cs := extractCompactionState(compacted)
+	cs, extractErr := extractCompactionState(compacted)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.Events) != keepStep {
 		t.Fatalf("expected %d compacted events, got %d", keepStep, len(cs.Events))
 	}
@@ -209,7 +221,10 @@ func TestCompactionPreservesRecentEvents(t *testing.T) {
 	compacted := events[:nEvents-tailSize]
 	tail := events[nEvents-tailSize:]
 
-	cs := extractCompactionState(compacted)
+	cs, extractErr := extractCompactionState(compacted)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(tail, cs)
 
 	// The tail events should be identical objects (not reconstructed from JSON).
@@ -235,7 +250,10 @@ func TestCompactionOfCompletedWorkflow(t *testing.T) {
 	}
 
 	// Full compaction: all events are compacted, tail is nil.
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if cs.CompactedStep != len(events) {
 		t.Errorf("expected CompactedStep=%d, got %d", len(events), cs.CompactedStep)
 	}
@@ -269,7 +287,10 @@ func TestCompactionOfRunningWorkflow(t *testing.T) {
 		{Step: 5, EventType: EventTypeSignalReceived, SignalName: "payment", SignalPayload: `{"paid":true}`},
 	}
 
-	cs := extractCompactionState(oldEvents)
+	cs, extractErr := extractCompactionState(oldEvents)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(recentEvents, cs)
 
 	expectedLen := len(oldEvents) + len(recentEvents)
@@ -356,7 +377,10 @@ func TestCompactionRoundTripThenReplay(t *testing.T) {
 	}
 
 	// Compact all events (simulating a fully compacted workflow) and reconstruct.
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.Events) != len(events) {
 		t.Fatalf("expected %d compacted events, got %d", len(events), len(cs.Events))
 	}
@@ -1035,7 +1059,10 @@ func TestExtractCompactionState_WithOpenChildren(t *testing.T) {
 		{Step: 1, EventType: EventTypeChildWorkflow, ChildName: "child-b", ChildInput: `{"y":2}`, RunID: "run-b"},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.OpenChildren) != 2 {
 		t.Fatalf("expected 2 open children, got %d", len(cs.OpenChildren))
 	}
@@ -1067,7 +1094,10 @@ func TestExtractCompactionState_OpenChildrenClosed(t *testing.T) {
 		{Step: 2, EventType: EventTypeAwaitChild, RunID: "run-a", Response: `{"ok":true}`},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.OpenChildren) != 1 {
 		t.Fatalf("expected 1 open child (child-b), got %d", len(cs.OpenChildren))
 	}
@@ -1085,7 +1115,10 @@ func TestExtractCompactionState_AwaitAllChildrenResets(t *testing.T) {
 		{Step: 2, EventType: EventTypeAwaitAllChildren, Response: `[{"ok":true}]`},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.OpenChildren) != 0 {
 		t.Errorf("expected 0 open children after await_all, got %d", len(cs.OpenChildren))
 	}
@@ -1099,7 +1132,10 @@ func TestExtractCompactionState_WithPendingDefers(t *testing.T) {
 		{Step: 1, EventType: EventTypeDefer, DeferID: "d2", DeferDescription: "close connection"},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.PendingDefers) != 2 {
 		t.Fatalf("expected 2 pending defers, got %d", len(cs.PendingDefers))
 	}
@@ -1130,7 +1166,10 @@ func TestExtractCompactionState_SideEffectRoundTrip(t *testing.T) {
 		{Step: 1, EventType: EventTypeScopeAcquired, ScopeKey: "vo:order:123"},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(nil, cs)
 
 	if len(reconstructed) != len(events) {
@@ -1356,7 +1395,10 @@ func TestCompactionWithOpenChildrenRoundTrip(t *testing.T) {
 		// child-b is still open (no await or await_all for run-b)
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.OpenChildren) != 1 {
 		t.Fatalf("expected 1 open child (child-b), got %d", len(cs.OpenChildren))
 	}
@@ -1395,7 +1437,10 @@ func TestCompactionWithPendingSignals(t *testing.T) {
 		{Step: 2, EventType: EventTypeAwaitSignals, SignalNames: "approval", TimeoutMs: 60000},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(nil, cs)
 
 	if len(reconstructed) != len(events) {
