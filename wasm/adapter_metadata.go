@@ -203,6 +203,29 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&payloadBuf[0], int(payloadLen)), found, nil",
 		},
 	},
+	// SignalWorkflow: three strings in, nothing out. IMPROVEMENT-PLAN 3.224.
+	//
+	// errCode is the full 64-bit result rather than a packed field: the engine
+	// returns 0 on success and a non-zero sentinel otherwise -- including
+	// errSignalAuthRequiredInt when signal authorization refuses the target --
+	// and there is no response buffer to carry a message, so the code is all
+	// the guest gets.
+	"SignalWorkflow": {
+		FieldName:  "SignalWorkflow",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"targetRunID", "string"},
+			{"signalName", "string"},
+			{"payload", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_signal_workflow: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
 	"ContinueAsNew": {
 		FieldName:  "ContinueAsNew",
 		ReturnType: "error",
