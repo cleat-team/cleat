@@ -232,15 +232,25 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 		return "", fmt.Errorf("start child workflow atomic: previous checksum: %w", err)
 	}
 	checksum := computeEventChecksum(event, prevCS)
+	// See PostgresStore.StartChildWorkflowAtomic for why the payload column
+	// matters here: it carries the fields the checksum covers that have no
+	// column of their own, and LoadEventHistory restores them from it. Omitted,
+	// every child_workflow event failed VerifyWorkflowEvents.
+	payloadJSON, _ := eventRecordToPayload(event)
+	payloadArg := nullStr("")
+	if len(payloadJSON) > 0 {
+		payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
+	}
+
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id)
-		SELECT @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9
+		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id, payload)
+		SELECT @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10
 		WHERE NOT EXISTS (
 			SELECT 1 FROM event_history WHERE workflow_id = @p1 AND step = @p2
 		)
 	`, parentID, event.Step, string(event.EventType),
 		nullStr(event.ChildName), nullStr(event.ChildInput), nullStr(childID),
-		time.UnixMilli(event.TimestampMs), checksum, s.tenantID)
+		time.UnixMilli(event.TimestampMs), checksum, s.tenantID, payloadArg)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
 	}
