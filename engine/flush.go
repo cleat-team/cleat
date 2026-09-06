@@ -104,6 +104,23 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 // clause is what actually loses that inference, forcing an explicit cast per
 // parameter. A bare WHERE EXISTS, with no FROM clause at all, does not have
 // that problem.
+// $34 is created_at, bound rather than NOW().
+//
+// LoadEventHistory reconstructs EventRecord.TimestampMs FROM created_at -- it is
+// the only carrier, since the checksum payload does not include a timestamp --
+// and execSession.Now() returns the previous event's TimestampMs so that time is
+// deterministic across replay. With NOW() the column held the moment of the
+// INSERT rather than the moment of the event, so the value read back on replay
+// was later than the one the first execution saw, by however long the flush
+// took. Measured at 78ms on an idle laptop; the adaptive flusher batches for up
+// to 8ms plus queueing, so it is not bounded by anything useful.
+//
+// The consequence was that h.Now() returned a different value on replay for
+// every workflow, which is what cleat vet E003 promises it does not
+// ("Use h.Now() for deterministic time"), and it made SideEffect -- which
+// validates the recomputed value against history -- fail any workflow that
+// wrapped a clock read. store_children.go already bound the event's own
+// timestamp here; this brings the two write paths into agreement.
 const insertEventSQL = `
 	INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 		duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
@@ -114,7 +131,7 @@ const insertEventSQL = `
 	SELECT $1, $2, $3, $4, $5, $6, $7, $8,
 		$9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
 		$20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
-		$30, NOW(), $31
+		$30, $34, $31
 	WHERE ($32 = '' OR EXISTS (
 		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $32 AND generation = $33
 	))
@@ -375,7 +392,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
-			payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration)
+			payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec))
 		if err != nil {
 			return fmt.Errorf("flush event (quota): %w", err)
 		}
@@ -393,7 +410,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
 		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
 		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
-		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration}
+		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec)}
 
 	// Tenanted path: the insert must carry the RLS context, which is
 	// transaction-scoped, so it needs an explicit transaction. That costs two
@@ -432,7 +449,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
 		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
 		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
-		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration)
+		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec))
 	if err != nil {
 		return fmt.Errorf("flush event: %w", err)
 	}
@@ -582,4 +599,14 @@ func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[
 			}
 		}
 	}
+}
+
+// eventCreatedAt is the timestamp the event itself carries, falling back to now
+// only if it has none. See insertEventSQL's doc for why the column must hold
+// this rather than the moment of the write.
+func eventCreatedAt(rec EventRecord) time.Time {
+	if rec.TimestampMs > 0 {
+		return time.UnixMilli(rec.TimestampMs)
+	}
+	return time.Now()
 }
