@@ -109,6 +109,7 @@ var hostFunctions = []HostFunction{
 	{"cleat_now", "Now"},
 	// Random
 	{"cleat_random", "Random"},
+
 	// Lock/concurrency key operations
 	{"cleat_acquire_lock", "AcquireLock"},
 	{"cleat_acquire_lock", "AcquireLockMs"},
@@ -175,6 +176,49 @@ func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInf
 	}
 
 	return info
+}
+
+// compositeRequires maps an SDK wrapper method to the imports its
+// implementation needs.
+//
+// It is deliberately NOT part of hostFunctions. That table is bidirectional:
+// info.Funcs is built from it, and every entry emits an adapter FIELD named
+// FieldName implemented by ImportName's body. Adding a wrapper there invents a
+// field -- {"cleat_call", "DurableCallWithHeartbeat"} emitted a
+// DurableCallWithHeartbeat closure carrying a heartbeatIntervalMs parameter
+// that cleat_call's body never reads, and the generated guest failed to compile
+// with "declared and not used". Wrappers are SDK-level; they need the inner
+// IMPORT wired and no field of their own.
+//
+// Why any of this is needed: AnalyzeUsage scans the user's AST for
+// h.<Method>(...) and does not follow into the SDK, so a wrapper implemented in
+// terms of another host call contributes no import. The inner adapter field
+// then stays nil and HostCallsImpl's nil branch returns a zero value -- in a
+// compiled workflow, with no build or deploy error. h.NewUUID() returned
+// 00000000-0000-4000-8000-000000000000 in every workflow, and a body of
+// h.Log(...) plus h.Call(...) compiled with no host calls wired at all. See #775.
+//
+// TestEveryCompositeHostCallHasAnImportRow derives this from the SDK source and
+// fails when a wrapper is added without an entry.
+var compositeRequires = map[string][]string{
+	"NewUUID":                       {"cleat_random"},
+	"NewUUIDv7":                     {"cleat_random", "cleat_now"},
+	"UUID":                          {"cleat_workflow_id"},
+	"Log":                           {"cleat_log"},
+	"Call":                          {"cleat_call"},
+	"AwaitCondition":                {"cleat_await_signals", "cleat_now"},
+	"AwaitSignalsWithQuorum":        {"cleat_await_signals"},
+	"AwaitPromiseMs":                {"cleat_await_promise"},
+	"PollSignals":                   {"cleat_poll_signal"},
+	"ChildWorkflowWithOptions":      {"cleat_child_workflow"},
+	"DurableCallWithHeartbeat":      {"cleat_call"},
+	"DurableCallTypedWithHeartbeat": {"cleat_call"},
+	// DurableCallWithOptions sleeps between retry attempts, so a workflow that
+	// sets a RetryPolicy and never calls DurableSleep itself would compile with
+	// cleat_sleep unwired and back off for no time at all.
+	"DurableCallWithOptions":      {"cleat_sleep"},
+	"DurableCallTypedWithOptions": {"cleat_call", "cleat_call_retry", "cleat_sleep"},
+	"DurableCallJSONWithOptions":  {"cleat_sleep"},
 }
 
 // collectRequirements scans the target package's source files for
@@ -248,6 +292,10 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 		}
 		fieldName := selExpr.Sel.Name
 		if importName, ok := fieldToImport[fieldName]; ok && importName != "" {
+			info.Used[importName] = true
+		}
+		// Wrappers implemented over another host call. See compositeRequires.
+		for _, importName := range compositeRequires[fieldName] {
 			info.Used[importName] = true
 		}
 
