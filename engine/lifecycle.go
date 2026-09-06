@@ -198,16 +198,32 @@ func (s *execSession) recordEvent(rec EventRecord) {
 }
 
 func (s *execSession) Now(ctx context.Context) int64 {
-	// During replay, read the timestamp from the last consumed event
-	// to produce deterministic Now() values matching the original
-	// execution. Before any event is consumed (stepCount==0), s.nowMs
-	// is seeded from the first history event or wall clock.
+	// The virtual clock is the LATER of two deterministic anchors, never just
+	// the recorded one.
+	//
+	// During replay, the last consumed event's timestamp reproduces what the
+	// original execution saw. But a sleep records no event and advances s.nowMs
+	// to anchor+duration (see DurableSleep), and stepCount does not move -- so
+	// reading only the history timestamp handed the guest a PRE-sleep instant
+	// after a sleep had completed. Measured: 163ms of apparent elapsed time
+	// across a 3000ms sleep, until the next event happened to be recorded and
+	// re-anchored the clock.
+	//
+	// Both values are deterministic, so taking the later of them is too:
+	// history timestamps are recorded, and s.nowMs is anchor+duration where the
+	// anchor is itself one of these. Replay recomputes the same sleeps from the
+	// same anchors and arrives at the same number.
+	//
+	// max, not assignment, for the reason DurableSleep gives for its own max:
+	// the clock must never run backwards, and either source can be the larger
+	// one depending on where the workflow is.
+	now := s.nowMs
 	if s.stepCount > 0 && s.stepCount <= len(s.history) {
-		if ts := s.history[s.stepCount-1].TimestampMs; ts > 0 {
-			return ts
+		if ts := s.history[s.stepCount-1].TimestampMs; ts > now {
+			now = ts
 		}
 	}
-	return s.nowMs
+	return now
 }
 
 func (s *execSession) Random(ctx context.Context) int64 {
