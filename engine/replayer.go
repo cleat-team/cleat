@@ -68,6 +68,34 @@ func (s *execSession) advanceReplayStep(ctx context.Context, rec *EventRecord) b
 	if rec != nil && rec.TimestampMs > 0 {
 		s.nowMs = rec.TimestampMs
 	}
+
+	// Advance the checksum chain over consumed events too.
+	//
+	// lastChecksum is the predecessor the NEXT recorded event chains from, and
+	// nothing seeded it from replayed history: it started empty on every
+	// resumed session. So the first event a workflow recorded after a
+	// resumption was written with a checksum chained from nothing, while
+	// verification recomputes the chain from the events that are actually
+	// there -- and the two disagree. The workflow then fails with
+	//
+	//	checksum mismatch (expected ..., got ...)
+	//
+	// which reads like corruption and is the integrity mechanism reporting on
+	// its own bookkeeping.
+	//
+	// Found by a workflow that awaits a promise: the await suspends, the
+	// resumed execution replays the await from history, finds the promise
+	// still pending, and records a second await -- the first new event after a
+	// replay, which is exactly the case that was wrong.
+	//
+	// The fresh paths already do this: recordEvent, callintent, and the atomic
+	// child insert in children.go, which had the same omission fixed
+	// call-site-by-call-site (#777). This is the same fix in the one place
+	// every consumed event passes through, so it does not need repeating for
+	// each event type.
+	if rec != nil {
+		s.lastChecksum = computeEventChecksum(*rec, s.lastChecksum)
+	}
 	if s.stepCallback == nil {
 		return true
 	}
