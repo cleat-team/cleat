@@ -27,21 +27,29 @@ import (
 // h.Log(...) plus h.Call(...) compiled with no host calls wired at all.
 //
 // This walks the SDK for methods that call another h.X(...) and fails if the
-// wrapper has no row covering the inner method's import. It is deliberately
+// wrapper does not end up with the inner method's import -- via its own
+// hostFunctions row, or via compositeRequires. It is deliberately
 // source-derived rather than a hand-maintained list: a hand-maintained list is
 // what hostFunctions already is, and it is what went stale.
 func TestEveryCompositeHostCallHasAnImportRow(t *testing.T) {
 	sdk := sdkDirForTest(t)
 
-	// import name -> set of methods that produce it
-	importsFor := map[string][]string{}
+	// What each method ultimately causes to be imported: its own field row, if
+	// it has one, plus anything compositeRequires adds for it.
 	methodImports := map[string]map[string]bool{}
-	for _, hf := range hostFunctions {
-		importsFor[hf.FieldName] = append(importsFor[hf.FieldName], hf.ImportName)
-		if methodImports[hf.FieldName] == nil {
-			methodImports[hf.FieldName] = map[string]bool{}
+	add := func(method, imp string) {
+		if methodImports[method] == nil {
+			methodImports[method] = map[string]bool{}
 		}
-		methodImports[hf.FieldName][hf.ImportName] = true
+		methodImports[method][imp] = true
+	}
+	for _, hf := range hostFunctions {
+		add(hf.FieldName, hf.ImportName)
+	}
+	for method, imports := range compositeRequires {
+		for _, imp := range imports {
+			add(method, imp)
+		}
 	}
 
 	inner := regexp.MustCompile(`\bh\.([A-Z]\w*)\(`)
@@ -49,7 +57,10 @@ func TestEveryCompositeHostCallHasAnImportRow(t *testing.T) {
 
 	entries, err := os.ReadDir(sdk)
 	if err != nil {
-		t.Skipf("SDK sources not available at %s: %v", sdk, err)
+		// Fatal, not Skip: cleat/ is in this repository, so this directory is
+		// always present. If it is not readable the test has lost its subject
+		// and passing would mean asserting nothing.
+		t.Fatalf("SDK sources not readable at %s: %v", sdk, err)
 	}
 
 	var problems []string
@@ -93,8 +104,9 @@ func TestEveryCompositeHostCallHasAnImportRow(t *testing.T) {
 					}
 					if !have[imp] {
 						problems = append(problems, fmt.Sprintf(
-							"h.%s calls h.%s which needs %s, but hostFunctions has no {%q, %q} row",
-							outer, callee, imp, imp, outer))
+							"h.%s calls h.%s which needs %s, but neither hostFunctions nor "+
+								"compositeRequires gives h.%s that import",
+							outer, callee, imp, outer))
 					}
 				}
 			}
