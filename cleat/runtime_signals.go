@@ -58,6 +58,19 @@ func (h *HostCallsImpl) SendSignalAndWait(targetRunID, signalName, payload strin
 	if err != nil {
 		return "", fmt.Errorf("durable: SendSignalAndWait: await reply to signal %q: %w", signalName, err)
 	}
+	// Returning an error on timedOut is correct even though AwaitPromise
+	// reports timedOut = true for a SUSPENSION as well as for a real timeout.
+	// The host distinguishes them and this code does not have to: when the
+	// await suspends, engine/promises.go sets session.suspendErr before
+	// returning, and engine/executor.go:264 treats a workflow error as a
+	// failure only when suspendErr is nil -- ":315 deliberately lets a
+	// suspension win over the error that accompanied it". So this error
+	// surfaces on a genuine timeout and is discarded on a suspension.
+	//
+	// Do not "fix" this into a suspension check. There is nothing in the
+	// returned triple to check: the engine signals suspension host-side, not
+	// through a sentinel, so the guest cannot tell the two apart and must not
+	// try.
 	if timedOut {
 		return "", fmt.Errorf("durable: SendSignalAndWait: no reply to signal %q from workflow %q within %v", signalName, targetRunID, timeout)
 	}
