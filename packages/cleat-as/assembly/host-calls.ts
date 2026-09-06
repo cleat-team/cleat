@@ -28,6 +28,7 @@ import {
 } from "./memory";
 
 import { jsonStrArray, jsonExtractString, jsonExtractNumber } from "./json";
+import { decodeSignalEnvelope, encodeSignalEnvelope, SignalEnvelope } from "./signal-envelope";
 
 /**
  * Map an error code from the host runtime to a human-readable name.
@@ -292,34 +293,14 @@ export declare function import_cleat_run_id(
   idMaxLen: i32,
 ): i64;
 
-/**
- * 22. cleat_send_signal_and_wait: Send a signal and wait for a response.
- * (import "env" "cleat_send_signal_and_wait") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
- */
-@external("env", "cleat_send_signal_and_wait")
-export declare function import_cleat_send_signal_and_wait(
-  targetRunIdPtr: i32,
-  targetRunIdLen: i32,
-  signalNamePtr: i32,
-  signalNameLen: i32,
-  payloadPtr: i32,
-  payloadLen: i32,
-  timeoutMs: i64,
-  responsePtr: i32,
-  responseMaxLen: i32,
-): i64;
-
-/**
- * 23. cleat_reply_to_signal: Respond to a signal from within a handler.
- * (import "env" "cleat_reply_to_signal") (param i32 i32 i32 i32) (result i64)
- */
-@external("env", "cleat_reply_to_signal")
-export declare function import_cleat_reply_to_signal(
-  correlationIdPtr: i32,
-  correlationIdLen: i32,
-  responsePtr: i32,
-  responseLen: i32,
-): i64;
+// 22/23. cleat_send_signal_and_wait (ABI 2.23) and cleat_reply_to_signal
+// (ABI 2.24) are deliberately NOT imported. Both were inert engine-side, and
+// request/reply is now composed from createPromise + signalWorkflow +
+// awaitPromise + resolvePromise (IMPROVEMENT-PLAN 3.220). Declaring an
+// @external this SDK never calls would make every AssemblyScript guest import
+// a host function it does not use. The engine still exports both; removing
+// the exports is a separate change that has to come after every SDK stops
+// importing them -- and with this SDK, every SDK has.
 
 /**
  * 24. cleat_signal_workflow: Send a signal to another workflow.
@@ -749,6 +730,16 @@ export class AwaitSignalsOutcome {
     public readonly timedOut: bool,
     /** Error message, or null on success. */
     public readonly error: string | null,
+    /**
+     * The address to answer this signal at, or "" for a one-way signal.
+     *
+     * Non-empty only when the sender used `sendSignalAndWait` and is
+     * suspended waiting for a reply; pass it to `replyToSignal`. A signal
+     * sent with `signalWorkflow` leaves it empty, which is how a receiver
+     * tells a request that wants an answer from a one-way notification.
+     * IMPROVEMENT-PLAN 3.220.
+     */
+    public readonly replyTo: string = "",
   ) {}
 
   /** Returns true when this outcome carries an error. */
@@ -1727,7 +1718,18 @@ export class HostCalls {
         ? this.memory.readString(payloadOffset, decoded.payloadLen as i32)
         : "";
 
-    return new AwaitSignalsOutcome(sigName, payload, decoded.timedOut, null);
+    // Strip the reply envelope, if this is a request/reply signal, so the
+    // receiver reads its payload exactly as the sender passed it and gets the
+    // address separately rather than parsing it out. IMPROVEMENT-PLAN 3.220.
+    let replyTo: string = "";
+    let unwrapped = decodeSignalEnvelope(payload);
+    if (unwrapped !== null) {
+      let env = <SignalEnvelope>unwrapped;
+      replyTo = env.replyTo;
+      payload = env.payload;
+    }
+
+    return new AwaitSignalsOutcome(sigName, payload, decoded.timedOut, null, replyTo);
   }
 
   // ────────────────────────────────────────────
@@ -2205,46 +2207,55 @@ export class HostCalls {
     payload: string,
     timeoutMs: i64,
   ): DurableResult<string> {
-    let targetLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, targetRunId);
-    let sigOffset: usize = SCRATCH_BASE + targetLen;
-    let remaining: i32 = OUT_BUF_SIZE - targetLen;
-    let sigLen: i32 = this.writeScratch(sigOffset, remaining, signalName, "signalName");
-    let payloadOffset: usize = sigOffset + sigLen;
-    remaining -= sigLen;
-    let payloadLen: i32 = this.writeScratch(payloadOffset, remaining, payload, "payload");
+    // Composed from three durable primitives rather than being a host call of
+    // its own: a promise is the reply channel, its ID is the correlation ID,
+    // and answering is resolving it (IMPROVEMENT-PLAN 3.220).
+    // cleat_send_signal_and_wait was inert engine-side -- it never delivered
+    // the signal it then waited for -- so this is the first version that
+    // works at all.
+    let promise = this.createPromise("__reply:" + signalName);
+    if (promise.isError) {
+      return new DurableResult<string>(
+        "",
+        "sendSignalAndWait: create reply promise: " + (promise.error as string),
+      );
+    }
+    let replyTo: string = promise.value;
 
-    let result: i64 = import_cleat_send_signal_and_wait(
-      SCRATCH_BASE as i32,
-      targetLen,
-      sigOffset as i32,
-      sigLen,
-      payloadOffset as i32,
-      payloadLen,
-      timeoutMs,
-      OUTPUT_OFFSET as i32,
-      OUT_BUF_SIZE,
+    let sendErr = this.signalWorkflow(
+      targetRunId,
+      signalName,
+      encodeSignalEnvelope(replyTo, payload),
     );
-
-    // The host refuses new work in a defer segment and marks the refusal with
-    // bit 31 (IMPROVEMENT-PLAN 3.300). Ask BEFORE decoding: decodeSimpleResult
-    // reads errCode from the low byte, where a stop is 0, and `extra` as a
-    // length, which for a stop is 0 -- an EMPTY SUCCESSFUL response.
-    if (stopRequested(result)) {
+    if (sendErr !== null) {
       return new DurableResult<string>(
         "",
-        "cleat: host refused this call -- the workflow is running its defer phase",
+        "sendSignalAndWait: send signal '" + signalName + "' to '" + targetRunId + "': " + (sendErr as string),
       );
     }
 
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0) {
+    let awaited = this.awaitPromiseMs(replyTo, timeoutMs);
+    if (awaited.isError) {
       return new DurableResult<string>(
         "",
-        "sendSignalAndWaitMs(targetRunId='" + targetRunId + "', signalName='" + signalName + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
+        "sendSignalAndWait: await reply to signal '" + signalName + "': " + (awaited.error as string),
       );
     }
-    let response: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
-    return new DurableResult<string>(response, null);
+    // Returning an error on timedOut is correct even though awaitPromise
+    // reports timedOut for a SUSPENSION as well as a real timeout. The host
+    // distinguishes them and this code does not have to: engine/promises.go
+    // sets session.suspendErr before returning, and engine/executor.go:264
+    // treats a workflow error as a failure only when suspendErr is nil --
+    // ":315 deliberately lets a suspension win over the error that
+    // accompanied it". There is nothing in the outcome to check: the engine
+    // signals suspension host-side, not through a sentinel.
+    if (awaited.timedOut) {
+      return new DurableResult<string>(
+        "",
+        "sendSignalAndWait: no reply to signal '" + signalName + "' from workflow '" + targetRunId + "' within " + timeoutMs.toString() + "ms",
+      );
+    }
+    return new DurableResult<string>(awaited.value, null);
   }
 
   // ────────────────────────────────────────────
@@ -2262,21 +2273,17 @@ export class HostCalls {
    * @returns An error message on failure, or null on success.
    */
   replyToSignal(correlationId: string, response: string): string | null {
-    let cidLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, correlationId);
-    let respOffset: usize = SCRATCH_BASE + cidLen;
-    let remaining: i32 = OUT_BUF_SIZE - cidLen;
-    let respLen: i32 = this.writeScratch(respOffset, remaining, response, "response");
-
-    let result: i64 = import_cleat_reply_to_signal(
-      SCRATCH_BASE as i32,
-      cidLen,
-      respOffset as i32,
-      respLen,
-    );
-
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0) {
-      return "replyToSignal(correlationId='" + correlationId + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
+    // correlationId is AwaitSignalsOutcome.replyTo, which is the reply
+    // promise's ID, so replying is resolving that promise. An ID matching no
+    // promise is an error rather than a silent success, which is what makes a
+    // stale address visible instead of leaving the sender suspended until its
+    // timeout. IMPROVEMENT-PLAN 3.220.
+    if (correlationId.length === 0) {
+      return "replyToSignal: empty correlation ID. Pass AwaitSignalsOutcome.replyTo from the signal being answered; it is empty when the sender used signalWorkflow and is not waiting for a reply.";
+    }
+    let settled = this.resolvePromise(correlationId, response);
+    if (settled !== null) {
+      return "replyToSignal(correlationId='" + correlationId + "'): " + (settled as string);
     }
     return null;
   }

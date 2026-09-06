@@ -41,5 +41,6 @@ export * from "./defer";
 export * from "./json";
 export * from "./plugins";
 export * from "./saga";
+export * from "./signal-envelope";
 export * from "./utils";
 export * from "./version";
