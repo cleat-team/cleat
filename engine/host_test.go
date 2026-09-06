@@ -2752,6 +2752,11 @@ func TestScheduleInvokeReplayMatch(t *testing.T) {
 }
 
 func TestScheduleInvokeReplayPastEnd(t *testing.T) {
+	// Past the end of history the schedule is new work and must be recorded.
+	// This test used to assert "isReplay to remain true (ScheduleInvoke does
+	// not exitReplay on past-end)" -- a restatement of the code, with the
+	// consequence that a delayed invocation scheduled after a suspension was
+	// dropped in silence. cleat#835; the same shape as DurableSend beside it.
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = nil // stepCount >= len → past end
@@ -2761,8 +2766,14 @@ func TestScheduleInvokeReplayPastEnd(t *testing.T) {
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
 	}
-	if !s.isReplay {
-		t.Error("expected isReplay to remain true (ScheduleInvoke does not exitReplay on past-end)")
+	if s.isReplay {
+		t.Error("the session stayed in replay, so the schedule was neither replayed nor recorded")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected the schedule to be recorded as a fresh event, got %d events", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeDurableScheduleInvoke {
+		t.Errorf("recorded %q, want %q", s.history[0].EventType, EventTypeDurableScheduleInvoke)
 	}
 }
 
@@ -3302,21 +3313,43 @@ func TestPluginCallStreamingReplay_StreamError(t *testing.T) {
 }
 
 func TestPluginCallStreamingReplay_EmptyHistory(t *testing.T) {
+	// An empty history means there is nothing recorded at this step, so the
+	// call is new work: leave replay and take the fresh path.
+	//
+	// This test used to assert "errCode=0 (empty result)" and "isReplay=true",
+	// which is what the code did: it returned SUCCESS with a marshalled `null`
+	// for a stream the plugin was never asked to produce. A workflow that
+	// suspended and then streamed got an empty stream and no error. cleat#835.
+	//
+	// The non-streaming twin, replayPluginCall, has always ended with
+	// exitReplay + freshPluginCall under the comment "Past recorded history --
+	// switch to fresh execution". Only the streaming one was written without it.
 	s := newTestExecSession()
 	s.isReplay = true
 	// empty history — no chunks to replay
 
 	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
 
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode=0 (empty result), got %d", errCode)
+	// stepCount is no longer asserted to be 0. It used to be, under the label
+	// "no events consumed" -- but with the history empty there was nothing to
+	// consume either way, so the assertion held for the wrong reason and
+	// conflated "consumed nothing from history" with "did nothing". The fresh
+	// path records a stream-level error event, so stepCount advancing is the
+	// call having happened.
+	if s.isReplay {
+		t.Error("the session stayed in replay, so the stream was neither replayed nor requested")
 	}
-	if s.stepCount != 0 {
-		t.Errorf("expected stepCount=0 (no events consumed), got %d", s.stepCount)
+	if len(s.history) == 0 {
+		t.Error("the fresh path recorded nothing, so the call did not happen")
 	}
-	if !s.isReplay {
-		t.Error("expected isReplay=true")
+	// No stream registry is configured on this session, so the fresh path
+	// fails -- and that failure is the assertion. It reports that the call
+	// REACHED the fresh path. The old behaviour returned errCode 0 for a
+	// plugin call that never happened, which is the one answer a caller
+	// cannot act on.
+	if errCode := uint32(result & 0xFFFFFFFF); errCode == 0 {
+		t.Error("errCode=0 for a streaming call with no registry: the call did not reach " +
+			"the fresh path, so success is being reported for a stream nobody produced")
 	}
 }
 

@@ -537,6 +537,21 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 	pluginName, functionName, inputJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
 
+	// Past recorded history -- switch to fresh execution.
+	//
+	// Without this the loop below reads nothing, `collected` stays nil, and
+	// the function returns SUCCESS with a marshalled `null` for a stream the
+	// plugin was never asked to produce. Every streaming call after a
+	// workflow's first suspension took that path.
+	//
+	// replayPluginCall, in this file, is the shape this should have had: it
+	// ends with exactly this pair of lines under exactly this comment. The
+	// streaming twin was written without them.
+	if s.stepCount >= len(s.history) {
+		s.exitReplay()
+		return s.freshPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+	}
+
 	var collected []plugin.StreamEvent
 	index := 0
 	// The code recorded alongside the chunk, used only in the single-finished-
