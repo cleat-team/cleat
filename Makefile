@@ -232,9 +232,15 @@ coverage-check: coverage-go
 bench:
 	go test -bench=. -benchmem -benchtime=$(GO_BENCHTIME) ./benchmarks/
 
+# Cross-framework comparison lives in cleat-team/cleat-bench, which has runners
+# for all three frameworks and the infrastructure to run them on equal hardware.
+# This target used to call ./benchmarks/compare.sh, a weaker in-repo duplicate
+# that was removed with benchmarks/comparative/.
 .PHONY: bench-compare
 bench-compare:
-	./benchmarks/compare.sh
+	@echo "Comparative benchmarks moved to https://github.com/cleat-team/cleat-bench"
+	@echo "  git clone git@github.com:cleat-team/cleat-bench.git && cd cleat-bench && make bench-quick"
+	@exit 1
 
 .PHONY: bench-save
 bench-save:

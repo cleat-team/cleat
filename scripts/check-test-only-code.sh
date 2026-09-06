@@ -98,7 +98,7 @@ trap 'rm -rf "$TOOLDIR"' EXIT
 modules() {
   find . -name go.mod \
       -not -path './node_modules/*' -not -path '*/node_modules/*' \
-      -not -path './.claude/*' -not -path './benchmarks/comparative/*' |
+      -not -path './.claude/*' |
     sed 's|/go\.mod$||; s|^\./||; s|^$|.|' |
     LC_ALL=C sort
 }

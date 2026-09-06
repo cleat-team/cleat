@@ -39,8 +39,11 @@ validating cleat's architecture against real-world code.
    It measures in-process function-call cost and says nothing about the sandbox.
    For a durable figure, `docs/contributor/design/cleat-execution-design.md`
    estimates roughly 500 steps/sec on a single PostgreSQL instance.
-   `benchmarks/comparative/` has Temporal and DBOS harnesses written but
-   `results/` contains only a template — no head-to-head numbers exist yet.
+   Head-to-head numbers still do not exist. `benchmarks/comparative/` — harnesses
+   written, results never produced — was removed in favour of
+   [cleat-bench](https://github.com/cleat-team/cleat-bench), whose committed
+   results cover cleat and DBOS at different rounds with no Temporal run at
+   either, so they are not a three-way comparison.
 
 ---
 

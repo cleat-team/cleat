@@ -433,7 +433,20 @@ jobs:
         # .githooks/* included since 2026-09-04: the pre-commit hook shipped in
         # #706 with a defect and nothing linted it. It sources
         # scripts/section-blocks.sh, which is an input here, so SC1091 resolves.
-        run: shellcheck scripts/*.sh benchmarks/*.sh .githooks/*
+        #
+        # benchmarks/*.sh was dropped here when benchmarks/compare.sh -- the only
+        # shell script that directory ever had -- moved to cleat-bench. Left in
+        # place it does not degrade to "lints nothing": with no match the literal
+        # `benchmarks/*.sh` reaches shellcheck, which exits 2 and fails this job.
+        # That is the loud failure and it is the good case. The quiet one is that
+        # this list is hand-maintained and four tracked .sh files have never been
+        # in it -- deploy/postgres/*.sh, examples/python-langchain/crash_demo.sh,
+        # crates/cleat-java/scripts/inject-metadata.sh. The first three pass
+        # today; the fourth has two SC2086 findings on a deliberately unquoted
+        # `$OUTPUT_FLAG` that must word-split, so widening the set to
+        # `git ls-files '*.sh'` needs that script fixed first. Tracked separately;
+        # not folded in here, where it would ride along with a file deletion.
+        run: shellcheck scripts/*.sh .githooks/*
 
       # CGO on. With CGO_ENABLED=0 this step analysed a build that is not the
       # one we ship: `//go:build cgo` takes eight files out of ./engine/,
@@ -584,9 +597,7 @@ jobs:
       # and the govulncheck step below derive theirs. Three copies of one find
       # is one too many, but making them agree by construction is a refactor of
       # its own; what matters here is that this one does not invent a fourth
-      # set of exclusions. benchmarks/comparative/* is excluded for the reason
-      # check-go-mod-tidy.sh gives: those modules deliberately pin old
-      # competitor releases and are not ours to keep clean.
+      # set of exclusions.
       #
       # Cost, measured 2026-08-08 on an M-series Mac with a cold lint cache:
       # cleat/ 3.5s (47 files), cleat/backendkit 1.6s (6 files), against the
@@ -599,8 +610,7 @@ jobs:
           cfg="$PWD/.golangci.yml"
           mods="$(find . -name go.mod \
                     -not -path './node_modules/*' -not -path '*/node_modules/*' \
-                    -not -path './.claude/*' \
-                    -not -path './benchmarks/comparative/*' |
+                    -not -path './.claude/*' |
                   sed 's|/go\.mod$||; s|^\./||; s|^$|.|' | sort)"
           if [ -z "$mods" ]; then
             echo "::error title=lint-go::found no go.mod at all -- this lint would pass vacuously" >&2
@@ -657,11 +667,6 @@ jobs:
       # `go-version: stable` toolchain does not have. No module-specific
       # vulnerability was hiding here today. What was missing was the coverage.
       #
-      # benchmarks/comparative/** is excluded deliberately: those modules pin
-      # specific competitor releases (Temporal, DBOS) for like-for-like
-      # measurement, so their dependency sets are meant to be old and are not
-      # shipped. check-go-mod-tidy.sh exempts them for the same reason.
-      #
       # The loop fails if it finds no modules at all, because a scan that
       # silently covers nothing is what this whole job exists to not be.
       - name: govulncheck (all first-party modules)
@@ -671,8 +676,7 @@ jobs:
           set -uo pipefail
           mods="$(find . -name go.mod \
                     -not -path './node_modules/*' -not -path '*/node_modules/*' \
-                    -not -path './.claude/*' \
-                    -not -path './benchmarks/comparative/*' |
+                    -not -path './.claude/*' |
                   sed 's|/go\.mod$||; s|^\./||; s|^$|.|' | sort)"
           if [ -z "$mods" ]; then
             echo "::error title=govulncheck::found no go.mod at all -- this scan would pass vacuously" >&2

@@ -2404,8 +2404,10 @@ for attention at the seams, and it went unspent there.
   terminator. First one is at line 53 of 495, so 89% of the spec is outside the module. No
   `.cfg` files exist for any spec and TLC never runs in CI. Either fix + run them, or move
   them to `docs/` as design notes.
-- `benchmarks/comparative/results/` contains only `template.md`. The Temporal and DBOS
-  harnesses are written — **run them.** Real head-to-head numbers would be a genuine asset.
+- Head-to-head numbers still do not exist. `benchmarks/comparative/` was removed from this
+  repo in favour of [cleat-bench](https://github.com/cleat-team/cleat-bench), which already
+  has the runners, seven workload specs and the AWS infrastructure — **run them there.**
+  Real head-to-head numbers would be a genuine asset.
 
 **Positioning decision** (needs you, not an agent):
 
