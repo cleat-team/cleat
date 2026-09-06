@@ -35,19 +35,31 @@ import (
 
 // postgresProcedureMigrations lists the migration files (in order) that
 // define finalize_workflow_status and friends for PostgreSQL.
+//
+// Hand-maintained, and therefore checked: TestProcedureMigrationListsAreComplete
+// fails when a migration defines the routine and is not listed here. A missing
+// entry is silent in the worst way -- every test that goes through
+// PostgresBackend.Setup keeps running against the LAST listed version of the
+// procedure, so a change to it is not merely untested, it is actively
+// contradicted by a suite that still passes. That happened: the query_state
+// fix below was written, applied to a real database, verified over HTTP, and
+// its own engine test still failed, because the harness was running 004.
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
 	"004_fix_finalize_workflow_status_fence.sql",
+	"043_query_state_on_suspension.sql",
 }
 
 var mysqlProcedureMigrations = []string{
 	"003_procedures.sql",
 	"004_fix_finalize_workflow_status_fence.sql",
+	"042_query_state_on_suspension.sql",
 }
 
 var mssqlProcedureMigrations = []string{
 	"003_procedures.sql",
 	"004_fix_finalize_workflow_status_fence.sql",
+	"046_query_state_on_suspension.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup
