@@ -191,3 +191,58 @@ func TestParityHarnessCanFail(t *testing.T) {
 			"be relied on to catch its own motivating bug.")
 	}
 }
+
+// TestReplayAdvancesTheChecksumChain is the same invariant as above -- replay
+// must leave the session where fresh execution would -- for a field the
+// harness above cannot reach.
+//
+// lastChecksum is the predecessor the NEXT recorded event chains from. Fresh
+// execution advances it in recordEvent; replay did not advance it at all, so a
+// resumed session reached its first new event with the chain still empty and
+// wrote a checksum chained from nothing. Verification recomputes the chain from
+// the events that are actually there, the two disagree, and the workflow dies
+// with "checksum mismatch" -- which reads like corruption and is the integrity
+// mechanism reporting on its own bookkeeping.
+//
+// The parity harness cannot see this: newTestExecSession has no db, and
+// recordEvent's whole checksum block is behind `s.engine.db != nil`, so both
+// sessions would compare empty against empty and agree.
+//
+// Found by a workflow that awaits a promise -- the await suspends, the resumed
+// execution replays it from history, finds the promise pending, and records a
+// second await. That is the first new event after a replay, which is exactly
+// the case that was wrong. It is the general form of #777, which was fixed one
+// call site at a time in children.go.
+func TestReplayAdvancesTheChecksumChain(t *testing.T) {
+	history := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "a", TimestampMs: 1000},
+		{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "b", TimestampMs: 1100},
+		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "c", TimestampMs: 1200},
+	}
+
+	// What the chain must be after consuming them: the same function fresh
+	// execution feeds each recorded event through, in the same order.
+	want := ""
+	for _, rec := range history {
+		want = computeEventChecksum(rec, want)
+	}
+	if want == "" {
+		t.Fatal("the expected chain came out empty, so this test cannot fail")
+	}
+
+	s := newTestExecSession()
+	s.history = history
+	for i := range s.history {
+		if !s.advanceReplayStep(context.Background(), &s.history[i]) {
+			t.Fatalf("advanceReplayStep(%d) aborted", i)
+		}
+	}
+
+	if s.lastChecksum != want {
+		t.Errorf("after replaying %d events the chain is %q, want %q.\n"+
+			"The next event this session records will be written chained from "+
+			"the wrong predecessor, and verification -- which recomputes the "+
+			"chain from the events that are there -- will reject it.",
+			len(history), s.lastChecksum, want)
+	}
+}
