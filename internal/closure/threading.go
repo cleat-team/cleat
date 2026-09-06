@@ -183,8 +183,81 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 	}
 
 	errors = append(errors, verifyEntryPointResults(result)...)
+	warnEntryPointTakesRawInput(result, cr)
 
 	return errors
+}
+
+// warnEntryPointTakesRawInput warns about an entry point whose only
+// parameter, after the HostCalls one, is a single string.
+//
+// Such a parameter receives the WHOLE input JSON, not the field matching its
+// name. Every other shape binds by exact Go parameter name. That is deliberate
+// -- something has to be able to carry an opaque payload -- so this is a
+// warning and not an error, and the rule itself is unchanged.
+//
+// What it costs when unwanted is the reason for the warning. The rule is
+// invisible at the call site, at build time and at deploy; it surfaces as a
+// semantic failure in whatever the parameter was eventually used for, which is
+// by construction somewhere else. Measured in cleat-team/cleat-ports:
+//
+//	func HandleLockTry(h cleat.HostCalls, key string) (string, error) {
+//		acquired, err := h.AcquireLockMs("lock"+key, 120000)
+//
+// started with {"key": "lock-abc"} took the lock
+// `lock-{"key":"lock-abc"}`, and every acquire failed with
+// `cleat_acquire_lock: error 1`. Nothing in that message points at argument
+// binding, and the natural reading is that locks are broken -- while a
+// near-identical two-parameter workflow acquired the same key correctly in the
+// same run. It has cost time three times: a detached-execution test, that lock
+// test, and a cron target whose scheduled runs completed successfully having
+// called the wrong service key. cleat#824.
+func warnEntryPointTakesRawInput(result *analyzer.AnalysisResult, cr *Result) {
+	if cr == nil || cr.Warnings == nil {
+		return
+	}
+	for _, name := range result.EntryPoints {
+		fd := result.Funcs[name]
+		if fd == nil || fd.Type == nil {
+			continue
+		}
+		params := fd.Type.Params()
+		if params == nil {
+			continue
+		}
+		// Skip a leading HostCalls parameter, which is not bound from the
+		// input at all.
+		start := 0
+		if params.Len() > 0 && analyzer.IsHostCallsType(params.At(0).Type()) {
+			start = 1
+		}
+		if params.Len()-start != 1 {
+			continue
+		}
+		p := params.At(start)
+		basic, ok := p.Type().Underlying().(*types.Basic)
+		if !ok || basic.Kind() != types.String {
+			continue
+		}
+		line := 0
+		if fd.Pkg != nil && fd.Pkg.Fset != nil && fd.Ast != nil {
+			line = fd.Pkg.Fset.Position(fd.Ast.Pos()).Line
+		}
+		cr.Warnings[name] = append(cr.Warnings[name], ValidationWarning{
+			Code:     "W003",
+			FuncName: name,
+			Message: fmt.Sprintf(
+				"%s is a workflow entry point whose only parameter is a single string, "+
+					"so %q receives the ENTIRE input JSON rather than the field of that name. "+
+					"Starting it with {%q: \"value\"} binds %s to the literal text {%q:\"value\"}.",
+				analyzer.ShortName(name), p.Name(), p.Name(), p.Name(), p.Name()),
+			Suggestion: "If that is what you want -- an opaque payload the workflow parses " +
+				"itself -- nothing needs to change. If you meant to bind one field by name, " +
+				fmt.Sprintf("add a second parameter or take a struct: func(h cleat.HostCalls, %s string, tag string). ", p.Name()) +
+				"Struct parameters are unmarshalled from the input JSON and bind by field.",
+			Line: line,
+		})
+	}
 }
 
 // verifyEntryPointResults rejects an entry point whose result value is not a

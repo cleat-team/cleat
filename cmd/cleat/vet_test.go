@@ -193,6 +193,65 @@ func TestVetGo_EntryPointMustReturnString(t *testing.T) {
 	}
 }
 
+// TestVetGo_SingleStringEntryPointWarns covers W003.
+//
+// An entry point whose only parameter (after HostCalls) is a string receives
+// the WHOLE input JSON rather than the field of that name. That is deliberate
+// -- something has to carry an opaque payload -- so it is a warning, not an
+// error, and the binding rule is unchanged.
+//
+// What it costs when unwanted is why the warning exists. The rule is invisible
+// at the call site, at build time and at deploy; it surfaces as a semantic
+// failure in whatever the parameter was eventually used for. A lock test in
+// cleat-team/cleat-ports took the lock `lock-{"key":"lock-abc"}` and failed
+// every acquire with `cleat_acquire_lock: error 1` -- a message that points at
+// locks, not at argument binding -- while a two-parameter workflow acquired
+// the same key correctly in the same run. cleat#824.
+//
+// The fixture carries four entry points and only ONE must warn. A check that
+// fired on all four would say nothing about the difference between them, which
+// is the whole content of the warning.
+func TestVetGo_SingleStringEntryPointWarns(t *testing.T) {
+	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "entrypoint_single_string_param")
+	out, err := runVetCmd(t, "vet", "--lang", "go", "--json", fixture)
+	if err != nil {
+		t.Fatalf("cleat vet failed on the fixture: %v\n%s", err, out)
+	}
+
+	var result VetOutput
+	if jsonErr := json.Unmarshal([]byte(out), &result); jsonErr != nil {
+		t.Fatalf("failed to parse JSON output: %v\nstdout: %s", jsonErr, out)
+	}
+
+	// A warning, not an error: the shape is legal and sometimes wanted.
+	if len(result.Errors) != 0 {
+		t.Errorf("W003 must not be an error -- the single-string shape is legal and "+
+			"some workflows want it. Got errors: %+v", result.Errors)
+	}
+
+	var w003 []VetResult
+	for _, w := range result.Warnings {
+		if w.Code == "W003" {
+			w003 = append(w003, w)
+		}
+	}
+	if len(w003) != 1 {
+		t.Fatalf("expected exactly 1 W003 warning, got %d: %+v\n"+
+			"The fixture has four entry points: one single string (must warn), one with "+
+			"two strings, one taking a struct, and one taking a single int -- the last "+
+			"three bind by name and must not.", len(w003), w003)
+	}
+	if !strings.Contains(w003[0].Message, "HandleOneString") {
+		t.Errorf("W003 fired on the wrong function: %q", w003[0].Message)
+	}
+	if !strings.Contains(w003[0].Message, "ENTIRE input JSON") {
+		t.Errorf("W003 does not say what actually happens to the parameter: %q", w003[0].Message)
+	}
+	if !strings.Contains(w003[0].Suggestion, "add a second parameter or take a struct") {
+		t.Errorf("W003 does not name the remedy: %q", w003[0].Suggestion)
+	}
+}
+
 // TestVetGo_HostCallsInAParameterStruct pins that a function reaching HostCalls
 // through a field of a struct it is PASSED counts as threaded.
 //

@@ -812,6 +812,7 @@ These codes are emitted by the `cleat build` pipeline's static analyser
 | E021 | Error | Non-deterministic map iteration | Sort keys before iterating |
 | W001 | Warning | Map iteration in non-critical path | Use sorted keys |
 | W002 | Warning | Float in control flow | Use `math.Float64bits()` |
+| W003 | Warning | Entry point takes a single `string`, so it receives the whole input JSON | Add a second parameter, or take a struct |
 
 See the full [Go Workflow Constraints](workflow-go-constraints.md#4-complete-error-code-reference)
 reference for detailed explanations of each code.

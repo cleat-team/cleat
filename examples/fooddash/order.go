@@ -191,8 +191,22 @@ func PlaceOrder(h cleat.HostCalls, userID string, restaurantID string,
 	}), nil
 }
 
+// OrderRef names one existing order. It is a struct rather than a bare string
+// parameter for a reason that is invisible at this call site: an entry point
+// whose ONLY parameter is a string receives the entire input JSON, not the
+// field of that name. `CancelOrder(h, orderID string)` started with
+// {"orderID": "ord-1"} bound orderID to the literal text {"orderID":"ord-1"},
+// so every step below addressed an order that does not exist -- and reported
+// success, because releasing a driver for an unknown order is not an error.
+// A struct parameter is unmarshalled from the input and binds by field.
+// `cleat vet` now warns about the old shape (W003); cleat#824.
+type OrderRef struct {
+	OrderID string `json:"orderID"`
+}
+
 // CancelOrder cancels an active order using Saga-based compensation.
-func CancelOrder(h cleat.HostCalls, orderID string) error {
+func CancelOrder(h cleat.HostCalls, ref OrderRef) error {
+	orderID := ref.OrderID
 	h.Log("cancelling order", "order_id", orderID)
 
 	s := cleat.NewSaga()
@@ -219,8 +233,8 @@ func CancelOrder(h cleat.HostCalls, orderID string) error {
 // via SetQueryState during workflow execution.
 // GetOrderStatus returns its result as a JSON string, for the same reason
 // PlaceOrder does.
-func GetOrderStatus(h cleat.HostCalls, orderID string) (string, error) {
-	status, err := lookupOrderState(orderID)
+func GetOrderStatus(h cleat.HostCalls, ref OrderRef) (string, error) {
+	status, err := lookupOrderState(ref.OrderID)
 	if err != nil {
 		return "", err
 	}
