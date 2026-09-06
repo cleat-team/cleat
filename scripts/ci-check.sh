@@ -138,8 +138,23 @@ run_step "gofmt -l ." \
 run_step "go vet ./..." \
     go vet ./...
 
-run_step "cleat vet (go) ./... (blocking)" \
-    go run ./cmd/cleat vet --lang go --json ./...
+# The target has to be a package that HAS workflow entry points. `./...` from
+# the repo root has none -- the root module is the engine, not a workflow -- so
+# this step read
+#
+#   Error loading package: no workflow entry points found in ./...
+#   exit status 1
+#
+# on every run, and since it is blocking the whole script exited 1 every time.
+# That is the second time this file has rotted into always-failing (see HISTORY
+# above, which describes the first). The preflight added then catches a path
+# that DISAPPEARS; it cannot catch a target that was never valid, which is what
+# this was.
+#
+# testdata/basic is the smallest package with real entry points, and it vets
+# clean: 3 entry points, 9 durable leaves, OK.
+run_step "cleat vet (go) testdata/basic (blocking)" \
+    go run ./cmd/cleat vet --lang go --json ./testdata/basic
 
 # shellcheck disable=SC2016
 run_step "cleat vet (go) testdata/vet-checks/e001 (expect errors)" \
@@ -164,8 +179,12 @@ run_step "cleat vet (go) testdata/vet-checks/e001 (expect errors)" \
 run_step "ruff check python-sdk/" \
     ruff check python-sdk/
 
-run_step "shellcheck scripts/*.sh benchmarks/*.sh" \
-    shellcheck scripts/*.sh benchmarks/*.sh
+# benchmarks/*.sh matched nothing -- there are no shell scripts under
+# benchmarks/ -- so shellcheck reported
+#   benchmarks/*.sh: openBinaryFile: does not exist
+# and the step failed for a glob rather than for a finding.
+run_step "shellcheck scripts/*.sh" \
+    shellcheck scripts/*.sh
 
 run_step "clippy (cleat-macro)" \
     bash -c "cd '$REPO_ROOT/crates/cleat-macro' && cargo clippy --all-targets -- -D warnings"
