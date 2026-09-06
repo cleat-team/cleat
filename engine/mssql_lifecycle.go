@@ -564,12 +564,24 @@ func (s *MSSQLStore) BatchHeartbeat(ctx context.Context, workerID string) (int64
 // returned before the commit and is not an mssql.Error, so the fence
 // semantics are untouched by the retry. See withRollbackGuaranteedRetry.
 func (s *MSSQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
+	// Coerce, as FinalizeWorkflowSegment does. The result column is jsonb on
+	// PostgreSQL and JSON on MySQL, and the raw string is not guaranteed to be
+	// either -- a workflow that continues as new never returned a value, so the
+	// result here is "", which is not valid JSON. Writing it raw failed the
+	// whole run with
+	//
+	//	pq: invalid input syntax for type json (22P02)
+	//
+	// so continue-as-new did not work at all on PostgreSQL. coerceResultJSON
+	// existed for exactly this and was called from one path out of three.
+	resultJSON := coerceResultJSON(ctx, s.log(), workflowID, result)
+
 	return withRollbackGuaranteedRetry(ctx, "complete workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		return s.completeWorkflowOnce(ctx, workflowID, workerID, generation, result, queryState)
+		return s.completeWorkflowOnce(ctx, workflowID, workerID, generation, resultJSON, queryState)
 	})
 }
 
-func (s *MSSQLStore) completeWorkflowOnce(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
+func (s *MSSQLStore) completeWorkflowOnce(ctx context.Context, workflowID, workerID string, generation int64, resultJSON string, queryState map[string]string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("complete workflow: begin: %w", err)
@@ -581,7 +593,7 @@ func (s *MSSQLStore) completeWorkflowOnce(ctx context.Context, workflowID, worke
 		UPDATE workflow_instances
 		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p5
-	`, workflowID, workerID, result, string(qsJSON), generation)
+	`, workflowID, workerID, resultJSON, string(qsJSON), generation)
 	if err != nil {
 		return err
 	}
@@ -599,7 +611,7 @@ func (s *MSSQLStore) completeWorkflowOnce(ctx context.Context, workflowID, worke
 	// Record idempotency result within the transaction (best-effort).
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET result = @p2 WHERE workflow_id = @p1`,
-		workflowID, result); err != nil {
+		workflowID, resultJSON); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -797,10 +809,22 @@ func (s *MSSQLStore) releaseWorkflowOnce(ctx context.Context, workflowID, worker
 // ContinueAsNew retries only on errors SQL Server guarantees it rolled back.
 // See withRollbackGuaranteedRetry.
 func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
+	// Coerce, as FinalizeWorkflowSegment does. The result column is jsonb on
+	// PostgreSQL and JSON on MySQL, and the raw string is not guaranteed to be
+	// either -- a workflow that continues as new never returned a value, so the
+	// result here is "", which is not valid JSON. Writing it raw failed the
+	// whole run with
+	//
+	//	pq: invalid input syntax for type json (22P02)
+	//
+	// so continue-as-new did not work at all on PostgreSQL. coerceResultJSON
+	// existed for exactly this and was called from one path out of three.
+	resultJSON := coerceResultJSON(ctx, s.log(), currentRunID, result)
+
 	var newRunID string
 	err := withRollbackGuaranteedRetry(ctx, "continue as new", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		var err error
-		newRunID, err = s.continueAsNewOnce(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, newEvents, result, queryState, priority)
+		newRunID, err = s.continueAsNewOnce(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, newEvents, resultJSON, queryState, priority)
 		return err
 	})
 	if err != nil {
@@ -809,7 +833,7 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	return newRunID, nil
 }
 
-func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
+func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, resultJSON string, queryState map[string]string, priority int) (string, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
@@ -840,7 +864,7 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 		UPDATE workflow_instances
 		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p5
-	`, currentRunID, workerID, result, string(qsJSON), generation)
+	`, currentRunID, workerID, resultJSON, string(qsJSON), generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}

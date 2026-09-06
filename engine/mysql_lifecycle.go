@@ -381,6 +381,18 @@ func (s *MySQLStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID s
 
 // CompleteWorkflow marks a workflow as completed with a result.
 func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
+	// Coerce, as FinalizeWorkflowSegment does. The result column is jsonb on
+	// PostgreSQL and JSON on MySQL, and the raw string is not guaranteed to be
+	// either -- a workflow that continues as new never returned a value, so the
+	// result here is "", which is not valid JSON. Writing it raw failed the
+	// whole run with
+	//
+	//	pq: invalid input syntax for type json (22P02)
+	//
+	// so continue-as-new did not work at all on PostgreSQL. coerceResultJSON
+	// existed for exactly this and was called from one path out of three.
+	resultJSON := coerceResultJSON(ctx, s.log(), workflowID, result)
+
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("complete workflow: begin: %w", err)
@@ -392,7 +404,7 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID 
 		UPDATE workflow_instances
 		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
-	`, result, qsJSON, workflowID, workerID, s.tenantID, generation)
+	`, resultJSON, qsJSON, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
 	}
@@ -618,6 +630,18 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 // current one in a single database transaction. If the transaction fails
 // neither operation takes effect. Returns the new run ID on success.
 func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
+	// Coerce, as FinalizeWorkflowSegment does. The result column is jsonb on
+	// PostgreSQL and JSON on MySQL, and the raw string is not guaranteed to be
+	// either -- a workflow that continues as new never returned a value, so the
+	// result here is "", which is not valid JSON. Writing it raw failed the
+	// whole run with
+	//
+	//	pq: invalid input syntax for type json (22P02)
+	//
+	// so continue-as-new did not work at all on PostgreSQL. coerceResultJSON
+	// existed for exactly this and was called from one path out of three.
+	resultJSON := coerceResultJSON(ctx, s.log(), currentRunID, result)
+
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
@@ -649,7 +673,7 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		UPDATE workflow_instances
 		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
-	`, result, qsJSON, currentRunID, workerID, s.tenantID, generation)
+	`, resultJSON, qsJSON, currentRunID, workerID, s.tenantID, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}

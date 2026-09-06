@@ -196,6 +196,14 @@ func (s *PostgresStore) AdminForceFail(ctx context.Context, workflowID string, g
 // The same clearing is on TerminateWorkflow's one-phase arm and the parent-close
 // plain TERMINATE arm, for the same reason. IMPROVEMENT-PLAN 3.112 and 3.114.
 func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string, generation int64, a adminForce) error {
+	// Coerce, as the workflow completion paths do. This writes the same
+	// jsonb column, from a result an OPERATOR supplied, so it is the one
+	// place the string is least likely to be well-formed JSON. Uncoerced,
+	// a force-complete with a bare value failed with a database syntax
+	// error naming 22P02 rather than telling the operator their result was
+	// not an object.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("admin %s: begin: %w", a.action, err)
@@ -308,6 +316,14 @@ func (s *MySQLStore) AdminForceFail(ctx context.Context, workflowID string, gene
 }
 
 func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, generation int64, a adminForce) error {
+	// Coerce, as the workflow completion paths do. This writes the same
+	// jsonb column, from a result an OPERATOR supplied, so it is the one
+	// place the string is least likely to be well-formed JSON. Uncoerced,
+	// a force-complete with a bare value failed with a database syntax
+	// error naming 22P02 rather than telling the operator their result was
+	// not an object.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("admin %s: begin: %w", a.action, err)
@@ -420,6 +436,11 @@ func (s *MSSQLStore) AdminForceFail(ctx context.Context, workflowID string, gene
 }
 
 func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID string, generation int64, a adminForce) error {
+	// Coerce, as the PostgreSQL and MySQL arms of this function do, and as
+	// the workflow completion paths do. Same jsonb-equivalent column, same
+	// operator-supplied string.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("admin %s: begin: %w", a.action, err)
