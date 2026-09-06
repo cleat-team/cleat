@@ -114,9 +114,23 @@ walkthrough with a real-world example.
 - **Plugin system** -- extensible via LLM, Slack, webhooks, and custom plugins;
   plugins run in-process with lifecycle hooks.
 - **WASM workflows** -- write in Go, Rust, Python, Java, or AssemblyScript, compile to
-  WebAssembly. wasmtime is the backend of record (CPU/wall-clock/memory limits via
-  epoch interruption, fuel, and store limits); wazero is a pure-Go, CGO-less fallback
-  with no compute-bound fencing -- see `docs/explanation/security-model.md`.
+  WebAssembly. wasmtime is the only WASM backend cleat has, and it requires CGO --
+  CPU/wall-clock/memory limits come from epoch interruption, fuel, and store limits.
+  There is no fallback: a `CGO_ENABLED=0` build has no backend at all, and
+  `cleat-worker` exits 1 at startup rather than running unfenced (check any worker
+  with `cleat-worker --verify-backend`). wazero is still in the tree as
+  `engine.Runtime`, but it executes guest code only for CLI and test tooling --
+  `cleat run_embedded`, `cleatctl replay|debug`, `cleat-bench`, `cleat/wasmtest` --
+  never for a worker. See `docs/explanation/security-model.md`.
+
+  <!-- Corrected 2026-09-06: this read "wazero is a pure-Go, CGO-less fallback with
+       no compute-bound fencing", and called wasmtime "the backend of record", which
+       implies a second backend to be the record against. There is no second backend:
+       `engine/backend_wazero.go` was deleted in #459 (2026-08-10) -- confirm with
+       `ls engine/backend_wazero.go`. The claim survived here for four weeks, and it
+       is the one a reader comparing cleat's portability would rely on: it advertises
+       a pure-Go deployment path that does not exist, and understates the CGO
+       requirement from "slower/unfenced without it" to "does not start without it". -->
 - **Signals and human-in-the-loop** -- `AwaitSignals` pauses workflows for external
   input; signals are recorded in the event history for deterministic replay.
 - **Saga / compensating transactions** -- structured rollback with `DurableDefer`,
