@@ -358,7 +358,8 @@ pub struct ChildWorkflowOptions {
 
 
 /// High-level Rust wrapper around the WASM host function imports.
-/// Mirrors the Go `durable.HostCalls` interface.
+/// Mirrors the Go `cleat.HostCalls` interface (was `durable.HostCalls`; the
+/// package was renamed and this pointer was not).
 pub struct HostCalls;
 
 impl HostCalls {
@@ -1127,7 +1128,26 @@ impl HostCalls {
         Ok(())
     }
 
-    /// Run a child workflow detached (fire-and-forget). Mirrors Go's RunDetached.
+    /// Run a child workflow detached (fire-and-forget).
+    ///
+    /// This does NOT mirror Go's `RunDetached`, though it used to say so. The
+    /// two take different things and are not ports of each other:
+    ///
+    /// ```text
+    /// Rust    run_detached(name: &str, input_json: &str) -> Result<(), String>
+    /// engine  cleat_run_detached(name, inputJSON)
+    /// Go      RunDetached(fn func(h HostCalls) error) error
+    /// ```
+    ///
+    /// This signature is the one that matches the host call. Go's takes a
+    /// closure, which cannot cross the ABI, so Go's method is never wired to
+    /// `cleat_run_detached` at all -- its unwired branch is `return nil`, a
+    /// silent success. Reconciling them means changing Go's exported signature,
+    /// which is a public API decision and is tracked separately.
+    ///
+    /// The claim mattered because it was the only cross-SDK statement in this
+    /// file, and someone porting a Go workflow would reasonably read it as
+    /// "same call, different spelling".
     pub fn run_detached(&self, name: &str, input_json: &str) -> Result<(), String> {
         let result = unsafe {
             imports::cleat_run_detached(

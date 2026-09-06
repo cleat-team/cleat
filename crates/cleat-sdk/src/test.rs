@@ -37,7 +37,12 @@
 //! }
 //! ```
 //!
-//! Mirrors Go `durabletest.TestEnv` at durable/durabletest/durabletest.go.
+//! Mirrors Go `cleattest.TestEnv` at cleat/cleattest/cleattest.go.
+//!
+//! (Was `durable/durabletest/durabletest.go`, a path that has not existed since
+//! the package was renamed. A stale cross-SDK pointer is worse than none: it
+//! sends a porter looking for a file rather than telling them there is nothing
+//! to find.)
 
 use std::collections::HashMap;
 
