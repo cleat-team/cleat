@@ -305,12 +305,12 @@ func (s *MSSQLStore) CreatePromise(ctx context.Context, workflowID, promiseName,
 	return err
 }
 
-func (s *MSSQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (s *MSSQLStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises
-		SET status = 'resolved', result = @p3, resolved_at = SYSUTCDATETIME()
-		WHERE workflow_id = @p1 AND promise_id = @p2 AND tenant_id = @p4
-	`, workflowID, promiseID, result, s.tenantID)
+		SET status = 'resolved', result = @p2, resolved_at = SYSUTCDATETIME()
+		WHERE promise_id = @p1 AND tenant_id = @p3
+	`, promiseID, result, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -319,17 +319,19 @@ func (s *MSSQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, 
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND status IN ('ready', 'suspended')
-	`, workflowID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises
+		            WHERE promise_id = @p1 AND tenant_id = @p2)
+		  AND status IN ('ready', 'suspended')
+	`, promiseID, s.tenantID)
 	return nil
 }
 
-func (s *MSSQLStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (s *MSSQLStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises
-		SET status = 'rejected', error_msg = @p3, resolved_at = SYSUTCDATETIME()
-		WHERE workflow_id = @p1 AND promise_id = @p2 AND tenant_id = @p4
-	`, workflowID, promiseID, errMsg, s.tenantID)
+		SET status = 'rejected', error_msg = @p2, resolved_at = SYSUTCDATETIME()
+		WHERE promise_id = @p1 AND tenant_id = @p3
+	`, promiseID, errMsg, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -338,8 +340,10 @@ func (s *MSSQLStore) RejectPromise(ctx context.Context, workflowID, promiseID, e
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND status IN ('ready', 'suspended')
-	`, workflowID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises
+		            WHERE promise_id = @p1 AND tenant_id = @p2)
+		  AND status IN ('ready', 'suspended')
+	`, promiseID, s.tenantID)
 	return nil
 }
 

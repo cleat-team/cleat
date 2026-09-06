@@ -1151,7 +1151,7 @@ func TestMSSQLIntegration_Promises(t *testing.T) {
 	}
 
 	// ResolvePromise.
-	if err := store.ResolvePromise(ctx, wfID, "promise-001", `{"resolved":true}`); err != nil {
+	if err := store.ResolvePromise(ctx, "promise-001", `{"resolved":true}`); err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
 
@@ -1186,7 +1186,7 @@ func TestMSSQLIntegration_Promises(t *testing.T) {
 	if err := store.CreatePromise(ctx, wfID, "reject-promise", promiseID2); err != nil {
 		t.Fatalf("CreatePromise 2nd: %v", err)
 	}
-	if err := store.RejectPromise(ctx, wfID, promiseID2, "rejected because"); err != nil {
+	if err := store.RejectPromise(ctx, promiseID2, "rejected because"); err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
 

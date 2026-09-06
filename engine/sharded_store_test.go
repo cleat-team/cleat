@@ -488,12 +488,12 @@ func (m *mockShardStore) CreatePromise(ctx context.Context, workflowID, promiseN
 	return m.err
 }
 
-func (m *mockShardStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockShardStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	m.recordCall("ResolvePromise")
 	return m.err
 }
 
-func (m *mockShardStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockShardStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	m.recordCall("RejectPromise")
 	return m.err
 }
@@ -2115,7 +2115,7 @@ func TestCreatePromise_Success(t *testing.T) {
 
 func TestResolvePromise_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	err := ss.ResolvePromise(context.Background(), "wf-1", "id-1", "result")
+	err := ss.ResolvePromise(context.Background(), "id-1", "result")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -2123,7 +2123,7 @@ func TestResolvePromise_Success(t *testing.T) {
 
 func TestRejectPromise_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	err := ss.RejectPromise(context.Background(), "wf-1", "id-1", "error msg")
+	err := ss.RejectPromise(context.Background(), "id-1", "error msg")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -3123,7 +3123,7 @@ func TestCreatePromise_NilShard(t *testing.T) {
 
 func TestResolvePromise_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	err := ss.ResolvePromise(context.Background(), "wf-1", "id-1", "result")
+	err := ss.ResolvePromise(context.Background(), "id-1", "result")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}
@@ -3131,7 +3131,7 @@ func TestResolvePromise_NilShard(t *testing.T) {
 
 func TestRejectPromise_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	err := ss.RejectPromise(context.Background(), "wf-1", "id-1", "err")
+	err := ss.RejectPromise(context.Background(), "id-1", "err")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}

@@ -2546,11 +2546,11 @@ func (w *Worker) dispatchPendingUpdates() {
 			// If the update request has an associated promise, resolve or reject it.
 			if upd.PromiseID != "" {
 				if dErr != nil {
-					if rErr := w.store.RejectPromise(ctx, wfID, upd.PromiseID, errStr); rErr != nil {
+					if rErr := w.store.RejectPromise(ctx, upd.PromiseID, errStr); rErr != nil {
 						w.logger.ErrorContext(w.ctx, "error rejecting promise", "worker_id", w.id, "workflow_id", wfID, "promise_id", upd.PromiseID, "error", rErr)
 					}
 				} else {
-					if rErr := w.store.ResolvePromise(ctx, wfID, upd.PromiseID, resultStr); rErr != nil {
+					if rErr := w.store.ResolvePromise(ctx, upd.PromiseID, resultStr); rErr != nil {
 						w.logger.ErrorContext(w.ctx, "error resolving promise", "worker_id", w.id, "workflow_id", wfID, "promise_id", upd.PromiseID, "error", rErr)
 					}
 				}

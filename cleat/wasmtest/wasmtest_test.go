@@ -153,7 +153,7 @@ func TestInMemoryPromiseStore_Resolve(t *testing.T) {
 	ctx := context.Background()
 
 	s.CreatePromise(ctx, "wf-1", "my-promise", "prom-1")
-	if err := s.ResolvePromise(ctx, "wf-1", "prom-1", `{"status":"done"}`); err != nil {
+	if err := s.ResolvePromise(ctx, "prom-1", `{"status":"done"}`); err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestInMemoryPromiseStore_Reject(t *testing.T) {
 	ctx := context.Background()
 
 	s.CreatePromise(ctx, "wf-1", "my-promise", "prom-1")
-	if err := s.RejectPromise(ctx, "wf-1", "prom-1", "something went wrong"); err != nil {
+	if err := s.RejectPromise(ctx, "prom-1", "something went wrong"); err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
 

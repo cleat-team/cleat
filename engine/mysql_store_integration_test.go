@@ -1208,7 +1208,7 @@ func TestMySQLIntegration_CreateAndResolvePromise(t *testing.T) {
 	}
 
 	// Resolve the promise.
-	if err := s.ResolvePromise(ctx, runID, "promise-abc", `{"resolved":true}`); err != nil {
+	if err := s.ResolvePromise(ctx, "promise-abc", `{"resolved":true}`); err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
 
@@ -1244,7 +1244,7 @@ func TestMySQLIntegration_CreateAndRejectPromise(t *testing.T) {
 	}
 
 	// Reject the promise.
-	if err := s.RejectPromise(ctx, runID, "promise-def", "something went wrong"); err != nil {
+	if err := s.RejectPromise(ctx, "promise-def", "something went wrong"); err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
 
@@ -1282,7 +1282,7 @@ func TestMySQLIntegration_ListPromises(t *testing.T) {
 	}
 
 	// Resolve the middle one.
-	if err := s.ResolvePromise(ctx, runID, "promise-1", `{"ok":true}`); err != nil {
+	if err := s.ResolvePromise(ctx, "promise-1", `{"ok":true}`); err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
 

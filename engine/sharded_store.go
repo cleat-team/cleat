@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	// "database/sql"
 	"encoding/binary"
 	"encoding/json"
@@ -919,22 +920,48 @@ func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseNam
 	return shard.Store.CreatePromise(ctx, workflowID, promiseName, promiseID)
 }
 
-// ResolvePromise routes by workflow ID.
-func (s *ShardedStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
-	shard := s.getShard(workflowID)
-	if shard == nil {
-		return fmt.Errorf("resolve_promise: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.ResolvePromise(ctx, workflowID, promiseID, result)
+// ResolvePromise fans out: a settler has no workflow ID to route by.
+//
+// Every other promise call routes by workflow ID, but settling is done by
+// something that holds only the promise ID -- that is the whole point of a
+// promise -- so there is nothing to hash. The shard holding the row is found
+// by asking each in turn, as ReapStaleInstances does.
+//
+// ErrPromiseNotFound from a shard means "not here", so it continues; any other
+// error is real and stops. If no shard has it, the ErrPromiseNotFound is the
+// honest answer and is returned.
+func (s *ShardedStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
+	return s.settleAcrossShards(ctx, "resolve_promise", func(st WorkflowStore) error {
+		return st.ResolvePromise(ctx, promiseID, result)
+	})
 }
 
-// RejectPromise routes by workflow ID.
-func (s *ShardedStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
-	shard := s.getShard(workflowID)
-	if shard == nil {
-		return fmt.Errorf("reject_promise: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+// RejectPromise fans out, as ResolvePromise does and for the same reason.
+func (s *ShardedStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
+	return s.settleAcrossShards(ctx, "reject_promise", func(st WorkflowStore) error {
+		return st.RejectPromise(ctx, promiseID, errMsg)
+	})
+}
+
+// settleAcrossShards applies settle to each shard until one reports something
+// other than ErrPromiseNotFound.
+func (s *ShardedStore) settleAcrossShards(ctx context.Context, op string, settle func(WorkflowStore) error) error {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	if len(shards) == 0 {
+		return fmt.Errorf("%s: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG", op)
 	}
-	return shard.Store.RejectPromise(ctx, workflowID, promiseID, errMsg)
+	for _, shard := range shards {
+		err := settle(shard.Store)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrPromiseNotFound) {
+			return fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+	}
+	return ErrPromiseNotFound
 }
 
 // GetPromise routes by workflow ID.

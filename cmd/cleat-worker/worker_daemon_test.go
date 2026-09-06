@@ -73,8 +73,8 @@ type mockStore struct {
 	loadCompactionStateFn              func(ctx context.Context, workflowID string) (*engine.CompactionState, error)
 	compactHistoryFn                   func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
 	createPromiseFn                    func(ctx context.Context, workflowID, promiseName, promiseID string) error
-	resolvePromiseFn                   func(ctx context.Context, workflowID, promiseID, result string) error
-	rejectPromiseFn                    func(ctx context.Context, workflowID, promiseID, errMsg string) error
+	resolvePromiseFn                   func(ctx context.Context, promiseID, result string) error
+	rejectPromiseFn                    func(ctx context.Context, promiseID, errMsg string) error
 	getPromiseFn                       func(ctx context.Context, workflowID, promiseID string) (string, string, string, error)
 	listPromisesFn                     func(ctx context.Context, workflowID string) ([]engine.PromiseInfo, error)
 	createUpdateRequestFn              func(ctx context.Context, workflowID, updateName, payload, promiseID string) error
@@ -388,16 +388,16 @@ func (m *mockStore) CreatePromise(ctx context.Context, workflowID, promiseName, 
 	return nil
 }
 
-func (m *mockStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	if m.resolvePromiseFn != nil {
-		return m.resolvePromiseFn(ctx, workflowID, promiseID, result)
+		return m.resolvePromiseFn(ctx, promiseID, result)
 	}
 	return nil
 }
 
-func (m *mockStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	if m.rejectPromiseFn != nil {
-		return m.rejectPromiseFn(ctx, workflowID, promiseID, errMsg)
+		return m.rejectPromiseFn(ctx, promiseID, errMsg)
 	}
 	return nil
 }
@@ -2897,7 +2897,7 @@ func TestAPIListPromises_Nil(t *testing.T) {
 
 func TestAPIResolvePromise(t *testing.T) {
 	ms := &mockStore{}
-	ms.resolvePromiseFn = func(ctx context.Context, workflowID, promiseID, result string) error {
+	ms.resolvePromiseFn = func(ctx context.Context, promiseID, result string) error {
 		return nil
 	}
 
@@ -2938,7 +2938,7 @@ func TestAPIResolvePromise_InvalidJSON(t *testing.T) {
 
 func TestAPIRejectPromise(t *testing.T) {
 	ms := &mockStore{}
-	ms.rejectPromiseFn = func(ctx context.Context, workflowID, promiseID, errMsg string) error {
+	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
 		return nil
 	}
 

@@ -3922,7 +3922,7 @@ func TestPostgresStore_ResolvePromise_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{"result":"ok"}`)
+	err := store.ResolvePromise(testCtx, "promise-1", `{"result":"ok"}`)
 	if err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
@@ -3935,7 +3935,7 @@ func TestPostgresStore_ResolvePromise_PromiseUpdateError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{}`)
+	err := store.ResolvePromise(testCtx, "promise-1", `{}`)
 	if err == nil {
 		t.Fatal("expected error from promise update failure")
 	}
@@ -3949,7 +3949,7 @@ func TestPostgresStore_ResolvePromise_WakeUpdateError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{}`)
+	err := store.ResolvePromise(testCtx, "promise-1", `{}`)
 	if err == nil {
 		t.Fatal("expected error from wake update failure")
 	}
@@ -3960,7 +3960,7 @@ func TestPostgresStore_ResolvePromise_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{}`)
+	err := store.ResolvePromise(testCtx, "promise-1", `{}`)
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
@@ -3981,7 +3981,7 @@ func TestPostgresStore_RejectPromise_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error msg")
+	err := store.RejectPromise(testCtx, "promise-1", "error msg")
 	if err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
@@ -3994,7 +3994,7 @@ func TestPostgresStore_RejectPromise_PromiseUpdateError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error")
+	err := store.RejectPromise(testCtx, "promise-1", "error")
 	if err == nil {
 		t.Fatal("expected error from promise update failure")
 	}
@@ -4008,7 +4008,7 @@ func TestPostgresStore_RejectPromise_WakeUpdateError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error")
+	err := store.RejectPromise(testCtx, "promise-1", "error")
 	if err == nil {
 		t.Fatal("expected error from wake update failure")
 	}
@@ -4019,7 +4019,7 @@ func TestPostgresStore_RejectPromise_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error")
+	err := store.RejectPromise(testCtx, "promise-1", "error")
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}

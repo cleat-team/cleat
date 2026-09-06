@@ -1351,11 +1351,11 @@ func (m *mockPromiseStore) CreatePromise(ctx context.Context, workflowID, promis
 	return m.createErr
 }
 
-func (m *mockPromiseStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockPromiseStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
 
-func (m *mockPromiseStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockPromiseStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 

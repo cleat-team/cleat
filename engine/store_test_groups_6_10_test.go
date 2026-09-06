@@ -300,20 +300,28 @@ func TestSignalsOfTheSameNameQueueOldestFirst(t *testing.T) {
 	}
 }
 
-// TestSettlingAPromiseThatIsNotYoursIsAnError is the regression test for
-// IMPROVEMENT-PLAN 3.233.
+// TestAPromiseIsSettledByAnyHolderOfItsID covers both halves of how settling
+// ended up: #818 made a settle that matched nothing report it, and #813 made a
+// settle by a workflow other than the creator match in the first place.
 //
-// ResolvePromise and RejectPromise ran an UPDATE and returned nil whatever it
-// matched, in all three dialects. So settling a promise that does not exist --
-// or, more usefully, one created by a DIFFERENT workflow, since the WHERE
-// carries the settler's workflow_id and the row carries the creator's -- was a
-// silent no-op. A workflow written to settle a promise for another ran to
-// completion and had no effect, which is how it went unnoticed.
+// This replaces TestSettlingAPromiseThatIsNotYoursIsAnError, which asserted
+// that a different workflow settling a promise is an error. That was a correct
+// reading of the code at the time and the wrong requirement: a promise exists
+// SO THAT something other than the waiter can complete it, and the settler is
+// handed an opaque ID and nothing else. Under the old rule the only caller who
+// could settle a promise was the one workflow with no reason to -- a workflow
+// awaiting its own promise deadlocks.
 //
-// Cross-backend because the silence was in three separate UPDATE statements,
-// not in one shared helper: postgres, mysql and mssql each wrote their own and
-// each dropped the row count.
-func TestSettlingAPromiseThatIsNotYoursIsAnError(t *testing.T) {
+// What survives from #818 is the half that was always right and is the harder
+// one to keep: a settle that matches no row must say so. Now that any holder of
+// the ID may settle, ErrPromiseNotFound means the promise genuinely does not
+// exist, which is a more useful thing for it to mean than "exists, but not
+// yours".
+//
+// Cross-backend because the behaviour lives in three separate UPDATE
+// statements, not one shared helper: postgres, mysql and mssql each write their
+// own.
+func TestAPromiseIsSettledByAnyHolderOfItsID(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
@@ -327,35 +335,51 @@ func TestSettlingAPromiseThatIsNotYoursIsAnError(t *testing.T) {
 			if err != nil {
 				t.Fatalf("StartNewRun(owner): %v", err)
 			}
-			other, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "promise-other", DefaultTenantUUID, 0)
-			if err != nil {
-				t.Fatalf("StartNewRun(other): %v", err)
-			}
 
 			if err := store.CreatePromise(ctx, owner, "approval", "prom-1"); err != nil {
 				t.Fatalf("CreatePromise: %v", err)
 			}
-
-			// The owner can settle it.
-			if err := store.ResolvePromise(ctx, owner, "prom-1", `{"ok":true}`); err != nil {
-				t.Fatalf("the creating workflow could not resolve its own promise: %v", err)
+			if err := store.CreatePromise(ctx, owner, "approval-2", "prom-2"); err != nil {
+				t.Fatalf("CreatePromise: %v", err)
 			}
 
-			// A different workflow cannot, and must be TOLD so rather than
-			// receiving nil.
-			if err := store.ResolvePromise(ctx, other, "prom-1", `{"ok":true}`); err == nil {
-				t.Error("resolving another workflow's promise returned nil; it settled nothing, " +
-					"so the caller believes it succeeded")
+			// Settling reaches the row without being told who owns it. This is
+			// the case a settler is actually in: it has the ID and nothing
+			// else. It used to update zero rows.
+			if err := store.ResolvePromise(ctx, "prom-1", `{"ok":true}`); err != nil {
+				t.Fatalf("resolving a promise by ID alone: %v", err)
 			}
-			if err := store.RejectPromise(ctx, other, "prom-1", "nope"); err == nil {
-				t.Error("rejecting another workflow's promise returned nil; it settled nothing")
+			status, result, _, err := store.GetPromise(ctx, owner, "prom-1")
+			if err != nil {
+				t.Fatalf("GetPromise: %v", err)
+			}
+			if status != "resolved" {
+				t.Errorf("status is %q, want resolved -- the settle reported success without "+
+					"changing the row, which is the shape of the defect it replaced", status)
+			}
+			if result == "" {
+				t.Error("the resolved promise carries no result; a settle that reaches the row " +
+					"but drops the value is only half the mechanism")
 			}
 
-			// Nor can anyone settle one that does not exist.
-			if err := store.ResolvePromise(ctx, owner, "no-such-promise", `{}`); err == nil {
-				t.Error("resolving a promise that does not exist returned nil")
+			if err := store.RejectPromise(ctx, "prom-2", "nope"); err != nil {
+				t.Fatalf("rejecting a promise by ID alone: %v", err)
 			}
-			if err := store.RejectPromise(ctx, owner, "no-such-promise", "nope"); err == nil {
+			if status, _, _, err := store.GetPromise(ctx, owner, "prom-2"); err != nil {
+				t.Fatalf("GetPromise: %v", err)
+			} else if status != "rejected" {
+				t.Errorf("status is %q, want rejected", status)
+			}
+
+			// The half kept from #818: a settle that matches nothing is
+			// reported. Without it the call above cannot be trusted either --
+			// a store that returns nil unconditionally passes every assertion
+			// up to here.
+			if err := store.ResolvePromise(ctx, "no-such-promise", `{}`); err == nil {
+				t.Error("resolving a promise that does not exist returned nil; the caller " +
+					"believes it succeeded")
+			}
+			if err := store.RejectPromise(ctx, "no-such-promise", "nope"); err == nil {
 				t.Error("rejecting a promise that does not exist returned nil")
 			}
 		})

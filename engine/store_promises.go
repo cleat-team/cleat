@@ -36,17 +36,18 @@ func (s *PostgresStore) CreatePromise(ctx context.Context, workflowID, promiseNa
 // ErrPromiseNotFound is returned when settling a promise matched no row.
 //
 // Settling one that does not exist used to be a SILENT no-op in all three
-// dialects: the UPDATE ran, matched nothing, and returned nil. That is how
-// IMPROVEMENT-PLAN 3.233 stayed invisible -- a workflow settling another
-// workflow's promise ran to completion and had no effect, because the WHERE
-// clause carries the SETTLER's workflow_id and the row carries the CREATOR's.
+// dialects: the UPDATE ran, matched nothing, and returned nil. Making it
+// loud (#818) is what made settling-by-ID-alone safe to introduce (#813):
+// a settle that reaches no row now says so, rather than reporting success
+// to a caller holding an ID that is wrong or expired.
 //
-// It does not distinguish "no such promise" from "not this workflow's promise",
-// deliberately and for the same reason ErrWorkflowNotFound does not: telling
-// them apart is a cross-workflow existence oracle.
-var ErrPromiseNotFound = errors.New("promise not found, or not owned by this workflow")
+// It says nothing about WHY the row was absent -- no such promise, wrong
+// tenant, already purged -- deliberately, and for the same reason
+// ErrWorkflowNotFound does not: distinguishing them is an existence oracle
+// over IDs the caller was not given.
+var ErrPromiseNotFound = errors.New("promise not found")
 
-func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (s *PostgresStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve promise: begin: %w", err)
@@ -54,9 +55,9 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseI
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_promises SET status = $3, result = $4, resolved_at = now()
-		WHERE workflow_id = $1 AND promise_id = $2
-	`, workflowID, promiseID, "resolved", result)
+		UPDATE workflow_promises SET status = $2, result = $3, resolved_at = now()
+		WHERE promise_id = $1
+	`, promiseID, "resolved", result)
 	if err != nil {
 		return err
 	}
@@ -65,8 +66,9 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseI
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = now()
-		WHERE id = $1 AND status IN ('ready', 'suspended')
-	`, workflowID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
+		  AND status IN ('ready', 'suspended')
+	`, promiseID)
 	if err != nil {
 		return err
 	}
@@ -78,7 +80,7 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseI
 // Also wakes the workflow instance so it can pick up the rejected promise
 // on the next poll cycle instead of waiting for the original timeout.
 
-func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (s *PostgresStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("reject promise: begin: %w", err)
@@ -86,9 +88,9 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_promises SET status = $3, error_msg = $4, resolved_at = now()
-		WHERE workflow_id = $1 AND promise_id = $2
-	`, workflowID, promiseID, "rejected", errMsg)
+		UPDATE workflow_promises SET status = $2, error_msg = $3, resolved_at = now()
+		WHERE promise_id = $1
+	`, promiseID, "rejected", errMsg)
 	if err != nil {
 		return err
 	}
@@ -97,8 +99,9 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = now()
-		WHERE id = $1 AND status IN ('ready', 'suspended')
-	`, workflowID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
+		  AND status IN ('ready', 'suspended')
+	`, promiseID)
 	if err != nil {
 		return err
 	}

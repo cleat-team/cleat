@@ -546,10 +546,10 @@ func (m *mockCompactStore) LoadCompactionState(ctx context.Context, workflowID s
 func (m *mockCompactStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockCompactStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockCompactStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockCompactStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockCompactStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockCompactStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
