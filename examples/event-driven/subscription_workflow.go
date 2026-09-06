@@ -88,9 +88,18 @@ type WelcomeEmailResponse struct {
 
 // ---- Entry point ----
 
-func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
+// HandleSignup returns its result as a JSON string, not as *SignupResult.
+//
+// A workflow entry point's result must be a string: a WASM entry point hands
+// back bytes, and string is the one shape every language SDK expresses
+// identically. IMPROVEMENT-PLAN 3.228.
+//
+// This defect was HIDDEN by the one above it. cleat vet stopped at E003 for
+// the time.Now() call, so the build never ran and the return type was never
+// reached. Fixing the clock is what surfaced it.
+func HandleSignup(h cleat.HostCalls, input SignupInput) (string, error) {
 	if input.UserID == "" || input.Email == "" {
-		return nil, fmt.Errorf("user_id and email are required")
+		return "", fmt.Errorf("user_id and email are required")
 	}
 
 	h.SetQueryState("stage", "processing")
@@ -106,14 +115,19 @@ func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
 	}))
 	if err != nil {
 		h.SetQueryState("stage", "profile_failed")
-		return nil, fmt.Errorf("create profile failed: %w", err)
+		return "", fmt.Errorf("create profile failed: %w", err)
 	}
 
 	var profile ProfileInfo
 	if err := json.Unmarshal([]byte(profileResp), &profile); err != nil {
+		// h.Now(), not time.Now(): a workflow re-executes from step 0 on
+		// every resume, so a wall-clock read produces a different value on
+		// replay and the run diverges. cleat vet rejects this as E003, and
+		// rejected THIS FILE until 2026-09-06 -- a shipped example doing the
+		// thing the linter exists to forbid. IMPROVEMENT-PLAN 3.228.
 		profile = ProfileInfo{
 			DisplayName: input.Name,
-			JoinedAt:    time.Now().Format(time.RFC3339),
+			JoinedAt:    h.Now().Format(time.RFC3339),
 		}
 	}
 
@@ -165,12 +179,12 @@ func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
 	h.DurableLog(fmt.Sprintf("Signup complete: user=%s welcome=%v activation=%s",
 		input.UserID, welcomeSent, activationStatus))
 
-	return &SignupResult{
+	return toJSON(SignupResult{
 		UserID:      input.UserID,
 		Email:       input.Email,
 		WelcomeSent: welcomeSent,
 		Profile:     profile,
-	}, nil
+	}), nil
 }
 
 func toJSON(v interface{}) string {
