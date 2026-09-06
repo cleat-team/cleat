@@ -4608,37 +4608,52 @@ Send `"approve"` twice before the workflow consumes it and the first payload is 
 error. Any workflow that accumulates — a counter, one approval per reviewer, a batch of items —
 silently receives only the last. **This is data loss on the ordinary path, not a race.**
 
-### And a counting consumer does not get a wrong answer — it hangs
+### (d) Signals are read and never consumed, and this one masks (b)
 
-The severity is not only the lost payload. A consumer that awaits N signals of one name counts them
-in, so losing one means the count never completes:
+**Nothing in the live path ever deletes a row from `workflow_signals`.** The destructive read
+exists — `PollAndClaimSignal`, `DELETE … RETURNING`, implemented in all four stores — and **nothing
+calls it**:
 
-    received := 0
-    for received < len(pending) {
-        signal := h.AwaitSignals([]string{"agent_result"}, timeout)
+    git grep -n "PollAndClaimSignal(" -- '*.go' | grep -v _test
+    # only the four implementations, store_interface.go:122, and the
+    # sharded_store.go:492 passthrough. No caller.
 
-The second delivery overwrites the first, `received` never reaches `len(pending)`, and the loop
-returns to `AwaitSignals` for a row that no longer exists. It then **blocks until the phase timeout**
-— minutes to half an hour — before breaking. Silent loss *plus* a stall.
+`DurableAwaitSignals` calls the **non-consuming** `PollSignal` on both paths — `engine/signaller.go:51`
+(replay) and `:89` (fresh) — whose SQL is a plain `SELECT` (`store_signals.go:192`), documented in
+`mysql_store.go:450` as checking "without consuming it". The only thing that ever removes a signal
+row is `ON DELETE CASCADE` when the whole instance is purged.
 
-**The window is much wider than "two writes in the same instant", and that part is verifiable
-here.** `PollAndClaimSignal` consumes destructively (`DELETE … RETURNING`, `engine/store_signals.go:67`)
-and `AwaitSignals` **suspends** the workflow (`engine/signaller.go:115`). So the window in which a
-second delivery can overwrite an unconsumed first spans delivery → `next_wake_at` → worker claim →
-replay → poll. For tasks started together doing comparable work, finishing inside that window is
-the likely case, not the unlikely one.
+The fresh path checks the store **before** suspending (`signaller.go:85`, "Fresh execution: check
+signal store first"), so a second `AwaitSignals` for the same name finds the same row and returns
+**the same payload again**. A counting loop therefore never suspends and never times out — it spins,
+growing event history, re-matching a payload whose slot is already filled.
 
-That also sharpens the idempotency requirement noted below: whatever replaces the primary key has
-to let a counting consumer distinguish **N distinct results** from **one result retried N times**.
-An application that has to solve this itself ends up putting a correlation ID in the payload.
+### The two defects mask each other, which is why neither was caught
 
-**Provenance, stated because I cannot check half of it.** The counting-loop shape, the timeout
-figures and the application-level correlation ID come from the conformance-port session reading
-`cleat-team/clew`, which is private and not in this checkout — I have not verified them and they
-are theirs. The mechanism half above *is* verified here: the destructive consume and the suspend are
-both in this tree at the lines cited. The same session also **retracted** its first example, a
-`child_done` signal that turned out to have no consumer at all; that retraction is recorded in
-§3.216 rather than dropped.
+(b) and (d) partially cancel. The second delivery's **overwrite** hands the spinning loop a new
+payload and lets it advance — so **(b)'s data loss is what terminates (d)'s spin**. Two defects
+concealing one another is exactly the shape that survives a test suite.
+
+**This constrains the fix, and is the most important line in this section.** Replace the primary key
+with a monotonic identity and give it FIFO semantics, but leave the await path on the non-consuming
+`PollSignal`, and the queue hands back the same head entry forever with no overwrite left to break
+the cycle: **intermittent loss becomes permanent livelock.** The fix must move the await path onto a
+claiming read — or better, delete `PollAndClaimSignal` and build consumption into the new queue
+read, since a dead method that was right all along is how this arose.
+
+Not checked yet: whether `workflow_promises` and the update-request path share the non-consumption.
+Given the dialect divergence in updates, do not assume.
+
+**An earlier version of this section said the loop "blocks until the phase timeout".** That was
+wrong, and wrong in a way worth recording: I cited `store_signals.go:67`'s `DELETE … RETURNING` as
+the consumption mechanism having verified only that it **exists**, not that it is called. That is
+the "grep proves existence, not function" error — which I had given someone else as a caution the
+same morning, about `TerminateWorkflow`. The conformance-port session found the missing caller.
+
+**Provenance.** The counting-loop shape and the application-level correlation ID come from that
+session reading `cleat-team/clew`, which is private and not in this checkout; those are theirs. The
+non-consumption, the dead claiming method, the re-read-before-suspend and the masking interaction
+are all verified here at the lines cited.
 
 ## (c) `cleattest` queues signals, so the test double cannot see (b)
 
