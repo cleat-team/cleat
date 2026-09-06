@@ -53,11 +53,13 @@ import (
 // InMemorySignalStore implements engine.SignalStore with in-memory maps.
 type InMemorySignalStore struct {
 	mu        sync.Mutex
-	signals   map[string][]pendingSignal   // workflowID -> pending signals
+	nextID    int64
+	signals   map[string][]pendingSignal   // workflowID -> pending signals, oldest first
 	cancelled map[string]cancellationState // workflowID -> cancellation state
 }
 
 type pendingSignal struct {
+	id      int64
 	name    string
 	payload string
 }
@@ -77,25 +79,45 @@ func NewInMemorySignalStore() *InMemorySignalStore {
 func (s *InMemorySignalStore) DeliverSignal(_ context.Context, workflowID, signalName, payload string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.signals[workflowID] = append(s.signals[workflowID], pendingSignal{name: signalName, payload: payload})
+	s.nextID++
+	s.signals[workflowID] = append(s.signals[workflowID], pendingSignal{id: s.nextID, name: signalName, payload: payload})
 	return nil
 }
 
-func (s *InMemorySignalStore) PollSignal(_ context.Context, workflowID, signalName string) (string, bool, error) {
+// PollSignal returns the oldest pending delivery with this name, without
+// consuming it.
+//
+// Note what changed here and what did not. This slice was ALWAYS a FIFO queue
+// per workflow, and this method always removed the entry it returned -- so
+// this double had the semantics IMPROVEMENT-PLAN 3.215 gives the real stores
+// long before they had them, and every wasmtest-based signal test passed
+// against behaviour no database implemented. The queue is unchanged. What
+// changed is that removal moved to ConsumeSignal, so the double now models the
+// separation the real interface has rather than a stronger contract.
+func (s *InMemorySignalStore) PollSignal(_ context.Context, workflowID, signalName string) (engine.SignalDelivery, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sig := range s.signals[workflowID] {
+		if sig.name == signalName {
+			return engine.SignalDelivery{ID: sig.id, Payload: sig.payload}, true, nil
+		}
+	}
+	return engine.SignalDelivery{}, false, nil
+}
+
+// ConsumeSignal removes one delivery by id. Removing an id that is already
+// gone is not an error, matching the real stores.
+func (s *InMemorySignalStore) ConsumeSignal(_ context.Context, workflowID string, id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pending := s.signals[workflowID]
 	for i, sig := range pending {
-		if sig.name == signalName {
+		if sig.id == id {
 			s.signals[workflowID] = append(pending[:i], pending[i+1:]...)
-			return sig.payload, true, nil
+			return nil
 		}
 	}
-	return "", false, nil
-}
-
-func (s *InMemorySignalStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return s.PollSignal(ctx, workflowID, signalName)
+	return nil
 }
 
 func (s *InMemorySignalStore) PollCancellation(_ context.Context, workflowID string) (bool, string, error) {

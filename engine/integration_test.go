@@ -343,36 +343,41 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 
 	// ---- Step 3: Poll the signal back (atomic claim + delete) ----
 	//
-	// This step exercises "atomic claim + delete", so it must call
-	// PollAndClaimSignal, not PollSignal. Those are two distinct
-	// SignalStore methods with two distinct, documented contracts:
-	// PollSignal "checks for a delivered signal" (a plain, repeatable read
-	// -- see TestPollSignal_NonDestructive in
-	// store_test_groups_6_10_test.go and PostgresStore.PollSignal's doc
-	// comment in store_signals.go) while PollAndClaimSignal "atomically
-	// checks for AND CLAIMS" it (consumes it). This test used to call
-	// PollSignal for both steps 3 and 4 and assert the consuming behavior
-	// on it, which happened to pass only because PostgresStore.PollSignal
-	// used to be implemented as a bug-for-bug copy of PollAndClaimSignal.
-	payload, found, err := store.PollAndClaimSignal(ctx, runID, "payment_confirmed")
+	// This step exercises what the await path does -- poll the head, then
+	// consume it by id -- which is two calls with two distinct, documented
+	// contracts. PollSignal "returns the oldest unconsumed delivery ...
+	// without consuming it" (a plain, repeatable read -- see
+	// TestPollSignal_NonDestructive in store_test_groups_6_10_test.go),
+	// and ConsumeSignal removes it.
+	//
+	// It used to call PollAndClaimSignal, which did both in one step and had
+	// no caller in the engine, so this was integration coverage of a method
+	// production never ran (IMPROVEMENT-PLAN 3.215(d)). Before that it called
+	// PollSignal for both steps 3 and 4 and asserted the consuming behaviour
+	// on it, which passed only because PollSignal was then a bug-for-bug copy
+	// of PollAndClaimSignal.
+	d, found, err := store.PollSignal(ctx, runID, "payment_confirmed")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
-		t.Error("expected PollAndClaimSignal to find the delivered signal")
+		t.Error("expected PollSignal to find the delivered signal")
 	}
-	if normalizeJSON(payload) != normalizeJSON(signalPayload) {
-		t.Errorf("signal payload mismatch: expected=%q, got=%q", signalPayload, payload)
+	if normalizeJSON(d.Payload) != normalizeJSON(signalPayload) {
+		t.Errorf("signal payload mismatch: expected=%q, got=%q", signalPayload, d.Payload)
 	}
-	t.Logf("Signal delivered and polled successfully: %s", payload)
+	if err := store.ConsumeSignal(ctx, runID, d.ID); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
+	}
+	t.Logf("Signal delivered, polled and consumed successfully: %s", d.Payload)
 
-	// ---- Step 4: Claiming the same signal again returns not-found (consumed) ----
-	_, found, err = store.PollAndClaimSignal(ctx, runID, "payment_confirmed")
+	// ---- Step 4: Polling the same signal again returns not-found (consumed) ----
+	_, found, err = store.PollSignal(ctx, runID, "payment_confirmed")
 	if err != nil {
-		t.Fatalf("second PollAndClaimSignal: %v", err)
+		t.Fatalf("second PollSignal: %v", err)
 	}
 	if found {
-		t.Error("expected second PollAndClaimSignal to return not-found (signal was consumed)")
+		t.Error("expected second PollSignal to return not-found (the delivery was consumed)")
 	}
 
 	// ---- Step 5: Persist the execution history ----

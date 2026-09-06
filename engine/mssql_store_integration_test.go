@@ -908,30 +908,35 @@ func TestMSSQLIntegration_Signals(t *testing.T) {
 	}
 
 	// Poll the signal.
-	payload, found, err := store.PollSignal(ctx, wfID, "my-signal")
+	d, found, err := store.PollSignal(ctx, wfID, "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Fatal("PollSignal: signal not found")
 	}
-	if payload != `{"hello":"world"}` {
-		t.Errorf("PollSignal payload = %s, want {\"hello\":\"world\"}", payload)
+	if d.Payload != `{"hello":"world"}` {
+		t.Errorf("PollSignal payload = %s, want {\"hello\":\"world\"}", d.Payload)
 	}
 
-	// PollAndClaim (atomically claims the signal).
-	payload2, found2, err := store.PollAndClaimSignal(ctx, wfID, "my-signal")
+	// Poll again: still there. PollSignal does not consume.
+	d2, found2, err := store.PollSignal(ctx, wfID, "my-signal")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("second PollSignal: %v", err)
 	}
 	if !found2 {
-		t.Fatal("PollAndClaimSignal: signal not found")
+		t.Fatal("second PollSignal: signal not found -- PollSignal must not consume")
 	}
-	if payload2 != `{"hello":"world"}` {
-		t.Errorf("PollAndClaimSignal payload = %s", payload2)
+	if d2.ID != d.ID {
+		t.Errorf("second PollSignal returned a different delivery: %d then %d", d.ID, d2.ID)
 	}
 
-	// Second Poll should NOT find it (PollAndClaimSignal deletes the signal).
+	// Consume it by id.
+	if err := store.ConsumeSignal(ctx, wfID, d.ID); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
+	}
+
+	// Second Poll should NOT find it (ConsumeSignal deleted the row).
 	_, found3, err := store.PollSignal(ctx, wfID, "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal 2nd: %v", err)

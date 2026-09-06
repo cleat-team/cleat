@@ -4439,7 +4439,49 @@ Found by WS-3 while re-deriving §3.213's Go figure of 35, and confirmed here in
 the mirror of §3.207: there a strict extractor missed generics and **inflated** Rust's coverage;
 here a loose scan of Go method names finds nine methods that exist and would **credit bindings that
 do not**. Anchoring on the import table rather than on method names is what makes 35 correct.
-### 3.215 A signal is stored as a row keyed by name, so a second one overwrites the first — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
+### 3.215 A signal is stored as a row keyed by name, so a second one overwrites the first — 🟢 **(b) AND (d) FIXED 2026-09-05, (a) OPEN** (WS-1, 2026-09-05)
+
+**Fixed in the PR that carries this line.** `workflow_signals` is now keyed on a surrogate
+monotonic id with `(workflow_id, signal_name)` demoted to an ordinary index, so the table is a FIFO
+queue per name (`migrations/{postgres/041,mysql/040,mssql/044}_signal_queue.sql`). `DeliverSignal`
+is a plain INSERT in all three dialects — no `ON CONFLICT`, no `ON DUPLICATE KEY`, no `MERGE`.
+`PollSignal` returns the oldest unconsumed `SignalDelivery` and does not consume; the await paths
+call `ConsumeSignal(workflowID, id)` **after** the `signal_received` event is durable.
+`PollAndClaimSignal` is deleted rather than wired up.
+
+**The order is the design, and it is the one thing not to change.** `recordEvent` persists
+synchronously, so recording first and consuming second makes delivery **at-least-once**: a crash in
+between leaves the row and the event, and replay reads the payload out of history positionally, so
+the worst case is a duplicate handed to a later await. Consuming first would make it at-most-once
+and lose the signal outright with no record it ever arrived. Both halves had to land together for
+the reason this section gave before the fix: a FIFO queue with a non-consuming read is *permanent*
+livelock, where the overwrite made it intermittent loss.
+
+**(a) is still open** — a signal delivered as a workflow completes is persisted and never
+delivered. That is a missing feature (completion must consider pending signals), not a torn write,
+and it is untouched here.
+
+**Regression test**: `TestSignalsOfTheSameNameQueueOldestFirst`
+(`engine/store_test_groups_6_10_test.go`), cross-backend. Falsified 2026-09-05 by restoring the old
+last-write-wins semantics in all three stores: red on postgres, mysql and mssql, each reporting
+`delivery 1: got payload "third", want "first"` — three deliveries collapsed to one. Three payloads
+rather than two on purpose: with two, a store that returns them in arbitrary order passes by luck
+half the time.
+
+**Two things the fix found that the section did not predict.**
+
+`cleat/wasmtest`'s `InMemorySignalStore` was **already** a FIFO queue that consumed on read. The
+test double had the intended semantics that no database implemented, so every wasmtest-based signal
+test passed against behaviour production did not have. That is the inverse of the usual mock
+problem and it is worse, because the double flatters the system instead of failing it.
+
+`engine/host_signal_test.go` contained `TestSignalDeliveryTwiceOverwrites`, asserting "only the
+latest version should be present" as intended behaviour. A test asserting a defect converts it into
+a requirement and makes the fix look like a regression. Fourth of that shape found in this repo; it
+is now `TestSignalDeliveredTwiceArrivesTwiceOldestFirst`.
+
+**Original report follows.**
+
 
 Three defects with one root. `workflow_signals` is keyed
 
@@ -4870,6 +4912,53 @@ the tool's blind spot correlates with what you are looking for.
 Final sweep tally: 125 multi-dialect operations compared, 12 flagged, **2 real (one latent), 1 known
 (§3.217's update divergence), 9 artifacts**. No second instance of the update-request defect. The
 three-dialect split both sessions expected to be widespread is narrow.
+
+### 3.220 `SendSignalAndWait` never sends the signal it then waits for — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
+
+Found while wiring signal consumption for §3.215, and deliberately not fixed there: it is a
+different defect and a different change.
+
+`execSession.SendSignalAndWait` (`engine/signaller.go`) does, in order: the replay check, the
+`stopBeforeNewWork` guard, the signal-authorization check, a `PollSignal` against `targetRunID`,
+and then — finding nothing — records an `await_signals` event and suspends. **There is no
+`DeliverSignal` call anywhere in the function.** Compare `SignalWorkflow` immediately below it,
+which does call `s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload)`.
+
+    grep -n "signalStore.DeliverSignal" engine/signaller.go
+    # one hit, line 304, inside SignalWorkflow
+
+Anchor on `signalStore.DeliverSignal`, not on `DeliverSignal`. The bare name now has two hits,
+because the second is a comment in `SendSignalAndWait` explaining that it does not call it — a
+grep a *denial* satisfies, which is the §1.1 trap, and the first draft of this section reported
+"one hit" off a command that returns two.
+
+So the `payload` argument is accepted, passed through authorization, and dropped. A workflow
+calling `send_signal_and_wait` waits for a reply to a message that was never sent, until its
+timeout.
+
+**The poll is also aimed oddly, and the two facts are probably one bug.** It reads
+`targetRunID`'s queue for `signalName` — the queue it would have written to had it sent — rather
+than this workflow's queue for a reply. Written as a request/response, the target replies to the
+*caller*; written as a send, the delivery goes to the target and there is nothing to poll. The
+function reads like the second half of a design whose first half is missing.
+
+**This is why §3.215 left this path non-consuming** while moving both `DurableAwaitSignals` paths
+onto consume-after-record. Consuming here would delete a row on a guess about whose delivery it is,
+and the two candidate answers imply different rows.
+
+Whoever fixes it should decide the semantic first, because the two readings need different code:
+
+| reading | what is missing |
+|---|---|
+| fire-and-wait-for-reply | the `DeliverSignal` to the target, and the poll should be on the caller's own queue with a correlation id |
+| the target writes back under the same name | the `DeliverSignal`, and the poll is right but must consume |
+
+`ReplyToSignal` is the other half to look at: it records a `signal_received` event and also calls
+no store method, so a reply is durable in the replier's history and invisible to anyone else.
+
+**Note what a name-based scan says about all of this: nothing.** `SendSignalAndWait` registers,
+dispatches, has tests, and appears in every SDK's surface list. Its being wired end to end is what
+the parity guards check, and it is wired — to a function that does not do the thing.
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 

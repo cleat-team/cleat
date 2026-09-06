@@ -481,8 +481,8 @@ func (m *mockCompactStore) CheckCancellation(ctx context.Context, workflowID str
 func (m *mockCompactStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	return nil
 }
-func (m *mockCompactStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return "", false, nil
+func (m *mockCompactStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	return nil
 }
 func (m *mockCompactStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
 	return "", false, nil
@@ -1724,8 +1724,8 @@ func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID
 	return nil
 }
 func (m *mockCompactStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
-func (m *mockCompactStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return "", false, nil
+func (m *mockCompactStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
 func (m *mockCompactStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	return false, "", nil

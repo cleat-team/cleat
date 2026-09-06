@@ -49,32 +49,36 @@ func (s *PostgresStore) CheckCancellation(ctx context.Context, workflowID string
 	return cancelled, reason.String, tx.Commit()
 }
 
-// PollAndClaimSignal atomically checks for and claims a pending signal.
-
-func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+// ConsumeSignal satisfies the SignalStore interface.
+//
+// This replaces PollAndClaimSignal, which read and deleted in one step and had
+// no caller at all -- the whole reason a signal was never consumed and an
+// await loop could re-read the same payload forever (IMPROVEMENT-PLAN 3.215).
+// Consumption is now a separate call the await path makes AFTER its
+// signal_received event is durable, which is what makes delivery at-least-once
+// rather than at-most-once.
+//
+// workflowID is not needed to identify the row -- id alone does that -- but it
+// is in the signature because ShardedStore routes on it, and it is in the
+// WHERE clause so a caller cannot delete another workflow's delivery by
+// guessing an id.
+func (s *PostgresStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", false, err
+		return err
 	}
 	defer tx.Rollback()
 
 	if err := s.setRLSOnTx(tx); err != nil {
-		return "", false, err
+		return err
 	}
 
-	var payload string
-	err = tx.QueryRowContext(ctx, `
-		DELETE FROM workflow_signals
-		WHERE workflow_id = $1 AND signal_name = $2
-		RETURNING payload
-	`, workflowID, signalName).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM workflow_signals WHERE id = $1 AND workflow_id = $2
+	`, id, workflowID); err != nil {
+		return fmt.Errorf("consume signal: %w", err)
 	}
-	if err != nil {
-		return "", false, fmt.Errorf("poll signal: %w", err)
-	}
-	return decodeJSONPayload(payload), true, tx.Commit()
+	return tx.Commit()
 }
 
 // encodeJSONPayload makes a payload acceptable to the `payload` column.
@@ -147,10 +151,14 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 	defer tx.Rollback()
 
 	payload = encodeJSONPayload(payload)
+	// A plain INSERT. It carried ON CONFLICT (workflow_id, signal_name) DO
+	// UPDATE until 3.215, which discarded the earlier payload with no error --
+	// so a workflow collecting one approval per reviewer saw only the last.
+	// The conflict is gone because the key is gone: the table's primary key is
+	// now a surrogate id and every delivery is its own row.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (workflow_id, signal_name) DO UPDATE SET payload = $3, delivered_at = now()
 	`, workflowID, signalName, payload, s.tenantID)
 	if err != nil {
 		return err
@@ -168,37 +176,45 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 	return tx.Commit()
 }
 
-// PollSignal satisfies the SignalStore interface by checking for a delivered
-// signal, without consuming it. This must be a plain read: it used to
-// delegate straight to PollAndClaimSignal, whose name and doc comment both
-// say it "atomically checks for AND CLAIMS" a signal (i.e. DELETEs the row)
-// -- the opposite of what SignalStore's own doc comment promises for
-// PollSignal ("checks for a delivered signal", no mention of consuming it).
-// A second PollSignal call for the same signal would find nothing, having
-// silently deleted it on the first call.
-func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+// PollSignal satisfies the SignalStore interface by returning the oldest
+// unconsumed delivery with this name, without consuming it.
+//
+// ORDER BY id LIMIT 1 is the whole of the FIFO guarantee, and it needs the
+// surrogate key to mean anything: before 3.215 there was at most one row per
+// (workflow_id, signal_name), so "which one" was not a question the query
+// could be asked.
+//
+// It must stay a plain read. It used to delegate straight to
+// PollAndClaimSignal, whose name and doc comment both say it "atomically
+// checks for AND CLAIMS" a signal (i.e. DELETEs the row) -- the opposite of
+// what SignalStore's own doc comment promises here. Consumption is
+// ConsumeSignal, called separately once the event is durable.
+func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", false, err
+		return SignalDelivery{}, false, err
 	}
 	defer tx.Rollback()
 
 	if err := s.setRLSOnTx(tx); err != nil {
-		return "", false, err
+		return SignalDelivery{}, false, err
 	}
 
+	var id int64
 	var payload string
 	err = tx.QueryRowContext(ctx, `
-		SELECT payload FROM workflow_signals
+		SELECT id, payload FROM workflow_signals
 		WHERE workflow_id = $1 AND signal_name = $2
-	`, workflowID, signalName).Scan(&payload)
+		ORDER BY id
+		LIMIT 1
+	`, workflowID, signalName).Scan(&id, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, tx.Rollback()
+		return SignalDelivery{}, false, tx.Rollback()
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("poll signal: %w", err)
+		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
-	return decodeJSONPayload(payload), true, tx.Commit()
+	return SignalDelivery{ID: id, Payload: decodeJSONPayload(payload)}, true, tx.Commit()
 }
 
 // PollCancellation satisfies the SignalStore interface.

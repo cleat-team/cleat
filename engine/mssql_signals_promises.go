@@ -19,37 +19,27 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	}
 	defer tx.Rollback()
 
-	// Use MERGE for upsert semantics (equivalent to ON CONFLICT DO UPDATE).
+	// A plain INSERT, and it is worth saying what it replaced because the
+	// replaced statement was the subtlest tenant bug in this file.
 	//
-	// `target.tenant_id = @p4` in the ON clause is load-bearing -- see
-	// TerminateWorkflow -- and this statement is the one that reads clean and
-	// is not. The audit script of the day asked whether `tenant_id` appeared
-	// anywhere in the statement, and it did: in the INSERT column list
-	// below, which scopes the row this call CREATES and says nothing about the
-	// row it MATCHES. A MERGE is an UPDATE when matched, so with an unscoped ON
-	// a caller holding another tenant's workflow id overwrote that workflow's
-	// pending signal payload with its own, and the wake below then ran it. That
-	// blind spot is why the gate 3.86 describes needs a position-aware check
-	// rather than a substring one.
+	// This was a MERGE, for upsert semantics, and IMPROVEMENT-PLAN 3.215
+	// removed the upsert: a second signal of the same name overwrote the
+	// first's payload with no error. With no MATCHED branch there is no
+	// UPDATE, so the cross-tenant hazard that made `target.tenant_id = @p4`
+	// load-bearing in the ON clause is gone with it -- a caller holding
+	// another tenant's workflow id can no longer overwrite that workflow's
+	// pending payload, because nothing overwrites anything. tenant_id is still
+	// in the column list, scoping the row this call creates, and the wake below
+	// is still scoped explicitly.
 	//
-	// USING (VALUES ...) rather than USING (SELECT @p1 AS ...), which is what
-	// this statement said until the tenant predicate was added to the ON
-	// clause. TestMSSQLUUIDColumnsAreConvertedInProjections is a textual scan
-	// whose projection span runs from a SELECT to the next terminator, and a
-	// USING (SELECT ...) has no terminator before the ON -- so `target.tenant_id`
-	// in the join predicate was read as an unconverted projection and the guard
-	// failed the build. Third time that shape has come up; DeployWorkflowDef's
-	// MERGE is the form that passes, and matching it is the fix rather than
-	// relaxing the guard, which is right about the defect it was written for.
+	// The blind spot that hid the original defect is still worth remembering:
+	// an audit asking whether `tenant_id` appears anywhere in the statement
+	// answered yes, off the INSERT column list, which says nothing about the
+	// row a MERGE MATCHES. That is why the gate 3.86 describes needs a
+	// position-aware check rather than a substring one.
 	_, err = tx.ExecContext(ctx, `
-		MERGE workflow_signals AS target
-		USING (VALUES (@p1, @p2, @p3)) AS source(workflow_id, signal_name, payload)
-		ON target.tenant_id = @p4
-		   AND target.workflow_id = source.workflow_id
-		   AND target.signal_name = source.signal_name
-		WHEN MATCHED THEN UPDATE SET payload = source.payload, delivered_at = SYSUTCDATETIME()
-		WHEN NOT MATCHED THEN INSERT (workflow_id, signal_name, payload, tenant_id)
-		     VALUES (source.workflow_id, source.signal_name, source.payload, @p4);
+		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
+		VALUES (@p1, @p2, @p3, @p4)
 	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
 	if err != nil {
 		return err
@@ -68,19 +58,24 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	return tx.Commit()
 }
 
-func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+// PollSignal returns the oldest unconsumed delivery with this name, without
+// consuming it. ConsumeSignal removes it by id once the caller's
+// signal_received event is durable.
+func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
+	var id int64
 	var payload string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT payload FROM workflow_signals
+		SELECT TOP 1 id, payload FROM workflow_signals
 		WHERE workflow_id = @p1 AND signal_name = @p2 AND tenant_id = @p3
-	`, workflowID, signalName, s.tenantID).Scan(&payload)
+		ORDER BY id
+	`, workflowID, signalName, s.tenantID).Scan(&id, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return SignalDelivery{}, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("poll signal: %w", err)
+		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
-	return decodeJSONPayload(payload), true, nil
+	return SignalDelivery{ID: id, Payload: decodeJSONPayload(payload)}, true, nil
 }
 
 func (s *MSSQLStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
@@ -165,60 +160,23 @@ func (s *MSSQLStore) setAllowedSignalCallersOnce(ctx context.Context, workflowID
 	return tx.Commit()
 }
 
-// PollAndClaimSignal is retried on a rollback-guaranteed error. The retry is
-// safe for the same reason it is everywhere else: SQL Server has definitively
-// undone the transaction, so the DELETE that claims the signal did not happen
-// and the row is still there to claim. A claimed-twice signal would need the
-// commit to have succeeded, which is the case withRollbackGuaranteedRetry
-// excludes by construction -- see its doc comment on why mssqlRetry, which also
-// retries unknown-outcome errors, must not be used at a transaction boundary.
-func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	var payload string
-	var found bool
-	err := withRollbackGuaranteedRetry(ctx, "poll and claim signal", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		var err error
-		payload, found, err = s.pollAndClaimSignalOnce(ctx, workflowID, signalName)
+// ConsumeSignal removes one delivery by id.
+//
+// No retry wrapper, and no transaction. The method this replaces read and
+// deleted in one step, so it needed both: a transaction to be atomic, and
+// withRollbackGuaranteedRetry to be safe to repeat. A DELETE of one known id
+// is atomic on its own, and repeating it is the documented no-op -- so a
+// retried DELETE cannot consume a second signal, which is the failure the old
+// retry commentary existed to rule out.
+
+func (s *MSSQLStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	return mssqlRetry(ctx, "consume signal", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			DELETE FROM workflow_signals
+			WHERE id = @p1 AND workflow_id = @p2 AND tenant_id = @p3
+		`, id, workflowID, s.tenantID)
 		return err
 	})
-	if err != nil {
-		return "", false, err
-	}
-	return payload, found, nil
-}
-
-func (s *MSSQLStore) pollAndClaimSignalOnce(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", false, err
-	}
-	defer tx.Rollback()
-
-	if err := s.setSessionContext(tx); err != nil {
-		return "", false, err
-	}
-
-	var payload string
-	// First SELECT the payload with a row lock to prevent races.
-	err = tx.QueryRowContext(ctx, `
-		SELECT payload FROM workflow_signals WITH (UPDLOCK, ROWLOCK, READPAST)
-		WHERE workflow_id = @p1 AND signal_name = @p2
-	`, workflowID, signalName).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, tx.Rollback()
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("poll and claim signal: select: %w", err)
-	}
-
-	// Delete the signal row so it cannot be claimed twice.
-	_, err = tx.ExecContext(ctx, `
-		DELETE FROM workflow_signals
-		WHERE workflow_id = @p1 AND signal_name = @p2
-	`, workflowID, signalName)
-	if err != nil {
-		return "", false, fmt.Errorf("poll and claim signal: delete: %w", err)
-	}
-	return decodeJSONPayload(payload), true, tx.Commit()
 }
 
 func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {

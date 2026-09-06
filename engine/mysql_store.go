@@ -418,8 +418,11 @@ func (s *MySQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 // DeliverSignal / PollSignal / PollCancellation / PollAndClaimSignal
 // ---------------------------------------------------------------------------
 
-// DeliverSignal stores a signal for a workflow. Uses ON DUPLICATE KEY UPDATE
-// so that re-delivering the same signal name replaces the payload.
+// DeliverSignal stores a signal for a workflow, as its own row.
+//
+// It used ON DUPLICATE KEY UPDATE until IMPROVEMENT-PLAN 3.215, which made a
+// second signal of the same name silently replace the first. The clause is
+// gone because the duplicate key is gone.
 func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
@@ -430,7 +433,6 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
 		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE payload = VALUES(payload), delivered_at = NOW(6)
 	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
 	if err != nil {
 		return err
@@ -447,21 +449,25 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	return tx.Commit()
 }
 
-// PollSignal checks for a delivered signal without consuming it.
-// This is non-destructive — the signal remains available after polling.
-func (s *MySQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+// PollSignal returns the oldest unconsumed delivery with this name without
+// consuming it. This is non-destructive — the delivery remains available until
+// ConsumeSignal removes it by id.
+func (s *MySQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
+	var id int64
 	var payload string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT payload FROM workflow_signals
+		SELECT id, payload FROM workflow_signals
 		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
-	`, workflowID, signalName, s.tenantID).Scan(&payload)
+		ORDER BY id
+		LIMIT 1
+	`, workflowID, signalName, s.tenantID).Scan(&id, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return SignalDelivery{}, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("poll signal: %w", err)
+		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
-	return decodeJSONPayload(payload), true, nil
+	return SignalDelivery{ID: id, Payload: decodeJSONPayload(payload)}, true, nil
 }
 
 // PollCancellation checks whether the workflow has been cancelled.
@@ -532,40 +538,21 @@ func (s *MySQLStore) SetAllowedSignalCallers(ctx context.Context, workflowID str
 }
 
 // PollAndClaimSignal atomically checks for and claims a pending signal.
-// Uses SELECT ... FOR UPDATE followed by DELETE in a transaction to emulate
-// PostgreSQL's DELETE ... RETURNING.
-func (s *MySQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", false, err
-	}
-	defer tx.Rollback()
-
-	// Step 1: SELECT ... FOR UPDATE to lock the row.
-	var payload string
-	err = tx.QueryRowContext(ctx, `
-		SELECT payload FROM workflow_signals
-		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
-		FOR UPDATE
-	`, workflowID, signalName, s.tenantID).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		tx.Rollback()
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("poll and claim signal: select: %w", err)
-	}
-
-	// Step 2: DELETE the claimed row.
-	_, err = tx.ExecContext(ctx, `
+// ConsumeSignal removes one delivery by id.
+//
+// No SELECT ... FOR UPDATE, and no transaction: the previous method here read
+// and deleted in one step, which needed a lock to be atomic. Deleting a known
+// id is already atomic, and deleting one that is already gone is the
+// documented no-op, so there is nothing left for the lock to protect.
+func (s *MySQLStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM workflow_signals
-		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
-	`, workflowID, signalName, s.tenantID)
+		WHERE id = ? AND workflow_id = ? AND tenant_id = ?
+	`, id, workflowID, s.tenantID)
 	if err != nil {
-		return "", false, fmt.Errorf("poll and claim signal: delete: %w", err)
+		return fmt.Errorf("consume signal: %w", err)
 	}
-
-	return decodeJSONPayload(payload), true, tx.Commit()
+	return nil
 }
 
 // ---------------------------------------------------------------------------

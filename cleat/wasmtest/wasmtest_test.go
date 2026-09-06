@@ -20,24 +20,42 @@ func TestInMemorySignalStore_DeliverAndPoll(t *testing.T) {
 	}
 
 	// Poll for it.
-	payload, found, err := s.PollSignal(ctx, "wf-1", "payment-received")
+	d, found, err := s.PollSignal(ctx, "wf-1", "payment-received")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Fatal("expected signal to be found")
 	}
-	if payload != `{"amount":100}` {
-		t.Fatalf("expected payload %q, got %q", `{"amount":100}`, payload)
+	if d.Payload != `{"amount":100}` {
+		t.Fatalf("expected payload %q, got %q", `{"amount":100}`, d.Payload)
 	}
 
-	// Second poll should not find it (consumed).
+	// Second poll STILL finds it: PollSignal does not consume. This assertion
+	// is inverted from what it was -- this double used to delete the entry it
+	// returned, which was the intended end-to-end behaviour but not the
+	// contract of the method (IMPROVEMENT-PLAN 3.215).
+	again, found, err := s.PollSignal(ctx, "wf-1", "payment-received")
+	if err != nil {
+		t.Fatalf("PollSignal: %v", err)
+	}
+	if !found {
+		t.Fatal("PollSignal must not consume; the second poll should still find the delivery")
+	}
+	if again.ID != d.ID {
+		t.Fatalf("expected the same delivery back, got id %d then %d", d.ID, again.ID)
+	}
+
+	// Consuming it is what makes it go away.
+	if err := s.ConsumeSignal(ctx, "wf-1", d.ID); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
+	}
 	_, found, err = s.PollSignal(ctx, "wf-1", "payment-received")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if found {
-		t.Fatal("expected signal to be consumed after first poll")
+		t.Fatal("expected the delivery to be gone after ConsumeSignal")
 	}
 }
 
@@ -45,15 +63,15 @@ func TestInMemorySignalStore_PollNonExistent(t *testing.T) {
 	s := NewInMemorySignalStore()
 	ctx := context.Background()
 
-	payload, found, err := s.PollSignal(ctx, "wf-1", "nonexistent")
+	d, found, err := s.PollSignal(ctx, "wf-1", "nonexistent")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if found {
 		t.Fatal("expected not found")
 	}
-	if payload != "" {
-		t.Fatalf("expected empty payload, got %q", payload)
+	if d.Payload != "" {
+		t.Fatalf("expected empty payload, got %q", d.Payload)
 	}
 }
 

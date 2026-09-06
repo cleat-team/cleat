@@ -269,24 +269,41 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 	// overwrote the victim's pending payload, and the wake below it then
 	// scheduled the victim's workflow to consume what was written.
 	//
-	// This case is the one whose SHAPE OF SUCCESS CHANGED, and it is worth
-	// stating exactly. pk_workflow_signals is (workflow_id, signal_name) with
-	// no tenant column, which is correct and should stay that way: workflow_id
-	// is generated and globally unique, so "one pending signal per workflow per
-	// name" is a global truth and adding tenant_id to that key would ALLOW two
-	// tenants to hold a signal for the same workflow. So once the MERGE's ON
-	// clause is tenant-scoped, a cross-tenant delivery no longer MATCHES the
-	// victim's row -- it falls through to the INSERT branch and the primary key
-	// refuses it. The call now returns an error where it used to return nil
-	// having silently overwritten another tenant's payload.
+	// This case is the one whose SHAPE OF SUCCESS CHANGED, twice, and both
+	// changes are worth stating because the second inverts an assertion.
 	//
-	// That is the same shape as SetWorkflowTag in the tags file: the refusal
-	// arrives as a constraint violation rather than a considered "not yours".
-	// It is safe but it is a 500, and it is distinguishable from delivering to
-	// an id that exists nowhere (which still succeeds, creating a harmless
-	// orphan row under the caller's own tenant) -- a weak cross-tenant
-	// existence oracle. Noted in 3.86 rather than fixed here; turning it into a
-	// clean not-found is a behaviour change to an HTTP contract.
+	// FIRST (3.86): the MERGE's ON clause was not tenant-scoped, so a
+	// cross-tenant delivery MATCHED the victim's row and silently overwrote
+	// tenant A's pending payload, returning nil. Scoping the ON clause made it
+	// fall through to the INSERT branch, where pk_workflow_signals
+	// (workflow_id, signal_name) refused it -- so the call returned an error.
+	// The comment here then recorded that "the refusal arrives as a constraint
+	// violation rather than a considered not-yours ... distinguishable from
+	// delivering to an id that exists nowhere (which still succeeds, creating a
+	// harmless orphan row under the caller's own tenant) -- a weak cross-tenant
+	// existence oracle."
+	//
+	// SECOND (3.215): that primary key is gone. workflow_signals is now keyed
+	// on a surrogate id, because keying a DELIVERY on a NAME made a second
+	// signal of the same name overwrite the first. So the constraint that was
+	// doing the refusing no longer exists, and this delivery now succeeds --
+	// creating exactly the harmless orphan row under the caller's own tenant
+	// that the paragraph above describes for a nonexistent id.
+	//
+	// THAT IS AN IMPROVEMENT, AND THE CASE HAS TO BE MADE RATHER THAN ASSUMED,
+	// because "a security test's assertion was inverted" is how a real
+	// regression gets shipped. Two protections, both still asserted below:
+	//
+	//   * Tenant A's payload is not overwritten. Structurally impossible now --
+	//     there is no UPDATE branch anywhere in DeliverSignal to reach.
+	//   * Tenant A's workflow is not woken. The wake UPDATE is still explicitly
+	//     tenant-scoped and is asserted unchanged.
+	//
+	// And one thing is gained: the existence oracle the previous comment flagged
+	// is closed. Error-versus-success no longer tells tenant B whether a
+	// workflow id exists in some other tenant, because both cases now succeed
+	// identically. The new assertion is that A cannot SEE what B wrote, which is
+	// the property that actually matters and which the old shape never checked.
 	t.Run("DeliverSignal", func(t *testing.T) {
 		const sig = "approve"
 		if err := storeA.DeliverSignal(ctx, cpWorkflowA, sig, `{"from":"tenant-a"}`); err != nil {
@@ -295,22 +312,47 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 		setInstanceStatus(t, storeA, cpWorkflowA, unscopedTenantA, "suspended")
 		before := instanceField(t, storeA, "next_wake_at", cpWorkflowA, unscopedTenantA)
 
-		// nil here is the defect: it is what this call returned while it was
-		// overwriting tenant A's payload.
-		if err := storeB.DeliverSignal(ctx, cpWorkflowA, sig, `{"from":"tenant-b"}`); err == nil {
-			t.Errorf("tenant B's delivery to tenant A's workflow was ACCEPTED; " +
-				"it should not have matched A's row at all")
+		// Succeeds, and writes a row under tenant B that tenant B alone can see.
+		if err := storeB.DeliverSignal(ctx, cpWorkflowA, sig, `{"from":"tenant-b"}`); err != nil {
+			t.Fatalf("cross-tenant delivery should now be an ordinary insert under "+
+				"the caller's own tenant, not an error: %v", err)
 		}
 
-		payload, ok, err := storeA.PollSignal(ctx, cpWorkflowA, sig)
+		d, ok, err := storeA.PollSignal(ctx, cpWorkflowA, sig)
 		if err != nil {
 			t.Fatalf("tenant A PollSignal: %v", err)
 		}
 		if !ok {
 			t.Fatalf("tenant A's own signal is gone; the fixture is broken")
 		}
-		if strings.Contains(payload, "tenant-b") {
-			t.Errorf("tenant B overwrote tenant A's pending signal payload: A reads %q", payload)
+		if strings.Contains(d.Payload, "tenant-b") {
+			t.Errorf("tenant B wrote into tenant A's signal queue: A reads %q", d.Payload)
+		}
+
+		// Reading the head alone is no longer sufficient, and this is the
+		// assertion the queue change forced. When the table held one row per
+		// name, "what A reads" and "everything A can see" were the same
+		// question. They are not now: B's row could sit BEHIND A's and a
+		// head-only check would pass while A's second await handed the
+		// workflow tenant B's payload. Drain it.
+		for i := 0; ; i++ {
+			next, more, err := storeA.PollSignal(ctx, cpWorkflowA, sig)
+			if err != nil {
+				t.Fatalf("draining tenant A's queue: %v", err)
+			}
+			if !more {
+				break
+			}
+			if strings.Contains(next.Payload, "tenant-b") {
+				t.Fatalf("tenant A can see tenant B's delivery at queue position %d: %q",
+					i, next.Payload)
+			}
+			if i > 8 {
+				t.Fatalf("tenant A's queue is not draining; ConsumeSignal is not removing rows")
+			}
+			if err := storeA.ConsumeSignal(ctx, cpWorkflowA, next.ID); err != nil {
+				t.Fatalf("draining tenant A's queue: consume: %v", err)
+			}
 		}
 		if after := instanceField(t, storeA, "next_wake_at", cpWorkflowA, unscopedTenantA); after != before {
 			t.Errorf("tenant B woke tenant A's suspended workflow: next_wake_at %q -> %q", before, after)
@@ -324,8 +366,8 @@ func TestAdminLoginControlPlaneWritesTouchOnlyTheCallersOwnWorkflow(t *testing.T
 		if err != nil || !ok {
 			t.Fatalf("tenant B could not read the signal it sent ITSELF: ok=%v err=%v", ok, err)
 		}
-		if !strings.Contains(own, "tenant-b") {
-			t.Errorf("tenant B's own signal payload is %q, want it to carry \"tenant-b\"", own)
+		if !strings.Contains(own.Payload, "tenant-b") {
+			t.Errorf("tenant B's own signal payload is %q, want it to carry \"tenant-b\"", own.Payload)
 		}
 	})
 }

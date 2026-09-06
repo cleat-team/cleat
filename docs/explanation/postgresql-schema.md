@@ -189,17 +189,36 @@ External signals delivered to running workflows.
 
 ```sql
 CREATE TABLE workflow_signals (
+    id BIGSERIAL PRIMARY KEY,
     workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
     signal_name TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}',
-    delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (workflow_id, signal_name)
+    delivered_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX idx_workflow_signals_queue
+    ON workflow_signals (workflow_id, signal_name);
 ```
 
-The engine checks for signals during `AwaitSignals` and `PollSignal`. Signal
-delivery is recorded in `event_history` as `signal_received` events for
-deterministic replay.
+**The key is a surrogate id, not `(workflow_id, signal_name)`, and that is the
+whole of the table's semantics.** A signal is a *delivery*, and a name is not an
+identity: sending `approve` twice before the workflow consumes it produces two
+rows, and a workflow that accumulates — a counter, one approval per reviewer, a
+batch of items — receives both. The table was keyed on the name until 2026-09-05
+(`migrations/postgres/041_signal_queue.sql`), which made the second delivery
+overwrite the first with no error.
+
+So the table is a FIFO queue per `(workflow_id, signal_name)`, ordered by `id`.
+`delivered_at` cannot serve as the order: two deliveries in the same microsecond
+tie, and the tie has to break identically on every read or a replay can see a
+different signal than the original run did.
+
+The engine checks for signals during `AwaitSignals` and `PollSignal`. Reading is
+non-consuming; the await path removes the delivery in a separate call *after*
+recording the `signal_received` event, so a crash in between re-delivers rather
+than losing the signal. Signal delivery is recorded in `event_history` as
+`signal_received` events for deterministic replay, and it is that record, not
+the row, that makes a consumed signal replayable.
 
 ### Additional Tables
 

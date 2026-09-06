@@ -483,13 +483,16 @@ func (s *ShardedStore) DeliverSignal(ctx context.Context, workflowID, signalName
 	return shard.Store.DeliverSignal(ctx, workflowID, signalName, payload)
 }
 
-// PollAndClaimSignal routes by workflow ID.
-func (s *ShardedStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+// ConsumeSignal routes by workflow ID.
+//
+// This is the reason ConsumeSignal takes a workflowID it does not strictly
+// need to identify the row: an id alone cannot be routed to a shard.
+func (s *ShardedStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return "", false, fmt.Errorf("poll_and_claim_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+		return fmt.Errorf("consume_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.PollAndClaimSignal(ctx, workflowID, signalName)
+	return shard.Store.ConsumeSignal(ctx, workflowID, id)
 }
 
 // StartNewRun generates a UUID and routes by it, so the workflow lands on a
@@ -791,10 +794,10 @@ func (s *ShardedStore) CompactHistory(ctx context.Context, workflowID string, co
 // ---------------------------------------------------------------------------
 
 // PollSignal satisfies the SignalStore interface.  It routes by workflow ID.
-func (s *ShardedStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+func (s *ShardedStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return "", false, fmt.Errorf("poll_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+		return SignalDelivery{}, false, fmt.Errorf("poll_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.PollSignal(ctx, workflowID, signalName)
 }

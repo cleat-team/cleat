@@ -575,9 +575,11 @@ func (k *keyedCancellationStore) DeliverSignal(_ context.Context, _, _, _ string
 	return nil
 }
 
-func (k *keyedCancellationStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
-	return "", false, nil
+func (k *keyedCancellationStore) PollSignal(_ context.Context, _, _ string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
+
+func (k *keyedCancellationStore) ConsumeSignal(context.Context, string, int64) error { return nil }
 
 // TestPollCancellationCancelled proves that a workflow actually observes a
 // cancellation request made against its own workflow ID. It uses a store

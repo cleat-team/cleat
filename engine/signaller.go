@@ -48,19 +48,21 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 						names = splitSignalNames(rec.SignalNames)
 					}
 					for _, name := range names {
-						payload, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
+						d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
 						if err == nil && found {
 							// Record the signal_received event so
-							// subsequent replays find it in history.
+							// subsequent replays find it in history,
+							// THEN consume. See consumeDelivered.
 							sigRec := EventRecord{
 								Step:          s.stepCount,
 								EventType:     EventTypeSignalReceived,
 								SignalName:    name,
-								SignalPayload: payload,
+								SignalPayload: d.Payload,
 							}
 							s.recordEvent(sigRec)
+							s.consumeDelivered(ctx, name, d)
 							written, _ := s.writeResult(ctx, m, sigNamePtr, name, sigNameMaxLen)
-							payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
+							payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
 							return packAwaitSignalsResult(written, payloadWritten, false, 0)
 						}
 					}
@@ -86,18 +88,19 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 	if s.engine.signalStore != nil {
 		names := splitSignalNames(signalNames)
 		for _, name := range names {
-			payload, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
+			d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
 			if err == nil && found {
 				rec := EventRecord{
 					Step:          s.stepCount,
 					EventType:     EventTypeSignalReceived,
 					SignalName:    name,
-					SignalPayload: payload,
+					SignalPayload: d.Payload,
 				}
 				s.recordEvent(rec)
+				s.consumeDelivered(ctx, name, d)
 
 				written, _ := s.writeResult(ctx, m, sigNamePtr, name, sigNameMaxLen)
-				payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
+				payloadWritten, _ := s.writeResult(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
 				return packAwaitSignalsResult(written, payloadWritten, false, 0)
 			}
 		}
@@ -140,12 +143,16 @@ func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reason
 	return 0
 }
 
+// PollSignal is the guest's non-durable peek: it reports whether a signal is
+// waiting and does NOT consume it, so a workflow can poll in a loop without
+// draining the queue. Only the await paths consume, and only after recording
+// the event that makes the consumption replayable.
 func (s *execSession) PollSignal(ctx context.Context, m api.Module, signalName string, payloadPtr, payloadMaxLen uint32) int64 {
 	if s.engine.signalStore != nil {
-		payload, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, signalName)
+		d, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, signalName)
 		if err == nil && found {
 
-			written, _ := s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
+			written, _ := s.writeResult(ctx, m, payloadPtr, d.Payload, payloadMaxLen)
 			flags := uint32(0x0100) // found=true
 			return int64(uint64(written)<<32 | uint64(flags))
 		}
@@ -186,17 +193,26 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 
 	// Fresh execution: check if target has responded via signal store.
 	if s.engine.signalStore != nil {
-		payload, found, err := s.engine.signalStore.PollSignal(ctx, targetRunID, signalName)
+		d, found, err := s.engine.signalStore.PollSignal(ctx, targetRunID, signalName)
 		if err == nil && found {
 			rec := EventRecord{
 				Step:          s.stepCount,
 				EventType:     EventTypeSignalReceived,
 				SignalName:    signalName,
-				SignalPayload: payload,
+				SignalPayload: d.Payload,
 			}
 			s.recordEvent(rec)
+			// Deliberately NOT consumed, unlike the two await paths above.
+			//
+			// This poll reads targetRunID's queue -- the workflow this one is
+			// signalling -- and what it is looking for there is a reply. But
+			// SendSignalAndWait never calls DeliverSignal, so it does not
+			// actually send the signal it waits on, and until that is settled
+			// it is not clear whose delivery this read is finding. Consuming
+			// on a path whose semantics are unresolved would delete a row on
+			// a guess. See IMPROVEMENT-PLAN 3.220.
 
-			written, _ := s.writeResult(ctx, m, responsePtr, payload, responseMaxLen)
+			written, _ := s.writeResult(ctx, m, responsePtr, d.Payload, responseMaxLen)
 			return packSimpleResult(0, written)
 		}
 	}
@@ -291,4 +307,36 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 	}
 
 	return 0
+}
+
+// consumeDelivered removes a delivery from this workflow's queue, after the
+// signal_received event recording it is durable.
+//
+// The ORDER is the whole point, and it is the difference between at-least-once
+// and at-most-once delivery.
+//
+// recordEvent persists synchronously (engine/lifecycle.go, "Persist immediately
+// so events survive worker crashes"), so by the time this is called the fact
+// that the workflow received this payload is on disk. A crash here therefore
+// leaves the row present and the event recorded: replay reads the payload out
+// of history positionally and never re-polls, so the stale row is at worst
+// handed to a LATER await of the same name -- a duplicate. Consuming first and
+// crashing before the event was durable would instead lose the signal outright,
+// with no record anywhere that it ever arrived.
+//
+// A failure to consume is logged and swallowed for the same reason. The
+// workflow has already been told it received the signal, and there is no
+// unwinding that; returning an error here would fail a run that succeeded.
+func (s *execSession) consumeDelivered(ctx context.Context, name string, d SignalDelivery) {
+	s.consumeDeliveredFrom(ctx, s.engine.workflowID, name, d)
+}
+
+func (s *execSession) consumeDeliveredFrom(ctx context.Context, workflowID, name string, d SignalDelivery) {
+	if s.engine.signalStore == nil {
+		return
+	}
+	if err := s.engine.signalStore.ConsumeSignal(ctx, workflowID, d.ID); err != nil {
+		s.engine.log().ErrorContext(ctx, "consume_signal failed; the delivery may be handed out again",
+			"workflow_id", workflowID, "tenant_id", s.tenantID, "signal_name", name, "signal_id", d.ID, "error", err)
+	}
 }

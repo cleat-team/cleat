@@ -1775,6 +1775,38 @@ tier3:
 #       against 52 is not wrong so much as answering a different question. Say which.
 #       IMPROVEMENT-PLAN 3.213 has the derivation and the command.
 #
+#   D13 DECIDED 2026-09-05, IMPLEMENTED the same day. A SIGNAL IS A DELIVERY, NOT A ROW.
+#       workflow_signals is keyed on a surrogate monotonic id and is a FIFO queue per
+#       (workflow_id, signal_name). Two signals of the same name are two deliveries and
+#       both arrive, oldest first. Delivery is AT-LEAST-ONCE.
+#       IMPROVEMENT-PLAN 3.215.
+#
+#       WHY it is recorded here rather than left as a bug fix: it changes an observable
+#       contract. The table was PRIMARY KEY (workflow_id, signal_name), so a second
+#       signal overwrote the first in all three dialects -- silently, on the ordinary
+#       path. Any workflow written against the old behaviour, one that expects to see
+#       only the latest "status_update", now sees every one of them. That is a
+#       behavioural change for existing guests even though no host call changed
+#       signature, which is exactly the kind of thing this register exists for.
+#
+#       WHAT AT-LEAST-ONCE MEANS AND WHY IT IS THE CHOICE. The await path records its
+#       signal_received event, which recordEvent persists synchronously, and only THEN
+#       removes the row. A crash between the two leaves a durable record that the
+#       workflow received the payload and a row that a later await may see again -- a
+#       duplicate. The other order loses the signal outright, with nothing anywhere
+#       saying it arrived. Neither Temporal nor DBOS offers exactly-once here either;
+#       Temporal appends the signal to history at delivery, which is the stronger design
+#       and a much larger change than this one.
+#
+#       WHAT IS STILL NOT TRUE, so it is not claimed: a signal delivered while a workflow
+#       is completing is persisted and never delivered (3.215(a), open). Completion does
+#       not consider pending signals, nothing reports the orphan, and no transaction
+#       spans the signal insert and the finalize.
+#
+#       GATE: TestSignalsOfTheSameNameQueueOldestFirst, cross-backend, tier 1. It runs on
+#       postgres, mysql and mssql because the overwrite was one schema decision honoured
+#       in three syntaxes -- a fix in one dialect's clause would go green on one of them.
+#
 # D1-D4 were settled together on 2026-08-06; D5-D10 have been added since, and this
 # register was still saying "all four" until D7 was recorded. New ones go here with
 # the same shape: what was decided, on what date, and what it changes about what the

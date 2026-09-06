@@ -344,7 +344,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 				t.Fatalf("PollSignal on store B: %v", err)
 			}
 			if found {
-				t.Errorf("ISOLATION BREACH: store B can poll signal from tenant A's workflow (payload: %s)", payload)
+				t.Errorf("ISOLATION BREACH: store B can poll signal from tenant A's workflow (payload: %s)", payload.Payload)
 			}
 
 			// Store A should see its own signal.

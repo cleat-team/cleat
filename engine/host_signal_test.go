@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -12,20 +13,27 @@ import (
 // ---------------------------------------------------------------------------
 
 // mockSignalWorkflowStore implements the signal-related methods of WorkflowStore
-// using an in-memory map. It supports DeliverSignal, PollSignal (non-destructive),
-// PollAndClaimSignal (destructive), and PollCancellation.
+// in memory: DeliverSignal, PollSignal (non-consuming), ConsumeSignal, and
+// PollCancellation.
+//
+// It was `map[string]string` keyed "workflowID:signalName" until
+// IMPROVEMENT-PLAN 3.215, which is to say it reproduced the schema's defect
+// exactly -- one signal per name, a second delivery overwriting the first --
+// so no test using it could observe the bug. It is now a queue per
+// (workflow, name), which is what the table became.
 type mockSignalWorkflowStore struct {
 	mu             sync.Mutex
-	signals        map[string]string // key = "workflowID:signalName" -> payload
-	pollCount      int               // total PollSignal calls
-	claimCount     int               // total PollAndClaimSignal calls
-	deliverCount   int               // total DeliverSignal calls
-	allowedCallers []string          // for GetAllowedSignalCallers
+	nextID         int64
+	signals        map[string][]SignalDelivery // key = "workflowID:signalName" -> queue, oldest first
+	pollCount      int                         // total PollSignal calls
+	consumeCount   int                         // total ConsumeSignal calls
+	deliverCount   int                         // total DeliverSignal calls
+	allowedCallers []string                    // for GetAllowedSignalCallers
 }
 
 func newMockSignalWorkflowStore() *mockSignalWorkflowStore {
 	return &mockSignalWorkflowStore{
-		signals: make(map[string]string),
+		signals: make(map[string][]SignalDelivery),
 	}
 }
 
@@ -33,42 +41,59 @@ func (m *mockSignalWorkflowStore) signalKey(workflowID, signalName string) strin
 	return workflowID + ":" + signalName
 }
 
-// DeliverSignal stores a signal in memory. If the same (workflowID, signalName)
-// pair already exists, it is overwritten with the new payload.
+// pollAndConsume is what the await path does: read the head, then remove it.
+// It exists so these tests exercise the two calls in the order the engine makes
+// them -- see execSession.consumeDelivered for why that order is load-bearing.
+func (m *mockSignalWorkflowStore) pollAndConsume(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+	d, found, err := m.PollSignal(ctx, workflowID, signalName)
+	if err != nil || !found {
+		return "", found, err
+	}
+	return d.Payload, true, m.ConsumeSignal(ctx, workflowID, d.ID)
+}
+
+// DeliverSignal appends a delivery. Two signals of the same name are two
+// deliveries; neither replaces the other.
 func (m *mockSignalWorkflowStore) DeliverSignal(_ context.Context, workflowID, signalName, payload string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deliverCount++
-	m.signals[m.signalKey(workflowID, signalName)] = payload
+	m.nextID++
+	key := m.signalKey(workflowID, signalName)
+	m.signals[key] = append(m.signals[key], SignalDelivery{ID: m.nextID, Payload: payload})
 	return nil
 }
 
-// PollSignal checks for a signal without consuming it (non-destructive).
-// Returns the payload if the signal exists.
-func (m *mockSignalWorkflowStore) PollSignal(_ context.Context, workflowID, signalName string) (string, bool, error) {
+// PollSignal returns the oldest delivery with this name without consuming it.
+func (m *mockSignalWorkflowStore) PollSignal(_ context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pollCount++
-	payload, ok := m.signals[m.signalKey(workflowID, signalName)]
-	if !ok {
-		return "", false, nil
+	q := m.signals[m.signalKey(workflowID, signalName)]
+	if len(q) == 0 {
+		return SignalDelivery{}, false, nil
 	}
-	return payload, true, nil
+	return q[0], true, nil
 }
 
-// PollAndClaimSignal checks for a signal and removes it atomically (destructive).
-// Returns the payload if the signal existed.
-func (m *mockSignalWorkflowStore) PollAndClaimSignal(_ context.Context, workflowID, signalName string) (string, bool, error) {
+// ConsumeSignal removes one delivery by id. An id that is already gone is not
+// an error, matching the real stores.
+func (m *mockSignalWorkflowStore) ConsumeSignal(_ context.Context, workflowID string, id int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.claimCount++
-	key := m.signalKey(workflowID, signalName)
-	payload, ok := m.signals[key]
-	if !ok {
-		return "", false, nil
+	m.consumeCount++
+	for key, q := range m.signals {
+		if !strings.HasPrefix(key, workflowID+":") {
+			continue
+		}
+		for i, d := range q {
+			if d.ID == id {
+				m.signals[key] = append(q[:i], q[i+1:]...)
+				return nil
+			}
+		}
 	}
-	delete(m.signals, key)
-	return payload, true, nil
+	return nil
 }
 
 // PollCancellation always returns not cancelled.
@@ -103,25 +128,32 @@ func TestDeliverSignalViaMockStore(t *testing.T) {
 	}
 
 	// Verify the signal is stored by polling it.
-	payload, found, err := store.PollSignal(ctx, "wf-001", "payment_confirmed")
+	d, found, err := store.PollSignal(ctx, "wf-001", "payment_confirmed")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Fatal("expected signal to be found after delivery")
 	}
-	if payload != `{"txn_id":"txn-001","amount":5000}` {
-		t.Errorf("expected payload %q, got %q", `{"txn_id":"txn-001","amount":5000}`, payload)
+	if d.Payload != `{"txn_id":"txn-001","amount":5000}` {
+		t.Errorf("expected payload %q, got %q", `{"txn_id":"txn-001","amount":5000}`, d.Payload)
 	}
 	if store.pollCount != 1 {
 		t.Errorf("expected pollCount=1, got %d", store.pollCount)
 	}
 }
 
-// TestPollAndClaimSignalConsumed verifies that PollAndClaimSignal returns the
-// signal payload on first call and returns not-found on second call (signal is
-// consumed atomically).
-func TestPollAndClaimSignalConsumed(t *testing.T) {
+// TestPollThenConsumeRemovesTheDelivery verifies that the await path's two
+// calls -- poll the head, then consume it by id -- make the delivery
+// unavailable to the next poll.
+//
+// This replaces TestPollAndClaimSignalConsumed, which tested a method
+// (PollAndClaimSignal) that had no caller anywhere in the engine. The
+// behaviour was correct and unreachable, which is IMPROVEMENT-PLAN 3.215's
+// (d): signals were read and never consumed on the live path, and the only
+// method that would have consumed one was dead. A test over a dead method is
+// how that survived.
+func TestPollThenConsumeRemovesTheDelivery(t *testing.T) {
 	ctx := context.Background()
 	store := newMockSignalWorkflowStore()
 
@@ -131,31 +163,31 @@ func TestPollAndClaimSignalConsumed(t *testing.T) {
 		t.Fatalf("DeliverSignal: %v", err)
 	}
 
-	// First PollAndClaimSignal should return the signal.
-	payload, found, err := store.PollAndClaimSignal(ctx, "wf-002", "order_shipped")
+	// First poll-and-consume should return the signal.
+	payload, found, err := store.pollAndConsume(ctx, "wf-002", "order_shipped")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("pollAndConsume: %v", err)
 	}
 	if !found {
-		t.Fatal("expected signal to be found on first claim")
+		t.Fatal("expected signal to be found on first poll")
 	}
 	if payload != `{"order_id":"ord-123","tracking":"TRACK-001"}` {
 		t.Errorf("expected payload %q, got %q", `{"order_id":"ord-123","tracking":"TRACK-001"}`, payload)
 	}
-	if store.claimCount != 1 {
-		t.Errorf("expected claimCount=1, got %d", store.claimCount)
+	if store.consumeCount != 1 {
+		t.Errorf("expected consumeCount=1, got %d", store.consumeCount)
 	}
 
-	// Second PollAndClaimSignal should return not found (signal consumed).
-	_, found, err = store.PollAndClaimSignal(ctx, "wf-002", "order_shipped")
+	// Second should return not found: the delivery is gone.
+	_, found, err = store.pollAndConsume(ctx, "wf-002", "order_shipped")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal second call: %v", err)
+		t.Fatalf("pollAndConsume second call: %v", err)
 	}
 	if found {
-		t.Fatal("expected signal to be consumed after first claim")
+		t.Fatal("expected the delivery to be gone after it was consumed")
 	}
-	if store.claimCount != 2 {
-		t.Errorf("expected claimCount=2, got %d", store.claimCount)
+	if store.consumeCount != 1 {
+		t.Errorf("a poll that found nothing must not consume: expected consumeCount=1, got %d", store.consumeCount)
 	}
 }
 
@@ -173,16 +205,16 @@ func TestPollSignalNonDestructive(t *testing.T) {
 
 	// Poll the same signal multiple times — it should still be found each time.
 	for i := 0; i < 3; i++ {
-		payload, found, err := store.PollSignal(ctx, "wf-003", "approval_granted")
+		d, found, err := store.PollSignal(ctx, "wf-003", "approval_granted")
 		if err != nil {
 			t.Fatalf("PollSignal iteration %d: %v", i, err)
 		}
 		if !found {
 			t.Fatalf("iteration %d: expected signal to still be found", i)
 		}
-		if payload != `{"approved":true,"role":"admin"}` {
+		if d.Payload != `{"approved":true,"role":"admin"}` {
 			t.Errorf("iteration %d: expected payload %q, got %q",
-				i, `{"approved":true,"role":"admin"}`, payload)
+				i, `{"approved":true,"role":"admin"}`, d.Payload)
 		}
 	}
 
@@ -191,13 +223,13 @@ func TestPollSignalNonDestructive(t *testing.T) {
 		t.Errorf("expected pollCount=3, got %d", store.pollCount)
 	}
 
-	// Verify signal also still exists via PollAndClaimSignal.
-	payload, found, err := store.PollAndClaimSignal(ctx, "wf-003", "approval_granted")
+	// Verify the delivery is still consumable after the non-destructive polls.
+	payload, found, err := store.pollAndConsume(ctx, "wf-003", "approval_granted")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal after poll: %v", err)
+		t.Fatalf("pollAndConsume after poll: %v", err)
 	}
 	if !found {
-		t.Fatal("expected signal to still be claimable after non-destructive polls")
+		t.Fatal("expected delivery to still be consumable after non-destructive polls")
 	}
 	if payload != `{"approved":true,"role":"admin"}` {
 		t.Errorf("expected payload %q, got %q", `{"approved":true,"role":"admin"}`, payload)
@@ -217,9 +249,9 @@ func TestSignalDeliveryInvalidWorkflowID(t *testing.T) {
 	}
 
 	// Even though the workflow ID is empty, the signal should be stored.
-	payload, found, err := store.PollAndClaimSignal(ctx, "", "test_signal")
+	payload, found, err := store.pollAndConsume(ctx, "", "test_signal")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("pollAndConsume: %v", err)
 	}
 	if !found {
 		t.Fatal("expected signal to be found even with empty workflow ID")
@@ -235,9 +267,9 @@ func TestSignalDeliveryInvalidWorkflowID(t *testing.T) {
 	}
 
 	// Verify it was stored under the empty signal name.
-	payload, found, err = store.PollAndClaimSignal(ctx, "wf-004", "")
+	payload, found, err = store.pollAndConsume(ctx, "wf-004", "")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal empty name: %v", err)
+		t.Fatalf("pollAndConsume empty name: %v", err)
 	}
 	if !found {
 		t.Fatal("expected signal to be found with empty signal name")
@@ -247,9 +279,21 @@ func TestSignalDeliveryInvalidWorkflowID(t *testing.T) {
 	}
 }
 
-// TestSignalDeliveryTwiceOverwrites verifies that delivering the same
-// (workflowID, signalName) pair twice overwrites the payload with the new value.
-func TestSignalDeliveryTwiceOverwrites(t *testing.T) {
+// TestSignalDeliveredTwiceArrivesTwiceOldestFirst verifies that delivering the
+// same (workflowID, signalName) pair twice produces TWO deliveries, and that
+// the first one to arrive is the first one read.
+//
+// This test is the inversion of TestSignalDeliveryTwiceOverwrites, which
+// asserted the opposite -- "only the latest version should be present" -- as
+// intended behaviour. It was not: the overwrite was a consequence of
+// PRIMARY KEY (workflow_id, signal_name), and it silently discarded the first
+// payload on the ordinary path (IMPROVEMENT-PLAN 3.215(b)). A workflow
+// collecting one approval per reviewer saw only the last reviewer.
+//
+// A test asserting a defect is worse than no test, because it converts the
+// defect into a requirement and makes fixing it look like a regression. This
+// is the fourth of that shape found in this repo.
+func TestSignalDeliveredTwiceArrivesTwiceOldestFirst(t *testing.T) {
 	ctx := context.Background()
 	store := newMockSignalWorkflowStore()
 
@@ -265,18 +309,37 @@ func TestSignalDeliveryTwiceOverwrites(t *testing.T) {
 		t.Fatalf("second DeliverSignal: %v", err)
 	}
 
-	// Only the latest version should be present.
-	payload, found, err := store.PollAndClaimSignal(ctx, "wf-005", "status_update")
+	// Both are present, oldest first.
+	payload, found, err := store.pollAndConsume(ctx, "wf-005", "status_update")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("first pollAndConsume: %v", err)
 	}
 	if !found {
-		t.Fatal("expected signal to be found")
+		t.Fatal("expected the first delivery to be found")
+	}
+	if payload != `{"status":"pending"}` {
+		t.Errorf("expected the FIRST payload %q, got %q", `{"status":"pending"}`, payload)
+	}
+
+	payload, found, err = store.pollAndConsume(ctx, "wf-005", "status_update")
+	if err != nil {
+		t.Fatalf("second pollAndConsume: %v", err)
+	}
+	if !found {
+		t.Fatal("expected the second delivery to be found -- it was discarded by the overwrite this test used to assert")
 	}
 	if payload != `{"status":"completed","result":"ok"}` {
-		t.Errorf("expected latest payload %q, got %q",
+		t.Errorf("expected the SECOND payload %q, got %q",
 			`{"status":"completed","result":"ok"}`, payload)
 	}
+
+	// And nothing else.
+	if _, found, err = store.pollAndConsume(ctx, "wf-005", "status_update"); err != nil {
+		t.Fatalf("third pollAndConsume: %v", err)
+	} else if found {
+		t.Fatal("expected the queue to be empty after both deliveries were consumed")
+	}
+
 	if store.deliverCount != 2 {
 		t.Errorf("expected deliverCount=2, got %d", store.deliverCount)
 	}
@@ -305,9 +368,9 @@ func TestSignalDeliveryToNonExistentWorkflow(t *testing.T) {
 	}
 
 	// Verify the signal was stored and can be polled.
-	payload, found, err := store.PollAndClaimSignal(ctx, "non-existent-workflow-id", "test_signal")
+	payload, found, err := store.pollAndConsume(ctx, "non-existent-workflow-id", "test_signal")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal after delivery: %v", err)
+		t.Fatalf("pollAndConsume after delivery: %v", err)
 	}
 	if !found {
 		t.Fatal("expected signal to be found even for non-existent workflow")
@@ -327,9 +390,9 @@ func TestSignalDeliveryToNonExistentWorkflow(t *testing.T) {
 	}
 
 	// Both signals should be independently pollable.
-	payload, found, err = store.PollAndClaimSignal(ctx, "non-existent-workflow-id", "another_signal")
+	payload, found, err = store.pollAndConsume(ctx, "non-existent-workflow-id", "another_signal")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal second signal: %v", err)
+		t.Fatalf("pollAndConsume second signal: %v", err)
 	}
 	if !found {
 		t.Fatal("expected second signal to be found")
@@ -351,30 +414,34 @@ func TestPollSignalForNeverDeliveredSignal(t *testing.T) {
 	store := newMockSignalWorkflowStore()
 
 	// Poll for a signal that was never delivered — should return not found.
-	payload, found, err := store.PollSignal(ctx, "wf-never", "never_delivered")
+	d, found, err := store.PollSignal(ctx, "wf-never", "never_delivered")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if found {
 		t.Fatal("expected found=false for never-delivered signal")
 	}
-	if payload != "" {
-		t.Errorf("expected empty payload, got %q", payload)
+	if d.Payload != "" {
+		t.Errorf("expected empty payload, got %q", d.Payload)
+	}
+	if d.ID != 0 {
+		t.Errorf("expected zero id alongside found=false, got %d", d.ID)
 	}
 	if store.pollCount != 1 {
 		t.Errorf("expected pollCount=1, got %d", store.pollCount)
 	}
 
-	// Verify PollAndClaimSignal also returns not found.
-	_, found, err = store.PollAndClaimSignal(ctx, "wf-never", "never_delivered")
+	// Verify the await path's poll-then-consume also returns not found, and
+	// consumes nothing.
+	_, found, err = store.pollAndConsume(ctx, "wf-never", "never_delivered")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("pollAndConsume: %v", err)
 	}
 	if found {
-		t.Fatal("expected PollAndClaimSignal to return not-found for never-delivered signal")
+		t.Fatal("expected pollAndConsume to return not-found for never-delivered signal")
 	}
-	if store.claimCount != 1 {
-		t.Errorf("expected claimCount=1, got %d", store.claimCount)
+	if store.consumeCount != 0 {
+		t.Errorf("expected consumeCount=0 when nothing was found, got %d", store.consumeCount)
 	}
 
 	// Verify that after delivering a signal, PollSignal returns it.
@@ -383,15 +450,18 @@ func TestPollSignalForNeverDeliveredSignal(t *testing.T) {
 		t.Fatalf("DeliverSignal: %v", err)
 	}
 
-	payload, found, err = store.PollSignal(ctx, "wf-never", "now_delivered")
+	d, found, err = store.PollSignal(ctx, "wf-never", "now_delivered")
 	if err != nil {
 		t.Fatalf("PollSignal after delivery: %v", err)
 	}
 	if !found {
 		t.Fatal("expected found=true after delivery")
 	}
-	if payload != `{"status":"ok"}` {
-		t.Errorf("expected payload %q, got %q", `{"status":"ok"}`, payload)
+	if d.Payload != `{"status":"ok"}` {
+		t.Errorf("expected payload %q, got %q", `{"status":"ok"}`, d.Payload)
+	}
+	if d.ID == 0 {
+		t.Error("a found delivery must carry a non-zero id: ConsumeSignal has nothing else to address")
 	}
 
 	// Polling for a completely different signal name should still return not found.

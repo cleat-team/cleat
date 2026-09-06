@@ -2079,9 +2079,11 @@ func (m *mockCancellationStore) DeliverSignal(_ context.Context, _, _, _ string)
 	return nil
 }
 
-func (m *mockCancellationStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
-	return "", false, nil
+func (m *mockCancellationStore) PollSignal(_ context.Context, _, _ string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
+
+func (m *mockCancellationStore) ConsumeSignal(_ context.Context, _ string, _ int64) error { return nil }
 
 func TestPollCancellationReplay(t *testing.T) {
 	s := newTestExecSession()
@@ -2527,9 +2529,11 @@ func (m *mockSignalStore) DeliverSignal(_ context.Context, workflowID, signalNam
 	return m.deliverErr
 }
 
-func (m *mockSignalStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
-	return "", false, nil
+func (m *mockSignalStore) PollSignal(_ context.Context, _, _ string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
+
+func (m *mockSignalStore) ConsumeSignal(_ context.Context, _ string, _ int64) error { return nil }
 
 func (m *mockSignalStore) PollCancellation(_ context.Context, _ string) (bool, string, error) {
 	return false, "", nil

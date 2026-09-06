@@ -1429,8 +1429,8 @@ func (s *stubWorkflowStore) CheckCancellation(ctx context.Context, workflowID st
 func (s *stubWorkflowStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	return nil
 }
-func (s *stubWorkflowStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return "", false, nil
+func (s *stubWorkflowStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	return nil
 }
 func (s *stubWorkflowStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
 	return "", false, nil
@@ -1447,8 +1447,8 @@ func (s *stubWorkflowStore) GetChildResult(ctx context.Context, runID string) (s
 func (s *stubWorkflowStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
 	return 0, nil
 }
-func (s *stubWorkflowStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return "", false, nil
+func (s *stubWorkflowStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
 func (s *stubWorkflowStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	return false, "", nil
