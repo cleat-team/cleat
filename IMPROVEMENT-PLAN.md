@@ -5320,6 +5320,173 @@ field of their own.
 Not started here: `wasm/usage.go` is being edited concurrently by #786, and two changes to that
 table at once is the R6 collision WORKSTREAM.md warns about.
 
+### 3.225 Nothing compiled the generated adapter, and an eighth method turned up when something did — 🟢 **GUARD ADDED 2026-09-06**; the method it found was closed by #786 (WS-1, 2026-09-06)
+
+Two failures on 2026-09-05, hours apart, both one-line compile errors in generated code, both
+caught only by CI:
+
+  * **#780** — a comment mentioning `strings.Index` made `patchAdapterImports` inject an import
+    nothing referenced; every guest build failed with `"strings" imported and not used`.
+  * **#786** (conformance-port session) — a wrapper row invented a closure field carrying a
+    parameter the inner import's body never reads; **eleven** CI jobs failed with
+    `declared and not used: heartbeatIntervalMs`.
+
+**Neither was visible to a unit test, and #786's own new unit test passed throughout.** It asserted
+that each wrapper ends up with the right *import* — true after the broken change; the *field* was
+the problem. Third instance in one day of a guard measuring the legible half of a two-halved thing
+(cf. §3.223's engine-versus-guest, and the port session's payload-carriage-versus-column-persistence
+in #777).
+
+The generator's tests assert on emitted **text** — `strings.Contains(code, "func parseChildResultArray")`
+— and the emitted file is only really checked by *building a guest*, which happens in integration
+jobs, for one fixture, using whichever calls that fixture happens to make.
+
+`TestEveryAdapterDefCompiles` (`wasm/adapter_compiles_test.go`) closes that: it builds a synthetic
+`UsageInfo` naming **every** `adapterDefs` and `hostWrapperDefs` entry, runs the real
+`PrepareBuildDir`, and compiles the result for `wasip1`. Covering every def rather than a fixture's
+subset is the point — the failure mode is one field in isolation, so a fixture that does not use
+that field cannot see it. Known-positive: giving `DurableLog`'s def a parameter its body never
+reads turns it red (with a signature mismatch rather than an unused-variable error, since that
+field's type is pinned by `HostCallsOptions` — either way, generated code that does not compile).
+
+## What it found on its first run
+
+`DurableCallTypedWithOptions` has an adapter definition and **no `hostFunctions` row**, so no build
+can ever emit it. Verified the way §3.224's seven were — by compiling a workflow whose only host
+call is that method:
+
+    Generating WASM imports (0 host functions used)... OK
+    gen_wasm_imports.go: cleat_complete, cleat_poll_work
+
+Zero. Only the wasip1 handshake. It is public (`cleat/runtime.go:64`), has a `HostCallsOptions`
+field, a `HostCallsImpl` method, a `hostWrapperDefs` entry, and appears in `cleat/localdev`.
+
+**That makes it an eighth instance of §3.224, and the worst of them.** The other seven are
+signalling, scoping and scheduling. This one is a **durable call** — the operation the system
+exists to provide. A durable call that silently does not happen leaves the workflow proceeding as
+though the external effect occurred.
+
+## Closed by #786, and the assertion is live
+
+`compositeRequires` (added by #786) covers `DurableCallTypedWithOptions`, so the call now happens.
+Proven on the branch by the port session, not recalled:
+
+    before:  Generating WASM imports (0 host functions used)  -> cleat_complete, cleat_poll_work
+    after:   Generating WASM imports (14 host functions used) -> cleat_call, cleat_call_retry,
+                                                                 cleat_sleep, ...
+
+The guard's reachability check is therefore an assertion (`t.Errorf`), not a report — but it had to
+learn to read **both** tables first, and the distinction is the one #786 exists to make.
+`hostFunctions` is bidirectional: a row requests an import **and** emits a field named `FieldName`
+implemented by that import's body. `compositeRequires` only requests imports, for SDK-level
+wrappers that must *not* get a field. **Checking `hostFunctions` alone reported
+`DurableCallTypedWithOptions` as unreachable when it is reachable through the second table** —
+so the first version of this assertion would have been a false positive on a fixed tree.
+
+Falsified by deleting `{"cleat_log", "DurableLog"}` from `hostFunctions`: red, naming `DurableLog`.
+
+**It is fixed by wiring the fallback, which is not the same as fixed properly, and the difference is
+a live determinism defect that #786 made reachable.**
+
+`HostCallsImpl.DurableCallTypedWithOptions` (`cleat/runtime.go:1177`) checks its own
+`HostCallsOptions` field first and only falls through to an SDK implementation over
+`DurableCallWithOptions` when that field is nil. `compositeRequires` wires the **fallback's**
+imports; it does not emit the field. **Measured, on a guest compiled from a workflow whose only
+host call is that method with a `Timeout` set:**
+
+    Generating WASM imports (14 host functions used)... OK
+    imports:  cleat_call, cleat_call_retry, cleat_sleep, cleat_complete, cleat_poll_work
+    grep -c DurableCallTypedWithOptions gen_host_adapter.go   ->  0
+
+Zero. No field is emitted, so `h.durableCallTypedWithOptions` is nil in every compiled Go guest and
+**the fallback is the path that runs.** That fallback is:
+
+    ch := make(chan callResult, 1)
+    go func() { ... h.DurableCallWithOptions(...) ... }()
+    select {
+    case r := <-ch:                     // the durable call finished
+    case <-time.After(opts.Timeout):    // WALL CLOCK, inside a workflow
+        return &CallTimeoutError{...}
+    }
+
+The durable call records its event whichever branch wins, because the goroutine makes it before the
+select resolves. **So the original run and the replay can take different branches**: on replay the
+call returns from history immediately, `<-ch` wins, and the workflow receives the response where the
+original received `CallTimeoutError`. Different branch, different subsequent host calls.
+
+**One of two things is true and which one is not measured.** Either the timer can preempt a
+blocking `//go:wasmimport` under wasip1 — in which case the divergence above is real — or it
+cannot, in which case `opts.Timeout` never fires and is **silently ineffective**. Both are defects;
+this section does not claim to know which. What it does claim, and has measured, is that the
+fallback is what a Go guest runs.
+
+Note the direction: this was harmless while the method was unreachable (§3.224's eighth instance).
+**Making it reachable is what made the hazard live**, which is the ordinary cost of fixing a wiring
+gap and an argument for emitting the field rather than wiring the fallback. Emitting it is a
+`hostFunctions` row plus an `adapterDefs` entry — the §3.224 recipe — and removes the question
+entirely, because the direct path has no goroutine and no `time.After`.
+
+`cleat vet` will not help: its rules scan the user's workflow code, and this `go` statement is in
+the SDK. That is a **scope** the tool does not have rather than a rule it is missing, and it is the
+second instance of the same limit — E003 told authors to use `h.Now()` for deterministic time and
+could not see that `h.Now()` was itself the broken clock (#776, #787).
+
+## It is not one obscure method: `DurableCallWithOptions` is the same, and it is mainstream
+
+Checked because the fix looked like a one-line recipe and the port session asked what would enforce
+`opts.Timeout` afterwards. **The answer widened the defect rather than the fix.**
+
+`HostCallsImpl.DurableCallWithOptions` (`cleat/runtime.go:1013`) has the identical shape — field
+check first, then a fallback that spawns a goroutine and selects it against
+`time.After(opts.Timeout)`. And it is in `hostWrapperDefs`, not `adapterDefs`, so **no field is
+emitted for it either.** Measured on a guest whose only host call is
+`h.DurableCallWithOptions(CallOptions{Timeout: 5 * time.Second}, ...)`:
+
+    Generating WASM imports (5 host functions used)... OK
+    emitted adapter fields:  DurableCallWithRetry, DurableSleep, DurableSleepMs
+
+No `DurableCallWithOptions`. So the fallback runs for **every Go workflow that calls
+`DurableCallWithOptions` with a timeout** — a documented, mainstream API, not the obscure typed
+variant this section started from. `DurableCallJSONWithOptions` is in the same map and worth
+checking the same way.
+
+## So do NOT emit the field — the ABI has nowhere to put the deadline
+
+Emitting a field for these delegates to `cleat_call` or `cleat_call_retry`, and **neither carries a
+per-call deadline**:
+
+    cleat_call        (svc, op, req, resp)                                    engine/imports.go:158
+    cleat_call_retry  (svc, op, req, maxAttempts, initialIntervalMs,
+                       backoffCoefficient100x, maxIntervalMs,
+                       nonRetryableErrorsJSON, resp)                          engine/imports.go:324
+
+Retry policy, not a deadline. `cleat_await_signals` is the only call in this family that takes a
+`timeoutMs`. So emitting the field would **silently drop `opts.Timeout`** — trading a determinism
+defect for a quieter dropped-option one, which is worse.
+
+The real fix is a host-side deadline, and **it is a semantics decision before it is a signature
+one** — a distinction worth stating because "add a `timeoutMs` parameter" looks like the whole job
+and is not. `cleat_await_signals` already carries `timeoutMs`, so a deadline can cross the ABI
+today; the open question is what it *means* on the host. A durable call's timeout has to be
+**replayable**: the second execution must reach the same verdict as the first, or the divergence
+this section is about has simply been rebuilt somewhere new. That points at recording the timeout
+*outcome* in the call event rather than re-evaluating a deadline against a fresh clock.
+
+**And the guest-visible clock is not currently fit for it.** Measured by the conformance-port
+session while writing the replay-determinism test: `h.Now()` does **not advance across a
+suspension** — 3ms observed across a 3000ms sleep, because it returns the previous event's
+timestamp and the sleep event is stamped when the sleep *begins*. A host-side deadline needs a clock
+that moves; anything built on the current one would measure the wrong interval. Related, and also
+still open after #787: `seedNowMs` takes the session seed from `replayHistory[0]` on a resume and
+from the wall clock on a first execution, so a workflow whose **first** action reads the clock still
+diverges (109ms measured). #787 fixed events after the first, which is what made the replay test
+possible; it did not close that leg.
+
+**Recorded here rather than attempted**, because it is a different size of change from §3.224's
+seven and needs those two answers first.
+
+
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
