@@ -1540,9 +1540,14 @@ func TestMSSQLStore_CreatePromise_Duplicate(t *testing.T) {
 }
 
 func TestMSSQLStore_ResolvePromise_Success(t *testing.T) {
+	// affected: 1 -- the settle must match a row. Settling a promise that does
+	// not exist now returns ErrPromiseNotFound rather than nil
+	// (IMPROVEMENT-PLAN 3.233), and the mock's default of zero rows is exactly
+	// the "settled nothing" case, so leaving it unset made this test assert the
+	// opposite of its own name.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET status = 'resolved'"},
-		{match: "SET next_wake_at"},
+		{match: "SET status = 'resolved'", affected: 1},
+		{match: "SET next_wake_at", affected: 1},
 	})
 	defer db.Close()
 
@@ -1554,9 +1559,14 @@ func TestMSSQLStore_ResolvePromise_Success(t *testing.T) {
 }
 
 func TestMSSQLStore_RejectPromise_Success(t *testing.T) {
+	// affected: 1 -- the settle must match a row. Settling a promise that does
+	// not exist now returns ErrPromiseNotFound rather than nil
+	// (IMPROVEMENT-PLAN 3.233), and the mock's default of zero rows is exactly
+	// the "settled nothing" case, so leaving it unset made this test assert the
+	// opposite of its own name.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET status = 'rejected'"},
-		{match: "SET next_wake_at"},
+		{match: "SET status = 'rejected'", affected: 1},
+		{match: "SET next_wake_at", affected: 1},
 	})
 	defer db.Close()
 

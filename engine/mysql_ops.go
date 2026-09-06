@@ -48,12 +48,15 @@ func (s *MySQLStore) CreatePromise(ctx context.Context, workflowID, promiseName,
 // Also wakes the workflow instance so it can pick up the resolved promise
 // on the next poll cycle instead of waiting for the original timeout.
 func (s *MySQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = ?, result = ?, resolved_at = NOW(6)
 		WHERE workflow_id = ? AND promise_id = ? AND tenant_id = ?
 	`, "resolved", result, workflowID, promiseID, s.tenantID)
 	if err != nil {
 		return err
+	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return fmt.Errorf("resolve promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = NOW(6)
@@ -66,12 +69,15 @@ func (s *MySQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, 
 // Also wakes the workflow instance so it can pick up the rejected promise
 // on the next poll cycle instead of waiting for the original timeout.
 func (s *MySQLStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = ?, error_msg = ?, resolved_at = NOW(6)
 		WHERE workflow_id = ? AND promise_id = ? AND tenant_id = ?
 	`, "rejected", errMsg, workflowID, promiseID, s.tenantID)
 	if err != nil {
 		return err
+	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = NOW(6)
