@@ -4608,6 +4608,38 @@ Send `"approve"` twice before the workflow consumes it and the first payload is 
 error. Any workflow that accumulates — a counter, one approval per reviewer, a batch of items —
 silently receives only the last. **This is data loss on the ordinary path, not a race.**
 
+### And a counting consumer does not get a wrong answer — it hangs
+
+The severity is not only the lost payload. A consumer that awaits N signals of one name counts them
+in, so losing one means the count never completes:
+
+    received := 0
+    for received < len(pending) {
+        signal := h.AwaitSignals([]string{"agent_result"}, timeout)
+
+The second delivery overwrites the first, `received` never reaches `len(pending)`, and the loop
+returns to `AwaitSignals` for a row that no longer exists. It then **blocks until the phase timeout**
+— minutes to half an hour — before breaking. Silent loss *plus* a stall.
+
+**The window is much wider than "two writes in the same instant", and that part is verifiable
+here.** `PollAndClaimSignal` consumes destructively (`DELETE … RETURNING`, `engine/store_signals.go:67`)
+and `AwaitSignals` **suspends** the workflow (`engine/signaller.go:115`). So the window in which a
+second delivery can overwrite an unconsumed first spans delivery → `next_wake_at` → worker claim →
+replay → poll. For tasks started together doing comparable work, finishing inside that window is
+the likely case, not the unlikely one.
+
+That also sharpens the idempotency requirement noted below: whatever replaces the primary key has
+to let a counting consumer distinguish **N distinct results** from **one result retried N times**.
+An application that has to solve this itself ends up putting a correlation ID in the payload.
+
+**Provenance, stated because I cannot check half of it.** The counting-loop shape, the timeout
+figures and the application-level correlation ID come from the conformance-port session reading
+`cleat-team/clew`, which is private and not in this checkout — I have not verified them and they
+are theirs. The mechanism half above *is* verified here: the destructive consume and the suspend are
+both in this tree at the lines cited. The same session also **retracted** its first example, a
+`child_done` signal that turned out to have no consumer at all; that retraction is recorded in
+§3.216 rather than dropped.
+
 ## (c) `cleattest` queues signals, so the test double cannot see (b)
 
 `cleat/cleattest/cleattest.go:281`:
