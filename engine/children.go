@@ -196,6 +196,13 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		// The store already wrote it to event_history atomically;
 		// the later flush will skip it via ON CONFLICT DO NOTHING.
 		rec.RunID = runID
+
+		// Advance the checksum chain. The store computed exactly this value
+		// when it wrote the row; this path replicates recordEvent's other
+		// bookkeeping (history, nowMs, stepCount) and used to omit the chain,
+		// so the next event recorded chained from a stale predecessor.
+		s.lastChecksum = computeEventChecksum(rec, s.lastChecksum)
+
 		s.history = append(s.history, rec)
 		s.nowMs = rec.TimestampMs
 		s.stepCount++

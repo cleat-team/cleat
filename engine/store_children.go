@@ -92,13 +92,33 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		return "", fmt.Errorf("start child workflow atomic: previous checksum: %w", err)
 	}
 	checksum := computeEventChecksum(event, prevCS)
+
+	// The payload column, which this INSERT used to omit.
+	//
+	// It is not a duplicate of the named columns. eventRecordToPayload is what
+	// the checksum is computed over, and for child_workflow it covers
+	// parent_workflow_id and parent_close_policy -- neither of which has a
+	// column on event_history. LoadEventHistory restores those fields by
+	// calling populateFromPayload on this column; with the column NULL they
+	// come back empty, VerifyWorkflowEvents recomputes the checksum without
+	// them, and it cannot match what was written here. Every workflow that
+	// spawned a child failed verification, deterministically.
+	//
+	// Plaintext, matching the batch write path: see the note on
+	// PostgresStore.encryption for why encryption is confined to flushEvent.
+	payloadJSON, _ := eventRecordToPayload(event)
+	payloadArg := nullStr("")
+	if len(payloadJSON) > 0 {
+		payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
+	}
+
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id, payload)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (workflow_id, step) DO NOTHING
 	`, parentID, event.Step, string(event.EventType),
 		nullStr(event.ChildName), nullStr(event.ChildInput), nullStr(childID),
-		time.UnixMilli(event.TimestampMs), checksum, s.tenantID)
+		time.UnixMilli(event.TimestampMs), checksum, s.tenantID, payloadArg)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
 	}
