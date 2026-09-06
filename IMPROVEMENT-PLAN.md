@@ -5112,6 +5112,106 @@ normal case for a fan-in that polls after a wait. Resolving it needs a completio
 can report and replay can reproduce; `workflow_instances` has no completed-at ordering that is
 currently read for this.
 
+### 3.223 The Go SDK's `Scoper` never reaches the host, so it takes no lock — 🟡 **DOCUMENTED 2026-09-05, GAP OPEN** (WS-1, 2026-09-05)
+
+Started as a stale-comment cleanup and turned into a parity gap. **The first version of this
+section was wrong in the flattering direction and is corrected below rather than preserved.**
+
+`docs/reference/sdk-api.md` lists `Scoper` among the SDK interfaces, which prompted "does this
+still exist after §3.216 deleted the state family?" It does, and the ENGINE half is entirely live:
+`freshSetScope` (`engine/scope.go`) takes a concurrency key `vo:<objectType>:<instanceKey>` and
+releases it on clear or replace, with replay bookkeeping split deliberately between releasing and
+forgetting.
+
+**So I wrote a comment saying "on a worker the engine takes a concurrency key" — and did not check
+that a Go guest can ask it to.** It cannot.
+
+    grep -n "Scope" cleat/runtime.go            # Scoper interface, no HostCallsOptions field
+    grep -n "SetScope" wasm/usage.go            # no row in hostFunctions
+    grep -n "SetScope" wasm/adapter_metadata.go # no adapter def
+
+`HostCallsImpl.SetScope` sets three local fields and returns. There is nothing to generate a call
+to `cleat_set_scope`, so the host is never told and **no lock is taken**. Combined with §3.216
+removing the state calls the prefix used to prefix, the Go SDK's three `Scoper` methods are now a
+local variable with an interface around it.
+
+**Confirmed by compilation, which is stronger than the greps above.** The conformance-port session
+built a Go workflow whose entire body is `h.SetScope(obj, key)` plus one log, and read the produced
+binary:
+
+    imports wired:   cleat_complete, cleat_log, cleat_poll_work
+    adapter fields:  DurableLog
+
+So it is not merely that the lock is not taken — **`cleat_set_scope` is not in the binary at all**,
+and `HostCallsImpl.SetScope` sets its three fields against a host call that was never generated.
+The static reading and the compiled artifact agree, which is the pair worth having: the tables say
+it cannot be wired, and the binary shows it was not.
+
+**Go is alone in this.** Verified at declaration and call sites, not by name search:
+
+| SDK | binding |
+|---|---|
+| Rust | `pub fn cleat_set_scope` (`crates/cleat-sdk/src/host_calls.rs:195`), called at `:943`, `:988` |
+| Java | `@Import(module = "env", name = "cleat_set_scope")` (`crates/cleat-java/.../HostCalls.java:266`) |
+| AssemblyScript | `@external("env", "cleat_set_scope")` (`packages/cleat-as/assembly/host-calls.ts:582`), called at `:2053`, `:2117` |
+| Python | a stub only (`python-sdk/cleat_sdk/host_calls.py:3275`) — **not verified as wired** |
+| **Go** | **nothing** |
+
+So virtual-object mutual exclusion works from three SDKs and silently does not from the one this
+repo's own examples are written in.
+
+**This is an instance of a larger, measured gap.** `cleat build` picks a Go guest's imports by
+scanning the user's AST against `wasm/usage.go`'s `hostFunctions` table, so an export with no row
+there can never be wired. Re-derive:
+
+    python3 - <<'EOF'
+    import re
+    u=open('wasm/usage.go').read(); i=u.index('var hostFunctions = []HostFunction{'); j=u.index('\n}', i)
+    rows=re.findall(r'\{"([^"]+)",\s*"([^"]+)"\}', u[i:j])
+    imports={r[0] for r in rows}
+    e=set(re.findall(r'\.Export\("([^"]+)"\)', open('engine/imports.go').read()))
+    print(len(e), len(imports), sorted(e-imports))
+    EOF
+
+Measured 2026-09-05: the engine exports **52**, the table names **35** distinct imports across
+**53 rows** and **51 method names** (many-to-one is normal — `cleat_call` alone serves nine
+methods), and **17 exports have no row at all**. Excluding D12's three non-workflow calls, **14
+workflow-facing exports are unreachable from a Go guest**: `cleat_fetch`, `cleat_get_scope`,
+`cleat_json_parse`, `cleat_json_stringify`, `cleat_reject_promise`, `cleat_reply_to_signal`,
+`cleat_resolve_promise`, `cleat_run_detached`, `cleat_schedule_invoke`, `cleat_send`,
+`cleat_send_signal_and_wait`, `cleat_set_scope`, `cleat_signal_workflow`, `cleat_uuid`.
+
+**That list is not 14 defects and must not be reported as such.** Some are plausibly
+external-only by design — promises are normally resolved by an API caller, not by the workflow that
+created them. Each needs triage against whether the SDK exposes a public method for it, which is
+the discriminator: `Scoper` is a defect precisely because the method is public, documented, and
+inert. Triage is not done here.
+
+**It is the import-space half of the conformance session's #775**, which measured the same
+mechanism in method-space and found ten public methods with no row — `h.NewUUID()` returning
+`00000000-0000-4000-8000-000000000000` in every compiled workflow because `cleat_random` is never
+wired. The two counts are different denominators of one defect and neither subsumes the other:
+`NewUUID` is missing from the table as a METHOD, and `cleat_uuid` is missing as an IMPORT.
+
+**Two method notes worth keeping.**
+
+The first count I derived for the table was **53**, from a regex that also matched unrelated
+`{"x", "Y"}` pairs elsewhere in the file; a tighter one gave **35**. Both were "right" about what
+they matched and neither was the number I wanted, which is *distinct imports*. Parsing the
+`hostFunctions` block by its delimiters rather than grepping the file resolved it — and the three
+figures (53 rows, 51 methods, 35 imports) are all true of the same table.
+
+And the earlier claim about `cleat/embedded` survives, sharpened: its `setScope` does not touch the
+in-memory lock map that its own `AcquireLock` uses.
+
+    sed -n '/func (e \*execution) setScope/,/^}/p' cleat/embedded/runner.go | grep -c 'locks'   # 0
+    grep -c 'e\.locks' cleat/embedded/runner.go                                                 # 3
+
+The first command I wrote there was `grep -c concurrencyKey` → **0**, which invited "the runner has
+no locking, so of course scope takes none." A looser read found `// lock state (in-memory
+concurrency keys)`. **The strict grep flattered the conclusion I was already writing** — the same
+direction as the engine-side error at the top of this section, twice in one change.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

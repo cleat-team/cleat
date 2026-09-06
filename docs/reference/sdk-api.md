@@ -555,7 +555,25 @@ GetScope() (objectType, instanceKey string)
 ClearScope() (previousScope string)
 ```
 
-Manages virtual object instance scoping for concurrency control.
+Manages virtual object instance scoping. In the **engine**, entering a scope
+takes a concurrency key named `vo:<objectType>:<instanceKey>` and holds it until
+the scope is cleared or replaced, so two workflows cannot be inside the same
+instance at once.
+
+> **Gap — the Go SDK does not reach that.** `SetScope`, `GetScope` and
+> `ClearScope` set local fields and never call `cleat_set_scope`: there is no
+> `HostCallsOptions` field, no row in `wasm/usage.go`, and no adapter
+> definition, so nothing generates the host call. **A Go workflow calling
+> `SetScope` takes no lock.** Rust, Java and AssemblyScript all bind and call
+> the import. See IMPROVEMENT-PLAN §3.223.
+>
+> `cleat/embedded` is inert for a separate reason: its scope does not touch the
+> in-memory lock map that its own `AcquireLock` uses.
+
+The returned string is an **opaque token** for stack-style save/restore — pass
+it back, do not parse it. It has the shape `vo:<objectType>:<instanceKey>:`
+because it once prefixed `SetState`/`GetState` keys; those calls were removed on
+2026-09-05 and the shape is vestigial.
 
 ---
 
