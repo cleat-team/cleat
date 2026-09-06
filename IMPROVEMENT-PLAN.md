@@ -5655,7 +5655,7 @@ but does not have a HostCalls parameter."* A shipped example that the project's 
 is either a broken example or a false positive in `cleat vet`, and which it is has not been
 established here.
 
-### 3.228 Six of the eight Go example workflows do not build — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+### 3.228 Six of the eight Go example workflows do not build — 🟢 **ALL EIGHT BUILD, AND A TEST NOW SAYS SO 2026-09-06** (WS-1, 2026-09-06)
 
 Found by pulling on §3.227's loose end: `ci-check.sh`'s vet step failed, and one of the things it
 could have been pointed at was `./examples/dag`, which turned out to fail too.
@@ -5721,6 +5721,27 @@ inside a workflow and is rejected by the project's own E003, the rule that exist
 
     // Build:
     //	cleat build -o /tmp/out ./examples/dag/
+
+## Closed
+
+All eight build, and `TestEveryGoExampleBuilds` (`cmd/cleat`) compiles every one on every run —
+about seven seconds wall clock, in parallel. Four fixes and two tooling defects:
+
+| | |
+|---|---|
+| #801 | `datapipeline`, `travel`, `onboarding` returned a struct pointer |
+| #802 | `event-driven`: `time.Now()`, and a struct return hidden behind it |
+| #805 | `fooddash`: three more struct returns, hidden behind a threading error |
+| #800 | `cleat vet` now rejects a non-string entry-point result up front |
+| #807 | the threading check credits HostCalls in a parameter's struct field (§3.229) |
+| #809 | the build gate no longer fails on pre-transform reports; auto-threading no longer renames the SDK import (§3.229, §3.230) |
+
+**Which directories are workflows is decided by building them**, not by a pattern: there is no
+`//cleat:entry` marker to look for — `IsEntryPoint` says an entry point is an exported non-method
+function whose first parameter is `cleat.HostCalls` — so the test treats the tool's own
+"no workflow entry points found" as "not a workflow". `third-party-plugin` is the one such
+directory. A floor of five guards the vacuous case, because "every example built" is also what a
+run that built nothing reports.
 
 ## Why this rotted: they are valid Go, and nothing compiles them to WASM
 
