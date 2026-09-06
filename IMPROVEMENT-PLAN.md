@@ -4815,6 +4815,62 @@ generated UUIDs, so a duplicate is unreachable in practice. **The swallowed erro
 away was the live defect, and it is dialect-independent.** Worth recording as a method note: the
 sweep's value was not the answer to the question it asked.
 
+### 3.219 The three `event_history` inserts diverge on the recovery path, and MySQL's comment described a Postgres that does not exist — 🟡 **COMMENT FIXED, DIVERGENCE OPEN 2026-09-05** (WS-1, 2026-09-05)
+
+All three dialects key `event_history` on `(workflow_id, step)`. The inserts differ:
+
+| dialect | clause | on a re-flush of an incomplete step |
+|---|---|---|
+| postgres | `ON CONFLICT (workflow_id, step) DO UPDATE SET response, error WHERE event_history.response = '' AND event_history.error IS NULL` (`adaptive_flush.go:384`) | **completes the row** |
+| mysql | `INSERT IGNORE` (`mysql_events.go:54`) | discards the write |
+| mssql | `INSERT … SELECT … WHERE NOT EXISTS` | discards the write |
+
+Postgres's is a *conditional* upsert: it fills in a row that was written without a result and leaves
+finished rows immutable, so a lost completion self-heals. The other two do not.
+
+**Bounded, because the alarming reading is wrong.** "Postgres upserts, the other two ignore, on the
+event history table" sounds like MySQL and SQL Server never persist a call's result. They do:
+`CompleteCallIntent` is a separate statement and is equivalent across all three dialects, so the
+normal completion path is uniform. The divergence is confined to the recovery path where a
+completion was lost and the step is flushed again. The conformance-port session built the larger
+claim, checked it, and withdrew it before sending — recorded here because the withdrawn version is
+the one a retelling would keep.
+
+## What is fixed here is the comment
+
+`mysql_events.go` said:
+
+    // MySQL uses INSERT IGNORE instead of ON CONFLICT DO NOTHING.
+
+**Postgres does not `DO NOTHING`.** The MySQL implementation was written against a mistaken reading
+of the semantics it was mirroring, and the comment would have sent the next person reconciling the
+three toward the wrong target — which, after §3.217's dialect work, is a likely next task. The
+comment now states the real clause, the real difference, and that the divergence is open.
+
+## Not settled here
+
+Whether the recovery paths should be reconciled, and in which direction. Postgres's self-heal is the
+more forgiving behaviour, but "more forgiving" is not automatically correct: a conditional upsert
+that fills in `response` is a write to history, and history is the thing replay trusts. That
+deserves its own decision rather than a sweep making all three match the one that looks nicest.
+
+## Method note, which outlived the finding
+
+The classifier that found this had two false positives, and their *direction* is the transferable
+part. `WriteCallIntent` flagged because it matched the string "No ON CONFLICT here" **inside a
+comment**; `StartNewRun` flagged because MSSQL delegates to a helper the classifier did not follow.
+Stripping comments and resolving one level of same-receiver delegation moved five of eight
+unclassified operations to "same".
+
+**A classifier that reads comments as code and ignores delegation mis-ranks exactly the code that
+has been thought about hardest** — because that is the code carrying explanatory comments and
+extracted helpers. Same family as the `cleat_` prefix in §3.213 and the `\.Method(` pattern in #769:
+the tool's blind spot correlates with what you are looking for.
+
+Final sweep tally: 125 multi-dialect operations compared, 12 flagged, **2 real (one latent), 1 known
+(§3.217's update divergence), 9 artifacts**. No second instance of the update-request defect. The
+three-dialect split both sessions expected to be widespread is narrow.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

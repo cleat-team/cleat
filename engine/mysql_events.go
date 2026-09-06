@@ -48,8 +48,29 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 		return nil
 	}
 
-	// MySQL uses INSERT IGNORE instead of ON CONFLICT DO NOTHING.
-	// The unique key on (workflow_id, step) prevents duplicates.
+	// MySQL uses INSERT IGNORE. The unique key on (workflow_id, step) prevents
+	// duplicates.
+	//
+	// THIS COMMENT USED TO SAY "instead of ON CONFLICT DO NOTHING", AND
+	// POSTGRES DOES NOT DO NOTHING. adaptive_flush.go:384 is a CONDITIONAL
+	// UPSERT:
+	//
+	//	ON CONFLICT (workflow_id, step) DO UPDATE
+	//	  SET response = EXCLUDED.response, error = EXCLUDED.error
+	//	  WHERE event_history.response = '' AND event_history.error IS NULL
+	//
+	// so on Postgres a re-flush COMPLETES a row that was written without a
+	// result, while leaving finished rows immutable. INSERT IGNORE discards
+	// that write, as does MSSQL's INSERT ... SELECT ... WHERE NOT EXISTS. The
+	// three dialects therefore agree on the normal path -- CompleteCallIntent
+	// is a separate statement and is equivalent across all three -- and differ
+	// only on the RECOVERY path where a completion was lost and the step is
+	// flushed again. Postgres self-heals there; the other two do not.
+	//
+	// Whether that divergence should be closed is open. What is not open is
+	// that the comment described a semantics Postgres has never had, so anyone
+	// reconciling the three from this file would have reconciled toward the
+	// wrong target. IMPROVEMENT-PLAN 3.219.
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT IGNORE INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
