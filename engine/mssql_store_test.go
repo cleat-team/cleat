@@ -1552,7 +1552,7 @@ func TestMSSQLStore_ResolvePromise_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
-	err := store.ResolvePromise(context.Background(), "wf-1", "promise-uuid-1", `{"result":"ok"}`)
+	err := store.ResolvePromise(context.Background(), "promise-uuid-1", `{"result":"ok"}`)
 	if err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
@@ -1571,7 +1571,7 @@ func TestMSSQLStore_RejectPromise_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
-	err := store.RejectPromise(context.Background(), "wf-1", "promise-uuid-1", "something went wrong")
+	err := store.RejectPromise(context.Background(), "promise-uuid-1", "something went wrong")
 	if err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}

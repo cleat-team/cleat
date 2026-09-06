@@ -47,11 +47,11 @@ func (s *MySQLStore) CreatePromise(ctx context.Context, workflowID, promiseName,
 // ResolvePromise marks a promise as resolved with the given result.
 // Also wakes the workflow instance so it can pick up the resolved promise
 // on the next poll cycle instead of waiting for the original timeout.
-func (s *MySQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (s *MySQLStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = ?, result = ?, resolved_at = NOW(6)
-		WHERE workflow_id = ? AND promise_id = ? AND tenant_id = ?
-	`, "resolved", result, workflowID, promiseID, s.tenantID)
+		WHERE promise_id = ? AND tenant_id = ?
+	`, "resolved", result, promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -60,19 +60,21 @@ func (s *MySQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, 
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = NOW(6)
-		WHERE id = ? AND status = 'ready' AND tenant_id = ?
-	`, workflowID, s.tenantID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises
+		            WHERE promise_id = ? AND tenant_id = ?)
+		  AND status = 'ready' AND tenant_id = ?
+	`, promiseID, s.tenantID, s.tenantID)
 	return nil
 }
 
 // RejectPromise marks a promise as rejected with the given error message.
 // Also wakes the workflow instance so it can pick up the rejected promise
 // on the next poll cycle instead of waiting for the original timeout.
-func (s *MySQLStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (s *MySQLStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = ?, error_msg = ?, resolved_at = NOW(6)
-		WHERE workflow_id = ? AND promise_id = ? AND tenant_id = ?
-	`, "rejected", errMsg, workflowID, promiseID, s.tenantID)
+		WHERE promise_id = ? AND tenant_id = ?
+	`, "rejected", errMsg, promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -81,8 +83,10 @@ func (s *MySQLStore) RejectPromise(ctx context.Context, workflowID, promiseID, e
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = NOW(6)
-		WHERE id = ? AND status = 'ready' AND tenant_id = ?
-	`, workflowID, s.tenantID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises
+		            WHERE promise_id = ? AND tenant_id = ?)
+		  AND status = 'ready' AND tenant_id = ?
+	`, promiseID, s.tenantID, s.tenantID)
 	return nil
 }
 

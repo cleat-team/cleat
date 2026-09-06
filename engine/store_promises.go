@@ -46,7 +46,7 @@ func (s *PostgresStore) CreatePromise(ctx context.Context, workflowID, promiseNa
 // them apart is a cross-workflow existence oracle.
 var ErrPromiseNotFound = errors.New("promise not found, or not owned by this workflow")
 
-func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (s *PostgresStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve promise: begin: %w", err)
@@ -54,9 +54,9 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseI
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_promises SET status = $3, result = $4, resolved_at = now()
-		WHERE workflow_id = $1 AND promise_id = $2
-	`, workflowID, promiseID, "resolved", result)
+		UPDATE workflow_promises SET status = $2, result = $3, resolved_at = now()
+		WHERE promise_id = $1
+	`, promiseID, "resolved", result)
 	if err != nil {
 		return err
 	}
@@ -65,8 +65,9 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseI
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = now()
-		WHERE id = $1 AND status IN ('ready', 'suspended')
-	`, workflowID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
+		  AND status IN ('ready', 'suspended')
+	`, promiseID)
 	if err != nil {
 		return err
 	}
@@ -78,7 +79,7 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseI
 // Also wakes the workflow instance so it can pick up the rejected promise
 // on the next poll cycle instead of waiting for the original timeout.
 
-func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (s *PostgresStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("reject promise: begin: %w", err)
@@ -86,9 +87,9 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_promises SET status = $3, error_msg = $4, resolved_at = now()
-		WHERE workflow_id = $1 AND promise_id = $2
-	`, workflowID, promiseID, "rejected", errMsg)
+		UPDATE workflow_promises SET status = $2, error_msg = $3, resolved_at = now()
+		WHERE promise_id = $1
+	`, promiseID, "rejected", errMsg)
 	if err != nil {
 		return err
 	}
@@ -97,8 +98,9 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = now()
-		WHERE id = $1 AND status IN ('ready', 'suspended')
-	`, workflowID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
+		  AND status IN ('ready', 'suspended')
+	`, promiseID)
 	if err != nil {
 		return err
 	}

@@ -867,7 +867,18 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 		s.writeError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-	if err := st.ResolvePromise(r.Context(), id, promiseID, req.Result); err != nil {
+	// The route names a workflow AND a promise, so the pairing is a claim this
+	// endpoint has to verify. Settling is now keyed by promise ID alone (#813),
+	// which is right for a workflow holding an opaque handle and wrong here:
+	// without this check an operator could resolve any promise by pairing it
+	// with any workflow ID in the path, and the mismatch would be accepted.
+	// The store used to enforce it incidentally, through a WHERE clause that
+	// carried both.
+	if _, _, _, err := st.GetPromise(r.Context(), id, promiseID); err != nil {
+		s.writeError(w, 404, "no such promise for this workflow")
+		return
+	}
+	if err := st.ResolvePromise(r.Context(), promiseID, req.Result); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
@@ -893,7 +904,13 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-	if err := st.RejectPromise(r.Context(), id, promiseID, req.Reason); err != nil {
+	// Verified against the workflow named in the route, as in
+	// handleResolvePromise above and for the same reason.
+	if _, _, _, err := st.GetPromise(r.Context(), id, promiseID); err != nil {
+		s.writeError(w, 404, "no such promise for this workflow")
+		return
+	}
+	if err := st.RejectPromise(r.Context(), promiseID, req.Reason); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}

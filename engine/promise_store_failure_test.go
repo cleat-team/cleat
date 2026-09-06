@@ -14,10 +14,10 @@ type failingPromiseStore struct{}
 func (f *failingPromiseStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return errors.New("store is down")
 }
-func (f *failingPromiseStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (f *failingPromiseStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (f *failingPromiseStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (f *failingPromiseStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (f *failingPromiseStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {

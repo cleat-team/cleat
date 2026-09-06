@@ -249,10 +249,13 @@ type WorkflowStore interface {
 	CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error
 
 	// ResolvePromise marks a promise as resolved with the given result.
-	ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error
+	// Keyed by promise ID alone -- see PromiseStore for why a settler cannot
+	// supply a workflow ID.
+	ResolvePromise(ctx context.Context, promiseID, result string) error
 
 	// RejectPromise marks a promise as rejected with the given error message.
-	RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error
+	// Keyed by promise ID alone, as ResolvePromise above.
+	RejectPromise(ctx context.Context, promiseID, errMsg string) error
 
 	// GetPromise returns the current status and result of a promise.
 	GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error)

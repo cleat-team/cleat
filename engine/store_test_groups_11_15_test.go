@@ -83,7 +83,7 @@ func TestResolvePromise(t *testing.T) {
 			if err := store.CreatePromise(ctx, runID, "prom-1", "pid-1"); err != nil {
 				t.Fatalf("CreatePromise: %v", err)
 			}
-			if err := store.ResolvePromise(ctx, runID, "pid-1", `{"resolved":true}`); err != nil {
+			if err := store.ResolvePromise(ctx, "pid-1", `{"resolved":true}`); err != nil {
 				t.Fatalf("ResolvePromise: %v", err)
 			}
 			status, result, errMsg, err := store.GetPromise(ctx, runID, "pid-1")
@@ -127,7 +127,7 @@ func TestRejectPromise(t *testing.T) {
 			if err := store.CreatePromise(ctx, runID, "prom-2", "pid-2"); err != nil {
 				t.Fatalf("CreatePromise: %v", err)
 			}
-			if err := store.RejectPromise(ctx, runID, "pid-2", "something went wrong"); err != nil {
+			if err := store.RejectPromise(ctx, "pid-2", "something went wrong"); err != nil {
 				t.Fatalf("RejectPromise: %v", err)
 			}
 			status, result, errMsg, err := store.GetPromise(ctx, runID, "pid-2")

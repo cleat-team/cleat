@@ -102,8 +102,6 @@ var tenantPredicateAllowlist = map[string]string{
 	"mssql_schedules.go:deleteExpiredEventsOnce":         scopedByCaller,
 	"mssql_signals_promises.go:GetChildCount":            scopedByCaller,
 	"mssql_signals_promises.go:GetChildResult":           scopedByCaller,
-	"mssql_signals_promises.go:RejectPromise":            scopedByCaller,
-	"mssql_signals_promises.go:ResolvePromise":           scopedByCaller,
 
 	// WHAT THIS GUARD TURNED UP BEFORE IT LANDED. Note that only the first came
 	// from the scan finding something nobody had looked at; the rest came from

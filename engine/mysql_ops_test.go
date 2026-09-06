@@ -134,7 +134,7 @@ func TestMySQLStore_ResolvePromise(t *testing.T) {
 		{match: "UPDATE workflow_promises SET status = ?, result = ?", affected: 1},
 		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
 	})
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-uuid", `{"ok":true}`)
+	err := store.ResolvePromise(testCtx, "promise-uuid", `{"ok":true}`)
 	if err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestMySQLStore_RejectPromise(t *testing.T) {
 		{match: "UPDATE workflow_promises SET status = ?, error_msg = ?", affected: 1},
 		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
 	})
-	err := store.RejectPromise(testCtx, "wf-1", "promise-uuid", "something went wrong")
+	err := store.RejectPromise(testCtx, "promise-uuid", "something went wrong")
 	if err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}

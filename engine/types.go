@@ -303,8 +303,21 @@ type SignalStore interface {
 // PromiseStore provides promise resolution capabilities for running workflows.
 type PromiseStore interface {
 	CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error
-	ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error
-	RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error
+	// Settled by promise ID alone, with no workflow ID.
+	//
+	// A promise exists so that something OTHER than the waiter can complete
+	// it, and the settler holds only the ID -- it has no way to know which
+	// workflow created the promise. Requiring a workflow ID could therefore
+	// only ever be satisfied with the wrong one, the caller's own, which is
+	// what these used to do: a child settling its parent's promise updated a
+	// row that did not exist and then woke ITSELF. The parent waited forever.
+	//
+	// #818 made that failure loud (ErrPromiseNotFound instead of nil); this is
+	// what makes it reachable. Knowing the ID is the authority to settle it,
+	// bounded by tenant -- by RLS on PostgreSQL and by an explicit tenant
+	// predicate elsewhere. See #813.
+	ResolvePromise(ctx context.Context, promiseID, result string) error
+	RejectPromise(ctx context.Context, promiseID, errMsg string) error
 	GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error)
 }
 

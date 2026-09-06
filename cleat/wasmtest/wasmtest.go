@@ -167,7 +167,7 @@ func (s *InMemoryPromiseStore) CreatePromise(_ context.Context, _, _, promiseID 
 	return nil
 }
 
-func (s *InMemoryPromiseStore) ResolvePromise(_ context.Context, _, promiseID, result string) error {
+func (s *InMemoryPromiseStore) ResolvePromise(_ context.Context, promiseID, result string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ps, ok := s.promises[promiseID]
@@ -179,7 +179,7 @@ func (s *InMemoryPromiseStore) ResolvePromise(_ context.Context, _, promiseID, r
 	return nil
 }
 
-func (s *InMemoryPromiseStore) RejectPromise(_ context.Context, _, promiseID, errMsg string) error {
+func (s *InMemoryPromiseStore) RejectPromise(_ context.Context, promiseID, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ps, ok := s.promises[promiseID]

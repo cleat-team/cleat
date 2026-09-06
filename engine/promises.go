@@ -277,7 +277,7 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 		s.engine.log().ErrorContext(ctx, "resolve_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 		return packSimpleResult(1, 0)
 	}
-	if err := s.engine.promiseStore.ResolvePromise(ctx, s.workflowID, promiseID, value); err != nil {
+	if err := s.engine.promiseStore.ResolvePromise(ctx, promiseID, value); err != nil {
 		s.engine.log().ErrorContext(ctx, "resolve_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		return packSimpleResult(1, 0)
 	}
@@ -312,7 +312,7 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 		s.engine.log().ErrorContext(ctx, "reject_promise: no promise store configured", "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 		return packSimpleResult(1, 0)
 	}
-	if err := s.engine.promiseStore.RejectPromise(ctx, s.workflowID, promiseID, errMsg); err != nil {
+	if err := s.engine.promiseStore.RejectPromise(ctx, promiseID, errMsg); err != nil {
 		s.engine.log().ErrorContext(ctx, "reject_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		return packSimpleResult(1, 0)
 	}

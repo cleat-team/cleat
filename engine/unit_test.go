@@ -1505,10 +1505,10 @@ func (s *stubWorkflowStore) CompactHistory(ctx context.Context, workflowID strin
 func (s *stubWorkflowStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (s *stubWorkflowStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (s *stubWorkflowStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (s *stubWorkflowStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (s *stubWorkflowStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (s *stubWorkflowStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
@@ -2661,10 +2661,10 @@ func (m *mockCollectMetricsStore) CompactHistory(ctx context.Context, workflowID
 func (m *mockCollectMetricsStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockCollectMetricsStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockCollectMetricsStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockCollectMetricsStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockCollectMetricsStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockCollectMetricsStore) GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error) {
@@ -2855,10 +2855,10 @@ func (m *mockCheckStaleStore) CompactHistory(ctx context.Context, workflowID str
 func (m *mockCheckStaleStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockCheckStaleStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockCheckStaleStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockCheckStaleStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockCheckStaleStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockCheckStaleStore) GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error) {
@@ -3046,10 +3046,10 @@ func (m *mockGCStore) CompactHistory(ctx context.Context, workflowID string, com
 func (m *mockGCStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockGCStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockGCStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockGCStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockGCStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockGCStore) GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error) {
@@ -3227,10 +3227,10 @@ func (m *mockPurgeStore) CompactHistory(ctx context.Context, workflowID string, 
 func (m *mockPurgeStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockPurgeStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockPurgeStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockPurgeStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockPurgeStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockPurgeStore) GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error) {
