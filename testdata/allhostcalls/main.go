@@ -100,12 +100,8 @@ func Entry(h cleat.HostCalls, input string) (string, error) {
 	_ = h.ContinueAsNewWithVersion("{}", 2)
 
 	// ---- state ----
-	h.SetState("k", "v")
-	_ = h.GetState("k", &out)
-	_ = h.HasState("k")
-	_ = h.IncrState("k", 1)
-	_ = h.ListState("pre")
-	h.DeleteState("k")
+	// SetQueryState is the whole of it. The durable-state family was removed
+	// 2026-09-05; see IMPROVEMENT-PLAN 3.216.
 	h.SetQueryState("k", "v")
 
 	// ---- scope ----
