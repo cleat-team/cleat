@@ -5464,10 +5464,26 @@ Retry policy, not a deadline. `cleat_await_signals` is the only call in this fam
 `timeoutMs`. So emitting the field would **silently drop `opts.Timeout`** — trading a determinism
 defect for a quieter dropped-option one, which is worse.
 
-The real fix is a host-side deadline: the timeout has to cross the ABI and be enforced where it can
-be durable and replayable, which is a host-call signature change, not a table row. **Recorded here
-rather than attempted**, because it is a different size of change from §3.224's seven and needs the
-ABI decision made first.
+The real fix is a host-side deadline, and **it is a semantics decision before it is a signature
+one** — a distinction worth stating because "add a `timeoutMs` parameter" looks like the whole job
+and is not. `cleat_await_signals` already carries `timeoutMs`, so a deadline can cross the ABI
+today; the open question is what it *means* on the host. A durable call's timeout has to be
+**replayable**: the second execution must reach the same verdict as the first, or the divergence
+this section is about has simply been rebuilt somewhere new. That points at recording the timeout
+*outcome* in the call event rather than re-evaluating a deadline against a fresh clock.
+
+**And the guest-visible clock is not currently fit for it.** Measured by the conformance-port
+session while writing the replay-determinism test: `h.Now()` does **not advance across a
+suspension** — 3ms observed across a 3000ms sleep, because it returns the previous event's
+timestamp and the sleep event is stamped when the sleep *begins*. A host-side deadline needs a clock
+that moves; anything built on the current one would measure the wrong interval. Related, and also
+still open after #787: `seedNowMs` takes the session seed from `replayHistory[0]` on a resume and
+from the wall clock on a first execution, so a workflow whose **first** action reads the clock still
+diverges (109ms measured). #787 fixed events after the first, which is what made the replay test
+possible; it did not close that leg.
+
+**Recorded here rather than attempted**, because it is a different size of change from §3.224's
+seven and needs those two answers first.
 
 
 
