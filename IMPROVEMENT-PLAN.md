@@ -5212,7 +5212,7 @@ no locking, so of course scope takes none." A looser read found `// lock state (
 concurrency keys)`. **The strict grep flattered the conclusion I was already writing** — the same
 direction as the engine-side error at the top of this section, twice in one change.
 
-### 3.224 Seven public Go SDK methods compile to nothing, and the build says OK — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
+### 3.224 Seven public Go SDK methods compile to nothing, and the build says OK — 🟡 **1 FIXED, 1 CLEAN, 5 NEED DECISIONS 2026-09-06** (WS-1, 2026-09-05)
 
 §3.223 measured that **17 of the engine's 52 exports have no row** in `wasm/usage.go`'s
 `hostFunctions` table, and said explicitly that the number was **not** a defect count and that the
@@ -5297,28 +5297,77 @@ one of them wires. **The harness cannot find a call that is missing from the tab
 runs calls that are in it.** These seven sit in the untested remainder, and nothing distinguishes
 "we have not got to it yet" from "it does not work".
 
-## Fixing one is not a one-line table addition
+## Fixing one takes FOUR pieces, not three
 
-A `hostFunctions` row is necessary but not sufficient, and the table is **bidirectional** — a row
-both requests an import AND, if `adapterDefs[FieldName]` exists, emits a closure field of that name
-implemented by that import's body. `generateField` is reached only through
+This section said three — a `hostFunctions` row, an `adapterDefs` entry, and the SDK's
+`HostCallsOptions` field plus delegation. **That is wrong, and adding only those produces a guest
+that does not compile:**
 
-    adef, ok := adapterDefs[hf.FieldName]
-    if !ok { continue }
+    ./gen_host_adapter.go:21:14: undefined: cleatSignalWorkflowImport
 
-so a row with no `adapterDefs` entry wires the import and generates nothing. That is exactly how
-`DurableFetch` and `FetchGet` work: rows pointing at `cleat_call`, no adapter def, and an SDK-level
-implementation over `DurableCall`. So each of the seven needs a row plus **either** an
-`adapterDefs` entry with a `HostCallsOptions` field and `HostCallsImpl` delegation, **or** an
-SDK-level implementation over an already-wired call.
+`GenerateImports` emits the `//go:wasmimport` declarations from a **third** table — `importDefs` in
+`wasm/generator.go` — and a field whose import has no entry there generates a call to a function
+that was never declared. So:
 
-The bidirectionality is also a trap, and #786 hit it: adding a row for a wrapper method invents a
-FIELD carrying that wrapper's parameters, whose body — the inner import's — never reads them, so
-the generated guest fails with `declared and not used`. Wrappers need the inner import wired and no
-field of their own.
+| piece | file | what it does |
+|---|---|---|
+| `importDefs` | `wasm/generator.go` | declares the `//go:wasmimport` stub |
+| `hostFunctions` | `wasm/usage.go` | makes the AST scan request that import, and names the field |
+| `adapterDefs` | `wasm/adapter_metadata.go` | emits the closure that calls it |
+| `HostCallsOptions` + delegation | `cleat/runtime.go` | lets the SDK method reach the closure |
 
-Not started here: `wasm/usage.go` is being edited concurrently by #786, and two changes to that
-table at once is the R6 collision WORKSTREAM.md warns about.
+The fourth was already present for all seven, which is why they look like table omissions rather
+than missing features. Found by doing it: #790 wired `SignalWorkflow` and hit the missing
+`importDefs` entry on the first build.
+
+## Triage of the seven, after attempting them
+
+Three of the seven are **not** recipe cases, and finding that out is why the recipe should be
+attempted per method rather than applied in bulk.
+
+**`SignalWorkflow` — fixed (#790).** Clean: SDK signature matches the ABI exactly. Before, a guest
+whose only host call was `h.SignalWorkflow(...)` imported nothing but the wasip1 handshake.
+
+**`ScheduleInvoke` — clean, not yet done.** `ScheduleInvoke(service, operation, requestJSON string,
+delayMs int64) error` against `cleat_schedule_invoke: (ptr,len x3, i64) -> i64`. Signature matches,
+error return exists, nothing to decide.
+
+**`RunDetached` — NOT a wiring omission. It is a signature mismatch, and the SDKs disagree about
+what the feature is.**
+
+    Go SDK    RunDetached(fn func(h HostCalls) error) error        cleat/runtime_workflow.go:269
+    engine    cleat_run_detached(name, inputJSON)                  engine/imports.go:735
+    Rust SDK  run_detached(name: &str, input_json: &str)           crates/cleat-sdk/.../host_calls.rs:1131
+
+A closure cannot cross the WASM ABI, so the Go method **cannot** be wired to that import at all —
+and its unwired branch is `return nil`, a silent success. Worse, the Rust method's doc comment says
+*"Mirrors Go's RunDetached"*, which it does not: it takes a name and input, and Go takes a
+function. Anyone porting between the two reads that comment and is misled.
+
+Fixing it is a public API decision — almost certainly changing Go's signature to `(name,
+inputJSON)` to match every other SDK, which is a breaking change to an exported method. **Not a
+table row, and not to be done silently.**
+
+**`SetScope` / `GetScope` — the signature cannot express the outcomes.** `freshSetScope`
+(`engine/scope.go`) has three: success, an error from the concurrency-key store
+(`packSimpleResult(1, 0)`), and — when the scope is **held by another workflow** — a *suspension*,
+with a five-second retry. The SDK method is
+
+    SetScope(objectType, instanceKey string) (previousScope string)
+
+No error return. So wiring it as-is would silently swallow a store failure, and the "held by
+another workflow" case is the *normal* one for a mutual-exclusion primitive — it is what the
+feature is for. Also a signature change, and it needs deciding alongside §3.223's question of what
+scope means in this SDK at all.
+
+**`SendSignalAndWait` / `ReplyToSignal` — blocked on §3.220.** Both are inert engine-side too, so
+wiring the guest half alone changes nothing observable. §3.220 needs a reply protocol decided
+first.
+
+**So the seven are: one fixed, one clean and pending, two needing a public API decision, one pair
+needing a design decision, and two blocked.** The count in this section's title was right about
+what compiles to nothing; it was silent about the fact that fixing them is four different kinds of
+work.
 
 ### 3.225 Nothing compiled the generated adapter, and an eighth method turned up when something did — 🟢 **GUARD ADDED 2026-09-06**; the method it found was closed by #786 (WS-1, 2026-09-06)
 
