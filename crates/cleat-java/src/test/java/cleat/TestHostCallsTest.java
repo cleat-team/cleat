@@ -692,7 +692,7 @@ class TestHostCallsTest {
 
     @Test
     void testSendSignalAndWaitTimesOutByDefault() {
-        // WHAT: Verify sendSignalAndWait returns a timeout error when no reply is sent
+        // WHAT: Verify sendSignalAndWait reports that no reply arrived
         // WHY: Signal-and-wait is the request-reply pattern for cross-workflow communication
 
         CleatResult<String> result = host.sendSignalAndWait(
@@ -700,32 +700,77 @@ class TestHostCallsTest {
             100);
 
         assertTrue(result.isErr(),
-            "Expected sendSignalAndWait to time out when no reply is sent, "
+            "Expected sendSignalAndWait to fail when no reply is sent, "
             + "but got success with value: " + result.getValue());
+        // The message changed with IMPROVEMENT-PLAN 3.220: it now names the
+        // signal and the target rather than saying only "timed out", because
+        // the composite can fail at three distinct steps and the reader needs
+        // to know it was the reply that never came.
         String errMsg = result.getError();
-        assertTrue(errMsg.contains("timed out"),
-            "Expected error message to mention 'timed out', "
+        assertTrue(errMsg.contains("no reply to signal"),
+            "Expected error message to mention 'no reply to signal', "
             + "but got: [" + errMsg + "]");
     }
 
+    /**
+     * Asserts the three things the request/reply envelope has to get right:
+     * the receiver sees the caller's payload exactly as sent, it gets a reply
+     * address without parsing one out of that payload, and replying to that
+     * address settles the promise the sender is waiting on.
+     *
+     * <p>What this replaces hardcoded the string "corr-target-1-mySignal-1" --
+     * the harness's own invented correlation-ID format, which existed in no
+     * other environment (IMPROVEMENT-PLAN 3.220). It asserted that a private
+     * HashMap had been written to.
+     *
+     * <p>It cannot assert the SENDER waking, because awaitPromise returns
+     * immediately for a pending promise rather than suspending. Same gap as
+     * the Go, Rust and Python harnesses; see IMPROVEMENT-PLAN 3.235.
+     */
     @Test
-    void testReplyToSignalWithKnownCorrelationIdSucceeds() {
-        // WHAT: Verify replyToSignal succeeds for a known correlation ID that was
-        //       registered by a previous sendSignalAndWait call
-        // WHY: The reply mechanism enables the signal sender to receive a response
+    void testSendSignalAndWaitDeliversAReplyAddressAndTheOriginalPayload() {
+        assertTrue(host.sendSignalAndWait("target-1", "mySignal", "{\"key\":\"val\"}", 100).isErr(),
+            "expected a failure: nothing replied");
 
-        // sendSignalAndWait creates a reply channel and then times out.
-        // We can reply after the timeout because the channel remains registered.
-        host.sendSignalAndWait("target-1", "mySignal", "{}", 100);
+        CleatResult<HostCalls.AwaitSignalsResult> got =
+            host.awaitSignals(new String[] {"mySignal"}, 1000);
+        assertTrue(got.isOk(), "awaitSignals failed: " + got.getError());
+        HostCalls.AwaitSignalsResult sig = got.getValue();
 
-        // The correlation ID pattern: "corr-target-1-mySignal-1" (first call, counter=1)
-        CleatResult<Void> replyResult = host.replyToSignal(
-            "corr-target-1-mySignal-1", "{\"status\":\"ok\"}");
+        assertFalse(sig.timedOut, "the signal was never sent");
+        assertEquals("{\"key\":\"val\"}", sig.payload,
+            "the receiver must see the payload exactly as sent");
+        assertFalse(sig.replyTo.isEmpty(),
+            "expected a reply address on a signal sent with sendSignalAndWait");
 
-        assertTrue(replyResult.isOk(),
-            "Expected replyToSignal to succeed for a known correlation ID "
-            + "'corr-target-1-mySignal-1' that was registered by sendSignalAndWait, "
-            + "but got error: " + replyResult.getError());
+        CleatResult<Void> replied = host.replyToSignal(sig.replyTo, "{\"status\":\"ok\"}");
+        assertTrue(replied.isOk(), "replyToSignal failed: " + replied.getError());
+
+        CleatResult<HostCalls.AwaitPromiseResult> settled = host.awaitPromise(sig.replyTo, 1000);
+        assertTrue(settled.isOk(), "awaitPromise after the reply: " + settled.getError());
+        assertFalse(settled.getValue().timedOut,
+            "the reply promise is still pending after replyToSignal");
+        assertEquals("{\"status\":\"ok\"}", settled.getValue().result);
+    }
+
+    /**
+     * Negative control: a one-way signal must carry no reply address, or a
+     * receiver cannot tell a request that wants an answer from a
+     * notification, and would reply into a promise nobody is awaiting.
+     */
+    @Test
+    void testSignalWorkflowCarriesNoReplyAddress() {
+        host.signalWorkflow("target-1", "mySignal", "{\"key\":\"val\"}");
+
+        CleatResult<HostCalls.AwaitSignalsResult> got =
+            host.awaitSignals(new String[] {"mySignal"}, 1000);
+        assertTrue(got.isOk(), "awaitSignals failed: " + got.getError());
+        HostCalls.AwaitSignalsResult sig = got.getValue();
+
+        assertFalse(sig.timedOut);
+        assertEquals("", sig.replyTo, "a one-way signal must carry no reply address");
+        assertEquals("{\"key\":\"val\"}", sig.payload,
+            "a one-way signal's payload must pass through unchanged");
     }
 
     @Test
@@ -736,9 +781,14 @@ class TestHostCallsTest {
         assertTrue(result.isErr(),
             "Expected replyToSignal with unknown correlation ID to return error, "
             + "but got success");
-        assertTrue(result.getError().contains("no pending signal"),
-            "Expected error to mention 'no pending signal', "
+        // A reply address IS a promise ID since IMPROVEMENT-PLAN 3.220, so an
+        // address nobody is waiting on is an unknown promise.
+        assertTrue(result.getError().contains("promise not found"),
+            "Expected error to mention 'promise not found', "
             + "but got: [" + result.getError() + "]");
+
+        CleatResult<Void> empty = host.replyToSignal("", "response");
+        assertTrue(empty.isErr(), "Expected an error for an empty correlation ID");
     }
 
     // ======================================================================

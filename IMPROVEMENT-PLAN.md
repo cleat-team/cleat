@@ -5187,11 +5187,15 @@ change and it should land in both at once, since the behaviour is identical in G
 #### Not done here
 
 The two host calls `cleat_send_signal_and_wait` and `cleat_reply_to_signal` are now dead on the Go,
-**Rust and Python** paths -- the Rust SDK stopped declaring the externs on 2026-09-06 -- but are
-**still exported by the engine and still imported by the Java and AssemblyScript SDKs**. Python
-still declares its WIT bindings for both and simply no longer calls them; removing those means
-editing generated `_wit/` bindings, `wit/cleat.wit` and `WitToEnvImport`, so it belongs with the
-export removal rather than with the port. Removing them is a separate change with the §3.216 shape (SDK imports first, then
+**Rust, Python and Java** paths. Rust dropped its `extern` declarations and Java its `@Import`s on
+2026-09-06, so neither guest imports either name. They remain **exported by the engine and
+imported by the AssemblyScript SDK**, which is the last one. Python still declares its WIT bindings
+for both and simply no longer calls them; removing those means editing generated `_wit/` bindings,
+`wit/cleat.wit` and `WitToEnvImport`, so it belongs with the export removal rather than the port.
+
+Each SDK's import floor in `tests/plugin-harness/sdk_import_names_test.go` moved 45 -> 44 as its
+imports went, and in both cases the drop was verified by diffing the **sets** rather than trusting
+the counts: `removed: [cleat_reply_to_signal, cleat_send_signal_and_wait]`, `added: []`. Removing them is a separate change with the §3.216 shape (SDK imports first, then
 the engine export — a module importing a name the engine does not export fails at
 instantiation, not at the call). Until then the ABI is unchanged and those four SDKs keep the
 inert behaviour described above.

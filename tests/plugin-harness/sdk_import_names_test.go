@@ -62,7 +62,12 @@ func TestEverySDKImportIsAHostExport(t *testing.T) {
 		// parse. Measured 2026-09-06, extracting the extern block from each
 		// revision: origin/develop 46, this branch 44.
 		{"rust", 44, rustDeclaredImports},
-		{"java", 45, javaDeclaredImports},
+		// Java's floor is 44 for the same reason as Rust's above: the two
+		// @Import declarations IMPROVEMENT-PLAN 3.220 removed,
+		// cleat_send_signal_and_wait and cleat_reply_to_signal. Measured
+		// 2026-09-06 by diffing the SETS, not the counts -- origin/develop 46,
+		// this branch 44, removed exactly those two and added none.
+		{"java", 44, javaDeclaredImports},
 		{"assemblyscript", 45, asDeclaredImports},
 
 		// Go and Python declare nothing themselves, and are covered here by

@@ -845,9 +845,12 @@ class CleatTestEnvTest {
             return reply.isErr() ? "error:" + reply.getError() : "ok";
         });
 
-        assertTrue(result.contains("no pending signal"),
+        // A reply address IS a promise ID since IMPROVEMENT-PLAN 3.220, so an
+        // address nobody is waiting on is an unknown promise. The message
+        // changed with it.
+        assertTrue(result.contains("promise not found"),
             "replyToSignal with unknown ID should return an error mentioning "
-            + "'no pending signal', but got: [" + result + "]");
+            + "'promise not found', but got: [" + result + "]");
     }
 
     // ======================================================================

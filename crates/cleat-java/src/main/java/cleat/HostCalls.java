@@ -169,18 +169,14 @@ public class HostCalls {
     @Import(module = "env", name = "cleat_run_id")
     private static native long cleatRunIdRaw(int outPtr, int maxLen);
 
-    @Import(module = "env", name = "cleat_send_signal_and_wait")
-    private static native long cleatSendSignalAndWaitRaw(
-        int targetRunIdPtr, int targetRunIdLen,
-        int signalNamePtr, int signalNameLen,
-        int payloadPtr, int payloadLen,
-        long timeoutMs,
-        int responsePtr, int responseMaxLen);
-
-    @Import(module = "env", name = "cleat_reply_to_signal")
-    private static native long cleatReplyToSignalRaw(
-        int correlationIdPtr, int correlationIdLen,
-        int responsePtr, int responseLen);
+    // cleat_send_signal_and_wait (ABI 2.23) and cleat_reply_to_signal
+    // (ABI 2.24) are deliberately NOT imported. Both were inert engine-side,
+    // and request/reply is now composed from createPromise + signalWorkflow
+    // + awaitPromise + resolvePromise (IMPROVEMENT-PLAN 3.220). Declaring an
+    // @Import this SDK never calls would make every Java guest import a host
+    // function it does not use. The engine still exports both; removing the
+    // exports is a separate change that has to come after every SDK stops
+    // importing them.
 
     @Import(module = "env", name = "cleat_signal_workflow")
     private static native long cleatSignalWorkflowRaw(
@@ -1023,7 +1019,17 @@ public class HostCalls {
         String payload = Memory.readString(payloadBufOffset,
             Math.min(payloadLen, payloadBufSize));
 
-        return CleatResult.ok(new AwaitSignalsResult(sigName, payload, timedOut));
+        // Strip the reply envelope, if this is a request/reply signal, so the
+        // receiver reads its payload exactly as the sender passed it and gets
+        // the address separately rather than parsing it out. IMPROVEMENT-PLAN 3.220.
+        String replyTo = "";
+        String[] unwrapped = SignalEnvelope.decode(payload);
+        if (unwrapped != null) {
+            replyTo = unwrapped[0];
+            payload = unwrapped[1];
+        }
+
+        return CleatResult.ok(new AwaitSignalsResult(sigName, payload, timedOut, replyTo));
     }
 
     /**
@@ -1379,32 +1385,43 @@ public class HostCalls {
      */
     public CleatResult<String> sendSignalAndWaitMs(
         String targetRunId, String signalName, String payload, long timeoutMs) {
-        int[] p = packStrings(targetRunId, signalName, payload);
-        int targetOff = p[0], sigOff = p[1], payOff = p[2];
-        int targetLen = p[3], sigLen = p[4], payLen = p[5];
+        // Composed from three durable primitives rather than being a host call
+        // of its own: a promise is the reply channel, its ID is the correlation
+        // ID, and answering is resolving it (IMPROVEMENT-PLAN 3.220).
+        // cleat_send_signal_and_wait was inert engine-side -- it never
+        // delivered the signal it then waited for -- so this is the first
+        // version that works at all.
+        CleatResult<String> promise = createPromise("__reply:" + signalName);
+        if (promise.isErr()) {
+            return CleatResult.err("sendSignalAndWait: create reply promise: " + promise.getError());
+        }
+        String replyTo = promise.getValue();
 
-        long result = cleatSendSignalAndWaitRaw(
-            targetOff, targetLen,
-            sigOff, sigLen,
-            payOff, payLen,
-            timeoutMs,
-            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
-
-        // Bit 31 before any field. IMPROVEMENT-PLAN 3.300: a stop decodes here as
-        // errCode=0 with extra=0 -- an empty SUCCESSFUL response, so the guest
-        // would return "" and carry on.
-        Memory.throwIfStopped(result);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int responseLen = Memory.decodeSimpleExtra(result);
-
-        if (errCode != 0) {
-            String errMsg = readOutput(responseLen);
-            return CleatResult.err(errMsg);
+        CleatResult<Void> sent = signalWorkflow(
+            targetRunId, signalName, SignalEnvelope.encode(replyTo, payload));
+        if (sent.isErr()) {
+            return CleatResult.err("sendSignalAndWait: send signal \"" + signalName
+                + "\" to \"" + targetRunId + "\": " + sent.getError());
         }
 
-        String response = readOutput(responseLen);
-        return CleatResult.ok(response);
+        CleatResult<AwaitPromiseResult> awaited = awaitPromiseMs(replyTo, timeoutMs);
+        if (awaited.isErr()) {
+            return CleatResult.err("sendSignalAndWait: await reply to signal \""
+                + signalName + "\": " + awaited.getError());
+        }
+        // Returning an error on timedOut is correct even though awaitPromise
+        // reports timedOut for a SUSPENSION as well as a real timeout. The host
+        // distinguishes them and this code does not have to: engine/promises.go
+        // sets session.suspendErr before returning, and engine/executor.go:264
+        // treats a workflow error as a failure only when suspendErr is nil --
+        // ":315 deliberately lets a suspension win over the error that
+        // accompanied it". There is nothing in the result to check: the engine
+        // signals suspension host-side, not through a sentinel.
+        if (awaited.getValue().timedOut) {
+            return CleatResult.err("sendSignalAndWait: no reply to signal \"" + signalName
+                + "\" from workflow \"" + targetRunId + "\" within " + timeoutMs + "ms");
+        }
+        return CleatResult.ok(awaited.getValue().result);
     }
 
     /**
@@ -1438,17 +1455,20 @@ public class HostCalls {
      * @return a result indicating success, or an error description on failure
      */
     public CleatResult<Void> replyToSignal(String correlationId, String response) {
-        int[] p = packStrings(correlationId, response);
-        int cidOff = p[0], respOff = p[1];
-        int cidLen = p[2], respLen = p[3];
-
-        long result = cleatReplyToSignalRaw(
-            cidOff, cidLen,
-            respOff, respLen);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        if (errCode != 0) {
-            return CleatResult.err("replyToSignal(correlationId=\"" + correlationId + "\") failed: host returned error code " + errCode + ". Check that the correlation ID is valid.");
+        // correlationId is AwaitSignalsResult.replyTo, which is the reply
+        // promise's ID, so replying is resolving that promise. An ID matching
+        // no promise is an error rather than a silent success, which is what
+        // makes a stale address visible instead of leaving the sender
+        // suspended until its timeout. IMPROVEMENT-PLAN 3.220.
+        if (correlationId == null || correlationId.isEmpty()) {
+            return CleatResult.err("replyToSignal: empty correlation ID. Pass "
+                + "AwaitSignalsResult.replyTo from the signal being answered; it is empty "
+                + "when the sender used signalWorkflow and is not waiting for a reply.");
+        }
+        CleatResult<Void> settled = resolvePromise(correlationId, response);
+        if (settled.isErr()) {
+            return CleatResult.err("replyToSignal(correlationId=\"" + correlationId
+                + "\"): " + settled.getError());
         }
         return CleatResult.ok(null);
     }
@@ -2404,16 +2424,43 @@ public class HostCalls {
         public final boolean timedOut;
 
         /**
-         * Construct a new await-signals result.
+         * The address to answer this signal at, or empty for a one-way signal.
+         * <p>
+         * Non-empty only when the sender used
+         * {@link HostCalls#sendSignalAndWaitMs(String, String, String, long)}
+         * and is suspended waiting for a reply; pass it to
+         * {@link HostCalls#replyToSignal(String, String)}. A signal sent with
+         * {@link HostCalls#signalWorkflow(String, String, String)} leaves it
+         * empty, which is how a receiver tells a request that wants an answer
+         * from a one-way notification. IMPROVEMENT-PLAN 3.220.
+         */
+        public final String replyTo;
+
+        /**
+         * Construct a new await-signals result with no reply address, for a
+         * one-way signal.
          *
          * @param signalName the received signal name
          * @param payload    the signal payload
          * @param timedOut   whether the wait timed out
          */
         public AwaitSignalsResult(String signalName, String payload, boolean timedOut) {
+            this(signalName, payload, timedOut, "");
+        }
+
+        /**
+         * Construct a new await-signals result.
+         *
+         * @param signalName the received signal name
+         * @param payload    the signal payload
+         * @param timedOut   whether the wait timed out
+         * @param replyTo    the address to answer at, or empty
+         */
+        public AwaitSignalsResult(String signalName, String payload, boolean timedOut, String replyTo) {
             this.signalName = signalName;
             this.payload = payload;
             this.timedOut = timedOut;
+            this.replyTo = replyTo;
         }
 
         @Override

@@ -61,6 +61,20 @@ var sdkStopSiteExemptions = map[string][]sdkCoverageExemption{
 	},
 	"java": {
 		{
+			hostSite: "SendSignalAndWait",
+			why: "the Java SDK stopped declaring the cleat_send_signal_and_wait @Import on " +
+				"2026-09-06: IMPROVEMENT-PLAN 3.220 made sendSignalAndWait a composite over " +
+				"createPromise + signalWorkflow + awaitPromise, and the import was removed " +
+				"with it, so a Java guest cannot reach this host function and has no result " +
+				"to decode. The refusable call it DOES make is signalWorkflow, which " +
+				"javaCallsTheHostCanRefuse covers. An absence, not a gap. The engine still " +
+				"exports the host function; when it is removed this entry goes with it. " +
+				"Re-derive with `grep -c 'name = \"cleat_send_signal_and_wait\"' " +
+				"crates/cleat-java/src/main/java/cleat/HostCalls.java` -> 0, anchored on the " +
+				"@Import site rather than the bare name, which also matches the comment " +
+				"explaining the removal.",
+		},
+		{
 			hostSite: "ScheduleCron",
 			why: "the Java SDK declares no scheduleCron method and no raw import for it, " +
 				"so a Java guest cannot register a cron trigger and there is no decoder " +
