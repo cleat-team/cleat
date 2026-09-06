@@ -4757,6 +4757,64 @@ Cross-instance shared state, of the kind Restate's virtual objects provide, **st
 in cleat for any language** — it never did. This removes an API that implied otherwise; it does not
 add the capability. If that capability is ever wanted it is engine work — persisting state keyed by
 scope and seeding `stateStore` at session start — and a much larger change than these six calls.
+### 3.218 A promise the store refused was reported as created, and the workflow then hung — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+`CreatePromise` (`engine/promises.go`) logged a store failure and continued, returning `errCode 0`
+to the guest. The obvious reading is that history and the promise store end up disagreeing. The
+actual consequence is worse and is a hang:
+
+1. `s.recordEvent(rec)` writes `EventTypeCreatePromise` **before** the store call, so history
+   already asserts the promise exists.
+2. The store refuses. The error is logged and execution continues.
+3. The guest receives a promise ID and `errCode 0` and proceeds.
+4. The later `AwaitPromise` calls `GetPromise`, which finds nothing, so **neither** the `resolved`
+   nor the `rejected` branch is taken.
+5. Control falls through to "Record await and suspend".
+
+The workflow then waits for a promise **no external caller can ever resolve**, because the row they
+would resolve against was never written. Nothing errors, and the log line is the only trace.
+
+**The ABI always had somewhere to put this.** `cleat_create_promise` returns `errCode` in bits 0-31
+(ABI.md 2.34). The failure was not unreportable; it was unreported. The fix returns
+`packSimpleResult(1, …)` with the store's own message in the output buffer.
+
+## A test asserted the defect
+
+`TestCreatePromiseFreshStoreError` read:
+
+    // Store error is logged, not surfaced. Function should still succeed.
+    if result != 0 {
+        t.Errorf("expected 0 (error is logged, not surfaced), got %d", result)
+    }
+
+That is the third instance in one day of a test **codifying** wrong behaviour rather than
+specifying right behaviour, after `TestHostCallsImpl_StateOperations` (§3.216) and the
+`AwaitAllChildren` row (#758). All three share a shape worth naming: **they assert the code as
+written and justify neither half**, so they cannot fail on the thing they appear to cover, and they
+make the defect look deliberate to the next reader. `engine/children_test.go:806` already carries
+that lesson in its own words — "It asserted the code as written and justified neither half, which
+is why it held the defect in place rather than catching it."
+
+The assertion is now inverted, with the old text quoted in place so the change is legible.
+
+## Not settled here
+
+This fixes the reporting, not the ordering. The event is still recorded before the store write, so a
+crash between the two leaves history asserting a promise the store never received — and on that
+path there is no error to return, because nothing failed. Making the two atomic is a larger change
+and is not attempted here.
+
+Also unaddressed: **every other swallowed store error on this pattern.** This section fixes
+`CreatePromise` because that is where the hang was traced. Whether `recordEvent`-then-store appears
+elsewhere with the same swallow is an open question and a cheap sweep.
+
+Found by the conformance-port session while running a three-dialect SQL comparison. The dialect
+question it started from turned out to be latent — `CreatePromise`'s conflict handling differs
+across the three stores (`DO NOTHING` / `INSERT IGNORE` / plain insert) but promise IDs are freshly
+generated UUIDs, so a duplicate is unreachable in practice. **The swallowed error sitting two lines
+away was the live defect, and it is dialect-independent.** Worth recording as a method note: the
+sweep's value was not the answer to the question it asked.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

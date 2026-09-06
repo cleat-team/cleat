@@ -1751,9 +1751,19 @@ func TestCreatePromiseFreshStoreError(t *testing.T) {
 
 	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
 
-	// Store error is logged, not surfaced. Function should still succeed.
-	if result != 0 {
-		t.Errorf("expected 0 (error is logged, not surfaced), got %d", result)
+	// The store error IS surfaced, and this assertion used to be its opposite:
+	// "Store error is logged, not surfaced. Function should still succeed."
+	//
+	// That test asserted the code as written and justified neither half, which
+	// is how it held the defect in place. Swallowing the error does not produce
+	// a disagreement between history and the store -- it produces a HANG. The
+	// event record above the store call already asserts the promise exists, the
+	// guest gets an ID and errCode 0, and the AwaitPromise that follows finds
+	// nothing in the store, falls past both the resolved and rejected branches,
+	// and suspends waiting for a promise no external caller can resolve.
+	// IMPROVEMENT-PLAN 3.218.
+	if errCode := uint32(result); errCode == 0 {
+		t.Errorf("expected a non-zero errCode after the store refused the write, got %d", result)
 	}
 	if mock.lastCreatedPromiseName != "my-promise" {
 		t.Error("expected CreatePromise called despite previous errors")
