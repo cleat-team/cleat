@@ -5212,6 +5212,114 @@ no locking, so of course scope takes none." A looser read found `// lock state (
 concurrency keys)`. **The strict grep flattered the conclusion I was already writing** — the same
 direction as the engine-side error at the top of this section, twice in one change.
 
+### 3.224 Seven public Go SDK methods compile to nothing, and the build says OK — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
+
+§3.223 measured that **17 of the engine's 52 exports have no row** in `wasm/usage.go`'s
+`hostFunctions` table, and said explicitly that the number was **not** a defect count and that the
+triage was undone. This is the triage, and it splits 7 / 7.
+
+## Proven by compiling, not by reading the table
+
+A probe workflow whose entire body is four calls:
+
+    h.DurableLog("probe start")
+    h.SignalWorkflow("00000000-...-0001", "ping", "{}")
+    h.RunDetached(func(hh cleat.HostCalls) error { return nil })
+    h.SetScope("obj", "key")
+
+built with `cleat build --target go`. The output:
+
+      Generating WASM imports (2 host functions used)... OK
+      ...
+      Wrote /tmp/probeout/probe.wasm (3.1 MB)
+
+    gen_wasm_imports.go:  cleat_log, cleat_complete, cleat_poll_work
+    gen_host_adapter.go:  one field, DurableLog
+
+`cleat_complete` and `cleat_poll_work` are the wasip1 handshake, so **one** of the four calls was
+wired. `SignalWorkflow`, `RunDetached` and `SetScope` produced no import, no adapter field, and no
+diagnostic. **The build succeeded.** The only warnings it printed were about the two handshake
+imports being present and *not* in the computed closure — noise pointing the opposite way from the
+actual problem.
+
+## The triage: 7 of the 17 are not defects
+
+| import | why it is fine |
+|---|---|
+| `cleat_json_parse`, `cleat_json_stringify`, `cleat_send`, `cleat_resolve_promise`, `cleat_reject_promise` | no public `HostCalls` method exists for them at all — nothing can be broken |
+| `cleat_fetch` | `DurableFetch` and `FetchGet` are wired, to `cleat_call`. The fetch import is a path this SDK does not take |
+| `cleat_uuid` | `UUID(seed)` is computed **locally** in the Go SDK, and the algorithm is identical to the host's — same `workflowID + ":" + seed`, same SHA-256, same version/variant bits, same format string (`cleat/runtime_workflow.go:189` vs `engine/lifecycle.go:223`). Duplication, not divergence |
+
+`cleat_uuid` is worth dwelling on, because I predicted it was the worst of the 17 and it turned out
+to be one of the harmless ones. I had linked it to `h.NewUUID()` returning the all-zeros UUID
+(#775). Wrong: `NewUUID` goes through `Random()` → `cleat_random`, which is what #786 fixes.
+`cleat_uuid` serves the *seeded* `UUID(seed)`, which never calls the host. **The two were unrelated
+and I connected them because both had "uuid" in the name.**
+
+## The other 7 are real, and each has a public, documented method wired to nothing
+
+| import | method | note |
+|---|---|---|
+| `cleat_signal_workflow` | `SignalWorkflow` | **the worst of the seven** — see below |
+| `cleat_run_detached` | `RunDetached` | fire-and-forget child execution, unreachable |
+| `cleat_schedule_invoke` | `ScheduleInvoke` | unreachable |
+| `cleat_set_scope` | `SetScope` | §3.223 |
+| `cleat_get_scope` | `GetScope` | §3.223 |
+| `cleat_send_signal_and_wait` | `SendSignalAndWait` | also inert engine-side (§3.220) |
+| `cleat_reply_to_signal` | `ReplyToSignal` | also inert engine-side (§3.220) |
+
+**`SignalWorkflow` is the worst because the engine implements it fully.** It is the one signalling
+path that does call `DeliverSignal` (`engine/signaller.go:304`) — the half of §3.220 that is *not*
+broken. So the engine can deliver a signal from one workflow to another, and a Go workflow cannot
+ask it to.
+
+The last two are broken at both ends: unreachable from the guest **and** inert in the engine. Fixing
+either end alone changes nothing observable, which is worth knowing before someone starts.
+
+## Go is the only SDK missing these
+
+Verified at declaration and call sites rather than by name count — Rust `pub fn` externs with call
+sites, Java `@Import`, AssemblyScript `@external`:
+
+    crates/cleat-sdk/src/host_calls.rs:188   pub fn cleat_signal_workflow(   (called :918)
+    crates/cleat-java/.../HostCalls.java:185 @Import(module="env", name="cleat_signal_workflow")
+    packages/cleat-as/.../host-calls.ts:328  @external("env", "cleat_signal_workflow")
+
+Rust, Java and AssemblyScript bind all seven. **The gap is Go's alone** — which is the opposite of
+the assumption most people bring, since Go is the language this repo's examples are written in and
+the one `--target go` is the default for.
+
+## Why this survived
+
+The host-call execution harness covers `wave1Calls` — 24 method names resolving to 23 imports
+(`tests/plugin-harness/hostcall_harness_test.go:37`). Every one of them is in the table, so every
+one of them wires. **The harness cannot find a call that is missing from the table, because it only
+runs calls that are in it.** These seven sit in the untested remainder, and nothing distinguishes
+"we have not got to it yet" from "it does not work".
+
+## Fixing one is not a one-line table addition
+
+A `hostFunctions` row is necessary but not sufficient, and the table is **bidirectional** — a row
+both requests an import AND, if `adapterDefs[FieldName]` exists, emits a closure field of that name
+implemented by that import's body. `generateField` is reached only through
+
+    adef, ok := adapterDefs[hf.FieldName]
+    if !ok { continue }
+
+so a row with no `adapterDefs` entry wires the import and generates nothing. That is exactly how
+`DurableFetch` and `FetchGet` work: rows pointing at `cleat_call`, no adapter def, and an SDK-level
+implementation over `DurableCall`. So each of the seven needs a row plus **either** an
+`adapterDefs` entry with a `HostCallsOptions` field and `HostCallsImpl` delegation, **or** an
+SDK-level implementation over an already-wired call.
+
+The bidirectionality is also a trap, and #786 hit it: adding a row for a wrapper method invents a
+FIELD carrying that wrapper's parameters, whose body — the inner import's — never reads them, so
+the generated guest fails with `declared and not used`. Wrappers need the inner import wired and no
+field of their own.
+
+Not started here: `wasm/usage.go` is being edited concurrently by #786, and two changes to that
+table at once is the R6 collision WORKSTREAM.md warns about.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
