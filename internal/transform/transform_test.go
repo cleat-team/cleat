@@ -271,13 +271,13 @@ func TestIsHostCallsField_StarExpr(t *testing.T) {
 			},
 		},
 	}
-	if !isHostCallsField(field) {
+	if !isHostCallsField(field, "durable") {
 		t.Error("expected true for *durable.HostCalls field")
 	}
 }
 
 func TestIsHostCallsField_NotMatch(t *testing.T) {
-	// A selector that does not match durable.HostCalls.
+	// A selector whose Sel is not HostCalls.
 	field := &ast.Field{
 		Names: []*ast.Ident{ast.NewIdent("h")},
 		Type: &ast.SelectorExpr{
@@ -285,7 +285,7 @@ func TestIsHostCallsField_NotMatch(t *testing.T) {
 			Sel: ast.NewIdent("Type"),
 		},
 	}
-	if isHostCallsField(field) {
+	if isHostCallsField(field, "durable") {
 		t.Error("expected false for other.Type")
 	}
 	// A bare ident (not a selector).
@@ -293,7 +293,7 @@ func TestIsHostCallsField_NotMatch(t *testing.T) {
 		Names: []*ast.Ident{ast.NewIdent("h")},
 		Type:  ast.NewIdent("string"),
 	}
-	if isHostCallsField(field2) {
+	if isHostCallsField(field2, "durable") {
 		t.Error("expected false for bare string type")
 	}
 }
