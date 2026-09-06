@@ -6075,6 +6075,64 @@ primary use — is intact now that #812 wires the store. What is blocked is work
 Not decided here. It is the same shape as §3.215's signal key, and that one was worth the write-up
 before the change rather than after.
 
+### 3.234 `h.NowMs()` compiled to nothing and returned epoch 0 — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+Found while doing §3.226's triage — classifying the public Go methods that sit outside the coverage
+guard's denominator, so the guard fix would be mechanical rather than a judgement call.
+
+Of **29** such methods, **23** are in `hostFunctions`, `compositeRequires`, or both: legitimate SDK
+wrappers with no adapter definition of their own. **Six were in neither table.** Three are the
+scope trio (§3.223, local-only by construction), two are §3.220's inert signal-reply pair, and one
+was new.
+
+    // a workflow whose only host call is h.NowMs()
+    Generating WASM imports (0 host functions used)... OK
+    imports:         cleat_complete, cleat_poll_work
+    adapter fields:  (none)
+
+`NowMs` finds `h.now == nil`, logs to a guest's stdout, and **returns 0**. Every workflow using it
+gets an epoch timestamp. Same family as #775's `h.NewUUID()` returning the all-zeros UUID, and
+arguably worse: a zero UUID looks wrong, a zero timestamp looks like a date.
+
+## Why the composite guard could not see it
+
+`TestEveryCompositeHostCallHasAnImportRow` (#786) walks the SDK for methods that call another
+`h.X(...)` and checks the wrapper ends up with the inner method's import. Its pattern is
+
+    \bh\.([A-Z]\w*)\(
+
+**`NowMs` calls `h.now()`** — the closure *field*, lowercase, exactly as `Now()` does. It is not a
+composite in that sense at all, so the scan does not consider it. `Now` has a `hostFunctions` row;
+`NowMs` had nothing.
+
+The generalisation, found by asking the question the guard does not: **a `HostCallsImpl` method that
+invokes a closure field, makes no `h.Uppercase(` call, and appears in neither table.** Seven exist:
+
+| method | verdict |
+|---|---|
+| `SetScope`, `GetScope`, `ClearScope` | touch only *local* value fields, no closure — §3.223, inert by construction |
+| `HandleUpdate` | falls back to locally registered handlers and errors clearly; not in the public `HostCalls` interface |
+| `NowMs` | **the defect**, fixed here |
+| `ReplyToSignal`, `SendSignalAndWait` | invoke real closure fields that are never wired — §3.220 |
+
+## The fix, and why `compositeRequires` is the right table
+
+`"NowMs": {"cleat_now"}`. A `hostFunctions` row would *emit a field* named `NowMs`
+(#786's lesson), and `HostCallsOptions` has no such field, so it would not compile. Marking the
+import is enough because `info.Funcs` is `hostFunctions` filtered by `Used` — so `cleat_now` being
+used pulls in `{"cleat_now", "Now"}`, and the emitted `Now` field is what populates `h.now`.
+
+Verified by compiling: `cleat_now` imported, `Now` field emitted. Falsified by removing the row:
+red with `imports wired: []`.
+
+## The guard this wants, and what blocks it
+
+The rule above — *every method invoking a closure field must be named by a table* — is mechanical
+and would have caught this. It cannot be written today because it would be **red on
+`ReplyToSignal` and `SendSignalAndWait`**, which are genuinely unwired and blocked on §3.220's
+reply-protocol decision. Recorded here so it can be added the moment that lands, rather than
+discovered again.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

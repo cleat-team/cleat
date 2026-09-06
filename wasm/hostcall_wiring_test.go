@@ -69,6 +69,14 @@ func TestEachRewiredMethodWiresItsImport(t *testing.T) {
 			why: "the failure half of ResolvePromise, and the half that matters more: unwired, " +
 				"the waiter has no way to be told the thing it waits for will never arrive",
 		},
+		{
+			method: "NowMs",
+			pkg:    "github.com/cleat-team/cleat/testdata/nowms",
+			imp:    "cleat_now",
+			why: "NowMs invokes the `now` CLOSURE FIELD directly rather than calling h.Now(), so " +
+				"TestEveryCompositeHostCallHasAnImportRow -- which scans for h.<Uppercase>( -- cannot see " +
+				"it. Unwired it returned 0, an epoch timestamp, from a clock",
+		},
 	}
 
 	for _, tc := range cases {
