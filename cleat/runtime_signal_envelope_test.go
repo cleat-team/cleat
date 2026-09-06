@@ -109,12 +109,18 @@ func TestUnwrapSignalResultExtractsTheReplyAddress(t *testing.T) {
 }
 
 // TestSignalEnvelopeWireFormatIsPinned fixes the exact bytes this SDK puts on
-// the wire, because the Rust SDK's signal_envelope.rs pins the same literal in
-// wire_format_matches_the_go_sdk. A Go workflow can answer a Rust one, so the
-// two encoders agreeing is a correctness requirement rather than a stylistic
-// one -- and cross-language interop is exactly the thing no local test run
-// exercises, so a drift would otherwise surface as a receiver that cannot
-// reply, in an integration suite, long after the change that caused it.
+// the wire, which is how a STRUCTURAL drift -- a renamed key, a reordering, a
+// stray space from non-compact separators -- fails here rather than in a
+// cross-language integration nobody runs locally. The Rust and Python SDKs
+// pin the same literal.
+//
+// It is NOT a byte-identity guarantee across SDKs, and the comment here said
+// it was until 2026-09-06. encoding/json HTML-escapes `<`, `>` and `&` by
+// default; Rust's serde_json and Python's json.dumps do not, so the same
+// payload leaves this SDK as \u003c and the others as <. The sample below
+// deliberately contains none of those three, because adding one would make
+// this test assert a false equivalence. The property that actually matters is
+// in TestSignalEnvelopeDecodesWhatTheOtherSDKsEncode.
 //
 // Field ORDER is part of what is pinned, not incidental: encoding/json emits
 // struct fields in declaration order, so reordering the two fields in
@@ -128,5 +134,47 @@ func TestSignalEnvelopeWireFormatIsPinned(t *testing.T) {
 	want := `{"cleat_reply_to":"promise-123","payload":"{\"key\":\"val\"}"}`
 	if got != want {
 		t.Errorf("wire format changed:\n got %s\nwant %s", got, want)
+	}
+}
+
+// TestSignalEnvelopeDecodesWhatTheOtherSDKsEncode is the cross-language
+// property request/reply really depends on: every SDK's decoder must accept
+// every other SDK's output. It had no test in any SDK until 2026-09-06 --
+// only the byte pin, which cannot see the difference because its sample
+// contains no HTML characters.
+//
+// The two forms below are the SAME envelope. This SDK emits the first, Rust
+// and Python the second, and a payload carrying `&` -- a query string, say --
+// takes the first shape from a Go sender and the second from a Python one.
+func TestSignalEnvelopeDecodesWhatTheOtherSDKsEncode(t *testing.T) {
+	const (
+		goForm         = `{"cleat_reply_to":"p1","payload":"{\"q\":\"a\u003cb\u0026c\u003ed\"}"}`
+		rustPythonForm = `{"cleat_reply_to":"p1","payload":"{\"q\":\"a<b&c>d\"}"}`
+		wantPayload    = `{"q":"a<b&c>d"}`
+	)
+
+	// Without this, the test would still pass if goForm had been written
+	// unescaped by mistake -- both cases would decode fine and nothing would
+	// be proved about escape handling. Asserting they DIFFER is what makes
+	// this a known-positive rather than two copies of the same input.
+	if goForm == rustPythonForm {
+		t.Fatal("the two forms must be different encodings of the same envelope")
+	}
+
+	for _, tc := range []struct{ name, raw string }{
+		{"go", goForm},
+		{"rust/python", rustPythonForm},
+	} {
+		replyTo, payload, ok := decodeSignalEnvelope(tc.raw)
+		if !ok {
+			t.Errorf("%s form was not recognised as an envelope", tc.name)
+			continue
+		}
+		if replyTo != "p1" {
+			t.Errorf("%s form: reply address %q, want %q", tc.name, replyTo, "p1")
+		}
+		if payload != wantPayload {
+			t.Errorf("%s form: payload %q, want %q", tc.name, payload, wantPayload)
+		}
 	}
 }

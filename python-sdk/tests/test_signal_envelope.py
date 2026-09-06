@@ -67,18 +67,47 @@ def test_does_not_misread_an_ordinary_payload():
 
 
 def test_wire_format_matches_the_other_sdks():
-    """The Go and Rust SDKs pin this exact byte sequence for the same inputs.
+    """Pins this SDK's exact output, so a STRUCTURAL drift fails here.
 
-    A Go or Rust workflow can answer a Python one, so the encoders agreeing is
-    a correctness requirement rather than a stylistic one -- and cross-language
-    interop is exactly what no single-language test run exercises, so a drift
-    would otherwise surface as a receiver that cannot reply, in an integration
-    suite, long after the change that caused it.
-
-    Python is the one that needs this most: ``json.dumps`` defaults to ``", "``
-    and ``": "`` separators, which do NOT match Go's ``encoding/json`` or
-    Rust's ``serde_json``. Only the explicit ``separators`` argument in
+    Python needs this most: ``json.dumps`` defaults to ``", "`` and ``": "``
+    separators, which do NOT match Go's ``encoding/json`` or Rust's
+    ``serde_json``. Only the explicit ``separators`` argument in
     encode_signal_envelope makes these bytes come out right.
+
+    It is not a byte-identity guarantee across SDKs. The sample deliberately
+    contains no ``<``, ``>`` or ``&``, because those are exactly where the
+    SDKs legitimately differ -- Go HTML-escapes them and this one does not --
+    so adding one would make this test assert a false equivalence. See
+    test_decodes_what_the_other_sdks_encode for the property that matters.
     """
     raw = encode_signal_envelope("promise-123", '{"key":"val"}')
     assert raw == '{"cleat_reply_to":"promise-123","payload":"{\\"key\\":\\"val\\"}"}'
+
+
+def test_decodes_what_the_other_sdks_encode():
+    """Every SDK's decoder must accept every other SDK's output.
+
+    This is what cross-language request/reply actually depends on, and it had
+    no test in any SDK until 2026-09-06 -- only the byte pin, which cannot see
+    the difference because its sample contains no HTML characters.
+
+    The two forms below are the SAME envelope. Go emits the first, Rust and
+    Python the second, so a payload carrying ``&`` -- a query string, say --
+    takes the first shape from a Go sender and the second from this one.
+    """
+    go_form = '{"cleat_reply_to":"p1","payload":"{\\"q\\":\\"a\\u003cb\\u0026c\\u003ed\\"}"}'
+    rust_python_form = '{"cleat_reply_to":"p1","payload":"{\\"q\\":\\"a<b&c>d\\"}"}'
+    want_payload = '{"q":"a<b&c>d"}'
+
+    # Without this, the test would still pass if go_form had been written
+    # unescaped by mistake -- both would decode fine and nothing would be
+    # proved about escape handling. Asserting they DIFFER is what makes this a
+    # known-positive rather than two copies of the same input.
+    assert go_form != rust_python_form, "the two forms must be different encodings"
+
+    for name, raw in (("go", go_form), ("rust/python", rust_python_form)):
+        unwrapped = decode_signal_envelope(raw)
+        assert unwrapped is not None, f"{name} form was not recognised as an envelope"
+        reply_to, payload = unwrapped
+        assert reply_to == "p1", f"{name} form"
+        assert payload == want_payload, f"{name} form"
