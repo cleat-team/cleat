@@ -48,10 +48,10 @@ func TestCreatePromiseReportsAStoreFailure(t *testing.T) {
 	got := s.CreatePromise(context.Background(), nil, "approval", 0, 0)
 
 	if errCode := uint32(got); errCode == 0 {
-		t.Fatalf("CreatePromise returned errCode 0 after the store refused the write.\n\n"+
-			"The guest now holds an ID for a promise that does not exist, and the "+
-			"AwaitPromise that follows will suspend forever: GetPromise finds nothing, "+
-			"so neither the resolved nor the rejected branch is taken and the await "+
+		t.Fatalf("CreatePromise returned errCode 0 after the store refused the write.\n\n" +
+			"The guest now holds an ID for a promise that does not exist, and the " +
+			"AwaitPromise that follows will suspend forever: GetPromise finds nothing, " +
+			"so neither the resolved nor the rejected branch is taken and the await " +
 			"records and suspends. Nothing external can resolve a row never written.")
 	}
 }
