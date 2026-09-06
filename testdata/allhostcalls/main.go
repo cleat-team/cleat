@@ -131,6 +131,12 @@ func Entry(h cleat.HostCalls, input string) (string, error) {
 		func(payloadJSON string) (string, error) { return payloadJSON, nil },
 		func(payloadJSON string) error { return nil })
 
+	// ---- detached execution ----
+	// Takes (name, inputJSON). It took a closure until the signature was
+	// changed to match cleat_run_detached and every other SDK; the closure form
+	// could not be wired at all, so this fixture had nothing to exercise.
+	_ = h.RunDetached("detached-child", "{}")
+
 	// ---- logging ----
 	h.Log("m")
 	h.LogKV("m", "k", "v")

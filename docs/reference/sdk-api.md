@@ -357,11 +357,17 @@ Typed variants that marshal/unmarshal request and result automatically.
 ---
 
 ```go
-RunDetached(fn func(h HostCalls) error) error
+RunDetached(name, inputJSON string) error
 ```
 
-Runs `fn` with a fresh `HostCalls` that ignores cancellation. `fn` is
-executed on every replay (not replayed from cache).
+Starts `name` fire-and-forget: it does not become a child of this workflow and
+this workflow does not wait for it. Matches `cleat_run_detached` and the same
+call in the Rust, Java, AssemblyScript and Python SDKs.
+
+Took a closure until it was changed: `RunDetached(fn func(h HostCalls) error)`.
+A closure cannot cross the WASM ABI, so that form worked only under `localdev`
+and `cleattest`, which populate the field in-process, and silently did nothing
+in every compiled workflow.
 
 ---
 

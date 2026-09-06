@@ -965,16 +965,11 @@ func TestLR_SetQueryState_Overwrites(t *testing.T) {
 
 func TestLR_RunDetached_Success(t *testing.T) {
 	r := NewLocalRunner(WithLogWriter(io.Discard))
-	called := false
-	err := r.runDetached(func(h cleat.HostCalls) error {
-		called = true
-		return nil
-	})
-	if err != nil {
+	// Records the request; localdev has no scheduler to hand a detached
+	// workflow to, and pretending otherwise is what made this the only place
+	// RunDetached appeared to work.
+	if err := r.runDetached("reconcile", `{"id":7}`); err != nil {
 		t.Fatalf("runDetached: %v", err)
-	}
-	if !called {
-		t.Error("detached function was not called")
 	}
 	events := r.Events()
 	found := false
@@ -986,19 +981,6 @@ func TestLR_RunDetached_Success(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected run_detached event")
-	}
-}
-
-func TestLR_RunDetached_Error(t *testing.T) {
-	r := NewLocalRunner(WithLogWriter(io.Discard))
-	err := r.runDetached(func(h cleat.HostCalls) error {
-		return fmt.Errorf("detached failure")
-	})
-	if err == nil {
-		t.Fatal("expected error from detached function")
-	}
-	if !strings.Contains(err.Error(), "detached failure") {
-		t.Errorf("unexpected error: %v", err)
 	}
 }
 

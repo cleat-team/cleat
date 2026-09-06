@@ -185,6 +185,13 @@ var importDefs = map[string]importDef{
 	"cleat_min_version": {
 		ImportName: "cleat_min_version",
 	},
+	"cleat_run_detached": {
+		ImportName: "cleat_run_detached",
+		Params: []paramSpec{
+			{"name", kindInString},
+			{"inputJSON", kindInString},
+		},
+	},
 	"set_query_state": {
 		ImportName: "set_query_state",
 		Params: []paramSpec{

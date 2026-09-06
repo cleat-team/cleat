@@ -589,19 +589,25 @@ func TestSideEffectFnError(t *testing.T) {
 	}
 }
 
-func TestRunDetached(t *testing.T) {
+func TestRunDetachedRecordsTheRequest(t *testing.T) {
 	env := NewTestEnv()
 
-	called := false
-	err := env.H().RunDetached(func(h cleat.HostCalls) error {
-		called = true
-		return nil
-	})
-	if err != nil {
+	// Records rather than executes, and asserts the record. The previous
+	// version passed a closure and asserted it ran -- which it did, here, and
+	// nowhere else: a closure cannot cross the WASM ABI, so in a compiled
+	// workflow the call started nothing and reported success. A test double
+	// succeeding where production is a no-op is what that test was protecting.
+	if err := env.H().RunDetached("reconcile", `{"id":7}`); err != nil {
 		t.Fatalf("RunDetached failed: %v", err)
 	}
-	if !called {
-		t.Fatal("expected RunDetached to execute the function")
+
+	runs := env.DetachedRuns()
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 detached request, got %d", len(runs))
+	}
+	if runs[0].Name != "reconcile" || runs[0].Input != `{"id":7}` {
+		t.Errorf("recorded (%q, %q), want (\"reconcile\", `{\"id\":7}`)",
+			runs[0].Name, runs[0].Input)
 	}
 }
 

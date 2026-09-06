@@ -266,11 +266,15 @@ func (h *HostCallsImpl) NewUUIDv7() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-func (h *HostCallsImpl) RunDetached(fn func(h HostCalls) error) error {
-	if h.runDetached != nil {
-		return h.runDetached(fn)
+func (h *HostCallsImpl) RunDetached(name, inputJSON string) error {
+	if h.runDetached == nil {
+		// An error, not nil. The previous closure-taking version returned nil
+		// here, so in a compiled workflow -- where the field was never set,
+		// because a closure cannot cross the ABI -- RunDetached reported
+		// success and started nothing at all.
+		return errors.New("durable: RunDetached can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
-	return nil
+	return h.runDetached(name, inputJSON)
 }
 
 func (h *HostCallsImpl) DurableFetch(url, method string, headers map[string]string, body string) (responseJSON string, statusCode int, err error) {

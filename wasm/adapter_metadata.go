@@ -452,6 +452,21 @@ var adapterDefs = map[string]adapterDef{
 			"return int(uint32(result))",
 		},
 	},
+	"RunDetached": {
+		FieldName:  "RunDetached",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"name", "string"},
+			{"inputJSON", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_run_detached: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
 	"SetQueryState": {
 		FieldName: "SetQueryState",
 		Params: []adapterParam{

@@ -101,8 +101,20 @@ var hostFunctions = []HostFunction{
 	{"cleat_call", "DurableFetchJSON"},
 	{"cleat_call", "FetchGet"},
 	{"cleat_call", "FetchGetJSON"},
-	// Detached execution (no WASM import needed, but tracked so it's not silently ignored)
-	{"", "RunDetached"},
+	// Detached execution. This row carried an EMPTY import name until the Go
+	// signature changed -- tracked deliberately, because it took a closure and
+	// a closure cannot cross the ABI. The consequence was that RunDetached
+	// worked under localdev and cleattest, which populate the field directly,
+	// and silently did nothing in every compiled workflow: the unwired branch
+	// returned nil. A test double succeeding where production is a no-op is the
+	// same shape as the signal defects in 0b/0c. The signature now matches the
+	// host call and every other SDK, so the import is real.
+	//
+	// The empty-name row is described rather than quoted on purpose:
+	// sdk_import_names_test.go scans this whole FILE for row literals, so a
+	// literal in a comment is counted as a row and disagrees with the row count
+	// taken from the slice itself.
+	{"cleat_run_detached", "RunDetached"},
 	// Heartbeat variants
 	{"cleat_call_heartbeat", "DurableCallTypedWithHeartbeat"},
 	// Time

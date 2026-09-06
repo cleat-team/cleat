@@ -279,6 +279,7 @@ type TestEnv struct {
 	callHistory    []CallRecord
 	callStubs      []*callStub
 	pendingSignals []scheduledSignal
+	detachedRuns   []DetachedRun
 	sleepRecs      []sleepRecord
 	signalWaiters  []signalWaiter
 	randomSeq      []int64
@@ -1362,9 +1363,32 @@ func (e *TestEnv) HandleUpdate(name, payload string) (string, error) {
 	return "", fmt.Errorf("cleattest: HandleUpdate not available")
 }
 
-func (e *TestEnv) runDetachedImpl(fn func(h cleat.HostCalls) error) error {
-	// Run the function directly. In test mode there is no cancellation anyway.
-	return fn(e.h)
+// runDetachedImpl records the request so a test can assert on it.
+//
+// It does not run anything. The previous version took a closure and executed it
+// inline, which meant a test asserting "the detached work happened" passed here
+// and the same workflow did nothing at all in production, where the closure
+// could not cross the ABI. See RunDetached's doc comment.
+func (e *TestEnv) runDetachedImpl(name, inputJSON string) error {
+	e.mu.Lock()
+	e.detachedRuns = append(e.detachedRuns, DetachedRun{Name: name, Input: inputJSON})
+	e.mu.Unlock()
+	return nil
+}
+
+// DetachedRun is one RunDetached request captured by the test environment.
+type DetachedRun struct {
+	Name  string
+	Input string
+}
+
+// DetachedRuns returns the detached workflows this run requested, in order.
+func (e *TestEnv) DetachedRuns() []DetachedRun {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]DetachedRun, len(e.detachedRuns))
+	copy(out, e.detachedRuns)
+	return out
 }
 
 func (e *TestEnv) awaitPromiseImpl(promiseID string, timeout time.Duration) (string, bool, error) {
