@@ -4641,8 +4641,49 @@ the cycle: **intermittent loss becomes permanent livelock.** The fix must move t
 claiming read — or better, delete `PollAndClaimSignal` and build consumption into the new queue
 read, since a dead method that was right all along is how this arose.
 
-Not checked yet: whether `workflow_promises` and the update-request path share the non-consumption.
-Given the dialect divergence in updates, do not assume.
+**Promises and update-requests do NOT share this, and the reason is in the schema.** They were
+checked structurally rather than by symptom — a non-consuming read on a promise is invisible until
+something awaits twice, so absence of a symptom would not have been evidence. Neither table models
+consumption by deletion at all; both use status transitions, and the transitions are genuinely
+called (`ResolvePromise` 9 sites, `RejectPromise` 9, `CompleteUpdateRequest` and
+`GetPendingUpdateRequests` from the worker's dispatch loop).
+
+**`workflow_signals` is the only one of the three with no `status` column**:
+
+    workflow_signals           workflow_id, signal_name, payload, delivered_at, tenant_id
+    workflow_promises          ... status TEXT NOT NULL DEFAULT 'pending'   (001_schema.sql:319)
+    workflow_update_requests   ... status TEXT NOT NULL DEFAULT 'pending'   (001_schema.sql:374)
+
+There is nowhere to record "consumed", so **deletion is the only mechanism the table shape allows**
+— which is exactly why the missing caller is fatal here and harmless in the siblings. The schema
+forced a design that was then not implemented.
+
+### The discriminator for a dead method is not "is it called"
+
+Sweeping the store interface for methods with no non-test caller returns 13 of 99, and the count on
+its own is a backlog generator rather than a finding. What separates them is **whether the behaviour
+exists anywhere else**:
+
+| | |
+|---|---|
+| `PollAndClaimSignal` | dead, and its behaviour exists **nowhere else** → a live defect, this section |
+| `UpdateScheduleNextRun` | dead, but the behaviour exists elsewhere **in a safer form** → a footgun |
+
+The second is worth its own warning wherever schedule work gets written. `UpdateScheduleNextRun`
+(`engine/db.go:628`) is `WHERE name = $1 AND tenant_id = $3` — unconditional. The live path,
+`ClaimDueSchedule` (`:1608`), is `WHERE name = $1 AND tenant_id = $4 AND next_run_at = $3` — a
+compare-and-swap, so two workers cannot fire one schedule. **The dead method is the racy version of
+the live one**, it is in the store interface, documented in `docs/sharding.md`, fanned out across
+every shard, and has 15+ passing tests. Anyone implementing schedule pause/unpause who reaches for
+the obviously-named method reintroduces the double-fire race, and every one of those tests still
+passes.
+
+Eleven of the thirteen are untriaged; most are probably handler-reachable surface. `ValidateVersion`
+and `VerifyWorkflowEvents` are the two worth looking at next, being integrity checks that sound like
+they were meant to run somewhere.
+
+Sweep and triage by the conformance-port session; the schema asymmetry and both SQL predicates
+verified here.
 
 **An earlier version of this section said the loop "blocks until the phase timeout".** That was
 wrong, and wrong in a way worth recording: I cited `store_signals.go:67`'s `DELETE … RETURNING` as
