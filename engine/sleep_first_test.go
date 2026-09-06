@@ -162,22 +162,45 @@ func TestSleepFirstStillWaitsWhenResumedEarly(t *testing.T) {
 	}
 }
 
-// TestSeedNowMsPrefersHistoryOverStartTime pins the precedence.
+// TestSeedNowMsPrefersStartTimeOverHistory pins the precedence.
 //
-// created_at anchors only an empty history. Once the workflow has recorded
-// anything, the first event's timestamp is the more accurate anchor and must
-// win -- otherwise a long-running workflow would measure every sleep from the
-// moment it was created, and deadlines minutes or days old would all read as
-// already elapsed.
-func TestSeedNowMsPrefersHistoryOverStartTime(t *testing.T) {
+// created_at wins. It is the only one of the three anchors that is the SAME on
+// a fresh execution and on a resume: it is a column on the workflow row. The
+// first event's timestamp is stable across replays but is not what a fresh
+// execution saw, because a fresh execution has no history and fell through to
+// created_at -- so Now() called before any event was recorded returned one
+// value originally and another on replay, 109ms apart when measured, and fatal
+// inside a SideEffect.
+//
+// This reverses the previous order, whose stated reason was that created_at
+// would make "a long-running workflow measure every sleep from the moment it
+// was created, and deadlines minutes or days old would all read as already
+// elapsed". That concern does not survive comparing the two values: the
+// alternative anchor is history[0], the FIRST event's timestamp, which on a
+// long-running workflow is just as old as created_at. The two differ by the gap
+// between the row being created and the first event being recorded -- both are
+// "workflow start". Neither is a recent clock, and s.nowMs advances off the
+// consumed events either way.
+func TestSeedNowMsPrefersStartTimeOverHistory(t *testing.T) {
 	e := NewEngine(nil, nil, WithWorkflowStartTime(1_000))
 	hist := []EventRecord{{Step: 0, EventType: EventTypeCall, TimestampMs: 9_000}}
 
-	if got := e.seedNowMs(hist); got != 9_000 {
-		t.Errorf("with history, seed = %d, want the first event's timestamp 9000", got)
+	// The point of the change: both answers are created_at, so a fresh
+	// execution and a resume agree.
+	if got := e.seedNowMs(hist); got != 1_000 {
+		t.Errorf("with history, seed = %d, want created_at 1000 -- a resume must "+
+			"anchor where the fresh execution did", got)
 	}
 	if got := e.seedNowMs(nil); got != 1_000 {
 		t.Errorf("without history, seed = %d, want created_at 1000", got)
+	}
+
+	// History still beats the wall clock when there is no created_at, which is
+	// the embedder case WithWorkflowStartTime's doc describes.
+	e3 := NewEngine(nil, nil)
+	nowMs.Store(7_777)
+	if got := e3.seedNowMs(hist); got != 9_000 {
+		t.Errorf("with history and no start time, seed = %d, want 9000", got)
 	}
 
 	// No start time and no history: fall back to the process clock rather than

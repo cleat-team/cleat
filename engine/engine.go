@@ -697,14 +697,32 @@ func WithWorkflowStartTime(ms int64) EngineOption {
 
 // seedNowMs picks the session's starting virtual clock.
 //
-// Preference order, most to least deterministic: the first recorded event's
-// timestamp, then the workflow's created_at, then the process wall clock.
+// Preference order: the workflow's created_at, then the first recorded event's
+// timestamp, then the process wall clock.
+//
+// created_at comes FIRST, and the order matters more than it looks. The two
+// branches are not two ways of spelling the same instant -- they are read on
+// different executions. A fresh run has no history, so it took created_at; a
+// resume has history, so it took the first event's timestamp. Those differ by
+// however long passed between the row being created and the first event being
+// recorded, so Now() called before any event was recorded returned one value on
+// the original run and another on the replay. Measured at 109ms apart, and
+// fatal inside a SideEffect, which validates the recomputed value against
+// history.
+//
+// created_at is the only one of the three that is the same on both executions:
+// it is a column on the workflow row, read back identically every time. The
+// first event's timestamp is stable across REPLAYS, which is what the previous
+// order was reasoning about, but the first execution is not a replay.
+//
+// Zero leaves the old behaviour for embedders with no such timestamp, and the
+// history branch still beats the wall clock there.
 func (e *Engine) seedNowMs(replayHistory []EventRecord) int64 {
-	if len(replayHistory) > 0 && replayHistory[0].TimestampMs > 0 {
-		return replayHistory[0].TimestampMs
-	}
 	if e.workflowStartMs > 0 {
 		return e.workflowStartMs
+	}
+	if len(replayHistory) > 0 && replayHistory[0].TimestampMs > 0 {
+		return replayHistory[0].TimestampMs
 	}
 	return nowMs.Load()
 }
