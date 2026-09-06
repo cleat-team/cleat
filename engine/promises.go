@@ -84,6 +84,13 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 }
 
 func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64 {
+	// Set when this call is resuming an await already recorded in history,
+	// rather than beginning one. The deadline belongs to the ORIGINAL await.
+	var (
+		resumingAwait  bool
+		awaitAnchorMs  int64
+		awaitTimeoutMs int64
+	)
 
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
@@ -106,7 +113,14 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 				if !s.advanceReplayStep(ctx, &rec) {
 					return 0
 				}
-				// Promise was pending in original execution. Check if resolved now.
+				// Promise was pending in original execution. Check if resolved
+				// now -- and carry the ORIGINAL await's anchor and timeout
+				// forward, because this wake has to be measured against when
+				// the await began, not against itself. See the suspend at the
+				// bottom of this function.
+				awaitAnchorMs = rec.TimestampMs
+				awaitTimeoutMs = rec.TimeoutMs
+				resumingAwait = true
 				s.exitReplay()
 			}
 		} else {
@@ -150,11 +164,76 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 		}
 	}
 
-	// Record await and suspend.
+	// Still pending. Either begin an await or resume the one already recorded.
+	//
+	// Resuming is the case that was wrong. This used to record ANOTHER
+	// await_promise event and suspend again with Until = now + timeout, so the
+	// deadline was recomputed from the current instant on every wake and could
+	// never be reached. Measured: a 5000ms timeout still `ready` at generation
+	// 31 three minutes later, burning a worker slot per wake. The timeout
+	// itself fired correctly -- the workflow woke 5.7s in -- there was simply
+	// nothing that reported it, only something that re-armed it. #814.
+	//
+	// The anchor it needs was already in history: the timestamp of the await
+	// event that began the wait. Carrying it makes the deadline a fixed point
+	// rather than one that moves with the observer, which is what a durable
+	// timeout has to be.
+	//
+	// AwaitSignals reaches the same outcome a weaker way: on any wake with no
+	// signal recorded it reports timedOut, on the reasoning that only the
+	// deadline could have woken it ("should not happen", says the comment).
+	// That is true today and stops being true the moment anything else wakes a
+	// suspended workflow. Comparing against the recorded deadline does not
+	// depend on why we woke.
+	if resumingAwait {
+		deadlineMs := awaitAnchorMs + awaitTimeoutMs
+		if awaitTimeoutMs <= 0 {
+			// An await recorded before the timeout was persisted, or one with
+			// no timeout at all. Nothing to measure against, so keep waiting
+			// rather than inventing a deadline -- but do not re-record the
+			// await, which is what produced the duplicate events.
+			s.suspendErr = &SuspendError{
+				Reason: fmt.Sprintf("await_promise(%s)", promiseID),
+				Until:  time.Now().Add(time.Duration(timeoutMs) * time.Millisecond),
+			}
+			return packAwaitPromiseResult(0, true, 0)
+		}
+		// time.Now(), not nowMs.Load(). The latter is a CACHED clock refreshed
+		// on poll cycles (UpdateNowMs), and a cached clock that lags the real
+		// one turns this comparison false while the scheduler, which uses real
+		// time, sees the deadline as already past. The workflow is then woken
+		// immediately, re-suspends against the same past deadline, and spins.
+		// Measured with the cached clock: the timeout was reported correctly
+		// but only after generation 3130, about 34 wakes a second for 91
+		// seconds. A deadline has to be compared against the same clock the
+		// scheduler wakes on.
+		if time.Now().UnixMilli() >= deadlineMs {
+			// Timed out. No event is recorded for this and none is needed:
+			// "the deadline has passed" is monotone, so every later replay
+			// reaching this point decides the same way. Time only moves
+			// forward, which is the property that makes the outcome stable
+			// without a durable record of it.
+			return packAwaitPromiseResult(0, true, 0)
+		}
+		// Woke early -- something other than the deadline. Wait out the
+		// REMAINDER of the original deadline, and record nothing: the await
+		// event is already in history.
+		s.suspendErr = &SuspendError{
+			Reason: fmt.Sprintf("await_promise(%s)", promiseID),
+			Until:  time.UnixMilli(deadlineMs),
+		}
+		return packAwaitPromiseResult(0, true, 0)
+	}
+
+	// First time: record the await and suspend.
 	rec := EventRecord{
 		Step:      s.stepCount,
 		EventType: EventTypeAwaitPromise,
 		PromiseID: promiseID,
+		// Persisted so a later wake can measure against the original deadline.
+		// await_signals has always recorded its timeout; await_promise did not,
+		// which is why the deadline had to be recomputed from scratch.
+		TimeoutMs: timeoutMs,
 	}
 	s.recordEvent(rec)
 

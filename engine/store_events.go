@@ -283,6 +283,12 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		payload["promise_id"] = rec.PromiseID
 	case "await_promise", "promise_resolved", "promise_rejected":
 		payload["promise_id"] = rec.PromiseID
+		// Only when set, so an await recorded before this existed keeps
+		// producing the payload it always did. #814: without the timeout on
+		// the event there is nothing for a later wake to measure against.
+		if rec.TimeoutMs > 0 {
+			payload["timeout_ms"] = rec.TimeoutMs
+		}
 		if rec.PromiseResult != "" {
 			payload["promise_result"] = rec.PromiseResult
 		}
@@ -674,6 +680,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	case "create_promise", "await_promise", "promise_resolved", "promise_rejected":
 		if v, ok := m["promise_name"].(string); ok {
 			rec.PromiseName = v
+		}
+		if v, ok := m["timeout_ms"].(float64); ok {
+			rec.TimeoutMs = int64(v)
 		}
 		if v, ok := m["promise_id"].(string); ok {
 			rec.PromiseID = v
