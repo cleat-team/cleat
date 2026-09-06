@@ -167,3 +167,63 @@ func TestGeneratedParseChildResultArrayHandlesAwkwardStrings(t *testing.T) {
 		t.Errorf("the generated parser mishandles strings or nesting.\n got:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+// TestPatchAdapterImportsIgnoresProse is the known-positive this guard did not
+// have: a file whose ONLY mention of the package is a comment about it.
+//
+// patchAdapterImports asked `strings.Contains(content, "strings.")`, which is
+// satisfied by a sentence. A comment added to parseChildResultArray explaining
+// that the code "was strings.Index(json, ...)" made it inject an import nothing
+// referenced, and every guest build failed with
+//
+//	./gen_host_adapter.go:8:2: "strings" imported and not used
+//
+// Neither of the checks that existed would have caught that: the generator
+// tests assert on the emitted TEXT and never compile it, and the guard's own
+// happy path (a file that really does use strings) kept passing. A guard needs
+// a case that is known to be wrong, not only a case that is known to be fine.
+func TestPatchAdapterImportsIgnoresProse(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool // should "strings" be added?
+	}{
+		{
+			name: "comment mentioning the package is not a use",
+			src: "package main\n\nimport (\n\t\"fmt\"\n)\n\n" +
+				"// This was strings.Index(json, \"{\") before it was rewritten.\nfunc f() { fmt.Print(1) }\n",
+			want: false,
+		},
+		{
+			name: "string literal mentioning the package is not a use",
+			src: "package main\n\nimport (\n\t\"fmt\"\n)\n\n" +
+				"func f() { fmt.Print(\"see strings.Index for the old shape\") }\n",
+			want: false,
+		},
+		{
+			name: "a real call is a use",
+			src: "package main\n\nimport (\n\t\"fmt\"\n)\n\n" +
+				"func f() { fmt.Print(strings.Index(\"a\", \"b\")) }\n",
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "gen_host_adapter.go")
+			if err := os.WriteFile(path, []byte(tc.src), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			patchAdapterImports(path)
+			out, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			got := strings.Contains(string(out), "\t\"strings\"")
+			if got != tc.want {
+				t.Errorf("import added = %v, want %v\n--- file ---\n%s", got, tc.want, out)
+			}
+		})
+	}
+}

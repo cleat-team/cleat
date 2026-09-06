@@ -2,6 +2,9 @@ package wasm
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -539,18 +542,71 @@ func propagateReplaces(projectRoot, outDir, modPath string) error {
 
 // patchAdapterImports adds missing "strings" import to the generated host adapter
 // if the adapter body references strings.* functions.
+// patchAdapterImports adds "strings" to the generated adapter when its code
+// actually uses the package.
+//
+// It asks the QUESTION with a parser rather than a substring search, and that
+// is not fastidiousness. It was
+//
+//	if !strings.Contains(content, "strings.") { return }
+//
+// which cannot tell a use from a SENTENCE ABOUT a use. A comment in the
+// emitted helpers reading "this was strings.Index(json, ...)" -- prose
+// explaining a call that is no longer there -- made this add an import nothing
+// referenced, and every guest build failed with
+//
+//	./gen_host_adapter.go:8:2: "strings" imported and not used
+//
+// That is the same defect this file's PR was fixing one layer down, where a
+// brace scan could not tell a brace from a brace inside a string. A text
+// search cannot tell a thing from a sentence about the thing; a parser can,
+// because comments are not in the AST.
+//
+// The generated file parses cleanly even while it is missing this import --
+// an undefined package qualifier is a type error, not a syntax error -- so
+// go/parser is usable here without the import already being present.
 func patchAdapterImports(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
 	content := string(data)
-	if !strings.Contains(content, "strings.") {
+	if strings.Contains(content, `"strings"`) {
 		return
 	}
-	if strings.Contains(content, `"strings"`) {
+	if !usesPackage(content, "strings") {
 		return
 	}
 	content = strings.Replace(content, "import (", "import (\n\t\"strings\"", 1)
 	os.WriteFile(path, []byte(content), 0644)
+}
+
+// usesPackage reports whether src contains a real qualified reference to pkg,
+// e.g. strings.Index. Comments and string literals do not count.
+//
+// A parse failure returns false rather than guessing: the caller's only action
+// is to ADD an import, and adding one that is not needed breaks the build
+// outright, while failing to add one that is needed breaks it in a way the
+// compiler names precisely. Neither is good, but the second is diagnosable.
+func usesPackage(src, pkg string) bool {
+	f, err := parser.ParseFile(token.NewFileSet(), "", src, parser.SkipObjectResolution)
+	if err != nil {
+		return false
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == pkg {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }

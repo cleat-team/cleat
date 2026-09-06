@@ -5016,6 +5016,28 @@ the helpers ever reference anything else in that package.
 leave parsing to a real decoder. `python-sdk`'s is on the local-host path, not the guest. One
 mechanism in one place, not a sweep.
 
+**Postscript, and it is the same defect one layer up.** The first version of this fix broke every
+Go guest build:
+
+    ./gen_host_adapter.go:8:2: "strings" imported and not used
+
+`patchAdapterImports` (`wasm/build.go`) decided whether the generated adapter needs `"strings"` with
+
+    if !strings.Contains(content, "strings.") { return }
+
+and the comment this fix added to `parseChildResultArray` — prose explaining that the code *was*
+`strings.Index(json, ...)` — satisfied it. **A retraction read as a use**, in the fix for a scanner
+that could not tell a brace from a brace inside a string, written by someone who had spent the day
+citing that exact rule. It is now a `go/parser` walk for a `strings.X` selector, because comments
+are not in the AST.
+
+The guard's known-positive is `TestPatchAdapterImportsIgnoresProse`: a file whose only mention of
+the package is a comment, and a second whose only mention is inside a string literal. Both go red
+under the substring check and green under the parser one, while a file with a real call stays green
+under both. Neither existing check could have caught it — the generator tests assert on emitted
+*text* and never compile it, and the guard's happy path (a file that really does use `strings`) kept
+passing the whole time.
+
 ### 3.222 `AwaitAnyChild` means "lowest run ID that is done", not "first to complete" — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
 
 `engine/children.go` sorts the run IDs (`sort.Strings(runIDs)`) and returns the first **completed**
