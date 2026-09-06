@@ -289,8 +289,13 @@ type Fetcher interface {
 type SignalStore interface {
 	// DeliverSignal stores a signal for a workflow.
 	DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error
-	// PollSignal checks for a delivered signal.
-	PollSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
+	// PollSignal returns the oldest unconsumed delivery with this name,
+	// without consuming it. See WorkflowStore.PollSignal for why it does not
+	// consume and ConsumeSignal is separate.
+	PollSignal(ctx context.Context, workflowID, signalName string) (delivery SignalDelivery, found bool, err error)
+	// ConsumeSignal removes one delivery by id. Removing an id that is
+	// already gone is not an error.
+	ConsumeSignal(ctx context.Context, workflowID string, id int64) error
 	// PollCancellation checks whether the workflow has been cancelled.
 	PollCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error)
 }

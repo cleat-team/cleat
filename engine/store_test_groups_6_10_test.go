@@ -33,15 +33,15 @@ func TestDeliverSignal(t *testing.T) {
 				t.Fatalf("DeliverSignal: %v", err)
 			}
 
-			payload, found, err := store.PollSignal(ctx, runID, "my-signal")
+			d, found, err := store.PollSignal(ctx, runID, "my-signal")
 			if err != nil {
 				t.Fatalf("PollSignal: %v", err)
 			}
 			if !found {
 				t.Fatal("PollSignal: expected found=true")
 			}
-			if payload != `{"data":"hello"}` {
-				t.Fatalf("PollSignal: expected payload %q, got %q", `{"data":"hello"}`, payload)
+			if d.Payload != `{"data":"hello"}` {
+				t.Fatalf("PollSignal: expected payload %q, got %q", `{"data":"hello"}`, d.Payload)
 			}
 		})
 	}
@@ -167,25 +167,28 @@ func TestPollAndClaimSignal(t *testing.T) {
 				t.Fatalf("DeliverSignal: %v", err)
 			}
 
-			// First call should find and claim the signal.
-			payload, found, err := store.PollAndClaimSignal(ctx, runID, "sig-1")
+			// Poll, then consume by id -- what the await path does.
+			d, found, err := store.PollSignal(ctx, runID, "sig-1")
 			if err != nil {
-				t.Fatalf("PollAndClaimSignal (first): %v", err)
+				t.Fatalf("PollSignal (first): %v", err)
 			}
 			if !found {
-				t.Fatal("PollAndClaimSignal (first): expected found=true")
+				t.Fatal("PollSignal (first): expected found=true")
 			}
-			if payload != "payload-1" {
-				t.Fatalf("PollAndClaimSignal (first): expected payload %q, got %q", "payload-1", payload)
+			if d.Payload != "payload-1" {
+				t.Fatalf("PollSignal (first): expected payload %q, got %q", "payload-1", d.Payload)
+			}
+			if err := store.ConsumeSignal(ctx, runID, d.ID); err != nil {
+				t.Fatalf("ConsumeSignal: %v", err)
 			}
 
-			// Second call should return found=false — signal already consumed.
-			_, found, err = store.PollAndClaimSignal(ctx, runID, "sig-1")
+			// Second call should return found=false — the delivery is gone.
+			_, found, err = store.PollSignal(ctx, runID, "sig-1")
 			if err != nil {
-				t.Fatalf("PollAndClaimSignal (second): %v", err)
+				t.Fatalf("PollSignal (second): %v", err)
 			}
 			if found {
-				t.Fatal("PollAndClaimSignal (second): expected found=false (signal already consumed)")
+				t.Fatal("PollSignal (second): expected found=false (the delivery was consumed)")
 			}
 		})
 	}
@@ -215,6 +218,83 @@ func TestPollSignal_NotDelivered(t *testing.T) {
 			}
 			if found {
 				t.Fatal("PollSignal for undelivered signal: expected found=false")
+			}
+		})
+	}
+}
+
+// TestSignalsOfTheSameNameQueueOldestFirst is the regression test for
+// IMPROVEMENT-PLAN 3.215(b): two signals of the same name, delivered before
+// either is consumed, must both arrive, oldest first.
+//
+// It ran red on all three dialects before the fix and for three different
+// reasons, which is the point of putting it here rather than in a
+// dialect-specific file -- the overwrite was not one bug reachable from three
+// places, it was one SCHEMA decision (PRIMARY KEY (workflow_id, signal_name))
+// that each dialect then honoured in its own syntax:
+//
+//	postgres  ON CONFLICT (workflow_id, signal_name) DO UPDATE SET payload = $3
+//	mysql     ON DUPLICATE KEY UPDATE payload = VALUES(payload)
+//	mssql     MERGE ... WHEN MATCHED THEN UPDATE SET payload = source.payload
+//
+// A fix that changed the Go and not the key would go green on none of them,
+// and a fix that changed one dialect's clause would go green on one.
+//
+// The third delivery is not padding. With two, a store that returns the LAST
+// delivery rather than the FIRST still fails the payload assertion, but a
+// store that returns them in arbitrary order can pass by luck half the time.
+// Three makes an ordering claim that a coin flip does not satisfy.
+func TestSignalsOfTheSameNameQueueOldestFirst(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			setupTestData(t, store)
+
+			ctx := context.Background()
+
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "signal-queue-test", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun: %v", err)
+			}
+
+			want := []string{"first", "second", "third"}
+			for _, p := range want {
+				if err := store.DeliverSignal(ctx, runID, "approve", p); err != nil {
+					t.Fatalf("DeliverSignal(%q): %v", p, err)
+				}
+			}
+
+			var lastID int64
+			for i, expected := range want {
+				d, found, err := store.PollSignal(ctx, runID, "approve")
+				if err != nil {
+					t.Fatalf("PollSignal %d: %v", i, err)
+				}
+				if !found {
+					t.Fatalf("delivery %d of %d is missing: a second signal of the same "+
+						"name overwrote an earlier one", i+1, len(want))
+				}
+				if d.Payload != expected {
+					t.Fatalf("delivery %d: got payload %q, want %q -- deliveries are "+
+						"not being returned oldest-first", i+1, d.Payload, expected)
+				}
+				if d.ID <= lastID {
+					t.Fatalf("delivery %d: id %d does not advance past %d, so ORDER BY id "+
+						"cannot express FIFO", i+1, d.ID, lastID)
+				}
+				lastID = d.ID
+
+				if err := store.ConsumeSignal(ctx, runID, d.ID); err != nil {
+					t.Fatalf("ConsumeSignal %d: %v", i, err)
+				}
+			}
+
+			if _, found, err := store.PollSignal(ctx, runID, "approve"); err != nil {
+				t.Fatalf("final PollSignal: %v", err)
+			} else if found {
+				t.Fatal("expected the queue to be empty after all three were consumed")
 			}
 		})
 	}
@@ -250,8 +330,8 @@ func TestPollSignal_NonDestructive(t *testing.T) {
 			if !found1 {
 				t.Fatal("PollSignal (first): expected found=true")
 			}
-			if p1 != "nd-payload" {
-				t.Fatalf("PollSignal (first): expected payload %q, got %q", "nd-payload", p1)
+			if p1.Payload != "nd-payload" {
+				t.Fatalf("PollSignal (first): expected payload %q, got %q", "nd-payload", p1.Payload)
 			}
 
 			// Second PollSignal must also find the signal — PollSignal is non-destructive.
@@ -262,8 +342,11 @@ func TestPollSignal_NonDestructive(t *testing.T) {
 			if !found2 {
 				t.Fatal("PollSignal (second): expected found=true (non-destructive)")
 			}
-			if p2 != "nd-payload" {
-				t.Fatalf("PollSignal (second): expected payload %q, got %q", "nd-payload", p2)
+			if p2.Payload != "nd-payload" {
+				t.Fatalf("PollSignal (second): expected payload %q, got %q", "nd-payload", p2.Payload)
+			}
+			if p2.ID != p1.ID {
+				t.Fatalf("PollSignal returned a different delivery on the second read: %d then %d", p1.ID, p2.ID)
 			}
 		})
 	}

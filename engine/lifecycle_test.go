@@ -934,15 +934,15 @@ func TestSignalWorkflow_Fresh(t *testing.T) {
 		t.Errorf("expected SignalName 'my-signal', got %q", s.history[0].SignalName)
 	}
 	// Verify signal was delivered to store.
-	payload, found, err := store.PollSignal(context.Background(), "target-wf", "my-signal")
+	d, found, err := store.PollSignal(context.Background(), "target-wf", "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Error("expected signal to be found in store")
 	}
-	if payload != `{"msg":"hello"}` {
-		t.Errorf("expected payload %q, got %q", `{"msg":"hello"}`, payload)
+	if d.Payload != `{"msg":"hello"}` {
+		t.Errorf("expected payload %q, got %q", `{"msg":"hello"}`, d.Payload)
 	}
 }
 

@@ -1056,33 +1056,33 @@ func TestMySQLIntegration_DeliverAndPollSignal(t *testing.T) {
 		t.Fatalf("DeliverSignal: %v", err)
 	}
 
-	gotPayload, found, err := s.PollSignal(ctx, runID, "my-signal")
+	got, found, err := s.PollSignal(ctx, runID, "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Fatal("PollSignal: expected found=true")
 	}
-	if gotPayload != payload {
-		t.Errorf("PollSignal payload = %q, want %q", gotPayload, payload)
+	if got.Payload != payload {
+		t.Errorf("PollSignal payload = %q, want %q", got.Payload, payload)
 	}
 
 	// Polling again should return the payload as well (signals are not
 	// consumed on read for MySQL).
-	gotPayload2, found2, err := s.PollSignal(ctx, runID, "my-signal")
+	got2, found2, err := s.PollSignal(ctx, runID, "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal (second): %v", err)
 	}
 	if !found2 {
 		t.Fatal("PollSignal (second): expected found=true")
 	}
-	if gotPayload2 != payload {
-		t.Errorf("PollSignal (second) payload = %q, want %q", gotPayload2, payload)
+	if got2.Payload != payload {
+		t.Errorf("PollSignal (second) payload = %q, want %q", got2.Payload, payload)
 	}
 }
 
 // 19.
-func TestMySQLIntegration_PollAndClaimSignal(t *testing.T) {
+func TestMySQLIntegration_ConsumeSignal(t *testing.T) {
 	s, teardown := mysqlIntegrationStore(t)
 	defer teardown()
 	ctx := context.Background()
@@ -1094,25 +1094,33 @@ func TestMySQLIntegration_PollAndClaimSignal(t *testing.T) {
 		t.Fatalf("DeliverSignal: %v", err)
 	}
 
-	// PollAndClaimSignal should find and atomically claim the signal.
-	gotPayload, found, err := s.PollAndClaimSignal(ctx, runID, "claim-signal")
+	got, found, err := s.PollSignal(ctx, runID, "claim-signal")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
-		t.Fatal("PollAndClaimSignal: expected found=true")
+		t.Fatal("PollSignal: expected found=true")
 	}
-	if gotPayload != payload {
-		t.Errorf("PollAndClaimSignal payload = %q, want %q", gotPayload, payload)
+	if got.Payload != payload {
+		t.Errorf("PollSignal payload = %q, want %q", got.Payload, payload)
 	}
 
-	// Second call should NOT find it — PollAndClaimSignal deletes the row.
-	_, found2, err := s.PollAndClaimSignal(ctx, runID, "claim-signal")
+	if err := s.ConsumeSignal(ctx, runID, got.ID); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
+	}
+
+	// Second poll should NOT find it — ConsumeSignal deleted the row.
+	_, found2, err := s.PollSignal(ctx, runID, "claim-signal")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal (second): %v", err)
+		t.Fatalf("PollSignal (second): %v", err)
 	}
 	if found2 {
-		t.Fatal("PollAndClaimSignal (second): expected found=false (signal was consumed)")
+		t.Fatal("PollSignal (second): expected found=false (the delivery was consumed)")
+	}
+
+	// Consuming it again is the documented no-op, not an error.
+	if err := s.ConsumeSignal(ctx, runID, got.ID); err != nil {
+		t.Fatalf("ConsumeSignal on an id already gone must not error: %v", err)
 	}
 }
 

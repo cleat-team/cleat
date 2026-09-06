@@ -1234,20 +1234,20 @@ func TestMSSQLStore_DeliverSignal_BeginError(t *testing.T) {
 
 func TestMSSQLStore_PollSignal_Found(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM workflow_signals", data: [][]driver.Value{{`{"approved":true}`}}},
+		{match: "FROM workflow_signals", data: [][]driver.Value{{int64(1), `{"approved":true}`}}},
 	}, nil)
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
-	payload, found, err := store.PollSignal(context.Background(), "wf-1", "order-approved")
+	d, found, err := store.PollSignal(context.Background(), "wf-1", "order-approved")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Error("expected found=true")
 	}
-	if payload != `{"approved":true}` {
-		t.Errorf("payload = %q, want %q", payload, `{"approved":true}`)
+	if d.Payload != `{"approved":true}` {
+		t.Errorf("payload = %q, want %q", d.Payload, `{"approved":true}`)
 	}
 }
 

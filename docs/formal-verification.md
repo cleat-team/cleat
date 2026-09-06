@@ -188,7 +188,11 @@ counts.
 
 ## 4. Component 3: Signal Delivery Protocol
 
-**Files:** `internal/host/engine.go` lines 824-895, `internal/host/db.go` (signal store)
+**Files:** `engine/signaller.go`, `engine/store_signals.go` (signal store).
+
+> These paths said `internal/host/` until 2026-09-05. Commit `3eeb74e` (2026-06-01)
+> moved `internal/host/` to `engine/`, so every `internal/` path elsewhere in this
+> document is stale by the same amount -- only this section has been rechecked.
 
 **The algorithm:**
 
@@ -202,9 +206,15 @@ Signal delivery (external → workflow):
 
 Signal consumption (inside workflow):
   PollSignal(signalName):
-    → SELECT FROM workflow_signals WHERE workflow_id = ? AND name = ?
-    → If exists: return payload, DELETE row
+    → SELECT id, payload FROM workflow_signals
+        WHERE workflow_id = ? AND name = ? ORDER BY id LIMIT 1
+    → If exists: return it. Does NOT delete.
     → If not exists: return "not found"
+
+  ConsumeSignal(id):
+    → DELETE FROM workflow_signals WHERE id = ?
+    → Called by the await path AFTER its signal_received event is durable,
+      which is what makes delivery at-least-once rather than at-most-once.
 
   AwaitSignals([signalNames], timeout):
     → For each name: call PollSignal
@@ -236,6 +246,19 @@ Safety:
   by that AwaitSignals call or a subsequent PollSignal
 - No signal is silently dropped (every INSERT into workflow_signals is
   eventually consumed or the workflow terminates)
+
+**The second property was false, and half of it still is.** Until 2026-09-05 the
+table was `PRIMARY KEY (workflow_id, signal_name)` and every dialect resolved the
+conflict by overwriting, so a second signal of the same name dropped the first
+silently and on the ordinary path -- not as a race, which is what this section
+was looking for. It is worth noting that a model of the *algorithm above* would
+not have caught it: the defect was in the schema, and the algorithm sketch does
+not mention a key. IMPROVEMENT-PLAN 3.215.
+
+The remaining half is 3.215(a), still open: a signal delivered while a workflow
+is completing is persisted and never delivered, and nothing reports the orphan.
+That one a model of this algorithm *would* catch, because "or the workflow
+terminates" is doing work in the property that the code does not do.
 
 Liveness:
 - If a signal is delivered while a workflow is suspended in AwaitSignals,

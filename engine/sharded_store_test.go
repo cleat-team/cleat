@@ -280,12 +280,12 @@ func (m *mockShardStore) DeliverSignal(ctx context.Context, workflowID, signalNa
 	return m.err
 }
 
-func (m *mockShardStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+func (m *mockShardStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	m.recordCall("PollSignal")
 	if m.err != nil {
-		return "", false, m.err
+		return SignalDelivery{}, false, m.err
 	}
-	return "", false, nil
+	return SignalDelivery{}, false, nil
 }
 
 func (m *mockShardStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
@@ -296,12 +296,9 @@ func (m *mockShardStore) PollCancellation(ctx context.Context, workflowID string
 	return false, "", nil
 }
 
-func (m *mockShardStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	m.recordCall("PollAndClaimSignal")
-	if m.err != nil {
-		return "", false, m.err
-	}
-	return "", false, nil
+func (m *mockShardStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	m.recordCall("ConsumeSignal")
+	return m.err
 }
 
 func (m *mockShardStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
@@ -1675,20 +1672,16 @@ func TestDeliverSignal_Success(t *testing.T) {
 	}
 }
 
-func TestPollAndClaimSignal_Success(t *testing.T) {
+func TestConsumeSignal_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	_, found, err := ss.PollAndClaimSignal(context.Background(), "wf-1", "sig")
-	if err != nil {
+	if err := ss.ConsumeSignal(context.Background(), "wf-1", 1); err != nil {
 		t.Errorf("unexpected error: %v", err)
-	}
-	if found {
-		t.Error("expected not found")
 	}
 }
 
-func TestPollAndClaimSignal_NilShard(t *testing.T) {
+func TestConsumeSignal_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	_, _, err := ss.PollAndClaimSignal(context.Background(), "wf-1", "sig")
+	err := ss.ConsumeSignal(context.Background(), "wf-1", 1)
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}

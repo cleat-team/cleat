@@ -224,16 +224,15 @@ func (m *mockStore) DeliverSignal(ctx context.Context, workflowID, signalName, p
 	return nil
 }
 
-func (m *mockStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	if m.pollAndClaimSignalFn != nil {
-		return m.pollAndClaimSignalFn(ctx, workflowID, signalName)
-	}
-	return "", false, nil
-}
+func (m *mockStore) ConsumeSignal(context.Context, string, int64) error { return nil }
 
 // PollSignal satisfies engine.SignalStore. Delegates to PollAndClaimSignal.
-func (m *mockStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return m.PollAndClaimSignal(ctx, workflowID, signalName)
+func (m *mockStore) PollSignal(ctx context.Context, workflowID, signalName string) (engine.SignalDelivery, bool, error) {
+	if m.pollAndClaimSignalFn != nil {
+		payload, found, err := m.pollAndClaimSignalFn(ctx, workflowID, signalName)
+		return engine.SignalDelivery{ID: 1, Payload: payload}, found, err
+	}
+	return engine.SignalDelivery{}, false, nil
 }
 
 // PollCancellation satisfies engine.SignalStore. Delegates to CheckCancellation.

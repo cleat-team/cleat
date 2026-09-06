@@ -1686,28 +1686,38 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_InsertError(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
-// PollAndClaimSignal
+// ConsumeSignal
 // ---------------------------------------------------------------------------
 
-func TestPostgresStore_PollAndClaimSignal_Found(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{
-			match: "DELETE FROM workflow_signals",
-			data:  [][]driver.Value{{`{"signal":"data"}`}},
-		},
-	}, nil)
+// TestPostgresStore_ConsumeSignal replaces TestPostgresStore_PollAndClaimSignal_Found.
+// PollAndClaimSignal read and deleted in one step and had no caller anywhere
+// in the engine; ConsumeSignal deletes a known id and is called from the
+// await paths (IMPROVEMENT-PLAN 3.215).
+func TestPostgresStore_ConsumeSignal(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "DELETE FROM workflow_signals", affected: 1},
+	})
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	payload, found, err := store.PollAndClaimSignal(testCtx, "wf-1", "my-signal")
-	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+	if err := store.ConsumeSignal(testCtx, "wf-1", 7); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
 	}
-	if !found {
-		t.Error("expected found=true")
-	}
-	if payload != `{"signal":"data"}` {
-		t.Errorf("unexpected payload: %q", payload)
+}
+
+// TestPostgresStore_ConsumeSignal_AlreadyGone pins the documented no-op. The
+// await path records its event before consuming, so a crash in between leaves
+// a row that a later consume may or may not find -- and "already gone" must
+// not be an error, or a replayed segment fails on a row it correctly removed.
+func TestPostgresStore_ConsumeSignal_AlreadyGone(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "DELETE FROM workflow_signals", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	if err := store.ConsumeSignal(testCtx, "wf-1", 7); err != nil {
+		t.Fatalf("deleting an id that is already gone must not error: %v", err)
 	}
 }
 
@@ -1807,27 +1817,32 @@ func TestPostgresStore_CleanupMemorySamples_WithDefs(t *testing.T) {
 // SELECT. It used to share PollAndClaimSignal's DELETE ... RETURNING
 // implementation (mocked here as "DELETE FROM workflow_signals"), which
 // meant a second poll for the same signal would always come back
-// found=false -- the opposite of what SignalStore's doc comment promises
-// for PollSignal ("checks for a delivered signal", no mention of consuming
-// it) and what PollAndClaimSignal's own doc comment promises only for
-// itself ("checks for AND CLAIMS"). See TestPollSignal_NonDestructive in
-// store_test_groups_6_10_test.go for the real-database regression test.
+// found=false -- the opposite of what SignalStore's doc comment promises.
+// See TestPollSignal_NonDestructive in store_test_groups_6_10_test.go for the
+// real-database regression test.
+//
+// The projection is now "SELECT id, payload": the id is what ConsumeSignal
+// addresses, and a poll that cannot return one leaves the caller with a
+// payload it has no way to consume.
 func TestPostgresStore_PollSignal(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT payload FROM workflow_signals",
-			data:  [][]driver.Value{{`{"polled":true}`}},
+			match: "SELECT id, payload FROM workflow_signals",
+			data:  [][]driver.Value{{int64(42), `{"polled":true}`}},
 		},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	payload, found, err := store.PollSignal(testCtx, "wf-1", "my-signal")
+	d, found, err := store.PollSignal(testCtx, "wf-1", "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
-	if !found || payload != `{"polled":true}` {
-		t.Errorf("unexpected: found=%v, payload=%q", found, payload)
+	if !found || d.Payload != `{"polled":true}` {
+		t.Errorf("unexpected: found=%v, payload=%q", found, d.Payload)
+	}
+	if d.ID != 42 {
+		t.Errorf("expected the row id to be carried back, got %d", d.ID)
 	}
 }
 
@@ -3490,28 +3505,28 @@ func TestPostgresStore_DeliverSignal_ExecError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// PollAndClaimSignal (Postgres variant) — error paths
+// ConsumeSignal (Postgres variant) — error paths
 // ---------------------------------------------------------------------------
 
-func TestPostgresStore_PollAndClaimSignal_DeleteError(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
+func TestPostgresStore_ConsumeSignal_DeleteError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "DELETE FROM workflow_signals", err: errors.New("delete failed")},
-	}, nil)
+	})
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, _, err := store.PollAndClaimSignal(testCtx, "wf-1", "sig")
+	err := store.ConsumeSignal(testCtx, "wf-1", 1)
 	if err == nil {
 		t.Fatal("expected error from delete failure")
 	}
 }
 
-func TestPostgresStore_PollAndClaimSignal_BeginError(t *testing.T) {
+func TestPostgresStore_ConsumeSignal_BeginError(t *testing.T) {
 	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, _, err := store.PollAndClaimSignal(testCtx, "wf-1", "sig")
+	err := store.ConsumeSignal(testCtx, "wf-1", 1)
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}

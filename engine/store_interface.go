@@ -8,6 +8,22 @@ import (
 	"github.com/google/uuid"
 )
 
+// SignalDelivery is one delivered, not-yet-consumed signal.
+//
+// The ID exists because a signal is a delivery and a delivery needs an
+// identity that a name cannot supply. Before IMPROVEMENT-PLAN 3.215 the table
+// was keyed (workflow_id, signal_name) and a second signal of the same name
+// overwrote the first, so "the approve signal" and "the approve delivery" were
+// the same row by construction.
+type SignalDelivery struct {
+	// ID orders the queue and identifies the row to ConsumeSignal. It is the
+	// table's surrogate key, monotonic per database.
+	ID int64
+	// Payload is the delivered body, already decoded out of the JSON wrapper
+	// the payload column requires (see decodeJSONPayload).
+	Payload string
+}
+
 type WorkflowStore interface {
 	// ClaimWorkflow atomically dequeues a runnable workflow instance.
 	// Uses SELECT ... FOR UPDATE SKIP LOCKED.
@@ -112,14 +128,26 @@ type WorkflowStore interface {
 	// DeliverSignal stores a signal for a workflow.
 	DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error
 
-	// PollSignal checks for a delivered signal.
-	PollSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
+	// PollSignal returns the OLDEST unconsumed delivery with this name,
+	// without consuming it. Ordering is by SignalDelivery.ID, which is the
+	// table's surrogate key -- see migrations/postgres/041_signal_queue.sql
+	// for why delivered_at cannot serve.
+	//
+	// It does not consume, and that is deliberate rather than an oversight:
+	// consuming here would make delivery at-most-once, because the caller
+	// still has to get the signal_received event durable and a crash in
+	// between would lose the signal outright. The await path records the
+	// event first and calls ConsumeSignal after. See IMPROVEMENT-PLAN 3.215.
+	PollSignal(ctx context.Context, workflowID, signalName string) (delivery SignalDelivery, found bool, err error)
+
+	// ConsumeSignal removes one delivery by id, so a later PollSignal for the
+	// same name returns the next one. Removing an id that is already gone is
+	// not an error: the await path may be replaying a segment whose consume
+	// succeeded and whose crash came after.
+	ConsumeSignal(ctx context.Context, workflowID string, id int64) error
 
 	// PollCancellation checks whether the workflow has been cancelled.
 	PollCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error)
-
-	// PollAndClaimSignal atomically checks for and claims a pending signal.
-	PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
 
 	// StartNewRun creates a new workflow instance.
 	// If idempotencyKey is non-empty, provides exactly-once semantics: a
