@@ -191,6 +191,18 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 // LoadEventHistory returns all event records for a workflow, ordered by step.
 
 func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
+	// Coerce, as FinalizeWorkflowSegment does. The result column is jsonb on
+	// PostgreSQL and JSON on MySQL, and the raw string is not guaranteed to be
+	// either -- a workflow that continues as new never returned a value, so the
+	// result here is "", which is not valid JSON. Writing it raw failed the
+	// whole run with
+	//
+	//	pq: invalid input syntax for type json (22P02)
+	//
+	// so continue-as-new did not work at all on PostgreSQL. coerceResultJSON
+	// existed for exactly this and was called from one path out of three.
+	resultJSON := coerceResultJSON(ctx, s.log(), currentRunID, result)
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
@@ -222,7 +234,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, currentRunID, workerID, result, qsJSON, generation)
+	`, currentRunID, workerID, resultJSON, qsJSON, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}
@@ -327,6 +339,18 @@ func validFinalStatus(status string) bool {
 // AppendEventHistory appends a single event to the history.
 
 func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
+	// Coerce, as FinalizeWorkflowSegment does. The result column is jsonb on
+	// PostgreSQL and JSON on MySQL, and the raw string is not guaranteed to be
+	// either -- a workflow that continues as new never returned a value, so the
+	// result here is "", which is not valid JSON. Writing it raw failed the
+	// whole run with
+	//
+	//	pq: invalid input syntax for type json (22P02)
+	//
+	// so continue-as-new did not work at all on PostgreSQL. coerceResultJSON
+	// existed for exactly this and was called from one path out of three.
+	resultJSON := coerceResultJSON(ctx, s.log(), workflowID, result)
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("complete workflow: begin: %w", err)
@@ -338,7 +362,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, workflowID, workerID, result, qsJSON, generation)
+	`, workflowID, workerID, resultJSON, qsJSON, generation)
 	if err != nil {
 		return err
 	}
@@ -368,7 +392,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	// policy's own scope, not a new source of truth for it.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
-		workflowID, result, s.tenantID); err != nil {
+		workflowID, resultJSON, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 

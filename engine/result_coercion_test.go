@@ -1,132 +1,193 @@
 package engine
 
-// IMPROVEMENT-PLAN 3.22. The result column is JSON-typed on every dialect, so a
-// result that is not valid JSON cannot be stored and something has to give.
-// Replacing it with "{}" is right -- failing the terminal write would lose a
-// whole workflow over a formatting defect -- but it was done silently, in a
-// two-line conditional with no log statement, in all three stores.
-//
-// That is how an ambiguous durable call was erased rather than mislabelled: the
-// engine detected it, the guest reported it, the generated wrapper turned it
-// into `{"error":""durable call ...""}` (doubled quotes, invalid), and this
-// replaced the lot with `{}`. The workflow was stored `done` with no error
-// anywhere.
-
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
 
-func TestCoerceResultJSON(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		in        string
-		want      string
-		wantLog   bool
-		wantInLog string
-	}{
-		{
-			name: "valid JSON is passed through untouched",
-			in:   `{"charged":true}`,
-			want: `{"charged":true}`,
-		},
-		{
-			// Kept, but now REPORTED. The contract is a string containing a
-			// JSON-encoded object; a scalar is valid JSON and does not satisfy
-			// it. This case used to assert silence, which encoded the older
-			// "any valid JSON is fine" rule -- and that acceptance is exactly
-			// what let a double-encoded result ("{\"ok\":true}" as a JSON
-			// string) through undetected in three SDKs.
+// TestEveryResultWriteIsCoerced is the guard for the defect that made
+// continue-as-new fail outright on PostgreSQL.
+//
+// The result column is jsonb on PostgreSQL and JSON on MySQL, and the string a
+// store is handed is not guaranteed to be either. coerceResultJSON exists for
+// exactly that: it turns "" into {} and replaces anything unparseable, loudly.
+//
+// It was called from one path out of three. FinalizeWorkflowSegment coerced;
+// ContinueAsNew and CompleteWorkflow wrote the raw string. A workflow that
+// continues as new never returned a value, so its result is "", and every such
+// run died with
+//
+//	pq: invalid input syntax for type json (22P02)
+//
+// Continue-as-new therefore did not work at all, and the failure named the
+// database rather than the missing call.
+//
+// The check is source-derived rather than a list of function names, because a
+// list of function names is what the three call sites already were.
+func TestEveryResultWriteIsCoerced(t *testing.T) {
+	// An UPDATE of workflow_instances that assigns the result column, in any
+	// dialect's placeholder style: result = $3, result = ?, result = @p3.
+	//
+	// Scoped to workflow_instances on purpose. workflow_promises and
+	// workflow_update_requests have their own `result` columns carrying a value
+	// the guest supplied and already validated; coercing those would silently
+	// rewrite a caller's data, which is a different decision from making a
+	// workflow's own result storable.
+	writesResult := regexp.MustCompile(`(?is)UPDATE\s+(?:dbo\.)?workflow_instances\b.{0,400}?\bresult\s*=\s*[$?@]`)
+
+	var offenders []string
+	var checked int
+
+	for _, path := range lifecycleSourcesForTest(t) {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, fn := range splitTopLevelFuncs(string(src)) {
+			// Comments are stripped before anything is matched. The first
+			// version of this test did not, and its own explanatory comment
+			// -- which names coerceResultJSON while describing the defect --
+			// counted as a call. Backing the fix out left the test green.
 			//
-			// Still kept rather than replaced: destroying a storable result
-			// would lose data, and workflows predating the contract return
-			// scalars. What changes is that the violation is no longer silent.
-			name:      "a JSON scalar is kept but reported as a contract violation",
-			in:        `"completed"`,
-			want:      `"completed"`,
-			wantLog:   true,
-			wantInLog: "not an object",
-		},
-		{
-			name: "empty is the ordinary no-result case and is not logged",
-			in:   "",
-			want: "{}",
-		},
-		{
-			// The exact shape 3.22 produced.
-			name:      "invalid JSON is replaced and reported",
-			in:        `{"error":""durable call payments.Ship: [0] [AMBIGUOUS] call outcome unknown""}`,
-			want:      "{}",
-			wantLog:   true,
-			wantInLog: "AMBIGUOUS",
-		},
-		{
-			name:      "a bare string is not JSON either",
-			in:        `completed`,
-			want:      "{}",
-			wantLog:   true,
-			wantInLog: "completed",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			// That is the fourth time in this repository that a scanner has
+			// read a sentence ABOUT a thing as the thing: a shellcheck path
+			// list, an import-name count, an SDK table, and now this. A text
+			// search cannot tell a use from a mention, so the mentions have
+			// to go before the search runs.
+			code := stripComments(fn.body)
+			if !writesResult.MatchString(code) {
+				continue
+			}
+			checked++
+			// Covered either by coercing here, or by receiving an
+			// already-coerced value. The second is not a loophole: the
+			// coerced value travels under the name resultJSON precisely so
+			// that a helper taking one is declaring where its value came
+			// from. The MSSQL store splits every write into an outer method
+			// that retries and an inner *Once that runs the statement, and
+			// the outer one is the right place to coerce.
+			if !strings.Contains(code, "coerceResultJSON(") &&
+				!strings.Contains(code, "resultJSON string") {
+				offenders = append(offenders,
+					filepath.Base(path)+":"+fn.name)
+			}
+		}
+	}
 
-			got := coerceResultJSON(context.Background(), log, "wf-1", tc.in)
-			if got != tc.want {
-				t.Errorf("coerceResultJSON(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-			if !json.Valid([]byte(got)) {
-				t.Errorf("coerceResultJSON returned %q, which is not valid JSON -- the column will reject it", got)
-			}
+	// Input assertion. A scan that finds no result writes reports perfect
+	// coverage, which is the failure this test is about.
+	if checked < 3 {
+		t.Fatalf("found only %d function(s) assigning the result column; expected at "+
+			"least 3 (one per dialect). The queries moved or changed shape and this "+
+			"test is checking a set it never found.", checked)
+	}
 
-			logged := buf.String()
-			if tc.wantLog {
-				if logged == "" {
-					t.Error("a result was discarded with no log line: this is the silence that erased 3.22's " +
-						"ambiguity, and the reason the workflow read as a clean success")
-				}
-				if tc.wantInLog != "" && !strings.Contains(logged, tc.wantInLog) {
-					t.Errorf("the log line does not carry what was discarded (%q); it must, or the "+
-						"information is still gone: %s", tc.wantInLog, logged)
-				}
-				if !strings.Contains(logged, "wf-1") {
-					t.Errorf("the log line does not name the workflow: %s", logged)
-				}
-			} else if logged != "" {
-				t.Errorf("a valid or empty result was logged as a problem: %s", logged)
+	sort.Strings(offenders)
+	if len(offenders) > 0 {
+		t.Errorf("%d function(s) write the result column without coercing it: %s\n\n"+
+			"result is jsonb on PostgreSQL and JSON on MySQL. The string handed to a "+
+			"store is not guaranteed to be valid JSON -- a workflow that continues as "+
+			"new never returned a value, so its result is the empty string -- and "+
+			"writing it raw fails the whole run with a syntax error that names the "+
+			"database rather than the missing call. Pass it through coerceResultJSON.",
+			len(offenders), strings.Join(offenders, ", "))
+	}
+}
+
+type topLevelFunc struct{ name, body string }
+
+// stripComments removes // and /* */ comments, leaving string literals alone.
+// SQL lives in raw string literals here, so those must survive intact -- and a
+// // inside one is not a comment.
+func stripComments(src string) string {
+	var out strings.Builder
+	out.Grow(len(src))
+	var inLine, inBlock, inStr, inRaw bool
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		switch {
+		case inLine:
+			if c == '\n' {
+				inLine = false
+				out.WriteByte(c)
 			}
+		case inBlock:
+			if c == '*' && i+1 < len(src) && src[i+1] == '/' {
+				inBlock = false
+				i++
+			}
+		case inRaw:
+			out.WriteByte(c)
+			if c == '`' {
+				inRaw = false
+			}
+		case inStr:
+			out.WriteByte(c)
+			if c == '\\' && i+1 < len(src) {
+				i++
+				out.WriteByte(src[i])
+			} else if c == '"' {
+				inStr = false
+			}
+		case c == '/' && i+1 < len(src) && src[i+1] == '/':
+			inLine = true
+			i++
+		case c == '/' && i+1 < len(src) && src[i+1] == '*':
+			inBlock = true
+			i++
+		default:
+			if c == '`' {
+				inRaw = true
+			} else if c == '"' {
+				inStr = true
+			}
+			out.WriteByte(c)
+		}
+	}
+	return out.String()
+}
+
+// splitTopLevelFuncs carves a Go source file into top-level functions by their
+// declaration lines. Deliberately textual rather than AST-based: the subject is
+// SQL inside string literals, which no Go AST walk reaches any more directly,
+// and the declaration line is the only anchor needed.
+func splitTopLevelFuncs(src string) []topLevelFunc {
+	decl := regexp.MustCompile(`(?m)^func (?:\([^)]*\) )?(\w+)\(`)
+	locs := decl.FindAllStringSubmatchIndex(src, -1)
+	out := make([]topLevelFunc, 0, len(locs))
+	for i, loc := range locs {
+		end := len(src)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		out = append(out, topLevelFunc{
+			name: src[loc[2]:loc[3]],
+			body: src[loc[0]:end],
 		})
 	}
+	return out
 }
 
-// TestCoerceResultJSON_TruncatesLargeResults keeps a caller-controlled value
-// from filling the log. A workflow result has no size limit worth relying on.
-func TestCoerceResultJSON_TruncatesLargeResults(t *testing.T) {
-	var buf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&buf, nil))
-
-	huge := strings.Repeat("x", 100_000) // not JSON
-	if got := coerceResultJSON(context.Background(), log, "wf-2", huge); got != "{}" {
-		t.Fatalf("got %q, want {}", got)
+func lifecycleSourcesForTest(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading engine sources: %v", err)
 	}
-	if n := buf.Len(); n > 4096 {
-		t.Errorf("the log line is %d bytes: a 100 KB result was not truncated", n)
+	var out []string
+	for _, e := range entries {
+		n := e.Name()
+		if !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		out = append(out, n)
 	}
-	if !strings.Contains(buf.String(), "truncated") {
-		t.Error("the log line does not say it was truncated, so the reader cannot tell a cut value " +
-			"from a complete one")
+	if len(out) == 0 {
+		t.Fatal("no engine sources found")
 	}
-}
-
-// TestCoerceResultJSON_NilLoggerIsSafe: the stores pass s.log(), which is
-// non-nil in production, but a zero-value store in a test is not worth a panic.
-func TestCoerceResultJSON_NilLoggerIsSafe(t *testing.T) {
-	if got := coerceResultJSON(context.Background(), nil, "wf-3", "not json"); got != "{}" {
-		t.Errorf("got %q, want {}", got)
-	}
+	return out
 }
