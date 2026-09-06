@@ -5427,7 +5427,49 @@ gap and an argument for emitting the field rather than wiring the fallback. Emit
 entirely, because the direct path has no goroutine and no `time.After`.
 
 `cleat vet` will not help: its rules scan the user's workflow code, and this `go` statement is in
-the SDK.
+the SDK. That is a **scope** the tool does not have rather than a rule it is missing, and it is the
+second instance of the same limit — E003 told authors to use `h.Now()` for deterministic time and
+could not see that `h.Now()` was itself the broken clock (#776, #787).
+
+## It is not one obscure method: `DurableCallWithOptions` is the same, and it is mainstream
+
+Checked because the fix looked like a one-line recipe and the port session asked what would enforce
+`opts.Timeout` afterwards. **The answer widened the defect rather than the fix.**
+
+`HostCallsImpl.DurableCallWithOptions` (`cleat/runtime.go:1013`) has the identical shape — field
+check first, then a fallback that spawns a goroutine and selects it against
+`time.After(opts.Timeout)`. And it is in `hostWrapperDefs`, not `adapterDefs`, so **no field is
+emitted for it either.** Measured on a guest whose only host call is
+`h.DurableCallWithOptions(CallOptions{Timeout: 5 * time.Second}, ...)`:
+
+    Generating WASM imports (5 host functions used)... OK
+    emitted adapter fields:  DurableCallWithRetry, DurableSleep, DurableSleepMs
+
+No `DurableCallWithOptions`. So the fallback runs for **every Go workflow that calls
+`DurableCallWithOptions` with a timeout** — a documented, mainstream API, not the obscure typed
+variant this section started from. `DurableCallJSONWithOptions` is in the same map and worth
+checking the same way.
+
+## So do NOT emit the field — the ABI has nowhere to put the deadline
+
+Emitting a field for these delegates to `cleat_call` or `cleat_call_retry`, and **neither carries a
+per-call deadline**:
+
+    cleat_call        (svc, op, req, resp)                                    engine/imports.go:158
+    cleat_call_retry  (svc, op, req, maxAttempts, initialIntervalMs,
+                       backoffCoefficient100x, maxIntervalMs,
+                       nonRetryableErrorsJSON, resp)                          engine/imports.go:324
+
+Retry policy, not a deadline. `cleat_await_signals` is the only call in this family that takes a
+`timeoutMs`. So emitting the field would **silently drop `opts.Timeout`** — trading a determinism
+defect for a quieter dropped-option one, which is worse.
+
+The real fix is a host-side deadline: the timeout has to cross the ABI and be enforced where it can
+be durable and replayable, which is a host-call signature change, not a table row. **Recorded here
+rather than attempted**, because it is a different size of change from §3.224's seven and needs the
+ABI decision made first.
+
+
 
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
