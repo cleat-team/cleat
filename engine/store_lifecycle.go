@@ -486,6 +486,23 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 		policy string
 		query  string
 	}{
+		// Both arms fence the child out. `generation = generation + 1` and
+		// `assigned_to = NULL` are not bookkeeping: without them a child that a
+		// worker is currently holding overwrites its own termination. The
+		// worker's fence is (assigned_to, generation), finalize_workflow_status
+		// checks it, and an UPDATE that changes only the status leaves that
+		// fence valid -- so the next FinalizeWorkflowSegment matches, sets the
+		// child back to 'ready' or on to 'done', and the termination is gone.
+		// The error_msg survives, because the 'done' branch does not clear it,
+		// leaving a row that says status='done' AND 'parent workflow
+		// terminated'. Measured 2026-09-06 before this line existed: 4 runs of
+		// 4, every TERMINATE child completed anyway carrying that message.
+		//
+		// The defer-phase arm below always had the bump, for the same reason
+		// ExpireDeferPhases has it. Only this arm lacked it -- and this is the
+		// arm most children take, since it is the one for children that owe no
+		// cleanup.
+		//
 		// Two TERMINATE arms, and the predicate is what splits them:
 		// a child that owes cleanup goes to 'terminating' with the outcome
 		// recorded, and is failed later by FinalizeDeferPhase once its
@@ -498,7 +515,8 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 		{"TERMINATE", `
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = 'parent workflow terminated',
-		    pending_terminal_status = NULL, defer_phase_deadline = NULL
+		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
+		    assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
