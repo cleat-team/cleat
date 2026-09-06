@@ -5320,6 +5320,61 @@ field of their own.
 Not started here: `wasm/usage.go` is being edited concurrently by #786, and two changes to that
 table at once is the R6 collision WORKSTREAM.md warns about.
 
+### 3.225 Nothing compiled the generated adapter, and an eighth method turned up when something did — 🟢 **GUARD ADDED 2026-09-06**, the method it found is 🔴 **OPEN** (WS-1, 2026-09-06)
+
+Two failures on 2026-09-05, hours apart, both one-line compile errors in generated code, both
+caught only by CI:
+
+  * **#780** — a comment mentioning `strings.Index` made `patchAdapterImports` inject an import
+    nothing referenced; every guest build failed with `"strings" imported and not used`.
+  * **#786** (conformance-port session) — a wrapper row invented a closure field carrying a
+    parameter the inner import's body never reads; **eleven** CI jobs failed with
+    `declared and not used: heartbeatIntervalMs`.
+
+**Neither was visible to a unit test, and #786's own new unit test passed throughout.** It asserted
+that each wrapper ends up with the right *import* — true after the broken change; the *field* was
+the problem. Third instance in one day of a guard measuring the legible half of a two-halved thing
+(cf. §3.223's engine-versus-guest, and the port session's payload-carriage-versus-column-persistence
+in #777).
+
+The generator's tests assert on emitted **text** — `strings.Contains(code, "func parseChildResultArray")`
+— and the emitted file is only really checked by *building a guest*, which happens in integration
+jobs, for one fixture, using whichever calls that fixture happens to make.
+
+`TestEveryAdapterDefCompiles` (`wasm/adapter_compiles_test.go`) closes that: it builds a synthetic
+`UsageInfo` naming **every** `adapterDefs` and `hostWrapperDefs` entry, runs the real
+`PrepareBuildDir`, and compiles the result for `wasip1`. Covering every def rather than a fixture's
+subset is the point — the failure mode is one field in isolation, so a fixture that does not use
+that field cannot see it. Known-positive: giving `DurableLog`'s def a parameter its body never
+reads turns it red (with a signature mismatch rather than an unused-variable error, since that
+field's type is pinned by `HostCallsOptions` — either way, generated code that does not compile).
+
+## What it found on its first run
+
+`DurableCallTypedWithOptions` has an adapter definition and **no `hostFunctions` row**, so no build
+can ever emit it. Verified the way §3.224's seven were — by compiling a workflow whose only host
+call is that method:
+
+    Generating WASM imports (0 host functions used)... OK
+    gen_wasm_imports.go: cleat_complete, cleat_poll_work
+
+Zero. Only the wasip1 handshake. It is public (`cleat/runtime.go:64`), has a `HostCallsOptions`
+field, a `HostCallsImpl` method, a `hostWrapperDefs` entry, and appears in `cleat/localdev`.
+
+**That makes it an eighth instance of §3.224, and the worst of them.** The other seven are
+signalling, scoping and scheduling. This one is a **durable call** — the operation the system
+exists to provide. A durable call that silently does not happen leaves the workflow proceeding as
+though the external effect occurred.
+
+## Why the guard reports it instead of asserting it
+
+The mechanism a wrapper should use to request its inner import is being changed in #786: a plain
+row invents a closure field, which is what broke eleven jobs there, and the replacement is a
+separate `compositeRequires` map. **An assertion written now would encode the shape being
+replaced.** The test therefore names it in a `t.Logf` and says so, and this becomes `t.Errorf` once
+#786 lands. That is a deliberate exception to "a skip is indistinguishable from a pass": the
+condition is reported on every run and recorded here, rather than silently tolerated.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
