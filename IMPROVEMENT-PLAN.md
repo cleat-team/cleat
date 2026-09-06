@@ -5536,6 +5536,76 @@ seven and needs those two answers first.
 
 
 
+### 3.226 The Go SDK cannot fail the host-call coverage guard, because its denominator is the wiring table — 🔴 **OPEN 2026-09-06** (WS-1, 2026-09-06)
+
+`scripts/sdk-host-call-coverage.py --report` says:
+
+    assemblyscript  called  60/60  100.0%
+    go              called  39/39  100.0%
+    java            called  64/64  100.0%
+    python          called  61/61  100.0%
+    rust            called  57/65   87.7%
+
+**Go reports 100% while being the SDK with seven public methods that compiled to nothing**
+(§3.224). The two facts are consistent, and that is the defect.
+
+    def go_surface() -> set[str]:
+        src = _read(ROOT / "wasm" / "adapter_metadata.go")
+        return set(re.findall(r'FieldName:\s*"(\w+)"', src))
+
+**Go's denominator is the wiring table.** A method missing from `adapterDefs` is missing from the
+surface, so it can never be counted as uncovered — the guard asks "is every wired method wired",
+which has one answer. Every other SDK reads its **public API**: `python_surface` parses the
+`HostCalls` class with `ast`, `rust_surface` parses the impl block's `pub fn`s. Go alone reads the
+generator's own table.
+
+## Measured
+
+    guard's go_surface (FieldName in adapter_metadata.go):   39
+    public interface methods in cleat/runtime.go:            69
+    public methods outside the denominator:                  31
+
+**Forty-five per cent of the Go public surface is invisible to a guard that reports 100%.** And the
+31 is not a random slice — *every Go SDK defect found on 2026-09-05 and 2026-09-06 is in it*:
+
+| defect | method | section |
+|---|---|---|
+| compiled to nothing | `SignalWorkflow`, `ScheduleInvoke` | §3.224, fixed |
+| compiled to nothing | `RunDetached`, `SetScope`, `GetScope`, `SendSignalAndWait`, `ReplyToSignal` | §3.224, open |
+| all-zeros UUID | `NewUUID` | #775 |
+| wall-clock select in a workflow | `DurableCallWithOptions`, `DurableCallTypedWithOptions` | §3.225 |
+
+Not one of them could have failed this guard.
+
+## The ratchet moves the wrong way too
+
+`--check` is a ratchet: coverage may rise, and a rise asks for `--update`. But adding an
+`adapterDefs` entry grows **numerator and denominator together**, so wiring two previously-dead
+methods took Go from 37/37 to 39/39 and left the percentage at 100.0%. **Fixing a defect the guard
+exists to catch does not move the number it reports.**
+
+## What it is not
+
+Not "the 31 are 31 defects". Many are SDK-level wrappers implemented over other methods —
+`DurableCallJSON`, `AwaitChildTyped`, `Log`, `FetchGet` — which legitimately have no adapter
+definition, the rows-without-defs category §3.224 describes. The defect is that they are
+**invisible** rather than **accounted for**: a wrapper that is deliberately not wired and a public
+method that is accidentally not wired are the same absence to this guard.
+
+## The fix, and why it is not done here
+
+Derive `go_surface()` from `cleat/runtime.go`'s public interfaces, as Python and Rust do, and
+classify the difference rather than hiding it — a wrapper needs a reason on file, exactly as
+`skip-ledger.tsv` does for skips. That will take Go from a reported 100% to something near 38/69
+and require the baseline to record the real figure.
+
+**That is a CI gate changing what it measures, and it will surface ~31 entries needing triage.** It
+should be a deliberate change with someone's eye on the triage, not a 5am rebaseline. The
+measurement is recorded here so the decision can be made against numbers rather than an assertion.
+
+**Note the direction, which is the same as every other measurement error this file records:** the
+circular denominator *flatters*. Go reads 100% and is the worst-covered SDK in the repo.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
