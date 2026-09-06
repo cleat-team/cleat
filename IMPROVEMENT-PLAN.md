@@ -5666,26 +5666,46 @@ Swept every example directory containing `.go` files, each into a **fresh** outp
 |---|---|
 | `saga-temporal-port` | OK |
 | `subscription` | OK |
-| `datapipeline` | codegen: `cannot convert __r (*PipelineResult) to []byte` |
-| `onboarding` | codegen: `cannot convert __r (*Profile) to []byte` |
-| `travel` | codegen: `cannot convert __r (*BookingResult) to []byte` |
+| `datapipeline` | returns `*PipelineResult`; an entry point must return a string |
+| `onboarding` | returns `*Profile`; an entry point must return a string |
+| `travel` | returns `*BookingResult`; an entry point must return a string |
 | `dag` | `Verifying HostCalls threading... 4 error(s)` |
 | `fooddash` | `Verifying HostCalls threading... 1 error(s)` |
 | `event-driven` | `E003: time.Now() ... breaking determinism` |
 | ~~`third-party-plugin`~~ | excluded — it is a plugin, not a workflow, so "no entry points" is correct |
 
-**Two of eight.** Three distinct causes.
+**Two of eight.** Three distinct causes, and **all six are defects in the examples** rather than in
+the engine — the tooling's only fault is how it reports one of them.
 
-## Cause 1: an entry point returning a pointer-to-struct generates invalid Go
+## Cause 1: three examples return a struct pointer, and an entry point must return a string
 
-`GenerateExports` declares `var __r string` (`wasm/exports.go:731`) and emits `return []byte(__r)`
-(`:794`) — it **assumes the entry point returns a string**. An entry point returning `*T` produces
+**The string return type is deliberate, not a codegen limitation.** It is what works across all
+five language SDKs — a WASM entry point hands back bytes, and `string` is the one shape every SDK
+can express identically. So this is an **example defect**, not a missing feature, and the three
+failures line up exactly with it:
+
+| example | entry point | builds |
+|---|---|---|
+| `saga-temporal-port` | `TransferMoney(h, TransferDetails) error` | **yes** |
+| `subscription` | `ManageSubscription(h, SubscriptionInput) (string, error)` | **yes** |
+| `datapipeline` | `RunPipeline(h, PipelineInput) (*PipelineResult, error)` | no |
+| `travel` | `BookTravel(h, BookingInput) (*BookingResult, error)` | no |
+| `onboarding` | `RegisterUser(h, SignupInput) (*Profile, error)` | no |
+
+Note that a struct **input** is fine — `TransferDetails`, `SubscriptionInput` and `PipelineInput`
+are all structs, and two of those build. It is only the return.
+
+**What is a defect on the tooling side is how the violation is reported.** `GenerateExports`
+declares `var __r string` (`wasm/exports.go:731`) and emits `return []byte(__r)` (`:794`), so a
+non-string return produces
 
     ./gen_wasm_exports.go:340:28: cannot convert __r (variable of type *BookingResult) to type []byte
 
-which is a compile error in **generated code the user never wrote**, naming a variable that does
-not appear in their source. Whether struct returns should be supported or rejected is a design
-question; producing a Go type error in a generated file is the wrong answer to either.
+a Go type error in **generated code the author never wrote**, naming a variable absent from their
+source and a file they did not create. The rule is real and the diagnostic should state it:
+*"entry point RunPipeline returns *PipelineResult; an entry point must return string, (string,
+error) or error, because that is the shape every language SDK can express."* `cleat vet` is the
+natural place, since it already refuses E001-E007 before the build gets this far.
 
 ## Cause 2 and 3 are in the examples themselves
 
