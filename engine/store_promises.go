@@ -33,6 +33,19 @@ func (s *PostgresStore) CreatePromise(ctx context.Context, workflowID, promiseNa
 // Also wakes the workflow instance so it can pick up the resolved promise
 // on the next poll cycle instead of waiting for the original timeout.
 
+// ErrPromiseNotFound is returned when settling a promise matched no row.
+//
+// Settling one that does not exist used to be a SILENT no-op in all three
+// dialects: the UPDATE ran, matched nothing, and returned nil. That is how
+// IMPROVEMENT-PLAN 3.233 stayed invisible -- a workflow settling another
+// workflow's promise ran to completion and had no effect, because the WHERE
+// clause carries the SETTLER's workflow_id and the row carries the CREATOR's.
+//
+// It does not distinguish "no such promise" from "not this workflow's promise",
+// deliberately and for the same reason ErrWorkflowNotFound does not: telling
+// them apart is a cross-workflow existence oracle.
+var ErrPromiseNotFound = errors.New("promise not found, or not owned by this workflow")
+
 func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -40,12 +53,15 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseI
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = $3, result = $4, resolved_at = now()
 		WHERE workflow_id = $1 AND promise_id = $2
 	`, workflowID, promiseID, "resolved", result)
 	if err != nil {
 		return err
+	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return fmt.Errorf("resolve promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = now()
@@ -69,12 +85,15 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = $3, error_msg = $4, resolved_at = now()
 		WHERE workflow_id = $1 AND promise_id = $2
 	`, workflowID, promiseID, "rejected", errMsg)
 	if err != nil {
 		return err
+	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = now()

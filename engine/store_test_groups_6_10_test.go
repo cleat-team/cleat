@@ -300,6 +300,68 @@ func TestSignalsOfTheSameNameQueueOldestFirst(t *testing.T) {
 	}
 }
 
+// TestSettlingAPromiseThatIsNotYoursIsAnError is the regression test for
+// IMPROVEMENT-PLAN 3.233.
+//
+// ResolvePromise and RejectPromise ran an UPDATE and returned nil whatever it
+// matched, in all three dialects. So settling a promise that does not exist --
+// or, more usefully, one created by a DIFFERENT workflow, since the WHERE
+// carries the settler's workflow_id and the row carries the creator's -- was a
+// silent no-op. A workflow written to settle a promise for another ran to
+// completion and had no effect, which is how it went unnoticed.
+//
+// Cross-backend because the silence was in three separate UPDATE statements,
+// not in one shared helper: postgres, mysql and mssql each wrote their own and
+// each dropped the row count.
+func TestSettlingAPromiseThatIsNotYoursIsAnError(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			setupTestData(t, store)
+
+			ctx := context.Background()
+
+			owner, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "promise-owner", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun(owner): %v", err)
+			}
+			other, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "promise-other", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun(other): %v", err)
+			}
+
+			if err := store.CreatePromise(ctx, owner, "approval", "prom-1"); err != nil {
+				t.Fatalf("CreatePromise: %v", err)
+			}
+
+			// The owner can settle it.
+			if err := store.ResolvePromise(ctx, owner, "prom-1", `{"ok":true}`); err != nil {
+				t.Fatalf("the creating workflow could not resolve its own promise: %v", err)
+			}
+
+			// A different workflow cannot, and must be TOLD so rather than
+			// receiving nil.
+			if err := store.ResolvePromise(ctx, other, "prom-1", `{"ok":true}`); err == nil {
+				t.Error("resolving another workflow's promise returned nil; it settled nothing, " +
+					"so the caller believes it succeeded")
+			}
+			if err := store.RejectPromise(ctx, other, "prom-1", "nope"); err == nil {
+				t.Error("rejecting another workflow's promise returned nil; it settled nothing")
+			}
+
+			// Nor can anyone settle one that does not exist.
+			if err := store.ResolvePromise(ctx, owner, "no-such-promise", `{}`); err == nil {
+				t.Error("resolving a promise that does not exist returned nil")
+			}
+			if err := store.RejectPromise(ctx, owner, "no-such-promise", "nope"); err == nil {
+				t.Error("rejecting a promise that does not exist returned nil")
+			}
+		})
+	}
+}
+
 func TestPollSignal_NonDestructive(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend

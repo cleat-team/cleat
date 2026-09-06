@@ -6025,6 +6025,56 @@ flow into `execSession`. The guard also has to be built from the loaded manifest
 relationship between `plugin_loader` and the engine. Both are design decisions, and a
 security-adjacent one written at speed is worse than one written down.
 
+### 3.233 Settling a promise that is not yours was silent, and whether it should be possible is undecided — 🟡 **SILENCE FIXED 2026-09-06, THE DESIGN QUESTION IS OPEN** (WS-1, 2026-09-06)
+
+The conformance-port session found (#813) that a promise is keyed by its creating workflow, so a
+child written to settle its parent's promise **ran to `done` and had no effect**. They declined to
+decide whether `workflow_id` belongs in that key, which is right — it is a real design call. This
+section separates the half that needs a decision from the half that does not.
+
+## The half that does not: a settle that matches nothing must say so
+
+    workflow_promises   PRIMARY KEY (workflow_id, promise_id)
+    ResolvePromise(ctx, workflowID, promiseID, result)
+    UPDATE workflow_promises SET ... WHERE workflow_id = $1 AND promise_id = $2
+
+`execSession.ResolvePromise` passes `s.workflowID` — the **settler's** ID — and the row carries the
+**creator's**. So the UPDATE matches nothing. **All three dialects then returned `nil`**: none
+checked `RowsAffected`, in either `ResolvePromise` or `RejectPromise`, so six statements reported
+success for settling nothing.
+
+That is why #813 was invisible rather than merely broken: the settler had no way to learn it had
+done nothing. Reporting a zero-row settle is never wrong under any answer to the design question,
+so it is fixed now — `ErrPromiseNotFound`, which deliberately does not distinguish "no such
+promise" from "not yours", for the same reason `ErrWorkflowNotFound` does not: telling them apart
+is a cross-workflow existence oracle.
+
+Cross-backend regression test, falsified on all three: four assertions each, every one
+`... returned nil; it settled nothing`.
+
+## The half that does: may a workflow settle another workflow's promise?
+
+`promise_id` is a UUID (`uuid.NewRandom()` in `CreatePromise`), so it is **already globally
+unique** — the composite key is not needed for uniqueness. Dropping `workflow_id` from the WHERE
+would make any workflow holding the ID able to settle it, and tenant isolation would still hold:
+PostgreSQL through RLS on the transaction, SQL Server through its filter predicate, MySQL by D1
+being single-tenant.
+
+So the question is not "is it safe" but "is it intended", and there are three answers:
+
+| | |
+|---|---|
+| **settle by ID** | any workflow holding the UUID may settle. Matches the external API's power, and makes the create-pass-to-child-settle pattern work |
+| **name the owner** | the host call takes the owning workflow's ID explicitly. More auditable, changes the guest ABI |
+| **external only** | promises are settled by API callers, never by other workflows. Then the guest-side `ResolvePromise` is nearly pointless — a workflow settling its own promise could return the value instead |
+
+**What already works, so the gap is stated accurately**: `POST /api/workflows/:id/promises/:promiseId/resolve`
+(`cmd/cleat-worker/server.go:851`) passes the owner's ID from the URL, so external completion — the
+primary use — is intact now that #812 wires the store. What is blocked is workflow-to-workflow.
+
+Not decided here. It is the same shape as §3.215's signal key, and that one was worth the write-up
+before the change rather than after.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).

@@ -306,13 +306,16 @@ func (s *MSSQLStore) CreatePromise(ctx context.Context, workflowID, promiseName,
 }
 
 func (s *MSSQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises
 		SET status = 'resolved', result = @p3, resolved_at = SYSUTCDATETIME()
 		WHERE workflow_id = @p1 AND promise_id = @p2 AND tenant_id = @p4
 	`, workflowID, promiseID, result, s.tenantID)
 	if err != nil {
 		return err
+	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return fmt.Errorf("resolve promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
@@ -322,13 +325,16 @@ func (s *MSSQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, 
 }
 
 func (s *MSSQLStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises
 		SET status = 'rejected', error_msg = @p3, resolved_at = SYSUTCDATETIME()
 		WHERE workflow_id = @p1 AND promise_id = @p2 AND tenant_id = @p4
 	`, workflowID, promiseID, errMsg, s.tenantID)
 	if err != nil {
 		return err
+	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
