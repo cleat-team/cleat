@@ -233,24 +233,61 @@ func parseSimpleResult(json string, secondKey string) (first, second, errStr str
 // Returns []cleat.ChildResult.
 func parseChildResultArray(json string) []cleat.ChildResult {
 	var results []cleat.ChildResult
-	// Find each object between { and }
-	i := 0
-	for i < len(json) {
-		open := strings.Index(json[i:], "{")
-		if open < 0 {
-			break
+	// Scan for top-level objects, tracking string state and escapes.
+	//
+	// This was strings.Index(json, "{") followed by strings.Index(json, "}"),
+	// which finds the WRONG closing brace as soon as any value contains one.
+	// A child's result is itself a JSON object, so an outcome reads
+	//
+	//	{"run_id":"a","result":"{\"tag\":\"x\"}"}
+	//
+	// and the first } is the escaped one INSIDE the result value. The object
+	// was therefore cut before its own closing quote, extractJSONString read an
+	// unterminated string and returned "", and run_id survived only because it
+	// sits before the cut. Every child of every fan-in came back with an empty
+	// result, no error, and a workflow that reported success.
+	depth := 0
+	start := -1
+	inStr := false
+	esc := false
+	for i := 0; i < len(json); i++ {
+		c := json[i]
+		if esc {
+			esc = false
+			continue
 		}
-		close := strings.Index(json[i+open:], "}")
-		if close < 0 {
-			break
+		if c == '\\' {
+			if inStr {
+				esc = true
+			}
+			continue
 		}
-		obj := json[i+open : i+open+close+1]
-		results = append(results, cleat.ChildResult{
-			RunID:  extractJSONString(obj, "run_id"),
-			Result: extractJSONString(obj, "result"),
-			Error:  extractJSONString(obj, "error"),
-		})
-		i = i + open + close + 1
+		if c == '"' {
+			inStr = !inStr
+			continue
+		}
+		if inStr {
+			continue
+		}
+		if c == '{' {
+			if depth == 0 {
+				start = i
+			}
+			depth++
+			continue
+		}
+		if c == '}' && depth > 0 {
+			depth--
+			if depth == 0 && start >= 0 {
+				obj := json[start : i+1]
+				results = append(results, cleat.ChildResult{
+					RunID:  extractJSONString(obj, "run_id"),
+					Result: extractJSONString(obj, "result"),
+					Error:  extractJSONString(obj, "error"),
+				})
+				start = -1
+			}
+		}
 	}
 	return results
 }

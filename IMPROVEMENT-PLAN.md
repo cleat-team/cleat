@@ -4960,6 +4960,75 @@ no store method, so a reply is durable in the replier's history and invisible to
 dispatches, has tests, and appears in every SDK's surface list. Its being wired end to end is what
 the parity guards check, and it is wired — to a function that does not do the thing.
 
+### 3.221 Every child result was lost to a brace scan that did not model strings — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Reported by the conformance-port session as #778: `AwaitAllChildren` returns a `ChildResult` per
+child with the right `RunID`, an **empty** `Result`, no error, and a workflow that reports success.
+`AwaitAnyChild` returns the same children's results correctly.
+
+**It is not in the engine.** `parseChildResultArray`, emitted into every Go guest from
+`wasm/adapter_component.go`, split the array into objects with
+
+    open  := strings.Index(json[i:], "{")
+    close := strings.Index(json[i+open:], "}")
+
+A child's result is itself a JSON object, so the outcome the engine marshals is
+
+    {"run_id":"child-a","result":"{\"tag\":\"child-0\"}"}
+
+and the first `}` after the opening brace is **the escaped one inside the result value**. Run
+verbatim on that input rather than read:
+
+    obj[0] = {"run_id":"child-a","result":"{\"tag\":\"child-0\"}
+
+Each object is cut before the closing quote of its own `result`. `extractJSONString` then reads an
+unterminated string and returns `""` — correctly; it is escape-aware and was never the problem.
+`run_id` survives only because it sits before the cut. An error message containing a brace was
+dropped the same way, which is worse: the one thing that could have reported the failure.
+
+`AwaitAnyChild` is unaffected because it returns a **single** object and never splits — same engine
+read (`GetChildResult`), same bytes, different parser. That asymmetry is what made it look like one
+await path being broken.
+
+**The host half was verified separately rather than inferred from the guest symptom.**
+`TestAwaitAllChildrenCarriesEachChildsResult` drives `freshAwaitAllChildren` against a store with
+three completed children and asserts the recorded event's `Response` carries each payload; it
+passes, and goes red on all three when the fake store returns `("", true, nil)`. The `Response` is
+the assertion target because it is the durable artifact — `replayAwaitAllChildren` hands those same
+bytes back on every future replay.
+
+**Why a name scan could not see it, which is the transferable part.** The existing coverage was
+
+    TestWriteManualJSONHelpers:  strings.Contains(code, "func parseChildResultArray")
+
+satisfied by a function that is emitted and wrong. There was also no engine-level test over
+`AwaitAllChildren` with completed children at all: the coverage was dispatch and linker
+registration — that the call is *reachable*, not that it *answers*. Same shape as §3.215(d), where
+a store method was implemented in four dialects, tested, and called by nothing.
+
+The replacement, `wasm/adapter_json_helpers_exec_test.go`, **compiles and runs** the emitted
+helpers. It substitutes only the `cleat.ChildResult` type name so the throwaway program needs no
+dependencies — the parser bodies are byte-identical to what a guest gets — and it fails loudly if
+the helpers ever reference anything else in that package.
+
+**Scope checked rather than assumed**: only the Go SDK hand-rolls this. Rust's
+`await_all_children` returns the raw JSON string, and the AssemblyScript extern does too, so both
+leave parsing to a real decoder. `python-sdk`'s is on the local-host path, not the guest. One
+mechanism in one place, not a sweep.
+
+### 3.222 `AwaitAnyChild` means "lowest run ID that is done", not "first to complete" — 🔴 **OPEN 2026-09-05** (WS-1, 2026-09-05)
+
+`engine/children.go` sorts the run IDs (`sort.Strings(runIDs)`) and returns the first **completed**
+child in that order. Observed by the port session with children staggered 600/1200/1800ms:
+`child-0` finishes first by a wide margin and `child-1` was returned. Not scheduling.
+
+The sort has a stated and good reason — deterministic replay when several children are complete at
+poll time — so the fix is not to remove it. But "any" promises first-to-complete to anyone reading
+the name, and the two answers differ **exactly when more than one child is done**, which is the
+normal case for a fan-in that polls after a wait. Resolving it needs a completion order the store
+can report and replay can reproduce; `workflow_instances` has no completed-at ordering that is
+currently read for this.
+
 ### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
 
 Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
