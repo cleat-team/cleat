@@ -110,14 +110,6 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	return schedules, rows.Err()
 }
 
-func (s *MSSQLStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_schedules SET last_run_at = SYSUTCDATETIME(), next_run_at = @p2
-		WHERE name = @p1 AND tenant_id = @p3
-	`, name, nextRun, s.tenantID)
-	return err
-}
-
 func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT w.id

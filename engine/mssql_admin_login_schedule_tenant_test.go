@@ -178,34 +178,16 @@ func TestAdminLoginSetScheduleEnabledCannotCrossTenants(t *testing.T) {
 	}
 }
 
-// TestAdminLoginUpdateScheduleNextRunCannotCrossTenants — the same statement
-// the scheduler loop uses to advance a firing, pointed at a name it does not
-// own. Moving another tenant's next_run_at backwards fires their workflow
-// early; forwards suppresses it.
-func TestAdminLoginUpdateScheduleNextRunCannotCrossTenants(t *testing.T) {
-	storeA, storeB := adminLoginStores(t)
-	const name = "tenant-a-reconcile"
-	mustCreateSchedule(t, storeA, name)
-
-	before := scheduleNamed(t, storeA, name)
-	if before == nil {
-		t.Fatalf("fixture is broken: tenant A cannot see %q", name)
-	}
-
-	moved := before.NextRunAt.Add(72 * time.Hour)
-	if err := storeB.UpdateScheduleNextRun(context.Background(), name, moved); err != nil {
-		t.Fatalf("tenant B UpdateScheduleNextRun: %v", err)
-	}
-
-	after := scheduleNamed(t, storeA, name)
-	if after == nil {
-		t.Fatalf("tenant A's schedule %q disappeared entirely", name)
-	}
-	if !after.NextRunAt.Equal(before.NextRunAt) {
-		t.Errorf("tenant B moved tenant A's schedule %q from %s to %s",
-			name, before.NextRunAt.UTC(), after.NextRunAt.UTC())
-	}
-}
+// TestAdminLoginUpdateScheduleNextRunCannotCrossTenants was here until
+// UpdateScheduleNextRun was deleted.
+//
+// It is not ported, because the property it asserted is already covered by
+// TestAdminLoginClaimDueScheduleCannotCrossTenants below, against the statement
+// the scheduler loop ACTUALLY runs. The removed test's own comment claimed to
+// cover "the same statement the scheduler loop uses to advance a firing" -- true
+// when written, false once the loop moved to the fenced CAS, and nothing
+// noticed. So it was a tenant-isolation test for a statement no production code
+// ran, sitting beside one for the statement that does.
 
 // TestAdminLoginGetDueSchedulesStaysWithinItsTenant covers the read.
 //

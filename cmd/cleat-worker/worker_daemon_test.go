@@ -328,13 +328,6 @@ func (m *mockStore) GetDueSchedules(ctx context.Context) ([]engine.Schedule, err
 	return nil, nil
 }
 
-func (m *mockStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	if m.updateScheduleNextRunFn != nil {
-		return m.updateScheduleNextRunFn(ctx, name, nextRun)
-	}
-	return nil
-}
-
 func (m *mockStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }

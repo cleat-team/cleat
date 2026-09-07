@@ -1065,10 +1065,27 @@ func TestMSSQLIntegration_Schedules(t *testing.T) {
 		t.Fatal("expected at least 1 due schedule")
 	}
 
-	// UpdateScheduleNextRun.
+	// Advance the schedule past now, so it stops being due.
+	//
+	// ClaimDueSchedule, not UpdateScheduleNextRun: the latter is gone. It was
+	// the unfenced sibling of this compare-and-swap, superseded and never
+	// called by anything that ships.
+	var current time.Time
+	for _, sch := range due {
+		if sch.Name == "test-schedule-1" {
+			current = sch.NextRunAt
+		}
+	}
+	if current.IsZero() {
+		t.Fatal("test-schedule-1 was not in the due list, so there is nothing to claim")
+	}
 	futureRun := time.Now().Add(1 * time.Hour)
-	if err := store.UpdateScheduleNextRun(ctx, "test-schedule-1", futureRun); err != nil {
-		t.Fatalf("UpdateScheduleNextRun: %v", err)
+	claimed, err := store.ClaimDueSchedule(ctx, "test-schedule-1", current, futureRun, "")
+	if err != nil {
+		t.Fatalf("ClaimDueSchedule: %v", err)
+	}
+	if !claimed {
+		t.Fatal("ClaimDueSchedule did not claim a schedule it had just read as due")
 	}
 
 	// Schedule should no longer be due.

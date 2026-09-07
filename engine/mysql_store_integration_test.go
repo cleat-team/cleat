@@ -1807,10 +1807,27 @@ func TestMySQLIntegration_ScheduleLifecycle(t *testing.T) {
 		t.Error("integ-test-schedule not included in GetDueSchedules")
 	}
 
-	// Update the next run time.
+	// Advance the next run time.
+	//
+	// ClaimDueSchedule, not UpdateScheduleNextRun: the latter is gone. It was
+	// the unfenced sibling of this compare-and-swap, superseded and never
+	// called by anything that ships.
+	var current time.Time
+	for _, sch := range due {
+		if sch.Name == "integ-test-schedule" {
+			current = sch.NextRunAt
+		}
+	}
+	if current.IsZero() {
+		t.Fatal("integ-test-schedule was not in the due list, so there is nothing to claim")
+	}
 	newNextRun := time.Now().Add(1 * time.Hour)
-	if err := s.UpdateScheduleNextRun(ctx, "integ-test-schedule", newNextRun); err != nil {
-		t.Fatalf("UpdateScheduleNextRun: %v", err)
+	claimed, err := s.ClaimDueSchedule(ctx, "integ-test-schedule", current, newNextRun, "")
+	if err != nil {
+		t.Fatalf("ClaimDueSchedule: %v", err)
+	}
+	if !claimed {
+		t.Fatal("ClaimDueSchedule did not claim a schedule it had just read as due")
 	}
 
 	// Disable the schedule.

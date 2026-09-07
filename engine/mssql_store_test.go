@@ -1864,20 +1864,6 @@ func TestMSSQLStore_GetDueSchedules_Empty(t *testing.T) {
 	}
 }
 
-func TestMSSQLStore_UpdateScheduleNextRun_Success(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "next_run_at = @p2"},
-	})
-	defer db.Close()
-
-	store := NewMSSQLStore(db)
-	err := store.UpdateScheduleNextRun(context.Background(), "hourly-job", now.Add(1*time.Hour))
-	if err != nil {
-		t.Fatalf("UpdateScheduleNextRun: %v", err)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Compaction operations
 // ---------------------------------------------------------------------------

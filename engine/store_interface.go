@@ -207,9 +207,6 @@ type WorkflowStore interface {
 	// GetDueSchedules returns enabled schedules whose next_run_at <= now().
 	GetDueSchedules(ctx context.Context) ([]Schedule, error)
 
-	// UpdateScheduleNextRun updates a schedule's next_run_at after firing.
-	UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error
-
 	// ClaimDueSchedule advances a schedule from one firing instant to the next,
 	// but only if it is still sitting on the instant the caller saw. It reports
 	// whether this caller was the one that moved it.
