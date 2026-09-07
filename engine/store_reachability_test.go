@@ -126,7 +126,6 @@ var storeUnreachedBaseline = map[string]bool{
 	// no production caller, whose siblings are live.
 	"GetWorkflowTag":     true,
 	"GetWorkflowTags":    true,
-	"LoadWorkflowConfig": true,
 	"RemoveRoutingRule":  true,
 	"RemoveWorkflowTag":  true,
 	"StreamEventHistory": true,

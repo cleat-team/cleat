@@ -672,8 +672,16 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 			FROM event_history
 			GROUP BY workflow_id
 		) e ON w.id = e.workflow_id
-		WHERE e.cnt > $1
-		  AND (w.compaction_step IS NULL OR w.compaction_step < e.cnt - $1)
+		-- LEFT, not INNER: a workflow whose definition row is missing must stay
+		-- a candidate on the global threshold rather than vanishing from
+		-- compaction entirely. With d NULL, NULLIF(NULL,0) is NULL and COALESCE
+		-- falls through to $1, which is exactly the behaviour before cleat#889.
+		LEFT JOIN workflow_defs d
+		       ON d.name = w.def_name AND d.version = w.def_version
+		      AND d.tenant_id = w.tenant_id
+		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), $1)
+		  AND (w.compaction_step IS NULL
+		       OR w.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), $1))
 		ORDER BY e.cnt DESC
 		LIMIT $2
 	`, threshold, limit)

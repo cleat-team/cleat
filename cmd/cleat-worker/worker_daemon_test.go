@@ -1412,8 +1412,18 @@ func TestCompactionLoop_CompactsCandidates(t *testing.T) {
 		return []string{"wf-compact-1"}, nil
 	}
 
-	// CompactWorkflowHistory calls LoadEventHistory first. For the mock,
-	// return enough events to exceed the default threshold.
+	// CompactWorkflowHistory resolves the workflow's definition FIRST, to read
+	// its max_history_length override (cleat#889), and treats a nil workflow as
+	// "deleted between candidate selection and now" -- so the mock has to say
+	// the workflow exists or nothing compacts. loadWorkflowConfigFn is left
+	// unset and returns 0, meaning "no override", so this test still measures
+	// the global threshold exactly as it did.
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "mock-wf", DefVersion: 1}, nil
+	}
+
+	// Then it calls LoadEventHistory. For the mock, return enough events to
+	// exceed the default threshold.
 	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]engine.EventRecord, error) {
 		events := make([]engine.EventRecord, engine.DefaultCompactionThreshold+100)
 		for i := range events {

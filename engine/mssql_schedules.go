@@ -114,12 +114,35 @@ func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT w.id
 		FROM workflow_instances w
-		WHERE w.status IN ('ready', 'running')
-		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id) > @p1
+		-- LEFT, not INNER: see the PostgreSQL half in engine/db.go. A missing
+		-- definition row must fall through to the global threshold rather than
+		-- removing the workflow from compaction.
+		--
+		-- d.tenant_id = w.tenant_id IS REQUIRED FOR CORRECTNESS AND DOES NOT
+		-- SCOPE ANYTHING. workflow_defs is keyed (tenant_id, name, version), so
+		-- joining on name+version alone can match ANOTHER tenant's definition of
+		-- the same name and read its max_history_length -- a compaction
+		-- threshold silently sourced from someone else's row. That is what this
+		-- line prevents.
+		--
+		-- It is a CORRELATION between two tables, not a restriction to the
+		-- caller, and the row scoping is the separate w.tenant_id = @p3 in the
+		-- WHERE below. Both are needed and they do different jobs. Said plainly
+		-- because the next reader will see tenant_id in an ON clause and
+		-- reasonably conclude the query is scoped -- which is exactly what
+		-- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate concluded
+		-- when this join was added without the WHERE, and it was wrong.
+		LEFT JOIN workflow_defs d
+		       ON d.name = w.def_name AND d.version = w.def_version
+		      AND d.tenant_id = w.tenant_id
+		WHERE w.tenant_id = @p3
+		  AND w.status IN ('ready', 'running')
+		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id)
+		      > COALESCE(NULLIF(d.max_history_length, 0), @p1)
 		  AND (w.compaction_step IS NULL OR w.compaction_step < (SELECT MAX(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id))
 		ORDER BY w.created_at
 		OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY
-	`, threshold, limit)
+	`, threshold, limit, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("get compaction candidates: %w", err)
 	}
