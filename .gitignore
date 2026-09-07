@@ -11,6 +11,7 @@ ast_demo
 ast_demo_v2
 /cleat-gen
 /cleat-worker
+/deploy-workflow
 
 # Node/Svelte
 web/node_modules/
