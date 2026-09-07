@@ -593,15 +593,19 @@ That is also why §14's falsification table has no row asserting a count.
 
 ## 13. Phasing
 
-**P0 — wire the plugin into the worker at all.** This was not in the first version of
-this plan, because the plan assumed the subsystem ran. It does not:
+**P0 — wire the plugin into the worker at all. DONE 2026-09-07.** This was not in the
+first version of this plan, because the plan assumed the subsystem ran. It did not:
 `cmd/cleat-worker/main.go` blank-imports exactly one plugin (`llm`), so `event-triggers`
 is never registered and none of this design's tables exist anywhere (§3.315). One import
 line, plus whatever falls out of those migrations executing for the first time against
 all three dialects — which is the part that will not be one line.
 
-Nothing below is testable end-to-end until this lands, and `--list-plugins` (§3.315,
-step 1) is what makes it verifiable rather than assumed.
+Nothing below was testable end-to-end until this landed, and `--list-plugins` (§3.315,
+step 1) is what makes it verifiable rather than assumed — it now reports 20 plugins,
+`event-triggers` among them. **So §8's schema is no longer greenfield in the same way:**
+the tables exist from the first boot of a worker built after that change, and a
+deployment that has booted one has them. P1 should re-check that before assuming it can
+reshape `event_awaiters` freely.
 
 **P0b — fix today's semantics.** `ORDER BY received_at DESC` → ordered ascending by a
 monotonic column; consume-and-record in one transaction (today's code marks consumed

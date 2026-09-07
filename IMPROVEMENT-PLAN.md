@@ -8800,7 +8800,28 @@ cannot be closed by editing prose.
 
 ---
 
-### 3.315 Both plugin mechanisms are built and unwired — the event subsystem does not run — 🔴 **OPEN** (WS-2, 2026-09-06)
+### 3.315 Both plugin mechanisms are built and unwired — the event subsystem does not run — 🟡 **PARTLY FIXED 2026-09-07** (WS-2, 2026-09-06)
+
+> **Update 2026-09-07.** The in-process half is fixed: `cmd/cleat-worker` now blank-imports
+> every bundled plugin except `pgvector`, so `event-triggers`, `event-store`, `webhook-ingest`
+> and `kafka-connect` register, their migrations run, and `await_event` is reachable. Verify
+> with `cleat-worker --list-plugins` (step 1, shipped in #857) — it reports 20.
+>
+> `pgvector` stays out, and the reason is stronger than the note it replaces: its
+> `Migrations()` creates an `embedding vector(1536)` column, and `plugin.RunMigrations` is
+> **fatal at boot** (`os.Exit(1)`), so linking it would stop the worker starting on any
+> PostgreSQL without the vector extension. Its `Init()` does `CREATE EXTENSION IF NOT EXISTS
+> vector` and an Init failure is non-fatal, but that only helps where the extension is
+> installable. Linking it needs the migration to degrade — a change to the plugin, not to
+> the import list.
+>
+> **The WASM half is still open.** `PluginLoader.LoadPlugin` still has no non-test callers
+> and `cmd/cleat-worker` still constructs no loader, so WASM plugin execution remains
+> unwired and the limits table in `docs/contributor/plugins/plugin-security.md` still
+> describes a sandbox nothing runs. That is why this is PARTLY and not FIXED.
+>
+> Step 2 — making `plugins/index.yaml` (4 of 21 directories) agree with the import list,
+> with a test asserting it — is also still open.
 
 Found while investigating which code touches `ingested_events` and `event_stream` for the
 event-routing design (`docs/contributor/design/event-routing-design.md`, D3). The answer to
