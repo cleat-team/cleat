@@ -849,11 +849,11 @@ func (s *MSSQLStore) continueAsNewOnce(ctx context.Context, currentRunID, worker
 	// Create the new workflow run with a Go-generated UUID.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, continued_from)
 		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS VARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3 AND tenant_id = @p5), 'default'),
-		        @p5, @p6)
-	`, newRunID, defName, defVersion, newInput, s.tenantID, priority)
+		        @p5, @p6, @p7)
+	`, newRunID, defName, defVersion, newInput, s.tenantID, priority, currentRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
