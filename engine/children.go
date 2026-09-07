@@ -324,6 +324,15 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 // live and answered "completed" on replay where the original run had seen
 // "running", then let the workflow branch on the difference.
 //
+// NOTE for anyone sweeping for replay handling: this method deliberately has
+// no isReplay check and records no event, and neither does PollSignal. A scan
+// that recognises replay handling by name flags both, identically before and
+// after their fixes. Read the comparison above -- completed_at against
+// s.nowMs here, DeliveredAtMs against s.nowMs in PollSignal -- rather than the
+// absence of isReplay. The full warning, including how such a sweep can miss
+// seven methods and still look right, is on PollSignal in
+// engine/signaller.go.
+//
 // THE RESIDUAL WINDOW, stated because it is real and small rather than
 // hidden. completed_at is the DATABASE clock; nowMs is the WORKER clock.
 // They were measured 40ms apart (#804) and ~60ms apart on another machine.
