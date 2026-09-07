@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/wasm"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
@@ -104,6 +105,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The version embedded in the WASM wins, and auto-increment is only the
+	// fallback when there is none.
+	//
+	// This used to auto-increment unconditionally. The engine validates the
+	// deployed row's version against the binary's own metadata at run time
+	// (error_op "version_check"), so a redeploy of changed bytes wrote
+	// def_version 2 for a binary still reporting 1, and every run of that
+	// workflow then failed with:
+	//
+	//	version mismatch: workflow instance <id> expects def_version 2 but
+	//	WASM binary metadata reports version 1 (def=<name>). The
+	//	workflow_defs row and the deployed WASM binary are out of sync.
+	//
+	// Not a corner: this is the only multi-dialect deploy path cleat has --
+	// cmd/cleat/db.go's openPostgresDB refuses a MySQL or SQL Server DSN and
+	// names this binary as the alternative -- so on those two dialects the
+	// SECOND deploy of any workflow produced one that could not run. Found by
+	// pointing the port harness at this binary and re-running.
+	//
+	// cmd/cleat's deploy has always read the metadata first and falls back the
+	// same way; this makes the two agree.
+	version := 0
+	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil && meta.WorkflowVersion > 0 {
+		version = meta.WorkflowVersion
+	}
+
 	// Determine next version number.
 	existingDefs, _ := store.ListWorkflowDefs(ctx, name)
 	nextVersion := 1
@@ -119,25 +146,26 @@ func main() {
 			}
 		}
 	}
-	minVersion := nextVersion - 1
+	version = chooseDeployVersion(version, nextVersion)
+	minVersion := version - 1
 	if minVersion < 1 {
 		minVersion = 1
 	}
 
 	def := &engine.WorkflowDef{
 		Name:       name,
-		Version:    nextVersion,
+		Version:    version,
 		WASMBytes:  wasmBytes,
 		ABIVersion: 1,
 		MinVersion: minVersion,
 		CreatedAt:  time.Now(),
 	}
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {
-		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, nextVersion, err)
+		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, version, err)
 		os.Exit(1)
 	}
 	fmt.Printf("Deployed %s v%d (%d bytes, SHA256=%x) to %s\n",
-		name, nextVersion, len(wasmBytes), hash[:8], *driver)
+		name, version, len(wasmBytes), hash[:8], *driver)
 }
 
 func mysqlBaseDSN(dsn string) string {
@@ -151,4 +179,18 @@ func mysqlBaseDSN(dsn string) string {
 		return dsn[:slash+1]
 	}
 	return dsn[:slash+1] + afterSlash[qIdx:]
+}
+
+// chooseDeployVersion picks the version a deploy writes: the one embedded in
+// the WASM when there is one, otherwise the next free number.
+//
+// A function so it can be tested. The rule is one line, and it was still worth
+// extracting -- getting it wrong does not fail the deploy, it produces a
+// workflow_defs row the engine rejects at RUN time, on a code path only the
+// second deploy of a given workflow reaches.
+func chooseDeployVersion(embedded, next int) int {
+	if embedded > 0 {
+		return embedded
+	}
+	return next
 }
