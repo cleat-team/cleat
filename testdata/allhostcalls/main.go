@@ -131,7 +131,7 @@ func Entry(h cleat.HostCalls, input string) (string, error) {
 	_ = h.MinVersion()
 
 	// ---- heartbeat, defer closure, update handler ----
-	_, _ = h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second, func(progressJSON string) {})
+	_, _ = h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second)
 	_, _ = h.DurableDeferFunc(func() {})
 	h.RegisterUpdateHandler("upd",
 		func(payloadJSON string) (string, error) { return payloadJSON, nil },

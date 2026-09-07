@@ -145,14 +145,6 @@ func ProcessItem(h cleat.HostCalls, input ChildInput) (string, error) {
 		map[string]string{"item": input.Item},
 		&fetchData,
 		5*time.Second,
-		func(progressJSON string) {
-			var p struct {
-				Percent int `json:"percent"`
-			}
-			if json.Unmarshal([]byte(progressJSON), &p) == nil {
-				h.SetQueryState("fetch_progress", fmt.Sprintf("%d%%", p.Percent))
-			}
-		},
 	); err != nil {
 		return "", fmt.Errorf("fetch failed for %s: %w", input.Item, err)
 	}

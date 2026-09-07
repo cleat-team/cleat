@@ -527,9 +527,8 @@ class LocalHostCalls:
         operation: str,
         request: Any,
         heartbeat_interval_ms: int,
-        progress: Callable[[str], None],
     ) -> str:
-        """Make a cleat call with heartbeat / progress updates."""
+        """Make a cleat call, heartbeating the claim while it runs."""
         return self.call(service, operation, request)
 
     # ------------------------------------------------------------------

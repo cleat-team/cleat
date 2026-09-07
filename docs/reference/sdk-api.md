@@ -83,11 +83,18 @@ result, err := h.DurableCallWithOptions(opts, "payments", "Charge", body)
 
 ```go
 DurableCallWithHeartbeat(service, operation, requestJSON string,
-    heartbeatInterval time.Duration,
-    onProgress func(progressJSON string)) (string, error)
+    heartbeatInterval time.Duration) (string, error)
 ```
 
-Long-running durable call with periodic progress updates from the host.
+Long-running durable call. The host heartbeats the claim every
+`heartbeatInterval` so a call that outlives the ordinary lease is not reaped as
+a stale instance.
+
+Took an `onProgress func(progressJSON string)` until cleat#854. It was removed
+rather than fixed: the guest is suspended inside the `cleat_call_heartbeat`
+import for the whole call, so there is no moment at which the host could run
+guest code. The ABI has never carried a progress channel — see `cleat.wit`,
+where `durable-call-heartbeat` takes only the four values above.
 
 ---
 
@@ -96,7 +103,7 @@ DurableCallJSON(service, operation, requestJSON string, result interface{}) erro
 DurableCallJSONWithOptions(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 DurableCallTypedWithOptions(opts CallOptions, service, operation string, request, result interface{}) error
 DurableCallTypedWithHeartbeat(service, operation string, request, result interface{},
-    heartbeatInterval time.Duration, onProgress func(progressJSON string)) error
+    heartbeatInterval time.Duration) error
 ```
 
 Variants combining typed, JSON, options, and heartbeat features.

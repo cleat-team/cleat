@@ -915,7 +915,7 @@ func TestHostCallsImpl_Fallback_DurableCallWithHeartbeat(t *testing.T) {
 			return "result", nil
 		},
 	})
-	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second, func(s string) {})
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -930,12 +930,12 @@ func TestHostCallsImpl_Fallback_DurableCallWithHeartbeat(t *testing.T) {
 func TestHostCallsImpl_Fallback_DurableCallWithHeartbeatDirect(t *testing.T) {
 	var captured bool
 	h := NewHostCalls(HostCallsOptions{
-		DurableCallWithHeartbeat: func(svc, op, req string, interval time.Duration, onProgress func(string)) (string, error) {
+		DurableCallWithHeartbeat: func(svc, op, req string, interval time.Duration) (string, error) {
 			captured = true
 			return "hb-result", nil
 		},
 	})
-	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second, func(s string) {})
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

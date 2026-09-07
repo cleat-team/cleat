@@ -56,7 +56,7 @@ def _exercise_every_host_call(h: HostCalls) -> None:
     h.call("svc", "op", {"a": 1})
     h.call_typed("svc", "op", {"a": 1}, Reply)
     h.call_with_retry("svc", "op", {"a": 1}, RetryPolicy())
-    h.call_with_heartbeat("svc", "op", {"a": 1}, 1000, lambda progress: None)
+    h.call_with_heartbeat("svc", "op", {"a": 1}, 1000)
     h.send("svc", "op", {"a": 1})
     h.schedule_invoke("svc", "op", {"a": 1}, 1000)
 

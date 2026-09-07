@@ -355,12 +355,6 @@ func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
         map[string]string{"item": input.Item},
         &fetchData,
         5*time.Second, // heartbeat interval
-        func(progressJSON string) {
-            // Progress callback -- update queryable state.
-            var p struct{ Percent int }
-            json.Unmarshal([]byte(progressJSON), &p)
-            h.SetQueryState("fetch_progress", fmt.Sprintf("%d%%", p.Percent))
-        },
     )
     if err != nil {
         return nil, fmt.Errorf("fetch failed: %w", err)

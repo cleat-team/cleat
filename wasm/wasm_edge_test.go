@@ -976,7 +976,7 @@ func TestImportParamDeclKindInt32(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGenerateHostAdapterWithHeartbeat(t *testing.T) {
-	// DurableCallWithHeartbeat has time.Duration and func(string) params.
+	// DurableCallWithHeartbeat takes a time.Duration and NO callback.
 	usage := &UsageInfo{
 		Used:  map[string]bool{"cleat_call_heartbeat": true},
 		Funcs: []HostFunction{{ImportName: "cleat_call_heartbeat", FieldName: "DurableCallWithHeartbeat"}},
@@ -984,12 +984,27 @@ func TestGenerateHostAdapterWithHeartbeat(t *testing.T) {
 	code := string(GenerateHostAdapter("mypkg", usage, "go"))
 	for _, c := range []string{
 		"heartbeatInterval time.Duration",
-		"onProgress func(string)",
 		"heartbeatIntervalMs := heartbeatInterval.Milliseconds()",
 	} {
 		if !strings.Contains(code, c) {
 			t.Errorf("expected heartbeat pattern: %s", c)
 		}
+	}
+
+	// This assertion is the inverse of the one it replaces, which required
+	// "onProgress func(string)" to be present. cleat#854 removed that
+	// parameter: it could never be invoked, because the guest is suspended
+	// inside the cleat_call_heartbeat import for the whole call, and the ABI
+	// has no progress channel to invoke it from -- durable-call-heartbeat in
+	// python-sdk/wit/cleat.wit takes four values and none of them is a
+	// callback. Asserting its ABSENCE is what stops it being reinstated by a
+	// generator change; wasm/adapter_callback_param_test.go catches the same
+	// thing from the metadata side.
+	if strings.Contains(code, "onProgress") {
+		t.Error("the generated heartbeat adapter declares an onProgress parameter again. " +
+			"It cannot be invoked -- the guest is suspended inside the import for the whole " +
+			"call -- so a workflow that supplies one is handed a callback that never fires. " +
+			"See cleat#854.")
 	}
 	syntaxCheck(t, "GenerateHostAdapter(heartbeat)", code)
 }
