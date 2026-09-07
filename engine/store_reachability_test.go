@@ -22,6 +22,9 @@ import (
 //
 //	PollAndClaimSignal          PollSignal is live; nothing consumes  -> signals never consumed
 //	SetRoutingRule              PickVersionByRouting runs every start -> A/B routing can never fire
+//	                            WIRED 2026-09-07 (#889): POST/GET/DELETE
+//	                            /api/workflows/{name}/routing. The read path was
+//	                            already correct; only the way in was missing.
 //	SetWorkflowTag              nothing consults tags                 -> tag family inert both ways
 //	DeleteDeadLetteredWorkflows n/a                                   -> dead-letter table only grows
 //	ValidateVersion             ListVersions has no deprecated filter -> deprecation unenforced
@@ -121,14 +124,12 @@ func TestEveryStoreMethodIsReachableFromProduction(t *testing.T) {
 var storeUnreachedBaseline = map[string]bool{
 	// cleat#769's original findings.
 	"DeleteDeadLetteredWorkflows": true,
-	"SetRoutingRule":              true,
 	"SetWorkflowTag":              true,
 
 	// Found by this guard. Each is the same shape: a write or read path with
 	// no production caller, whose siblings are live.
 	"GetWorkflowTag":     true,
 	"GetWorkflowTags":    true,
-	"RemoveRoutingRule":  true,
 	"RemoveWorkflowTag":  true,
 	"StreamEventHistory": true,
 }
