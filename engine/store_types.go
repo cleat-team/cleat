@@ -46,6 +46,22 @@ type WorkflowInstance struct {
 	// the claim rather than read back afterwards. Status cannot carry it:
 	// every claim sets status = 'running' and returns the new value.
 	PendingTerminalStatus string `json:"pending_terminal_status,omitempty"`
+
+	// ContinuedFrom is the run that continued into this one -- the id of the
+	// predecessor in a ContinueAsNew chain, or "" for the overwhelming
+	// majority of rows, which are not continuations. cleat#826, cleat#887.
+	//
+	// POPULATED ON THE READ PATH ONLY: GetWorkflowByID sets it, and nothing
+	// else does. A claim does not, because the claim queries share one scanner
+	// (Dialect.scanWorkflowInstanceExtra) with one column list, and the
+	// dispatch loop has no use for the link -- adding it there would widen the
+	// hottest query in the system to carry a field nobody reads.
+	//
+	// So "" means either "not a continuation" OR "you did not get this from
+	// GetWorkflowByID". Stated rather than left to be discovered, because a
+	// field that is populated on one path and empty on another is exactly the
+	// shape that reads as data.
+	ContinuedFrom string `json:"continued_from,omitempty"`
 }
 
 // Schedule is a row from workflow_schedules.

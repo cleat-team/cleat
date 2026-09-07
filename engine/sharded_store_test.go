@@ -389,6 +389,20 @@ func (m *mockShardStore) GetWorkflowByID(ctx context.Context, id string) (*Workf
 	return nil, nil
 }
 
+// GetTerminalRun mirrors GetWorkflowByID rather than returning nil
+// unconditionally: ShardedStore.GetTerminalRun walks by asking each shard, so a
+// mock that always answers nil would make that fan-out untestable here.
+func (m *mockShardStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
+	m.recordCall("GetTerminalRun")
+	if m.getWorkflowByIDFn != nil {
+		return m.getWorkflowByIDFn(ctx, id)
+	}
+	if m.err != nil {
+		return nil, m.err
+	}
+	return nil, nil
+}
+
 func (m *mockShardStore) CreateSchedule(ctx context.Context, s Schedule) error {
 	m.recordCall("CreateSchedule")
 	return m.err

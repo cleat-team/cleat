@@ -327,6 +327,9 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost:
 		// POST /api/workflows/:id/retry
 		s.handleWorkflowRetry(w, r, id)
+	case len(parts) == 2 && parts[1] == "terminal" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/terminal
+		s.handleGetTerminalRun(w, r, id)
 	case len(parts) == 2 && parts[1] == "history" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/history
 		s.handleGetHistory(w, r, id)
@@ -386,6 +389,37 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 
 	// Return full workflow info.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if wf == nil {
+		s.writeError(w, 404, "workflow not found")
+		return
+	}
+	s.writeJSON(w, 200, wf)
+}
+
+// handleGetTerminalRun serves GET /api/workflows/:id/terminal -- the last run
+// in this id's ContinueAsNew chain, which is the one carrying the result a
+// caller is waiting for. cleat#887.
+//
+// A SEPARATE route rather than a `?follow=1` on the handler above. Both were on
+// the table; the sub-resource wins because the existing URL keeps returning
+// exactly the row it names. Four call sites and the admin dashboard read
+// through GetWorkflowByID, and a query parameter that changes which row comes
+// back is the same hazard as making the follow implicit -- it just moves the
+// surprise from "always" to "whenever someone sets the flag".
+//
+// A workflow that never continued is its own terminal run, so this is not an
+// error case for the overwhelming majority of ids -- it returns the same row
+// the plain GET does.
+func (s *apiServer) handleGetTerminalRun(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	wf, err := st.GetTerminalRun(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return

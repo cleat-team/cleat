@@ -826,6 +826,7 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC),
 			`{"result":"ok"}`, "", nil, nil, int64(0), int64(0), "", "tenant-1",
+			"wf-0", // continued_from (cleat#887)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")
@@ -834,6 +835,11 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 	}
 	if wf == nil || wf.ID != "wf-1" || wf.TraceID != "" {
 		t.Errorf("unexpected: %+v", wf)
+	}
+	// cleat#887, as in the PostgreSQL test: supplied by the fake row, so it
+	// must reach the struct rather than being scanned and dropped.
+	if wf != nil && wf.ContinuedFrom != "wf-0" {
+		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
 	}
 }
 
@@ -1486,6 +1492,7 @@ func TestMySQLStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 			nil, nil, nil, nil,
 			nil, nil, nil, nil,
 			int64(0), int64(0), "", "tenant-1",
+			nil, // continued_from (NULL: not a continuation)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")

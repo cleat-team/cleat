@@ -1462,6 +1462,9 @@ func (s *stubWorkflowStore) ListWorkflows(ctx context.Context, filter WorkflowFi
 func (s *stubWorkflowStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
 	return nil, nil
 }
+func (s *stubWorkflowStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
+	return nil, nil
+}
 func (s *stubWorkflowStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	return nil
 }

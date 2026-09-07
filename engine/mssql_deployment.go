@@ -226,6 +226,7 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	var result sql.NullString
 	var inputRaw string
 	var errorCode, errorOp sql.NullString
+	var continuedFrom sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
@@ -236,12 +237,13 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       -- into a Go string as 16 raw storage bytes. Same workaround as
 		       -- the claim queries, and TestMSSQLUUIDColumnsAreConvertedInProjections
 		       -- fails the build without it.
-		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id
+		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id,
+		       continued_from
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
-		&wf.TraceID, &wf.TenantID)
+		&wf.TraceID, &wf.TenantID, &continuedFrom)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -254,6 +256,7 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	wf.Error = errorMsg.String
 	wf.ErrorCode = errorCode.String
 	wf.ErrorOp = errorOp.String
+	wf.ContinuedFrom = continuedFrom.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}

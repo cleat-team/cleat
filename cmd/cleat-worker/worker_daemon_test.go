@@ -60,6 +60,7 @@ type mockStore struct {
 	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
 	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
 	getWorkflowByIDFn                  func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
+	getTerminalRunFn                   func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
 	createScheduleFn                   func(ctx context.Context, s engine.Schedule) error
 	listSchedulesFn                    func(ctx context.Context) ([]engine.Schedule, error)
 	deleteScheduleFn                   func(ctx context.Context, name string) error
@@ -289,6 +290,17 @@ func (m *mockStore) ListWorkflows(ctx context.Context, filter engine.WorkflowFil
 func (m *mockStore) GetWorkflowByID(ctx context.Context, id string) (*engine.WorkflowInstance, error) {
 	if m.getWorkflowByIDFn != nil {
 		return m.getWorkflowByIDFn(ctx, id)
+	}
+	return nil, nil
+}
+
+// GetTerminalRun has its OWN hook rather than falling back to
+// getWorkflowByIDFn. The whole guarantee in cleat#887 is that these two calls
+// answer differently for a continued workflow, so a mock that made them answer
+// identically could not express the case the handler exists for.
+func (m *mockStore) GetTerminalRun(ctx context.Context, id string) (*engine.WorkflowInstance, error) {
+	if m.getTerminalRunFn != nil {
+		return m.getTerminalRunFn(ctx, id)
 	}
 	return nil, nil
 }
