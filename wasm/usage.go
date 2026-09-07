@@ -267,6 +267,19 @@ var compositeRequires = map[string][]string{
 	// on the two paths where the host hands back something this SDK cannot use.
 	"AwaitChildTyped": {"cleat_complete_update", "cleat_log", "cleat_poll_update"},
 	"DispatchUpdates": {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	// completeOrLog is runUpdate's single exit: it completes the request and
+	// calls DurableLog when the completion itself fails. Those four call sites
+	// discarded the error with `_ =` until IMPROVEMENT-PLAN 3.245, so there was
+	// nothing here to declare -- adding the log is what gave this method an
+	// inner import, and TestEveryCompositeHostCallHasAnImportRow caught it on
+	// the same commit.
+	//
+	// Reached only through DispatchUpdates, whose row above already carries
+	// both names, so this is belt-and-braces rather than a live gap. It is
+	// declared anyway because the guard's question is per-method: a future
+	// caller reaching completeOrLog by another route would otherwise compile
+	// with cleat_log unwired and log nothing.
+	"completeOrLog": {"cleat_complete_update", "cleat_log"},
 	// EVERY SUSPENSION POINT IS A DISPATCH POINT, so each one transitively
 	// needs the update imports. This is not bookkeeping: without these rows the
 	// closure analysis omits cleat_poll_update from a workflow whose only
